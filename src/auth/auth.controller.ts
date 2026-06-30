@@ -17,6 +17,8 @@ import { CurrentUser, CurrentUserData } from './decorators/current-user.decorato
 import { SignupRejectedError } from './errors/signup-rejected.error';
 import { Public } from './decorators/public.decorator';
 import { GoogleAuthGuard } from './guards/google-auth.guard';
+import { decodeOAuthState } from './oauth-state';
+import { resolvePostLoginRedirect } from './safe-redirect';
 import { Throttle, seconds } from '@nestjs/throttler';
 
 @Controller('auth')
@@ -49,11 +51,13 @@ export class AuthController {
     @Res({ passthrough: true }) res: Response,
   ): Promise<void> {
     const profile = req.user as GoogleUserInput;
-    const state = typeof req.query.state === 'string' ? req.query.state : undefined;
+    const { invite, redirect } = decodeOAuthState(
+      typeof req.query.state === 'string' ? req.query.state : undefined,
+    );
 
     let user: User;
     try {
-      user = await this.authService.validateOrCreateGoogleUser(profile, state);
+      user = await this.authService.validateOrCreateGoogleUser(profile, invite);
     } catch (err) {
       if (err instanceof SignupRejectedError) {
         const target = new URL(
@@ -72,7 +76,10 @@ export class AuthController {
       req.headers['user-agent'],
     );
     setAuthCookies(res, tokens, this.cookieOpts());
-    res.redirect(this.config.getOrThrow<string>('app.frontendUrl'));
+    // Honor the validated post-login redirect; fall back to the default landing
+    // page when it is absent or fails the open-redirect safety checks.
+    const frontendUrl = this.config.getOrThrow<string>('app.frontendUrl');
+    res.redirect(resolvePostLoginRedirect(redirect, frontendUrl));
   }
 
   @Public()

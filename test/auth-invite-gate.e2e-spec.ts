@@ -8,6 +8,7 @@ import { GoogleAuthGuard } from '../src/auth/guards/google-auth.guard';
 import { User, UserStatus, UserRole } from '../src/users/entities/user.entity';
 import { Profile } from '../src/users/entities/profile.entity';
 import { Invite, InviteStatus } from '../src/membership/entities/invite.entity';
+import { encodeOAuthState } from '../src/auth/oauth-state';
 
 // Stub guard: read the desired Google profile + invite code from headers.
 // Replaces the real GoogleAuthGuard (which does a live OAuth round-trip)
@@ -154,6 +155,58 @@ describe('Invite-gated Google sign-in (e2e)', () => {
 
     expect(res.status).toBe(302);
     expect(res.headers.location).not.toContain('error=');
+  });
+
+  // -------------------------------------------------------------------------
+  // Scenario 3b: returning user + safe redirect → lands on FRONTEND + /feed
+  // -------------------------------------------------------------------------
+  it('redirects a returning user to a validated post-login path', async () => {
+    await ds.getRepository(User).save(
+      ds.getRepository(User).create({
+        googleId: 'g-redir',
+        email: 'redir@example.com',
+        status: UserStatus.Active,
+        role: UserRole.Member,
+        activatedAt: new Date(),
+      }),
+    );
+
+    const res = await request(app.getHttpServer())
+      .get('/auth/google/callback')
+      .set(
+        'x-google-profile',
+        profile({ googleId: 'g-redir', email: 'redir@example.com' }),
+      )
+      .set('x-invite-state', encodeOAuthState({ redirect: '/feed' })!);
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toMatch(/\/feed$/);
+  });
+
+  // -------------------------------------------------------------------------
+  // Scenario 3c: returning user + malicious redirect → ignored, default landing
+  // -------------------------------------------------------------------------
+  it('ignores an open-redirect attempt and uses the default landing page', async () => {
+    await ds.getRepository(User).save(
+      ds.getRepository(User).create({
+        googleId: 'g-evil',
+        email: 'evil@example.com',
+        status: UserStatus.Active,
+        role: UserRole.Member,
+        activatedAt: new Date(),
+      }),
+    );
+
+    const res = await request(app.getHttpServer())
+      .get('/auth/google/callback')
+      .set(
+        'x-google-profile',
+        profile({ googleId: 'g-evil', email: 'evil@example.com' }),
+      )
+      .set('x-invite-state', encodeOAuthState({ redirect: 'https://evil.com' })!);
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).not.toContain('evil.com');
   });
 
   // -------------------------------------------------------------------------
