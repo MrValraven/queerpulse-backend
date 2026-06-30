@@ -1,0 +1,24 @@
+meta {
+  name: Create Join Request
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/join-requests
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "message": "I'd love to join — referred by a friend in the network."
+}
+
+docs {
+  Pending-ok. Returns the created join request.
+}

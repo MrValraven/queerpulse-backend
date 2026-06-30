@@ -1,0 +1,24 @@
+meta {
+  name: Get CSRF Token
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/csrf-token
+  body: none
+  auth: none
+}
+
+script:post-response {
+  // Persist the CSRF token so every mutating request can send it as X-CSRF-Token.
+  if (res.getStatus() === 200 && res.getBody() && res.getBody().csrfToken) {
+    bru.setEnvVar("csrfToken", res.getBody().csrfToken);
+  }
+}
+
+docs {
+  Public. Returns { csrfToken }. Run this FIRST: the post-response script stores
+  the token in the `csrfToken` env var used by all POST/PUT/PATCH/DELETE requests.
+  The same value is also set as the (non-httpOnly) csrf_token cookie.
+}

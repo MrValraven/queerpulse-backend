@@ -1,0 +1,15 @@
+meta {
+  name: Google Callback
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/auth/google/callback
+  body: none
+  auth: none
+}
+
+docs {
+  Public. Google redirects here with a code; the backend sets access_token / refresh_token / csrf_token cookies, then 302 -> FRONTEND_URL. Not meant to be called directly.
+}

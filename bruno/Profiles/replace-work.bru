@@ -1,0 +1,27 @@
+meta {
+  name: Replace Work
+  type: http
+  seq: 5
+}
+
+put {
+  url: {{baseUrl}}/profiles/me/work
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "items": [
+    { "category": "design", "title": "Pride 2025 Identity", "year": 2025, "imageUrl": "https://cdn.example/work/pride.png" },
+    { "category": "writing", "title": "On Chosen Family", "year": 2024 }
+  ]
+}
+
+docs {
+  Pending-ok. Replaces ALL work items; order preserved. imageUrl optional (from /uploads/work-image). Returns WorkItemView[].
+}

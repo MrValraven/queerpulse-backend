@@ -1,0 +1,27 @@
+meta {
+  name: Replace Socials
+  type: http
+  seq: 4
+}
+
+put {
+  url: {{baseUrl}}/profiles/me/socials
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "items": [
+    { "platform": "instagram", "urlOrHandle": "@jordan.rivera" },
+    { "platform": "website", "urlOrHandle": "https://jordan.example" }
+  ]
+}
+
+docs {
+  Pending-ok. Replaces ALL social links; array order = display order. Returns SocialLinkView[].
+}

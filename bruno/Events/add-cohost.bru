@@ -1,0 +1,24 @@
+meta {
+  name: Add Cohost
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{baseUrl}}/events/{{eventSlug}}/cohosts
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "slug": "{{cohostSlug}}"
+}
+
+docs {
+  Active-only (host/co-host). Co-host must be active. Returns { ok: true }.
+}

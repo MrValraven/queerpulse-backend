@@ -1,0 +1,24 @@
+meta {
+  name: Review Join Request
+  type: http
+  seq: 6
+}
+
+patch {
+  url: {{baseUrl}}/join-requests/{{joinRequestId}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "status": "approved"
+}
+
+docs {
+  Moderator/admin. status: 'approved' | 'declined'. Approving promotes the user.
+}

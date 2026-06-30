@@ -1,0 +1,24 @@
+meta {
+  name: Update Connection
+  type: http
+  seq: 3
+}
+
+patch {
+  url: {{baseUrl}}/connections/{{connectionId}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "action": "accept"
+}
+
+docs {
+  Active-only. action: 'accept' | 'decline' | 'block' | 'unblock'. Only the addressee can accept/decline; only the blocker can unblock.
+}

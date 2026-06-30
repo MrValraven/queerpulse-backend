@@ -1,0 +1,15 @@
+meta {
+  name: List My Invites
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/invites
+  body: none
+  auth: none
+}
+
+docs {
+  Active-only. Returns invites issued by the current user.
+}

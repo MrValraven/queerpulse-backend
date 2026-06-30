@@ -1,0 +1,24 @@
+meta {
+  name: Mute Conversation
+  type: http
+  seq: 5
+}
+
+patch {
+  url: {{baseUrl}}/conversations/{{conversationId}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "muted": true
+}
+
+docs {
+  Active-only. Toggle mute. Returns { ok: true }.
+}

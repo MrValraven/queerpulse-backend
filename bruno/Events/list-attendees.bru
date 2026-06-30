@@ -1,0 +1,15 @@
+meta {
+  name: List Attendees
+  type: http
+  seq: 8
+}
+
+get {
+  url: {{baseUrl}}/events/{{eventSlug}}/attendees
+  body: none
+  auth: none
+}
+
+docs {
+  Active-only. Returns AttendeeView[].
+}

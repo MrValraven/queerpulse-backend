@@ -1,0 +1,15 @@
+meta {
+  name: List Members
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/members?query=&tags=&page=1
+  body: none
+  auth: none
+}
+
+docs {
+  Active-only. Directory of active members. tags = comma-separated. Returns { items, total, page, pageSize }.
+}

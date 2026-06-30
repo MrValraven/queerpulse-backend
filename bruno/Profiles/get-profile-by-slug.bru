@@ -1,0 +1,15 @@
+meta {
+  name: Get Profile By Slug
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/profiles/{{slug}}
+  body: none
+  auth: none
+}
+
+docs {
+  Active-only. Returns the full profile, or a limited card (limited: true) per the owner's visibility (open/network/private).
+}

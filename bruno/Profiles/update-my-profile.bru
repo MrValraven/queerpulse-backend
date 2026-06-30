@@ -1,0 +1,32 @@
+meta {
+  name: Update My Profile
+  type: http
+  seq: 3
+}
+
+patch {
+  url: {{baseUrl}}/profiles/me
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "firstName": "Jordan",
+  "lastName": "Rivera",
+  "pronouns": "they/them",
+  "tagline": "Designer & community organizer",
+  "bio": "Building queer spaces online and off.",
+  "location": "Lisbon, PT",
+  "visibility": "network",
+  "openTo": ["collaboration", "mentorship"],
+  "tags": ["design", "community"]
+}
+
+docs {
+  Pending-ok. Send any subset of the listed fields. Returns the full profile. Use { avatarUrl } here after an upload presign + PUT.
+}

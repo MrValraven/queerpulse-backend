@@ -1,0 +1,24 @@
+meta {
+  name: Invite To Event
+  type: http
+  seq: 11
+}
+
+post {
+  url: {{baseUrl}}/events/{{eventSlug}}/invites
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "slugs": ["{{slug}}", "{{cohostSlug}}"]
+}
+
+docs {
+  Active-only (host/co-host). Returns { created }.
+}

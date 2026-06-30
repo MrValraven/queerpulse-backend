@@ -1,0 +1,15 @@
+meta {
+  name: List Vouchers
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/members/{{slug}}/vouchers
+  body: none
+  auth: none
+}
+
+docs {
+  Active-only. Returns { count, vouchers: [{ slug, firstName, lastName, avatarUrl, note, createdAt }] }.
+}

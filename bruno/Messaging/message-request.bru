@@ -1,0 +1,25 @@
+meta {
+  name: Message Request
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/messages/request
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "toSlug": "{{slug}}",
+  "body": "Hi — I came across your profile and would love to connect."
+}
+
+docs {
+  Active-only. Connected -> { conversationId, message, connectionRequestId: null }. Not connected -> creates a pending connection carrying body: { conversationId: null, message: null, connectionRequestId }. Rate limit: 15/min.
+}

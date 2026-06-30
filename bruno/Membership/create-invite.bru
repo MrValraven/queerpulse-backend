@@ -1,0 +1,30 @@
+meta {
+  name: Create Invite
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/invites
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "email": "friend@example.com",
+  "note": "A line for the link preview.",
+  "vouch": "Why they belong here."
+}
+
+docs {
+  Active-only. email is optional. note (max 200) shows on the link
+  preview/landing page; vouch (max 280) is the inviter's "why I'm
+  inviting you" message shown on the onboarding welcome step. Both
+  optional and trimmed (empty/whitespace stored as null). Returns the
+  invite incl. code.
+}

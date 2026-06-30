@@ -1,0 +1,25 @@
+meta {
+  name: Create Connection
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/connections
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "toSlug": "{{slug}}",
+  "message": "Hi! Would love to connect."
+}
+
+docs {
+  Active-only. Creates a pending connection. message is the optional seed body (see Messaging > Message Request semantics).
+}

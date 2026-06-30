@@ -1,0 +1,22 @@
+docs {
+  # QueerPulse API
+
+  Bruno collection covering every REST endpoint of the QueerPulse NestJS backend.
+
+  ## Auth model (read first)
+  - Auth is **cookie-based** (httpOnly JWTs). Bruno's cookie jar holds the
+    `access_token` / `refresh_token` / `csrf_token` cookies automatically once set.
+  - The Google OAuth flow (`GET /auth/google` -> consent -> callback) sets those
+    cookies in a real browser. In Bruno you typically authenticate the browser
+    once, then paste the cookies into Bruno's cookie jar, OR run against a backend
+    seeded with a test session.
+  - **CSRF:** every mutating request (POST/PUT/PATCH/DELETE) needs an
+    `X-CSRF-Token` header equal to the `csrf_token` cookie. Run
+    **Security > Get CSRF Token** first — its post-response script stores the
+    token in the `csrfToken` environment variable, which all mutations reference.
+
+  ## Conventions
+  - JSON, camelCase, ISO-8601 timestamps.
+  - Path/id placeholders (`{{slug}}`, `{{conversationId}}`, ...) live in the
+    selected environment — edit them to match your data.
+}

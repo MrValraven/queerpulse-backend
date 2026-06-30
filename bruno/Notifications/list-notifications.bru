@@ -1,0 +1,15 @@
+meta {
+  name: List Notifications
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/notifications?unread=true
+  body: none
+  auth: none
+}
+
+docs {
+  Pending-ok, own-only. Newest-first, <=100. Returns Notification[]. type in {connection_request, connection_accepted, vouch_received, promoted_to_member, new_message, event_invite, event_reminder, waitlist_promoted}. Poll-based (no WS push yet).
+}

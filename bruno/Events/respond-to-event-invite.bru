@@ -1,0 +1,24 @@
+meta {
+  name: Respond To Event Invite
+  type: http
+  seq: 12
+}
+
+patch {
+  url: {{baseUrl}}/event-invites/{{eventInviteId}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "action": "accept"
+}
+
+docs {
+  Active-only (invitee). action: 'accept' | 'decline'. Returns the invite.
+}

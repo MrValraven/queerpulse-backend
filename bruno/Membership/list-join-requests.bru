@@ -1,0 +1,15 @@
+meta {
+  name: List Join Requests
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{baseUrl}}/join-requests?status=pending
+  body: none
+  auth: none
+}
+
+docs {
+  Moderator/admin. Review queue. status query filters the list.
+}

@@ -1,0 +1,15 @@
+meta {
+  name: List Conversations
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/conversations
+  body: none
+  auth: none
+}
+
+docs {
+  Active-only. Returns ConversationSummary[] (last message + unreadCount + muted + otherMember).
+}

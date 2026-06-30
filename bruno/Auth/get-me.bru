@@ -1,0 +1,15 @@
+meta {
+  name: Get Me
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{baseUrl}}/auth/me
+  body: none
+  auth: none
+}
+
+docs {
+  Pending-ok. Returns { id, email, status, role, profile }. status in {pending, active, suspended}, role in {member, moderator, admin}.
+}

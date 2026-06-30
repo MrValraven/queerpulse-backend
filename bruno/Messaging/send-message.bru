@@ -1,0 +1,24 @@
+meta {
+  name: Send Message
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/conversations/{{conversationId}}/messages
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "body": "Hey, great to be connected!"
+}
+
+docs {
+  Active-only. Returns the MessageView; also broadcast over WS message:new. Rate limit: 60/min.
+}

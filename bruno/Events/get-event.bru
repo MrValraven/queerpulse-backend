@@ -1,0 +1,15 @@
+meta {
+  name: Get Event
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/events/{{eventSlug}}
+  body: none
+  auth: none
+}
+
+docs {
+  Active-only. Returns EventDetail (adds description, onlineUrl, host, cohosts[], isOrganizer, goingCount, waitlistCount, myRsvpStatus, myWaitlistPosition).
+}

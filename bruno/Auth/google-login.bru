@@ -1,0 +1,15 @@
+meta {
+  name: Google Login
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/auth/google
+  body: none
+  auth: none
+}
+
+docs {
+  Public. Navigate the BROWSER here (do not fetch) to start Google OAuth. On success the callback sets the auth cookies and 302-redirects to FRONTEND_URL.
+}

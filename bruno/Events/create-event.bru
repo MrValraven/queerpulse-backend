@@ -1,0 +1,34 @@
+meta {
+  name: Create Event
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/events
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "title": "Queer Book Club — June",
+  "description": "Monthly meetup discussing queer literature.",
+  "startAt": "2026-07-15T18:00:00.000Z",
+  "endAt": "2026-07-15T20:00:00.000Z",
+  "timezone": "Europe/Lisbon",
+  "venue": "Livraria Ler Devagar",
+  "isOnline": false,
+  "capacity": 30,
+  "visibility": "members",
+  "status": "published",
+  "coverImageUrl": "https://cdn.example/events/bookclub.png"
+}
+
+docs {
+  Active-only. visibility: 'public'|'members'|'invite_only'. status: 'draft'|'published' (defaults published). For online events set isOnline + onlineUrl. Returns EventDetail.
+}

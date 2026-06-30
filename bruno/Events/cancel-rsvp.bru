@@ -1,0 +1,20 @@
+meta {
+  name: Cancel RSVP
+  type: http
+  seq: 7
+}
+
+delete {
+  url: {{baseUrl}}/events/{{eventSlug}}/rsvp
+  body: none
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+docs {
+  Active-only. Returns { ok: true }. Promotes the waitlist head to going (emits waitlist_promoted notification).
+}

@@ -1,0 +1,15 @@
+meta {
+  name: List Events
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/events?filter=upcoming&page=1
+  body: none
+  auth: none
+}
+
+docs {
+  Active-only. filter = upcoming | going | hosting | waitlisted | past | saved. saved returns [] (no bookmark entity in MVP). Returns EventSummary[].
+}

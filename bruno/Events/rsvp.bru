@@ -1,0 +1,24 @@
+meta {
+  name: RSVP
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/events/{{eventSlug}}/rsvp
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "status": "going"
+}
+
+docs {
+  Active-only. status: 'going' | 'maybe'. At capacity, going becomes waitlisted. Returns { status, waitlistPosition }.
+}

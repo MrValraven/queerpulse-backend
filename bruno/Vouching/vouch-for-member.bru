@@ -1,0 +1,24 @@
+meta {
+  name: Vouch For Member
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/members/{{slug}}/vouch
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "note": "Brilliant collaborator — vouching wholeheartedly."
+}
+
+docs {
+  Active-only. note optional. Returns { vouchCount }. Crossing VOUCH_THRESHOLD promotes the vouchee. Rate limit: 20/min. Can't vouch for yourself; one vouch per (voucher, vouchee).
+}

@@ -1,10 +1,15 @@
 {
+  "ts-node": {
+    "compilerOptions": {
+      "module": "CommonJS"
+    }
+  },
   "compilerOptions": {
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "resolvePackageJsonExports": true,
     "esModuleInterop": true,
-    "isolatedModules": true,
+    "isolatedModules": false,
     "declaration": true,
     "removeComments": true,
     "emitDecoratorMetadata": true,
@@ -14,6 +19,7 @@
     "sourceMap": true,
     "outDir": "./dist",
     "baseUrl": "./",
+    "types": ["jest", "node"],
     "incremental": true,
     "skipLibCheck": true,
     "strictNullChecks": true,

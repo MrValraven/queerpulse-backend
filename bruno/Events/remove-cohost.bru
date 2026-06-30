@@ -1,0 +1,20 @@
+meta {
+  name: Remove Cohost
+  type: http
+  seq: 10
+}
+
+delete {
+  url: {{baseUrl}}/events/{{eventSlug}}/cohosts/{{cohostSlug}}
+  body: none
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+docs {
+  Active-only (host/co-host). Returns { ok: true }.
+}

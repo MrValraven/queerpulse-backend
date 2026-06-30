@@ -1,0 +1,25 @@
+meta {
+  name: Update Event
+  type: http
+  seq: 4
+}
+
+patch {
+  url: {{baseUrl}}/events/{{eventSlug}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "description": "Updated agenda: bring a book to swap!",
+  "capacity": 40
+}
+
+docs {
+  Active-only (host/co-host). Partial event fields. Returns EventDetail.
+}
