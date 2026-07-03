@@ -63,6 +63,15 @@ export class Profile {
   @Column({ type: 'text', array: true, default: '{}' })
   tags: string[];
 
+  @Column({ type: 'boolean', default: false })
+  verified: boolean;
+
+  @Column({ type: 'text', nullable: true })
+  now: string | null;
+
+  @Column({ type: 'timestamptz', default: () => 'now()' })
+  joinedAt: Date;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 

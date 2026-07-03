@@ -116,9 +116,10 @@ describe('Invite-gated Google sign-in (e2e)', () => {
     expect(res.headers.location).not.toContain('error=');
 
     // New user must be Active and attributed to the inviter (spec §3)
-    const created = await ds
-      .getRepository(User)
-      .findOne({ where: { googleId: 'g-new' }, relations: { invitedBy: true } });
+    const created = await ds.getRepository(User).findOne({
+      where: { googleId: 'g-new' },
+      relations: { invitedBy: true },
+    });
     expect(created).not.toBeNull();
     expect(created?.status).toBe(UserStatus.Active);
     expect(created?.invitedBy?.id).toBe(inviter.id);
@@ -203,7 +204,10 @@ describe('Invite-gated Google sign-in (e2e)', () => {
         'x-google-profile',
         profile({ googleId: 'g-evil', email: 'evil@example.com' }),
       )
-      .set('x-invite-state', encodeOAuthState({ redirect: 'https://evil.com' })!);
+      .set(
+        'x-invite-state',
+        encodeOAuthState({ redirect: 'https://evil.com' })!,
+      );
 
     expect(res.status).toBe(302);
     expect(res.headers.location).not.toContain('evil.com');

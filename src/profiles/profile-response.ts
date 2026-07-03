@@ -1,63 +1,195 @@
 import { Profile } from '../users/entities/profile.entity';
+import { Activity } from './entities/activity.entity';
+import { BoardPost } from './entities/board-post.entity';
+import { Shaping, ShapingKind } from './entities/shaping.entity';
+import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
 import { WorkItem } from './entities/work-item.entity';
+
+export interface ProfileCard {
+  slug: string;
+  firstName: string;
+  lastName: string;
+  pronouns: string | null;
+  tagline: string | null;
+  avatarUrl: string | null;
+  tags: string[];
+  vouchCount: number;
+  visibility: string;
+}
 
 export interface SocialLinkView {
   platform: string;
   urlOrHandle: string;
-  position: number;
 }
 
-export interface WorkItemView {
+export interface WorkView {
   category: string;
   title: string;
   year: string;
   imageUrl: string | null;
-  position: number;
 }
 
-export interface FullProfileResponse {
+export interface BoardView {
+  kind: string;
+  title: string;
   slug: string;
-  firstName: string;
-  lastName: string;
-  pronouns: string | null;
-  tagline: string | null;
+}
+
+export interface SkillView {
+  name: string;
+  meta: string;
+}
+
+export interface GroupView {
+  name: string;
+  role: string;
+}
+
+export interface ShapingView {
+  kind: string;
+  title: string;
+  note: string;
+}
+
+export interface ActivityView {
+  kind: string;
+  title: string;
+  sub: string | null;
+  to: string | null;
+}
+
+export interface ProfileRelations {
+  socials: SocialLink[];
+  work: WorkItem[];
+  board: BoardPost[];
+  skills: Skill[];
+  groups: GroupView[];
+  shapings: Shaping[];
+  activity: Activity[];
+  related: ProfileCard[];
+}
+
+export interface FullProfileResponse extends ProfileCard {
+  verified: boolean;
+  joinedAt: string;
   bio: string | null;
   location: string | null;
-  avatarUrl: string | null;
-  visibility: string;
+  now: string | null;
   openTo: string[];
-  tags: string[];
   socials: SocialLinkView[];
-  work: WorkItemView[];
-  vouchCount: number;
+  work: WorkView[];
+  board: BoardView[];
+  skills: SkillView[];
+  groups: GroupView[];
+  shapings: ShapingView[];
+  activity: ActivityView[];
+  related: ProfileCard[];
   limited: false;
 }
 
-export interface LimitedProfileResponse {
-  slug: string;
-  firstName: string;
-  lastName: string;
-  pronouns: string | null;
-  tagline: string | null;
-  avatarUrl: string | null;
-  visibility: string;
-  vouchCount: number;
+export interface LimitedProfileResponse extends ProfileCard {
+  verified: boolean;
+  joinedAt: string;
+  openTo: [];
+  socials: [];
+  work: [];
+  board: [];
+  skills: [];
+  groups: [];
+  shapings: [];
+  activity: [];
+  related: [];
   limited: true;
 }
 
-export interface MemberCard {
-  slug: string;
-  firstName: string;
-  lastName: string;
-  pronouns: string | null;
-  tagline: string | null;
+// Retained for the members list endpoint (searchMembers), which uses a card
+// shape with extra location/openTo fields.
+export interface MemberCard extends ProfileCard {
   location: string | null;
-  avatarUrl: string | null;
-  tags: string[];
   openTo: string[];
-  visibility: string;
-  vouchCount: number;
+}
+
+export const SHAPING_KIND_ORDER: ShapingKind[] = [
+  ShapingKind.Film,
+  ShapingKind.Book,
+  ShapingKind.Song,
+  ShapingKind.Moment,
+];
+
+export function sortShapings(rows: Shaping[]): Shaping[] {
+  return [...rows].sort(
+    (a, b) =>
+      SHAPING_KIND_ORDER.indexOf(a.kind) - SHAPING_KIND_ORDER.indexOf(b.kind),
+  );
+}
+
+export function toProfileCard(p: Profile, vouchCount: number): ProfileCard {
+  return {
+    slug: p.slug,
+    firstName: p.firstName,
+    lastName: p.lastName,
+    pronouns: p.pronouns,
+    tagline: p.tagline,
+    avatarUrl: p.avatarUrl,
+    tags: p.tags,
+    vouchCount,
+    visibility: p.visibility,
+  };
+}
+
+export function toMemberCard(p: Profile, vouchCount: number): MemberCard {
+  return {
+    ...toProfileCard(p, vouchCount),
+    location: p.location,
+    openTo: p.openTo,
+  };
+}
+
+export function toFullProfile(
+  p: Profile,
+  rels: ProfileRelations,
+  vouchCount: number,
+): FullProfileResponse {
+  return {
+    ...toProfileCard(p, vouchCount),
+    verified: p.verified,
+    joinedAt: p.joinedAt.toISOString(),
+    bio: p.bio,
+    location: p.location,
+    now: p.now,
+    openTo: p.openTo,
+    socials: rels.socials.map((s) => ({
+      platform: s.platform,
+      urlOrHandle: s.urlOrHandle,
+    })),
+    work: rels.work.map((w) => ({
+      category: w.category,
+      title: w.title,
+      year: w.year,
+      imageUrl: w.imageUrl,
+    })),
+    board: rels.board.map((b) => ({
+      kind: b.kind,
+      title: b.title,
+      slug: b.slug,
+    })),
+    skills: rels.skills.map((s) => ({ name: s.name, meta: s.meta })),
+    groups: rels.groups,
+    shapings: sortShapings(rels.shapings).map((s) => ({
+      kind: s.kind,
+      title: s.title,
+      note: s.note,
+    })),
+    activity: rels.activity.map((a) => ({
+      kind: a.kind,
+      title: a.title,
+      sub: a.sub,
+      to: a.toLink,
+    })),
+    related: rels.related,
+    limited: false,
+  };
 }
 
 export function toLimitedProfile(
@@ -65,65 +197,18 @@ export function toLimitedProfile(
   vouchCount: number,
 ): LimitedProfileResponse {
   return {
-    slug: p.slug,
-    firstName: p.firstName,
-    lastName: p.lastName,
-    pronouns: p.pronouns,
-    tagline: p.tagline,
-    avatarUrl: p.avatarUrl,
-    visibility: p.visibility,
-    vouchCount,
+    ...toProfileCard(p, vouchCount),
+    verified: p.verified,
+    joinedAt: p.joinedAt.toISOString(),
+    openTo: [],
+    socials: [],
+    work: [],
+    board: [],
+    skills: [],
+    groups: [],
+    shapings: [],
+    activity: [],
+    related: [],
     limited: true,
-  };
-}
-
-export function toFullProfile(
-  p: Profile,
-  socials: SocialLink[],
-  work: WorkItem[],
-  vouchCount: number,
-): FullProfileResponse {
-  return {
-    slug: p.slug,
-    firstName: p.firstName,
-    lastName: p.lastName,
-    pronouns: p.pronouns,
-    tagline: p.tagline,
-    bio: p.bio,
-    location: p.location,
-    avatarUrl: p.avatarUrl,
-    visibility: p.visibility,
-    openTo: p.openTo,
-    tags: p.tags,
-    socials: socials.map((s) => ({
-      platform: s.platform,
-      urlOrHandle: s.urlOrHandle,
-      position: s.position,
-    })),
-    work: work.map((w) => ({
-      category: w.category,
-      title: w.title,
-      year: w.year,
-      imageUrl: w.imageUrl,
-      position: w.position,
-    })),
-    vouchCount,
-    limited: false,
-  };
-}
-
-export function toMemberCard(p: Profile, vouchCount: number): MemberCard {
-  return {
-    slug: p.slug,
-    firstName: p.firstName,
-    lastName: p.lastName,
-    pronouns: p.pronouns,
-    tagline: p.tagline,
-    location: p.location,
-    avatarUrl: p.avatarUrl,
-    tags: p.tags,
-    openTo: p.openTo,
-    visibility: p.visibility,
-    vouchCount,
   };
 }

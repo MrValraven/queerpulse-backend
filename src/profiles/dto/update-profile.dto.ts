@@ -14,6 +14,7 @@ export class UpdateProfileDto {
   @IsOptional() @IsString() @MaxLength(160) tagline?: string;
   @IsOptional() @IsString() @MaxLength(5000) bio?: string;
   @IsOptional() @IsString() @MaxLength(120) location?: string;
+  @IsOptional() @IsString() @MaxLength(2000) now?: string;
 
   @IsOptional() @IsEnum(ProfileVisibility) visibility?: ProfileVisibility;
 

@@ -3,6 +3,12 @@ import { DataSource } from 'typeorm';
 import { SnakeNamingStrategy } from 'typeorm-naming-strategies';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
+import { Activity, ActivityKind } from '../profiles/entities/activity.entity';
+import { BoardPost, BoardKind } from '../profiles/entities/board-post.entity';
+import { Group } from '../profiles/entities/group.entity';
+import { GroupMembership } from '../profiles/entities/group-membership.entity';
+import { Shaping, ShapingKind } from '../profiles/entities/shaping.entity';
+import { Skill } from '../profiles/entities/skill.entity';
 
 // Representative members for local frontend integration. Replace/extend with the
 // prototype's mock members (frontend src/features/members/data/members.ts) as
@@ -83,7 +89,16 @@ async function seed(): Promise<void> {
   const dataSource = new DataSource({
     type: 'postgres',
     url: process.env.DATABASE_URL,
-    entities: [User, Profile],
+    entities: [
+      User,
+      Profile,
+      Skill,
+      BoardPost,
+      Shaping,
+      Activity,
+      Group,
+      GroupMembership,
+    ],
     namingStrategy: new SnakeNamingStrategy(),
     synchronize: false,
   });
@@ -92,6 +107,20 @@ async function seed(): Promise<void> {
     await dataSource.transaction(async (manager) => {
       const users = manager.getRepository(User);
       const profiles = manager.getRepository(Profile);
+
+      const groupRepo = manager.getRepository(Group);
+      let devsGroup = await groupRepo.findOne({
+        where: { slug: 'queer-devs-lisbon' },
+      });
+      if (!devsGroup) {
+        devsGroup = await groupRepo.save(
+          groupRepo.create({
+            slug: 'queer-devs-lisbon',
+            name: 'Queer Devs Lisbon',
+          }),
+        );
+      }
+
       for (const m of MEMBERS) {
         // Idempotent: skip if a user with this googleId already exists.
         const existing = await users.findOne({
@@ -123,11 +152,64 @@ async function seed(): Promise<void> {
             avatarUrl: null,
           }),
         );
-        // eslint-disable-next-line no-console
+
+        if (m.slug === 'tomas-mendes') {
+          await manager.getRepository(Profile).update(
+            { userId: user.id },
+            {
+              verified: true,
+              now: 'Illustrating a zine about the neighbourhood.',
+              joinedAt: new Date('2024-03-01T00:00:00.000Z'),
+            },
+          );
+          await manager.getRepository(Skill).save([
+            manager.getRepository(Skill).create({
+              userId: user.id,
+              name: 'Illustration',
+              meta: 'Available · ink, risograph',
+              position: 0,
+            }),
+          ]);
+          await manager.getRepository(BoardPost).save([
+            manager.getRepository(BoardPost).create({
+              userId: user.id,
+              kind: BoardKind.Offering,
+              title: 'Cover art for community zines',
+              slug: 'zine-covers',
+              position: 0,
+            }),
+          ]);
+          await manager.getRepository(Shaping).save([
+            manager.getRepository(Shaping).create({
+              userId: user.id,
+              kind: ShapingKind.Film,
+              title: 'Paris Is Burning',
+              note: 'Chosen family is a craft.',
+            }),
+          ]);
+          await manager.getRepository(Activity).save([
+            manager.getRepository(Activity).create({
+              userId: user.id,
+              kind: ActivityKind.Event,
+              title: "RSVP'd to Queer Poetry Night",
+              sub: 'Anjos · Thursday',
+              toLink: '/gatherings/queer-poetry-night',
+              occurredAt: new Date('2026-06-20T18:00:00.000Z'),
+            }),
+          ]);
+          await manager.getRepository(GroupMembership).save(
+            manager.getRepository(GroupMembership).create({
+              userId: user.id,
+              groupId: devsGroup.id,
+              role: 'Member',
+            }),
+          );
+        }
+
         console.log(`Seeded member ${m.slug}`);
       }
     });
-    // eslint-disable-next-line no-console
+
     console.log('Seed complete.');
   } finally {
     await dataSource.destroy();
@@ -135,7 +217,6 @@ async function seed(): Promise<void> {
 }
 
 seed().catch((err) => {
-  // eslint-disable-next-line no-console
   console.error('Seed failed:', err);
   process.exit(1);
 });
