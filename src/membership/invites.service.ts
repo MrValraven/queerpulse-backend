@@ -8,7 +8,12 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { randomBytes } from 'node:crypto';
-import { DataSource, EntityManager, MoreThanOrEqual, Repository } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  MoreThanOrEqual,
+  Repository,
+} from 'typeorm';
 import { UserStatus } from '../users/entities/user.entity';
 import { USER_PROMOTED, UserPromotedEvent } from '../users/user.events';
 import { UsersService } from '../users/users.service';
@@ -207,10 +212,12 @@ export class InvitesService {
     inviteId: string,
     acceptedBy: string,
   ): Promise<void> {
-    const claim = await manager.getRepository(Invite).update(
-      { id: inviteId, status: InviteStatus.Pending },
-      { status: InviteStatus.Accepted, acceptedBy, usedAt: new Date() },
-    );
+    const claim = await manager
+      .getRepository(Invite)
+      .update(
+        { id: inviteId, status: InviteStatus.Pending },
+        { status: InviteStatus.Accepted, acceptedBy, usedAt: new Date() },
+      );
     if (claim.affected !== 1) {
       throw new SignupRejectedError('invite_invalid');
     }

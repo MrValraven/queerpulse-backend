@@ -19,7 +19,12 @@ import { RsvpService } from './rsvp.service';
     NotificationsModule,
   ],
   controllers: [EventsController, EventInvitesController],
-  providers: [EventsService, RsvpService, EventInvitesService, EventRemindersService],
+  providers: [
+    EventsService,
+    RsvpService,
+    EventInvitesService,
+    EventRemindersService,
+  ],
   exports: [EventsService],
 })
 export class EventsModule {}

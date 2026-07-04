@@ -23,7 +23,12 @@ describe('MessagingService.sendMessage', () => {
     conversations = { findOne: jest.fn() };
     messages = {
       create: jest.fn((v) => v),
-      save: jest.fn(async (v) => ({ id: 'm1', createdAt: new Date(), editedAt: null, ...v })),
+      save: jest.fn(async (v) => ({
+        id: 'm1',
+        createdAt: new Date(),
+        editedAt: null,
+        ...v,
+      })),
     };
     connections = { areConnected: jest.fn().mockResolvedValue(true) };
     emitter = { emit: jest.fn() };
@@ -59,9 +64,9 @@ describe('MessagingService.sendMessage', () => {
       .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' }); // other
     conversations.findOne.mockResolvedValue({ id: 'c1', isOfficial: false });
     connections.areConnected.mockResolvedValue(false);
-    await expect(
-      service.sendMessage('c1', 'me', 'hi'),
-    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(service.sendMessage('c1', 'me', 'hi')).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
   });
 
   it('persists and emits message.created on a valid send', async () => {

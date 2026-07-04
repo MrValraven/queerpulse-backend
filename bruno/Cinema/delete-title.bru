@@ -1,0 +1,19 @@
+meta {
+  name: Delete Title (admin)
+  type: http
+  seq: 7
+}
+
+delete {
+  url: {{baseUrl}}/cinema/titles/{{cinemaTitleId}}
+  body: none
+  auth: none
+}
+
+headers {
+  X-CSRF-Token: {{csrfToken}}
+}
+
+docs {
+  Moderator/admin. Deletes the title (and its Mux assets, best-effort). 204.
+}

@@ -1,0 +1,21 @@
+meta {
+  name: Request Upload URL (admin)
+  type: http
+  seq: 8
+}
+
+post {
+  url: {{baseUrl}}/cinema/titles/{{cinemaTitleId}}/upload
+  body: none
+  auth: none
+}
+
+headers {
+  X-CSRF-Token: {{csrfToken}}
+}
+
+docs {
+  Moderator/admin. Mints a one-time Mux direct-upload URL; PUT the source
+  file to uploadUrl from the browser. On a 'ready' title this stages a
+  replacement that swaps in when transcoded. 409 while processing.
+}

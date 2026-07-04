@@ -6,7 +6,12 @@ import { NotificationsService } from './notifications.service';
 
 describe('NotificationsService', () => {
   let service: NotificationsService;
-  let repo: { create: jest.Mock; save: jest.Mock; find: jest.Mock; update: jest.Mock };
+  let repo: {
+    create: jest.Mock;
+    save: jest.Mock;
+    find: jest.Mock;
+    update: jest.Mock;
+  };
 
   beforeEach(async () => {
     repo = {

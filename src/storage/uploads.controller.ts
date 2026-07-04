@@ -20,10 +20,7 @@ export class UploadsController {
 
   // pending-ok: avatar upload supports editing your own draft profile.
   @Post('avatar')
-  avatar(
-    @CurrentUser() user: CurrentUserData,
-    @Body() dto: PresignUploadDto,
-  ) {
+  avatar(@CurrentUser() user: CurrentUserData, @Body() dto: PresignUploadDto) {
     const key = `avatars/${user.userId}/${randomUUID()}${EXT[dto.contentType]}`;
     return this.storage.createPresignedUpload(key, dto.contentType);
   }

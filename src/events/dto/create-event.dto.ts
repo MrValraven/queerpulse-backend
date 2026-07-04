@@ -23,6 +23,7 @@ export class CreateEventDto {
   @IsOptional() @IsString() @MaxLength(500) onlineUrl?: string;
   @IsOptional() @IsInt() @Min(1) capacity?: number;
   @IsOptional() @IsEnum(EventVisibility) visibility?: EventVisibility;
-  @IsOptional() @IsIn([EventStatus.Draft, EventStatus.Published]) status?: EventStatus.Draft | EventStatus.Published;
+  @IsOptional() @IsIn([EventStatus.Draft, EventStatus.Published]) status?:
+    EventStatus.Draft | EventStatus.Published;
   @IsOptional() @IsString() @MaxLength(500) coverImageUrl?: string;
 }

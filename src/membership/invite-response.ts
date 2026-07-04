@@ -29,7 +29,10 @@ export interface PublicInviteView {
 // Explicit terminal states from the DB win over time-based expiry: an accepted
 // invite is 'used' and a cancelled one is 'revoked' regardless of the clock.
 // Only a still-pending invite is checked against expires_at.
-export function resolveInviteStatus(invite: Invite, now: Date): PublicInviteStatus {
+export function resolveInviteStatus(
+  invite: Invite,
+  now: Date,
+): PublicInviteStatus {
   if (invite.status === InviteStatus.Revoked) {
     return 'revoked';
   }
@@ -63,7 +66,9 @@ export function toPublicInviteView(
   // The configured validity window (created_at → expires_at), in whole days,
   // for the static "Valid for N days" badge.
   const validForDays = invite.expiresAt
-    ? Math.round((invite.expiresAt.getTime() - invite.createdAt.getTime()) / DAY_MS)
+    ? Math.round(
+        (invite.expiresAt.getTime() - invite.createdAt.getTime()) / DAY_MS,
+      )
     : null;
 
   return {

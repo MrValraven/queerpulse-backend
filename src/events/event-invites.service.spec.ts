@@ -20,7 +20,10 @@ describe('EventInvitesService', () => {
       providers: [
         EventInvitesService,
         { provide: getRepositoryToken(EventInvite), useValue: invites },
-        { provide: getRepositoryToken(Event), useValue: { findOne: jest.fn() } },
+        {
+          provide: getRepositoryToken(Event),
+          useValue: { findOne: jest.fn() },
+        },
         { provide: getRepositoryToken(Profile), useValue: { find: jest.fn() } },
         { provide: EventsService, useValue: eventsService },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },

@@ -1,0 +1,21 @@
+meta {
+  name: Create Playback Session
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/cinema/titles/{{cinemaTitleId}}/playback
+  body: none
+  auth: none
+}
+
+headers {
+  X-CSRF-Token: {{csrfToken}}
+}
+
+docs {
+  Active members. Entitlement check + short-TTL signed URLs (HLS manifest,
+  poster, storyboard) and the resume position. Response is no-store.
+  Point hls.js (or Safari native HLS) at hlsUrl.
+}

@@ -72,10 +72,13 @@ describe('InvitesService.acceptInvite', () => {
 
   it('rejects when the inviter is not an active member', async () => {
     repo.findOne.mockResolvedValue(pendingInvite());
-    users.findById.mockResolvedValue({ id: 'inviter', status: UserStatus.Pending });
-    await expect(
-      service.acceptInvite('c', currentUser),
-    ).rejects.toBeInstanceOf(ForbiddenException);
+    users.findById.mockResolvedValue({
+      id: 'inviter',
+      status: UserStatus.Pending,
+    });
+    await expect(service.acceptInvite('c', currentUser)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
   });
 
   it('rejects when the redeemer is already an active member', async () => {
@@ -84,9 +87,9 @@ describe('InvitesService.acceptInvite', () => {
       id,
       status: UserStatus.Active,
     }));
-    await expect(
-      service.acceptInvite('c', currentUser),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.acceptInvite('c', currentUser)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
     expect(manager.update).not.toHaveBeenCalled();
   });
 
@@ -116,9 +119,9 @@ describe('InvitesService.acceptInvite', () => {
     users.findById.mockImplementation(activeInviterPendingRedeemer);
     manager.update.mockResolvedValue({ affected: 0 }); // lost the race
 
-    await expect(
-      service.acceptInvite('c', currentUser),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.acceptInvite('c', currentUser)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
     expect(users.promoteToActive).not.toHaveBeenCalled();
   });
 
@@ -126,10 +129,13 @@ describe('InvitesService.acceptInvite', () => {
     repo.findOne.mockResolvedValue(
       pendingInvite({ email: 'someone-else@x.com' }),
     );
-    users.findById.mockResolvedValue({ id: 'inviter', status: UserStatus.Active });
-    await expect(
-      service.acceptInvite('c', currentUser),
-    ).rejects.toBeInstanceOf(ForbiddenException);
+    users.findById.mockResolvedValue({
+      id: 'inviter',
+      status: UserStatus.Active,
+    });
+    await expect(service.acceptInvite('c', currentUser)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
   });
 });
 
@@ -148,7 +154,11 @@ describe('resolveInviteStatus', () => {
   it("maps a pending invite past expires_at to 'expired'", () => {
     expect(
       resolveInviteStatus(
-        { ...base, status: InviteStatus.Pending, expiresAt: new Date('2026-06-01T00:00:00.000Z') },
+        {
+          ...base,
+          status: InviteStatus.Pending,
+          expiresAt: new Date('2026-06-01T00:00:00.000Z'),
+        },
         now,
       ),
     ).toBe('expired');
@@ -223,7 +233,7 @@ describe('toPublicInviteView', () => {
 
   it('returns null note/vouch and null avatar when absent, omitting memberSince when no inviter', () => {
     const view = toPublicInviteView(
-      { ...invite, note: null, vouch: null } as Invite,
+      { ...invite, note: null, vouch: null },
       null,
       0,
       now,
@@ -281,7 +291,12 @@ describe('InvitesService.resolveInvite', () => {
     users.findByIdWithProfile.mockResolvedValue({
       activatedAt: new Date('2024-03-01T00:00:00.000Z'),
       createdAt: new Date('2024-02-01T00:00:00.000Z'),
-      profile: { slug: 'ines', firstName: 'Inês', lastName: 'Tavares', avatarUrl: null },
+      profile: {
+        slug: 'ines',
+        firstName: 'Inês',
+        lastName: 'Tavares',
+        avatarUrl: null,
+      },
     });
 
     const view = await service.resolveInvite('QP-7F3K-2026');
@@ -349,9 +364,7 @@ describe('InvitesService.createInvite', () => {
   });
 
   it('regenerates the code on collision before persisting', async () => {
-    repo.exists
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(false);
+    repo.exists.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
     await service.createInvite('inviter');
     expect(repo.exists).toHaveBeenCalledTimes(2);
   });
@@ -449,12 +462,13 @@ describe('InvitesService.validateInviteForSignup + claimInvite', () => {
   });
 
   describe('validateInviteForSignup', () => {
-    const makeManager = (invite: any) => ({
-      getRepository: () => ({
-        findOne: jest.fn().mockResolvedValue(invite),
-        update: jest.fn().mockResolvedValue({ affected: 1 }),
-      }),
-    }) as any;
+    const makeManager = (invite: any) =>
+      ({
+        getRepository: () => ({
+          findOne: jest.fn().mockResolvedValue(invite),
+          update: jest.fn().mockResolvedValue({ affected: 1 }),
+        }),
+      }) as any;
 
     it('returns inviteId + inviterId for a valid pending invite', async () => {
       usersService.findById = jest
@@ -513,7 +527,9 @@ describe('InvitesService.validateInviteForSignup + claimInvite', () => {
   describe('claimInvite', () => {
     it('throws when the conditional claim affects no rows (already used)', async () => {
       const manager = {
-        getRepository: () => ({ update: jest.fn().mockResolvedValue({ affected: 0 }) }),
+        getRepository: () => ({
+          update: jest.fn().mockResolvedValue({ affected: 0 }),
+        }),
       } as any;
       await expect(
         service.claimInvite(manager, 'inv-1', 'new-user'),
@@ -528,7 +544,11 @@ describe('InvitesService.validateInviteForSignup + claimInvite', () => {
       ).resolves.toBeUndefined();
       expect(update).toHaveBeenCalledWith(
         { id: 'inv-1', status: InviteStatus.Pending },
-        { status: InviteStatus.Accepted, acceptedBy: 'new-user', usedAt: expect.any(Date) },
+        {
+          status: InviteStatus.Accepted,
+          acceptedBy: 'new-user',
+          usedAt: expect.any(Date),
+        },
       );
     });
   });

@@ -3,10 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { UsersService } from '../users/users.service';
-import {
-  JoinRequest,
-  JoinRequestStatus,
-} from './entities/join-request.entity';
+import { JoinRequest, JoinRequestStatus } from './entities/join-request.entity';
 import { JoinRequestsService } from './join-requests.service';
 
 describe('JoinRequestsService.review', () => {
@@ -15,7 +12,10 @@ describe('JoinRequestsService.review', () => {
   let users: { promoteToActive: jest.Mock };
 
   beforeEach(async () => {
-    repo = { findOne: jest.fn(), save: jest.fn().mockImplementation(async (r) => r) };
+    repo = {
+      findOne: jest.fn(),
+      save: jest.fn().mockImplementation(async (r) => r),
+    };
     users = { promoteToActive: jest.fn().mockResolvedValue(true) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -34,7 +34,11 @@ describe('JoinRequestsService.review', () => {
       userId: 'u1',
       status: JoinRequestStatus.Pending,
     });
-    const result = await service.review('r1', 'mod-1', JoinRequestStatus.Approved);
+    const result = await service.review(
+      'r1',
+      'mod-1',
+      JoinRequestStatus.Approved,
+    );
     expect(users.promoteToActive).toHaveBeenCalledWith('u1');
     expect(result.status).toBe(JoinRequestStatus.Approved);
     expect(result.reviewedBy).toBe('mod-1');

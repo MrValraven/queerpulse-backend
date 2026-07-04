@@ -18,22 +18,28 @@ describe('GoogleAuthGuard.getAuthenticateOptions', () => {
   });
 
   it('encodes the invite code into state', () => {
-    const opts = guard.getAuthenticateOptions(contextWithQuery({ invite: 'CODE' }));
-    expect(decodeOAuthState((opts as { state?: string }).state)).toEqual({ invite: 'CODE' });
+    const opts = guard.getAuthenticateOptions(
+      contextWithQuery({ invite: 'CODE' }),
+    );
+    expect(decodeOAuthState(opts.state)).toEqual({
+      invite: 'CODE',
+    });
   });
 
   it('encodes the redirect path into state', () => {
     const opts = guard.getAuthenticateOptions(
       contextWithQuery({ redirect: '/feed' }),
     );
-    expect(decodeOAuthState((opts as { state?: string }).state)).toEqual({ redirect: '/feed' });
+    expect(decodeOAuthState(opts.state)).toEqual({
+      redirect: '/feed',
+    });
   });
 
   it('encodes both invite and redirect together', () => {
     const opts = guard.getAuthenticateOptions(
       contextWithQuery({ invite: 'CODE', redirect: '/auth/welcome' }),
     );
-    expect(decodeOAuthState((opts as { state?: string }).state)).toEqual({
+    expect(decodeOAuthState(opts.state)).toEqual({
       invite: 'CODE',
       redirect: '/auth/welcome',
     });

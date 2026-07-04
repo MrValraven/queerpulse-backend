@@ -1,5 +1,13 @@
 import { plainToInstance } from 'class-transformer';
-import { IsEnum, IsNumber, IsOptional, IsString, Max, Min, validateSync } from 'class-validator';
+import {
+  IsEnum,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+  validateSync,
+} from 'class-validator';
 
 export enum NodeEnv {
   Development = 'development',
@@ -57,6 +65,12 @@ export class EnvironmentVariables {
   @IsOptional() @IsString() S3_SECRET_KEY?: string;
   @IsOptional() @IsString() S3_PUBLIC_URL?: string;
 
+  @IsOptional() @IsString() MUX_TOKEN_ID?: string;
+  @IsOptional() @IsString() MUX_TOKEN_SECRET?: string;
+  @IsOptional() @IsString() MUX_WEBHOOK_SECRET?: string;
+  @IsOptional() @IsString() MUX_SIGNING_KEY_ID?: string;
+  @IsOptional() @IsString() MUX_SIGNING_PRIVATE_KEY?: string;
+
   @IsOptional()
   @IsNumber()
   VOUCH_THRESHOLD?: number;
@@ -67,7 +81,9 @@ export class EnvironmentVariables {
   INVITE_MONTHLY_QUOTA?: number;
 }
 
-export function validate(config: Record<string, unknown>): EnvironmentVariables {
+export function validate(
+  config: Record<string, unknown>,
+): EnvironmentVariables {
   const validated = plainToInstance(EnvironmentVariables, config, {
     enableImplicitConversion: true,
   });

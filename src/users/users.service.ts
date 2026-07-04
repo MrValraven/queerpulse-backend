@@ -79,7 +79,9 @@ export class UsersService {
       email: input.email,
       status,
       activatedAt: status === UserStatus.Active ? new Date() : null,
-      ...(input.invitedBy ? { invitedBy: { id: input.invitedBy } as User } : {}),
+      ...(input.invitedBy
+        ? { invitedBy: { id: input.invitedBy } as User }
+        : {}),
     });
     const saved = await manager.save(user);
 

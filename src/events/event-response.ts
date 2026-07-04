@@ -44,7 +44,9 @@ export interface AttendeeView {
   waitlistPosition: number | null;
 }
 
-export function toOrganizerView(p: Profile | undefined): EventOrganizerView | null {
+export function toOrganizerView(
+  p: Profile | undefined,
+): EventOrganizerView | null {
   if (!p) return null;
   return {
     slug: p.slug,

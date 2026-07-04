@@ -52,14 +52,20 @@ describe('UsersService', () => {
     });
 
     it('is idempotent: returns false for an already-active user', async () => {
-      usersRepo.findOne.mockResolvedValue({ id: 'u1', status: UserStatus.Active } as User);
+      usersRepo.findOne.mockResolvedValue({
+        id: 'u1',
+        status: UserStatus.Active,
+      });
       usersRepo.save = jest.fn();
       await expect(service.promoteToActive('u1')).resolves.toBe(false);
       expect(usersRepo.save).not.toHaveBeenCalled();
     });
 
     it('sets invitedBy when provided', async () => {
-      usersRepo.findOne.mockResolvedValue({ id: 'u1', status: UserStatus.Pending } as User);
+      usersRepo.findOne.mockResolvedValue({
+        id: 'u1',
+        status: UserStatus.Pending,
+      });
       usersRepo.save = jest.fn().mockImplementation(async (u) => u);
       await service.promoteToActive('u1', { invitedBy: 'inviter-1' });
       expect(usersRepo.save).toHaveBeenCalledWith(
@@ -75,7 +81,10 @@ describe('UsersService', () => {
       const manager = {
         create: jest.fn((_entity, v) => v),
         save: jest.fn(async (v) => {
-          const row = { id: saved.length === 0 ? 'new-user' : 'new-profile', ...v };
+          const row = {
+            id: saved.length === 0 ? 'new-user' : 'new-profile',
+            ...v,
+          };
           saved.push(row);
           return row;
         }),

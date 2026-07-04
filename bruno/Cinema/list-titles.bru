@@ -1,0 +1,16 @@
+meta {
+  name: List Titles
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/cinema/titles
+  body: none
+  auth: none
+}
+
+docs {
+  Active members. Published + ready titles with my watch progress.
+  Moderators/admins may pass ?all=true to include drafts/processing/failed.
+}

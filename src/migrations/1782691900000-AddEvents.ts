@@ -102,25 +102,57 @@ export class AddEvents1782691900000 implements MigrationInterface {
     );
 
     // Foreign keys
-    await queryRunner.query(`ALTER TABLE "events" ADD CONSTRAINT "FK_events_host_id" FOREIGN KEY ("host_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION`);
-    await queryRunner.query(`ALTER TABLE "event_cohosts" ADD CONSTRAINT "FK_event_cohosts_event_id" FOREIGN KEY ("event_id") REFERENCES "events"("id") ON DELETE CASCADE ON UPDATE NO ACTION`);
-    await queryRunner.query(`ALTER TABLE "event_cohosts" ADD CONSTRAINT "FK_event_cohosts_user_id" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION`);
-    await queryRunner.query(`ALTER TABLE "event_rsvps" ADD CONSTRAINT "FK_event_rsvps_event_id" FOREIGN KEY ("event_id") REFERENCES "events"("id") ON DELETE CASCADE ON UPDATE NO ACTION`);
-    await queryRunner.query(`ALTER TABLE "event_rsvps" ADD CONSTRAINT "FK_event_rsvps_user_id" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION`);
-    await queryRunner.query(`ALTER TABLE "event_invites" ADD CONSTRAINT "FK_event_invites_event_id" FOREIGN KEY ("event_id") REFERENCES "events"("id") ON DELETE CASCADE ON UPDATE NO ACTION`);
-    await queryRunner.query(`ALTER TABLE "event_invites" ADD CONSTRAINT "FK_event_invites_inviter_id" FOREIGN KEY ("inviter_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION`);
-    await queryRunner.query(`ALTER TABLE "event_invites" ADD CONSTRAINT "FK_event_invites_invitee_id" FOREIGN KEY ("invitee_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION`);
+    await queryRunner.query(
+      `ALTER TABLE "events" ADD CONSTRAINT "FK_events_host_id" FOREIGN KEY ("host_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "event_cohosts" ADD CONSTRAINT "FK_event_cohosts_event_id" FOREIGN KEY ("event_id") REFERENCES "events"("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "event_cohosts" ADD CONSTRAINT "FK_event_cohosts_user_id" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "event_rsvps" ADD CONSTRAINT "FK_event_rsvps_event_id" FOREIGN KEY ("event_id") REFERENCES "events"("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "event_rsvps" ADD CONSTRAINT "FK_event_rsvps_user_id" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "event_invites" ADD CONSTRAINT "FK_event_invites_event_id" FOREIGN KEY ("event_id") REFERENCES "events"("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "event_invites" ADD CONSTRAINT "FK_event_invites_inviter_id" FOREIGN KEY ("inviter_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "event_invites" ADD CONSTRAINT "FK_event_invites_invitee_id" FOREIGN KEY ("invitee_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
+    );
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`ALTER TABLE "event_invites" DROP CONSTRAINT "FK_event_invites_invitee_id"`);
-    await queryRunner.query(`ALTER TABLE "event_invites" DROP CONSTRAINT "FK_event_invites_inviter_id"`);
-    await queryRunner.query(`ALTER TABLE "event_invites" DROP CONSTRAINT "FK_event_invites_event_id"`);
-    await queryRunner.query(`ALTER TABLE "event_rsvps" DROP CONSTRAINT "FK_event_rsvps_user_id"`);
-    await queryRunner.query(`ALTER TABLE "event_rsvps" DROP CONSTRAINT "FK_event_rsvps_event_id"`);
-    await queryRunner.query(`ALTER TABLE "event_cohosts" DROP CONSTRAINT "FK_event_cohosts_user_id"`);
-    await queryRunner.query(`ALTER TABLE "event_cohosts" DROP CONSTRAINT "FK_event_cohosts_event_id"`);
-    await queryRunner.query(`ALTER TABLE "events" DROP CONSTRAINT "FK_events_host_id"`);
+    await queryRunner.query(
+      `ALTER TABLE "event_invites" DROP CONSTRAINT "FK_event_invites_invitee_id"`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "event_invites" DROP CONSTRAINT "FK_event_invites_inviter_id"`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "event_invites" DROP CONSTRAINT "FK_event_invites_event_id"`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "event_rsvps" DROP CONSTRAINT "FK_event_rsvps_user_id"`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "event_rsvps" DROP CONSTRAINT "FK_event_rsvps_event_id"`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "event_cohosts" DROP CONSTRAINT "FK_event_cohosts_user_id"`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "event_cohosts" DROP CONSTRAINT "FK_event_cohosts_event_id"`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "events" DROP CONSTRAINT "FK_events_host_id"`,
+    );
     await queryRunner.query(`DROP TABLE "event_invites"`);
     await queryRunner.query(`DROP TABLE "event_rsvps"`);
     await queryRunner.query(`DROP TABLE "event_cohosts"`);

@@ -1,0 +1,20 @@
+meta {
+  name: Refresh Title State (admin)
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{baseUrl}}/cinema/titles/{{cinemaTitleId}}/refresh
+  body: none
+  auth: none
+}
+
+headers {
+  X-CSRF-Token: {{csrfToken}}
+}
+
+docs {
+  Moderator/admin. Polls Mux for the title's upload/asset state and applies
+  the same transitions as the webhook (missed-webhook recovery).
+}

@@ -76,9 +76,7 @@ export class NotificationsListener {
         userId: Not(e.message.senderId),
       },
     });
-    const recipientIds = others
-      .filter((p) => !p.muted)
-      .map((p) => p.userId);
+    const recipientIds = others.filter((p) => !p.muted).map((p) => p.userId);
     await this.notifications.createForRecipients(
       recipientIds,
       NotificationType.NewMessage,
@@ -92,11 +90,10 @@ export class NotificationsListener {
 
   @OnEvent(EVENT_INVITED)
   async onEventInvited(e: EventInvitedEvent): Promise<void> {
-    await this.notifications.create(
-      e.inviteeId,
-      NotificationType.EventInvite,
-      { eventId: e.eventId, inviterId: e.inviterId },
-    );
+    await this.notifications.create(e.inviteeId, NotificationType.EventInvite, {
+      eventId: e.eventId,
+      inviterId: e.inviterId,
+    });
   }
 
   @OnEvent(EVENT_WAITLIST_PROMOTED)

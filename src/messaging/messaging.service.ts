@@ -232,7 +232,11 @@ export class MessagingService {
       toSlug,
       body,
     );
-    return { conversationId: null, message: null, connectionRequestId: conn.id };
+    return {
+      conversationId: null,
+      message: null,
+      connectionRequestId: conn.id,
+    };
   }
 
   @OnEvent(CONNECTION_ACCEPTED)

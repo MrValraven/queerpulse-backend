@@ -13,7 +13,10 @@ import { User } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { setAuthCookies, clearAuthCookies } from './auth-cookies';
 import { AuthService, GoogleUserInput } from './auth.service';
-import { CurrentUser, CurrentUserData } from './decorators/current-user.decorator';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from './decorators/current-user.decorator';
 import { SignupRejectedError } from './errors/signup-rejected.error';
 import { Public } from './decorators/public.decorator';
 import { GoogleAuthGuard } from './guards/google-auth.guard';

@@ -1,0 +1,26 @@
+meta {
+  name: Update Title (admin)
+  type: http
+  seq: 6
+}
+
+patch {
+  url: {{baseUrl}}/cinema/titles/{{cinemaTitleId}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "title": "New name",
+  "published": true
+}
+
+docs {
+  Moderator/admin. Edit metadata; published: true requires status 'ready',
+  published: false unpublishes.
+}

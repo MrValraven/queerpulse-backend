@@ -9,7 +9,11 @@ import { PresenceService } from './presence.service';
 
 describe('ChatGateway', () => {
   let gateway: ChatGateway;
-  let messaging: { sendMessage: jest.Mock; markRead: jest.Mock; isParticipant: jest.Mock };
+  let messaging: {
+    sendMessage: jest.Mock;
+    markRead: jest.Mock;
+    isParticipant: jest.Mock;
+  };
   let emit: jest.Mock;
 
   beforeEach(async () => {
@@ -27,7 +31,9 @@ describe('ChatGateway', () => {
         { provide: MessagingService, useValue: messaging },
         {
           provide: ConnectionsService,
-          useValue: { getAcceptedConnectionUserIds: jest.fn().mockResolvedValue([]) },
+          useValue: {
+            getAcceptedConnectionUserIds: jest.fn().mockResolvedValue([]),
+          },
         },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
       ],

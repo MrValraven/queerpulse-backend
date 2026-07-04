@@ -8,6 +8,6 @@ export const ALLOWED_IMAGE_TYPES = [
 ] as const;
 
 export class PresignUploadDto {
-  @IsIn(ALLOWED_IMAGE_TYPES as unknown as string[])
+  @IsIn(ALLOWED_IMAGE_TYPES)
   contentType: string;
 }

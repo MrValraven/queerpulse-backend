@@ -1,0 +1,16 @@
+meta {
+  name: Get Title
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/cinema/titles/{{cinemaTitleId}}
+  body: none
+  auth: none
+}
+
+docs {
+  Active members. Detail for a published + ready title (mods also see drafts,
+  plus status/errorMessage fields).
+}

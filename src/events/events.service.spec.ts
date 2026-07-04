@@ -27,9 +27,15 @@ describe('EventsService', () => {
         { provide: getRepositoryToken(EventCohost), useValue: cohosts },
         {
           provide: getRepositoryToken(EventRsvp),
-          useValue: { count: jest.fn().mockResolvedValue(0), findOne: jest.fn() },
+          useValue: {
+            count: jest.fn().mockResolvedValue(0),
+            findOne: jest.fn(),
+          },
         },
-        { provide: getRepositoryToken(Profile), useValue: { find: jest.fn().mockResolvedValue([]) } },
+        {
+          provide: getRepositoryToken(Profile),
+          useValue: { find: jest.fn().mockResolvedValue([]) },
+        },
         { provide: UsersService, useValue: { findById: jest.fn() } },
       ],
     }).compile();

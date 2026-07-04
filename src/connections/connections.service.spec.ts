@@ -7,10 +7,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Profile } from '../users/entities/profile.entity';
-import {
-  Connection,
-  ConnectionStatus,
-} from './entities/connection.entity';
+import { Connection, ConnectionStatus } from './entities/connection.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import { ConnectionsService } from './connections.service';
 
@@ -50,9 +47,9 @@ describe('ConnectionsService', () => {
 
   it('rejects connecting to yourself', async () => {
     profiles.findOne.mockResolvedValue({ userId: 'me', slug: 'me' });
-    await expect(
-      service.requestConnection('me', 'me'),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.requestConnection('me', 'me')).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
   });
 
   it('creates a pending request when no pair row exists', async () => {
@@ -82,9 +79,9 @@ describe('ConnectionsService', () => {
       addresseeId: 'them',
       status: ConnectionStatus.Pending,
     });
-    await expect(
-      service.respond('c1', 'me', 'accept'),
-    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(service.respond('c1', 'me', 'accept')).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
   });
 
   it('accepts a pending request as the addressee', async () => {
@@ -107,13 +104,15 @@ describe('ConnectionsService', () => {
       status: ConnectionStatus.Blocked,
       blockedBy: 'them',
     });
-    await expect(
-      service.respond('c1', 'me', 'unblock'),
-    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(service.respond('c1', 'me', 'unblock')).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
   });
 
   it('areConnected is true only for an accepted pair', async () => {
-    connections.findOne.mockResolvedValue({ status: ConnectionStatus.Accepted });
+    connections.findOne.mockResolvedValue({
+      status: ConnectionStatus.Accepted,
+    });
     await expect(service.areConnected('a', 'b')).resolves.toBe(true);
     connections.findOne.mockResolvedValue({ status: ConnectionStatus.Pending });
     await expect(service.areConnected('a', 'b')).resolves.toBe(false);

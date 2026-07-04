@@ -7,9 +7,7 @@ import { NotificationsListener } from './notifications.listener';
 import { NotificationsService } from './notifications.service';
 
 @Module({
-  imports: [
-    TypeOrmModule.forFeature([Notification, ConversationParticipant]),
-  ],
+  imports: [TypeOrmModule.forFeature([Notification, ConversationParticipant])],
   controllers: [NotificationsController],
   providers: [NotificationsService, NotificationsListener],
   exports: [NotificationsService],

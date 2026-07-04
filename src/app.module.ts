@@ -7,6 +7,7 @@ import { ThrottlerGuard, ThrottlerModule, seconds } from '@nestjs/throttler';
 import appConfig from './config/app.config';
 import authConfig from './config/auth.config';
 import databaseConfig from './config/database.config';
+import muxConfig from './config/mux.config';
 import storageConfig from './config/storage.config';
 import { validate } from './config/env.validation';
 import { AuthModule } from './auth/auth.module';
@@ -19,6 +20,7 @@ import { VouchModule } from './vouch/vouch.module';
 import { ConnectionsModule } from './connections/connections.module';
 import { MessagingModule } from './messaging/messaging.module';
 import { ChatModule } from './chat/chat.module';
+import { CinemaModule } from './cinema/cinema.module';
 import { EventsModule } from './events/events.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { StorageModule } from './storage/storage.module';
@@ -31,7 +33,7 @@ import { SecurityModule } from './security/security.module';
     ConfigModule.forRoot({
       isGlobal: true,
       cache: true,
-      load: [appConfig, databaseConfig, authConfig, storageConfig],
+      load: [appConfig, databaseConfig, authConfig, storageConfig, muxConfig],
       validate,
     }),
     EventEmitterModule.forRoot(),
@@ -51,6 +53,7 @@ import { SecurityModule } from './security/security.module';
     EventsModule,
     NotificationsModule,
     StorageModule,
+    CinemaModule,
     HealthModule,
     SecurityModule,
   ],

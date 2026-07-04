@@ -80,7 +80,10 @@ export class AuthService {
   }
 
   async issueTokens(user: User, userAgent?: string): Promise<TokenPair> {
-    const { accessToken, refreshToken } = await this.issueTokensWithRow(user, userAgent);
+    const { accessToken, refreshToken } = await this.issueTokensWithRow(
+      user,
+      userAgent,
+    );
     return { accessToken, refreshToken };
   }
 
@@ -130,7 +133,10 @@ export class AuthService {
       replacedBy: tokens.rowId,
     });
 
-    return { accessToken: tokens.accessToken, refreshToken: tokens.refreshToken };
+    return {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+    };
   }
 
   async revokeRefreshToken(rawRefreshToken: string): Promise<void> {
@@ -148,7 +154,7 @@ export class AuthService {
     refreshToken: string,
     userAgent?: string,
   ): Promise<RefreshToken> {
-    const decoded = this.jwtService.decode(refreshToken) as { exp: number };
+    const decoded = this.jwtService.decode(refreshToken);
     const row = this.refreshTokens.create({
       userId,
       tokenHash: this.hashToken(refreshToken),
@@ -186,7 +192,11 @@ export class AuthService {
         ) as JwtSignOptions['expiresIn'],
       },
     );
-    const row = await this.persistRefreshToken(user.id, refreshToken, userAgent);
+    const row = await this.persistRefreshToken(
+      user.id,
+      refreshToken,
+      userAgent,
+    );
     return { accessToken, refreshToken, rowId: row.id };
   }
 

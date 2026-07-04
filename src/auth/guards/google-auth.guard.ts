@@ -7,7 +7,8 @@ import { encodeOAuthState } from '../oauth-state';
 export class GoogleAuthGuard extends AuthGuard('google') {
   getAuthenticateOptions(context: ExecutionContext) {
     const req = context.switchToHttp().getRequest<Request>();
-    const invite = typeof req.query?.invite === 'string' ? req.query.invite : undefined;
+    const invite =
+      typeof req.query?.invite === 'string' ? req.query.invite : undefined;
     const redirect =
       typeof req.query?.redirect === 'string' ? req.query.redirect : undefined;
     // Carry both the invite code and the post-login redirect across the Google

@@ -36,10 +36,7 @@ export class EventsController {
   ) {}
 
   @Get()
-  list(
-    @CurrentUser() user: CurrentUserData,
-    @Query() query: ListEventsQuery,
-  ) {
+  list(@CurrentUser() user: CurrentUserData, @Query() query: ListEventsQuery) {
     return this.eventsService.list(
       user.userId,
       query.filter ?? 'upcoming',
@@ -48,18 +45,12 @@ export class EventsController {
   }
 
   @Post()
-  create(
-    @CurrentUser() user: CurrentUserData,
-    @Body() dto: CreateEventDto,
-  ) {
+  create(@CurrentUser() user: CurrentUserData, @Body() dto: CreateEventDto) {
     return this.eventsService.create(user.userId, dto);
   }
 
   @Get(':slug')
-  get(
-    @CurrentUser() user: CurrentUserData,
-    @Param('slug') slug: string,
-  ) {
+  get(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.eventsService.getBySlug(slug, user.userId);
   }
 
@@ -73,10 +64,7 @@ export class EventsController {
   }
 
   @Post(':slug/cancel')
-  cancel(
-    @CurrentUser() user: CurrentUserData,
-    @Param('slug') slug: string,
-  ) {
+  cancel(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.eventsService.cancel(slug, user.userId);
   }
 
@@ -98,10 +86,7 @@ export class EventsController {
   }
 
   @Get(':slug/attendees')
-  attendees(
-    @CurrentUser() user: CurrentUserData,
-    @Param('slug') slug: string,
-  ) {
+  attendees(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.eventsService.attendees(slug, user.userId);
   }
 

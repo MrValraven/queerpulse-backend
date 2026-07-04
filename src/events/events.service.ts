@@ -39,12 +39,7 @@ export interface CreateEventInput {
 
 export type UpdateEventInput = Partial<CreateEventInput>;
 export type EventListFilter =
-  | 'upcoming'
-  | 'going'
-  | 'hosting'
-  | 'waitlisted'
-  | 'past'
-  | 'saved';
+  'upcoming' | 'going' | 'hosting' | 'waitlisted' | 'past' | 'saved';
 
 const PAGE_SIZE = 20;
 
@@ -108,9 +103,7 @@ export class EventsService {
       ...(dto.onlineUrl !== undefined
         ? { onlineUrl: dto.onlineUrl ?? null }
         : {}),
-      ...(dto.capacity !== undefined
-        ? { capacity: dto.capacity ?? null }
-        : {}),
+      ...(dto.capacity !== undefined ? { capacity: dto.capacity ?? null } : {}),
       ...(dto.visibility !== undefined ? { visibility: dto.visibility } : {}),
       ...(dto.status !== undefined ? { status: dto.status } : {}),
       ...(dto.coverImageUrl !== undefined
@@ -141,10 +134,7 @@ export class EventsService {
       const cohosted = await this.cohosts.find({ where: { userId } });
       const ids = cohosted.map((c) => c.eventId);
       events = await this.events.find({
-        where: [
-          { hostId: userId },
-          ...(ids.length ? [{ id: In(ids) }] : []),
-        ],
+        where: [{ hostId: userId }, ...(ids.length ? [{ id: In(ids) }] : [])],
         order: { startAt: 'DESC' },
         take: PAGE_SIZE,
         skip: (page - 1) * PAGE_SIZE,
@@ -260,7 +250,10 @@ export class EventsService {
 
   // --- internals ---
 
-  private async assertOrganizer(eventId: string, userId: string): Promise<void> {
+  private async assertOrganizer(
+    eventId: string,
+    userId: string,
+  ): Promise<void> {
     if (!(await this.isOrganizer(eventId, userId))) {
       throw new ForbiddenException('Only the host or a co-host can do that');
     }

@@ -70,7 +70,11 @@ export class VouchService {
     let promoted = false;
     await this.dataSource.transaction(async (manager) => {
       try {
-        await manager.insert(Vouch, { voucherId, voucheeId, note: note ?? null });
+        await manager.insert(Vouch, {
+          voucherId,
+          voucheeId,
+          note: note ?? null,
+        });
       } catch (err) {
         // The pre-check above can be lost to a concurrent vouch; the UNIQUE
         // constraint is the real backstop. Map it to a 409, not a 500.
@@ -78,13 +82,17 @@ export class VouchService {
           err instanceof QueryFailedError &&
           (err.driverError as { code?: string })?.code === '23505'
         ) {
-          throw new ConflictException('You have already vouched for this member');
+          throw new ConflictException(
+            'You have already vouched for this member',
+          );
         }
         throw err;
       }
       vouchCount = await manager.count(Vouch, { where: { voucheeId } });
       if (vouchCount >= threshold) {
-        promoted = await this.usersService.promoteToActive(voucheeId, { manager });
+        promoted = await this.usersService.promoteToActive(voucheeId, {
+          manager,
+        });
       }
     });
     this.eventEmitter.emit(VOUCH_CREATED, {

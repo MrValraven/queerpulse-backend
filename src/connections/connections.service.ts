@@ -172,10 +172,7 @@ export class ConnectionsService {
     }
   }
 
-  async remove(
-    connectionId: string,
-    actorId: string,
-  ): Promise<{ ok: true }> {
+  async remove(connectionId: string, actorId: string): Promise<{ ok: true }> {
     const conn = await this.connections.findOne({
       where: { id: connectionId },
     });
@@ -225,16 +222,18 @@ export class ConnectionsService {
           where: { voucherId: userId },
         });
         const vouchedIds = new Set(given.map((v) => v.voucheeId));
-        rows = rows.filter((c) =>
-          vouchedIds.has(this.otherId(c, userId)),
-        );
+        rows = rows.filter((c) => vouchedIds.has(this.otherId(c, userId)));
       }
     }
 
     const otherIds = rows.map((c) => this.otherId(c, userId));
     const profilesById = await this.profilesByUserIds(otherIds);
     return rows.map((c) =>
-      toConnectionListItem(c, userId, profilesById.get(this.otherId(c, userId))),
+      toConnectionListItem(
+        c,
+        userId,
+        profilesById.get(this.otherId(c, userId)),
+      ),
     );
   }
 

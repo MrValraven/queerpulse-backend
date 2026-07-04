@@ -1,0 +1,25 @@
+meta {
+  name: Report Progress
+  type: http
+  seq: 4
+}
+
+put {
+  url: {{baseUrl}}/cinema/titles/{{cinemaTitleId}}/progress
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  X-CSRF-Token: {{csrfToken}}
+}
+
+body:json {
+  "positionSeconds": 1284
+}
+
+docs {
+  Active members. Upserts resume position (send every ~10s while playing).
+  First report past min(60s, 50% of duration) counts one view per user.
+}

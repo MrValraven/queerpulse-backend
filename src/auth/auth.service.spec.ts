@@ -46,14 +46,17 @@ describe('AuthService.rotateRefreshToken', () => {
       decode: jest.fn().mockReturnValue({ exp: 9999999999 }),
     };
     users = {
-      findById: jest
-        .fn()
-        .mockResolvedValue({ id: 'u1', email: 'a@b.c', status: 'active', role: 'member' }),
+      findById: jest.fn().mockResolvedValue({
+        id: 'u1',
+        email: 'a@b.c',
+        status: 'active',
+        role: 'member',
+      }),
       findByGoogleId: jest.fn(),
       createGoogleUser: jest.fn(),
     };
     dataSource = {
-      transaction: jest.fn(async (cb: any) => cb({ /* fake manager */ })),
+      transaction: jest.fn(async (cb: any) => cb({/* fake manager */})),
     };
     invites = {
       validateInviteForSignup: jest.fn(),
@@ -104,9 +107,9 @@ describe('AuthService.rotateRefreshToken', () => {
       revokedAt: new Date(),
       expiresAt: new Date(Date.now() + 60_000),
     });
-    await expect(service.rotateRefreshToken('raw-token')).rejects.toBeInstanceOf(
-      UnauthorizedException,
-    );
+    await expect(
+      service.rotateRefreshToken('raw-token'),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
     expect(repo.update).toHaveBeenCalledWith(
       { userId: 'u1', revokedAt: expect.anything() },
       expect.objectContaining({ revokedAt: expect.any(Date) }),
@@ -115,9 +118,9 @@ describe('AuthService.rotateRefreshToken', () => {
 
   it('rejects an unknown token', async () => {
     repo.findOne.mockResolvedValue(null);
-    await expect(service.rotateRefreshToken('raw-token')).rejects.toBeInstanceOf(
-      UnauthorizedException,
-    );
+    await expect(
+      service.rotateRefreshToken('raw-token'),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
   });
 });
 
@@ -160,14 +163,17 @@ describe('validateOrCreateGoogleUser', () => {
       decode: jest.fn().mockReturnValue({ exp: 9999999999 }),
     };
     users = {
-      findById: jest
-        .fn()
-        .mockResolvedValue({ id: 'u1', email: 'a@b.c', status: 'active', role: 'member' }),
+      findById: jest.fn().mockResolvedValue({
+        id: 'u1',
+        email: 'a@b.c',
+        status: 'active',
+        role: 'member',
+      }),
       findByGoogleId: jest.fn(),
       createGoogleUser: jest.fn(),
     };
     dataSource = {
-      transaction: jest.fn(async (cb: any) => cb({ /* fake manager */ })),
+      transaction: jest.fn(async (cb: any) => cb({/* fake manager */})),
     };
     invites = {
       validateInviteForSignup: jest.fn(),
@@ -196,9 +202,9 @@ describe('validateOrCreateGoogleUser', () => {
   it('returns the existing user by googleId without needing an invite', async () => {
     const existing = { id: 'u1', status: UserStatus.Active };
     users.findByGoogleId = jest.fn().mockResolvedValue(existing);
-    await expect(
-      service.validateOrCreateGoogleUser(profile),
-    ).resolves.toBe(existing);
+    await expect(service.validateOrCreateGoogleUser(profile)).resolves.toBe(
+      existing,
+    );
     expect(dataSource.transaction).not.toHaveBeenCalled();
   });
 

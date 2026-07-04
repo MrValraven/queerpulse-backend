@@ -19,7 +19,10 @@ describe('oauth-state codec', () => {
     });
 
     it('round-trips both invite and redirect', () => {
-      const encoded = encodeOAuthState({ invite: 'CODE', redirect: '/auth/welcome' });
+      const encoded = encodeOAuthState({
+        invite: 'CODE',
+        redirect: '/auth/welcome',
+      });
       expect(decodeOAuthState(encoded)).toEqual({
         invite: 'CODE',
         redirect: '/auth/welcome',

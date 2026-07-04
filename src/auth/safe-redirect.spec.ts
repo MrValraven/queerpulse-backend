@@ -4,7 +4,9 @@ describe('safeRedirectPath', () => {
   it('accepts simple internal paths', () => {
     expect(safeRedirectPath('/feed')).toBe('/feed');
     expect(safeRedirectPath('/auth/welcome')).toBe('/auth/welcome');
-    expect(safeRedirectPath('/events/123?tab=going')).toBe('/events/123?tab=going');
+    expect(safeRedirectPath('/events/123?tab=going')).toBe(
+      '/events/123?tab=going',
+    );
     expect(safeRedirectPath('/')).toBe('/');
   });
 
@@ -56,7 +58,9 @@ describe('resolvePostLoginRedirect', () => {
   });
 
   it('falls back to the default landing page for an open-redirect attempt', () => {
-    expect(resolvePostLoginRedirect('https://evil.com', FRONTEND)).toBe(FRONTEND);
+    expect(resolvePostLoginRedirect('https://evil.com', FRONTEND)).toBe(
+      FRONTEND,
+    );
     expect(resolvePostLoginRedirect('//evil.com', FRONTEND)).toBe(FRONTEND);
   });
 

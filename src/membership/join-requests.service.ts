@@ -10,10 +10,7 @@ import { Repository } from 'typeorm';
 import { UserStatus } from '../users/entities/user.entity';
 import { USER_PROMOTED, UserPromotedEvent } from '../users/user.events';
 import { UsersService } from '../users/users.service';
-import {
-  JoinRequest,
-  JoinRequestStatus,
-} from './entities/join-request.entity';
+import { JoinRequest, JoinRequestStatus } from './entities/join-request.entity';
 
 @Injectable()
 export class JoinRequestsService {

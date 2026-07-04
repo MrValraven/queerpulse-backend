@@ -32,10 +32,7 @@ export class VouchController {
   }
 
   @Delete(':slug/vouch')
-  withdraw(
-    @CurrentUser() user: CurrentUserData,
-    @Param('slug') slug: string,
-  ) {
+  withdraw(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.vouchService.withdrawVouch(user.userId, slug);
   }
 

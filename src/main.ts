@@ -6,7 +6,8 @@ import helmet from 'helmet';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // rawBody: exposes req.rawBody for HMAC-verified webhooks (Mux).
+  const app = await NestFactory.create(AppModule, { rawBody: true });
   const configService = app.get(ConfigService);
 
   // Security middleware before routes.
@@ -17,9 +18,7 @@ async function bootstrap() {
     'app.frontendUrl',
     'http://localhost:5173',
   );
-  const origins = Array.from(
-    new Set([frontendUrl, 'http://localhost:5173']),
-  );
+  const origins = Array.from(new Set([frontendUrl, 'http://localhost:5173']));
   app.enableCors({
     origin: origins,
     credentials: true,
