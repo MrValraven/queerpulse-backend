@@ -29,6 +29,14 @@ describe('oauth-state codec', () => {
       });
     });
 
+    it('round-trips the anti-CSRF nonce', () => {
+      const encoded = encodeOAuthState({ redirect: '/feed', nonce: 'abc123' });
+      expect(decodeOAuthState(encoded)).toEqual({
+        redirect: '/feed',
+        nonce: 'abc123',
+      });
+    });
+
     it('produces a single opaque token (no raw path leakage)', () => {
       const encoded = encodeOAuthState({ redirect: '/feed' })!;
       expect(encoded).not.toContain('/');

@@ -3,7 +3,13 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Notification, NotificationType } from './entities/notification.entity';
 
-const LIST_LIMIT = 100;
+const PAGE_SIZE = 20;
+
+export interface NotificationsPage {
+  items: Notification[];
+  page: number;
+  hasMore: boolean;
+}
 
 @Injectable()
 export class NotificationsService {
@@ -37,12 +43,24 @@ export class NotificationsService {
     );
   }
 
-  list(userId: string, unread?: boolean): Promise<Notification[]> {
-    return this.notifications.find({
-      where: { userId, ...(unread ? { read: false } : {}) },
+  async list(
+    userId: string,
+    opts: { unread?: boolean; page?: number } = {},
+  ): Promise<NotificationsPage> {
+    const page = opts.page && opts.page > 0 ? opts.page : 1;
+    // Fetch one extra row to detect a following page without a second count.
+    const rows = await this.notifications.find({
+      where: { userId, ...(opts.unread ? { read: false } : {}) },
       order: { createdAt: 'DESC' },
-      take: LIST_LIMIT,
+      skip: (page - 1) * PAGE_SIZE,
+      take: PAGE_SIZE + 1,
     });
+    const hasMore = rows.length > PAGE_SIZE;
+    return { items: hasMore ? rows.slice(0, PAGE_SIZE) : rows, page, hasMore };
+  }
+
+  unreadCount(userId: string): Promise<number> {
+    return this.notifications.count({ where: { userId, read: false } });
   }
 
   async markRead(id: string, userId: string): Promise<{ ok: true }> {

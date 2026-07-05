@@ -1,99 +1,175 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# QueerPulse Backend
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+The API for QueerPulse — an invite-only community platform. Built with
+[NestJS](https://nestjs.com/) (v11) + TypeScript, PostgreSQL via
+[TypeORM](https://typeorm.io/), Google OAuth + JWT cookie sessions, WebSocket
+chat (socket.io), and Mux-backed video ("cinema").
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Prerequisites
 
-## Description
+- **Node.js** `>= 20.11`
+- **pnpm** `>= 9` (this repo pins `pnpm@9.15.0` via `packageManager`; run
+  `corepack enable` to have the right version selected automatically)
+- **PostgreSQL** `>= 14` (16 recommended)
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Project setup
+## Quickstart
 
 ```bash
-$ pnpm install
+# 1. Install dependencies (required — recent changes added new dependencies,
+#    so re-run this even if you have an older node_modules).
+pnpm install
+
+# 2. Configure environment
+cp .env.example .env
+#    then edit .env — at minimum set DATABASE_URL and the JWT/Google values.
+
+# 3. Create the schema (migrations own the schema; `synchronize` is never on)
+pnpm run migration:run
+
+# 4. (Optional) seed local fixture members
+pnpm run seed
+
+# 5. Run the API
+pnpm run start:dev        # watch mode
 ```
 
-## Compile and run the project
+The server listens on `PORT` (default `3000`). Health check:
+`GET http://localhost:3000/health`.
+
+## Environment variables
+
+Copy `.env.example` and fill these in. Required values are validated at boot
+(`src/config/env.validation.ts`) — the app refuses to start if any are missing
+or malformed.
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `NODE_ENV` | yes | `development` \| `production` \| `test` |
+| `PORT` | yes | HTTP port (e.g. `3000`) |
+| `DATABASE_URL` | yes | `postgres://user:pass@host:5432/db` |
+| `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` | yes | signing secrets |
+| `JWT_ACCESS_TTL` / `JWT_REFRESH_TTL` | no | e.g. `15m` / `30d` |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_CALLBACK_URL` | yes | OAuth |
+| `FRONTEND_URL` | no | CORS origin + post-login redirect base |
+| `COOKIE_DOMAIN` | no | leave unset for localhost |
+| `S3_*` / `MUX_*` | no | storage + video features |
+| `VOUCH_THRESHOLD` / `INVITE_MONTHLY_QUOTA` | no | membership tuning |
+
+### Database TLS & connection pool
+
+TLS defaults to **on in production with certificate verification enabled**.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `DATABASE_SSL` | (prod → on) | explicit `true`/`false` override for TLS negotiation |
+| `DATABASE_SSL_CA` | — | CA bundle: inline PEM or a file path |
+| `DATABASE_SSL_INSECURE` | `false` | `true` disables cert verification — local/self-signed only, never production |
+| `DATABASE_POOL_MAX` | `10` | max pool connections |
+| `DATABASE_POOL_MIN` | `0` | min pool connections |
+| `DATABASE_CONNECTION_TIMEOUT_MS` | `10000` | acquire timeout |
+| `DATABASE_IDLE_TIMEOUT_MS` | `30000` | idle client timeout |
+| `DATABASE_STATEMENT_TIMEOUT_MS` | `30000` | per-statement server timeout |
+
+### Observability / feature flags
+
+| Variable | Notes |
+| --- | --- |
+| `SENTRY_DSN` | enables Sentry error reporting when set |
+| `LOG_LEVEL` | pino level (`info`, `debug`, …) |
+| `ENABLE_SWAGGER` | serve the OpenAPI/Swagger UI when set |
+
+## Database & migrations
+
+The schema is owned entirely by migrations under `src/migrations`. **Never**
+enable `synchronize`.
 
 ```bash
-# development
-$ pnpm run start
-
-# watch mode
-$ pnpm run start:dev
-
-# production mode
-$ pnpm run start:prod
+pnpm run migration:run                     # apply pending migrations (dev, ts-node)
+pnpm run migration:revert                   # revert the last migration
+pnpm run migration:generate src/migrations/<Name>   # diff entities -> migration
+pnpm run migration:create   src/migrations/<Name>   # empty migration
+pnpm run migration:run:prod                 # apply migrations from compiled dist/
+pnpm run seed                               # local fixture members (refuses NODE_ENV=production)
 ```
 
-## Run tests
+`pnpm run typeorm ...` is the raw CLI wrapper (`-d src/data-source.ts`). The
+`*:prod` variants run the TypeORM CLI against `dist/data-source.js` and are what
+you use in a built/containerized deploy.
+
+## Running
 
 ```bash
-# unit tests
-$ pnpm run test
-
-# e2e tests
-$ pnpm run test:e2e
-
-# test coverage
-$ pnpm run test:cov
+pnpm run start:dev        # watch/hot-reload
+pnpm run start            # run once (no watch)
+pnpm run build            # compile to dist/
+pnpm run start:prod       # node dist/main (from a build)
 ```
+
+## Tests
+
+```bash
+pnpm run test             # unit tests (*.spec.ts, colocated under src/)
+pnpm run test:cov         # unit tests + coverage
+pnpm run test:e2e         # e2e tests (boots the full app, runInBand)
+```
+
+### e2e test database safety
+
+The e2e suites (`test/*.e2e-spec.ts`) **delete every table between tests**. A
+guard (`test/db-safety.ts`, wired via `test/jest-e2e.json`) refuses to run
+unless the target database name ends in `_test`, or a dedicated
+`TEST_DATABASE_URL` is set.
+
+```bash
+cp .env.test.example .env.test    # point DATABASE_URL at a *_test database
+createdb queerpulse_test          # (or however you provision it)
+pnpm run migration:run            # with DATABASE_URL pointing at the test DB
+pnpm run test:e2e
+```
+
+`.env.test` overrides `.env` for e2e runs; any variable it omits falls back to
+`.env`. `.env.test` is git-ignored.
 
 ## Deployment
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+Order matters: **build → migrate → start**.
 
 ```bash
-$ pnpm install -g @nestjs/mau
-$ mau deploy
+pnpm install --frozen-lockfile
+pnpm run build
+pnpm run migration:run:prod        # apply migrations against the target DB
+pnpm run start:prod                # node dist/main
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+Run `migration:run:prod` as a discrete step before rolling out new app
+instances so the schema is in place before any new code serves traffic.
 
-## Resources
+> After dependency changes, run `pnpm install` and **commit the updated
+> `pnpm-lock.yaml`** — CI installs with `--frozen-lockfile` and fails on a stale
+> lockfile.
 
-Check out a few resources that may come in handy when working with NestJS:
+### Health probes
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+- `GET /health` — full check incl. DB ping (backwards-compatible)
+- `GET /health/live` — liveness (no external deps)
+- `GET /health/ready` — readiness (DB reachable)
 
-## Support
+## Docker
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+```bash
+docker compose up --build     # app + postgres; app migrates then starts
+```
 
-## Stay in touch
+Or build just the image (multi-stage; runs `node dist/main`):
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+```bash
+docker build -t queerpulse-backend .
+docker run --rm -p 3000:3000 --env-file .env queerpulse-backend
+# migrate first: docker run --rm --env-file .env queerpulse-backend npm run migration:run:prod
+```
 
-## License
+## CI
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
-# queerpulse-backend
+`.github/workflows/ci.yml` runs on push/PR to `main`: pnpm install → lint →
+build → unit tests → e2e against a Postgres service container using a
+`queerpulse_test` database. Node and pnpm versions are pinned.

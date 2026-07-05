@@ -31,13 +31,29 @@ export class CinemaReconciliationService {
     if (!this.config.get<string>('mux.tokenId')) {
       return; // Mux not configured — nothing to reconcile against
     }
+    // Cut on last_ingest_event_at, NOT updated_at: a view-count increment bumps
+    // updated_at and would reset the clock on a title that is genuinely stuck
+    // mid-ingest, hiding it from this sweep. Every in-flight title stamps
+    // last_ingest_event_at on each transition (and when its upload is minted).
     const cutoff = new Date(Date.now() - STUCK_AFTER_MS);
     const stuck = await this.titles.find({
       where: [
-        { status: TitleStatus.AwaitingUpload, updatedAt: LessThan(cutoff) },
-        { status: TitleStatus.Processing, updatedAt: LessThan(cutoff) },
-        { pendingMuxUploadId: Not(IsNull()), updatedAt: LessThan(cutoff) },
-        { pendingMuxAssetId: Not(IsNull()), updatedAt: LessThan(cutoff) },
+        {
+          status: TitleStatus.AwaitingUpload,
+          lastIngestEventAt: LessThan(cutoff),
+        },
+        {
+          status: TitleStatus.Processing,
+          lastIngestEventAt: LessThan(cutoff),
+        },
+        {
+          pendingMuxUploadId: Not(IsNull()),
+          lastIngestEventAt: LessThan(cutoff),
+        },
+        {
+          pendingMuxAssetId: Not(IsNull()),
+          lastIngestEventAt: LessThan(cutoff),
+        },
       ],
     });
     for (const title of stuck) {

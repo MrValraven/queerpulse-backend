@@ -39,6 +39,17 @@ export class NotificationsListener {
       NotificationType.ConnectionRequest,
       { connectionId: e.connectionId, fromUserId: e.requesterId },
     );
+    if (e.introducedBy) {
+      await this.notifications.create(
+        e.introducedBy,
+        NotificationType.IntroductionMade,
+        {
+          connectionId: e.connectionId,
+          requesterId: e.requesterId,
+          addresseeId: e.addresseeId,
+        },
+      );
+    }
   }
 
   @OnEvent(CONNECTION_ACCEPTED)
@@ -92,6 +103,7 @@ export class NotificationsListener {
   async onEventInvited(e: EventInvitedEvent): Promise<void> {
     await this.notifications.create(e.inviteeId, NotificationType.EventInvite, {
       eventId: e.eventId,
+      inviteId: e.inviteId,
       inviterId: e.inviterId,
     });
   }

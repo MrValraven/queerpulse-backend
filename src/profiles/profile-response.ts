@@ -1,4 +1,4 @@
-import { Profile } from '../users/entities/profile.entity';
+import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { Activity } from './entities/activity.entity';
 import { BoardPost } from './entities/board-post.entity';
 import { Shaping, ShapingKind } from './entities/shaping.entity';
@@ -139,10 +139,15 @@ export function toProfileCard(p: Profile, vouchCount: number): ProfileCard {
 }
 
 export function toMemberCard(p: Profile, vouchCount: number): MemberCard {
+  // The directory lists every member (§8), but only `open` profiles expose
+  // location/openTo on the card — `network`/`private` keep them blank here,
+  // mirroring toLimitedProfile so the card can't leak what the profile detail
+  // deliberately hides.
+  const open = p.visibility === ProfileVisibility.Open;
   return {
     ...toProfileCard(p, vouchCount),
-    location: p.location,
-    openTo: p.openTo,
+    location: open ? p.location : null,
+    openTo: open ? p.openTo : [],
   };
 }
 

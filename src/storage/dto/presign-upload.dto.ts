@@ -1,11 +1,5 @@
 import { IsIn } from 'class-validator';
-
-export const ALLOWED_IMAGE_TYPES = [
-  'image/jpeg',
-  'image/png',
-  'image/webp',
-  'image/gif',
-] as const;
+import { ALLOWED_IMAGE_TYPES } from '../upload-content-types';
 
 export class PresignUploadDto {
   @IsIn(ALLOWED_IMAGE_TYPES)

@@ -311,31 +311,38 @@ describe('InvitesService.resolveInvite', () => {
 
 describe('InvitesService.createInvite', () => {
   let service: InvitesService;
-  let repo: {
+  let invitesRepo: { exists: jest.Mock };
+  // The quota check + insert now run inside a transaction against a manager;
+  // the inviter row is read under a pessimistic lock (userRepo.findOne).
+  let userRepo: { findOne: jest.Mock };
+  let manager: {
+    getRepository: jest.Mock;
     count: jest.Mock;
-    exists: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
   };
   let config: { get: jest.Mock };
-  let usersService: { findById: jest.Mock };
 
   const build = async (quota = 1) => {
-    repo = {
+    invitesRepo = { exists: jest.fn().mockResolvedValue(false) };
+    // Default: no per-user override, so the quota check falls back to config.
+    userRepo = { findOne: jest.fn().mockResolvedValue(null) };
+    manager = {
+      getRepository: jest.fn(() => userRepo),
       count: jest.fn().mockResolvedValue(0),
-      exists: jest.fn().mockResolvedValue(false),
-      create: jest.fn((x) => x),
-      save: jest.fn(async (x) => x),
+      create: jest.fn((_entity, v) => v),
+      save: jest.fn(async (v) => v),
     };
     config = { get: jest.fn(() => quota) };
-    // Default: no per-user override, so the quota check falls back to config.
-    usersService = { findById: jest.fn().mockResolvedValue(null) };
+    const dataSource = {
+      transaction: jest.fn().mockImplementation(async (cb) => cb(manager)),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         InvitesService,
-        { provide: getRepositoryToken(Invite), useValue: repo },
-        { provide: UsersService, useValue: usersService },
-        { provide: DataSource, useValue: {} },
+        { provide: getRepositoryToken(Invite), useValue: invitesRepo },
+        { provide: UsersService, useValue: { findById: jest.fn() } },
+        { provide: DataSource, useValue: dataSource },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
         { provide: ConfigService, useValue: config },
       ],
@@ -364,67 +371,77 @@ describe('InvitesService.createInvite', () => {
   });
 
   it('regenerates the code on collision before persisting', async () => {
-    repo.exists.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    invitesRepo.exists
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
     await service.createInvite('inviter');
-    expect(repo.exists).toHaveBeenCalledTimes(2);
+    expect(invitesRepo.exists).toHaveBeenCalledTimes(2);
+  });
+
+  it('inserts under the caller transaction, not the bare repository', async () => {
+    await service.createInvite('inviter', { note: 'hi' });
+    expect(manager.save).toHaveBeenCalled();
   });
 
   it('trims the note and stores empty/whitespace as null', async () => {
     await service.createInvite('inviter', { note: '  hello  ' });
-    expect(repo.create).toHaveBeenCalledWith(
+    expect(manager.create).toHaveBeenCalledWith(
+      Invite,
       expect.objectContaining({ note: 'hello' }),
     );
 
-    repo.create.mockClear();
+    manager.create.mockClear();
     await service.createInvite('inviter', { note: '   ' });
-    expect(repo.create).toHaveBeenCalledWith(
+    expect(manager.create).toHaveBeenCalledWith(
+      Invite,
       expect.objectContaining({ note: null }),
     );
 
-    repo.create.mockClear();
+    manager.create.mockClear();
     await service.createInvite('inviter');
-    expect(repo.create).toHaveBeenCalledWith(
+    expect(manager.create).toHaveBeenCalledWith(
+      Invite,
       expect.objectContaining({ note: null }),
     );
   });
 
   it('trims the vouch and stores empty/whitespace as null', async () => {
     await service.createInvite('inviter', { vouch: '  why they belong  ' });
-    expect(repo.create).toHaveBeenCalledWith(
+    expect(manager.create).toHaveBeenCalledWith(
+      Invite,
       expect.objectContaining({ vouch: 'why they belong' }),
     );
 
-    repo.create.mockClear();
+    manager.create.mockClear();
     await service.createInvite('inviter', { vouch: '   ' });
-    expect(repo.create).toHaveBeenCalledWith(
-      expect.objectContaining({ vouch: null }),
-    );
-
-    repo.create.mockClear();
-    await service.createInvite('inviter');
-    expect(repo.create).toHaveBeenCalledWith(
+    expect(manager.create).toHaveBeenCalledWith(
+      Invite,
       expect.objectContaining({ vouch: null }),
     );
   });
 
   it('rejects with 403 when the monthly quota is exhausted', async () => {
     await build(1);
-    repo.count.mockResolvedValue(1); // already used this month's allowance
+    manager.count.mockResolvedValue(1); // already used this month's allowance
 
     await expect(
       service.createInvite('inviter', { note: 'hi' }),
     ).rejects.toBeInstanceOf(ForbiddenException);
-    expect(repo.save).not.toHaveBeenCalled();
+    expect(manager.save).not.toHaveBeenCalled();
   });
 
-  it('uses the per-user quota override instead of the global default', async () => {
+  it('locks the inviter row and uses its per-user quota override', async () => {
     await build(1); // global default is 1
-    usersService.findById.mockResolvedValue({ inviteMonthlyQuota: 3 });
-    repo.count.mockResolvedValue(2); // 2 used, override allows 3
+    userRepo.findOne.mockResolvedValue({ inviteMonthlyQuota: 3 });
+    manager.count.mockResolvedValue(2); // 2 used, override allows 3
 
     await expect(service.createInvite('inviter')).resolves.toBeDefined();
+    expect(userRepo.findOne).toHaveBeenCalledWith({
+      where: { id: 'inviter' },
+      lock: { mode: 'pessimistic_write' },
+    });
 
-    repo.count.mockResolvedValue(3); // now at the override limit
+    manager.count.mockResolvedValue(3); // now at the override limit
     await expect(service.createInvite('inviter')).rejects.toBeInstanceOf(
       ForbiddenException,
     );
@@ -432,13 +449,80 @@ describe('InvitesService.createInvite', () => {
 
   it('counts only invites created since the start of the UTC month', async () => {
     await service.createInvite('inviter');
-    const where = repo.count.mock.calls[0][0].where;
+    const where = manager.count.mock.calls[0][1].where;
     expect(where.inviterId).toBe('inviter');
     // MoreThanOrEqual(monthStart) — assert the boundary is the 1st at 00:00 UTC.
     const boundary: Date = where.createdAt.value;
     expect(boundary.getUTCDate()).toBe(1);
     expect(boundary.getUTCHours()).toBe(0);
     expect(boundary.getUTCMinutes()).toBe(0);
+  });
+});
+
+describe('InvitesService.listMyInvites', () => {
+  let service: InvitesService;
+  let repo: { find: jest.Mock };
+
+  beforeEach(async () => {
+    repo = { find: jest.fn().mockResolvedValue([]) };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        InvitesService,
+        { provide: getRepositoryToken(Invite), useValue: repo },
+        { provide: UsersService, useValue: {} },
+        { provide: DataSource, useValue: {} },
+        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        { provide: ConfigService, useValue: { get: jest.fn(() => 1) } },
+      ],
+    }).compile();
+    service = module.get(InvitesService);
+  });
+
+  it('maps to whitelisted MyInviteView rows (no raw entity / internal ids)', async () => {
+    repo.find.mockResolvedValue([
+      {
+        id: 'internal-id',
+        inviterId: 'inviter',
+        acceptedBy: 'someone',
+        code: 'QP-AAAA-BBBB',
+        email: 'x@y.z',
+        note: 'hi',
+        vouch: 'why',
+        status: InviteStatus.Pending,
+        expiresAt: new Date('2026-07-12T00:00:00.000Z'),
+        createdAt: new Date('2026-07-05T00:00:00.000Z'),
+      },
+    ]);
+    const rows = await service.listMyInvites('inviter', { limit: 10 });
+    expect(repo.find).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { inviterId: 'inviter' },
+        take: 10,
+        skip: 0,
+      }),
+    );
+    expect(Object.keys(rows[0]).sort()).toEqual(
+      ['code', 'createdAt', 'email', 'expiresAt', 'note', 'status', 'vouch'].sort(),
+    );
+    expect(rows[0]).not.toHaveProperty('id');
+    expect(rows[0]).not.toHaveProperty('acceptedBy');
+    expect(rows[0].expiresAt).toBe('2026-07-12T00:00:00.000Z');
+  });
+
+  it('recomputes status so a not-yet-swept expiry reads as expired', async () => {
+    repo.find.mockResolvedValue([
+      {
+        code: 'QP-AAAA-BBBB',
+        email: null,
+        note: null,
+        vouch: null,
+        status: InviteStatus.Pending, // stale in the DB
+        expiresAt: new Date('2000-01-01T00:00:00.000Z'), // long past
+        createdAt: new Date('1999-12-01T00:00:00.000Z'),
+      },
+    ]);
+    const rows = await service.listMyInvites('inviter');
+    expect(rows[0].status).toBe('expired');
   });
 });
 

@@ -50,6 +50,7 @@ function makeTitle(overrides: Partial<CinemaTitle> = {}): CinemaTitle {
     muxPlaybackId: 'pb-1',
     pendingMuxUploadId: null,
     pendingMuxAssetId: null,
+    lastIngestEventAt: null,
     durationSeconds: 7200,
     aspectRatio: '16:9',
     publishedAt: new Date('2026-07-01T00:00:00Z'),
@@ -75,6 +76,7 @@ describe('CinemaService', () => {
     signPlaybackTokens: jest.Mock;
     deleteAsset: jest.Mock;
     createDirectUpload: jest.Mock;
+    getAsset: jest.Mock;
   };
   let dataSource: { transaction: jest.Mock };
   let updateExecute: jest.Mock;
@@ -107,6 +109,7 @@ describe('CinemaService', () => {
         uploadId: 'up-new',
         uploadUrl: 'https://storage.mux.com/put',
       }),
+      getAsset: jest.fn(),
     };
     updateExecute = jest.fn().mockResolvedValue({ affected: 1 });
     const updateQb = {
@@ -210,13 +213,27 @@ describe('CinemaService', () => {
       expect(titles.find).not.toHaveBeenCalled();
     });
 
-    it('lists all statuses for a moderator with includeAll', async () => {
+    it('lists all statuses for a moderator with includeAll, exposing admin fields', async () => {
       titles.find.mockResolvedValue([
-        makeTitle({ status: TitleStatus.Draft, publishedAt: null }),
+        makeTitle({
+          status: TitleStatus.Failed,
+          publishedAt: null,
+          errorMessage: 'bad codec',
+        }),
       ]);
       const result = await service.listTitles(moderator, true);
       expect(result).toHaveLength(1);
       expect(findArg().where).toBeUndefined();
+      // Admin list must distinguish drafts/processing/failed titles.
+      expect(result[0].status).toBe(TitleStatus.Failed);
+      expect(result[0].errorMessage).toBe('bad codec');
+    });
+
+    it('omits admin fields from the member-facing list', async () => {
+      titles.find.mockResolvedValue([makeTitle()]);
+      const result = await service.listTitles(member, false);
+      expect(result[0].status).toBeUndefined();
+      expect(result[0].errorMessage).toBeUndefined();
     });
 
     it('lists only published ready titles for members, with progress merged', async () => {
@@ -289,6 +306,21 @@ describe('CinemaService', () => {
       expect(saved.muxUploadId).toBe('up-1');
       expect(saved.muxAssetId).toBe('as-1');
       expect(mux.deleteAsset).not.toHaveBeenCalled();
+    });
+
+    it('drops a superseded pending asset before staging another replacement', async () => {
+      // A prior replacement already produced a pending asset; re-uploading must
+      // delete it at Mux so the abandoned asset is not billed forever.
+      titles.findOne.mockResolvedValue(
+        makeTitle({ pendingMuxUploadId: 'up-old', pendingMuxAssetId: 'as-old' }),
+      );
+      await service.requestUpload('title-1');
+      expect(mux.deleteAsset).toHaveBeenCalledWith('as-old');
+      const saved = savedTitle();
+      expect(saved.pendingMuxUploadId).toBe('up-new');
+      expect(saved.pendingMuxAssetId).toBeNull();
+      expect(saved.muxAssetId).toBe('as-1'); // live asset untouched
+      expect(saved.status).toBe(TitleStatus.Ready);
     });
 
     it('409s while an upload is processing', async () => {
@@ -439,6 +471,95 @@ describe('CinemaService', () => {
       expect(saved.status).toBe(TitleStatus.Ready);
       expect(saved.pendingMuxUploadId).toBeNull();
     });
+
+    it('rejects an on* transition with an empty provider id', async () => {
+      await expect(
+        service.onAssetReady('', {
+          playbackId: 'pb',
+          durationSeconds: 1,
+          aspectRatio: null,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(titles.findOne).not.toHaveBeenCalled();
+    });
+
+    it('ignores a late asset.errored on a Ready/published title', async () => {
+      // Main asset (as-1) errors after the title is already Ready — a stale or
+      // replayed event must not yank a live title back to Failed.
+      titles.findOne.mockResolvedValue(makeTitle()); // Ready, published, as-1
+      await service.onAssetErrored('as-1', 'transient blip');
+      expect(titles.save).not.toHaveBeenCalled();
+    });
+
+    it('ignores a late upload failure on a Ready/published title', async () => {
+      titles.findOne.mockResolvedValue(makeTitle()); // Ready, published, up-1
+      await service.onUploadFailed('up-1', 'video.upload.errored');
+      expect(titles.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('syncAssetState (out-of-order heal)', () => {
+    it('applies a ready asset that arrived before asset_created linked it', async () => {
+      // asset_created just linked as-1 (title Processing); the earlier
+      // asset.ready was dropped as "unknown". Polling now heals it.
+      titles.findOne.mockResolvedValue(
+        makeTitle({
+          status: TitleStatus.Processing,
+          publishedAt: null,
+          muxAssetId: 'as-1',
+          muxPlaybackId: null,
+          durationSeconds: null,
+        }),
+      );
+      mux.getAsset.mockResolvedValue({
+        status: 'ready',
+        playbackId: 'pb-late',
+        durationSeconds: 4800,
+        aspectRatio: '16:9',
+        errorMessage: null,
+      });
+      await service.syncAssetState('as-1');
+      expect(mux.getAsset).toHaveBeenCalledWith('as-1');
+      const saved = savedTitle();
+      expect(saved.status).toBe(TitleStatus.Ready);
+      expect(saved.muxPlaybackId).toBe('pb-late');
+      expect(saved.durationSeconds).toBe(4800);
+    });
+
+    it('fails the title when the polled asset already errored', async () => {
+      titles.findOne.mockResolvedValue(
+        makeTitle({
+          status: TitleStatus.Processing,
+          publishedAt: null,
+          muxAssetId: 'as-1',
+          muxPlaybackId: null,
+        }),
+      );
+      mux.getAsset.mockResolvedValue({
+        status: 'errored',
+        playbackId: null,
+        durationSeconds: null,
+        aspectRatio: null,
+        errorMessage: 'bad codec',
+      });
+      await service.syncAssetState('as-1');
+      const saved = savedTitle();
+      expect(saved.status).toBe(TitleStatus.Failed);
+      expect(saved.errorMessage).toBe('bad codec');
+    });
+
+    it('does not poll a main asset that is already Ready', async () => {
+      titles.findOne.mockResolvedValue(makeTitle()); // Ready, muxAssetId as-1
+      await service.syncAssetState('as-1');
+      expect(mux.getAsset).not.toHaveBeenCalled();
+      expect(titles.save).not.toHaveBeenCalled();
+    });
+
+    it('ignores an unknown asset without polling', async () => {
+      titles.findOne.mockResolvedValue(null);
+      await service.syncAssetState('as-x');
+      expect(mux.getAsset).not.toHaveBeenCalled();
+    });
   });
 
   describe('admin CRUD', () => {
@@ -461,6 +582,16 @@ describe('CinemaService', () => {
     it('refuses to publish a title that is not ready', async () => {
       titles.findOne.mockResolvedValue(
         makeTitle({ status: TitleStatus.Processing, publishedAt: null }),
+      );
+      await expect(
+        service.updateTitle('title-1', { published: true }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(titles.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses to publish a ready title with no playback id', async () => {
+      titles.findOne.mockResolvedValue(
+        makeTitle({ publishedAt: null, muxPlaybackId: null }),
       );
       await expect(
         service.updateTitle('title-1', { published: true }),
@@ -568,6 +699,16 @@ describe('CinemaService', () => {
       await expect(
         service.reportProgress(member, 'title-1', 90),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('saves progress but does not count a view for a moderator preview', async () => {
+      // Moderators may report progress against an unpublished title (preview);
+      // that must never inflate the public view count.
+      titles.findOne.mockResolvedValue(makeTitle({ publishedAt: null }));
+      const result = await service.reportProgress(moderator, 'title-1', 90);
+      expect(progress.upsert).toHaveBeenCalled();
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(result).toEqual({ positionSeconds: 90, viewCounted: false });
     });
   });
 

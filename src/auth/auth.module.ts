@@ -7,6 +7,7 @@ import { UsersModule } from '../users/users.module';
 import { MembershipModule } from '../membership/membership.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { AuthMaintenanceService } from './auth-maintenance.service';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { GoogleStrategy } from './strategies/google.strategy';
 import { JwtStrategy } from './strategies/jwt.strategy';
@@ -31,7 +32,12 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, GoogleStrategy, JwtStrategy],
+  providers: [
+    AuthService,
+    AuthMaintenanceService,
+    GoogleStrategy,
+    JwtStrategy,
+  ],
   exports: [AuthService],
 })
 export class AuthModule {}

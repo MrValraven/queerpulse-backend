@@ -18,12 +18,15 @@ export interface ConnectionListItem {
   createdAt: Date;
   respondedAt: Date | null;
   member: ConnectionMemberView;
+  // The mutual connection who introduced the requester (network intros only).
+  introducedBy: ConnectionMemberView | null;
 }
 
 export function toConnectionListItem(
   conn: Connection,
   viewerUserId: string,
   otherProfile: Profile | undefined,
+  introducerProfile?: Profile,
 ): ConnectionListItem {
   // From the viewer's perspective: an incoming pending request is one where the
   // viewer is the addressee; outgoing is one they sent; accepted is "connected".
@@ -48,5 +51,15 @@ export function toConnectionListItem(
       pronouns: otherProfile?.pronouns ?? null,
       tagline: otherProfile?.tagline ?? null,
     },
+    introducedBy: introducerProfile
+      ? {
+          slug: introducerProfile.slug,
+          firstName: introducerProfile.firstName,
+          lastName: introducerProfile.lastName,
+          avatarUrl: introducerProfile.avatarUrl ?? null,
+          pronouns: introducerProfile.pronouns ?? null,
+          tagline: introducerProfile.tagline ?? null,
+        }
+      : null,
   };
 }

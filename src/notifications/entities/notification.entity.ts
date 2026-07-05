@@ -15,6 +15,8 @@ export enum NotificationType {
   EventInvite = 'event_invite',
   EventReminder = 'event_reminder',
   WaitlistPromoted = 'waitlist_promoted',
+  EventCancelled = 'event_cancelled',
+  IntroductionMade = 'introduction_made',
 }
 
 @Entity('notifications')

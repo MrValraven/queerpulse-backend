@@ -7,6 +7,7 @@ import {
   RawBodyRequest,
   Req,
 } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import { Request } from 'express';
 import { Public } from '../auth/decorators/public.decorator';
 import { SkipCsrf } from '../security/skip-csrf.decorator';
@@ -34,8 +35,11 @@ export class CinemaWebhooksController {
 
   // No cookies/JWT here — the request is authenticated by the Mux HMAC
   // signature over the raw body (hence @Public + @SkipCsrf + rawBody).
+  // @SkipThrottle: a Mux retry burst after an outage must not be rate-limited
+  // into 429s and dropped — the HMAC signature is the abuse control here.
   @Public()
   @SkipCsrf()
+  @SkipThrottle()
   @Post('mux')
   @HttpCode(HttpStatus.OK)
   async handleMux(@Req() req: RawBodyRequest<Request>) {
@@ -47,14 +51,25 @@ export class CinemaWebhooksController {
       req.headers,
     )) as MuxWebhookEvent;
 
+    // The object id is the sole match key for every transition; a payload
+    // missing it must be rejected, not dispatched (an undefined id in a
+    // TypeORM `where` is silently dropped and would match the first row).
+    if (typeof event?.data?.id !== 'string' || !event.data.id) {
+      throw new BadRequestException('Malformed webhook payload');
+    }
+
     // Handlers are idempotent; Mux retries and may deliver out of order.
     switch (event.type) {
       case 'video.upload.asset_created':
-        if (event.data.asset_id) {
+        if (typeof event.data.asset_id === 'string' && event.data.asset_id) {
           await this.cinema.onUploadAssetCreated(
             event.data.id,
             event.data.asset_id,
           );
+          // Heal out-of-order delivery: video.asset.ready may have already
+          // fired (and been dropped as "unknown") before this event linked
+          // the asset id — poll it once now instead of waiting for the cron.
+          await this.cinema.syncAssetState(event.data.asset_id);
         }
         break;
       case 'video.asset.ready':

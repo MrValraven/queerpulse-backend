@@ -12,6 +12,7 @@ describe('CinemaWebhooksController', () => {
     onAssetReady: jest.Mock;
     onAssetErrored: jest.Mock;
     onUploadFailed: jest.Mock;
+    syncAssetState: jest.Mock;
   };
 
   function request(body: unknown = { any: 'thing' }) {
@@ -28,6 +29,7 @@ describe('CinemaWebhooksController', () => {
       onAssetReady: jest.fn(),
       onAssetErrored: jest.fn(),
       onUploadFailed: jest.fn(),
+      syncAssetState: jest.fn(),
     };
     const module: TestingModule = await Test.createTestingModule({
       controllers: [CinemaWebhooksController],
@@ -55,13 +57,38 @@ describe('CinemaWebhooksController', () => {
     expect(mux.verifyWebhook).not.toHaveBeenCalled();
   });
 
-  it('dispatches video.upload.asset_created', async () => {
+  it('dispatches video.upload.asset_created and polls the linked asset', async () => {
     mux.verifyWebhook.mockResolvedValue({
       type: 'video.upload.asset_created',
       data: { id: 'up-1', asset_id: 'as-1' },
     });
     const result = await controller.handleMux(request());
     expect(cinema.onUploadAssetCreated).toHaveBeenCalledWith('up-1', 'as-1');
+    // Out-of-order heal: after linking, the asset is polled once so an early
+    // asset.ready that was dropped as "unknown" is applied immediately.
+    expect(cinema.syncAssetState).toHaveBeenCalledWith('as-1');
+    expect(result).toEqual({ received: true });
+  });
+
+  it('rejects a payload missing data.id before any dispatch', async () => {
+    mux.verifyWebhook.mockResolvedValue({
+      type: 'video.asset.ready',
+      data: { playback_ids: [{ id: 'pb-1' }] }, // no id
+    });
+    await expect(controller.handleMux(request())).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(cinema.onAssetReady).not.toHaveBeenCalled();
+  });
+
+  it('does not poll when asset_created has no asset_id', async () => {
+    mux.verifyWebhook.mockResolvedValue({
+      type: 'video.upload.asset_created',
+      data: { id: 'up-1' }, // asset_id missing
+    });
+    const result = await controller.handleMux(request());
+    expect(cinema.onUploadAssetCreated).not.toHaveBeenCalled();
+    expect(cinema.syncAssetState).not.toHaveBeenCalled();
     expect(result).toEqual({ received: true });
   });
 

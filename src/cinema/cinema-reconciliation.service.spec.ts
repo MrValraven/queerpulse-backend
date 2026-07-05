@@ -25,6 +25,7 @@ function makeTitle(overrides: Partial<CinemaTitle> = {}): CinemaTitle {
     muxPlaybackId: null,
     pendingMuxUploadId: null,
     pendingMuxAssetId: null,
+    lastIngestEventAt: new Date('2026-06-30T00:00:00Z'),
     durationSeconds: null,
     aspectRatio: null,
     publishedAt: null,
@@ -80,6 +81,21 @@ describe('CinemaReconciliationService', () => {
     configValues = {};
     await service.reconcile();
     expect(titles.find).not.toHaveBeenCalled();
+  });
+
+  it('cuts stuck titles on last_ingest_event_at, not updated_at', async () => {
+    // A view-count increment bumps updated_at; cutting on it would reset the
+    // stale clock and hide a genuinely stuck title. The sweep must filter on
+    // last_ingest_event_at instead.
+    await service.reconcile();
+    const where = (
+      titles.find.mock.calls as [{ where?: Record<string, unknown>[] }][]
+    )[0][0].where;
+    expect(Array.isArray(where)).toBe(true);
+    for (const clause of where ?? []) {
+      expect(clause).toHaveProperty('lastIngestEventAt');
+      expect(clause).not.toHaveProperty('updatedAt');
+    }
   });
 
   it('promotes a stuck upload whose asset now exists', async () => {

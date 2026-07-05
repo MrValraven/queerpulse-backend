@@ -71,6 +71,13 @@ export class CinemaTitle {
   @Column({ type: 'varchar', nullable: true })
   pendingMuxAssetId: string | null;
 
+  // Stamped on every ingest state transition (upload minted, asset created,
+  // asset ready/errored). Reconciliation cuts stale in-flight titles on THIS,
+  // not updated_at — view-count increments bump updated_at and would otherwise
+  // hide a title that is genuinely stuck mid-ingest.
+  @Column({ type: 'timestamptz', nullable: true })
+  lastIngestEventAt: Date | null;
+
   @Column({ type: 'integer', nullable: true })
   durationSeconds: number | null;
 

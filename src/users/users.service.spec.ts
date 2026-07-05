@@ -1,6 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
 import { Profile } from './entities/profile.entity';
 import { User, UserStatus } from './entities/user.entity';
 import { UsersService } from './users.service';
@@ -16,7 +15,6 @@ describe('UsersService', () => {
         UsersService,
         { provide: getRepositoryToken(User), useValue: usersRepo },
         { provide: getRepositoryToken(Profile), useValue: {} },
-        { provide: DataSource, useValue: {} },
       ],
     }).compile();
     service = module.get(UsersService);
@@ -89,6 +87,11 @@ describe('UsersService', () => {
           return row;
         }),
         getRepository: jest.fn(() => profileRepo),
+        // The profile insert runs in a nested SAVEPOINT transaction; the mock
+        // just re-enters the same manager.
+        transaction: jest.fn(async (cb: (m: unknown) => Promise<void>) =>
+          cb(manager),
+        ),
       } as any;
 
       const user = await service.createGoogleUser(manager, {

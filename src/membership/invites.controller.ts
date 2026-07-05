@@ -6,6 +6,7 @@ import {
   HttpStatus,
   Param,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -15,6 +16,7 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Public } from '../auth/decorators/public.decorator';
 import { CreateInviteDto } from './dto/create-invite.dto';
+import { PaginationQuery } from './dto/pagination.query';
 import { PublicInviteView } from './invite-response';
 import { InvitesService } from './invites.service';
 
@@ -35,8 +37,8 @@ export class InvitesController {
 
   @Get()
   @UseGuards(ActiveMemberGuard)
-  list(@CurrentUser() user: CurrentUserData) {
-    return this.invitesService.listMyInvites(user.userId);
+  list(@CurrentUser() user: CurrentUserData, @Query() page: PaginationQuery) {
+    return this.invitesService.listMyInvites(user.userId, page);
   }
 
   // Public, unauthenticated: the recipient's landing page resolves their invite

@@ -1,0 +1,33 @@
+# Build artifacts & deps (reinstalled/rebuilt inside the image)
+node_modules
+dist
+build
+coverage
+.nyc_output
+
+# Git & CI
+.git
+.github
+.gitignore
+
+# Env & secrets (inject at runtime, never bake into the image)
+.env
+.env.*
+!.env.example
+!.env.test.example
+
+# Editor / OS
+.vscode
+.idea
+.DS_Store
+
+# Dev-only tooling & docs
+.claude
+.superpowers
+docs
+bruno
+*.log
+
+# Tests (not needed in the production image)
+test
+**/*.spec.ts

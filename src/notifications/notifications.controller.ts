@@ -24,7 +24,18 @@ export class NotificationsController {
     @CurrentUser() user: CurrentUserData,
     @Query() query: ListNotificationsQuery,
   ) {
-    return this.notificationsService.list(user.userId, query.unread);
+    return this.notificationsService.list(user.userId, {
+      unread: query.unread,
+      page: query.page,
+    });
+  }
+
+  @Get('unread-count')
+  async unreadCount(
+    @CurrentUser() user: CurrentUserData,
+  ): Promise<{ count: number }> {
+    const count = await this.notificationsService.unreadCount(user.userId);
+    return { count };
   }
 
   @Post('read-all')

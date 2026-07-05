@@ -2,6 +2,7 @@ import {
   ForbiddenException,
   Injectable,
   InternalServerErrorException,
+  Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Mux from '@mux/mux-node';
@@ -34,6 +35,7 @@ export type PlaybackTokens = {
 // depends on these methods, which is also the seam for a future provider swap.
 @Injectable()
 export class MuxService {
+  private readonly logger = new Logger(MuxService.name);
   private client: Mux | null = null;
 
   constructor(private readonly config: ConfigService) {}
@@ -155,9 +157,10 @@ export class MuxService {
   private requireConfig(key: string): string {
     const value = this.config.get<string>(key);
     if (!value) {
-      throw new InternalServerErrorException(
-        `Mux is not configured (missing ${key})`,
-      );
+      // Log the exact missing key for operators; never leak internal config
+      // key names (MUX_*) to API clients.
+      this.logger.error(`Mux is not configured (missing ${key})`);
+      throw new InternalServerErrorException('Video service is not configured');
     }
     return value;
   }

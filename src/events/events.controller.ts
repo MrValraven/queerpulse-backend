@@ -123,6 +123,11 @@ export class EventsController {
 export class EventInvitesController {
   constructor(private readonly eventInvitesService: EventInvitesService) {}
 
+  @Get()
+  listMine(@CurrentUser() user: CurrentUserData) {
+    return this.eventInvitesService.listMyPendingInvites(user.userId);
+  }
+
   @Patch(':id')
   respond(
     @CurrentUser() user: CurrentUserData,

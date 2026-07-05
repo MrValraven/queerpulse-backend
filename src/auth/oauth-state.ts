@@ -21,6 +21,15 @@ export interface OAuthState {
   invite?: string;
   /** Internal app path to land on after login, e.g. `/feed`. */
   redirect?: string;
+  /**
+   * Anti-CSRF / session-fixation nonce. Minted when the flow starts, stored in a
+   * short-lived httpOnly `oauth_state` cookie, and echoed here inside `state`.
+   * The callback rejects unless the two match — this is what actually makes the
+   * `state` value trustworthy (the redirect/invite are still independently
+   * validated). Unlike invite/redirect it is NOT user-supplied, so tampering
+   * with it just fails the check.
+   */
+  nonce?: string;
 }
 
 /**
@@ -31,6 +40,7 @@ export function encodeOAuthState(state: OAuthState): string | undefined {
   const payload: OAuthState = {};
   if (state.invite) payload.invite = state.invite;
   if (state.redirect) payload.redirect = state.redirect;
+  if (state.nonce) payload.nonce = state.nonce;
   if (Object.keys(payload).length === 0) {
     return undefined;
   }
@@ -53,6 +63,7 @@ export function decodeOAuthState(raw: string | undefined | null): OAuthState {
       const out: OAuthState = {};
       if (typeof obj.invite === 'string') out.invite = obj.invite;
       if (typeof obj.redirect === 'string') out.redirect = obj.redirect;
+      if (typeof obj.nonce === 'string') out.nonce = obj.nonce;
       return out;
     }
   } catch {

@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { Profile, Strategy, VerifyCallback } from 'passport-google-oauth20';
 import { GoogleUserInput } from '../auth.service';
+import { OAuthProfileError } from '../errors/oauth-profile.error';
 
 @Injectable()
 export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
@@ -22,9 +23,17 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
     done: VerifyCallback,
   ): void {
     const { id, name, emails, photos } = profile;
-    const email = emails?.[0]?.value;
+    const primary = emails?.[0];
+    const email = primary?.value;
     if (!email) {
-      done(new Error('Google account has no email'), undefined);
+      // No email on the Google account — mapped to `?error=no_email` upstream.
+      done(new OAuthProfileError('no_email'), undefined);
+      return;
+    }
+    if (primary?.verified !== true) {
+      // Never trust an unverified Google email (account-takeover vector) —
+      // mapped to `?error=email_unverified` upstream.
+      done(new OAuthProfileError('email_unverified'), undefined);
       return;
     }
     const result: GoogleUserInput = {

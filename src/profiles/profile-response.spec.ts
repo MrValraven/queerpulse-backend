@@ -10,6 +10,7 @@ import {
   sortShapings,
   toFullProfile,
   toLimitedProfile,
+  toMemberCard,
   toProfileCard,
 } from './profile-response';
 
@@ -160,6 +161,28 @@ describe('profile-response mappers', () => {
       related: [],
       limited: true,
     });
+  });
+
+  it('toMemberCard exposes location/openTo only for open profiles', () => {
+    const openCard = toMemberCard(
+      profile({ visibility: ProfileVisibility.Open }),
+      1,
+    );
+    expect(openCard.location).toBe('Arroios');
+    expect(openCard.openTo).toEqual(['Collaboration']);
+  });
+
+  it('toMemberCard blanks location/openTo for network and private cards', () => {
+    for (const visibility of [
+      ProfileVisibility.Network,
+      ProfileVisibility.Private,
+    ]) {
+      const card = toMemberCard(profile({ visibility }), 1);
+      expect(card.location).toBeNull();
+      expect(card.openTo).toEqual([]);
+      // identity fields are still listed in the directory
+      expect(card.slug).toBe('tiago');
+    }
   });
 
   it('sortShapings orders film → book → song → moment', () => {

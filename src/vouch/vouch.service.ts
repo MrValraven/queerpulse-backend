@@ -9,10 +9,26 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, In, QueryFailedError, Repository } from 'typeorm';
 import { Profile } from '../users/entities/profile.entity';
+import { User } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { Vouch } from './entities/vouch.entity';
 import { USER_PROMOTED, UserPromotedEvent } from '../users/user.events';
 import { VOUCH_CREATED, VouchCreatedEvent } from './vouch.events';
+
+// Bounds an otherwise-unbounded list read; callers may narrow with limit/offset.
+const DEFAULT_PAGE_SIZE = 20;
+
+export interface PageParams {
+  limit?: number;
+  offset?: number;
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    err instanceof QueryFailedError &&
+    (err.driverError as { code?: string })?.code === '23505'
+  );
+}
 
 export interface VoucherView {
   slug: string;
@@ -65,23 +81,31 @@ export class VouchService {
       throw new ConflictException('You have already vouched for this member');
     }
 
+    // Empty/whitespace-only notes are stored as null, not "".
+    const trimmedNote = note?.trim();
+    const cleanNote = trimmedNote ? trimmedNote : null;
+
     const threshold = this.config.get<number>('app.vouchThreshold', 2);
     let vouchCount = 0;
     let promoted = false;
     await this.dataSource.transaction(async (manager) => {
+      // Take a write lock on the vouchee row first so concurrent vouches for the
+      // same member serialize: without it two racing vouches could each read a
+      // pre-threshold count and both skip promotion. The lock is held to commit.
+      await manager.findOne(User, {
+        where: { id: voucheeId },
+        lock: { mode: 'pessimistic_write' },
+      });
       try {
         await manager.insert(Vouch, {
           voucherId,
           voucheeId,
-          note: note ?? null,
+          note: cleanNote,
         });
       } catch (err) {
         // The pre-check above can be lost to a concurrent vouch; the UNIQUE
         // constraint is the real backstop. Map it to a 409, not a 500.
-        if (
-          err instanceof QueryFailedError &&
-          (err.driverError as { code?: string })?.code === '23505'
-        ) {
+        if (isUniqueViolation(err)) {
           throw new ConflictException(
             'You have already vouched for this member',
           );
@@ -130,14 +154,21 @@ export class VouchService {
 
   async listVouchers(
     slug: string,
+    page?: PageParams,
   ): Promise<{ count: number; vouchers: VoucherView[] }> {
     const target = await this.profiles.findOne({ where: { slug } });
     if (!target) {
       throw new NotFoundException('Member not found');
     }
+    // `count` is the full tally; `rows` is the requested (bounded) page.
+    const count = await this.vouches.count({
+      where: { voucheeId: target.userId },
+    });
     const rows = await this.vouches.find({
       where: { voucheeId: target.userId },
       order: { createdAt: 'DESC' },
+      take: page?.limit ?? DEFAULT_PAGE_SIZE,
+      skip: page?.offset ?? 0,
     });
     const voucherProfiles = await this.profilesByUserIds(
       rows.map((v) => v.voucherId),
@@ -145,13 +176,18 @@ export class VouchService {
     const vouchers = rows.map((v) =>
       this.toVouchView(voucherProfiles.get(v.voucherId), v.note, v.createdAt),
     );
-    return { count: rows.length, vouchers };
+    return { count, vouchers };
   }
 
-  async listGiven(voucherId: string): Promise<GivenVouchView[]> {
+  async listGiven(
+    voucherId: string,
+    page?: PageParams,
+  ): Promise<GivenVouchView[]> {
     const rows = await this.vouches.find({
       where: { voucherId },
       order: { createdAt: 'DESC' },
+      take: page?.limit ?? DEFAULT_PAGE_SIZE,
+      skip: page?.offset ?? 0,
     });
     const voucheeProfiles = await this.profilesByUserIds(
       rows.map((v) => v.voucheeId),

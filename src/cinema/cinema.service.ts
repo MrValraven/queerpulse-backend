@@ -64,8 +64,11 @@ export class CinemaService {
       user.userId,
       rows.map((row) => row.id),
     );
+    // includeAll is moderator-only (guarded above), so it doubles as the
+    // admin-fields flag: the admin list must expose status/errorMessage to
+    // tell drafts/processing/failed titles apart.
     return rows.map((row) =>
-      toTitleListItem(row, progressByTitle.get(row.id) ?? null),
+      toTitleListItem(row, progressByTitle.get(row.id) ?? null, includeAll),
     );
   }
 
@@ -145,6 +148,11 @@ export class CinemaService {
       if (title.status !== TitleStatus.Ready) {
         throw new BadRequestException('Title is not ready to publish');
       }
+      // Ready without a playback id means the asset swap never completed;
+      // publishing it would surface a title with no playable stream.
+      if (!title.muxPlaybackId) {
+        throw new BadRequestException('Title has no playable asset');
+      }
       title.publishedAt = title.publishedAt ?? new Date();
     } else if (dto.published === false) {
       title.publishedAt = null;
@@ -182,6 +190,11 @@ export class CinemaService {
     if (title.status === TitleStatus.Ready) {
       // Replacement: the title stays published and playable on the current
       // asset until the new one reaches ready (swap happens in onAssetReady).
+      // A prior replacement attempt may have already produced a pending asset;
+      // drop it at Mux before superseding it or it is billed forever.
+      if (title.pendingMuxAssetId) {
+        await this.deleteAssetBestEffort(title.pendingMuxAssetId, title.id);
+      }
       title.pendingMuxUploadId = upload.uploadId;
       title.pendingMuxAssetId = null;
     } else {
@@ -195,6 +208,7 @@ export class CinemaService {
       title.status = TitleStatus.AwaitingUpload;
       title.errorMessage = null;
     }
+    title.lastIngestEventAt = new Date();
     await this.titles.save(title);
     return upload;
   }
@@ -202,7 +216,19 @@ export class CinemaService {
   // --- webhook/reconciliation state transitions (idempotent; unknown ids
   // are ignored — Mux retries and can deliver out of order) ---
 
+  // Provider ids are the sole match key for these transitions. A missing id
+  // would reach a TypeORM `where` as `undefined`, which is silently dropped —
+  // matching (and mutating) the FIRST row of the table. Reject empty ids up
+  // front so a malformed webhook can never touch the wrong title.
+  private assertProviderId(id: string, kind: 'upload' | 'asset'): void {
+    if (typeof id !== 'string' || id.length === 0) {
+      throw new BadRequestException(`Missing Mux ${kind} id`);
+    }
+  }
+
   async onUploadAssetCreated(uploadId: string, assetId: string): Promise<void> {
+    this.assertProviderId(uploadId, 'upload');
+    this.assertProviderId(assetId, 'asset');
     const title = await this.titles.findOne({
       where: [{ muxUploadId: uploadId }, { pendingMuxUploadId: uploadId }],
     });
@@ -223,7 +249,37 @@ export class CinemaService {
         title.status = TitleStatus.Processing;
       }
     }
+    title.lastIngestEventAt = new Date();
     await this.titles.save(title);
+  }
+
+  // Poll a freshly-linked asset once and apply the result. Heals the
+  // out-of-order delivery where video.asset.ready arrived (and was dropped as
+  // "unknown asset") before video.upload.asset_created linked the id — without
+  // it, the title would sit in Processing until the hourly reconcile cron.
+  async syncAssetState(assetId: string): Promise<void> {
+    this.assertProviderId(assetId, 'asset');
+    const title = await this.titles.findOne({
+      where: [{ muxAssetId: assetId }, { pendingMuxAssetId: assetId }],
+    });
+    if (!title) {
+      return;
+    }
+    // A main asset that is already Ready has nothing to heal; a pending
+    // replacement still needs its own ready check even on a Ready title.
+    if (title.muxAssetId === assetId && title.status === TitleStatus.Ready) {
+      return;
+    }
+    const asset = await this.mux.getAsset(assetId);
+    if (asset.status === 'ready') {
+      await this.onAssetReady(assetId, {
+        playbackId: asset.playbackId,
+        durationSeconds: asset.durationSeconds,
+        aspectRatio: asset.aspectRatio,
+      });
+    } else if (asset.status === 'errored') {
+      await this.onAssetErrored(assetId, asset.errorMessage ?? 'Asset errored');
+    }
   }
 
   async onAssetReady(
@@ -234,6 +290,7 @@ export class CinemaService {
       aspectRatio: string | null;
     },
   ): Promise<void> {
+    this.assertProviderId(assetId, 'asset');
     const title = await this.titles.findOne({
       where: [{ muxAssetId: assetId }, { pendingMuxAssetId: assetId }],
     });
@@ -266,6 +323,7 @@ export class CinemaService {
   }
 
   async onAssetErrored(assetId: string, message: string): Promise<void> {
+    this.assertProviderId(assetId, 'asset');
     const title = await this.titles.findOne({
       where: [{ muxAssetId: assetId }, { pendingMuxAssetId: assetId }],
     });
@@ -277,14 +335,26 @@ export class CinemaService {
       title.pendingMuxAssetId = null;
       title.pendingMuxUploadId = null;
       title.errorMessage = `Replacement failed: ${message}`;
-    } else {
+    } else if (
+      title.status === TitleStatus.AwaitingUpload ||
+      title.status === TitleStatus.Processing
+    ) {
       title.status = TitleStatus.Failed;
       title.errorMessage = message;
+    } else {
+      // Late/replayed failure for a title that is already Ready/published —
+      // never yank a live title on a stale event.
+      this.logger.warn(
+        `Ignoring asset.errored for ${title.status} title ${title.id} (asset ${assetId})`,
+      );
+      return;
     }
+    title.lastIngestEventAt = new Date();
     await this.titles.save(title);
   }
 
   async onUploadFailed(uploadId: string, message: string): Promise<void> {
+    this.assertProviderId(uploadId, 'upload');
     const title = await this.titles.findOne({
       where: [{ muxUploadId: uploadId }, { pendingMuxUploadId: uploadId }],
     });
@@ -295,10 +365,20 @@ export class CinemaService {
       title.pendingMuxUploadId = null;
       title.pendingMuxAssetId = null;
       title.errorMessage = `Replacement failed: ${message}`;
-    } else {
+    } else if (
+      title.status === TitleStatus.AwaitingUpload ||
+      title.status === TitleStatus.Processing
+    ) {
       title.status = TitleStatus.Failed;
       title.errorMessage = message;
+    } else {
+      // Late/replayed failure for a title that is already Ready/published.
+      this.logger.warn(
+        `Ignoring upload failure for ${title.status} title ${title.id} (upload ${uploadId})`,
+      );
+      return;
     }
+    title.lastIngestEventAt = new Date();
     await this.titles.save(title);
   }
 
@@ -315,6 +395,7 @@ export class CinemaService {
     title.aspectRatio = meta.aspectRatio;
     title.status = TitleStatus.Ready;
     title.errorMessage = null;
+    title.lastIngestEventAt = new Date();
   }
 
   private async deleteAssetBestEffort(
@@ -358,12 +439,14 @@ export class CinemaService {
 
     // A view counts once per user per title, when progress first crosses
     // min(60 s, 50% of duration) — the 50% arm covers very short films.
+    // Moderator previews of an unpublished title (the only way progress is
+    // reported on a non-published title) must not inflate the public count.
     const threshold = Math.min(
       60,
       Math.ceil((title.durationSeconds ?? 120) * 0.5),
     );
     let viewCounted = false;
-    if (positionSeconds >= threshold) {
+    if (positionSeconds >= threshold && title.publishedAt !== null) {
       await this.dataSource.transaction(async (manager) => {
         // The IS NULL guard makes racing/repeated reports count exactly once.
         const marked = await manager

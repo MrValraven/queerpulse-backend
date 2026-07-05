@@ -3,6 +3,7 @@ export const EVENT_WAITLIST_PROMOTED = 'event.waitlist_promoted';
 
 export interface EventInvitedEvent {
   eventId: string;
+  inviteId: string;
   inviterId: string;
   inviteeId: string;
 }

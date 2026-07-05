@@ -15,6 +15,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { CinemaReconciliationService } from './cinema-reconciliation.service';
@@ -22,8 +23,11 @@ import { CinemaService } from './cinema.service';
 import { CreateTitleDto } from './dto/create-title.dto';
 import { UpdateTitleDto } from './dto/update-title.dto';
 
+// ActiveMemberGuard runs first (a suspended moderator is locked out), then
+// RolesGuard checks moderator/admin. These routes trigger irreversible
+// Mux-side asset deletion, so both gates are required — not roles alone.
 @Controller('cinema/titles')
-@UseGuards(RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)
 export class AdminTitlesController {
   constructor(

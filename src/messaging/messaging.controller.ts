@@ -39,6 +39,7 @@ export class ConversationsController {
   ) {
     return this.messagingService.getMessages(id, user.userId, {
       before: query.before,
+      beforeId: query.beforeId,
       limit: query.limit,
     });
   }

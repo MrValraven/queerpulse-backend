@@ -1,12 +1,12 @@
-import { IsBoolean, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsBoolean, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
 
 export class JoinPayload {
-  @IsString()
+  @IsUUID('4')
   conversationId: string;
 }
 
 export class SendMessagePayload {
-  @IsString()
+  @IsUUID('4')
   conversationId: string;
 
   @IsString()
@@ -16,7 +16,7 @@ export class SendMessagePayload {
 }
 
 export class TypingPayload {
-  @IsString()
+  @IsUUID('4')
   conversationId: string;
 
   @IsBoolean()
@@ -24,6 +24,6 @@ export class TypingPayload {
 }
 
 export class ReadPayload {
-  @IsString()
+  @IsUUID('4')
   conversationId: string;
 }

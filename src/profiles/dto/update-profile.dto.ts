@@ -1,4 +1,5 @@
 import {
+  ArrayMaxSize,
   IsArray,
   IsEnum,
   IsOptional,
@@ -18,6 +19,17 @@ export class UpdateProfileDto {
 
   @IsOptional() @IsEnum(ProfileVisibility) visibility?: ProfileVisibility;
 
-  @IsOptional() @IsArray() @IsString({ each: true }) openTo?: string[];
-  @IsOptional() @IsArray() @IsString({ each: true }) tags?: string[];
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsString({ each: true })
+  @MaxLength(50, { each: true })
+  openTo?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(30)
+  @IsString({ each: true })
+  @MaxLength(40, { each: true })
+  tags?: string[];
 }

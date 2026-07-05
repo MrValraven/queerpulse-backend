@@ -5,6 +5,7 @@ import {
   Get,
   Param,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -14,6 +15,7 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Throttle, seconds } from '@nestjs/throttler';
 import { CreateVouchDto } from './dto/create-vouch.dto';
+import { PaginationQuery } from './dto/pagination.query';
 import { VouchService } from './vouch.service';
 
 @Controller('members')
@@ -37,8 +39,8 @@ export class VouchController {
   }
 
   @Get(':slug/vouchers')
-  vouchers(@Param('slug') slug: string) {
-    return this.vouchService.listVouchers(slug);
+  vouchers(@Param('slug') slug: string, @Query() page: PaginationQuery) {
+    return this.vouchService.listVouchers(slug, page);
   }
 }
 
@@ -48,7 +50,7 @@ export class MyVouchesController {
   constructor(private readonly vouchService: VouchService) {}
 
   @Get('given')
-  given(@CurrentUser() user: CurrentUserData) {
-    return this.vouchService.listGiven(user.userId);
+  given(@CurrentUser() user: CurrentUserData, @Query() page: PaginationQuery) {
+    return this.vouchService.listGiven(user.userId, page);
   }
 }

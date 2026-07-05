@@ -31,6 +31,17 @@ export class EventRemindersService {
       },
     });
     for (const event of due) {
+      // Claim the event *before* fanning out (stamp-before-send = at-most-once).
+      // The conditional UPDATE only stamps a row whose reminder is still unsent,
+      // so a concurrent run (or an overlapping tick) that loses the race sees
+      // affected === 0 and skips — never a double send.
+      const claim = await this.events.update(
+        { id: event.id, reminderSentAt: IsNull() },
+        { reminderSentAt: now },
+      );
+      if (claim.affected !== 1) {
+        continue;
+      }
       const attendees = await this.rsvps.find({
         where: {
           eventId: event.id,
@@ -42,8 +53,6 @@ export class EventRemindersService {
         NotificationType.EventReminder,
         { eventId: event.id, startAt: event.startAt.toISOString() },
       );
-      event.reminderSentAt = now;
-      await this.events.save(event);
       this.logger.log(
         `Sent ${attendees.length} reminder(s) for event ${event.slug}`,
       );

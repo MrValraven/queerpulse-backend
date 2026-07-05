@@ -31,7 +31,7 @@ export class ConnectionsController {
     @CurrentUser() user: CurrentUserData,
     @Query() query: ListConnectionsQuery,
   ) {
-    return this.connectionsService.list(user.userId, query.tab ?? 'all');
+    return this.connectionsService.list(user.userId, query.tab ?? 'all', query);
   }
 
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
@@ -44,6 +44,7 @@ export class ConnectionsController {
       user.userId,
       dto.toSlug,
       dto.message,
+      dto.introducerSlug,
     );
   }
 

@@ -39,6 +39,20 @@ describe('NotificationsListener', () => {
     );
   });
 
+  it('also notifies the introducer when the request was introduced', async () => {
+    await listener.onConnectionRequested({
+      connectionId: 'c1',
+      requesterId: 'r',
+      addresseeId: 'a',
+      introducedBy: 'intro',
+    });
+    expect(notifications.create).toHaveBeenCalledWith(
+      'intro',
+      NotificationType.IntroductionMade,
+      { connectionId: 'c1', requesterId: 'r', addresseeId: 'a' },
+    );
+  });
+
   it('fans a new message out to non-sender, non-muted participants', async () => {
     participants.find.mockResolvedValue([
       { userId: 'b', muted: false },
@@ -61,6 +75,33 @@ describe('NotificationsListener', () => {
       'u',
       NotificationType.VouchReceived,
       expect.objectContaining({ voucherId: 'v' }),
+    );
+  });
+
+  it('notifies an invitee on an event invite, carrying the invite id', async () => {
+    await listener.onEventInvited({
+      eventId: 'e1',
+      inviteId: 'i1',
+      inviterId: 'host',
+      inviteeId: 'u2',
+    });
+    expect(notifications.create).toHaveBeenCalledWith(
+      'u2',
+      NotificationType.EventInvite,
+      expect.objectContaining({
+        eventId: 'e1',
+        inviteId: 'i1',
+        inviterId: 'host',
+      }),
+    );
+  });
+
+  it('notifies a member promoted off the event waitlist', async () => {
+    await listener.onWaitlistPromoted({ eventId: 'e1', userId: 'u2' });
+    expect(notifications.create).toHaveBeenCalledWith(
+      'u2',
+      NotificationType.WaitlistPromoted,
+      expect.objectContaining({ eventId: 'e1' }),
     );
   });
 });

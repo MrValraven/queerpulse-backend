@@ -1,8 +1,11 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { EntityManager, QueryFailedError, Repository } from 'typeorm';
 import { Profile } from './entities/profile.entity';
 import { User, UserStatus } from './entities/user.entity';
+
+// Bounds the slug-collision retry loop (see insertProfileWithUniqueSlug).
+const MAX_SLUG_ATTEMPTS = 5;
 
 export interface CreateGoogleUserInput {
   googleId: string;
@@ -12,11 +15,17 @@ export interface CreateGoogleUserInput {
   avatarUrl?: string | null;
 }
 
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    err instanceof QueryFailedError &&
+    (err.driverError as { code?: string })?.code === '23505'
+  );
+}
+
 @Injectable()
 export class UsersService {
   constructor(
     @InjectRepository(User) private readonly usersRepo: Repository<User>,
-    private readonly dataSource: DataSource,
   ) {}
 
   findByGoogleId(googleId: string): Promise<User | null> {
@@ -85,21 +94,48 @@ export class UsersService {
     });
     const saved = await manager.save(user);
 
-    const slug = await this.generateUniqueSlug(
+    const baseSlug = await this.generateUniqueSlug(
       manager.getRepository(Profile),
       input.firstName,
       input.lastName,
     );
-    const profile = manager.create(Profile, {
-      userId: saved.id,
-      slug,
-      firstName: input.firstName,
-      lastName: input.lastName,
-      avatarUrl: input.avatarUrl ?? null,
-    });
-    await manager.save(profile);
+    await this.insertProfileWithUniqueSlug(manager, saved.id, baseSlug, input);
 
     return saved;
+  }
+
+  // Inserts the profile, retrying with a bumped suffix if the slug collides on
+  // insert (a 23505 the exists-check above raced past). Each attempt runs in a
+  // SAVEPOINT (nested transaction) so a collision rolls back only this insert,
+  // not the surrounding sign-up transaction.
+  private async insertProfileWithUniqueSlug(
+    manager: EntityManager,
+    userId: string,
+    baseSlug: string,
+    input: CreateGoogleUserInput,
+  ): Promise<void> {
+    let slug = baseSlug;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await manager.transaction(async (m) => {
+          const profile = m.create(Profile, {
+            userId,
+            slug,
+            firstName: input.firstName,
+            lastName: input.lastName,
+            avatarUrl: input.avatarUrl ?? null,
+          });
+          await m.save(profile);
+        });
+        return;
+      } catch (err) {
+        if (isUniqueViolation(err) && attempt < MAX_SLUG_ATTEMPTS) {
+          slug = `${baseSlug}-${attempt + 1}`;
+          continue;
+        }
+        throw err;
+      }
+    }
   }
 
   private async generateUniqueSlug(

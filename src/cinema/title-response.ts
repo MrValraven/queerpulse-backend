@@ -23,12 +23,12 @@ export interface TitleListItem {
   publishedAt: Date | null;
   viewCount: number;
   myProgress: MyProgressResponse | null;
-}
-
-export interface TitleDetail extends TitleListItem {
+  // Admin-only, present when includeAdminFields is set (moderator/admin views).
   status?: TitleStatus;
   errorMessage?: string | null;
 }
+
+export type TitleDetail = TitleListItem;
 
 export function isFinished(
   title: Pick<CinemaTitle, 'durationSeconds'>,
@@ -43,8 +43,9 @@ export function isFinished(
 export function toTitleListItem(
   title: CinemaTitle,
   progress: { positionSeconds: number } | null,
+  includeAdminFields = false,
 ): TitleListItem {
-  return {
+  const base: TitleListItem = {
     id: title.id,
     kind: title.kind,
     title: title.title,
@@ -60,6 +61,11 @@ export function toTitleListItem(
         }
       : null,
   };
+  if (includeAdminFields) {
+    base.status = title.status;
+    base.errorMessage = title.errorMessage;
+  }
+  return base;
 }
 
 export function toTitleDetail(
@@ -67,9 +73,5 @@ export function toTitleDetail(
   progress: { positionSeconds: number } | null,
   includeAdminFields: boolean,
 ): TitleDetail {
-  const base = toTitleListItem(title, progress);
-  if (!includeAdminFields) {
-    return base;
-  }
-  return { ...base, status: title.status, errorMessage: title.errorMessage };
+  return toTitleListItem(title, progress, includeAdminFields);
 }

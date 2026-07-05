@@ -12,17 +12,20 @@ import {
   DataSource,
   EntityManager,
   MoreThanOrEqual,
+  QueryFailedError,
   Repository,
 } from 'typeorm';
-import { UserStatus } from '../users/entities/user.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import { USER_PROMOTED, UserPromotedEvent } from '../users/user.events';
 import { UsersService } from '../users/users.service';
 import { SignupRejectedError } from '../auth/errors/signup-rejected.error';
 import { Invite, InviteStatus } from './entities/invite.entity';
 import {
+  MyInviteView,
   PublicInviteStatus,
   PublicInviteView,
   resolveInviteStatus,
+  toMyInviteView,
   toPublicInviteView,
 } from './invite-response';
 
@@ -31,6 +34,24 @@ const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 // Code groups are drawn from an unambiguous uppercase alphabet (no I/O/0/1) so
 // codes are easy to read aloud and copy from a link preview. 32 symbols.
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+// Bounds the otherwise-unbounded "my invites" list read.
+const DEFAULT_PAGE_SIZE = 20;
+
+// Whole-operation retries if a freshly-minted code collides on insert (23505).
+const MAX_CODE_ATTEMPTS = 5;
+
+export interface PageParams {
+  limit?: number;
+  offset?: number;
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    err instanceof QueryFailedError &&
+    (err.driverError as { code?: string })?.code === '23505'
+  );
+}
 
 // The minimal payload returned by POST /invites. The frontend derives the share
 // URL https://queerpulse.com/invite/<code> from `code`.
@@ -58,32 +79,46 @@ export class InvitesService {
       vouch?: string | null;
     } = {},
   ): Promise<CreatedInviteView> {
-    await this.assertWithinMonthlyQuota(inviterId);
-
-    // Empty or whitespace-only notes are stored as null, not "".
+    // Empty or whitespace-only notes/vouch are stored as null, not "".
     const trimmedNote = opts.note?.trim();
     const note = trimmedNote ? trimmedNote : null;
-
-    // Same treatment for the vouch: empty/whitespace becomes "no vouch" (null).
     const trimmedVouch = opts.vouch?.trim();
     const vouch = trimmedVouch ? trimmedVouch : null;
+    const email = opts.email ?? null;
 
-    const code = await this.generateUniqueCode();
-    const invite = this.invites.create({
-      inviterId,
-      code,
-      email: opts.email ?? null,
-      note,
-      vouch,
-      status: InviteStatus.Pending,
-      expiresAt: new Date(Date.now() + INVITE_TTL_MS),
-    });
-    const saved = await this.invites.save(invite);
-    return {
-      code: saved.code,
-      expiresAt: saved.expiresAt as Date,
-      status: resolveInviteStatus(saved, new Date()),
-    };
+    for (let attempt = 1; ; attempt++) {
+      const code = await this.generateUniqueCode();
+      try {
+        const saved = await this.dataSource.transaction(async (manager) => {
+          // Quota check + insert run under a per-inviter row lock so parallel
+          // POST /invites requests serialize and can't each pass the check and
+          // blow past the monthly limit.
+          await this.assertWithinMonthlyQuota(manager, inviterId);
+          const invite = manager.create(Invite, {
+            inviterId,
+            code,
+            email,
+            note,
+            vouch,
+            status: InviteStatus.Pending,
+            expiresAt: new Date(Date.now() + INVITE_TTL_MS),
+          });
+          return manager.save(invite);
+        });
+        return {
+          code: saved.code,
+          expiresAt: saved.expiresAt as Date,
+          status: resolveInviteStatus(saved, new Date()),
+        };
+      } catch (err) {
+        // A code collision is astronomically unlikely, but the pre-check races
+        // with concurrent inserts; retry with a fresh code before surfacing.
+        if (isUniqueViolation(err) && attempt < MAX_CODE_ATTEMPTS) {
+          continue;
+        }
+        throw err;
+      }
+    }
   }
 
   // Public, unauthenticated read powering the recipient's invite landing page.
@@ -100,11 +135,20 @@ export class InvitesService {
     return toPublicInviteView(invite, inviter, memberCount, new Date());
   }
 
-  listMyInvites(inviterId: string): Promise<Invite[]> {
-    return this.invites.find({
+  // Returns a mapped view (never raw entities): whitelisted fields only, plus a
+  // freshly-computed status so a not-yet-swept expiry reads as 'expired'.
+  async listMyInvites(
+    inviterId: string,
+    page?: PageParams,
+  ): Promise<MyInviteView[]> {
+    const invites = await this.invites.find({
       where: { inviterId },
       order: { createdAt: 'DESC' },
+      take: page?.limit ?? DEFAULT_PAGE_SIZE,
+      skip: page?.offset ?? 0,
     });
+    const now = new Date();
+    return invites.map((invite) => toMyInviteView(invite, now));
   }
 
   async acceptInvite(
@@ -116,7 +160,12 @@ export class InvitesService {
       throw new BadRequestException('Invite is invalid or already used');
     }
     if (invite.expiresAt && invite.expiresAt.getTime() < Date.now()) {
-      await this.invites.update(invite.id, { status: InviteStatus.Expired });
+      // Conditional on status so we only expire a still-pending invite (never
+      // clobber an accepted/revoked one that raced us).
+      await this.invites.update(
+        { id: invite.id, status: InviteStatus.Pending },
+        { status: InviteStatus.Expired },
+      );
       throw new BadRequestException('Invite has expired');
     }
     if (invite.inviterId === currentUser.userId) {
@@ -189,7 +238,11 @@ export class InvitesService {
       // Persist the Expired marking on the non-transactional repo so it
       // survives the rollback triggered by the throw below (the caller runs
       // this inside a transaction it will roll back). Mirrors acceptInvite.
-      await this.invites.update(invite.id, { status: InviteStatus.Expired });
+      // Conditional on status so we only expire a still-pending invite.
+      await this.invites.update(
+        { id: invite.id, status: InviteStatus.Pending },
+        { status: InviteStatus.Expired },
+      );
       throw new SignupRejectedError('invite_invalid');
     }
     if (invite.email && invite.email.toLowerCase() !== email.toLowerCase()) {
@@ -225,11 +278,20 @@ export class InvitesService {
 
   // Enforces "N invites per calendar month". Counts every invite the member
   // created since the start of the current UTC month regardless of status, so
-  // revoking or letting one expire can't reclaim a slot.
-  private async assertWithinMonthlyQuota(inviterId: string): Promise<void> {
-    // Per-user override wins; NULL (or a missing user) falls back to the global
-    // default configured via INVITE_MONTHLY_QUOTA (itself defaulting to 1).
-    const inviter = await this.usersService.findById(inviterId);
+  // revoking or letting one expire can't reclaim a slot. Runs inside the
+  // caller's transaction and takes a write lock on the inviter row so parallel
+  // POST /invites requests serialize through the check.
+  private async assertWithinMonthlyQuota(
+    manager: EntityManager,
+    inviterId: string,
+  ): Promise<void> {
+    // Lock the inviter's row for the duration of the transaction. Per-user
+    // override wins; NULL (or a missing user) falls back to the global default
+    // configured via INVITE_MONTHLY_QUOTA (itself defaulting to 1).
+    const inviter = await manager.getRepository(User).findOne({
+      where: { id: inviterId },
+      lock: { mode: 'pessimistic_write' },
+    });
     const limit =
       inviter?.inviteMonthlyQuota ??
       this.config.get<number>('app.inviteMonthlyQuota', 1);
@@ -237,7 +299,7 @@ export class InvitesService {
     const monthStart = new Date(
       Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
     );
-    const used = await this.invites.count({
+    const used = await manager.count(Invite, {
       where: { inviterId, createdAt: MoreThanOrEqual(monthStart) },
     });
     if (used >= limit) {

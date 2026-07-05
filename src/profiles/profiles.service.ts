@@ -357,9 +357,13 @@ export class ProfilesService {
       });
 
     if (q.query) {
+      // Escape LIKE metacharacters (\ % _) so a user-supplied term is matched
+      // literally and can't inject wildcards. Postgres treats backslash as the
+      // default LIKE escape character.
+      const term = `%${q.query.replace(/[\\%_]/g, '\\$&')}%`;
       qb.andWhere(
         '(p.firstName ILIKE :term OR p.lastName ILIKE :term OR p.slug ILIKE :term OR p.tagline ILIKE :term)',
-        { term: `%${q.query}%` },
+        { term },
       );
     }
 

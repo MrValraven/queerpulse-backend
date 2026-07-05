@@ -13,4 +13,5 @@ export interface ConnectionRequestedEvent {
   connectionId: string;
   requesterId: string;
   addresseeId: string;
+  introducedBy?: string | null;
 }

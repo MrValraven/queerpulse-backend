@@ -1,0 +1,51 @@
+# Local stack: the API plus its Postgres. For development/demo — inject real
+# secrets and enable TLS for anything internet-facing.
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: queerpulse
+      POSTGRES_PASSWORD: queerpulse
+      POSTGRES_DB: queerpulse
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U queerpulse']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      DATABASE_URL: postgres://queerpulse:queerpulse@postgres:5432/queerpulse
+      # The bundled Postgres speaks plaintext, so disable TLS explicitly here.
+      # For a managed/prod database, remove this and provide DATABASE_SSL_CA.
+      DATABASE_SSL: 'false'
+      # Replace these throwaway values before exposing the service.
+      JWT_ACCESS_SECRET: change-me-access-secret
+      JWT_REFRESH_SECRET: change-me-refresh-secret
+      JWT_ACCESS_TTL: 15m
+      JWT_REFRESH_TTL: 30d
+      GOOGLE_CLIENT_ID: your-google-client-id
+      GOOGLE_CLIENT_SECRET: your-google-client-secret
+      GOOGLE_CALLBACK_URL: http://localhost:3000/auth/google/callback
+      FRONTEND_URL: http://localhost:5173
+    ports:
+      - '3000:3000'
+    # Deploy order: run migrations, then start the server.
+    command: sh -c "npm run migration:run:prod && node dist/main"
+
+volumes:
+  pgdata:

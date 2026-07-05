@@ -48,6 +48,31 @@ export function resolveInviteStatus(
   return 'valid';
 }
 
+// The inviter-facing row shape for GET /invites (the member's own invites).
+// Whitelisted fields only — never internal ids — with a freshly-computed status
+// so a not-yet-swept expiry reads as 'expired' instead of a stale 'pending'.
+export interface MyInviteView {
+  code: string;
+  note: string | null;
+  vouch: string | null;
+  email: string | null;
+  status: PublicInviteStatus;
+  expiresAt: string | null;
+  createdAt: string;
+}
+
+export function toMyInviteView(invite: Invite, now: Date): MyInviteView {
+  return {
+    code: invite.code,
+    note: invite.note ?? null,
+    vouch: invite.vouch ?? null,
+    email: invite.email ?? null,
+    status: resolveInviteStatus(invite, now),
+    expiresAt: invite.expiresAt ? invite.expiresAt.toISOString() : null,
+    createdAt: invite.createdAt.toISOString(),
+  };
+}
+
 // Builds the limited, non-sensitive payload returned by GET /invites/:code.
 // Reachable by anyone holding the link, so it exposes only public profile
 // fields — never emails, ids, or other inviter data.

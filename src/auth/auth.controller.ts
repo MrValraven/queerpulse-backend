@@ -5,19 +5,27 @@ import {
   Req,
   Res,
   UnauthorizedException,
+  UseFilters,
   UseGuards,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { timingSafeEqual } from 'node:crypto';
 import { Request, Response } from 'express';
 import { User } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
-import { setAuthCookies, clearAuthCookies } from './auth-cookies';
+import {
+  setAuthCookies,
+  clearAuthCookies,
+  clearCsrfCookie,
+  clearOAuthStateCookie,
+} from './auth-cookies';
 import { AuthService, GoogleUserInput } from './auth.service';
 import {
   CurrentUser,
   CurrentUserData,
 } from './decorators/current-user.decorator';
 import { SignupRejectedError } from './errors/signup-rejected.error';
+import { OAuthCallbackFilter } from './filters/oauth-callback.filter';
 import { Public } from './decorators/public.decorator';
 import { GoogleAuthGuard } from './guards/google-auth.guard';
 import { decodeOAuthState } from './oauth-state';
@@ -39,6 +47,17 @@ export class AuthController {
     };
   }
 
+  // Constant-time nonce comparison (both are our own hex strings of equal
+  // length; the length guard avoids timingSafeEqual throwing on a mismatch).
+  private nonceMatches(a: string, b: string): boolean {
+    const ab = Buffer.from(a);
+    const bb = Buffer.from(b);
+    if (ab.length !== bb.length) {
+      return false;
+    }
+    return timingSafeEqual(ab, bb);
+  }
+
   @Public()
   @UseGuards(GoogleAuthGuard)
   @Get('google')
@@ -48,15 +67,38 @@ export class AuthController {
 
   @Public()
   @UseGuards(GoogleAuthGuard)
+  @UseFilters(OAuthCallbackFilter)
   @Get('google/callback')
   async googleCallback(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<void> {
-    const profile = req.user as GoogleUserInput;
-    const { invite, redirect } = decodeOAuthState(
+    const state = decodeOAuthState(
       typeof req.query.state === 'string' ? req.query.state : undefined,
     );
+    const cookieNonce = req.cookies?.['oauth_state'];
+    // The nonce cookie is single-use: clear it now regardless of the outcome.
+    clearOAuthStateCookie(res, this.cookieOpts());
+
+    // CSRF / fixation gate: the nonce echoed in `state` must match the one we
+    // stored in the httpOnly cookie when the flow began. Reject on missing or
+    // mismatched nonce before trusting anything else in `state`.
+    if (
+      !state.nonce ||
+      typeof cookieNonce !== 'string' ||
+      !this.nonceMatches(state.nonce, cookieNonce)
+    ) {
+      const target = new URL(
+        '/login',
+        this.config.getOrThrow<string>('app.frontendUrl'),
+      );
+      target.searchParams.set('error', 'invalid_state');
+      res.redirect(target.toString());
+      return;
+    }
+
+    const profile = req.user as GoogleUserInput;
+    const { invite, redirect } = state;
 
     let user: User;
     try {
@@ -113,6 +155,11 @@ export class AuthController {
     return { ok: true };
   }
 
+  // @Public so an EXPIRED access token still logs the user out (JwtAuthGuard is
+  // skipped) — but it stays a POST behind the global CsrfGuard, so it remains
+  // CSRF-protected. Best-effort: revoke the refresh row if we can, ALWAYS clear
+  // cookies, ALWAYS return ok.
+  @Public()
   @Post('logout')
   async logout(
     @Req() req: Request,
@@ -120,9 +167,28 @@ export class AuthController {
   ): Promise<{ ok: true }> {
     const raw = req.cookies?.['refresh_token'];
     if (raw) {
-      await this.authService.revokeRefreshToken(raw);
+      try {
+        await this.authService.revokeRefreshToken(raw);
+      } catch {
+        // Best-effort: a bad/unknown refresh token must not block logout.
+      }
     }
     clearAuthCookies(res, this.cookieOpts());
+    clearCsrfCookie(res);
+    return { ok: true };
+  }
+
+  // Global sign-out: revoke every live refresh token for the current user, then
+  // clear this device's cookies. Authenticated (NOT @Public) so we know who to
+  // revoke; POST keeps it CSRF-protected.
+  @Post('logout-all')
+  async logoutAll(
+    @CurrentUser() current: CurrentUserData,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ ok: true }> {
+    await this.authService.revokeAllForUser(current.userId);
+    clearAuthCookies(res, this.cookieOpts());
+    clearCsrfCookie(res);
     return { ok: true };
   }
 

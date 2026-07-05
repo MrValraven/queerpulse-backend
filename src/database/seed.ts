@@ -86,6 +86,14 @@ const MEMBERS: Array<{
 ];
 
 async function seed(): Promise<void> {
+  // Guard: the seed inserts fixture members and must never touch a production
+  // database. Refuse to run when NODE_ENV signals production.
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'Refusing to run the seed with NODE_ENV=production. The seed is for local/dev fixtures only.',
+    );
+  }
+
   const dataSource = new DataSource({
     type: 'postgres',
     url: process.env.DATABASE_URL,
