@@ -9,8 +9,9 @@ describe('env validate()', () => {
     NODE_ENV: 'development',
     PORT: '3000',
     DATABASE_URL: 'postgres://u:p@localhost:5432/db',
-    JWT_ACCESS_SECRET: 'access-secret',
-    JWT_REFRESH_SECRET: 'refresh-secret',
+    // Both must clear @MinLength(32) and differ from each other.
+    JWT_ACCESS_SECRET: 'access-secret-at-least-thirty-two-chars',
+    JWT_REFRESH_SECRET: 'refresh-secret-at-least-thirty-two-chars',
     GOOGLE_CLIENT_ID: 'client-id',
     GOOGLE_CLIENT_SECRET: 'client-secret',
     GOOGLE_CALLBACK_URL: 'http://localhost:3000/auth/google/callback',

@@ -17,10 +17,12 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { Feature } from '../common/feature.decorator';
 import { CinemaService } from './cinema.service';
 import { ListTitlesQuery } from './dto/list-titles.query';
 import { ReportProgressDto } from './dto/report-progress.dto';
 
+@Feature('cinema')
 @Controller('cinema/titles')
 @UseGuards(ActiveMemberGuard)
 export class TitlesController {

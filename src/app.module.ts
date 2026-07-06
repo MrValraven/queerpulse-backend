@@ -24,14 +24,20 @@ import { ConnectionsModule } from './connections/connections.module';
 import { MessagingModule } from './messaging/messaging.module';
 import { ChatModule } from './chat/chat.module';
 import { CinemaModule } from './cinema/cinema.module';
+import { CommunitiesModule } from './communities/communities.module';
+import { CompaniesModule } from './companies/companies.module';
 import { EventsModule } from './events/events.module';
+import { JobsModule } from './jobs/jobs.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { PartnersModule } from './partners/partners.module';
 import { StorageModule } from './storage/storage.module';
 import { UsersModule } from './users/users.module';
+import { VolunteeringModule } from './volunteering/volunteering.module';
 import { CsrfGuard } from './security/csrf.guard';
 import { HttpThrottlerGuard } from './security/http-throttler.guard';
 import { SecurityModule } from './security/security.module';
 import { AllExceptionsFilter } from './common/all-exceptions.filter';
+import { LaunchedFeaturesGuard } from './common/launched-features.guard';
 
 @Module({
   imports: [
@@ -81,6 +87,11 @@ import { AllExceptionsFilter } from './common/all-exceptions.filter';
     MessagingModule,
     ChatModule,
     EventsModule,
+    CommunitiesModule,
+    CompaniesModule,
+    JobsModule,
+    PartnersModule,
+    VolunteeringModule,
     NotificationsModule,
     StorageModule,
     CinemaModule,
@@ -90,8 +101,11 @@ import { AllExceptionsFilter } from './common/all-exceptions.filter';
   providers: [
     // Guards run in registration order. Throttle first (cheapest, and it must
     // count requests that CSRF/JWT would otherwise reject before they do), then
+    // the launched-feature gate (an unlaunched feature 404s before auth runs,
+    // so callers get "not available yet" instead of a misleading 401/403), then
     // CSRF (double-submit, independent of auth), then JWT authentication.
     { provide: APP_GUARD, useClass: HttpThrottlerGuard },
+    { provide: APP_GUARD, useClass: LaunchedFeaturesGuard },
     { provide: APP_GUARD, useClass: CsrfGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     // Adds error logging + Sentry capture, then defers to Nest's default filter.

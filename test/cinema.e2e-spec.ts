@@ -9,6 +9,7 @@ import request from 'supertest';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { GoogleAuthGuard } from '../src/auth/guards/google-auth.guard';
+import { LaunchedFeaturesGuard } from '../src/common/launched-features.guard';
 import {
   CinemaTitle,
   TitleKind,
@@ -49,6 +50,11 @@ describe('Cinema (e2e)', () => {
     })
       .overrideGuard(GoogleAuthGuard)
       .useValue(stubGuard)
+      // Cinema ships disabled by default (src/launchedFeatures.ts) because Mux
+      // isn't provisioned in test. Neutralise the flag gate so this suite can
+      // still exercise the cinema routes end-to-end.
+      .overrideGuard(LaunchedFeaturesGuard)
+      .useValue({ canActivate: () => true })
       .compile();
     app = moduleRef.createNestApplication({ rawBody: true });
     await app.init();

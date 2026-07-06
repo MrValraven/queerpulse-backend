@@ -15,6 +15,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { Feature } from '../common/feature.decorator';
 import { CohostDto } from './dto/cohost.dto';
 import { CreateEventDto } from './dto/create-event.dto';
 import { InviteEventDto } from './dto/invite-event.dto';
@@ -26,6 +27,7 @@ import { EventInvitesService } from './event-invites.service';
 import { EventsService } from './events.service';
 import { RsvpService } from './rsvp.service';
 
+@Feature('events')
 @Controller('events')
 @UseGuards(ActiveMemberGuard)
 export class EventsController {
@@ -118,6 +120,7 @@ export class EventsController {
   }
 }
 
+@Feature('events')
 @Controller('event-invites')
 @UseGuards(ActiveMemberGuard)
 export class EventInvitesController {

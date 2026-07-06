@@ -15,12 +15,14 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { Feature } from '../common/feature.decorator';
 import { CreateConnectionDto } from './dto/create-connection.dto';
 import { ListConnectionsQuery } from './dto/list-connections.query';
 import { RespondConnectionDto } from './dto/respond-connection.dto';
 import { ConnectionsService } from './connections.service';
 import { Throttle, seconds } from '@nestjs/throttler';
 
+@Feature('connections')
 @Controller('connections')
 @UseGuards(ActiveMemberGuard)
 export class ConnectionsController {

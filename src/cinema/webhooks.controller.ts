@@ -11,6 +11,7 @@ import { SkipThrottle } from '@nestjs/throttler';
 import { Request } from 'express';
 import { Public } from '../auth/decorators/public.decorator';
 import { SkipCsrf } from '../security/skip-csrf.decorator';
+import { Feature } from '../common/feature.decorator';
 import { CinemaService } from './cinema.service';
 import { MuxService } from './mux.service';
 
@@ -26,6 +27,7 @@ type MuxWebhookEvent = {
   };
 };
 
+@Feature('cinema')
 @Controller('cinema/webhooks')
 export class CinemaWebhooksController {
   constructor(

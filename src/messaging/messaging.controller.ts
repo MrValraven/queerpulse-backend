@@ -14,6 +14,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { Feature } from '../common/feature.decorator';
 import { GetMessagesQuery } from './dto/get-messages.query';
 import { MessageRequestDto } from './dto/message-request.dto';
 import { SendMessageDto } from './dto/send-message.dto';
@@ -21,6 +22,7 @@ import { UpdateConversationDto } from './dto/update-conversation.dto';
 import { MessagingService } from './messaging.service';
 import { Throttle, seconds } from '@nestjs/throttler';
 
+@Feature('messaging')
 @Controller('conversations')
 @UseGuards(ActiveMemberGuard)
 export class ConversationsController {
@@ -72,6 +74,7 @@ export class ConversationsController {
   }
 }
 
+@Feature('messaging')
 @Controller('messages')
 @UseGuards(ActiveMemberGuard)
 export class MessageRequestController {

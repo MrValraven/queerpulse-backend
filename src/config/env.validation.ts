@@ -9,6 +9,7 @@ import {
   MinLength,
   validateSync,
 } from 'class-validator';
+import { missingLaunchedFeatureEnv } from '../launchedFeatures';
 
 export enum NodeEnv {
   Development = 'development',
@@ -144,6 +145,14 @@ export function validate(
       );
     }
   }
+
+  // Every launched feature's required env vars must be present (see
+  // src/launchedFeatures.ts). Currently only cinema declares any (Mux), and it
+  // ships disabled — so this is a no-op until a feature with requiredEnv is
+  // switched on.
+  problems.push(
+    ...missingLaunchedFeatureEnv(config as Record<string, unknown>),
+  );
 
   if (problems.length > 0) {
     throw new Error(problems.join('; '));
