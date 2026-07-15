@@ -4,6 +4,7 @@ import { In, Repository } from 'typeorm';
 import {
   CursorPage,
   cursorPaginate,
+  decodeCursor,
   encodeCursor,
 } from '../common/cursor-pagination';
 import { MemberLookup, MemberRef } from '../common/member-ref';
@@ -17,18 +18,24 @@ import {
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
+import { UserStatus } from '../users/entities/user.entity';
 import { FeedTab } from './dto/get-feed.query';
 import {
   communityPostToFeedItem,
   eventToFeedItem,
   FeedItem,
   forumThreadToFeedItem,
+  newMemberToFeedItem,
 } from './feed-response';
 
 const DEFAULT_LIMIT = 20;
 
-/** The three underlying stores this read-time aggregation unions. */
-type SourceKind = 'community_post' | 'forum_thread' | 'gathering';
+/** The four underlying stores this read-time aggregation unions. `new_member`
+ * (recently-joined active members, for the "People" tab) reads `profiles`
+ * directly rather than a dedicated feed table — same "no new table" idiom as
+ * the other three sources. */
+type SourceKind =
+  'community_post' | 'forum_thread' | 'gathering' | 'new_member';
 
 /**
  * A row from any one source, reduced to just what the cross-source merge
@@ -41,7 +48,7 @@ interface Candidate {
   createdAt: Date;
   type: SourceKind;
   authorId: string;
-  row: CommunityPost | ForumThread | Event;
+  row: CommunityPost | ForumThread | Event | Profile;
 }
 
 /** Same ordering `cursorPaginate` applies per-source: newest first, `id`
@@ -56,22 +63,25 @@ function compareCandidatesDesc(a: Candidate, b: Candidate): number {
 
 /**
  * `GET /feed?tab=&cursor=` — read-time aggregation over `community_posts`,
- * `forum_thread`, and `events` (the "gathering" the frontend's `FeedItem`
- * union calls it). No new table: every page is assembled by querying each
- * included source, merging, and re-paginating in memory.
+ * `forum_thread`, `events` (the "gathering" the frontend's `FeedItem` union
+ * calls it), and `profiles` (recently-joined active members, "new_member" —
+ * backs the "People" tab). No new table: every page is assembled by querying
+ * each included source, merging, and re-paginating in memory.
  *
  * CURSOR / MERGE STRATEGY: for a page of size `limit`, we ask each included
  * source for its own top `limit + 1` rows after the cursor (via
  * `cursorPaginate`, which already knows how to decode/apply the
  * `(createdAt, id) < cursor` keyset predicate — `CommunityPost`,
  * `ForumThread`, and `Event` all satisfy its `{ id: string; createdAt: Date }`
- * constraint). This is enough to guarantee correctness: the true global
- * top-`(limit + 1)` rows across all sources, restricted to any single
- * source, can't rank worse than `limit + 1` *within that source* — so if we
- * fetch each source's own top `limit + 1`, the merged set is guaranteed to
- * contain the true global top `limit + 1`. Sorting the merged candidates and
- * taking the first `limit + 1` therefore gives an exact answer, not an
- * approximation.
+ * constraint; `Profile`'s PK is `userId` rather than `id`, so its
+ * `new_member` case builds the same `(createdAt, id) < cursor` predicate by
+ * hand instead of going through `cursorPaginate`). This is enough to
+ * guarantee correctness: the true global top-`(limit + 1)` rows across all
+ * sources, restricted to any single source, can't rank worse than
+ * `limit + 1` *within that source* — so if we fetch each source's own top
+ * `limit + 1`, the merged set is guaranteed to contain the true global top
+ * `limit + 1`. Sorting the merged candidates and taking the first
+ * `limit + 1` therefore gives an exact answer, not an approximation.
  *
  * The cursor/`hasMore` for the *next* request is anchored to this raw,
  * pre-block-filter boundary (the `limit`-th candidate) — block/mute filtering
@@ -103,18 +113,11 @@ export class FeedService {
     limit: number = DEFAULT_LIMIT,
   ): Promise<CursorPage<FeedItem>> {
     const sources = this.sourcesForTab(tab ?? 'all');
-    if (!sources.length) {
-      // "people" — no FeedItem source represents a bare member (the union is
-      // only community_post | forum_thread | gathering); see the module
-      // report for why this returns an empty page rather than guessing at a
-      // substitute source.
-      return { data: [], pageInfo: { nextCursor: null, hasMore: false } };
-    }
 
     const perSourceLimit = limit + 1;
     const candidateLists = await Promise.all(
       sources.map((source) =>
-        this.fetchCandidates(source, cursor, perSourceLimit),
+        this.fetchCandidates(source, viewerId, cursor, perSourceLimit),
       ),
     );
     const merged = candidateLists.flat().sort(compareCandidatesDesc);
@@ -134,8 +137,9 @@ export class FeedService {
 
   // --- internals ---
 
-  /** `tab` -> which sources are unioned. See the module report for how
-   * `people` (no FeedItem source) was handled. */
+  /** `tab` -> which sources are unioned. `people` unions just `new_member`;
+   * `all` includes it alongside the other three, so recently-joined members
+   * surface in the unfiltered feed too. */
   private sourcesForTab(tab: FeedTab): SourceKind[] {
     switch (tab) {
       case 'communities':
@@ -145,15 +149,16 @@ export class FeedService {
       case 'posts':
         return ['community_post', 'forum_thread'];
       case 'people':
-        return [];
+        return ['new_member'];
       case 'all':
       default:
-        return ['community_post', 'forum_thread', 'gathering'];
+        return ['community_post', 'forum_thread', 'gathering', 'new_member'];
     }
   }
 
   private async fetchCandidates(
     kind: SourceKind,
+    viewerId: string,
     cursor: string | undefined,
     limit: number,
   ): Promise<Candidate[]> {
@@ -198,6 +203,45 @@ export class FeedService {
           createdAt: row.createdAt,
           type: 'gathering' as const,
           authorId: row.hostId,
+          row,
+        }));
+      }
+      case 'new_member': {
+        // Recently-joined ACTIVE members, newest-first. Reads `profiles`
+        // directly (no dedicated feed table, same idiom as the other three
+        // sources). `Profile`'s PK is `userId` (not `id`), so it can't
+        // satisfy `cursorPaginate`'s generic constraint — the same
+        // `(createdAt, id) < cursor` keyset predicate is built by hand here
+        // instead, mirroring `cursor-pagination.ts`'s millisecond-truncated
+        // comparison so same-millisecond rows can't fall through the page
+        // boundary. Excludes the viewer's own profile (mirrors
+        // `ProfilesService#loadRelated`'s `p.user_id != :self`) — you
+        // already know you joined, so you shouldn't see yourself as a "new
+        // member" in your own feed.
+        const qb = this.profiles
+          .createQueryBuilder('p')
+          .innerJoin('p.user', 'u', 'u.status = :active', {
+            active: UserStatus.Active,
+          })
+          .where('p.user_id != :viewerId', { viewerId });
+
+        const createdAtExpr = `date_trunc('milliseconds', "p"."created_at")`;
+        qb.orderBy(createdAtExpr, 'DESC').addOrderBy('p.user_id', 'DESC');
+
+        const decoded = cursor ? decodeCursor(cursor) : null;
+        if (decoded) {
+          qb.andWhere(
+            `(${createdAtExpr}, p.user_id) < (:cursorCreatedAt, :cursorId)`,
+            { cursorCreatedAt: decoded.createdAt, cursorId: decoded.id },
+          );
+        }
+
+        const rows = await qb.take(limit).getMany();
+        return rows.map((row) => ({
+          id: row.userId,
+          createdAt: row.createdAt,
+          type: 'new_member' as const,
+          authorId: row.userId,
           row,
         }));
       }
@@ -271,6 +315,8 @@ export class FeedService {
           return forumThreadToFeedItem(c.row as ForumThread, author);
         case 'gathering':
           return eventToFeedItem(c.row as Event, author);
+        case 'new_member':
+          return newMemberToFeedItem(c.row as Profile, author);
       }
     });
   }

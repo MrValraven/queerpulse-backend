@@ -44,11 +44,20 @@ describe('ContentController', () => {
 
 describe('TopicsController', () => {
   let controller: TopicsController;
-  let topicsService: { list: jest.Mock };
+  let topicsService: {
+    list: jest.Mock;
+    getBySlug: jest.Mock;
+    listPosts: jest.Mock;
+  };
 
   beforeEach(async () => {
     topicsService = {
       list: jest.fn().mockResolvedValue([]),
+      getBySlug: jest.fn().mockResolvedValue({}),
+      listPosts: jest.fn().mockResolvedValue({
+        data: [],
+        pageInfo: { nextCursor: null, hasMore: false },
+      }),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -61,5 +70,28 @@ describe('TopicsController', () => {
   it('delegates the topic directory listing', async () => {
     await controller.list();
     expect(topicsService.list).toHaveBeenCalled();
+  });
+
+  it('delegates the topic-detail lookup by slug', async () => {
+    await controller.getBySlug('healthcare');
+    expect(topicsService.getBySlug).toHaveBeenCalledWith('healthcare');
+  });
+
+  it('delegates the topic post feed with cursor + limit', async () => {
+    await controller.listPosts('healthcare', { cursor: 'abc', limit: 10 });
+    expect(topicsService.listPosts).toHaveBeenCalledWith(
+      'healthcare',
+      'abc',
+      10,
+    );
+  });
+
+  it('delegates the topic post feed with no query params', async () => {
+    await controller.listPosts('healthcare', {});
+    expect(topicsService.listPosts).toHaveBeenCalledWith(
+      'healthcare',
+      undefined,
+      undefined,
+    );
   });
 });

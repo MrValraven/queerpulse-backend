@@ -3,11 +3,13 @@ import {
   Get,
   Param,
   ParseEnumPipe,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { ContentPagesService } from './content-pages.service';
+import { ListTopicPostsQuery } from './dto/list-topic-posts.query';
 import { ContentSection } from './entities/content-page.entity';
 import { TopicsService } from './topics.service';
 
@@ -47,7 +49,9 @@ export class ContentController {
 // `topics` isn't a `ContentSection` — it's a separate directory shape (see
 // `entities/topic.entity.ts`) — so it gets its own route rather than being
 // squeezed under `/pages/topics`.
-//   GET /topics -> TopicResponse[] (the full topic directory)
+//   GET /topics             -> TopicResponse[]       (the full topic directory)
+//   GET /topics/:slug       -> TopicDetailResponse    (one topic's meta, 404 if missing)
+//   GET /topics/:slug/posts -> Paginated<TopicPostResponse> (that topic's post feed)
 @Feature('content')
 @Controller('topics')
 @UseGuards(ActiveMemberGuard)
@@ -57,5 +61,15 @@ export class TopicsController {
   @Get()
   list() {
     return this.topicsService.list();
+  }
+
+  @Get(':slug')
+  getBySlug(@Param('slug') slug: string) {
+    return this.topicsService.getBySlug(slug);
+  }
+
+  @Get(':slug/posts')
+  listPosts(@Param('slug') slug: string, @Query() query: ListTopicPostsQuery) {
+    return this.topicsService.listPosts(slug, query.cursor, query.limit);
   }
 }

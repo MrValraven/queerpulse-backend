@@ -35,6 +35,7 @@ describe('ResourcesService', () => {
     description:
       "What Portugal's Labour Code protects, how to document incidents, and a template complaint letter for the ACT.",
     body: 'Full guide body text…',
+    meta: 'Guide · 12 min · PT / EN',
     externalUrl: null,
     publishedAt: new Date('2026-01-01T00:00:00.000Z'),
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
@@ -125,6 +126,7 @@ describe('ResourcesService', () => {
             description:
               "What Portugal's Labour Code protects, how to document incidents, and a template complaint letter for the ACT.",
             body: 'Full guide body text…',
+            meta: 'Guide · 12 min · PT / EN',
             externalUrl: null,
           },
         ],
@@ -175,6 +177,7 @@ describe('ResourcesService', () => {
         description:
           "What Portugal's Labour Code protects, how to document incidents, and a template complaint letter for the ACT.",
         body: 'Full guide body text…',
+        meta: 'Guide · 12 min · PT / EN',
         externalUrl: null,
       });
     });

@@ -3,6 +3,7 @@ import { CommunityPost } from '../communities/entities/community-post.entity';
 import { Community } from '../communities/entities/community.entity';
 import { Event } from '../events/entities/event.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
+import { Profile } from '../users/entities/profile.entity';
 
 // ── Frontend-contract shapes ─────────────────────────────────────────────
 // Mirror `AuthorSummary`/`FeedItem`/`FeedItemType` from the frontend's
@@ -10,7 +11,8 @@ import { ForumThread } from '../forum/entities/forum-thread.entity';
 // `src/common`) — same idiom as `src/forum/forum-response.ts`, which notes no
 // shared `AuthorSummary` mapper exists yet.
 
-export type FeedItemType = 'community_post' | 'forum_thread' | 'gathering';
+export type FeedItemType =
+  'community_post' | 'forum_thread' | 'gathering' | 'new_member';
 
 export interface AuthorSummary {
   handle: string;
@@ -112,5 +114,28 @@ export function eventToFeedItem(
     summary: truncate(event.description),
     link: `/gatherings/${event.slug}`,
     actor: toAuthorSummary(host),
+  };
+}
+
+/**
+ * A recently-joined active member, for the "People" tab. `title`/`summary`
+ * are read straight off the member's own profile row (not the batched
+ * `MemberRef`/`actor` lookup) since the candidate row IS the member — the
+ * `actor` field is filled in for the `AuthorSummary` shape the frontend's
+ * `NewMemberCard` expects, but isn't the source of truth here. `summary`
+ * falls back from `tagline` to `bio` to an empty string (both nullable).
+ */
+export function newMemberToFeedItem(
+  profile: Profile,
+  actor: MemberRef | null,
+): FeedItem {
+  return {
+    id: profile.userId,
+    type: 'new_member',
+    createdAt: profile.createdAt.toISOString(),
+    title: `${profile.firstName} ${profile.lastName}`.trim(),
+    summary: profile.tagline ?? profile.bio ?? '',
+    link: `/profile/${profile.slug}`,
+    actor: toAuthorSummary(actor),
   };
 }

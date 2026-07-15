@@ -39,6 +39,12 @@ export class Resource {
   @Column({ type: 'text' })
   body: string;
 
+  // Short card-footer chip the FE's `library.data.ts` `Guide.meta` renders
+  // (e.g. "Guide · 12 min · PT / EN") — format, read time, language
+  // availability. Nullable so older/unauthored rows degrade gracefully.
+  @Column({ type: 'varchar', nullable: true })
+  meta: string | null;
+
   @Column({ type: 'varchar', nullable: true })
   externalUrl: string | null;
 

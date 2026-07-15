@@ -25,7 +25,10 @@ import { MessagingModule } from './messaging/messaging.module';
 import { ChatModule } from './chat/chat.module';
 import { CinemaModule } from './cinema/cinema.module';
 import { CommunitiesModule } from './communities/communities.module';
+import { CommunityModule } from './community/community.module';
 import { CompaniesModule } from './companies/companies.module';
+import { CultureModule } from './culture/culture.module';
+import { GovernanceModule } from './governance/governance.module';
 import { EventsModule } from './events/events.module';
 import { JobsModule } from './jobs/jobs.module';
 import { NotificationsModule } from './notifications/notifications.module';
@@ -127,6 +130,9 @@ import { LaunchedFeaturesGuard } from './common/launched-features.guard';
     MagazineModule,
     ResourcesModule,
     ContentModule,
+    CultureModule,
+    GovernanceModule,
+    CommunityModule,
   ],
   providers: [
     // Guards run in registration order. Throttle first (cheapest, and it must

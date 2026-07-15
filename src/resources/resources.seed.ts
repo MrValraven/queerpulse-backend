@@ -38,6 +38,7 @@ export interface ResourceSeed {
   title: string;
   description: string;
   body: string;
+  meta: string | null;
   externalUrl: string | null;
   publishedAt: Date;
 }
@@ -141,6 +142,10 @@ export const resourceSeeds: ResourceSeed[] = GUIDE_SOURCES.map((g) => ({
   title: g.title,
   description: g.desc,
   body: `${g.desc} (${g.meta}.)`,
+  // `Guide.meta` verbatim (format · read time · language) — the FE's card
+  // footer chip. Kept as its own field so `LibraryPage`'s card footer has
+  // something to render beyond the derived `body` above.
+  meta: g.meta,
   externalUrl: null,
   publishedAt: PUBLISHED_AT,
 }));

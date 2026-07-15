@@ -20,6 +20,7 @@ export class AddResources1782800520000 implements MigrationInterface {
         "title" character varying NOT NULL,
         "description" text NOT NULL,
         "body" text NOT NULL,
+        "meta" character varying,
         "external_url" character varying,
         "published_at" TIMESTAMP WITH TIME ZONE,
         "created_at" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),

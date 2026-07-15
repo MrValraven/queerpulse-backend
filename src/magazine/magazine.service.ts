@@ -19,6 +19,7 @@ import {
 export interface ListArticlesInput {
   issue?: string;
   tag?: string;
+  author?: string;
   page?: number;
 }
 
@@ -67,6 +68,14 @@ export class MagazineService {
     }
     if (query.tag) {
       qb.andWhere(':tag = ANY(article.tags)', { tag: query.tag });
+    }
+    if (query.author) {
+      qb.innerJoin(
+        MagazineAuthor,
+        'byline',
+        'byline.id = article.author_id AND byline.slug = :authorSlug',
+        { authorSlug: query.author },
+      );
     }
 
     qb.orderBy('article.published_at', 'DESC', 'NULLS LAST').addOrderBy(

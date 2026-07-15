@@ -11,6 +11,12 @@ export class ListArticlesQuery {
   @IsString()
   tag?: string;
 
+  // `magazine_author.slug` — lets AuthorPage's "Selected work" grid ask for
+  // just this byline's pieces (GET /magazine/articles?author=<slug>).
+  @IsOptional()
+  @IsString()
+  author?: string;
+
   @IsOptional()
   @Type(() => Number)
   @IsInt()

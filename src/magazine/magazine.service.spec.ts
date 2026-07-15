@@ -181,6 +181,20 @@ describe('MagazineService', () => {
       });
     });
 
+    it("filters by author slug via an inner join (AuthorPage's Selected work)", async () => {
+      const qb = makeQueryBuilder([], 0);
+      articles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.listArticles({ author: 'sofia' });
+
+      expect(qb.innerJoin).toHaveBeenCalledWith(
+        expect.anything(),
+        'byline',
+        expect.stringContaining('byline.slug = :authorSlug'),
+        { authorSlug: 'sofia' },
+      );
+    });
+
     it('drops a row whose author is missing (data-integrity guard)', async () => {
       const qb = makeQueryBuilder([ARTICLE], 1);
       articles.createQueryBuilder.mockReturnValue(qb);

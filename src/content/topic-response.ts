@@ -26,3 +26,36 @@ export function toTopicResponse(topic: Topic): TopicResponse {
     crisisCard: topic.crisisCard,
   };
 }
+
+/** One entry of `TopicDetailResponse.relatedTopics` — mirrors the mock's
+ * `RelatedTopic` (`{ tag, count }`) in `topics.data.tsx`. */
+export interface RelatedTopicResponse {
+  tag: string;
+  count: number;
+}
+
+/**
+ * The shape returned by `GET /topics/:slug` — everything `TopicHeader` /
+ * `TopicSidebar` need beyond the directory entry: the follower count, how
+ * many posts landed this week, and the related-topics list. Does NOT
+ * include `topVoices` or the curated `resources` panel — no backend shape
+ * was requested for those; see `entities/topic.entity.ts`'s docstring.
+ */
+export interface TopicDetailResponse extends TopicResponse {
+  followerCount: number;
+  postsThisWeek: number;
+  relatedTopics: RelatedTopicResponse[];
+}
+
+export function toTopicDetailResponse(
+  topic: Topic,
+  relatedTopics: RelatedTopicResponse[],
+  postsThisWeek: number,
+): TopicDetailResponse {
+  return {
+    ...toTopicResponse(topic),
+    followerCount: topic.followerCount,
+    postsThisWeek,
+    relatedTopics,
+  };
+}

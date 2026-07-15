@@ -28,10 +28,14 @@ import { ContentSection } from './entities/content-page.entity';
  *   sections named in `NAV`).
  * - `topics`   <- `queerpulse/src/features/topics/topics.data.tsx`'s `TOPICS`
  *   record (the five curated topics; `tag`, flattened `title`->`label`,
- *   flattened `sub`->`description`, `totalPosts`, `crisisCard`). The per-topic
- *   post feed / top voices / curated-resources in the mock are demo-only
- *   forum/feed content authored as JSX and belong to those domains, not this
- *   generic CMS — so they are not seeded here (see `entities/topic.entity.ts`).
+ *   flattened `sub`->`description`, `totalPosts`, `followerCount` (from the
+ *   mock's "Members following" stat), `crisisCard`), plus `topicPostSeeds`
+ *   below — a representative subset (not exhaustive) of each topic's
+ *   `posts[]`, flattened to `topic_post` rows (see
+ *   `entities/topic-post.entity.ts` for the modeling rationale and which
+ *   mock fields map onto which columns). `topVoices` and the curated
+ *   `resources` panel are still not seeded — no backend shape was requested
+ *   for those (see `entities/topic.entity.ts`).
  */
 
 export interface ContentPageSeed {
@@ -48,7 +52,26 @@ export interface TopicSeed {
   label: string;
   description: string;
   totalPosts: number;
+  followerCount: number;
   crisisCard: boolean;
+}
+
+export interface TopicPostSeed {
+  topicTag: string;
+  authorName: string;
+  authorInitials: string;
+  authorTone: string;
+  contextLabel: string | null;
+  kind: string;
+  category: string;
+  title: string;
+  body: string;
+  reactionCount: number;
+  reactionLabel: string;
+  replyCount: number;
+  replyLabel: string | null;
+  tags: string[];
+  href: string;
 }
 
 const PUBLISHED_AT = new Date('2026-01-01T00:00:00.000Z');
@@ -196,6 +219,7 @@ export const topicSeeds: TopicSeed[] = [
     description:
       'Conversations, resources, recommendations, and warnings about navigating health systems as a queer person in Lisbon. Curated by Trans Hub & Wellbeing.',
     totalPosts: 347,
+    followerCount: 1200,
     crisisCard: true,
   },
   {
@@ -204,6 +228,7 @@ export const topicSeeds: TopicSeed[] = [
     description:
       'Everything trans and non-binary life in Lisbon touches — legal name changes, hormones, community, joy. Curated by Trans Hub.',
     totalPosts: 512,
+    followerCount: 2100,
     crisisCard: true,
   },
   {
@@ -212,6 +237,7 @@ export const topicSeeds: TopicSeed[] = [
     description:
       'Therapy that gets us, peer support, and the honest conversations in between. Curated by Wellbeing. You are not alone here.',
     totalPosts: 428,
+    followerCount: 1600,
     crisisCard: true,
   },
   {
@@ -220,6 +246,7 @@ export const topicSeeds: TopicSeed[] = [
     description:
       'Sublets, flatshares, co-ops, and mutual aid for finding somewhere safe to live as a queer person in Lisbon. Real listings, real people, no agencies.',
     totalPosts: 173,
+    followerCount: 890,
     crisisCard: false,
   },
   {
@@ -228,6 +255,183 @@ export const topicSeeds: TopicSeed[] = [
     description:
       "Where to dance, who's playing, and which rooms actually feel safe after dark. Party listings, venue reviews, and get-home-safe plans, by the people who go.",
     totalPosts: 289,
+    followerCount: 1400,
     crisisCard: false,
+  },
+];
+
+// --- topic posts (a representative subset — not all — of each topic's
+// posts[] in topics.data.tsx, flattened per entities/topic-post.entity.ts) ---
+export const topicPostSeeds: TopicPostSeed[] = [
+  {
+    topicTag: 'healthcare',
+    authorName: 'Anika Kovač',
+    authorInitials: 'AK',
+    authorTone: 'coral',
+    contextLabel: 'Trans & Non-Binary Network',
+    kind: 'asking',
+    category: 'thread',
+    title: 'Anyone have recommendations for a queer-friendly GP in Lisbon?',
+    body: "Preferably someone familiar with trans healthcare — I'm tired of having to explain myself from scratch every appointment. Mine retired in March…",
+    reactionCount: 42,
+    reactionLabel: 'relate',
+    replyCount: 18,
+    replyLabel: 'replies',
+    tags: ['healthcare', 'trans', 'lisbon'],
+    href: '/forum',
+  },
+  {
+    topicTag: 'healthcare',
+    authorName: 'Sara Pinheiro for QueerPulse Magazine',
+    authorInitials: 'SP',
+    authorTone: 'jade',
+    contextLabel: '8 min read',
+    kind: 'article',
+    category: 'article',
+    title: "Five things I learned navigating Lisbon's trans health system.",
+    body: "From the SNS to private clinics, what nobody tells you about waiting lists, referrals, and how to actually get a hormone prescription without losing a year of your life.",
+    reactionCount: 284,
+    reactionLabel: 'reads',
+    replyCount: 26,
+    replyLabel: 'bookmarks',
+    tags: ['healthcare', 'trans', 'explainer'],
+    href: '/magazine/article',
+  },
+  {
+    topicTag: 'trans',
+    authorName: 'Céu Marques',
+    authorInitials: 'CM',
+    authorTone: 'coral',
+    contextLabel: 'Trans Hub',
+    kind: 'asking',
+    category: 'thread',
+    title: 'Has anyone done the legal name change at Conservatória in 2026?',
+    body: 'Trying to work out which documents actually get accepted now versus what the old guides say. Would love a step-by-step from someone who did it this year.',
+    reactionCount: 51,
+    reactionLabel: 'relate',
+    replyCount: 33,
+    replyLabel: 'replies',
+    tags: ['trans', 'legal', 'lisbon'],
+    href: '/forum',
+  },
+  {
+    topicTag: 'trans',
+    authorName: 'Nuno Alves',
+    authorInitials: 'NA',
+    authorTone: 'plum',
+    contextLabel: 'Trans Hub',
+    kind: 'thread',
+    category: 'resource',
+    title: 'The 2026 trans starter kit — one link, everything in it.',
+    body: "Hormones, healthcare, legal, housing, and the people to ask. If you're newly out or newly arrived, start here. We keep it current so you don't have to dig.",
+    reactionCount: 312,
+    reactionLabel: 'upvotes',
+    replyCount: 88,
+    replyLabel: 'replies',
+    tags: ['trans', 'resource', 'healthcare'],
+    href: '/forum',
+  },
+  {
+    topicTag: 'mentalhealth',
+    authorName: 'Mariana Reis',
+    authorInitials: 'MR',
+    authorTone: 'jade',
+    contextLabel: 'Clinical psychologist',
+    kind: 'recommend',
+    category: 'recommendation',
+    title: 'Sliding-scale therapists who actually have openings this month.',
+    body: 'Six queer-affirming practitioners with space right now, including two who work in English and one who does trauma-focused work with trans clients. DM for the list.',
+    reactionCount: 97,
+    reactionLabel: 'relate',
+    replyCount: 41,
+    replyLabel: 'replies',
+    tags: ['mentalhealth', 'therapy', 'lisbon'],
+    href: '/forum',
+  },
+  {
+    topicTag: 'mentalhealth',
+    authorName: 'Anonymous member',
+    authorInitials: '?',
+    authorTone: 'plum',
+    contextLabel: 'posted anonymously',
+    kind: 'asking',
+    category: 'thread',
+    title: "How do you tell a new therapist you're queer without the flinch?",
+    body: 'Every first session I brace for the pause. Looking for scripts, or honestly just to hear it gets easier. Replies from people who\'ve been here especially welcome.',
+    reactionCount: 73,
+    reactionLabel: 'relate',
+    replyCount: 56,
+    replyLabel: 'replies',
+    tags: ['mentalhealth', 'therapy'],
+    href: '/forum',
+  },
+  {
+    topicTag: 'housing',
+    authorName: 'Carla Nunes',
+    authorInitials: 'CN',
+    authorTone: 'coral',
+    contextLabel: null,
+    kind: 'asking',
+    category: 'thread',
+    title:
+      'Looking for a room in a queer household, June–August, Arroios area.',
+    body: 'Quiet, employed, cat-friendly, allergic to landlord drama. Would love to land somewhere that already feels like home rather than start from zero.',
+    reactionCount: 19,
+    reactionLabel: 'relate',
+    replyCount: 11,
+    replyLabel: 'replies',
+    tags: ['housing', 'sublet', 'arroios'],
+    href: '/forum',
+  },
+  {
+    topicTag: 'housing',
+    authorName: 'Beatriz Lopes',
+    authorInitials: 'BL',
+    authorTone: 'plum',
+    contextLabel: null,
+    kind: 'recommend',
+    category: 'recommendation',
+    title: 'A landlord in Graça who actually put queer-friendly in writing.',
+    body: 'Rare, I know. Fair rent, no weirdness about who visits, fixed the boiler in a day. Happy to pass the contact to anyone searching — just ask.',
+    reactionCount: 34,
+    reactionLabel: 'relate',
+    replyCount: 16,
+    replyLabel: 'replies',
+    tags: ['housing', 'graca', 'lisbon'],
+    href: '/forum',
+  },
+  {
+    topicTag: 'nightlife',
+    authorName: 'Diogo Faria',
+    authorInitials: 'DF',
+    authorTone: 'coral',
+    contextLabel: 'Music producer',
+    kind: 'event',
+    category: 'event',
+    title: 'Warehouse party Friday — trans DJs only, door policy that means it.',
+    body: 'Vetted crowd, trained welfare team, chill-out room upstairs. Location on RSVP. Bring your people, look after each other, dance until the trams start.',
+    reactionCount: 62,
+    reactionLabel: 'going',
+    replyCount: 0,
+    replyLabel: null,
+    tags: ['nightlife', 'music', 'lisbon'],
+    href: '/gathering/trans-djs-warehouse',
+  },
+  {
+    topicTag: 'nightlife',
+    authorName: 'Rita Vasquez',
+    authorInitials: 'RV',
+    authorTone: 'jade',
+    contextLabel: null,
+    kind: 'recommend',
+    category: 'recommendation',
+    title: 'A bar in Cais do Sodré that gets the vibe right on a Wednesday.',
+    body: 'No pressure, no creeps, staff who step in when needed. Perfect for a first date or a soft night out. They keep the back room quiet enough to actually talk.',
+    reactionCount: 48,
+    reactionLabel: 'relate',
+    replyCount: 15,
+    replyLabel: 'replies',
+    tags: ['nightlife', 'caisdosodre', 'lisbon'],
+    href: '/forum',
   },
 ];

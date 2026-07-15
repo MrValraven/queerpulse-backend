@@ -18,6 +18,7 @@ import {
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
+import { UserStatus } from '../users/entities/user.entity';
 import { FeedService } from './feed.service';
 
 // A chainable query-builder stub whose terminal `getMany()` resolves to a
@@ -27,7 +28,14 @@ import { FeedService } from './feed.service';
 // cursor predicate.
 function qbStub(rows: unknown[] = []) {
   const qb: Record<string, jest.Mock> = {};
-  for (const m of ['where', 'andWhere', 'orderBy', 'addOrderBy', 'take']) {
+  for (const m of [
+    'where',
+    'andWhere',
+    'innerJoin',
+    'orderBy',
+    'addOrderBy',
+    'take',
+  ]) {
     qb[m] = jest.fn().mockReturnValue(qb);
   }
   qb.getMany = jest.fn().mockResolvedValue(rows);
@@ -113,13 +121,28 @@ const baseProfile = (overrides: Partial<Profile> = {}): Profile =>
     ...overrides,
   }) as Profile;
 
+/** A profile row as the `new_member` source itself would return it (the
+ * candidate row IS the member, not just a resolved author). */
+const baseMemberProfile = (overrides: Partial<Profile> = {}): Profile =>
+  ({
+    userId: 'member-1',
+    slug: 'kai',
+    firstName: 'Kai',
+    lastName: 'Larsson',
+    avatarUrl: null,
+    tagline: 'Filmmaker new to Lisbon',
+    bio: 'Longer bio text.',
+    createdAt: t('2026-07-10T00:00:00.000Z'),
+    ...overrides,
+  }) as Profile;
+
 describe('FeedService', () => {
   let service: FeedService;
   let communityPosts: { createQueryBuilder: jest.Mock };
   let communities: { find: jest.Mock };
   let forumThreads: { createQueryBuilder: jest.Mock };
   let events: { createQueryBuilder: jest.Mock };
-  let profiles: { find: jest.Mock };
+  let profiles: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let blockFilter: { isBlockedEitherWay: jest.Mock; isMutedBy: jest.Mock };
 
   beforeEach(async () => {
@@ -127,7 +150,10 @@ describe('FeedService', () => {
     communities = { find: jest.fn().mockResolvedValue([]) };
     forumThreads = { createQueryBuilder: jest.fn(() => qbStub()) };
     events = { createQueryBuilder: jest.fn(() => qbStub()) };
-    profiles = { find: jest.fn().mockResolvedValue([]) };
+    profiles = {
+      find: jest.fn().mockResolvedValue([]),
+      createQueryBuilder: jest.fn(() => qbStub()),
+    };
     blockFilter = {
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
       isMutedBy: jest.fn().mockResolvedValue(false),
@@ -201,9 +227,10 @@ describe('FeedService', () => {
       expect(types).toEqual(['community_post', 'forum_thread']);
     });
 
-    it('"people" queries nothing and returns an empty page (no FeedItem source for a bare member)', async () => {
+    it('"people" only queries active member profiles, not the other sources', async () => {
       const page = await service.getFeed('viewer-1', 'people', undefined);
 
+      expect(profiles.createQueryBuilder).toHaveBeenCalled();
       expect(communityPosts.createQueryBuilder).not.toHaveBeenCalled();
       expect(forumThreads.createQueryBuilder).not.toHaveBeenCalled();
       expect(events.createQueryBuilder).not.toHaveBeenCalled();
@@ -211,6 +238,124 @@ describe('FeedService', () => {
         data: [],
         pageInfo: { nextCursor: null, hasMore: false },
       });
+    });
+  });
+
+  describe('"people" tab / new_member items', () => {
+    it('returns recently-joined members as new_member items, newest-first', async () => {
+      const newer = baseMemberProfile({
+        userId: 'member-2',
+        slug: 'bilal-kaya',
+        firstName: 'Bilal',
+        lastName: 'Kaya',
+        tagline: 'Just moved to Lisbon',
+        createdAt: t('2026-07-12T00:00:00.000Z'),
+      });
+      const older = baseMemberProfile({
+        createdAt: t('2026-07-10T00:00:00.000Z'),
+      });
+      profiles.createQueryBuilder.mockReturnValue(qbStub([newer, older]));
+      profiles.find.mockResolvedValue([newer, older]);
+
+      const page = await service.getFeed('viewer-1', 'people', undefined);
+
+      expect(page.data.map((i) => i.id)).toEqual(['member-2', 'member-1']);
+      expect(page.data[0]).toMatchObject({
+        type: 'new_member',
+        title: 'Bilal Kaya',
+        summary: 'Just moved to Lisbon',
+        link: '/profile/bilal-kaya',
+        actor: {
+          handle: 'bilal-kaya',
+          displayName: 'Bilal Kaya',
+          avatarUrl: null,
+        },
+      });
+      expect(page.data.every((i) => i.type === 'new_member')).toBe(true);
+    });
+
+    it('only joins active users (filters on user status via the profiles query)', async () => {
+      const qb = qbStub([]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getFeed('viewer-1', 'people', undefined);
+
+      expect(qb.innerJoin).toHaveBeenCalledWith(
+        'p.user',
+        'u',
+        'u.status = :active',
+        { active: UserStatus.Active },
+      );
+    });
+
+    it('excludes the viewer\'s own profile from their "people" feed', async () => {
+      // The exclusion happens in the SQL predicate the query builder is
+      // asked to apply — this asserts the predicate is actually issued,
+      // since the qb stub can't otherwise simulate DB-side filtering.
+      const qb = qbStub([]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getFeed('viewer-42', 'people', undefined);
+
+      expect(qb.where).toHaveBeenCalledWith('p.user_id != :viewerId', {
+        viewerId: 'viewer-42',
+      });
+    });
+
+    it('drops new_member items whose member the viewer has blocked', async () => {
+      const blocked = baseMemberProfile({
+        userId: 'blocked-1',
+        slug: 'blocked',
+        createdAt: t('2026-07-12T00:00:00.000Z'),
+      });
+      const ok = baseMemberProfile({
+        userId: 'ok-1',
+        slug: 'ok',
+        createdAt: t('2026-07-11T00:00:00.000Z'),
+      });
+      profiles.createQueryBuilder.mockReturnValue(qbStub([blocked, ok]));
+      profiles.find.mockResolvedValue([blocked, ok]);
+      blockFilter.isBlockedEitherWay.mockImplementation(
+        (_viewer: string, authorId: string) => authorId === 'blocked-1',
+      );
+
+      const page = await service.getFeed('viewer-1', 'people', undefined);
+
+      expect(page.data.map((i) => i.id)).toEqual(['ok-1']);
+    });
+
+    it('drops new_member items whose member the viewer has muted', async () => {
+      const muted = baseMemberProfile({
+        userId: 'muted-1',
+        slug: 'muted',
+        createdAt: t('2026-07-12T00:00:00.000Z'),
+      });
+      const ok = baseMemberProfile({
+        userId: 'ok-1',
+        slug: 'ok',
+        createdAt: t('2026-07-11T00:00:00.000Z'),
+      });
+      profiles.createQueryBuilder.mockReturnValue(qbStub([muted, ok]));
+      profiles.find.mockResolvedValue([muted, ok]);
+      blockFilter.isMutedBy.mockImplementation(
+        (_viewer: string, authorId: string) => authorId === 'muted-1',
+      );
+
+      const page = await service.getFeed('viewer-1', 'people', undefined);
+
+      expect(page.data.map((i) => i.id)).toEqual(['ok-1']);
+    });
+
+    it('"all" includes new_member items alongside the other sources', async () => {
+      communityPosts.createQueryBuilder.mockReturnValue(qbStub([basePost()]));
+      const member = baseMemberProfile();
+      profiles.createQueryBuilder.mockReturnValue(qbStub([member]));
+      profiles.find.mockResolvedValue([member]);
+
+      const page = await service.getFeed('viewer-1', 'all', undefined);
+
+      const types = page.data.map((i) => i.type).sort();
+      expect(types).toEqual(['community_post', 'new_member']);
     });
   });
 
