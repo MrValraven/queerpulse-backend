@@ -1,19 +1,17 @@
-// Single source of truth for accepted image uploads. The DTO validates the
-// requested Content-Type against these keys; the controller derives the
-// object-key extension and the presigned-POST size cap from the same entry —
-// no drift between the whitelist and the extension map.
+// Single source of truth for accepted image content types. The DTOs validate
+// the requested Content-Type against these keys; the controller derives the
+// object-key extension from the same entry — no drift between the whitelist
+// and the extension map. Byte caps are per-*kind* (see `upload-kinds.ts`),
+// not per content type — a GIF avatar is capped the same as a PNG avatar.
 export interface ImageUploadSpec {
   extension: string;
-  maxBytes: number;
 }
 
-const MB = 1024 * 1024;
-
 export const IMAGE_UPLOAD_TYPES: Readonly<Record<string, ImageUploadSpec>> = {
-  'image/jpeg': { extension: '.jpg', maxBytes: 5 * MB },
-  'image/png': { extension: '.png', maxBytes: 5 * MB },
-  'image/webp': { extension: '.webp', maxBytes: 5 * MB },
-  'image/gif': { extension: '.gif', maxBytes: 8 * MB },
+  'image/jpeg': { extension: '.jpg' },
+  'image/png': { extension: '.png' },
+  'image/webp': { extension: '.webp' },
+  'image/gif': { extension: '.gif' },
 };
 
 export const ALLOWED_IMAGE_TYPES: readonly string[] =

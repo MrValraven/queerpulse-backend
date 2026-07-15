@@ -83,4 +83,9 @@ export class MeApplicationsController {
   myApplications(@CurrentUser() user: CurrentUserData) {
     return this.jobsService.listMyApplications(user.userId);
   }
+
+  @Get('jobs')
+  myJobs(@CurrentUser() user: CurrentUserData, @Query() query: ListJobsQuery) {
+    return this.jobsService.listMine(user.userId, query);
+  }
 }

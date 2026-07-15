@@ -5,6 +5,13 @@ export enum ReactionKey {
   Celebrate = 'celebrate',
   Support = 'support',
   Fire = 'fire',
+  // Reserved for the flat `POST /community-posts/:id/like` alias (see
+  // `CommunityPostsController`/`CommunityPostsService.likeFlatPost`).
+  // Deliberately excluded from `ReactionDto`'s `@IsIn` allowlist and from
+  // `REACTION_KEY_ORDER` in `community-response.ts` so it never shows up in
+  // the generic 4-key reaction summary — it's a dedicated "like" counter that
+  // happens to reuse this table/store instead of a new one.
+  Like = 'like',
 }
 
 @Entity('community_post_reactions')

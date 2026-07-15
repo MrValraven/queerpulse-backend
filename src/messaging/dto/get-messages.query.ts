@@ -3,6 +3,7 @@ import {
   IsInt,
   IsISO8601,
   IsOptional,
+  IsString,
   IsUUID,
   Max,
   Min,
@@ -20,6 +21,15 @@ export class GetMessagesQuery {
   @IsOptional()
   @IsUUID('4')
   beforeId?: string;
+
+  // Opaque cursor (see `src/common/cursor-pagination.ts`) the frontend sends
+  // instead of `before`/`beforeId`. Decoded server-side into the same
+  // (createdAt, id) keyset predicate; ignored (falls back to the first page)
+  // when it doesn't decode, and superseded by an explicit `before` if both
+  // are present.
+  @IsOptional()
+  @IsString()
+  cursor?: string;
 
   @IsOptional()
   @Type(() => Number)

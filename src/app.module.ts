@@ -36,6 +36,21 @@ import { VolunteeringModule } from './volunteering/volunteering.module';
 import { CsrfGuard } from './security/csrf.guard';
 import { HttpThrottlerGuard } from './security/http-throttler.guard';
 import { SecurityModule } from './security/security.module';
+import { SocialModule } from './social/social.module';
+import { ReportsModule } from './reports/reports.module';
+import { ModerationModule } from './moderation/moderation.module';
+import { AccountModule } from './account/account.module';
+import { ConsentModule } from './consent/consent.module';
+import { SavedModule } from './saved/saved.module';
+import { DraftsModule } from './drafts/drafts.module';
+import { RecognitionModule } from './recognition/recognition.module';
+import { AffiliationModule } from './affiliation/affiliation.module';
+import { ForumModule } from './forum/forum.module';
+import { FeedModule } from './feed/feed.module';
+import { ListingsModule } from './listings/listings.module';
+import { MagazineModule } from './magazine/magazine.module';
+import { ResourcesModule } from './resources/resources.module';
+import { ContentModule } from './content/content.module';
 import { AllExceptionsFilter } from './common/all-exceptions.filter';
 import { LaunchedFeaturesGuard } from './common/launched-features.guard';
 
@@ -97,6 +112,21 @@ import { LaunchedFeaturesGuard } from './common/launched-features.guard';
     CinemaModule,
     HealthModule,
     SecurityModule,
+    SocialModule,
+    ReportsModule,
+    ModerationModule,
+    AccountModule,
+    ConsentModule,
+    SavedModule,
+    DraftsModule,
+    RecognitionModule,
+    AffiliationModule,
+    ForumModule,
+    FeedModule,
+    ListingsModule,
+    MagazineModule,
+    ResourcesModule,
+    ContentModule,
   ],
   providers: [
     // Guards run in registration order. Throttle first (cheapest, and it must

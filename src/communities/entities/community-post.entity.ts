@@ -16,9 +16,14 @@ export class CommunityPost {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
+  // Nullable: a `null` community_id is a "flat"/global post created via
+  // `POST /community-posts` without a `communitySlug` (see
+  // `CommunityPostsService.createFlatPost`) — it isn't scoped to any
+  // community's roster/membership and never appears in a single community's
+  // `GET /:slug/posts` feed.
   @Index('IDX_community_posts_community_id')
-  @Column({ type: 'uuid' })
-  communityId: string;
+  @Column({ type: 'uuid', nullable: true })
+  communityId: string | null;
 
   @Index('IDX_community_posts_author_id')
   @Column({ type: 'uuid' })

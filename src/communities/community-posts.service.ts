@@ -32,6 +32,12 @@ export interface CreatePostInput {
   kind?: PostKind;
 }
 
+/** Input for the flat `POST /community-posts` alias (see `createFlatPost`). */
+export interface CreateFlatPostInput {
+  body: string;
+  communitySlug?: string;
+}
+
 // `pinned` is deliberately the only field that maps to a moderator-only
 // check (see `updatePost`) — `body`/`kind` stay author-only, per the spec's
 // `PATCH posts/:id | author; pin ⇒ mod` guard column.
@@ -184,6 +190,105 @@ export class CommunityPostsService {
     return toCommunityReply(saved, authors.get(userId) ?? null);
   }
 
+  // --- flat aliases (`POST /community-posts*` — see `CommunityPostsController`) ---
+  //
+  // These reuse the same `community_posts`/`community_post_reactions`/
+  // `community_post_replies` store as the nested `/communities/:slug/posts*`
+  // routes above, just addressed by post id instead of (slug, id). A post
+  // created without a `communitySlug` gets `communityId: null` — a "global"
+  // post, per `CommunityPost.communityId`'s doc comment.
+
+  /**
+   * `POST /community-posts` — create a post, optionally inside a community.
+   * With `communitySlug`, this is exactly `createPost` (same 404-on-unknown-
+   * slug + roster-member-only checks). Without one, it's a global post any
+   * active member may create (guarded only by `ActiveMemberGuard` at the
+   * controller) — there's no community roster to be a member of.
+   */
+  async createFlatPost(
+    authorId: string,
+    dto: CreateFlatPostInput,
+  ): Promise<{ id: string }> {
+    let communityId: string | null = null;
+    if (dto.communitySlug) {
+      const community = await this.loadCommunityOr404(dto.communitySlug);
+      await this.assertMember(community.id, authorId);
+      communityId = community.id;
+    }
+
+    const saved = await this.posts.save(
+      this.posts.create({
+        communityId,
+        authorId,
+        body: dto.body,
+        image: null,
+        kind: PostKind.Post,
+        pinned: false,
+      }),
+    );
+    return { id: saved.id };
+  }
+
+  /**
+   * `POST /community-posts/:id/like` — idempotent like/unlike toggle over the
+   * reserved `ReactionKey.Like` key (same `orIgnore` insert / `delete` idiom
+   * as `addReaction`/`removeReaction`). For a community-scoped post, only a
+   * roster member may like it (mirrors the nested reaction routes); a global
+   * post (`communityId: null`) has no roster, so any active member may.
+   */
+  async likeFlatPost(
+    postId: string,
+    userId: string,
+    liked: boolean,
+  ): Promise<{ liked: boolean; likeCount: number }> {
+    const post = await this.loadPostByIdOr404(postId);
+    if (post.communityId) {
+      await this.assertMember(post.communityId, userId);
+    }
+
+    if (liked) {
+      await this.reactions
+        .createQueryBuilder()
+        .insert()
+        .into(CommunityPostReaction)
+        .values({ postId: post.id, userId, key: ReactionKey.Like })
+        .orIgnore()
+        .execute();
+    } else {
+      await this.reactions.delete({
+        postId: post.id,
+        userId,
+        key: ReactionKey.Like,
+      });
+    }
+
+    const likeCount = await this.reactions.count({
+      where: { postId: post.id, key: ReactionKey.Like },
+    });
+    return { liked, likeCount };
+  }
+
+  /**
+   * `POST /community-posts/:id/replies` — reply to a post by id (same
+   * membership rule as `likeFlatPost` above; reuses the same
+   * `community_post_replies` insert as `addReply`).
+   */
+  async addFlatReply(
+    postId: string,
+    userId: string,
+    text: string,
+  ): Promise<{ id: string }> {
+    const post = await this.loadPostByIdOr404(postId);
+    if (post.communityId) {
+      await this.assertMember(post.communityId, userId);
+    }
+
+    const saved = await this.replies.save(
+      this.replies.create({ postId: post.id, authorId: userId, text }),
+    );
+    return { id: saved.id };
+  }
+
   // --- internals ---
 
   private async loadCommunityOr404(slug: string): Promise<Community> {
@@ -201,6 +306,16 @@ export class CommunityPostsService {
     const post = await this.posts.findOne({
       where: { id: postId, communityId },
     });
+    if (!post) {
+      throw new NotFoundException('Post not found');
+    }
+    return post;
+  }
+
+  // Used by the flat by-id aliases above, which have no `slug` to scope the
+  // lookup with (a global post has no community at all).
+  private async loadPostByIdOr404(postId: string): Promise<CommunityPost> {
+    const post = await this.posts.findOne({ where: { id: postId } });
     if (!post) {
       throw new NotFoundException('Post not found');
     }

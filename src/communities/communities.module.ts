@@ -4,6 +4,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { UsersModule } from '../users/users.module';
 import { CommunitiesController } from './communities.controller';
 import { CommunitiesService } from './communities.service';
+import { CommunityPostsController } from './community-posts.controller';
 import { CommunityPostsService } from './community-posts.service';
 import { CommunityJoinRequest } from './entities/community-join-request.entity';
 import { CommunityMember } from './entities/community-member.entity';
@@ -25,7 +26,7 @@ import { Community } from './entities/community.entity';
     ]),
     UsersModule,
   ],
-  controllers: [CommunitiesController],
+  controllers: [CommunitiesController, CommunityPostsController],
   providers: [CommunitiesService, CommunityPostsService],
   exports: [CommunitiesService],
 })
