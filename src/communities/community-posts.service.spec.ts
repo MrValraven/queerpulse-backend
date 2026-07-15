@@ -91,6 +91,7 @@ describe('CommunityPostsService', () => {
   let reactions: {
     find: jest.Mock;
     delete: jest.Mock;
+    count: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
   let replies: { find: jest.Mock; create: jest.Mock; save: jest.Mock };
@@ -114,6 +115,7 @@ describe('CommunityPostsService', () => {
     reactions = {
       find: jest.fn().mockResolvedValue([]),
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
+      count: jest.fn().mockResolvedValue(0),
       createQueryBuilder: jest.fn(() => insertQbStub()),
     };
     replies = {
@@ -400,6 +402,156 @@ describe('CommunityPostsService', () => {
       members.findOne.mockResolvedValue(null);
       await expect(
         service.listPosts('queer-devs', 'stranger'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  // --- flat aliases (`POST /community-posts*`) ---
+
+  describe('createFlatPost', () => {
+    it('creates a global post (no communitySlug) without touching community/member lookups', async () => {
+      const res = await service.createFlatPost('u1', { body: 'hello world' });
+
+      expect(communities.findOne).not.toHaveBeenCalled();
+      expect(members.findOne).not.toHaveBeenCalled();
+      expect(posts.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          communityId: null,
+          authorId: 'u1',
+          body: 'hello world',
+        }),
+      );
+      expect(res).toEqual({ id: 'post-id' });
+    });
+
+    it('creates a post scoped to a community when communitySlug is given', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+
+      const res = await service.createFlatPost('author-1', {
+        body: 'hi there',
+        communitySlug: 'queer-devs',
+      });
+
+      expect(communities.findOne).toHaveBeenCalled();
+      expect(posts.save).toHaveBeenCalledWith(
+        expect.objectContaining({ communityId: 'c1', authorId: 'author-1' }),
+      );
+      expect(res).toEqual({ id: 'post-id' });
+    });
+
+    it('rejects a non-roster-member posting into a specific community', async () => {
+      members.findOne.mockResolvedValue(null);
+      await expect(
+        service.createFlatPost('stranger', {
+          body: 'hi',
+          communitySlug: 'queer-devs',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(posts.save).not.toHaveBeenCalled();
+    });
+
+    it('404s an unknown communitySlug', async () => {
+      communities.findOne.mockResolvedValue(null);
+      await expect(
+        service.createFlatPost('u1', { body: 'x', communitySlug: 'nope' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('likeFlatPost', () => {
+    it('likes a community-scoped post as a roster member, via the reserved Like key', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      const qb = insertQbStub();
+      reactions.createQueryBuilder.mockReturnValue(qb);
+      reactions.count.mockResolvedValue(3);
+
+      const res = await service.likeFlatPost('p1', 'u1', true);
+
+      expect(qb.insert).toHaveBeenCalled();
+      expect(qb.values).toHaveBeenCalledWith({
+        postId: 'p1',
+        userId: 'u1',
+        key: ReactionKey.Like,
+      });
+      expect(reactions.count).toHaveBeenCalledWith({
+        where: { postId: 'p1', key: ReactionKey.Like },
+      });
+      expect(res).toEqual({ liked: true, likeCount: 3 });
+    });
+
+    it('unlikes by deleting the (post,user,Like) row', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      reactions.count.mockResolvedValue(0);
+
+      const res = await service.likeFlatPost('p1', 'u1', false);
+
+      expect(reactions.delete).toHaveBeenCalledWith({
+        postId: 'p1',
+        userId: 'u1',
+        key: ReactionKey.Like,
+      });
+      expect(res).toEqual({ liked: false, likeCount: 0 });
+    });
+
+    it('rejects a non-roster-member liking a community-scoped post', async () => {
+      members.findOne.mockResolvedValue(null);
+      await expect(
+        service.likeFlatPost('p1', 'stranger', true),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('lets any active member like a global post (no community roster to check)', async () => {
+      posts.findOne.mockResolvedValue({ ...POST, communityId: null });
+      members.findOne.mockResolvedValue(null); // would 403 if a roster check ran
+
+      const res = await service.likeFlatPost('p1', 'u1', true);
+
+      expect(members.findOne).not.toHaveBeenCalled();
+      expect(res.liked).toBe(true);
+    });
+
+    it('404s an unknown post id', async () => {
+      posts.findOne.mockResolvedValue(null);
+      await expect(
+        service.likeFlatPost('missing', 'u1', true),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('addFlatReply', () => {
+    it('rejects a non-roster-member replying to a community-scoped post', async () => {
+      members.findOne.mockResolvedValue(null);
+      await expect(
+        service.addFlatReply('p1', 'stranger', 'hi'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(replies.save).not.toHaveBeenCalled();
+    });
+
+    it('replies to a community-scoped post as a roster member', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+
+      const res = await service.addFlatReply('p1', 'u1', 'hi!');
+
+      expect(replies.save).toHaveBeenCalledWith(
+        expect.objectContaining({ postId: 'p1', authorId: 'u1', text: 'hi!' }),
+      );
+      expect(res).toEqual({ id: 'r1' });
+    });
+
+    it('lets any active member reply to a global post (no community roster to check)', async () => {
+      posts.findOne.mockResolvedValue({ ...POST, communityId: null });
+      members.findOne.mockResolvedValue(null); // would 403 if a roster check ran
+
+      const res = await service.addFlatReply('p1', 'u1', 'hi!');
+
+      expect(members.findOne).not.toHaveBeenCalled();
+      expect(res).toEqual({ id: 'r1' });
+    });
+
+    it('404s an unknown post id', async () => {
+      posts.findOne.mockResolvedValue(null);
+      await expect(
+        service.addFlatReply('missing', 'u1', 'hi'),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
   });

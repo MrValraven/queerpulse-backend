@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { ConnectionsService } from '../connections/connections.service';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { VouchService } from '../vouch/vouch.service';
 import { Activity } from './entities/activity.entity';
@@ -41,6 +42,7 @@ describe('ProfilesService.getBySlug visibility', () => {
   let service: ProfilesService;
   let profiles: { findOne: jest.Mock; createQueryBuilder: jest.Mock };
   let connections: { areConnected: jest.Mock };
+  let blockFilter: { isBlockedEitherWay: jest.Mock; excludeBlocked: jest.Mock };
   const findEmpty = () => ({ find: jest.fn().mockResolvedValue([]) });
 
   const profile = (overrides = {}): Profile =>
@@ -69,6 +71,10 @@ describe('ProfilesService.getBySlug visibility', () => {
       createQueryBuilder: jest.fn(() => qbStub()),
     };
     connections = { areConnected: jest.fn().mockResolvedValue(false) };
+    blockFilter = {
+      isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+      excludeBlocked: jest.fn((qb) => qb),
+    };
     const groupMemberships = {
       ...findEmpty(),
       createQueryBuilder: jest.fn(() => qbStub()),
@@ -97,6 +103,7 @@ describe('ProfilesService.getBySlug visibility', () => {
           },
         },
         { provide: ConnectionsService, useValue: connections },
+        { provide: BlockFilterService, useValue: blockFilter },
       ],
     }).compile();
     service = module.get(ProfilesService);
@@ -189,6 +196,22 @@ describe('ProfilesService.getBySlug visibility', () => {
     expect(res.limited).toBe(false);
     expect((res as { now: string | null }).now).toBe('new now');
   });
+
+  describe('searchMembers', () => {
+    it('applies excludeBlocked scoped to the viewer and the p.user_id column', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount.mockResolvedValue([[], 0]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.searchMembers({}, 'viewer-1');
+
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+        qb,
+        'viewer-1',
+        '"p"."user_id"',
+      );
+    });
+  });
 });
 
 describe('ProfilesService replace-list endpoints', () => {
@@ -255,6 +278,13 @@ describe('ProfilesService replace-list endpoints', () => {
           },
         },
         { provide: ConnectionsService, useValue: { areConnected: jest.fn() } },
+        {
+          provide: BlockFilterService,
+          useValue: {
+            isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+            excludeBlocked: jest.fn((qb: unknown) => qb),
+          },
+        },
       ],
     }).compile();
     return module.get(ProfilesService);

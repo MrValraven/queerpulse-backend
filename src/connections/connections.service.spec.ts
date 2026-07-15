@@ -8,6 +8,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { QueryFailedError } from 'typeorm';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { CONNECTION_ACCEPTED } from './connection.events';
@@ -42,6 +43,7 @@ describe('ConnectionsService', () => {
   let profiles: { findOne: jest.Mock; find: jest.Mock };
   let vouches: { find: jest.Mock };
   let emitter: { emit: jest.Mock };
+  let blockFilter: { isBlockedEitherWay: jest.Mock };
 
   beforeEach(async () => {
     connections = {
@@ -55,6 +57,7 @@ describe('ConnectionsService', () => {
     profiles = { findOne: jest.fn(), find: jest.fn().mockResolvedValue([]) };
     vouches = { find: jest.fn().mockResolvedValue([]) };
     emitter = { emit: jest.fn() };
+    blockFilter = { isBlockedEitherWay: jest.fn().mockResolvedValue(false) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ConnectionsService,
@@ -62,6 +65,7 @@ describe('ConnectionsService', () => {
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: getRepositoryToken(Vouch), useValue: vouches },
         { provide: EventEmitter2, useValue: emitter },
+        { provide: BlockFilterService, useValue: blockFilter },
       ],
     }).compile();
     service = module.get(ConnectionsService);
@@ -91,6 +95,16 @@ describe('ConnectionsService', () => {
       await expect(
         service.requestConnection('me', 'them'),
       ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('rejects when either party has blocked the other (spec §2)', async () => {
+      profiles.findOne.mockResolvedValue(targetProfile());
+      blockFilter.isBlockedEitherWay.mockResolvedValueOnce(true);
+      await expect(
+        service.requestConnection('me', 'them'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith('me', 'them');
+      expect(connections.save).not.toHaveBeenCalled();
     });
 
     it('creates a pending request when no pair row exists', async () => {
@@ -324,9 +338,9 @@ describe('ConnectionsService', () => {
         status: ConnectionStatus.Blocked,
         blockedBy: 'them',
       });
-      await expect(
-        service.respond('c1', 'me', 'block'),
-      ).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(service.respond('c1', 'me', 'block')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
     });
 
     it('places a block on a pending connection', async () => {

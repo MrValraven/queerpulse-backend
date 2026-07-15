@@ -36,6 +36,12 @@ export const launchedFeatures = {
   events: { launched: true },
   connections: { launched: true },
   messaging: { launched: true },
+  forum: { launched: true },
+  feed: { launched: true },
+  listings: { launched: true },
+  magazine: { launched: true },
+  resources: { launched: true },
+  content: { launched: true },
   // Cinema ships off until Mux is provisioned: launching it makes the Mux
   // credentials below mandatory at boot (see env.validation.ts). Flip to
   // `launched: true` in an environment that has those vars set.

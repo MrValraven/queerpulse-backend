@@ -244,6 +244,24 @@ export class JobsService {
   }
 
   async list(query: JobListQuery): Promise<Paginated<JobCardDTO>> {
+    return this.listInternal(query);
+  }
+
+  // Owner's own postings — backs `GET /me/jobs`. Reuses the same
+  // `JobListQuery`/`Paginated<JobCardDTO>` shape as `list()`, just scoped to
+  // `posterId` (mirrors `listMyApplications`'s "me" precedent, but keeps
+  // page-number pagination since this is a card list, not a feed).
+  async listMine(
+    posterId: string,
+    query: JobListQuery,
+  ): Promise<Paginated<JobCardDTO>> {
+    return this.listInternal(query, posterId);
+  }
+
+  private async listInternal(
+    query: JobListQuery,
+    posterId?: string,
+  ): Promise<Paginated<JobCardDTO>> {
     const page = normalizePage(query.page);
     const qb = this.jobs
       .createQueryBuilder('j')
@@ -254,6 +272,9 @@ export class JobsService {
     }
     if (query.type) {
       qb.andWhere('j.commitment = :type', { type: query.type });
+    }
+    if (posterId) {
+      qb.andWhere('j.poster_id = :posterId', { posterId });
     }
 
     return paginate(qb, page, async (rows) => {

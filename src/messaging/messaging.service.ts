@@ -12,14 +12,19 @@ import {
   ConnectionAcceptedEvent,
 } from '../connections/connection.events';
 import { ConnectionsService } from '../connections/connections.service';
+import { decodeCursor } from '../common/cursor-pagination';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
 import { Conversation } from './entities/conversation.entity';
 import { Message } from './entities/message.entity';
 import {
   ConversationMemberView,
+  ConversationResponse,
   ConversationSummary,
   MessageView,
+  requireAuthorSummary,
+  toAuthorSummary,
   toConversationMemberView,
   toMessageView,
 } from './message-response';
@@ -46,6 +51,7 @@ export class MessagingService {
     private readonly dataSource: DataSource,
     private readonly eventEmitter: EventEmitter2,
     private readonly connectionsService: ConnectionsService,
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   async listConversations(userId: string): Promise<ConversationSummary[]> {
@@ -177,24 +183,42 @@ export class MessagingService {
   async getMessages(
     conversationId: string,
     userId: string,
-    opts: { before?: string; beforeId?: string; limit?: number },
+    opts: {
+      before?: string;
+      beforeId?: string;
+      limit?: number;
+      cursor?: string;
+    },
   ): Promise<MessageView[]> {
     await this.requireParticipant(conversationId, userId);
     const limit = Math.min(opts.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
+    // An explicit `before`/`beforeId` wins; otherwise decode the frontend's
+    // opaque `cursor` onto the same (createdAt, id) keyset predicate. A
+    // malformed cursor decodes to `null` and is treated as no cursor (first
+    // page) rather than rejecting the request.
+    let before = opts.before;
+    let beforeId = opts.beforeId;
+    if (!before && opts.cursor) {
+      const decoded = decodeCursor(opts.cursor);
+      if (decoded) {
+        before = decoded.createdAt.toISOString();
+        beforeId = decoded.id;
+      }
+    }
     const qb = this.messages
       .createQueryBuilder('m')
       .where('m.conversation_id = :id', { id: conversationId });
-    if (opts.before) {
-      if (opts.beforeId) {
+    if (before) {
+      if (beforeId) {
         // Composite keyset cursor: strictly "older" than (before, beforeId) in
         // the (created_at DESC, id DESC) ordering, so messages sharing the same
         // millisecond as the page boundary are neither skipped nor duplicated.
         qb.andWhere(
           '(m.created_at, m.id) < (:before::timestamptz, :beforeId::uuid)',
-          { before: opts.before, beforeId: opts.beforeId },
+          { before, beforeId },
         );
       } else {
-        qb.andWhere('m.created_at < :before', { before: opts.before });
+        qb.andWhere('m.created_at < :before', { before });
       }
     }
     // @DeleteDateColumn makes the QueryBuilder exclude soft-deleted rows.
@@ -273,6 +297,79 @@ export class MessagingService {
     return this.participants.exists({ where: { conversationId, userId } });
   }
 
+  /**
+   * `POST /conversations` — create-or-return the DM with `recipientHandle`
+   * (this backend's `slug`). Thin wrapper over the same
+   * `getOrCreateConversation` helper `messageRequest` uses, minus the
+   * required first message: opening a thread from a profile shouldn't force
+   * the caller to have already typed something, and this is intentionally
+   * idempotent (repeat calls return the same conversation). No connection
+   * check here — `sendMessage` already gates actually messaging — but a
+   * block either way is a hard stop: a blocked user cannot even open a
+   * thread.
+   */
+  async createConversation(
+    userId: string,
+    recipientHandle: string,
+  ): Promise<ConversationResponse> {
+    const recipient = await this.profiles.findOne({
+      where: { slug: recipientHandle },
+    });
+    if (!recipient) {
+      throw new NotFoundException('Member not found');
+    }
+    if (recipient.userId === userId) {
+      throw new BadRequestException(
+        'You cannot start a conversation with yourself',
+      );
+    }
+    if (await this.blockFilter.isBlockedEitherWay(userId, recipient.userId)) {
+      throw new ForbiddenException(
+        'You cannot start a conversation with this member',
+      );
+    }
+
+    const { conversation } = await this.getOrCreateConversation(
+      userId,
+      recipient.userId,
+    );
+    return this.toConversationResponse(conversation, userId, recipient.userId);
+  }
+
+  /** Builds the frontend-contract `ConversationResponse` for a 1:1 DM. */
+  private async toConversationResponse(
+    convo: Conversation,
+    userId: string,
+    otherUserId: string,
+  ): Promise<ConversationResponse> {
+    const [profiles, lastByConvo, unreadByConvo] = await Promise.all([
+      this.profiles.find({ where: { userId: In([userId, otherUserId]) } }),
+      this.lastMessagesByConversation([convo.id]),
+      this.unreadCountsByConversation([convo.id], userId),
+    ]);
+    const profileByUser = new Map(profiles.map((p) => [p.userId, p]));
+    const lastMessage = lastByConvo.get(convo.id) ?? null;
+
+    return {
+      id: convo.id,
+      type: convo.isOfficial ? 'group' : 'dm',
+      otherParticipant: toAuthorSummary(profileByUser.get(otherUserId)),
+      lastMessage: lastMessage
+        ? {
+            id: lastMessage.id,
+            conversationId: convo.id,
+            body: lastMessage.body,
+            sender: requireAuthorSummary(
+              profileByUser.get(lastMessage.senderId),
+            ),
+            createdAt: lastMessage.createdAt.toISOString(),
+          }
+        : null,
+      unreadCount: unreadByConvo.get(convo.id) ?? 0,
+      updatedAt: (lastMessage?.createdAt ?? convo.createdAt).toISOString(),
+    };
+  }
+
   async messageRequest(
     userId: string,
     toSlug: string,
@@ -288,6 +385,9 @@ export class MessagingService {
     }
     if (recipient.userId === userId) {
       throw new BadRequestException('You cannot message yourself');
+    }
+    if (await this.blockFilter.isBlockedEitherWay(userId, recipient.userId)) {
+      throw new ForbiddenException('You cannot message this member');
     }
 
     if (await this.connectionsService.areConnected(userId, recipient.userId)) {

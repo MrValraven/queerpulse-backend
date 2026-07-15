@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConnectionsModule } from '../connections/connections.module';
+import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
 import { VouchModule } from '../vouch/vouch.module';
 import { Activity } from './entities/activity.entity';
@@ -29,6 +30,9 @@ import { ProfilesService } from './profiles.service';
     UsersModule,
     VouchModule,
     ConnectionsModule,
+    // Exports `BlockFilterService`, used to hide blocked-either-way members
+    // from the members directory search (spec §2).
+    SocialModule,
   ],
   controllers: [ProfilesController, MembersController],
   providers: [ProfilesService],

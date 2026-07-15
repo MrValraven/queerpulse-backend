@@ -15,6 +15,7 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
+import { CreateConversationDto } from './dto/create-conversation.dto';
 import { GetMessagesQuery } from './dto/get-messages.query';
 import { MessageRequestDto } from './dto/message-request.dto';
 import { SendMessageDto } from './dto/send-message.dto';
@@ -33,6 +34,18 @@ export class ConversationsController {
     return this.messagingService.listConversations(user.userId);
   }
 
+  @Throttle({ default: { limit: 30, ttl: seconds(60) } })
+  @Post()
+  create(
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: CreateConversationDto,
+  ) {
+    return this.messagingService.createConversation(
+      user.userId,
+      dto.recipientHandle,
+    );
+  }
+
   @Get(':id/messages')
   messages(
     @Param('id', ParseUUIDPipe) id: string,
@@ -43,6 +56,7 @@ export class ConversationsController {
       before: query.before,
       beforeId: query.beforeId,
       limit: query.limit,
+      cursor: query.cursor,
     });
   }
 

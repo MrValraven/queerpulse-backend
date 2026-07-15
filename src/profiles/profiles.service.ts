@@ -6,6 +6,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Repository } from 'typeorm';
 import { ConnectionsService } from '../connections/connections.service';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { VouchService } from '../vouch/vouch.service';
@@ -61,6 +62,7 @@ export class ProfilesService {
     private readonly dataSource: DataSource,
     private readonly vouchService: VouchService,
     private readonly connectionsService: ConnectionsService,
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   async getBySlug(
@@ -343,7 +345,10 @@ export class ProfilesService {
     return this.loadGroups(userId);
   }
 
-  async searchMembers(q: ListMembersQuery): Promise<{
+  async searchMembers(
+    q: ListMembersQuery,
+    viewerUserId: string,
+  ): Promise<{
     items: MemberCard[];
     total: number;
     page: number;
@@ -355,6 +360,10 @@ export class ProfilesService {
       .innerJoin('p.user', 'u', 'u.status = :active', {
         active: UserStatus.Active,
       });
+    // Blocked-either-way members (in either direction) never surface in the
+    // directory (spec §2). `p`'s primary key is `user_id` (snake_case, per
+    // SnakeNamingStrategy) — matches this query builder's alias.
+    this.blockFilter.excludeBlocked(qb, viewerUserId, '"p"."user_id"');
 
     if (q.query) {
       // Escape LIKE metacharacters (\ % _) so a user-supplied term is matched

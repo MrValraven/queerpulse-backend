@@ -1,9 +1,15 @@
-import { ForbiddenException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, QueryFailedError } from 'typeorm';
 import { ConnectionsService } from '../connections/connections.service';
+import { encodeCursor } from '../common/cursor-pagination';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
 import { Conversation } from './entities/conversation.entity';
@@ -66,6 +72,7 @@ describe('MessagingService', () => {
   let profiles: { findOne: jest.Mock; find: jest.Mock };
   let dataSource: { transaction: jest.Mock };
   let connections: { areConnected: jest.Mock; requestConnection: jest.Mock };
+  let blockFilter: { isBlockedEitherWay: jest.Mock };
   let emitter: { emit: jest.Mock };
 
   beforeEach(async () => {
@@ -97,6 +104,7 @@ describe('MessagingService', () => {
       areConnected: jest.fn().mockResolvedValue(true),
       requestConnection: jest.fn(),
     };
+    blockFilter = { isBlockedEitherWay: jest.fn().mockResolvedValue(false) };
     emitter = { emit: jest.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -112,6 +120,7 @@ describe('MessagingService', () => {
         { provide: DataSource, useValue: dataSource },
         { provide: EventEmitter2, useValue: emitter },
         { provide: ConnectionsService, useValue: connections },
+        { provide: BlockFilterService, useValue: blockFilter },
       ],
     }).compile();
     service = module.get(MessagingService);
@@ -200,7 +209,9 @@ describe('MessagingService', () => {
           { conversationId: 'c1', muted: false, lastReadAt: null },
         ])
         .mockResolvedValueOnce([]);
-      conversations.find.mockResolvedValueOnce([{ id: 'c1', isOfficial: false }]);
+      conversations.find.mockResolvedValueOnce([
+        { id: 'c1', isOfficial: false },
+      ]);
       const lastQb = makeQb();
       const unreadQb = makeQb();
       messages.createQueryBuilder
@@ -225,10 +236,24 @@ describe('MessagingService', () => {
           { conversationId: 'off', userId: 'x' },
           { conversationId: 'off', userId: 'y' },
         ]);
-      conversations.find.mockResolvedValueOnce([{ id: 'off', isOfficial: true }]);
+      conversations.find.mockResolvedValueOnce([
+        { id: 'off', isOfficial: true },
+      ]);
       profiles.find.mockResolvedValueOnce([
-        { userId: 'x', slug: 'x', firstName: 'X', lastName: 'X', avatarUrl: null },
-        { userId: 'y', slug: 'y', firstName: 'Y', lastName: 'Y', avatarUrl: null },
+        {
+          userId: 'x',
+          slug: 'x',
+          firstName: 'X',
+          lastName: 'X',
+          avatarUrl: null,
+        },
+        {
+          userId: 'y',
+          slug: 'y',
+          firstName: 'Y',
+          lastName: 'Y',
+          avatarUrl: null,
+        },
       ]);
       messages.createQueryBuilder
         .mockReturnValueOnce(makeQb())
@@ -307,6 +332,52 @@ describe('MessagingService', () => {
         service.getMessages('c1', 'intruder', {}),
       ).rejects.toBeInstanceOf(ForbiddenException);
     });
+
+    it('decodes an opaque `cursor` into the same composite keyset predicate', async () => {
+      const qb = makeQb();
+      messages.createQueryBuilder.mockReturnValueOnce(qb);
+      const cursor = encodeCursor({
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        id: '11111111-1111-4111-8111-111111111111',
+      });
+
+      await service.getMessages('c1', 'me', { cursor });
+
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        '(m.created_at, m.id) < (:before::timestamptz, :beforeId::uuid)',
+        {
+          before: '2026-01-01T00:00:00.000Z',
+          beforeId: '11111111-1111-4111-8111-111111111111',
+        },
+      );
+    });
+
+    it('treats a malformed `cursor` as no cursor (first page)', async () => {
+      const qb = makeQb();
+      messages.createQueryBuilder.mockReturnValueOnce(qb);
+
+      await service.getMessages('c1', 'me', { cursor: 'not-a-real-cursor' });
+
+      expect(qb.andWhere).not.toHaveBeenCalled();
+    });
+
+    it('prefers an explicit `before`/`beforeId` over `cursor` when both are given', async () => {
+      const qb = makeQb();
+      messages.createQueryBuilder.mockReturnValueOnce(qb);
+      const cursor = encodeCursor({
+        createdAt: new Date('2020-01-01T00:00:00.000Z'),
+        id: '22222222-2222-4222-8222-222222222222',
+      });
+
+      await service.getMessages('c1', 'me', {
+        before: '2026-01-01T00:00:00Z',
+        cursor,
+      });
+
+      expect(qb.andWhere).toHaveBeenCalledWith('m.created_at < :before', {
+        before: '2026-01-01T00:00:00Z',
+      });
+    });
   });
 
   describe('markRead', () => {
@@ -382,9 +453,9 @@ describe('MessagingService', () => {
         .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
       conversations.findOne.mockResolvedValue({ id: 'c1', isOfficial: false });
       connections.areConnected.mockResolvedValue(false);
-      await expect(service.sendMessage('c1', 'me', 'hi')).rejects.toBeInstanceOf(
-        ForbiddenException,
-      );
+      await expect(
+        service.sendMessage('c1', 'me', 'hi'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
     });
 
     it('persists and emits message.created on a valid send', async () => {
@@ -404,11 +475,25 @@ describe('MessagingService', () => {
   });
 
   describe('messageRequest', () => {
+    it('rejects when either party has blocked the other', async () => {
+      profiles.findOne.mockResolvedValueOnce({ userId: 'them', slug: 'them' });
+      blockFilter.isBlockedEitherWay.mockResolvedValueOnce(true);
+      await expect(
+        service.messageRequest('me', 'them', 'hi there'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith('me', 'them');
+      expect(connections.areConnected).not.toHaveBeenCalled();
+      expect(connections.requestConnection).not.toHaveBeenCalled();
+    });
+
     it('when already connected: materializes a conversation and posts the message', async () => {
       profiles.findOne.mockResolvedValueOnce({ userId: 'them', slug: 'them' });
       connections.areConnected.mockResolvedValue(true);
       // getOrCreateConversation finds an existing thread (no transaction).
-      conversations.findOne.mockResolvedValueOnce({ id: 'c9', isOfficial: false });
+      conversations.findOne.mockResolvedValueOnce({
+        id: 'c9',
+        isOfficial: false,
+      });
 
       const result = await service.messageRequest('me', 'them', 'hey');
 
@@ -433,6 +518,96 @@ describe('MessagingService', () => {
         'them',
         'hi there',
       );
+    });
+  });
+
+  describe('createConversation', () => {
+    const recipient = {
+      userId: 'them',
+      slug: 'tam-rivera',
+      firstName: 'Tam',
+      lastName: 'Rivera',
+      avatarUrl: null,
+    };
+
+    it('creates a new DM when none exists and returns a ConversationResponse', async () => {
+      profiles.findOne.mockResolvedValueOnce(recipient);
+      // getOrCreateConversation: no existing pairKey row -> materializes one.
+      conversations.findOne.mockResolvedValueOnce(null);
+      const created = {
+        id: 'convo-1',
+        isOfficial: false,
+        pairKey: 'me:them',
+        createdAt: new Date('2026-07-01T00:00:00.000Z'),
+      };
+      dataSource.transaction.mockResolvedValueOnce(created);
+      // toConversationResponse: profile lookup for both participants, plus
+      // the last-message/unread-count query-builder queries (no rows yet).
+      profiles.find.mockResolvedValueOnce([recipient]);
+      messages.createQueryBuilder
+        .mockReturnValueOnce(makeQb()) // lastMessagesByConversation
+        .mockReturnValueOnce(makeQb()); // unreadCountsByConversation
+
+      const result = await service.createConversation('me', 'tam-rivera');
+
+      expect(result.id).toBe('convo-1');
+      expect(result.type).toBe('dm');
+      expect(result.otherParticipant).toEqual({
+        handle: 'tam-rivera',
+        displayName: 'Tam Rivera',
+        avatarUrl: null,
+      });
+      expect(result.lastMessage).toBeNull();
+      expect(result.unreadCount).toBe(0);
+    });
+
+    it('is idempotent: calling twice returns the same conversation id, only creating once', async () => {
+      profiles.findOne.mockResolvedValue(recipient);
+      profiles.find.mockResolvedValue([recipient]);
+      messages.createQueryBuilder.mockImplementation(() => makeQb());
+
+      // First call: no existing conversation, materializes one.
+      conversations.findOne.mockResolvedValueOnce(null);
+      const created = {
+        id: 'convo-1',
+        isOfficial: false,
+        pairKey: 'me:them',
+        createdAt: new Date('2026-07-01T00:00:00.000Z'),
+      };
+      dataSource.transaction.mockResolvedValueOnce(created);
+      const first = await service.createConversation('me', 'tam-rivera');
+
+      // Second call: the same pairKey row now exists -> reused, no transaction.
+      conversations.findOne.mockResolvedValueOnce(created);
+      const second = await service.createConversation('me', 'tam-rivera');
+
+      expect(first.id).toBe('convo-1');
+      expect(second.id).toBe('convo-1');
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('404s when recipientHandle does not resolve to a member', async () => {
+      profiles.findOne.mockResolvedValueOnce(null);
+      await expect(
+        service.createConversation('me', 'ghost'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('400s when recipientHandle resolves to the caller themself', async () => {
+      profiles.findOne.mockResolvedValueOnce({ ...recipient, userId: 'me' });
+      await expect(
+        service.createConversation('me', 'my-own-slug'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('rejects when either party has blocked the other', async () => {
+      profiles.findOne.mockResolvedValueOnce(recipient);
+      blockFilter.isBlockedEitherWay.mockResolvedValueOnce(true);
+      await expect(
+        service.createConversation('me', 'tam-rivera'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith('me', 'them');
+      expect(dataSource.transaction).not.toHaveBeenCalled();
     });
   });
 

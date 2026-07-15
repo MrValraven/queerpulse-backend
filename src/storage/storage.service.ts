@@ -4,8 +4,8 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { S3Client } from '@aws-sdk/client-s3';
-import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
+import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 const PRESIGN_EXPIRY_SECONDS = 300; // 5 minutes
 
@@ -13,15 +13,18 @@ const PRESIGN_EXPIRY_SECONDS = 300; // 5 minutes
 // never uploads, or uploads then discards the draft profile), leaving objects
 // under avatars/ and work/ that no DB row references. Provision an S3 bucket
 // lifecycle rule that expires objects under those prefixes after N days; a row
-// only becomes "claimed" once its fileUrl is persisted on a profile/title, so
-// anything older than the presign window that is still unreferenced is safe to
-// reap. (Alternative: track claimed keys in a table and sweep the difference.)
+// only becomes "claimed" once its publicUrl is persisted on a profile/title,
+// so anything older than the presign window that is still unreferenced is
+// safe to reap. (Alternative: track claimed keys in a table and sweep the
+// difference.)
 
 export interface PresignedUpload {
-  // Browser POSTs multipart/form-data to `url` with `fields` + the file last.
-  url: string;
-  fields: Record<string, string>;
-  fileUrl: string;
+  /** Short-lived presigned URL to `PUT` the raw bytes to (direct-to-storage). */
+  uploadUrl: string;
+  /** Stable, CDN-served URL we persist once the PUT succeeds. */
+  publicUrl: string;
+  /** Seconds until `uploadUrl` expires. */
+  expiresIn: number;
 }
 
 @Injectable()
@@ -31,28 +34,31 @@ export class StorageService {
 
   constructor(private readonly config: ConfigService) {}
 
-  // Presigned POST (not PUT): only a POST policy can enforce a maximum object
-  // size (content-length-range) and pin the Content-Type. A presigned PUT URL
-  // can neither, so a caller could upload an arbitrarily large or mistyped
-  // object. The client must echo `fields` and append the file as the last
-  // multipart part.
+  // Presigned PUT: the caller `PUT`s the raw bytes straight to `uploadUrl`
+  // with no cookies/CSRF — the signature alone authorizes writing this one
+  // key, and the pinned `ContentType` means a client can't silently swap it
+  // after the signature is minted. Unlike a POST policy, a presigned PUT URL
+  // cannot itself enforce a content-length-range condition, so the caller
+  // (`UploadsController`) is responsible for rejecting an over-cap
+  // `byteSize` and a disallowed content type *before* calling this.
   async createPresignedUpload(
     key: string,
     contentType: string,
-    maxBytes: number,
   ): Promise<PresignedUpload> {
     const bucket = this.requireConfig('storage.bucket');
-    const { url, fields } = await createPresignedPost(this.s3(), {
+    const command = new PutObjectCommand({
       Bucket: bucket,
       Key: key,
-      Conditions: [
-        ['content-length-range', 1, maxBytes],
-        ['eq', '$Content-Type', contentType],
-      ],
-      Fields: { 'Content-Type': contentType },
-      Expires: PRESIGN_EXPIRY_SECONDS,
+      ContentType: contentType,
     });
-    return { url, fields, fileUrl: this.fileUrl(bucket, key) };
+    const uploadUrl = await getSignedUrl(this.s3(), command, {
+      expiresIn: PRESIGN_EXPIRY_SECONDS,
+    });
+    return {
+      uploadUrl,
+      publicUrl: this.fileUrl(bucket, key),
+      expiresIn: PRESIGN_EXPIRY_SECONDS,
+    };
   }
 
   private s3(): S3Client {

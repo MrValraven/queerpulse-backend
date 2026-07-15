@@ -354,4 +354,78 @@ describe('JobsService', () => {
       expect(companiesService.companyRefsByIds).not.toHaveBeenCalled();
     });
   });
+
+  describe('listMine', () => {
+    it('scopes the query to the given posterId and maps rows to JobCardDTO', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount.mockResolvedValue([
+        [
+          {
+            id: 'job-1',
+            slug: 'a',
+            companyId: 'co-1',
+            title: 'A',
+            category: 'c',
+            commitment: 'ft',
+            seniority: 's',
+            format: JobFormat.Remote,
+            location: 'l',
+            city: null,
+            timezone: null,
+            salary: null,
+            rateMin: null,
+            rateMax: null,
+            currency: null,
+            ratePer: null,
+            hidePay: false,
+            barter: false,
+            deadline: null,
+            startDate: null,
+            desc: 'd',
+            tags: [],
+            queerRun: false,
+            qrLabel: null,
+            status: JobStatus.Open,
+            createdAt: new Date('2026-01-01T00:00:00.000Z'),
+          },
+        ],
+        1,
+      ]);
+      jobs.createQueryBuilder.mockReturnValue(qb);
+      companiesService.companyRefsByIds.mockResolvedValue(
+        new Map([
+          ['co-1', { slug: 'atelier-pulso', nameText: 'Atelier Pulso' }],
+        ]),
+      );
+
+      const res = await service.listMine('poster-1', {});
+
+      expect(qb.andWhere).toHaveBeenCalledWith('j.poster_id = :posterId', {
+        posterId: 'poster-1',
+      });
+      expect(res).toEqual({
+        items: [
+          expect.objectContaining({
+            slug: 'a',
+            company: { slug: 'atelier-pulso', nameText: 'Atelier Pulso' },
+          }),
+        ],
+        total: 1,
+        page: 1,
+        pageSize: 20,
+      });
+    });
+
+    it('does not scope the public list() to a poster', async () => {
+      const qb = qbStub();
+      jobs.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list({});
+
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        'j.poster_id = :posterId',
+        expect.anything(),
+      );
+    });
+  });
 });

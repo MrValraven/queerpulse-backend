@@ -90,7 +90,7 @@ export class MembersController {
 
   @Get()
   @UseGuards(ActiveMemberGuard)
-  list(@Query() query: ListMembersQuery) {
-    return this.profilesService.searchMembers(query);
+  list(@CurrentUser() user: CurrentUserData, @Query() query: ListMembersQuery) {
+    return this.profilesService.searchMembers(query, user.userId);
   }
 }

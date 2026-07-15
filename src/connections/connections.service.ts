@@ -14,6 +14,7 @@ import {
   CONNECTION_REQUESTED,
   ConnectionRequestedEvent,
 } from './connection.events';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
@@ -49,6 +50,7 @@ export class ConnectionsService {
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     @InjectRepository(Vouch) private readonly vouches: Repository<Vouch>,
     private readonly eventEmitter: EventEmitter2,
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   async requestConnection(
@@ -67,6 +69,10 @@ export class ConnectionsService {
     const addresseeId = target.userId;
     if (addresseeId === requesterId) {
       throw new BadRequestException('You cannot connect to yourself');
+    }
+    // A block either way severs the possibility of a new request (spec §2).
+    if (await this.blockFilter.isBlockedEitherWay(requesterId, addresseeId)) {
+      throw new ForbiddenException('You cannot connect with this member');
     }
     // Only active members can receive connection requests (spec §8).
     if (!target.user || target.user.status !== UserStatus.Active) {
