@@ -218,12 +218,20 @@ export class FeedService {
         // `ProfilesService#loadRelated`'s `p.user_id != :self`) — you
         // already know you joined, so you shouldn't see yourself as a "new
         // member" in your own feed.
+        // NB: the active-user filter is a correlated EXISTS rather than an
+        // innerJoin on purpose. TypeORM's `.take()` + join combination forces
+        // getMany() down its two-query "distinct pagination" path, which can't
+        // handle the raw `date_trunc(...)` ORDER BY below (it splits the
+        // expression on '.' and treats a fragment as an alias name). Keeping
+        // this join-free preserves the simple single-query path where the raw
+        // ORDER BY is emitted verbatim.
         const qb = this.profiles
           .createQueryBuilder('p')
-          .innerJoin('p.user', 'u', 'u.status = :active', {
-            active: UserStatus.Active,
-          })
-          .where('p.user_id != :viewerId', { viewerId });
+          .where('p.user_id != :viewerId', { viewerId })
+          .andWhere(
+            `EXISTS (SELECT 1 FROM "users" "u" WHERE "u"."id" = "p"."user_id" AND "u"."status" = :active)`,
+            { active: UserStatus.Active },
+          );
 
         const createdAtExpr = `date_trunc('milliseconds', "p"."created_at")`;
         qb.orderBy(createdAtExpr, 'DESC').addOrderBy('p.user_id', 'DESC');

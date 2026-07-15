@@ -151,7 +151,7 @@ export class ProfilesService {
       params.loc = profile.location;
     }
     qb.andWhere(`(${conds.join(' OR ')})`, params)
-      .orderBy('p.first_name', 'ASC')
+      .orderBy('p.firstName', 'ASC')
       .take(RELATED_LIMIT);
     const rows = await qb.getMany();
     const counts = await this.vouchService.getVouchCounts(
