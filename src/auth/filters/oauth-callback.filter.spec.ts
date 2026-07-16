@@ -17,7 +17,7 @@ describe('OAuthCallbackFilter', () => {
     filter.catch(new OAuthCallbackError('access_denied'), host);
 
     expect(redirect).toHaveBeenCalledWith(
-      'https://app.example.com/login?error=access_denied',
+      'https://app.example.com/auth/sign-in?error=access_denied',
     );
   });
 });

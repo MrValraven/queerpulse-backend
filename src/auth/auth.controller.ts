@@ -29,7 +29,7 @@ import { OAuthCallbackFilter } from './filters/oauth-callback.filter';
 import { Public } from './decorators/public.decorator';
 import { GoogleAuthGuard } from './guards/google-auth.guard';
 import { decodeOAuthState } from './oauth-state';
-import { resolvePostLoginRedirect } from './safe-redirect';
+import { resolvePostLoginRedirect, signInErrorUrl } from './safe-redirect';
 import { Throttle, seconds } from '@nestjs/throttler';
 
 @Controller('auth')
@@ -88,12 +88,12 @@ export class AuthController {
       typeof cookieNonce !== 'string' ||
       !this.nonceMatches(state.nonce, cookieNonce)
     ) {
-      const target = new URL(
-        '/login',
-        this.config.getOrThrow<string>('app.frontendUrl'),
+      res.redirect(
+        signInErrorUrl(
+          this.config.getOrThrow<string>('app.frontendUrl'),
+          'invalid_state',
+        ),
       );
-      target.searchParams.set('error', 'invalid_state');
-      res.redirect(target.toString());
       return;
     }
 
@@ -105,12 +105,12 @@ export class AuthController {
       user = await this.authService.validateOrCreateGoogleUser(profile, invite);
     } catch (err) {
       if (err instanceof SignupRejectedError) {
-        const target = new URL(
-          '/login',
-          this.config.getOrThrow<string>('app.frontendUrl'),
+        res.redirect(
+          signInErrorUrl(
+            this.config.getOrThrow<string>('app.frontendUrl'),
+            err.reason,
+          ),
         );
-        target.searchParams.set('error', err.reason);
-        res.redirect(target.toString());
         return;
       }
       throw err;

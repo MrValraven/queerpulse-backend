@@ -1,4 +1,5 @@
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
+import { DIRECTORY_BLURB_MAX_CHARS, truncateAtWord } from './directory-blurb';
 import { Activity, ActivityKind } from './entities/activity.entity';
 import { BoardKind, BoardPost } from './entities/board-post.entity';
 import { Shaping, ShapingKind } from './entities/shaping.entity';
@@ -35,6 +36,9 @@ const profile = (overrides: Partial<Profile> = {}): Profile =>
     joinedAt: new Date('2024-03-01T00:00:00.000Z'),
     ...overrides,
   }) as Profile;
+
+const LONG_BIO =
+  "I build things for the web and spend most weekends cooking for more people than my kitchen was designed for. Lately I've been learning to bind books.";
 
 const emptyRels: ProfileRelations = {
   socials: [],
@@ -197,6 +201,53 @@ describe('profile-response mappers', () => {
       // identity fields are still listed in the directory
       expect(card.slug).toBe('tiago');
     }
+  });
+
+  it('toMemberCard shows a written tagline verbatim, untruncated', () => {
+    const longTagline = 'a'.repeat(DIRECTORY_BLURB_MAX_CHARS + 40);
+    const card = toMemberCard(
+      profile({ tagline: longTagline, bio: LONG_BIO }),
+      1,
+    );
+    expect(card.tagline).toBe(longTagline);
+  });
+
+  it('toMemberCard borrows the bio opening when the tagline is empty', () => {
+    const card = toMemberCard(profile({ tagline: '', bio: LONG_BIO }), 1);
+    expect(card.tagline).toBe(truncateAtWord(LONG_BIO));
+    expect(card.tagline!.length).toBeLessThanOrEqual(
+      DIRECTORY_BLURB_MAX_CHARS + 1,
+    );
+    expect(card.tagline!.endsWith('…')).toBe(true);
+    // The card DTO must never carry the full bio to every browser.
+    expect(card).not.toHaveProperty('bio');
+  });
+
+  it('toMemberCard shows a short bio whole, and treats blanks as empty', () => {
+    expect(
+      toMemberCard(profile({ tagline: null, bio: 'Cooks a lot' }), 1).tagline,
+    ).toBe('Cooks a lot');
+    expect(
+      toMemberCard(profile({ tagline: '   ', bio: 'Cooks a lot' }), 1).tagline,
+    ).toBe('Cooks a lot');
+    expect(toMemberCard(profile({ tagline: '', bio: '' }), 1).tagline).toBe('');
+  });
+
+  it('toProfileCard keeps the tagline raw when a member has only a bio', () => {
+    // The trap: ProfileDTO inherits `tagline` from the card. The profile editor
+    // seeds its short-bio input from this field, so serving the borrowed bio
+    // here would let a member Save text they never wrote. Fallback is list-only.
+    const card = toProfileCard(profile({ tagline: '', bio: LONG_BIO }), 1);
+    expect(card.tagline).toBe('');
+    expect(
+      toProfileCard(profile({ tagline: null, bio: LONG_BIO }), 1).tagline,
+    ).toBeNull();
+  });
+
+  it('toFullProfile and toLimitedProfile serve the raw tagline too', () => {
+    const p = profile({ tagline: '', bio: LONG_BIO });
+    expect(toFullProfile(p, emptyRels, 1).tagline).toBe('');
+    expect(toLimitedProfile(p, 1).tagline).toBe('');
   });
 
   it('sortShapings orders film → book → song → moment', () => {

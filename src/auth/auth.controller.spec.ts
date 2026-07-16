@@ -83,7 +83,7 @@ describe('AuthController.googleCallback', () => {
       expect.anything(),
     );
     expect(res.redirect).toHaveBeenCalledWith(
-      `${FRONTEND}/login?error=invalid_state`,
+      `${FRONTEND}/auth/sign-in?error=invalid_state`,
     );
     expect(authService.validateOrCreateGoogleUser).not.toHaveBeenCalled();
   });
@@ -99,7 +99,7 @@ describe('AuthController.googleCallback', () => {
     await controller.googleCallback(req, res as unknown as Response);
 
     expect(res.redirect).toHaveBeenCalledWith(
-      `${FRONTEND}/login?error=invalid_state`,
+      `${FRONTEND}/auth/sign-in?error=invalid_state`,
     );
   });
 
@@ -159,7 +159,7 @@ describe('AuthController.googleCallback', () => {
     await controller.googleCallback(req, res as unknown as Response);
 
     expect(res.redirect).toHaveBeenCalledWith(
-      `${FRONTEND}/login?error=invite_required`,
+      `${FRONTEND}/auth/sign-in?error=invite_required`,
     );
   });
 });

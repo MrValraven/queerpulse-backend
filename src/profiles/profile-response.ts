@@ -1,4 +1,5 @@
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
+import { directoryBlurb } from './directory-blurb';
 import { Activity } from './entities/activity.entity';
 import { BoardPost } from './entities/board-post.entity';
 import { Shaping, ShapingKind } from './entities/shaping.entity';
@@ -128,6 +129,11 @@ export function sortShapings(rows: Shaping[]): Shaping[] {
   );
 }
 
+// The RAW card, carrying the member's tagline exactly as they wrote it. Used by
+// the profile endpoints (via toFullProfile/toLimitedProfile) and by `related`.
+// Do NOT resolve the directory blurb fallback here: the profile editor seeds its
+// short-bio input from this field, so borrowed bio text would let a member save
+// words they never typed. The fallback belongs to the list path — toMemberCard.
 export function toProfileCard(p: Profile, vouchCount: number): ProfileCard {
   return {
     slug: p.slug,
@@ -150,6 +156,10 @@ export function toMemberCard(p: Profile, vouchCount: number): MemberCard {
   const open = p.visibility === ProfileVisibility.Open;
   return {
     ...toProfileCard(p, vouchCount),
+    // The card DTO deliberately omits `bio`, so a browser can't do this itself —
+    // the fallback has to happen here, where the bio is in scope. See
+    // ./directory-blurb.ts; this is the list path only.
+    tagline: directoryBlurb(p.tagline, p.bio),
     location: open ? p.location : null,
     openTo: open ? p.openTo : [],
   };

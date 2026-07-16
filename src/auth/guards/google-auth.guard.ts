@@ -49,7 +49,7 @@ export class GoogleAuthGuard extends AuthGuard('google') {
 
   // Convert OAuth/profile failures into a redirectable error instead of the
   // default 401 JSON. `OAuthCallbackFilter` (bound on the callback route) turns
-  // this into `${frontendUrl}/login?error=<code>`.
+  // this into a redirect to the SPA sign-in page with `?error=<code>`.
   handleRequest<TUser = unknown>(
     err: unknown,
     user: TUser,

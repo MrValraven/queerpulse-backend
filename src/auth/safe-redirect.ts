@@ -53,6 +53,27 @@ export function safeRedirectPath(value: unknown): string | null {
 }
 
 /**
+ * The SPA's sign-in route. Must stay in sync with `routes.signIn` in the
+ * frontend's `src/app/routeMap.ts` — a stale value strands rejected users on the
+ * SPA's 404 page instead of showing them why sign-in failed.
+ */
+const SIGN_IN_PATH = '/auth/sign-in';
+
+/**
+ * Absolute URL of the sign-in page carrying a machine-readable failure code.
+ *
+ * The Google callback is a top-level browser navigation, so every failure path
+ * (guard-level OAuth errors, a bad `state` nonce, a rejected signup) has to come
+ * back as a redirect a human can read rather than a JSON error body. The SPA
+ * maps `?error=<code>` to a user-facing notice.
+ */
+export function signInErrorUrl(frontendUrl: string, code: string): string {
+  const target = new URL(SIGN_IN_PATH, frontendUrl);
+  target.searchParams.set('error', code);
+  return target.toString();
+}
+
+/**
  * Resolve the absolute URL to send the browser to after a successful login.
  *
  * If `redirect` is a safe internal path it is appended to `frontendUrl`;

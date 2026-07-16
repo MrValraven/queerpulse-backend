@@ -6,6 +6,7 @@ import { ConnectionsService } from '../connections/connections.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { VouchService } from '../vouch/vouch.service';
+import { truncateAtWord } from './directory-blurb';
 import { Activity } from './entities/activity.entity';
 import { BoardPost } from './entities/board-post.entity';
 import { Group } from './entities/group.entity';
@@ -37,6 +38,9 @@ const qbStub = () => {
   qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
   return qb;
 };
+
+const LONG_BIO =
+  "I build things for the web and spend most weekends cooking for more people than my kitchen was designed for. Lately I've been learning to bind books.";
 
 describe('ProfilesService.getBySlug visibility', () => {
   let service: ProfilesService;
@@ -229,6 +233,27 @@ describe('ProfilesService.getBySlug visibility', () => {
         'viewer-1',
         '"p"."user_id"',
       );
+    });
+
+    it('serves the bio-derived blurb on the card, but the raw tagline on the profile', async () => {
+      // The trap, end to end: one member, no short bio, a long bio. Their card
+      // borrows the bio's opening so the directory isn't a grid of blank lines,
+      // while GET /profiles/:slug must still say the short bio is empty —
+      // otherwise the editor seeds its input with words they never wrote and a
+      // Save silently commits them.
+      const p = profile({ tagline: '', bio: LONG_BIO });
+      const qb = qbStub();
+      qb.getManyAndCount.mockResolvedValue([[p], 1]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+      profiles.findOne.mockResolvedValue(p);
+
+      const list = await service.searchMembers({}, 'viewer-1');
+      expect(list.items[0].tagline).toBe(truncateAtWord(LONG_BIO));
+      expect(list.items[0].tagline!.endsWith('…')).toBe(true);
+      expect(list.items[0]).not.toHaveProperty('bio');
+
+      const detail = await service.getBySlug('jo', 'viewer-1');
+      expect(detail.tagline).toBe('');
     });
   });
 });
