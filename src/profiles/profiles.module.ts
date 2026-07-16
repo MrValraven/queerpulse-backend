@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConnectionsModule } from '../connections/connections.module';
+import { HandlesModule } from '../handles/handles.module';
 import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
 import { VouchModule } from '../vouch/vouch.module';
@@ -33,6 +34,9 @@ import { ProfilesService } from './profiles.service';
     // Exports `BlockFilterService`, used to hide blocked-either-way members
     // from the members directory search (spec §2).
     SocialModule,
+    // Exports `HandlesService` for the shared global username namespace — the
+    // `PATCH me/username` rename transacts against it (design plan PART C / UC4).
+    HandlesModule,
   ],
   controllers: [ProfilesController, MembersController],
   providers: [ProfilesService],

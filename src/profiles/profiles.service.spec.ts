@@ -59,6 +59,8 @@ describe('ProfilesService.getBySlug visibility', () => {
       avatarUrl: null,
       visibility: ProfileVisibility.Open,
       openTo: [],
+      identities: ['Queer'],
+      lookingFor: ['Community & friendship'],
       tags: [],
       verified: false,
       joinedAt: new Date('2024-03-01T00:00:00.000Z'),
@@ -123,6 +125,10 @@ describe('ProfilesService.getBySlug visibility', () => {
     const res = await service.getBySlug('jo', 'someone-else');
     expect(res.limited).toBe(false);
     expect((res as { bio: string }).bio).toBe('longform');
+    // Private Interests fields stay hidden from a non-owner viewer.
+    const full = res as Extract<typeof res, { limited: false }>;
+    expect(full.identities).toEqual([]);
+    expect(full.lookingFor).toEqual([]);
   });
 
   it('returns a limited card for a private profile to a non-owner', async () => {
@@ -140,6 +146,10 @@ describe('ProfilesService.getBySlug visibility', () => {
     );
     const res = await service.getBySlug('jo', 'owner-1');
     expect(res.limited).toBe(false);
+    // The owner gets their private Interests fields back.
+    const full = res as Extract<typeof res, { limited: false }>;
+    expect(full.identities).toEqual(['Queer']);
+    expect(full.lookingFor).toEqual(['Community & friendship']);
   });
 
   it('treats network as limited for a non-owner (until Phase 6 connections)', async () => {
@@ -191,10 +201,19 @@ describe('ProfilesService.getBySlug visibility', () => {
     (profiles as unknown as { save: jest.Mock }).save = jest
       .fn()
       .mockResolvedValue(p);
-    const res = await service.updateMe('owner-1', { now: 'new now' });
+    const res = await service.updateMe('owner-1', {
+      now: 'new now',
+      identities: ['Trans'],
+      lookingFor: ['Creative collaboration'],
+    });
     expect(p.now).toBe('new now');
+    expect(p.identities).toEqual(['Trans']);
     expect(res.limited).toBe(false);
-    expect((res as { now: string | null }).now).toBe('new now');
+    const full = res as Extract<typeof res, { limited: false }>;
+    expect(full.now).toBe('new now');
+    // updateMe is always the owner, so private fields come back.
+    expect(full.identities).toEqual(['Trans']);
+    expect(full.lookingFor).toEqual(['Creative collaboration']);
   });
 
   describe('searchMembers', () => {

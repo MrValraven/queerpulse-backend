@@ -20,6 +20,7 @@ import { ReplaceSkillsDto } from './dto/replace-skills.dto';
 import { ReplaceSocialsDto } from './dto/replace-socials.dto';
 import { ReplaceWorkDto } from './dto/replace-work.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { UpdateUsernameDto } from './dto/update-username.dto';
 import { ProfilesService } from './profiles.service';
 
 @Controller('profiles')
@@ -33,6 +34,17 @@ export class ProfilesController {
     @Body() dto: UpdateProfileDto,
   ) {
     return this.profilesService.updateMe(user.userId, dto);
+  }
+
+  // Set/rename the caller's mandatory global @username (design plan PART C /
+  // UC4). Declared with the other 'me/...' routes so 'me' is never captured by
+  // ':slug'. 409 when taken, 422 when invalid/reserved.
+  @Patch('me/username')
+  updateUsername(
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: UpdateUsernameDto,
+  ) {
+    return this.profilesService.updateUsername(user.userId, dto.username);
   }
 
   @Put('me/socials')

@@ -60,6 +60,15 @@ export class Profile {
   @Column({ type: 'text', array: true, default: '{}' })
   openTo: string[];
 
+  // Private Settings → Interests preferences — never shown on the public profile,
+  // only returned to the owner (see toFullProfile). Distinct from the public
+  // `openTo` blurbs.
+  @Column({ type: 'text', array: true, default: '{}' })
+  identities: string[];
+
+  @Column({ type: 'text', array: true, default: '{}' })
+  lookingFor: string[];
+
   @Column({ type: 'text', array: true, default: '{}' })
   tags: string[];
 

@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, QueryFailedError, Repository } from 'typeorm';
 import { Profile } from './entities/profile.entity';
 import { User, UserStatus } from './entities/user.entity';
+import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 
 // Bounds the slug-collision retry loop (see insertProfileWithUniqueSlug).
 const MAX_SLUG_ATTEMPTS = 5;
@@ -126,6 +127,17 @@ export class UsersService {
             avatarUrl: input.avatarUrl ?? null,
           });
           await m.save(profile);
+          // Register the profile's username in the ONE global handle namespace
+          // within the SAME savepoint (design plan PART C / UC2), so a collision
+          // on the `handles` PK raises 23505 and reuses the existing suffix
+          // retry below. `insert` (not `save`) guarantees an INSERT — `save`
+          // would UPDATE an existing row and silently steal another user's
+          // handle instead of colliding.
+          await m.insert(Handle, {
+            name: slug,
+            ownerKind: HandleOwnerKind.Profile,
+            userId,
+          });
         });
         return;
       } catch (err) {

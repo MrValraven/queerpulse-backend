@@ -28,6 +28,8 @@ const profile = (overrides: Partial<Profile> = {}): Profile =>
     avatarUrl: 'https://x/a.png',
     visibility: ProfileVisibility.Open,
     openTo: ['Collaboration'],
+    identities: ['Queer'],
+    lookingFor: ['Community & friendship'],
     tags: ['React', 'TypeScript'],
     verified: true,
     joinedAt: new Date('2024-03-01T00:00:00.000Z'),
@@ -68,6 +70,18 @@ describe('profile-response mappers', () => {
     expect(dto.joinedAt).toBe('2024-03-01T00:00:00.000Z');
     expect(dto.now).toBe('building things');
     expect(dto.bio).toBe('a bio');
+  });
+
+  it('toFullProfile exposes private Interests fields only to the owner', () => {
+    const owned = toFullProfile(profile(), emptyRels, 2, true);
+    expect(owned.identities).toEqual(['Queer']);
+    expect(owned.lookingFor).toEqual(['Community & friendship']);
+
+    // Any other viewer of a full (open/network) profile gets empty arrays —
+    // and the default (no flag) is the safe, non-owner behaviour.
+    const viewed = toFullProfile(profile(), emptyRels, 2);
+    expect(viewed.identities).toEqual([]);
+    expect(viewed.lookingFor).toEqual([]);
   });
 
   it('toFullProfile maps relations to their DTO shapes (no position leak)', () => {

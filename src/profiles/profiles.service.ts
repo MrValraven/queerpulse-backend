@@ -1,11 +1,15 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, In, QueryFailedError, Repository } from 'typeorm';
+import { handleFormatError, normalizeHandle } from '../common/handles';
 import { ConnectionsService } from '../connections/connections.service';
+import { HandlesService } from '../handles/handles.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
@@ -42,6 +46,17 @@ const PAGE_SIZE = 20;
 const RELATED_LIMIT = 4;
 const ACTIVITY_LIMIT = 6;
 
+// Postgres unique-violation SQLSTATE — the `profiles.slug` unique index racing a
+// concurrent username change.
+const PG_UNIQUE_VIOLATION = '23505';
+
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    err instanceof QueryFailedError &&
+    (err.driverError as { code?: string })?.code === PG_UNIQUE_VIOLATION
+  );
+}
+
 @Injectable()
 export class ProfilesService {
   constructor(
@@ -63,6 +78,7 @@ export class ProfilesService {
     private readonly vouchService: VouchService,
     private readonly connectionsService: ConnectionsService,
     private readonly blockFilter: BlockFilterService,
+    private readonly handles: HandlesService,
   ) {}
 
   async getBySlug(
@@ -77,12 +93,18 @@ export class ProfilesService {
     if (!(await this.canViewFull(profile, viewerUserId))) {
       return toLimitedProfile(profile, vouchCount);
     }
-    return this.buildFullProfile(profile, vouchCount);
+    return this.buildFullProfile(
+      profile,
+      vouchCount,
+      profile.userId === viewerUserId,
+    );
   }
 
   private async buildFullProfile(
     profile: Profile,
     vouchCount: number,
+    // Owner-only private fields (Interests) are included only when true.
+    isOwner: boolean,
   ): Promise<FullProfileResponse> {
     const userId = profile.userId;
     const [socials, work, board, skills, shapings, activity, groups, related] =
@@ -113,7 +135,7 @@ export class ProfilesService {
       activity,
       related,
     };
-    return toFullProfile(profile, rels, vouchCount);
+    return toFullProfile(profile, rels, vouchCount, isOwner);
   }
 
   private async loadGroups(userId: string): Promise<GroupView[]> {
@@ -188,7 +210,59 @@ export class ProfilesService {
     Object.assign(profile, dto);
     await this.profiles.save(profile);
     const vouchCount = await this.vouchService.getVouchCount(userId);
-    return this.buildFullProfile(profile, vouchCount);
+    return this.buildFullProfile(profile, vouchCount, true);
+  }
+
+  // Set/rename the caller's mandatory global @username. The username IS the
+  // profile `slug` and doubles as its entry in the ONE global handle namespace
+  // (design plan PART C / UC4): rename in the `handles` registry and update
+  // `profiles.slug` atomically. Collisions surface as 409; bad format/reserved
+  // as 422.
+  async updateUsername(
+    userId: string,
+    rawUsername: string,
+  ): Promise<FullProfileResponse> {
+    const username = normalizeHandle(rawUsername);
+    const profile = await this.profiles.findOne({ where: { userId } });
+    if (!profile) {
+      throw new NotFoundException('Profile not found');
+    }
+    // No-op if it already resolves to the current username.
+    if (username === profile.slug) {
+      const vouchCount = await this.vouchService.getVouchCount(userId);
+      return this.buildFullProfile(profile, vouchCount, true);
+    }
+
+    const fmt = handleFormatError(username);
+    if (fmt === 'invalid') {
+      throw new UnprocessableEntityException({ reason: 'invalid' });
+    }
+    if (fmt === 'reserved') {
+      throw new UnprocessableEntityException({ reason: 'reserved' });
+    }
+
+    const currentSlug = profile.slug;
+    try {
+      await this.dataSource.transaction(async (m) => {
+        // Releases the old registry name and claims the new one; a taken name
+        // throws ConflictException (→ 409), which bubbles unchanged.
+        await this.handles.rename(m, currentSlug, username, {
+          kind: 'profile',
+          userId,
+        });
+        await m.update(Profile, { userId }, { slug: username });
+      });
+    } catch (err) {
+      // The `profiles.slug` unique index can also lose the race.
+      if (isUniqueViolation(err)) {
+        throw new ConflictException('That username is already taken');
+      }
+      throw err;
+    }
+
+    const updated = await this.profiles.findOne({ where: { userId } });
+    const vouchCount = await this.vouchService.getVouchCount(userId);
+    return this.buildFullProfile(updated ?? profile, vouchCount, true);
   }
 
   async replaceSocials(

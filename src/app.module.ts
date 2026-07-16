@@ -19,6 +19,8 @@ import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { MembershipModule } from './membership/membership.module';
 import { ProfilesModule } from './profiles/profiles.module';
+import { SubprofilesModule } from './subprofiles/subprofiles.module';
+import { HandlesModule } from './handles/handles.module';
 import { VouchModule } from './vouch/vouch.module';
 import { ConnectionsModule } from './connections/connections.module';
 import { MessagingModule } from './messaging/messaging.module';
@@ -78,12 +80,40 @@ import { LaunchedFeaturesGuard } from './common/launched-features.guard';
           res.setHeader('x-request-id', id);
           return id;
         },
-        // Never log credentials.
+        // Never log credentials. Largely redundant now that the serializers
+        // below drop headers entirely, but kept as defense-in-depth for the
+        // prod JSON path in case a serializer is ever widened.
         redact: [
           'req.headers.cookie',
           'req.headers.authorization',
           'res.headers["set-cookie"]',
         ],
+        // Log only essential fields per request. reqId and responseTime are
+        // emitted at the top level by pino-http and survive automatically.
+        serializers: {
+          req: (req: IncomingMessage) => ({
+            method: req.method,
+            url: req.url,
+          }),
+          res: (res: ServerResponse) => ({ statusCode: res.statusCode }),
+          err: (err: Error & { type?: string }) => ({
+            type: err.type,
+            message: err.message,
+            stack: err.stack,
+          }),
+        },
+        // Suppress 304 cache-hits ('silent' skips emission) and map status to
+        // level so failures stand out (warn/error) while success stays info.
+        customLogLevel: (
+          _req: IncomingMessage,
+          res: ServerResponse,
+          err?: Error,
+        ) => {
+          if (res.statusCode === 304) return 'silent';
+          if (res.statusCode >= 500 || err) return 'error';
+          if (res.statusCode >= 400) return 'warn';
+          return 'info';
+        },
         transport:
           process.env.NODE_ENV === 'production'
             ? undefined
@@ -100,6 +130,8 @@ import { LaunchedFeaturesGuard } from './common/launched-features.guard';
     AuthModule,
     MembershipModule,
     ProfilesModule,
+    SubprofilesModule,
+    HandlesModule,
     VouchModule,
     ConnectionsModule,
     MessagingModule,

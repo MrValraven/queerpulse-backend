@@ -77,6 +77,10 @@ export interface FullProfileResponse extends ProfileCard {
   location: string | null;
   now: string | null;
   openTo: string[];
+  // Private Interests preferences — populated only when the requester is the
+  // profile owner; `[]` for everyone else (see toFullProfile's `isOwner`).
+  identities: string[];
+  lookingFor: string[];
   socials: SocialLinkView[];
   work: WorkView[];
   board: BoardView[];
@@ -155,6 +159,9 @@ export function toFullProfile(
   p: Profile,
   rels: ProfileRelations,
   vouchCount: number,
+  // The Interests preferences are private; only surface them to the owner. Any
+  // other viewer of a full (open/network) profile gets empty arrays.
+  isOwner = false,
 ): FullProfileResponse {
   return {
     ...toProfileCard(p, vouchCount),
@@ -164,6 +171,8 @@ export function toFullProfile(
     location: p.location,
     now: p.now,
     openTo: p.openTo,
+    identities: isOwner ? (p.identities ?? []) : [],
+    lookingFor: isOwner ? (p.lookingFor ?? []) : [],
     socials: rels.socials.map((s) => ({
       platform: s.platform,
       urlOrHandle: s.urlOrHandle,

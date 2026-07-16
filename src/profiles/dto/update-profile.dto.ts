@@ -32,4 +32,19 @@ export class UpdateProfileDto {
   @IsString({ each: true })
   @MaxLength(40, { each: true })
   tags?: string[];
+
+  // Private Settings → Interests preferences — never shown on the public profile.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(30)
+  @IsString({ each: true })
+  @MaxLength(60, { each: true })
+  identities?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(30)
+  @IsString({ each: true })
+  @MaxLength(60, { each: true })
+  lookingFor?: string[];
 }
