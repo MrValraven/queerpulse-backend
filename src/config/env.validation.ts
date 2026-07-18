@@ -105,10 +105,6 @@ export class EnvironmentVariables {
 
   @IsOptional()
   @IsNumber()
-  VOUCH_THRESHOLD?: number;
-
-  @IsOptional()
-  @IsNumber()
   @Min(0)
   INVITE_MONTHLY_QUOTA?: number;
 }

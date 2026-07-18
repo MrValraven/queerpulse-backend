@@ -10,10 +10,35 @@ import {
 } from 'typeorm';
 import { Profile } from './profile.entity';
 
+/**
+ * There is no `Pending` state. A person who is not a member has NO `users` row
+ * at all — they exist only as a `join_requests` row until an admin approves
+ * them and they redeem the resulting invite through Google sign-up, which
+ * creates them `Active` in one step. See `RemovePendingStatus1782800740000`.
+ */
 export enum UserStatus {
-  Pending = 'pending',
   Active = 'active',
   Suspended = 'suspended',
+  /**
+   * Member-initiated, reversible hiding. Set by `AccountService.deactivate`
+   * (explicit "pause my account") and by `AccountService.requestDeletion`
+   * (the 30-day erasure grace period, during which the UI promises the member
+   * is already hidden).
+   *
+   * The whole point of it being a `UserStatus` rather than only a row in
+   * `account_deactivation` is that the codebase is already full of
+   * `status = UserStatus.Active` predicates — directory search, feed, member
+   * refs, connection/cohost/invite targets, `ActiveMemberGuard`, the chat
+   * handshake. Anything that is not `Active` is already excluded by all of
+   * them, so hiding rides on machinery that exists instead of needing a new
+   * filter in every query.
+   *
+   * NEVER restore a member to `Active` by hardcoding it — restore the
+   * `previous_status` recorded when they were deactivated, or a suspended
+   * member could launder away their suspension by deactivating and signing
+   * back in. See `AccountDeactivation.previousStatus`.
+   */
+  Deactivated = 'deactivated',
 }
 
 export enum UserRole {
@@ -37,7 +62,7 @@ export class User {
     type: 'enum',
     enum: UserStatus,
     enumName: 'users_status_enum',
-    default: UserStatus.Pending,
+    default: UserStatus.Active,
   })
   status: UserStatus;
 
@@ -55,6 +80,18 @@ export class User {
 
   @Column({ type: 'timestamptz', nullable: true })
   activatedAt: Date | null;
+
+  /**
+   * When the member self-attested to being 18+ (Terms §eligibility). Set once,
+   * at signup, from the checkbox on the invite landing page. NULL means the
+   * account predates the gate — see the backfill note in the migration.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  ageAttestedAt: Date | null;
+
+  /** Terms revision the attestation was made against, e.g. "2.4". */
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  termsVersion: string | null;
 
   // Per-user override for the monthly invite quota. NULL means "use the global
   // default" (app.inviteMonthlyQuota, itself defaulting to 1). Set directly in

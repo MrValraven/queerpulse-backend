@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
 import { EventInvitesController, EventsController } from './events.controller';
 import { EventCohost } from './entities/event-cohost.entity';
@@ -17,6 +18,11 @@ import { RsvpService } from './rsvp.service';
     TypeOrmModule.forFeature([Event, EventCohost, EventRsvp, EventInvite]),
     UsersModule,
     NotificationsModule,
+    // `BlockFilterService` — attendee lists drop blocked members. Plain
+    // import: `SocialModule` -> {`UsersModule`, `ReportsModule`} only, so
+    // neither this nor `NotificationsModule`'s own `SocialModule` import
+    // closes a cycle back to `EventsModule`.
+    SocialModule,
   ],
   controllers: [EventsController, EventInvitesController],
   providers: [

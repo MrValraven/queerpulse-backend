@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { SocialModule } from '../social/social.module';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersModule } from '../users/users.module';
 import { CommunitiesController } from './communities.controller';
@@ -12,6 +13,7 @@ import { CommunityPostReaction } from './entities/community-post-reaction.entity
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { CommunityPost } from './entities/community-post.entity';
 import { Community } from './entities/community.entity';
+import { MeCommunitiesController } from './me-communities.controller';
 
 @Module({
   imports: [
@@ -25,8 +27,16 @@ import { Community } from './entities/community.entity';
       Profile,
     ]),
     UsersModule,
+    // `BlockFilterService` — community post feeds and their nested replies
+    // exclude blocked/muted authors. Plain import (no `forwardRef`):
+    // `SocialModule` pulls in only `UsersModule` + `ReportsModule`.
+    SocialModule,
   ],
-  controllers: [CommunitiesController, CommunityPostsController],
+  controllers: [
+    CommunitiesController,
+    CommunityPostsController,
+    MeCommunitiesController,
+  ],
   providers: [CommunitiesService, CommunityPostsService],
   exports: [CommunitiesService],
 })

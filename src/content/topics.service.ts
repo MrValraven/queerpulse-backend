@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { MoreThanOrEqual, Repository } from 'typeorm';
 import { CursorPage, cursorPaginate } from '../common/cursor-pagination';
+import { BlockFilterService } from '../social/block-filter.service';
 import { TopicPost } from './entities/topic-post.entity';
 import { Topic } from './entities/topic.entity';
 import { TopicPostResponse, toTopicPostResponse } from './topic-post-response';
@@ -24,6 +25,7 @@ export class TopicsService {
     private readonly topics: Repository<Topic>,
     @InjectRepository(TopicPost)
     private readonly topicPosts: Repository<TopicPost>,
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   /** The full topic directory, most-posted first. */
@@ -52,8 +54,30 @@ export class TopicsService {
   }
 
   // GET /topics/:slug/posts?cursor= — the topic's post feed, newest first.
+  //
+  // Block/mute filtered in-query, like every other post surface, now that
+  // `1782800720000-AddTopicPostAuthor` has given `topic_post` an `author_id`.
+  //
+  // Two things worth stating explicitly:
+  //
+  // 1. NULL-authored rows stay VISIBLE. Every seeded row has `author_id IS
+  //    NULL` (the migration explains why no name-matching backfill was run),
+  //    and `excludeHidden` is NULL-safe by construction: its correlated
+  //    `NOT EXISTS` compares `blocked_id`/`muted_id` against `"tp"."author_id"`,
+  //    and `<uuid> = NULL` is never true, so the subquery matches nothing and
+  //    `NOT EXISTS` is TRUE. The filter therefore silences real members without
+  //    swallowing the editorial seed content.
+  // 2. `andWhere` only, no joins. `cursorPaginate` calls `getMany()` with
+  //    `.take()`, and TypeORM's `.take()` + join combination switches to its
+  //    two-query "distinct pagination" path — see the note at
+  //    `src/feed/feed.service.ts:221-227`. Keeping this join-free preserves the
+  //    single-query path and the keyset ORDER BY.
+  //
+  // In-query rather than post-query filtering so the keyset page fills to
+  // `limit` with visible rows instead of coming back short.
   async listPosts(
     slug: string,
+    viewerId: string,
     cursor: string | undefined,
     limit: number | undefined,
   ): Promise<CursorPage<TopicPostResponse>> {
@@ -62,6 +86,7 @@ export class TopicsService {
     const qb = this.topicPosts
       .createQueryBuilder('tp')
       .where('tp.topicId = :topicId', { topicId: topic.id });
+    this.blockFilter.excludeHidden(qb, viewerId, '"tp"."author_id"');
 
     const { rows, nextCursor, hasMore } = await cursorPaginate(
       qb,

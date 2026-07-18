@@ -13,6 +13,8 @@ import { Shaping } from './entities/shaping.entity';
 import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
 import { WorkItem } from './entities/work-item.entity';
+import { DiscoverableIdentitiesController } from './discoverable-identities.controller';
+import { DiscoverableIdentitiesService } from './discoverable-identities.service';
 import { MembersController, ProfilesController } from './profiles.controller';
 import { ProfilesService } from './profiles.service';
 
@@ -38,7 +40,11 @@ import { ProfilesService } from './profiles.service';
     // `PATCH me/username` rename transacts against it (design plan PART C / UC4).
     HandlesModule,
   ],
-  controllers: [ProfilesController, MembersController],
-  providers: [ProfilesService],
+  controllers: [
+    ProfilesController,
+    MembersController,
+    DiscoverableIdentitiesController,
+  ],
+  providers: [ProfilesService, DiscoverableIdentitiesService],
 })
 export class ProfilesModule {}

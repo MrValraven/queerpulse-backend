@@ -1,6 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { BlockFilterService } from '../social/block-filter.service';
 import { TopicPost } from './entities/topic-post.entity';
 import { Topic } from './entities/topic.entity';
 import { TopicsService } from './topics.service';
@@ -15,6 +16,9 @@ describe('TopicsService', () => {
     count: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
+  let blockFilter: { excludeHidden: jest.Mock };
+
+  const VIEWER_ID = 'viewer-1';
 
   const healthcare: Topic = {
     id: 'topic-1',
@@ -41,6 +45,9 @@ describe('TopicsService', () => {
   const post: TopicPost = {
     id: 'post-1',
     topicId: 'topic-1',
+    // Seed content has no member behind it — see
+    // `1782800720000-AddTopicPostAuthor` on why these are left NULL.
+    authorId: null,
     authorName: 'Anika Kovač',
     authorInitials: 'AK',
     authorTone: 'coral',
@@ -78,12 +85,14 @@ describe('TopicsService', () => {
       count: jest.fn().mockResolvedValue(0),
       createQueryBuilder: jest.fn().mockReturnValue(makeQueryBuilder([])),
     };
+    blockFilter = { excludeHidden: jest.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         TopicsService,
         { provide: getRepositoryToken(Topic), useValue: topics },
         { provide: getRepositoryToken(TopicPost), useValue: topicPosts },
+        { provide: BlockFilterService, useValue: blockFilter },
       ],
     }).compile();
     service = module.get(TopicsService);
@@ -165,9 +174,9 @@ describe('TopicsService', () => {
 
   describe('listPosts', () => {
     it('throws NotFoundException when the topic does not exist', async () => {
-      await expect(service.listPosts('nope', undefined, undefined)).rejects.toThrow(
-        NotFoundException,
-      );
+      await expect(
+        service.listPosts('nope', VIEWER_ID, undefined, undefined),
+      ).rejects.toThrow(NotFoundException);
     });
 
     it('scopes the query to the resolved topic id and maps rows to TopicPostResponse[]', async () => {
@@ -175,7 +184,12 @@ describe('TopicsService', () => {
       const qb = makeQueryBuilder([post]);
       topicPosts.createQueryBuilder.mockReturnValue(qb);
 
-      const page = await service.listPosts('healthcare', undefined, undefined);
+      const page = await service.listPosts(
+        'healthcare',
+        VIEWER_ID,
+        undefined,
+        undefined,
+      );
 
       expect(qb.where).toHaveBeenCalledWith('tp.topicId = :topicId', {
         topicId: 'topic-1',
@@ -206,10 +220,31 @@ describe('TopicsService', () => {
       });
     });
 
+    it('applies the block/mute filter in-query against the author column', async () => {
+      topics.findOne.mockResolvedValue(healthcare);
+      const qb = makeQueryBuilder([post]);
+      topicPosts.createQueryBuilder.mockReturnValue(qb);
+
+      await service.listPosts('healthcare', VIEWER_ID, undefined, undefined);
+
+      // Raw, already-quoted snake_case column per `BlockFilterService`'s
+      // splicing contract — not a TypeORM camelCase property path.
+      expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
+        qb,
+        VIEWER_ID,
+        '"tp"."author_id"',
+      );
+    });
+
     it('returns an empty page when the topic has no posts', async () => {
       topics.findOne.mockResolvedValue(healthcare);
 
-      const page = await service.listPosts('healthcare', undefined, undefined);
+      const page = await service.listPosts(
+        'healthcare',
+        VIEWER_ID,
+        undefined,
+        undefined,
+      );
 
       expect(page).toEqual({
         data: [],

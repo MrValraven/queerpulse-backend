@@ -15,12 +15,31 @@
  * trusted just because it round-tripped through `state`. Tampering buys an
  * attacker nothing — a bad redirect falls back to the default landing page and
  * a bad invite is rejected.
+ *
+ * `ageAttested` is the one field that cannot be independently re-validated: it
+ * is a *self-declaration*, so whatever arrives here is what we record. That is
+ * acceptable precisely because the thing it mirrors — ticking a checkbox — is
+ * equally self-declared: forging the state param buys an attacker exactly what
+ * clicking the box buys them, and nothing more. What it is NOT is proof the
+ * member saw the checkbox, since a third party can hand someone a crafted
+ * `/auth/google?ageAttested=1` link. If that distinction ever needs to hold up
+ * (a regulator asking to see the affirmative act), replace this with a
+ * server-side attestation row keyed to the `nonce` and written *before* the
+ * redirect, so the record is minted by us rather than echoed back to us.
  */
 export interface OAuthState {
   /** Invite code for invite-gated signup (returning members don't need one). */
   invite?: string;
   /** Internal app path to land on after login, e.g. `/feed`. */
   redirect?: string;
+  /**
+   * The 18+ self-attestation, ticked on the invite landing page before the
+   * "Register with Google" button unlocks. Required to create a NEW account
+   * (Terms §eligibility); returning members already have theirs on file.
+   */
+  ageAttested?: boolean;
+  /** Which Terms revision the member attested against, for the audit trail. */
+  termsVersion?: string;
   /**
    * Anti-CSRF / session-fixation nonce. Minted when the flow starts, stored in a
    * short-lived httpOnly `oauth_state` cookie, and echoed here inside `state`.
@@ -41,6 +60,8 @@ export function encodeOAuthState(state: OAuthState): string | undefined {
   if (state.invite) payload.invite = state.invite;
   if (state.redirect) payload.redirect = state.redirect;
   if (state.nonce) payload.nonce = state.nonce;
+  if (state.ageAttested) payload.ageAttested = true;
+  if (state.termsVersion) payload.termsVersion = state.termsVersion;
   if (Object.keys(payload).length === 0) {
     return undefined;
   }
@@ -64,6 +85,11 @@ export function decodeOAuthState(raw: string | undefined | null): OAuthState {
       if (typeof obj.invite === 'string') out.invite = obj.invite;
       if (typeof obj.redirect === 'string') out.redirect = obj.redirect;
       if (typeof obj.nonce === 'string') out.nonce = obj.nonce;
+      // Strictly `=== true`: a truthy string like "false" must not attest.
+      if (obj.ageAttested === true) out.ageAttested = true;
+      if (typeof obj.termsVersion === 'string') {
+        out.termsVersion = obj.termsVersion;
+      }
       return out;
     }
   } catch {

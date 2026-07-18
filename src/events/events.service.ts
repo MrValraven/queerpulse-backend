@@ -10,6 +10,7 @@ import { randomBytes } from 'node:crypto';
 import { In, Not, Repository } from 'typeorm';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
@@ -79,6 +80,7 @@ export class EventsService {
     private readonly usersService: UsersService,
     private readonly rsvpService: RsvpService,
     private readonly notifications: NotificationsService,
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   async create(hostId: string, dto: CreateEventInput): Promise<EventDetail> {
@@ -345,7 +347,20 @@ export class EventsService {
       where: { eventId: event.id },
       order: { status: 'ASC', waitlistPosition: 'ASC' },
     });
-    const visible = rsvps.filter((r) => r.status !== RsvpStatus.Cancelled);
+    const notCancelled = rsvps.filter((r) => r.status !== RsvpStatus.Cancelled);
+    // Blocks only — deliberately NOT mutes. A block is a mutual severance, so
+    // a blocked member must not surface in a list the viewer reads (same rule
+    // `ProfilesService.searchMembers` applies to the directory). A mute is a
+    // content-feed silence, not an "erase them from the guest list" tool:
+    // dropping muted members here would misstate who is actually attending,
+    // which the viewer may need to know for their own safety planning.
+    // Post-query is sound here — `attendees` returns the whole list with no
+    // LIMIT, so there is no page to under-fill.
+    const blocked = await this.blockFilter.blockedUserIds(
+      viewerId,
+      notCancelled.map((r) => r.userId),
+    );
+    const visible = notCancelled.filter((r) => !blocked.has(r.userId));
     const profiles = await this.profilesByUserIds(visible.map((r) => r.userId));
     return visible
       .filter((r) => profiles.has(r.userId)) // drop profile-less ghost rows

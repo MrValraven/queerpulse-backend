@@ -7,6 +7,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
   CommunityPostDTO,
@@ -59,6 +60,7 @@ export class CommunityPostsService {
     @InjectRepository(CommunityPostReply)
     private readonly replies: Repository<CommunityPostReply>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   async listPosts(
@@ -75,6 +77,11 @@ export class CommunityPostsService {
       .where('p.community_id = :communityId', { communityId: community.id })
       .orderBy('p.pinned', 'DESC')
       .addOrderBy('p.created_at', 'DESC');
+    // Blocked-either-way and muted authors' posts are excluded in-query, so
+    // `paginate`'s LIMIT/OFFSET and its `total` both count only visible posts.
+    // Filtering the fetched rows instead would under-fill every page *and*
+    // report a `total` the caller can never page through.
+    this.blockFilter.excludeHidden(qb, viewerId, '"p"."author_id"');
 
     return paginate(qb, normalizedPage, (rows) =>
       this.toPostDTOs(rows, viewerId),
@@ -352,17 +359,40 @@ export class CommunityPostsService {
     }
   }
 
+  /**
+   * Drops replies whose author the viewer has blocked (either way) or muted.
+   *
+   * Post-query rather than in-query on purpose, and without the short-page
+   * flaw that makes post-query filtering wrong for `listPosts`: replies are a
+   * nested collection fetched *whole* per post, with no LIMIT to under-fill —
+   * removing rows just shortens a list that was never promised a length. One
+   * batched `BlockFilterService.hiddenUserIds` call covers the entire page of
+   * posts, so this stays two queries regardless of how many replies there are.
+   */
+  private async visibleReplies(
+    rows: CommunityPostReply[],
+    viewerId: string,
+  ): Promise<CommunityPostReply[]> {
+    if (!rows.length) return rows;
+    const hidden = await this.blockFilter.hiddenUserIds(
+      viewerId,
+      rows.map((r) => r.authorId),
+    );
+    return hidden.size ? rows.filter((r) => !hidden.has(r.authorId)) : rows;
+  }
+
   private async buildPostDTO(
     post: CommunityPost,
     viewerId: string,
   ): Promise<CommunityPostDTO> {
-    const [reactionRows, replyRows] = await Promise.all([
+    const [reactionRows, allReplyRows] = await Promise.all([
       this.reactions.find({ where: { postId: post.id } }),
       this.replies.find({
         where: { postId: post.id },
         order: { createdAt: 'ASC' },
       }),
     ]);
+    const replyRows = await this.visibleReplies(allReplyRows, viewerId);
 
     const authorIds = [post.authorId, ...replyRows.map((r) => r.authorId)];
     const authors = await new MemberLookup(this.profiles).byUserIds(authorIds);
@@ -389,13 +419,14 @@ export class CommunityPostsService {
     if (!rows.length) return [];
     const postIds = rows.map((p) => p.id);
 
-    const [reactionRows, replyRows] = await Promise.all([
+    const [reactionRows, allReplyRows] = await Promise.all([
       this.reactions.find({ where: { postId: In(postIds) } }),
       this.replies.find({
         where: { postId: In(postIds) },
         order: { createdAt: 'ASC' },
       }),
     ]);
+    const replyRows = await this.visibleReplies(allReplyRows, viewerId);
 
     const reactionsByPost = groupBy(reactionRows, (r) => r.postId);
     const repliesByPost = groupBy(replyRows, (r) => r.postId);

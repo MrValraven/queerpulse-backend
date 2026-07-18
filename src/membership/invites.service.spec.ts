@@ -1,8 +1,4 @@
-import {
-  BadRequestException,
-  ForbiddenException,
-  NotFoundException,
-} from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
@@ -15,129 +11,13 @@ import { Invite, InviteStatus } from './entities/invite.entity';
 import { resolveInviteStatus, toPublicInviteView } from './invite-response';
 import { InvitesService } from './invites.service';
 
-describe('InvitesService.acceptInvite', () => {
-  let service: InvitesService;
-  let repo: { findOne: jest.Mock; save: jest.Mock; update: jest.Mock };
-  let users: { findById: jest.Mock; promoteToActive: jest.Mock };
-  let manager: { update: jest.Mock };
-  let dataSource: { transaction: jest.Mock };
-
-  const currentUser = { userId: 'u-new', email: 'new@x.com' };
-
-  // inviter is active; the redeemer (currentUser) is pending — unless overridden.
-  const activeInviterPendingRedeemer = async (id: string) =>
-    id === 'inviter'
-      ? { id: 'inviter', status: UserStatus.Active }
-      : { id, status: UserStatus.Pending };
-
-  beforeEach(async () => {
-    repo = { findOne: jest.fn(), save: jest.fn(), update: jest.fn() };
-    manager = { update: jest.fn().mockResolvedValue({ affected: 1 }) };
-    dataSource = {
-      transaction: jest.fn().mockImplementation(async (cb) => cb(manager)),
-    };
-    users = {
-      findById: jest.fn(),
-      promoteToActive: jest.fn().mockResolvedValue(true),
-    };
-    const module: TestingModule = await Test.createTestingModule({
-      providers: [
-        InvitesService,
-        { provide: getRepositoryToken(Invite), useValue: repo },
-        { provide: UsersService, useValue: users },
-        { provide: DataSource, useValue: dataSource },
-        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
-        { provide: ConfigService, useValue: { get: jest.fn(() => 1) } },
-      ],
-    }).compile();
-    service = module.get(InvitesService);
-  });
-
-  const pendingInvite = (overrides = {}) => ({
-    id: 'i1',
-    inviterId: 'inviter',
-    code: 'c',
-    email: null,
-    status: InviteStatus.Pending,
-    expiresAt: null,
-    ...overrides,
-  });
-
-  it('rejects an unknown or already-used invite', async () => {
-    repo.findOne.mockResolvedValue(null);
-    await expect(
-      service.acceptInvite('nope', currentUser),
-    ).rejects.toBeInstanceOf(BadRequestException);
-  });
-
-  it('rejects when the inviter is not an active member', async () => {
-    repo.findOne.mockResolvedValue(pendingInvite());
-    users.findById.mockResolvedValue({
-      id: 'inviter',
-      status: UserStatus.Pending,
-    });
-    await expect(service.acceptInvite('c', currentUser)).rejects.toBeInstanceOf(
-      ForbiddenException,
-    );
-  });
-
-  it('rejects when the redeemer is already an active member', async () => {
-    repo.findOne.mockResolvedValue(pendingInvite());
-    users.findById.mockImplementation(async (id) => ({
-      id,
-      status: UserStatus.Active,
-    }));
-    await expect(service.acceptInvite('c', currentUser)).rejects.toBeInstanceOf(
-      BadRequestException,
-    );
-    expect(manager.update).not.toHaveBeenCalled();
-  });
-
-  it('accepts a valid invite: atomically claims it and promotes the user', async () => {
-    repo.findOne.mockResolvedValue(pendingInvite());
-    users.findById.mockImplementation(activeInviterPendingRedeemer);
-
-    await service.acceptInvite('c', currentUser);
-
-    expect(manager.update).toHaveBeenCalledWith(
-      Invite,
-      { id: 'i1', status: InviteStatus.Pending },
-      expect.objectContaining({
-        status: InviteStatus.Accepted,
-        acceptedBy: 'u-new',
-        usedAt: expect.any(Date),
-      }),
-    );
-    expect(users.promoteToActive).toHaveBeenCalledWith(
-      'u-new',
-      expect.objectContaining({ invitedBy: 'inviter', manager }),
-    );
-  });
-
-  it('rejects the claim when the invite was concurrently consumed', async () => {
-    repo.findOne.mockResolvedValue(pendingInvite());
-    users.findById.mockImplementation(activeInviterPendingRedeemer);
-    manager.update.mockResolvedValue({ affected: 0 }); // lost the race
-
-    await expect(service.acceptInvite('c', currentUser)).rejects.toBeInstanceOf(
-      BadRequestException,
-    );
-    expect(users.promoteToActive).not.toHaveBeenCalled();
-  });
-
-  it('rejects an invite bound to a different email', async () => {
-    repo.findOne.mockResolvedValue(
-      pendingInvite({ email: 'someone-else@x.com' }),
-    );
-    users.findById.mockResolvedValue({
-      id: 'inviter',
-      status: UserStatus.Active,
-    });
-    await expect(service.acceptInvite('c', currentUser)).rejects.toBeInstanceOf(
-      ForbiddenException,
-    );
-  });
-});
+// NOTE: the `InvitesService.acceptInvite` suite that used to sit here is gone
+// along with the method and the `POST /invites/:code/accept` route. The route
+// was unreachable by construction — it required a JWT, and holding a JWT means
+// you already have an account, which you can only get by redeeming an invite at
+// Google sign-up (`validateInviteForSignup` + `claimInvite`, covered below and
+// in auth.service.spec.ts). Its last precondition, `redeemer.status ===
+// 'pending'`, referenced a status that no longer exists.
 
 describe('resolveInviteStatus', () => {
   const base = {
@@ -371,9 +251,7 @@ describe('InvitesService.createInvite', () => {
   });
 
   it('regenerates the code on collision before persisting', async () => {
-    invitesRepo.exists
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(false);
+    invitesRepo.exists.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
     await service.createInvite('inviter');
     expect(invitesRepo.exists).toHaveBeenCalledTimes(2);
   });
@@ -457,6 +335,59 @@ describe('InvitesService.createInvite', () => {
     expect(boundary.getUTCHours()).toBe(0);
     expect(boundary.getUTCMinutes()).toBe(0);
   });
+
+  describe('createInviteForApproval', () => {
+    it('mints on the CALLER transaction manager, bound to the email', async () => {
+      // A manager distinct from the one dataSource.transaction would hand out,
+      // so "did it use the caller's?" is actually observable.
+      const callerManager = {
+        getRepository: jest.fn(() => userRepo),
+        count: jest.fn().mockResolvedValue(0),
+        create: jest.fn((_entity, v) => v),
+        save: jest.fn(async (v) => ({ id: 'inv-new', ...v })),
+      };
+
+      const result = await service.createInviteForApproval(
+        callerManager as never,
+        'admin-1',
+        'applicant@x.com',
+      );
+
+      expect(callerManager.save).toHaveBeenCalled();
+      expect(manager.save).not.toHaveBeenCalled();
+      expect(callerManager.create).toHaveBeenCalledWith(
+        Invite,
+        expect.objectContaining({
+          inviterId: 'admin-1',
+          email: 'applicant@x.com',
+          status: InviteStatus.Pending,
+        }),
+      );
+      expect(result.id).toBe('inv-new');
+      expect(result.code).toMatch(/^QP-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
+    });
+
+    it('skips the monthly quota so an admin can clear the queue', async () => {
+      // Quota of 1, already spent. createInvite would 403 here.
+      await build(1);
+      const callerManager = {
+        getRepository: jest.fn(() => userRepo),
+        count: jest.fn().mockResolvedValue(5),
+        create: jest.fn((_entity, v) => v),
+        save: jest.fn(async (v) => ({ id: 'inv-new', ...v })),
+      };
+
+      await expect(
+        service.createInviteForApproval(
+          callerManager as never,
+          'admin-1',
+          'applicant@x.com',
+        ),
+      ).resolves.toEqual(expect.objectContaining({ id: 'inv-new' }));
+      // The quota path was never entered at all.
+      expect(callerManager.count).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('InvitesService.listMyInvites', () => {
@@ -502,7 +433,15 @@ describe('InvitesService.listMyInvites', () => {
       }),
     );
     expect(Object.keys(rows[0]).sort()).toEqual(
-      ['code', 'createdAt', 'email', 'expiresAt', 'note', 'status', 'vouch'].sort(),
+      [
+        'code',
+        'createdAt',
+        'email',
+        'expiresAt',
+        'note',
+        'status',
+        'vouch',
+      ].sort(),
     );
     expect(rows[0]).not.toHaveProperty('id');
     expect(rows[0]).not.toHaveProperty('acceptedBy');
@@ -594,7 +533,7 @@ describe('InvitesService.validateInviteForSignup + claimInvite', () => {
     it('rejects when the inviter is not active', async () => {
       usersService.findById = jest
         .fn()
-        .mockResolvedValue({ id: 'inviter-1', status: UserStatus.Pending });
+        .mockResolvedValue({ id: 'inviter-1', status: UserStatus.Suspended });
       const manager = makeManager({
         id: 'inv-1',
         inviterId: 'inviter-1',

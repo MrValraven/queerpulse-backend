@@ -3,6 +3,9 @@ import { ConfigService } from '@nestjs/config';
 import { JwtModule, JwtSignOptions } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
+import { DeletionRequest } from '../account/entities/deletion-request.entity';
+import { EmailSuppression } from '../account/entities/email-suppression.entity';
 import { UsersModule } from '../users/users.module';
 import { MembershipModule } from '../membership/membership.module';
 import { User } from '../users/entities/user.entity';
@@ -20,7 +23,21 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     PassportModule,
     // User: JwtStrategy re-reads status/role per request so bans take effect
     // immediately rather than lagging by the access-token TTL.
-    TypeOrmModule.forFeature([RefreshToken, User]),
+    // EmailSuppression: the erasure suppression list, consulted on the
+    // new-account signup path. Owned by `src/account` (which writes it during
+    // erasure); registered here read-side only, the same way `AccountModule`
+    // registers `RefreshToken`.
+    // AccountDeactivation / DeletionRequest: the reactivate-on-sign-in path
+    // (`AuthService.reactivateIfDeactivated`) needs to tell a reversible
+    // pause apart from a pending erasure — only the former is undone by
+    // signing in. Read-side registration, same pattern as EmailSuppression.
+    TypeOrmModule.forFeature([
+      RefreshToken,
+      User,
+      EmailSuppression,
+      AccountDeactivation,
+      DeletionRequest,
+    ]),
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({

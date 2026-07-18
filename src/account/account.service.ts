@@ -5,9 +5,16 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash, randomBytes } from 'node:crypto';
-import { IsNull, Repository } from 'typeorm';
+import { DataSource, EntityManager, IsNull, Repository } from 'typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
+import {
+  USER_SESSION_REVOKED,
+  UserSessionRevokedEvent,
+} from '../chat/session.events';
+import { User, UserStatus } from '../users/entities/user.entity';
+import { AccountExportService } from './account-export.service';
 import {
   DeletionRequestResponse,
   DsarResponse,
@@ -68,6 +75,13 @@ export class AccountService {
     private readonly deactivations: Repository<AccountDeactivation>,
     @InjectRepository(RefreshToken)
     private readonly refreshTokens: Repository<RefreshToken>,
+    private readonly exportService: AccountExportService,
+    // Deactivation and deletion each write a ledger row AND flip
+    // `users.status` — the two must commit together or the member is hidden
+    // with no way back (or has a way back without being hidden).
+    private readonly dataSource: DataSource,
+    // Drops live sockets on deactivation/deletion — see revokeAllSessions.
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   // --- Step-up re-authentication -------------------------------------------
@@ -97,17 +111,78 @@ export class AccountService {
 
   // --- Deactivation (reversible, non-erasure) ------------------------------
 
+  /**
+   * Resolve the status to record as "what to come back to".
+   *
+   * Reads through a `Deactivated` current status to the value stashed on
+   * whichever ledger row already exists, so a member who deactivates, then
+   * requests deletion (or deactivates twice) does not end up with
+   * `previous_status = 'deactivated'` — which would strand them.
+   *
+   * SUSPENDED MEMBERS: deliberately allowed to deactivate and to request
+   * deletion. Erasure is a GDPR right that cannot be conditioned on good
+   * standing, and deactivation is strictly *more* restrictive than suspension
+   * (both already fail `ActiveMemberGuard`), so permitting it grants a
+   * suspended member nothing. The abuse to defend against is not the
+   * deactivation, it is the *return* — which is why the prior status is
+   * recorded here and replayed verbatim on restore instead of defaulting to
+   * `Active`.
+   */
+  private async resolveRestoreStatus(
+    manager: EntityManager,
+    userId: string,
+  ): Promise<UserStatus> {
+    const user = await manager.findOne(User, {
+      where: { id: userId },
+      select: { id: true, status: true },
+    });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    if (user.status !== UserStatus.Deactivated) {
+      return user.status;
+    }
+    const openDeactivation = await manager.findOne(AccountDeactivation, {
+      where: { userId, reactivatedAt: IsNull() },
+    });
+    const openDeletion = await manager.findOne(DeletionRequest, {
+      where: { userId, status: DeletionRequestStatus.Grace },
+    });
+    return (
+      openDeactivation?.previousStatus ??
+      openDeletion?.previousStatus ??
+      UserStatus.Active
+    );
+  }
+
   async deactivate(
     userId: string,
     dto: DeactivateDto,
   ): Promise<{ status: 'deactivated' }> {
     await this.assertReauth(userId, dto.reauthToken);
-    const existing = await this.deactivations.findOne({ where: { userId } });
-    await this.deactivations.save({
-      ...(existing ?? {}),
-      userId,
-      deactivatedAt: new Date(),
-      reactivatedAt: null,
+    // The ledger row and `users.status` are one atomic fact: a row without the
+    // status change hides nobody (the bug this replaces), and a status change
+    // without the row leaves the member with no recorded way back.
+    await this.dataSource.transaction(async (manager) => {
+      const previousStatus = await this.resolveRestoreStatus(manager, userId);
+      const existing = await manager.findOne(AccountDeactivation, {
+        where: { userId },
+      });
+      await manager.save(AccountDeactivation, {
+        ...(existing ?? {}),
+        userId,
+        deactivatedAt: new Date(),
+        reactivatedAt: null,
+        previousStatus,
+      });
+      // This is what actually hides them: every `status = 'active'` predicate
+      // in the codebase (search, feed, member refs, guards, chat handshake)
+      // stops matching.
+      await manager.update(
+        User,
+        { id: userId },
+        { status: UserStatus.Deactivated },
+      );
     });
     // Deactivating is a full sign-out everywhere, including this device.
     await this.revokeAllSessions(userId);
@@ -128,11 +203,27 @@ export class AccountService {
       throw new ConflictException('A deletion request is already scheduled');
     }
     const scheduledFor = new Date(Date.now() + DELETION_GRACE_DAYS * DAY_MS);
-    const saved = await this.deletionRequests.save({
-      userId,
-      status: DeletionRequestStatus.Grace,
-      scheduledFor,
-      reason: dto.reason ?? null,
+    // The delete-account UI says "everything is hidden now and will be
+    // permanently erased on {date}". The erasure half was already true; the
+    // hiding half was not — the request row was written and nothing read it.
+    // Setting `Deactivated` in the same transaction as the row is what makes
+    // the first clause true, via the `status = 'active'` filters that already
+    // exist everywhere.
+    const saved = await this.dataSource.transaction(async (manager) => {
+      const previousStatus = await this.resolveRestoreStatus(manager, userId);
+      const row = await manager.save(DeletionRequest, {
+        userId,
+        status: DeletionRequestStatus.Grace,
+        scheduledFor,
+        reason: dto.reason ?? null,
+        previousStatus,
+      });
+      await manager.update(
+        User,
+        { id: userId },
+        { status: UserStatus.Deactivated },
+      );
+      return row;
     });
     // Opening the grace period kills the member's sessions server-side.
     await this.revokeAllSessions(userId);
@@ -155,24 +246,61 @@ export class AccountService {
   }
 
   async cancelDeletionRequest(userId: string): Promise<void> {
-    const active = await this.deletionRequests.findOne({
-      where: { userId, status: DeletionRequestStatus.Grace },
+    await this.dataSource.transaction(async (manager) => {
+      const active = await manager.findOne(DeletionRequest, {
+        where: { userId, status: DeletionRequestStatus.Grace },
+      });
+      if (!active) {
+        throw new NotFoundException('No pending deletion request');
+      }
+      active.status = DeletionRequestStatus.Cancelled;
+      await manager.save(DeletionRequest, active);
+
+      // Changing your mind about erasure un-hides you — UNLESS you were also
+      // separately deactivated. Someone who paused their account and *then*
+      // asked to be erased is cancelling only the erasure; they asked to stay
+      // hidden, and silently un-pausing them here would be a second broken
+      // promise in the opposite direction. Their open `account_deactivation`
+      // row keeps them `Deactivated` until they sign back in.
+      const openDeactivation = await manager.findOne(AccountDeactivation, {
+        where: { userId, reactivatedAt: IsNull() },
+      });
+      if (openDeactivation) {
+        return;
+      }
+      // Restore the recorded status, never a hardcoded `Active` — a suspended
+      // member must land back on `Suspended`. The `status: Deactivated`
+      // predicate makes this a no-op if something else already moved them
+      // (e.g. a moderator acting during the grace period).
+      await manager.update(
+        User,
+        { id: userId, status: UserStatus.Deactivated },
+        { status: active.previousStatus ?? UserStatus.Active },
+      );
     });
-    if (!active) {
-      throw new NotFoundException('No pending deletion request');
-    }
-    active.status = DeletionRequestStatus.Cancelled;
-    await this.deletionRequests.save(active);
   }
 
   // --- Right to portability — data export (job) -----------------------------
 
-  // No real worker/queue in this scaffold: the archive is built synchronously
-  // and the job is created already `Ready`.
+  // No real worker/queue: the archive is built synchronously and the job is
+  // created already `Ready`. See `AccountExportService.build` for the size
+  // risk that carries.
+  //
+  // FORMAT: `dto.format` (`json` | `csv` | `both`) is persisted on the job and
+  // then IGNORED — this backend only ever produces JSON. A member who picks
+  // `csv` or `both` gets a `.json` archive. The column is kept because the
+  // frontend sends it and the eventual worker will need it; nothing downstream
+  // reads it today. Do not assume CSV works because the enum has a value for it.
   async requestExport(
     userId: string,
     dto: RequestExportDto,
   ): Promise<ExportJobResponse> {
+    // Step-up auth, REQUIRED — matching `deactivate`, `requestDeletion` and
+    // `submitDsar`. An export is a complete dump of everything we hold on a
+    // person, so a stolen session cookie alone must not be enough to exfiltrate
+    // it. The frontend mints the token inside `useExportFlow.start()` (live
+    // branch only), so no page has to know this route needs one.
+    await this.assertReauth(userId, dto.reauthToken);
     const now = new Date();
     const job = await this.exportJobs.save({
       userId,
@@ -181,10 +309,33 @@ export class AccountService {
       format: dto.format as DataExportFormat,
       requestedAt: now,
       generatedAt: now,
-      data: this.buildExportPayload(userId, dto.categories),
+      data: await this.exportService.build(userId, dto.categories),
       error: null,
     });
     return toExportJobResponse(job);
+  }
+
+  /**
+   * Backs `GET /account/export/:jobId/download`. Returns the raw archive for
+   * the controller to stream, scoped to the owning user by the same
+   * `{ id, userId }` lookup `getExportJob` uses — a job id is a uuid, but it is
+   * not a capability, so ownership is checked rather than assumed.
+   */
+  async getExportDownload(
+    userId: string,
+    jobId: string,
+  ): Promise<{ filename: string; body: Buffer }> {
+    const job = await this.exportJobs.findOne({ where: { id: jobId, userId } });
+    if (!job) {
+      throw new NotFoundException('Export job not found');
+    }
+    if (job.status !== DataExportStatus.Ready || !job.data) {
+      throw new NotFoundException('Export archive is not ready');
+    }
+    return {
+      filename: `queerpulse-export-${job.id}.json`,
+      body: Buffer.from(JSON.stringify(job.data, null, 2), 'utf8'),
+    };
   }
 
   async getExportJob(
@@ -198,20 +349,6 @@ export class AccountService {
       throw new NotFoundException('Export job not found');
     }
     return toExportJobResponse(job);
-  }
-
-  private buildExportPayload(
-    userId: string,
-    categories: string[],
-  ): Record<string, unknown> {
-    return {
-      manifest: {
-        exportedAt: new Date().toISOString(),
-        schemaVersion: '1.0',
-        categories,
-      },
-      userId,
-    };
   }
 
   // --- DSAR intake & tracking ------------------------------------------------
@@ -310,13 +447,29 @@ export class AccountService {
     await this.refreshTokens.save(toRevoke);
   }
 
-  // Revoke ALL live sessions including the caller's (used by deactivate and
-  // deletion, where the account itself is going away).
+  /**
+   * Revoke ALL live sessions including the caller's (used by deactivate and
+   * deletion, where the account itself is going away).
+   *
+   * Revoking refresh tokens is not sufficient on its own: an already-issued
+   * ACCESS token stays valid for its full TTL (15m by default), and
+   * `ChatGateway.authenticate` reads `status` straight off that token's claims
+   * without touching the DB. So a member who deactivates mid-session would keep
+   * a working socket — still visible in presence, still receiving messages —
+   * for up to 15 minutes after every HTTP route had started rejecting them.
+   *
+   * Emitting `USER_SESSION_REVOKED` closes that window: the gateway already
+   * listens for it and drops the member's sockets immediately. This mirrors
+   * what `AuthService.revokeFamily` does on reuse detection.
+   */
   async revokeAllSessions(userId: string): Promise<void> {
     await this.refreshTokens.update(
       { userId, revokedAt: IsNull() },
       { revokedAt: new Date() },
     );
+    this.eventEmitter.emit(USER_SESSION_REVOKED, {
+      userId,
+    } satisfies UserSessionRevokedEvent);
   }
 
   // --- Email preferences ------------------------------------------------------

@@ -34,8 +34,10 @@ services:
       # For a managed/prod database, remove this and provide DATABASE_SSL_CA.
       DATABASE_SSL: 'false'
       # Replace these throwaway values before exposing the service.
-      JWT_ACCESS_SECRET: change-me-access-secret
-      JWT_REFRESH_SECRET: change-me-refresh-secret
+      # CHANGE THESE. Both must be >=32 chars and differ from each other, or
+      # the app fails validation at boot (src/config/env.validation.ts).
+      JWT_ACCESS_SECRET: change-me-access-secret-0000000000
+      JWT_REFRESH_SECRET: change-me-refresh-secret-000000000
       JWT_ACCESS_TTL: 15m
       JWT_REFRESH_TTL: 30d
       GOOGLE_CLIENT_ID: your-google-client-id

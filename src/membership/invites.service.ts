@@ -1,12 +1,10 @@
 import {
-  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EventEmitter2 } from '@nestjs/event-emitter';
 import { randomBytes } from 'node:crypto';
 import {
   DataSource,
@@ -16,7 +14,6 @@ import {
   Repository,
 } from 'typeorm';
 import { User, UserStatus } from '../users/entities/user.entity';
-import { USER_PROMOTED, UserPromotedEvent } from '../users/user.events';
 import { UsersService } from '../users/users.service';
 import { SignupRejectedError } from '../auth/errors/signup-rejected.error';
 import { Invite, InviteStatus } from './entities/invite.entity';
@@ -67,7 +64,6 @@ export class InvitesService {
     @InjectRepository(Invite) private readonly invites: Repository<Invite>,
     private readonly usersService: UsersService,
     private readonly dataSource: DataSource,
-    private readonly eventEmitter: EventEmitter2,
     private readonly config: ConfigService,
   ) {}
 
@@ -85,31 +81,15 @@ export class InvitesService {
     const trimmedVouch = opts.vouch?.trim();
     const vouch = trimmedVouch ? trimmedVouch : null;
     const email = opts.email ?? null;
+    const fields = { email, note, vouch, skipQuota: false };
 
     for (let attempt = 1; ; attempt++) {
       const code = await this.generateUniqueCode();
       try {
-        const saved = await this.dataSource.transaction(async (manager) => {
-          // Quota check + insert run under a per-inviter row lock so parallel
-          // POST /invites requests serialize and can't each pass the check and
-          // blow past the monthly limit.
-          await this.assertWithinMonthlyQuota(manager, inviterId);
-          const invite = manager.create(Invite, {
-            inviterId,
-            code,
-            email,
-            note,
-            vouch,
-            status: InviteStatus.Pending,
-            expiresAt: new Date(Date.now() + INVITE_TTL_MS),
-          });
-          return manager.save(invite);
-        });
-        return {
-          code: saved.code,
-          expiresAt: saved.expiresAt as Date,
-          status: resolveInviteStatus(saved, new Date()),
-        };
+        const saved = await this.dataSource.transaction((manager) =>
+          this.mintInvite(manager, inviterId, code, fields),
+        );
+        return this.toCreatedView(saved);
       } catch (err) {
         // A code collision is astronomically unlikely, but the pre-check races
         // with concurrent inserts; retry with a fresh code before surfacing.
@@ -119,6 +99,76 @@ export class InvitesService {
         throw err;
       }
     }
+  }
+
+  /**
+   * Mints the invite that a join-request approval hands to the applicant, in
+   * the CALLER'S transaction so the approval and the invite commit or roll back
+   * together (no "approved but no invite" stuck state). Returns the id as well
+   * as the code because the caller records it on `join_requests.invite_id`.
+   *
+   * Two deliberate differences from `createInvite`:
+   *
+   * 1. The monthly quota is skipped. This is not the admin spending a personal
+   *    invite, and with `INVITE_MONTHLY_QUOTA` defaulting to 1 an admin would
+   *    otherwise be unable to clear the queue past their first approval of the
+   *    month.
+   * 2. There is no code-collision retry loop. A 23505 inside someone else's
+   *    transaction has already aborted it, so retrying would just issue
+   *    statements against a poisoned transaction. `generateUniqueCode` has
+   *    already checked the code is free, so a collision here means a concurrent
+   *    insert of the same 8-symbol code drawn from a 32-symbol alphabet; it
+   *    surfaces as a 500 with the approval rolled back, and the admin retries.
+   */
+  async createInviteForApproval(
+    manager: EntityManager,
+    inviterId: string,
+    email: string,
+  ): Promise<{ id: string; code: string }> {
+    const saved = await this.mintInvite(
+      manager,
+      inviterId,
+      await this.generateUniqueCode(),
+      { email, note: null, vouch: null, skipQuota: true },
+    );
+    return { id: saved.id, code: saved.code };
+  }
+
+  private async mintInvite(
+    manager: EntityManager,
+    inviterId: string,
+    code: string,
+    fields: {
+      email: string | null;
+      note: string | null;
+      vouch: string | null;
+      skipQuota: boolean;
+    },
+  ): Promise<Invite> {
+    // Quota check + insert run under a per-inviter row lock so parallel
+    // POST /invites requests serialize and can't each pass the check and
+    // blow past the monthly limit.
+    if (!fields.skipQuota) {
+      await this.assertWithinMonthlyQuota(manager, inviterId);
+    }
+    const invite = manager.create(Invite, {
+      inviterId,
+      code,
+      email: fields.email,
+      note: fields.note,
+      vouch: fields.vouch,
+      status: InviteStatus.Pending,
+      expiresAt: new Date(Date.now() + INVITE_TTL_MS),
+    });
+    return manager.save(invite);
+  }
+
+  private toCreatedView(saved: Invite): CreatedInviteView {
+    return {
+      code: saved.code,
+      expiresAt: saved.expiresAt as Date,
+      status: resolveInviteStatus(saved, new Date()),
+    };
   }
 
   // Public, unauthenticated read powering the recipient's invite landing page.
@@ -151,73 +201,6 @@ export class InvitesService {
     return invites.map((invite) => toMyInviteView(invite, now));
   }
 
-  async acceptInvite(
-    code: string,
-    currentUser: { userId: string; email: string },
-  ): Promise<void> {
-    const invite = await this.invites.findOne({ where: { code } });
-    if (!invite || invite.status !== InviteStatus.Pending) {
-      throw new BadRequestException('Invite is invalid or already used');
-    }
-    if (invite.expiresAt && invite.expiresAt.getTime() < Date.now()) {
-      // Conditional on status so we only expire a still-pending invite (never
-      // clobber an accepted/revoked one that raced us).
-      await this.invites.update(
-        { id: invite.id, status: InviteStatus.Pending },
-        { status: InviteStatus.Expired },
-      );
-      throw new BadRequestException('Invite has expired');
-    }
-    if (invite.inviterId === currentUser.userId) {
-      throw new ForbiddenException('You cannot accept your own invite');
-    }
-    if (
-      invite.email &&
-      invite.email.toLowerCase() !== currentUser.email.toLowerCase()
-    ) {
-      throw new ForbiddenException('Invite is bound to a different email');
-    }
-
-    const inviter = await this.usersService.findById(invite.inviterId);
-    if (!inviter || inviter.status !== UserStatus.Active) {
-      throw new ForbiddenException('Inviter is not an active member');
-    }
-
-    // Don't consume an invite for someone who is already a member (the JWT
-    // status can be stale, so check the DB truth).
-    const redeemer = await this.usersService.findById(currentUser.userId);
-    if (!redeemer || redeemer.status !== UserStatus.Pending) {
-      throw new BadRequestException('You are already a member');
-    }
-
-    // Claim the invite and promote atomically. The conditional update only
-    // succeeds if the invite is still pending, so a concurrent/double redeem
-    // (TOCTOU) loses the race and is rejected instead of double-consuming.
-    const promoted = await this.dataSource.transaction(async (manager) => {
-      const claim = await manager.update(
-        Invite,
-        { id: invite.id, status: InviteStatus.Pending },
-        {
-          status: InviteStatus.Accepted,
-          acceptedBy: currentUser.userId,
-          usedAt: new Date(),
-        },
-      );
-      if (claim.affected !== 1) {
-        throw new BadRequestException('Invite is invalid or already used');
-      }
-      return this.usersService.promoteToActive(currentUser.userId, {
-        invitedBy: invite.inviterId,
-        manager,
-      });
-    });
-    if (promoted) {
-      this.eventEmitter.emit(USER_PROMOTED, {
-        userId: currentUser.userId,
-      } satisfies UserPromotedEvent);
-    }
-  }
-
   /**
    * Validate an invite for a *new* Google sign-up, inside the caller's
    * transaction. Returns the inviteId + inviterId so the caller can create the
@@ -237,7 +220,7 @@ export class InvitesService {
     if (invite.expiresAt && invite.expiresAt.getTime() < Date.now()) {
       // Persist the Expired marking on the non-transactional repo so it
       // survives the rollback triggered by the throw below (the caller runs
-      // this inside a transaction it will roll back). Mirrors acceptInvite.
+      // this inside a transaction it will roll back).
       // Conditional on status so we only expire a still-pending invite.
       await this.invites.update(
         { id: invite.id, status: InviteStatus.Pending },

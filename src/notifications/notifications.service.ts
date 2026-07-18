@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Notification, NotificationType } from './entities/notification.entity';
 import {
   NOTIFICATION_CREATED,
@@ -22,13 +23,42 @@ export class NotificationsService {
     @InjectRepository(Notification)
     private readonly notifications: Repository<Notification>,
     private readonly eventEmitter: EventEmitter2,
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
+  /**
+   * Creates a notification for `userId`, unless `actorId` (the member whose
+   * action triggered it) is hidden from the recipient — blocked in either
+   * direction, or muted by the recipient. Returns `null` when suppressed.
+   *
+   * ENFORCEMENT POINT — write time, not read time. Three reasons this is the
+   * right side of the line:
+   *  1. `announce()` pushes every persisted notification straight to the
+   *     recipient's live sockets (`notification:new`, via the chat gateway).
+   *     A read-time filter in `list()` could never unring that bell — the
+   *     blocked member's name would still pop up in real time. Suppressing the
+   *     write suppresses the push too, because the push hangs off the write.
+   *  2. The actor is buried in `payload` under a per-type key
+   *     (`fromUserId` / `byUserId` / `voucherId` / `senderId` / `inviterId`),
+   *     so a read-time filter would have to reverse-engineer JSON by
+   *     `NotificationType` and silently miss any type added later. At write
+   *     time each caller already holds the actor id as a typed value.
+   *  3. `unreadCount()` is a separate query from `list()`; filtering at read
+   *     time means keeping two independent filters in sync or shipping a badge
+   *     count that never matches the list below it.
+   * The trade-off — notifications created *before* a block are not
+   * retroactively hidden — is consistent with how blocks behave elsewhere and
+   * is why this is enforcement, not history rewriting.
+   */
   async create(
     userId: string,
     type: NotificationType,
     payload: Record<string, unknown> = {},
-  ): Promise<Notification> {
+    actorId?: string,
+  ): Promise<Notification | null> {
+    if (actorId && (await this.isHiddenFrom(userId, actorId))) {
+      return null;
+    }
     const saved = await this.notifications.save(
       this.notifications.create({ userId, type, payload }),
     );
@@ -36,16 +66,23 @@ export class NotificationsService {
     return saved;
   }
 
+  /** Fan-out sibling of `create`, with the same write-time actor filter
+   *  applied per recipient (a block/mute is one recipient's relationship, so
+   *  it must never suppress the notification for everybody else). */
   async createForRecipients(
     userIds: string[],
     type: NotificationType,
     payload: Record<string, unknown> = {},
+    actorId?: string,
   ): Promise<void> {
-    if (!userIds.length) {
+    const recipients = actorId
+      ? await this.visibleRecipients(userIds, actorId)
+      : userIds;
+    if (!recipients.length) {
       return;
     }
     const saved = await this.notifications.save(
-      userIds.map((userId) =>
+      recipients.map((userId) =>
         this.notifications.create({ userId, type, payload }),
       ),
     );
@@ -88,6 +125,36 @@ export class NotificationsService {
   async markAllRead(userId: string): Promise<{ ok: true }> {
     await this.notifications.update({ userId, read: false }, { read: true });
     return { ok: true };
+  }
+
+  /**
+   * `true` when `actorId`'s actions must not reach `recipientId`: blocked in
+   * either direction (hard severance), or muted by the recipient — mutes are
+   * one-way and `BlockFilterService.isMutedBy`'s docstring names "notifications
+   * skipped" as exactly what a mute does. A member is never hidden from
+   * themself (both helpers short-circuit on equal ids), so self-notifications
+   * still go through.
+   */
+  private async isHiddenFrom(
+    recipientId: string,
+    actorId: string,
+  ): Promise<boolean> {
+    const [blocked, muted] = await Promise.all([
+      this.blockFilter.isBlockedEitherWay(recipientId, actorId),
+      this.blockFilter.isMutedBy(recipientId, actorId),
+    ]);
+    return blocked || muted;
+  }
+
+  /** Per-recipient application of `isHiddenFrom` for the fan-out path. */
+  private async visibleRecipients(
+    userIds: string[],
+    actorId: string,
+  ): Promise<string[]> {
+    const flags = await Promise.all(
+      userIds.map((userId) => this.isHiddenFrom(userId, actorId)),
+    );
+    return userIds.filter((_, i) => !flags[i]);
   }
 
   /**

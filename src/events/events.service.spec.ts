@@ -7,6 +7,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersService } from '../users/users.service';
 import { EventCohost } from './entities/event-cohost.entity';
@@ -33,6 +34,8 @@ describe('EventsService', () => {
   let invites: { exists: jest.Mock };
   let rsvpService: { reconcileWaitlist: jest.Mock };
   let notifications: { createForRecipients: jest.Mock };
+  let blockFilter: { blockedUserIds: jest.Mock };
+  let profiles: { find: jest.Mock };
 
   beforeEach(async () => {
     events = {
@@ -55,6 +58,10 @@ describe('EventsService', () => {
     notifications = {
       createForRecipients: jest.fn().mockResolvedValue(undefined),
     };
+    blockFilter = {
+      blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
+    };
+    profiles = { find: jest.fn().mockResolvedValue([]) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         EventsService,
@@ -62,16 +69,83 @@ describe('EventsService', () => {
         { provide: getRepositoryToken(EventCohost), useValue: cohosts },
         { provide: getRepositoryToken(EventRsvp), useValue: rsvps },
         { provide: getRepositoryToken(EventInvite), useValue: invites },
-        {
-          provide: getRepositoryToken(Profile),
-          useValue: { find: jest.fn().mockResolvedValue([]) },
-        },
+        { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: UsersService, useValue: { findById: jest.fn() } },
         { provide: RsvpService, useValue: rsvpService },
         { provide: NotificationsService, useValue: notifications },
+        { provide: BlockFilterService, useValue: blockFilter },
       ],
     }).compile();
     service = module.get(EventsService);
+  });
+
+  // Attendee lists filter BLOCKS ONLY, never mutes: a mute silences content,
+  // it is not an "erase them from the guest list" tool, and misstating who is
+  // actually attending could matter for a viewer's own safety planning.
+  describe('attendees', () => {
+    const publishedEvent = {
+      id: 'e1',
+      slug: 'party',
+      hostId: 'host-1',
+      status: EventStatus.Published,
+      visibility: EventVisibility.Public,
+    };
+
+    it('drops blocked members from the attendee list', async () => {
+      events.findOne.mockResolvedValue(publishedEvent);
+      rsvps.find.mockResolvedValue([
+        { eventId: 'e1', userId: 'blocked-1', status: 'going' },
+        { eventId: 'e1', userId: 'ok-1', status: 'going' },
+      ]);
+      blockFilter.blockedUserIds.mockResolvedValue(new Set(['blocked-1']));
+
+      await service.attendees('party', 'viewer-1');
+
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith('viewer-1', [
+        'blocked-1',
+        'ok-1',
+      ]);
+      // The blocked member is gone before the profile hydration step, so no
+      // trace of them can reach the response.
+      expect(profiles.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { userId: expect.anything() as unknown },
+        }),
+      );
+      const [{ where }] = profiles.find.mock.calls[0] as [
+        { where: { userId: { _value: string[] } } },
+      ];
+      expect(where.userId._value).toEqual(['ok-1']);
+    });
+
+    // The `blockFilter` stub deliberately exposes ONLY `blockedUserIds`: if
+    // `attendees` ever reached for a mute-aware helper it would throw here,
+    // which is the assertion. Mutes must not hide people from a guest list.
+    it('consults the block list only, never the mute list', async () => {
+      events.findOne.mockResolvedValue(publishedEvent);
+      rsvps.find.mockResolvedValue([
+        { eventId: 'e1', userId: 'muted-1', status: 'going' },
+      ]);
+
+      await expect(
+        service.attendees('party', 'viewer-1'),
+      ).resolves.toBeDefined();
+      expect(blockFilter.blockedUserIds).toHaveBeenCalled();
+    });
+
+    it('excludes cancelled RSVPs from the block lookup', async () => {
+      events.findOne.mockResolvedValue(publishedEvent);
+      rsvps.find.mockResolvedValue([
+        { eventId: 'e1', userId: 'gone-1', status: 'cancelled' },
+        { eventId: 'e1', userId: 'ok-1', status: 'going' },
+      ]);
+
+      await service.attendees('party', 'viewer-1');
+
+      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith('viewer-1', [
+        'ok-1',
+      ]);
+    });
   });
 
   it('isOrganizer is true for the host', async () => {

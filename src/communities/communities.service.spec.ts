@@ -735,4 +735,285 @@ describe('CommunitiesService', () => {
       expect(members.delete).not.toHaveBeenCalled();
     });
   });
+
+  describe('myCommunities', () => {
+    it('returns a bare, unpaginated array of the caller`s roster rows', async () => {
+      const qb = qbStub();
+      qb.getRawMany.mockResolvedValue([
+        {
+          slug: 'trans-joy',
+          name: 'Trans Joy',
+          role: RosterRole.Mod,
+          joinedAt: new Date('2026-02-02T00:00:00.000Z'),
+        },
+        {
+          slug: 'book-club',
+          name: 'Book Club',
+          role: RosterRole.Member,
+          joinedAt: new Date('2026-01-01T00:00:00.000Z'),
+        },
+      ]);
+      members.createQueryBuilder.mockReturnValue(qb);
+
+      const res = await service.myCommunities('me-1');
+
+      // A plain array — no `items`/`page`/`total` envelope. Paginating this
+      // is the defect the endpoint exists to fix.
+      expect(Array.isArray(res)).toBe(true);
+      expect(res).toEqual([
+        {
+          slug: 'trans-joy',
+          name: 'Trans Joy',
+          role: RosterRole.Mod,
+          joinedAt: '2026-02-02T00:00:00.000Z',
+        },
+        {
+          slug: 'book-club',
+          name: 'Book Club',
+          role: RosterRole.Member,
+          joinedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ]);
+      expect(qb.skip).not.toHaveBeenCalled();
+      expect(qb.take).not.toHaveBeenCalled();
+      expect(qb.where).toHaveBeenCalledWith('m.user_id = :userId', {
+        userId: 'me-1',
+      });
+    });
+
+    it('is sourced from community_members only, so a pending join request is never a membership', async () => {
+      const qb = qbStub();
+      members.createQueryBuilder.mockReturnValue(qb);
+
+      await expect(service.myCommunities('applicant-1')).resolves.toEqual([]);
+
+      // The join-requests table is never consulted: a pending request has no
+      // roster row, so it is excluded structurally rather than by a filter.
+      expect(joinRequests.find).not.toHaveBeenCalled();
+      expect(joinRequests.findOne).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('setMemberRole', () => {
+    const community = { id: 'c1', slug: 'x', ownerId: 'owner-1' };
+
+    // Resolves `memberSlug` -> userId through `MemberLookup.userIdForSlug`,
+    // which runs on the profiles query builder.
+    const resolveSlug = (slug: string, userId: string) => {
+      const qb = qbStub();
+      qb.getMany.mockResolvedValue([{ slug, userId }]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+    };
+
+    beforeEach(() => {
+      communities.findOne.mockResolvedValue(community);
+    });
+
+    it('lets the owner promote a member to mod', async () => {
+      resolveSlug('target-slug', 'target-1');
+      members.findOne
+        .mockResolvedValueOnce({ role: RosterRole.Owner, userId: 'owner-1' }) // actor
+        .mockResolvedValueOnce({
+          id: 'm2',
+          role: RosterRole.Member,
+          userId: 'target-1',
+        }); // target
+
+      const res = await service.setMemberRole(
+        'x',
+        'owner-1',
+        'target-slug',
+        RosterRole.Mod,
+      );
+
+      expect(res).toEqual({
+        slug: 'x',
+        memberSlug: 'target-slug',
+        role: RosterRole.Mod,
+      });
+      expect(members.save).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'm2', role: RosterRole.Mod }),
+      );
+    });
+
+    it('lets a mod promote a plain member to mod', async () => {
+      resolveSlug('target-slug', 'target-1');
+      members.findOne
+        .mockResolvedValueOnce({ role: RosterRole.Mod, userId: 'mod-1' })
+        .mockResolvedValueOnce({
+          id: 'm2',
+          role: RosterRole.Member,
+          userId: 'target-1',
+        });
+
+      await expect(
+        service.setMemberRole('x', 'mod-1', 'target-slug', RosterRole.Mod),
+      ).resolves.toEqual({
+        slug: 'x',
+        memberSlug: 'target-slug',
+        role: RosterRole.Mod,
+      });
+    });
+
+    it('forbids a plain member from changing anyone`s role', async () => {
+      members.findOne.mockResolvedValue({
+        role: RosterRole.Member,
+        userId: 'nobody-1',
+      });
+
+      await expect(
+        service.setMemberRole('x', 'nobody-1', 'target-slug', RosterRole.Mod),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(members.save).not.toHaveBeenCalled();
+      // Authorization runs before the target is resolved, so an unauthorized
+      // caller learns nothing about who is on the roster.
+      expect(profiles.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('forbids a non-member (stranger) from changing anyone`s role', async () => {
+      members.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.setMemberRole('x', 'stranger', 'target-slug', RosterRole.Mod),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(members.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses to demote the owner, even when a mod asks', async () => {
+      resolveSlug('owner-slug', 'owner-1');
+      members.findOne
+        .mockResolvedValueOnce({ role: RosterRole.Mod, userId: 'mod-1' })
+        .mockResolvedValueOnce({
+          id: 'm1',
+          role: RosterRole.Owner,
+          userId: 'owner-1',
+        });
+
+      await expect(
+        service.setMemberRole('x', 'mod-1', 'owner-slug', RosterRole.Member),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(members.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses to demote the owner even when the owner asks (ownership is immutable here)', async () => {
+      resolveSlug('owner-slug', 'owner-1');
+      members.findOne
+        .mockResolvedValueOnce({ role: RosterRole.Owner, userId: 'owner-1' })
+        .mockResolvedValueOnce({
+          id: 'm1',
+          role: RosterRole.Owner,
+          userId: 'owner-1',
+        });
+
+      await expect(
+        service.setMemberRole('x', 'owner-1', 'owner-slug', RosterRole.Member),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(members.save).not.toHaveBeenCalled();
+    });
+
+    it('forbids a mod from demoting a peer mod (only the owner can)', async () => {
+      resolveSlug('peer-slug', 'peer-1');
+      members.findOne
+        .mockResolvedValueOnce({ role: RosterRole.Mod, userId: 'mod-1' })
+        .mockResolvedValueOnce({
+          id: 'm3',
+          role: RosterRole.Mod,
+          userId: 'peer-1',
+        });
+
+      await expect(
+        service.setMemberRole('x', 'mod-1', 'peer-slug', RosterRole.Member),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(members.save).not.toHaveBeenCalled();
+    });
+
+    it('lets the owner demote a mod back to member', async () => {
+      resolveSlug('peer-slug', 'peer-1');
+      members.findOne
+        .mockResolvedValueOnce({ role: RosterRole.Owner, userId: 'owner-1' })
+        .mockResolvedValueOnce({
+          id: 'm3',
+          role: RosterRole.Mod,
+          userId: 'peer-1',
+        });
+
+      await expect(
+        service.setMemberRole('x', 'owner-1', 'peer-slug', RosterRole.Member),
+      ).resolves.toEqual({
+        slug: 'x',
+        memberSlug: 'peer-slug',
+        role: RosterRole.Member,
+      });
+      expect(members.save).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'm3', role: RosterRole.Member }),
+      );
+    });
+
+    it('forbids a mod from changing their own role', async () => {
+      resolveSlug('mod-slug', 'mod-1');
+      members.findOne
+        .mockResolvedValueOnce({ role: RosterRole.Mod, userId: 'mod-1' })
+        .mockResolvedValueOnce({
+          id: 'm2',
+          role: RosterRole.Mod,
+          userId: 'mod-1',
+        });
+
+      await expect(
+        service.setMemberRole('x', 'mod-1', 'mod-slug', RosterRole.Member),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(members.save).not.toHaveBeenCalled();
+    });
+
+    it('404s an unknown member slug, and a member of a different community', async () => {
+      // Unknown slug -> MemberLookup resolves nothing.
+      const emptyQb = qbStub();
+      profiles.createQueryBuilder.mockReturnValue(emptyQb);
+      members.findOne.mockResolvedValue({
+        role: RosterRole.Owner,
+        userId: 'owner-1',
+      });
+      await expect(
+        service.setMemberRole('x', 'owner-1', 'ghost', RosterRole.Mod),
+      ).rejects.toBeInstanceOf(NotFoundException);
+
+      // Known member, but no roster row in *this* community.
+      resolveSlug('elsewhere-slug', 'elsewhere-1');
+      members.findOne
+        .mockResolvedValueOnce({ role: RosterRole.Owner, userId: 'owner-1' })
+        .mockResolvedValueOnce(null);
+      await expect(
+        service.setMemberRole('x', 'owner-1', 'elsewhere-slug', RosterRole.Mod),
+      ).rejects.toBeInstanceOf(NotFoundException);
+
+      expect(members.save).not.toHaveBeenCalled();
+    });
+
+    it('404s an unknown community before any authorization work', async () => {
+      communities.findOne.mockResolvedValue(null);
+      await expect(
+        service.setMemberRole('nope', 'owner-1', 'target-slug', RosterRole.Mod),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('is idempotent: re-promoting an existing mod as the owner writes nothing', async () => {
+      resolveSlug('peer-slug', 'peer-1');
+      members.findOne
+        .mockResolvedValueOnce({ role: RosterRole.Owner, userId: 'owner-1' })
+        .mockResolvedValueOnce({
+          id: 'm3',
+          role: RosterRole.Mod,
+          userId: 'peer-1',
+        });
+
+      await expect(
+        service.setMemberRole('x', 'owner-1', 'peer-slug', RosterRole.Mod),
+      ).resolves.toEqual({
+        slug: 'x',
+        memberSlug: 'peer-slug',
+        role: RosterRole.Mod,
+      });
+      expect(members.save).not.toHaveBeenCalled();
+    });
+  });
 });

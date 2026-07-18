@@ -118,9 +118,15 @@ export class Report {
   })
   status: ReportStatus;
 
+  // Nullable since `AddDeletionErasureSupport1782800700000`: when the reporter
+  // erases their account this is NULLed (FK is `ON DELETE SET NULL`) so the
+  // report itself SURVIVES. Reports a member filed against other people are
+  // moderation history about those people — erasing your own account must not
+  // wipe the evidence trail against everyone you reported. Always non-null at
+  // write time (`ReportsService.create`); only erasure produces a NULL.
   @Index('IDX_reports_reporter_id')
-  @Column({ type: 'uuid' })
-  reporterId: string;
+  @Column({ type: 'uuid', nullable: true })
+  reporterId: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

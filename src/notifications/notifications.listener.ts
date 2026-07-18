@@ -32,12 +32,20 @@ export class NotificationsListener {
     private readonly participants: Repository<ConversationParticipant>,
   ) {}
 
+  // Every `create`/`createForRecipients` call below passes the acting member as
+  // the trailing `actorId` argument so `NotificationsService` can suppress the
+  // notification when that actor is blocked/muted by the recipient (see that
+  // method's doc comment for why this is enforced at write time). The two
+  // system-generated types — `PromotedToMember` and `WaitlistPromoted` — pass
+  // no actor on purpose: they are the platform telling you about your own
+  // status, with no member behind them to filter on.
   @OnEvent(CONNECTION_REQUESTED)
   async onConnectionRequested(e: ConnectionRequestedEvent): Promise<void> {
     await this.notifications.create(
       e.addresseeId,
       NotificationType.ConnectionRequest,
       { connectionId: e.connectionId, fromUserId: e.requesterId },
+      e.requesterId,
     );
     if (e.introducedBy) {
       await this.notifications.create(
@@ -48,6 +56,7 @@ export class NotificationsListener {
           requesterId: e.requesterId,
           addresseeId: e.addresseeId,
         },
+        e.requesterId,
       );
     }
   }
@@ -58,6 +67,7 @@ export class NotificationsListener {
       e.requesterId,
       NotificationType.ConnectionAccepted,
       { connectionId: e.connectionId, byUserId: e.addresseeId },
+      e.addresseeId,
     );
   }
 
@@ -67,6 +77,7 @@ export class NotificationsListener {
       e.voucheeId,
       NotificationType.VouchReceived,
       { voucherId: e.voucherId },
+      e.voucherId,
     );
   }
 
@@ -96,16 +107,18 @@ export class NotificationsListener {
         messageId: e.message.id,
         senderId: e.message.senderId,
       },
+      e.message.senderId,
     );
   }
 
   @OnEvent(EVENT_INVITED)
   async onEventInvited(e: EventInvitedEvent): Promise<void> {
-    await this.notifications.create(e.inviteeId, NotificationType.EventInvite, {
-      eventId: e.eventId,
-      inviteId: e.inviteId,
-      inviterId: e.inviterId,
-    });
+    await this.notifications.create(
+      e.inviteeId,
+      NotificationType.EventInvite,
+      { eventId: e.eventId, inviteId: e.inviteId, inviterId: e.inviterId },
+      e.inviterId,
+    );
   }
 
   @OnEvent(EVENT_WAITLIST_PROMOTED)

@@ -98,11 +98,14 @@ export class AuthController {
     }
 
     const profile = req.user as GoogleUserInput;
-    const { invite, redirect } = state;
+    const { invite, redirect, ageAttested, termsVersion } = state;
 
     let user: User;
     try {
-      user = await this.authService.validateOrCreateGoogleUser(profile, invite);
+      user = await this.authService.validateOrCreateGoogleUser(profile, invite, {
+        ageAttested,
+        termsVersion,
+      });
     } catch (err) {
       if (err instanceof SignupRejectedError) {
         res.redirect(
@@ -203,6 +206,9 @@ export class AuthController {
       email: user.email,
       status: user.status,
       role: user.role,
+      // NULL for accounts created before the 18+ gate shipped — the frontend
+      // contract (AuthUser.ageAttestedAt) already expects a nullable ISO string.
+      ageAttestedAt: user.ageAttestedAt?.toISOString() ?? null,
       profile: user.profile ?? null,
     };
   }

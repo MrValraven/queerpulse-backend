@@ -2,6 +2,7 @@ import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { encodeCursor } from '../common/cursor-pagination';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { ForumPostVote } from './entities/forum-post-vote.entity';
 import { ForumPost } from './entities/forum-post.entity';
@@ -71,6 +72,7 @@ describe('ForumPostsService', () => {
     delete: jest.Mock;
   };
   let profiles: { find: jest.Mock };
+  let blockFilter: { excludeHidden: jest.Mock };
   let threadsService: { loadOr404: jest.Mock; markActivity: jest.Mock };
 
   beforeEach(async () => {
@@ -101,6 +103,7 @@ describe('ForumPostsService', () => {
       loadOr404: jest.fn().mockResolvedValue(baseThread()),
       markActivity: jest.fn().mockResolvedValue(undefined),
     };
+    blockFilter = { excludeHidden: jest.fn((qb: unknown) => qb) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -109,6 +112,7 @@ describe('ForumPostsService', () => {
         { provide: getRepositoryToken(ForumPostVote), useValue: votes },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: ForumThreadsService, useValue: threadsService },
+        { provide: BlockFilterService, useValue: blockFilter },
       ],
     }).compile();
     service = module.get(ForumPostsService);
@@ -133,6 +137,31 @@ describe('ForumPostsService', () => {
       });
       expect(qb.orderBy).toHaveBeenCalledWith('p.createdAt', 'ASC');
       expect(qb.addOrderBy).toHaveBeenCalledWith('p.id', 'ASC');
+    });
+
+    // In-query, not post-query: the keyset LIMIT must count only visible
+    // posts, otherwise a page comes back short (the flaw in
+    // `FeedService.dropBlocked`).
+    it('excludes blocked/muted authors in-query, keyed on the author column', async () => {
+      const qb = qbStub([basePost()]);
+      posts.createQueryBuilder.mockReturnValue(qb);
+
+      await service.listPosts('hello-world', 'viewer-1', undefined, undefined);
+
+      expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
+        qb,
+        'viewer-1',
+        '"p"."author_id"',
+      );
+    });
+
+    it('passes the viewer to the thread lookup so a blocked author 404s', async () => {
+      await service.listPosts('hello-world', 'viewer-1', undefined, undefined);
+
+      expect(threadsService.loadOr404).toHaveBeenCalledWith(
+        'hello-world',
+        'viewer-1',
+      );
     });
 
     it('applies a `>` keyset predicate (ascending) when a cursor is given', async () => {

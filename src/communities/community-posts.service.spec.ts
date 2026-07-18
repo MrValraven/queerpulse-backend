@@ -1,6 +1,7 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { CommunityPostsService } from './community-posts.service';
 import {
@@ -96,6 +97,10 @@ describe('CommunityPostsService', () => {
   };
   let replies: { find: jest.Mock; create: jest.Mock; save: jest.Mock };
   let profiles: { find: jest.Mock };
+  let blockFilter: {
+    excludeHidden: jest.Mock;
+    hiddenUserIds: jest.Mock;
+  };
 
   beforeEach(async () => {
     communities = { findOne: jest.fn().mockResolvedValue(COMMUNITY) };
@@ -130,6 +135,10 @@ describe('CommunityPostsService', () => {
       ),
     };
     profiles = { find: jest.fn().mockResolvedValue([]) };
+    blockFilter = {
+      excludeHidden: jest.fn((qb: unknown) => qb),
+      hiddenUserIds: jest.fn().mockResolvedValue(new Set<string>()),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -143,6 +152,7 @@ describe('CommunityPostsService', () => {
         },
         { provide: getRepositoryToken(CommunityPostReply), useValue: replies },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        { provide: BlockFilterService, useValue: blockFilter },
       ],
     }).compile();
     service = module.get(CommunityPostsService);
@@ -392,6 +402,42 @@ describe('CommunityPostsService', () => {
 
       expect(qb.orderBy).toHaveBeenCalledWith('p.pinned', 'DESC');
       expect(qb.addOrderBy).toHaveBeenCalledWith('p.created_at', 'DESC');
+    });
+
+    // In-query so that both the LIMIT/OFFSET page and `total` count only
+    // visible posts — filtering the fetched rows would report a `total` the
+    // caller can never page through.
+    it('excludes blocked/muted authors in-query, keyed on the author column', async () => {
+      const qb = qbStub();
+      posts.createQueryBuilder.mockReturnValue(qb);
+
+      await service.listPosts('queer-devs', 'u1');
+
+      expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
+        qb,
+        'u1',
+        '"p"."author_id"',
+      );
+    });
+
+    // Replies are a nested, unpaginated collection, so post-query filtering is
+    // safe here — there is no page length to under-fill.
+    it('drops nested replies whose author is blocked or muted', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount.mockResolvedValue([
+        [{ ...POST, id: 'post-id', authorId: 'u1' }],
+        1,
+      ]);
+      posts.createQueryBuilder.mockReturnValue(qb);
+      replies.find.mockResolvedValue([
+        { id: 'r1', postId: 'post-id', authorId: 'blocked-1', text: 'hi' },
+        { id: 'r2', postId: 'post-id', authorId: 'ok-1', text: 'hello' },
+      ]);
+      blockFilter.hiddenUserIds.mockResolvedValue(new Set(['blocked-1']));
+
+      const page = await service.listPosts('queer-devs', 'u1');
+
+      expect(page.items[0].replies.map((r) => r.id)).toEqual(['r2']);
     });
 
     it("404s a private community's feed for a non-member", async () => {

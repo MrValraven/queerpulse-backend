@@ -4,15 +4,12 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, In, QueryFailedError, Repository } from 'typeorm';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
-import { UsersService } from '../users/users.service';
 import { Vouch } from './entities/vouch.entity';
-import { USER_PROMOTED, UserPromotedEvent } from '../users/user.events';
 import { VOUCH_CREATED, VouchCreatedEvent } from './vouch.events';
 
 // Bounds an otherwise-unbounded list read; callers may narrow with limit/offset.
@@ -53,9 +50,7 @@ export class VouchService {
   constructor(
     @InjectRepository(Vouch) private readonly vouches: Repository<Vouch>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
-    private readonly usersService: UsersService,
     private readonly dataSource: DataSource,
-    private readonly config: ConfigService,
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
@@ -85,13 +80,16 @@ export class VouchService {
     const trimmedNote = note?.trim();
     const cleanNote = trimmedNote ? trimmedNote : null;
 
-    const threshold = this.config.get<number>('app.vouchThreshold', 2);
+    // Vouches are a trust/recognition signal ONLY — they no longer gate
+    // membership. The threshold-crossing promotion that used to live here died
+    // with `UserStatus.Pending`: its target was "a pending account reaching N
+    // vouches", and there are no pending accounts. Membership is decided by
+    // invite (or by an admin approving a join request), never by accumulation.
     let vouchCount = 0;
-    let promoted = false;
     await this.dataSource.transaction(async (manager) => {
-      // Take a write lock on the vouchee row first so concurrent vouches for the
-      // same member serialize: without it two racing vouches could each read a
-      // pre-threshold count and both skip promotion. The lock is held to commit.
+      // Take a write lock on the vouchee row first so concurrent vouches for
+      // the same member serialize and `vouchCount` below is read consistently
+      // rather than from a racing snapshot. The lock is held to commit.
       await manager.findOne(User, {
         where: { id: voucheeId },
         lock: { mode: 'pessimistic_write' },
@@ -113,21 +111,11 @@ export class VouchService {
         throw err;
       }
       vouchCount = await manager.count(Vouch, { where: { voucheeId } });
-      if (vouchCount >= threshold) {
-        promoted = await this.usersService.promoteToActive(voucheeId, {
-          manager,
-        });
-      }
     });
     this.eventEmitter.emit(VOUCH_CREATED, {
       voucherId,
       voucheeId,
     } satisfies VouchCreatedEvent);
-    if (promoted) {
-      this.eventEmitter.emit(USER_PROMOTED, {
-        userId: voucheeId,
-      } satisfies UserPromotedEvent);
-    }
     return { vouchCount };
   }
 

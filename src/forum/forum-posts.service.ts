@@ -11,6 +11,7 @@ import {
   encodeCursor,
 } from '../common/cursor-pagination';
 import { MemberLookup } from '../common/member-ref';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { ForumPostVote } from './entities/forum-post-vote.entity';
 import { ForumPost } from './entities/forum-post.entity';
@@ -34,6 +35,7 @@ export class ForumPostsService {
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
     private readonly threadsService: ForumThreadsService,
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   // GET /forum/threads/:slug/posts?cursor= — OP + replies, oldest-first.
@@ -49,11 +51,19 @@ export class ForumPostsService {
     cursor: string | undefined,
     limit: number | undefined,
   ): Promise<CursorPage<ForumPostResponse>> {
-    const thread = await this.threadsService.loadOr404(threadSlug);
+    const thread = await this.threadsService.loadOr404(threadSlug, viewerId);
 
     const qb = this.posts
       .createQueryBuilder('p')
       .where('p.threadId = :threadId', { threadId: thread.id });
+    // Posts by a blocked (either way) or muted author are dropped in-query, so
+    // the keyset page below fills to `limit` with visible posts instead of
+    // coming back short (see `BlockFilterService.excludeHidden`). NB: this can
+    // hide the OP itself when the thread author is only *muted* — a muted
+    // author's thread is still reachable by direct navigation (see
+    // `ForumThreadsService.loadOr404`), but their posts stay silenced, which is
+    // exactly what a mute means.
+    this.blockFilter.excludeHidden(qb, viewerId, '"p"."author_id"');
 
     const { rows, nextCursor, hasMore } = await this.paginateOldestFirst(
       qb,
@@ -75,7 +85,10 @@ export class ForumPostsService {
     authorId: string,
     body: string,
   ): Promise<ForumPostResponse> {
-    const thread = await this.threadsService.loadOr404(threadSlug);
+    // Passing the replier as viewer 404s the thread when its author is blocked
+    // either way — a block is a hard severance, so it has to gate the write
+    // path too, not just the reads above.
+    const thread = await this.threadsService.loadOr404(threadSlug, authorId);
     if (thread.isLocked) {
       throw new ForbiddenException('This thread is locked');
     }

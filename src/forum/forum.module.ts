@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
 import { ForumPostVote } from './entities/forum-post-vote.entity';
 import { ForumPost } from './entities/forum-post.entity';
@@ -16,6 +17,10 @@ import { ForumThreadsService } from './forum-threads.service';
     // `EventsModule`'s import, not `CommunitiesModule`'s redundant
     // `TypeOrmModule.forFeature([..., Profile])`.
     UsersModule,
+    // `BlockFilterService` — thread/post lists exclude blocked-either-way and
+    // muted authors. Plain import, no `forwardRef`: `SocialModule` imports only
+    // `UsersModule` + `ReportsModule`, neither of which reaches `ForumModule`.
+    SocialModule,
   ],
   controllers: [ForumController],
   providers: [ForumThreadsService, ForumPostsService],

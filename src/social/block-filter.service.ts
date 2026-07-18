@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { ObjectLiteral, Repository, SelectQueryBuilder } from 'typeorm';
+import { In, ObjectLiteral, Repository, SelectQueryBuilder } from 'typeorm';
 import { Block } from './entities/block.entity';
 import { Mute } from './entities/mute.entity';
 
@@ -69,5 +69,107 @@ export class BlockFilterService {
       )`,
       { blockFilterActorId: actorId },
     );
+  }
+
+  /**
+   * Directional sibling of `excludeBlocked`: appends a `NOT EXISTS` predicate
+   * dropping rows whose member column `actorId` has muted. Same raw-SQL
+   * splicing contract as `excludeBlocked` — pass an already-quoted
+   * `"alias"."snake_case_column"`. Binds its own parameter name
+   * (`muteFilterActorId`), so a single query builder can safely carry both
+   * this and `excludeBlocked`; like that method, call it at most once per
+   * query builder.
+   *
+   * Content lists generally want BOTH (a block hides bidirectionally, a mute
+   * one-directionally) — see `excludeHidden`, which applies the pair.
+   */
+  excludeMuted<E extends ObjectLiteral>(
+    qb: SelectQueryBuilder<E>,
+    actorId: string,
+    memberIdColumn: string,
+  ): SelectQueryBuilder<E> {
+    return qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "mutes" "__mute_filter"
+        WHERE "__mute_filter"."muter_id" = :muteFilterActorId
+          AND "__mute_filter"."muted_id" = ${memberIdColumn}
+      )`,
+      { muteFilterActorId: actorId },
+    );
+  }
+
+  /**
+   * The composition every *content list* should use: hide authors blocked in
+   * either direction (hard severance) and authors `actorId` has muted (soft,
+   * one-way silence — `isMutedBy`'s docstring: a muted author's content is
+   * "hidden from feeds/lists"). This is the in-query equivalent of
+   * `FeedService.dropBlocked`, and is preferred over it: filtering inside the
+   * query lets `LIMIT` count only visible rows, so a page of 20 comes back
+   * with 20 items instead of being silently short (the known flaw of
+   * post-query filtering).
+   */
+  excludeHidden<E extends ObjectLiteral>(
+    qb: SelectQueryBuilder<E>,
+    actorId: string,
+    memberIdColumn: string,
+  ): SelectQueryBuilder<E> {
+    this.excludeBlocked(qb, actorId, memberIdColumn);
+    return this.excludeMuted(qb, actorId, memberIdColumn);
+  }
+
+  /**
+   * Batched set lookup for collections that are **not** paginated in SQL —
+   * nested replies, attendee lists — where the in-query `excludeHidden`
+   * predicate has nowhere to attach and post-query filtering carries no
+   * short-page penalty (there is no `LIMIT` to under-fill).
+   *
+   * Two queries total regardless of `candidateIds` length, unlike
+   * `FeedService.dropBlocked`'s per-author `exist()` calls. `actorId` is never
+   * reported as hidden from itself.
+   */
+  async blockedUserIds(
+    actorId: string,
+    candidateIds: string[],
+  ): Promise<Set<string>> {
+    const ids = [...new Set(candidateIds)].filter((id) => id !== actorId);
+    if (!ids.length) return new Set();
+    const rows = await this.blocks.find({
+      where: [
+        { blockerId: actorId, blockedId: In(ids) },
+        { blockedId: actorId, blockerId: In(ids) },
+      ],
+      select: { blockerId: true, blockedId: true },
+    });
+    return new Set(
+      rows.map((r) => (r.blockerId === actorId ? r.blockedId : r.blockerId)),
+    );
+  }
+
+  /** One-way companion to `blockedUserIds`: the subset `actorId` has muted. */
+  async mutedUserIds(
+    actorId: string,
+    candidateIds: string[],
+  ): Promise<Set<string>> {
+    const ids = [...new Set(candidateIds)].filter((id) => id !== actorId);
+    if (!ids.length) return new Set();
+    const rows = await this.mutes.find({
+      where: { muterId: actorId, mutedId: In(ids) },
+      select: { mutedId: true },
+    });
+    return new Set(rows.map((r) => r.mutedId));
+  }
+
+  /** Union of `blockedUserIds` and `mutedUserIds` — the post-query analogue
+   *  of `excludeHidden`, for non-paginated collections. */
+  async hiddenUserIds(
+    actorId: string,
+    candidateIds: string[],
+  ): Promise<Set<string>> {
+    const [blocked, muted] = await Promise.all([
+      this.blockedUserIds(actorId, candidateIds),
+      this.mutedUserIds(actorId, candidateIds),
+    ]);
+    for (const id of muted) blocked.add(id);
+    return blocked;
   }
 }

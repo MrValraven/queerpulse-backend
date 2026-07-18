@@ -32,13 +32,21 @@ export class ForumController {
   ) {}
 
   @Get('threads')
-  listThreads(@Query() query: ListThreadsQuery) {
-    return this.threadsService.list(query.category, query.cursor, query.limit);
+  listThreads(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: ListThreadsQuery,
+  ) {
+    return this.threadsService.list(
+      user.userId,
+      query.category,
+      query.cursor,
+      query.limit,
+    );
   }
 
   @Get('threads/:slug')
-  getThread(@Param('slug') slug: string) {
-    return this.threadsService.getBySlug(slug);
+  getThread(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
+    return this.threadsService.getBySlug(slug, user.userId);
   }
 
   @Get('threads/:slug/posts')

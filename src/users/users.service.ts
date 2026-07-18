@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, QueryFailedError, Repository } from 'typeorm';
 import { Profile } from './entities/profile.entity';
@@ -49,46 +49,28 @@ export class UsersService {
     return this.usersRepo.count({ where: { status: UserStatus.Active } });
   }
 
-  async promoteToActive(
-    userId: string,
-    opts?: { invitedBy?: string; manager?: EntityManager },
-  ): Promise<boolean> {
-    // Run against the caller's transaction manager when provided so promotion
-    // can be atomic with the action that triggered it (e.g. invite acceptance).
-    const repo = opts?.manager
-      ? opts.manager.getRepository(User)
-      : this.usersRepo;
-    const user = await repo.findOne({ where: { id: userId } });
-    if (!user) {
-      throw new NotFoundException('User not found');
-    }
-    // One-way + idempotent: only pending accounts are promoted. Active stays
-    // active; suspended is never auto-revived.
-    if (user.status !== UserStatus.Pending) {
-      return false;
-    }
-    user.status = UserStatus.Active;
-    user.activatedAt = new Date();
-    if (opts?.invitedBy) {
-      user.invitedBy = { id: opts.invitedBy } as User;
-    }
-    await repo.save(user);
-    return true;
-  }
+  // NOTE: `promoteToActive` used to live here. It has been removed along with
+  // `UserStatus.Pending` — with no pending state there is nothing to promote
+  // FROM. A member is created `Active` in a single step by `createGoogleUser`
+  // once their invite validates at sign-up.
 
   async createGoogleUser(
     manager: EntityManager,
     input: CreateGoogleUserInput & {
       status?: UserStatus;
       invitedBy?: string | null;
+      ageAttestedAt?: Date | null;
+      termsVersion?: string | null;
     },
   ): Promise<User> {
-    const status = input.status ?? UserStatus.Pending;
+    const status = input.status ?? UserStatus.Active;
     const user = manager.create(User, {
       googleId: input.googleId,
       email: input.email,
       status,
       activatedAt: status === UserStatus.Active ? new Date() : null,
+      ageAttestedAt: input.ageAttestedAt ?? null,
+      termsVersion: input.termsVersion ?? null,
       ...(input.invitedBy
         ? { invitedBy: { id: input.invitedBy } as User }
         : {}),

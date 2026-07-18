@@ -101,7 +101,13 @@ export function toModReportDTO(
 export interface AuditEntryDTO {
   id: string;
   reportId: string;
-  actorId: string;
+  /**
+   * `null` once the acting moderator has erased their account — the log entry
+   * survives them (see `ModAuditLog.actorId`). `actorName` is then
+   * 'Deleted member'. NOTE: the frontend's `moderation.api.ts` still types this
+   * `string`; it needs widening to `string | null` to match.
+   */
+  actorId: string | null;
   actorName: string;
   action: string;
   reasonCode?: string;

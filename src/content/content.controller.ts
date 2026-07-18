@@ -6,6 +6,10 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { ContentPagesService } from './content-pages.service';
@@ -68,8 +72,20 @@ export class TopicsController {
     return this.topicsService.getBySlug(slug);
   }
 
+  // Needs the viewer: the post feed is block/mute filtered per-viewer (see
+  // `TopicsService.listPosts`). The two routes above are viewer-independent —
+  // topic meta carries no author — so they stay unparameterized.
   @Get(':slug/posts')
-  listPosts(@Param('slug') slug: string, @Query() query: ListTopicPostsQuery) {
-    return this.topicsService.listPosts(slug, query.cursor, query.limit);
+  listPosts(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Query() query: ListTopicPostsQuery,
+  ) {
+    return this.topicsService.listPosts(
+      slug,
+      user.userId,
+      query.cursor,
+      query.limit,
+    );
   }
 }

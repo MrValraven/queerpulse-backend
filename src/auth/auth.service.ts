@@ -13,6 +13,15 @@ import {
   UserSessionRevokedEvent,
 } from '../chat/session.events';
 import { InvitesService } from '../membership/invites.service';
+import {
+  EmailSuppression,
+  hashSuppressedEmail,
+} from '../account/entities/email-suppression.entity';
+import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
+import {
+  DeletionRequest,
+  DeletionRequestStatus,
+} from '../account/entities/deletion-request.entity';
 import { SignupRejectedError } from './errors/signup-rejected.error';
 import { RefreshToken } from './entities/refresh-token.entity';
 
@@ -42,19 +51,58 @@ export class AuthService {
     private readonly dataSource: DataSource,
     private readonly invitesService: InvitesService,
     private readonly eventEmitter: EventEmitter2,
+    @InjectRepository(EmailSuppression)
+    private readonly emailSuppressions: Repository<EmailSuppression>,
+    // Both read-only here, for the reactivate-on-sign-in path. Registered as
+    // repositories for the same reason `EmailSuppression` is (see above):
+    // injecting `AccountService` would create an AuthModule <-> AccountModule
+    // cycle, since AccountModule already depends on AuthModule's entities.
+    @InjectRepository(AccountDeactivation)
+    private readonly deactivations: Repository<AccountDeactivation>,
+    @InjectRepository(DeletionRequest)
+    private readonly deletionRequests: Repository<DeletionRequest>,
   ) {}
+
+  // The suppression list is a plain lookup table with no service of its own,
+  // and `AccountModule` already imports `AuthModule`'s entity the same way —
+  // so this reads the repository directly rather than creating a module cycle
+  // by injecting an account-module service here.
+  private async isEmailSuppressed(email: string): Promise<boolean> {
+    const hit = await this.emailSuppressions.findOne({
+      where: { emailHash: hashSuppressedEmail(email) },
+    });
+    return hit !== null;
+  }
 
   async validateOrCreateGoogleUser(
     profile: GoogleUserInput,
     inviteCode?: string,
+    attestation?: { ageAttested?: boolean; termsVersion?: string },
   ): Promise<User> {
     const existing = await this.usersService.findByGoogleId(profile.googleId);
     if (existing) {
-      return existing; // returning member — invite not required
+      // Returning member — invite not required. May also be coming back from a
+      // deactivation, which signing in is the documented way to undo.
+      return this.reactivateIfDeactivated(existing);
     }
     if (!inviteCode) {
       throw new SignupRejectedError('invite_required');
     }
+    // Erasure suppression list. Checked on the NEW-account path only: the
+    // `existing` short-circuit above already returned, so a member who still
+    // has an account is never affected. Without this, a member who exercised
+    // their right to erasure and then signed in with the same Google account
+    // would silently get a brand-new account — exactly the "accidentally
+    // re-create your account" outcome the delete-account UI promises against.
+    if (await this.isEmailSuppressed(profile.email)) {
+      throw new SignupRejectedError('account_suppressed');
+    }
+    // 18+ gate (Terms §eligibility). New accounts only: existing members
+    // predate the gate and must not be locked out of their own accounts.
+    if (!attestation?.ageAttested) {
+      throw new SignupRejectedError('age_attestation_required');
+    }
+    const attestedAt = new Date();
 
     const user = await this.dataSource.transaction(async (manager) => {
       const { inviteId, inviterId } =
@@ -71,6 +119,8 @@ export class AuthService {
         avatarUrl: profile.avatarUrl ?? null,
         status: UserStatus.Active,
         invitedBy: inviterId,
+        ageAttestedAt: attestedAt,
+        termsVersion: attestation.termsVersion ?? null,
       });
       await this.invitesService.claimInvite(manager, inviteId, created.id);
       return created;
@@ -82,6 +132,84 @@ export class AuthService {
       userId: user.id,
     } satisfies UserPromotedEvent);
 
+    return user;
+  }
+
+  /**
+   * "Reactivate by signing back in with Google" — the promise the deactivation
+   * UI makes. Undoes a member-initiated pause on the returning-member path.
+   *
+   * 🔴 The critical distinction this method enforces: **a member in the 30-day
+   * deletion grace period is NOT reactivated by signing in.** Both states share
+   * `users.status = Deactivated`, but they mean opposite things. Deactivation
+   * is "pause me, let me back whenever"; a deletion request is a standing
+   * instruction to erase everything, revocable only by an explicit, deliberate
+   * `DELETE /account/deletion-request` (reachable precisely because the account
+   * controller has no `ActiveMemberGuard`). Silently cancelling an erasure
+   * because someone opened the app once would be very wrong — and it is a
+   * realistic accident, since signing in is exactly how a member checks how
+   * many days they have left.
+   *
+   * So an open grace/processing request wins over an open deactivation row,
+   * including in the both-rows case (deactivated first, then asked to be
+   * erased). Such a member stays hidden and stays scheduled for erasure; they
+   * come back by cancelling the deletion, and `cancelDeletionRequest` then
+   * leaves them deactivated if that is what they separately asked for.
+   */
+  private async reactivateIfDeactivated(user: User): Promise<User> {
+    if (user.status !== UserStatus.Deactivated) {
+      return user;
+    }
+
+    // Erasure pending → hands off. Note `Processing` too: the sweep has already
+    // claimed the row and is mid-erasure, which is even less reversible.
+    const pendingDeletion = await this.deletionRequests.findOne({
+      where: [
+        { userId: user.id, status: DeletionRequestStatus.Grace },
+        { userId: user.id, status: DeletionRequestStatus.Processing },
+      ],
+    });
+    if (pendingDeletion) {
+      return user;
+    }
+
+    const open = await this.deactivations.findOne({
+      where: { userId: user.id, reactivatedAt: IsNull() },
+    });
+    if (!open) {
+      // `Deactivated` with no open ledger row: we have no recorded status to
+      // restore and no evidence the member asked for this. Guessing `Active`
+      // here would be a privilege grant, so leave it for a human.
+      this.logger.warn(
+        `User ${user.id} is deactivated with no open deactivation row; not auto-reactivating`,
+      );
+      return user;
+    }
+
+    // Restore what they had — NOT a hardcoded `Active`. A suspended member who
+    // deactivated comes back suspended; deactivation is not a way to launder a
+    // moderation action.
+    const restored = open.previousStatus ?? UserStatus.Active;
+    await this.dataSource.transaction(async (manager) => {
+      // Conditional claim on both writes (the `invites.service` idiom): two
+      // concurrent sign-ins reactivate exactly once.
+      await manager.update(
+        AccountDeactivation,
+        { id: open.id, reactivatedAt: IsNull() },
+        { reactivatedAt: new Date() },
+      );
+      await manager.update(
+        User,
+        { id: user.id, status: UserStatus.Deactivated },
+        { status: restored },
+      );
+    });
+    this.logger.log(`Reactivated user ${user.id} on sign-in (-> ${restored})`);
+
+    // Keep the in-memory entity consistent — the caller mints an access token
+    // from it, and a stale `deactivated` claim would put the member straight
+    // back into a 403 on their first request.
+    user.status = restored;
     return user;
   }
 

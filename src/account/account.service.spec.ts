@@ -5,7 +5,11 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { DataSource } from 'typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
+import { AccountExportService } from './account-export.service';
 import { AccountService, DEFAULT_EMAIL_PREFERENCES } from './account.service';
 import { AccountDeactivation } from './entities/account-deactivation.entity';
 import { AccountReauthToken } from './entities/account-reauth-token.entity';
@@ -32,12 +36,19 @@ describe('AccountService', () => {
   };
   let reauthTokens: { save: jest.Mock; findOne: jest.Mock };
   let deactivations: { findOne: jest.Mock; save: jest.Mock };
+  let exportService: { build: jest.Mock };
   let refreshTokens: {
     find: jest.Mock;
     findOne: jest.Mock;
     save: jest.Mock;
     update: jest.Mock;
   };
+  // Stand-in for the `users` row the deactivation/deletion transactions read
+  // and update. Tests set `users.u1.status` to drive the status a flow must
+  // preserve, then assert on it after the call.
+  let users: Record<string, { id: string; status: UserStatus }>;
+  let dataSource: { transaction: jest.Mock };
+  let events: { emit: jest.Mock };
 
   const now = new Date('2026-07-15T12:00:00.000Z');
 
@@ -85,11 +96,87 @@ describe('AccountService', () => {
         Promise.resolve({ id: 'deact-1', ...v }),
       ),
     };
+    // The archive builder is exercised by its own suite; here it only has to
+    // resolve so `AccountService` can be constructed.
+    exportService = {
+      build: jest
+        .fn()
+        .mockResolvedValue({ manifest: { schemaVersion: '1.0' } }),
+    };
     refreshTokens = {
       find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue(null),
       save: jest.fn((v: Partial<RefreshToken>) => Promise.resolve(v)),
       update: jest.fn().mockResolvedValue(undefined),
+    };
+
+    users = { u1: { id: 'u1', status: UserStatus.Active } };
+
+    // Deactivation/deletion must drop live sockets too — the access token still
+    // carries `status: 'active'` until it expires, so the gateway needs telling.
+    events = { emit: jest.fn() };
+
+    // `dataSource.transaction(cb)` runs the callback immediately against a
+    // fake EntityManager that routes by entity class onto the same repository
+    // mocks the rest of this suite asserts against — so a test can keep
+    // checking `deactivations.save(...)` while the service does its writes
+    // through a manager.
+    type Where = Record<string, unknown>;
+    const manager = {
+      findOne: jest.fn(
+        (
+          entity: unknown,
+          options: { where: Where | Where[] },
+        ): Promise<unknown> => {
+          const where = Array.isArray(options.where)
+            ? options.where[0]
+            : options.where;
+          if (entity === User) {
+            return Promise.resolve(users[where.id as string] ?? null);
+          }
+          if (entity === AccountDeactivation) {
+            return deactivations.findOne(options) as Promise<unknown>;
+          }
+          if (entity === DeletionRequest) {
+            return deletionRequests.findOne(options) as Promise<unknown>;
+          }
+          throw new Error('unexpected entity in manager.findOne');
+        },
+      ),
+      save: jest.fn((entity: unknown, value: unknown): Promise<unknown> => {
+        if (entity === AccountDeactivation) {
+          return deactivations.save(value) as Promise<unknown>;
+        }
+        if (entity === DeletionRequest) {
+          return deletionRequests.save(value) as Promise<unknown>;
+        }
+        throw new Error('unexpected entity in manager.save');
+      }),
+      update: jest.fn(
+        (
+          entity: unknown,
+          criteria: { id: string; status?: UserStatus },
+          patch: { status: UserStatus },
+        ) => {
+          if (entity !== User) {
+            return Promise.resolve({ affected: 1 });
+          }
+          const row = users[criteria.id];
+          // Mirror the real conditional-claim semantics: an `update` with a
+          // `status` in the criteria only applies when it still matches.
+          if (
+            row &&
+            (criteria.status === undefined || row.status === criteria.status)
+          ) {
+            row.status = patch.status;
+            return Promise.resolve({ affected: 1 });
+          }
+          return Promise.resolve({ affected: 0 });
+        },
+      ),
+    };
+    dataSource = {
+      transaction: jest.fn((cb: (m: typeof manager) => unknown) => cb(manager)),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -114,6 +201,9 @@ describe('AccountService', () => {
           useValue: deactivations,
         },
         { provide: getRepositoryToken(RefreshToken), useValue: refreshTokens },
+        { provide: AccountExportService, useValue: exportService },
+        { provide: DataSource, useValue: dataSource },
+        { provide: EventEmitter2, useValue: events },
       ],
     }).compile();
 
@@ -223,14 +313,73 @@ describe('AccountService', () => {
         id: 'del-1',
         userId: 'u1',
         status: DeletionRequestStatus.Grace,
+        previousStatus: UserStatus.Active,
       };
       deletionRequests.findOne.mockResolvedValue(row);
+      users.u1.status = UserStatus.Deactivated;
 
       await service.cancelDeletionRequest('u1');
 
       expect(deletionRequests.save).toHaveBeenCalledWith(
         expect.objectContaining({ status: DeletionRequestStatus.Cancelled }),
       );
+    });
+
+    it('requestDeletion hides the member by setting status Deactivated', async () => {
+      reauthTokens.findOne.mockResolvedValue({
+        userId: 'u1',
+        token: 'tok',
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      deletionRequests.findOne.mockResolvedValue(null);
+      deactivations.findOne.mockResolvedValue(null);
+
+      await service.requestDeletion('u1', { reauthToken: 'tok' });
+
+      // The whole point: "everything is hidden now" is now true.
+      expect(users.u1.status).toBe(UserStatus.Deactivated);
+      expect(deletionRequests.save).toHaveBeenCalledWith(
+        expect.objectContaining({ previousStatus: UserStatus.Active }),
+      );
+    });
+
+    it('cancelDeletionRequest restores the recorded status, not a hardcoded Active', async () => {
+      // 🔴 A suspended member must not launder their suspension by opening a
+      // deletion request and immediately cancelling it.
+      deletionRequests.findOne.mockResolvedValue({
+        id: 'del-1',
+        userId: 'u1',
+        status: DeletionRequestStatus.Grace,
+        previousStatus: UserStatus.Suspended,
+      });
+      deactivations.findOne.mockResolvedValue(null);
+      users.u1.status = UserStatus.Deactivated;
+
+      await service.cancelDeletionRequest('u1');
+
+      expect(users.u1.status).toBe(UserStatus.Suspended);
+    });
+
+    it('cancelDeletionRequest leaves a separately-deactivated member hidden', async () => {
+      deletionRequests.findOne.mockResolvedValue({
+        id: 'del-1',
+        userId: 'u1',
+        status: DeletionRequestStatus.Grace,
+        previousStatus: UserStatus.Active,
+      });
+      // They paused their account first, then asked to be erased. Cancelling
+      // the erasure cancels only the erasure.
+      deactivations.findOne.mockResolvedValue({
+        id: 'deact-1',
+        userId: 'u1',
+        reactivatedAt: null,
+        previousStatus: UserStatus.Active,
+      });
+      users.u1.status = UserStatus.Deactivated;
+
+      await service.cancelDeletionRequest('u1');
+
+      expect(users.u1.status).toBe(UserStatus.Deactivated);
     });
   });
 
@@ -255,14 +404,74 @@ describe('AccountService', () => {
         expect.objectContaining({ userId: 'u1' }),
       );
       expect(refreshTokens.update).toHaveBeenCalled();
+      // The row alone hid nobody before — the status change is what does it.
+      expect(users.u1.status).toBe(UserStatus.Deactivated);
+      // Revoking refresh tokens does NOT close a live socket: the access token
+      // still carries `status: 'active'` for up to its 15m TTL, and the chat
+      // gateway reads status off the claims without hitting the DB. Without
+      // this event the member stays online, and visible in presence, while
+      // every HTTP route already rejects them.
+      expect(events.emit).toHaveBeenCalledWith('user.session.revoked', {
+        userId: 'u1',
+      });
+    });
+
+    it('records the prior status so reactivation can restore it', async () => {
+      reauthTokens.findOne.mockResolvedValue({
+        userId: 'u1',
+        token: 'tok',
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      // 🔴 A suspended member is allowed to deactivate — deactivation is
+      // strictly more restrictive than suspension, so it grants them nothing.
+      // What must not happen is coming back as Active.
+      users.u1.status = UserStatus.Suspended;
+
+      await service.deactivate('u1', { reauthToken: 'tok' });
+
+      expect(deactivations.save).toHaveBeenCalledWith(
+        expect.objectContaining({ previousStatus: UserStatus.Suspended }),
+      );
+      expect(users.u1.status).toBe(UserStatus.Deactivated);
+    });
+
+    it('never records Deactivated as the status to restore to', async () => {
+      reauthTokens.findOne.mockResolvedValue({
+        userId: 'u1',
+        token: 'tok',
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      // Already deactivated (a repeat call). Reading `users.status` naively
+      // here would overwrite the real prior status with `deactivated` and
+      // strand the member.
+      users.u1.status = UserStatus.Deactivated;
+      deactivations.findOne.mockResolvedValue({
+        id: 'deact-1',
+        userId: 'u1',
+        reactivatedAt: null,
+        previousStatus: UserStatus.Suspended,
+      });
+
+      await service.deactivate('u1', { reauthToken: 'tok' });
+
+      expect(deactivations.save).toHaveBeenCalledWith(
+        expect.objectContaining({ previousStatus: UserStatus.Suspended }),
+      );
     });
   });
 
   describe('export', () => {
     it('requestExport creates an already-ready job and returns the envelope with requestedAt', async () => {
+      reauthTokens.findOne.mockResolvedValue({
+        userId: 'u1',
+        token: 'tok',
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+
       const result = await service.requestExport('u1', {
         categories: ['profile'],
         format: 'json',
+        reauthToken: 'tok',
       });
       expect(result.status).toBe('ready');
       expect(result.jobId).toBe('job-1');
@@ -274,6 +483,35 @@ describe('AccountService', () => {
       expect(exportJobs.save).toHaveBeenCalledWith(
         expect.objectContaining({ userId: 'u1', status: 'ready' }),
       );
+    });
+
+    it('requestExport rejects a missing or stale step-up token and builds nothing', async () => {
+      // No matching row — a bogus or already-consumed token.
+      reauthTokens.findOne.mockResolvedValue(null);
+      await expect(
+        service.requestExport('u1', {
+          categories: ['profile'],
+          format: 'json',
+          reauthToken: 'bogus',
+        }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+
+      // An expired token is equally refused.
+      reauthTokens.findOne.mockResolvedValue({
+        userId: 'u1',
+        token: 'tok',
+        expiresAt: new Date(Date.now() - 1_000),
+      });
+      await expect(
+        service.requestExport('u1', {
+          categories: ['profile'],
+          format: 'json',
+          reauthToken: 'tok',
+        }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+
+      // The archive must never be assembled for an unauthenticated caller.
+      expect(exportJobs.save).not.toHaveBeenCalled();
     });
 
     it('getExportJob 404s for an unknown/foreign job', async () => {

@@ -8,6 +8,7 @@ import { DataSource, Repository } from 'typeorm';
 import { CursorPage, cursorPaginate } from '../common/cursor-pagination';
 import { MemberLookup } from '../common/member-ref';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
@@ -37,15 +38,23 @@ export class ForumThreadsService {
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
     private readonly dataSource: DataSource,
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   // GET /forum/threads?category=&cursor= — newest-first cursor page.
   async list(
+    viewerId: string,
     category: string | undefined,
     cursor: string | undefined,
     limit: number | undefined,
   ): Promise<CursorPage<ForumThreadResponse>> {
     const qb = this.threads.createQueryBuilder('t');
+    // Threads by a member blocked either way, or one the viewer has muted,
+    // never enter the page (spec §2). Applied to the query rather than to the
+    // fetched rows so `cursorPaginate`'s `LIMIT` counts only visible threads —
+    // post-query filtering (`FeedService.dropBlocked`) returns short pages.
+    // `t`'s author column is `author_id` under `SnakeNamingStrategy`.
+    this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
     if (category) {
       qb.andWhere('t.category = :category', { category });
     }
@@ -64,8 +73,11 @@ export class ForumThreadsService {
   }
 
   // GET /forum/threads/:slug
-  async getBySlug(slug: string): Promise<ForumThreadResponse> {
-    const thread = await this.loadOr404(slug);
+  async getBySlug(
+    slug: string,
+    viewerId: string,
+  ): Promise<ForumThreadResponse> {
+    const thread = await this.loadOr404(slug, viewerId);
     const authors = await new MemberLookup(this.profiles).byUserIds([
       thread.authorId,
     ]);
@@ -85,10 +97,28 @@ export class ForumThreadsService {
     return toForumThreadResponse(thread, authors.get(authorId) ?? null);
   }
 
-  /** Shared with `ForumPostsService` — 404s a thread lookup by slug. */
-  async loadOr404(slug: string): Promise<ForumThread> {
+  /**
+   * Shared with `ForumPostsService` — 404s a thread lookup by slug.
+   *
+   * When `viewerId` is supplied, a thread whose author is blocked in either
+   * direction is also 404 — the same "don't leak existence" shape
+   * `CommunityPostsService.assertViewable` uses for private communities, so a
+   * blocked author's thread can't be reached by guessing its slug either.
+   *
+   * Deliberately checks blocks only, not mutes: a mute is a soft silence that
+   * keeps content out of feeds and lists (see `BlockFilterService.isMutedBy`),
+   * not a hard severance — a muted member's thread stays reachable if the
+   * viewer navigates to it directly.
+   */
+  async loadOr404(slug: string, viewerId?: string): Promise<ForumThread> {
     const thread = await this.threads.findOne({ where: { slug } });
     if (!thread) {
+      throw new NotFoundException('Thread not found');
+    }
+    if (
+      viewerId &&
+      (await this.blockFilter.isBlockedEitherWay(viewerId, thread.authorId))
+    ) {
       throw new NotFoundException('Thread not found');
     }
     return thread;

@@ -21,7 +21,7 @@ describe('UsersService', () => {
   });
 
   it('findByGoogleId delegates to the repository', async () => {
-    const user = { id: 'u1', status: UserStatus.Pending } as User;
+    const user = { id: 'u1', status: UserStatus.Active } as User;
     usersRepo.findOne.mockResolvedValue(user);
     await expect(service.findByGoogleId('g-123')).resolves.toBe(user);
     expect(usersRepo.findOne).toHaveBeenCalledWith({
@@ -34,43 +34,9 @@ describe('UsersService', () => {
     expect(service.slugify('Tomás Mendes!')).toBe('tomas-mendes');
   });
 
-  describe('promoteToActive', () => {
-    it('promotes a pending user and returns true', async () => {
-      const user = { id: 'u1', status: UserStatus.Pending } as User;
-      usersRepo.findOne.mockResolvedValue(user);
-      usersRepo.save = jest.fn().mockResolvedValue(user);
-
-      await expect(service.promoteToActive('u1')).resolves.toBe(true);
-      expect(usersRepo.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          status: UserStatus.Active,
-          activatedAt: expect.any(Date),
-        }),
-      );
-    });
-
-    it('is idempotent: returns false for an already-active user', async () => {
-      usersRepo.findOne.mockResolvedValue({
-        id: 'u1',
-        status: UserStatus.Active,
-      });
-      usersRepo.save = jest.fn();
-      await expect(service.promoteToActive('u1')).resolves.toBe(false);
-      expect(usersRepo.save).not.toHaveBeenCalled();
-    });
-
-    it('sets invitedBy when provided', async () => {
-      usersRepo.findOne.mockResolvedValue({
-        id: 'u1',
-        status: UserStatus.Pending,
-      });
-      usersRepo.save = jest.fn().mockImplementation(async (u) => u);
-      await service.promoteToActive('u1', { invitedBy: 'inviter-1' });
-      expect(usersRepo.save).toHaveBeenCalledWith(
-        expect.objectContaining({ invitedBy: { id: 'inviter-1' } }),
-      );
-    });
-  });
+  // `promoteToActive` was removed with `UserStatus.Pending` — there is no
+  // pending state to promote out of. Membership is granted at creation time
+  // (see the createGoogleUser suite below), never as a later transition.
 
   describe('createGoogleUser', () => {
     it('creates an Active member with invitedBy + activatedAt on the given manager', async () => {

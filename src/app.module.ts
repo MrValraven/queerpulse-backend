@@ -33,6 +33,7 @@ import { CultureModule } from './culture/culture.module';
 import { GovernanceModule } from './governance/governance.module';
 import { EventsModule } from './events/events.module';
 import { JobsModule } from './jobs/jobs.module';
+import { WorkshopsModule } from './workshops/workshops.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PartnersModule } from './partners/partners.module';
 import { StorageModule } from './storage/storage.module';
@@ -47,6 +48,7 @@ import { ModerationModule } from './moderation/moderation.module';
 import { AccountModule } from './account/account.module';
 import { ConsentModule } from './consent/consent.module';
 import { SavedModule } from './saved/saved.module';
+import { PreferencesModule } from './preferences/preferences.module';
 import { DraftsModule } from './drafts/drafts.module';
 import { RecognitionModule } from './recognition/recognition.module';
 import { AffiliationModule } from './affiliation/affiliation.module';
@@ -154,6 +156,7 @@ import { LaunchedFeaturesGuard } from './common/launched-features.guard';
     CommunitiesModule,
     CompaniesModule,
     JobsModule,
+    WorkshopsModule,
     PartnersModule,
     VolunteeringModule,
     NotificationsModule,
@@ -167,6 +170,7 @@ import { LaunchedFeaturesGuard } from './common/launched-features.guard';
     AccountModule,
     ConsentModule,
     SavedModule,
+    PreferencesModule,
     DraftsModule,
     RecognitionModule,
     AffiliationModule,

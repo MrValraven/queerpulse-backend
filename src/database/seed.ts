@@ -135,20 +135,13 @@ const MEMBERS: Array<{
       { kind: 'custom', label: 'Hiring' },
     ],
   },
-  {
-    googleId: 'seed-pending',
-    email: 'pending@example.com',
-    status: UserStatus.Pending,
-    slug: 'sam-pending',
-    firstName: 'Sam',
-    lastName: 'Costa',
-    pronouns: 'she/they',
-    tagline: 'New here',
-    location: 'Lisbon',
-    visibility: ProfileVisibility.Open,
-    tags: [],
-    openTo: [],
-  },
+  // NOTE: the `seed-pending` / `sam-pending` fixture that used to sit here has
+  // been removed. `UserStatus.Pending` no longer exists — a person who is not a
+  // member has no `users` row at all, only a `join_requests` row. This seed was
+  // the last writer of that status anywhere in the codebase. Nothing referenced
+  // the slug (no community roster, reaction, or reply), so it is dropped rather
+  // than converted. To exercise the admin queue locally, POST to the now-public
+  // `/join-requests` instead.
 ];
 
 // Representative communities for local frontend integration, owned by the

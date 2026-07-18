@@ -99,6 +99,28 @@ export interface RosterEntryDTO {
   joinedAt: string;
 }
 
+/**
+ * One row of `GET /me/communities` — the caller's own membership in a
+ * community, flattened to just what a membership *map* needs (slug -> role).
+ * Deliberately not a `CommunityCardDTO`: this endpoint is a membership index,
+ * not a listing, so it carries no stats and no `myRole` (the `role` here *is*
+ * the caller's role).
+ */
+export interface MyCommunityDTO {
+  slug: string;
+  name: string;
+  role: RosterRole;
+  joinedAt: string;
+}
+
+/** Result of a role change on `PATCH /communities/:slug/members/:memberSlug`.
+ * `slug` is the community, `memberSlug` the member whose role changed. */
+export interface MemberRoleDTO {
+  slug: string;
+  memberSlug: string;
+  role: RosterRole;
+}
+
 export interface CommunityJoinRequestDTO {
   id: string;
   member: MemberRef;

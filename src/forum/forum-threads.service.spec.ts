@@ -2,6 +2,7 @@ import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
@@ -55,6 +56,10 @@ describe('ForumThreadsService', () => {
   let posts: { createQueryBuilder: jest.Mock };
   let profiles: { find: jest.Mock };
   let dataSource: { transaction: jest.Mock };
+  let blockFilter: {
+    excludeHidden: jest.Mock;
+    isBlockedEitherWay: jest.Mock;
+  };
 
   beforeEach(async () => {
     threads = {
@@ -66,6 +71,10 @@ describe('ForumThreadsService', () => {
     };
     posts = { createQueryBuilder: jest.fn(() => qbStub()) };
     profiles = { find: jest.fn().mockResolvedValue([]) };
+    blockFilter = {
+      excludeHidden: jest.fn((qb: unknown) => qb),
+      isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+    };
 
     // Runs the transaction callback against a manager whose `getRepository`
     // resolves to the *same* mocked repos the test configures — mirrors
@@ -112,6 +121,7 @@ describe('ForumThreadsService', () => {
         { provide: getRepositoryToken(ForumPost), useValue: posts },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: DataSource, useValue: dataSource },
+        { provide: BlockFilterService, useValue: blockFilter },
       ],
     }).compile();
     service = module.get(ForumThreadsService);
@@ -122,20 +132,36 @@ describe('ForumThreadsService', () => {
       const qb = qbStub([baseThread()]);
       threads.createQueryBuilder.mockReturnValue(qb);
 
-      await service.list('housing', undefined, undefined);
+      await service.list('viewer-1', 'housing', undefined, undefined);
 
       expect(qb.andWhere).toHaveBeenCalledWith('t.category = :category', {
         category: 'housing',
       });
     });
 
-    it('does not filter when category is omitted', async () => {
+    it('does not filter by category when it is omitted', async () => {
       const qb = qbStub([baseThread()]);
       threads.createQueryBuilder.mockReturnValue(qb);
 
-      await service.list(undefined, undefined, undefined);
+      await service.list('viewer-1', undefined, undefined, undefined);
 
-      expect(qb.andWhere).not.toHaveBeenCalled();
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        't.category = :category',
+        expect.anything(),
+      );
+    });
+
+    it('excludes blocked/muted authors in-query, keyed on the author column', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('viewer-1', undefined, undefined, undefined);
+
+      expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
+        qb,
+        'viewer-1',
+        '"t"."author_id"',
+      );
     });
 
     it('returns a cursor page of ForumThreadResponse with resolved authors', async () => {
@@ -143,7 +169,12 @@ describe('ForumThreadsService', () => {
       threads.createQueryBuilder.mockReturnValue(qb);
       profiles.find.mockResolvedValue([baseProfile()]);
 
-      const page = await service.list(undefined, undefined, undefined);
+      const page = await service.list(
+        'viewer-1',
+        undefined,
+        undefined,
+        undefined,
+      );
 
       expect(page.data).toEqual([
         expect.objectContaining({
@@ -160,7 +191,12 @@ describe('ForumThreadsService', () => {
       threads.createQueryBuilder.mockReturnValue(qb);
       profiles.find.mockResolvedValue([]);
 
-      const page = await service.list(undefined, undefined, undefined);
+      const page = await service.list(
+        'viewer-1',
+        undefined,
+        undefined,
+        undefined,
+      );
 
       expect(page.data[0].author).toEqual({
         handle: '',
@@ -173,18 +209,41 @@ describe('ForumThreadsService', () => {
   describe('getBySlug', () => {
     it('404s an unknown slug', async () => {
       threads.findOne.mockResolvedValue(null);
-      await expect(service.getBySlug('nope')).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(
+        service.getBySlug('nope', 'viewer-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
 
     it('returns the ForumThreadResponse for a known slug', async () => {
       threads.findOne.mockResolvedValue(baseThread());
       profiles.find.mockResolvedValue([baseProfile()]);
 
-      const res = await service.getBySlug('hello-world');
+      const res = await service.getBySlug('hello-world', 'viewer-1');
       expect(res.slug).toBe('hello-world');
       expect(res.author.handle).toBe('ava');
+    });
+
+    it('404s a thread whose author is blocked either way', async () => {
+      threads.findOne.mockResolvedValue(baseThread());
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+      await expect(
+        service.getBySlug('hello-world', 'viewer-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith(
+        'viewer-1',
+        'author-1',
+      );
+    });
+  });
+
+  describe('loadOr404', () => {
+    it('skips the block check when no viewer is supplied', async () => {
+      threads.findOne.mockResolvedValue(baseThread());
+
+      await service.loadOr404('hello-world');
+
+      expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();
     });
   });
 

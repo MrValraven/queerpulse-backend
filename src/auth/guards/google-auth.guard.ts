@@ -31,6 +31,13 @@ export class GoogleAuthGuard extends AuthGuard('google') {
       typeof req.query?.invite === 'string' ? req.query.invite : undefined;
     const redirect =
       typeof req.query?.redirect === 'string' ? req.query.redirect : undefined;
+    // 18+ self-attestation, ticked before the client sends us here. Only the
+    // literal "1" attests, so a stray `?ageAttested=0` can't sneak through.
+    const ageAttested = req.query?.ageAttested === '1';
+    const termsVersion =
+      typeof req.query?.termsVersion === 'string'
+        ? req.query.termsVersion
+        : undefined;
 
     // Bind this authorization request to the browser: a random nonce lives in
     // BOTH a short-lived httpOnly cookie and the OAuth `state` param; the
@@ -41,9 +48,17 @@ export class GoogleAuthGuard extends AuthGuard('google') {
       domain: this.config.get<string>('auth.cookieDomain') || undefined,
     });
 
-    // Carry invite + post-login redirect across the consent hop too (both are
-    // independently re-validated on the way back).
-    const state = encodeOAuthState({ invite, redirect, nonce });
+    // Carry invite + post-login redirect + the age attestation across the
+    // consent hop too (invite and redirect are independently re-validated on the
+    // way back; see the integrity note in oauth-state.ts for why the
+    // attestation is trusted as-declared).
+    const state = encodeOAuthState({
+      invite,
+      redirect,
+      nonce,
+      ageAttested,
+      termsVersion,
+    });
     return state ? { state } : {};
   }
 

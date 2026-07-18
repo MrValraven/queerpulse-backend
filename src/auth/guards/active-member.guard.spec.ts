@@ -15,9 +15,9 @@ describe('ActiveMemberGuard', () => {
     expect(guard.canActivate(ctx({ status: UserStatus.Active }))).toBe(true);
   });
 
-  it('rejects a pending member', () => {
+  it('rejects a deactivated member', () => {
     expect(() =>
-      guard.canActivate(ctx({ status: UserStatus.Pending })),
+      guard.canActivate(ctx({ status: UserStatus.Deactivated })),
     ).toThrow(ForbiddenException);
   });
 

@@ -121,10 +121,12 @@ describe('AccountController', () => {
     const result = await controller.requestExport(user, {
       categories: ['profile'],
       format: 'json',
+      reauthToken: 'tok',
     });
     expect(service.requestExport).toHaveBeenCalledWith('u1', {
       categories: ['profile'],
       format: 'json',
+      reauthToken: 'tok',
     });
     expect(result.jobId).toBe('job-1');
     expect(result.requestedAt).toBe('2026-07-15T12:00:00.000Z');

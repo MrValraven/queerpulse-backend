@@ -271,6 +271,12 @@ export class ModerationService {
 
   private async describeReporter(report: Report): Promise<ModReporterDTO> {
     if (report.anonymous) return { anonymous: true };
+    // An erased reporter (`reporter_id` NULLed by the erasure sweep) becomes
+    // indistinguishable from an anonymous one — which is exactly right: the
+    // report stands, the person behind it is no longer identifiable. Reusing
+    // the existing `{ anonymous: true }` arm keeps `ModReporterDTO.id`
+    // honestly non-nullable instead of inventing a placeholder id.
+    if (!report.reporterId) return { anonymous: true };
     const name = await this.nameForUserId(report.reporterId);
     return { anonymous: false, id: report.reporterId, name };
   }
@@ -371,7 +377,13 @@ export class ModerationService {
     };
   }
 
-  private async nameForUserId(userId: string): Promise<string> {
+  // `null` is the erased-account case: `reports.reporter_id` and
+  // `mod_audit_logs.actor_id` are NULLed rather than cascaded when a member
+  // exercises their right to erasure, so the moderation record outlives them.
+  // There is no one left to name — say so plainly rather than falling through
+  // to a lookup that would return the generic 'Member'.
+  private async nameForUserId(userId: string | null): Promise<string> {
+    if (!userId) return 'Deleted member';
     const profile = await this.profiles.findOne({ where: { userId } });
     if (profile) return `${profile.firstName} ${profile.lastName}`.trim();
     const user = await this.users.findOne({ where: { id: userId } });

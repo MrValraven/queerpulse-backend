@@ -11,6 +11,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { ProfileVisibility } from '../../users/entities/profile.entity';
+import { INTEREST_LABELS } from '../identities';
 import {
   MAX_NOW_LENGTH,
   MAX_OPEN_TO_ENTRIES,
@@ -73,11 +74,20 @@ export class UpdateProfileDto {
   tags?: string[];
 
   // Private Settings → Interests preferences — never shown on the public profile.
+  //
+  // Range-checked against the canonical vocabulary now that a member can PUBLISH
+  // a subset of these for directory search (`discoverable_identities`). A free
+  // string was acceptable while nothing queried the column; it is not acceptable
+  // for a value that can end up in a search index, and the DB's subset CHECK
+  // constrains the published set to this one, so an off-vocabulary value here
+  // would be unpublishable-but-stored — see src/profiles/identities.ts.
+  //
+  // Dropping an entry here also UN-PUBLISHES it; ProfilesService.updateMe prunes
+  // `discoverableIdentities` in the same write.
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(30)
-  @IsString({ each: true })
-  @MaxLength(60, { each: true })
+  @IsIn(INTEREST_LABELS, { each: true })
   identities?: string[];
 
   @IsOptional()

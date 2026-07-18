@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { ContentController, TopicsController } from './content.controller';
 import { ContentPagesService } from './content-pages.service';
 import { ContentSection } from './entities/content-page.entity';
@@ -50,6 +51,13 @@ describe('TopicsController', () => {
     listPosts: jest.Mock;
   };
 
+  const viewer: CurrentUserData = {
+    userId: 'viewer-1',
+    email: 'viewer@example.com',
+    status: 'active',
+    role: 'member',
+  };
+
   beforeEach(async () => {
     topicsService = {
       list: jest.fn().mockResolvedValue([]),
@@ -77,19 +85,24 @@ describe('TopicsController', () => {
     expect(topicsService.getBySlug).toHaveBeenCalledWith('healthcare');
   });
 
-  it('delegates the topic post feed with cursor + limit', async () => {
-    await controller.listPosts('healthcare', { cursor: 'abc', limit: 10 });
+  it('delegates the topic post feed with the viewer id, cursor + limit', async () => {
+    await controller.listPosts(viewer, 'healthcare', {
+      cursor: 'abc',
+      limit: 10,
+    });
     expect(topicsService.listPosts).toHaveBeenCalledWith(
       'healthcare',
+      'viewer-1',
       'abc',
       10,
     );
   });
 
   it('delegates the topic post feed with no query params', async () => {
-    await controller.listPosts('healthcare', {});
+    await controller.listPosts(viewer, 'healthcare', {});
     expect(topicsService.listPosts).toHaveBeenCalledWith(
       'healthcare',
+      'viewer-1',
       undefined,
       undefined,
     );

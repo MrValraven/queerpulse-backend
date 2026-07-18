@@ -49,6 +49,25 @@ export class TopicPost {
   @Column({ type: 'uuid' })
   topicId: string;
 
+  /** The authoring member, when there is one. NULLABLE on purpose, and the
+   *  FK is `ON DELETE SET NULL` — the same rationale
+   *  `1782800700000-AddDeletionErasureSupport` applied to `reports.reporter_id`
+   *  and `mod_audit_logs.actor_id`:
+   *
+   *  - **Nullable** because every row in this table today is seeded editorial
+   *    content (`../content.seed.ts`) with no real member behind it. Forcing a
+   *    NOT NULL would mean inventing an attribution for each seed post.
+   *  - **SET NULL** because a post must survive its author's erasure. Cascading
+   *    would make deleting an account silently delete its topic posts.
+   *
+   *  The display strings below stay authoritative for rendering — they are not
+   *  derived from this column, and a post with `authorId === null` still shows
+   *  its `authorName`. This column exists so `BlockFilterService` has a user id
+   *  to filter against; see `../topics.service.ts#listPosts`. */
+  @Index('IDX_topic_post_author_id')
+  @Column({ type: 'uuid', nullable: true })
+  authorId: string | null;
+
   @Column({ type: 'varchar' })
   authorName: string;
 

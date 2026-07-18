@@ -3,15 +3,12 @@ import {
   ConflictException,
   NotFoundException,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, QueryFailedError } from 'typeorm';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
-import { USER_PROMOTED } from '../users/user.events';
-import { UsersService } from '../users/users.service';
 import { Vouch } from './entities/vouch.entity';
 import { VOUCH_CREATED } from './vouch.events';
 import { VouchService } from './vouch.service';
@@ -26,7 +23,6 @@ describe('VouchService', () => {
   let service: VouchService;
   let vouches: { findOne: jest.Mock; find: jest.Mock; count: jest.Mock };
   let profiles: { findOne: jest.Mock; find: jest.Mock };
-  let users: { promoteToActive: jest.Mock };
   let manager: { findOne: jest.Mock; insert: jest.Mock; count: jest.Mock };
   let dataSource: { transaction: jest.Mock };
   let emitter: { emit: jest.Mock };
@@ -41,7 +37,6 @@ describe('VouchService', () => {
       findOne: jest.fn(),
       find: jest.fn().mockResolvedValue([]),
     };
-    users = { promoteToActive: jest.fn().mockResolvedValue(true) };
     manager = {
       findOne: jest.fn().mockResolvedValue(null), // the pessimistic-lock read
       insert: jest.fn().mockResolvedValue(undefined),
@@ -56,9 +51,7 @@ describe('VouchService', () => {
         VouchService,
         { provide: getRepositoryToken(Vouch), useValue: vouches },
         { provide: getRepositoryToken(Profile), useValue: profiles },
-        { provide: UsersService, useValue: users },
         { provide: DataSource, useValue: dataSource },
-        { provide: ConfigService, useValue: { get: () => 2 } },
         { provide: EventEmitter2, useValue: emitter },
       ],
     }).compile();
@@ -114,34 +107,27 @@ describe('VouchService', () => {
       );
     });
 
-    it('promotes the vouchee at the threshold and emits both events', async () => {
+    // Vouches are a trust/recognition signal only — they no longer gate
+    // membership. There is no threshold, no promotion, and no USER_PROMOTED
+    // here; the vouch count is returned for display and nothing else.
+    it('returns the vouch count and emits only VOUCH_CREATED', async () => {
       profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
-      manager.count.mockResolvedValue(2); // threshold is 2
+      manager.count.mockResolvedValue(2);
       const result = await service.createVouch('u1', 'them');
-      expect(users.promoteToActive).toHaveBeenCalledWith('u2', { manager });
       expect(result).toEqual({ vouchCount: 2 });
+      expect(emitter.emit).toHaveBeenCalledTimes(1);
       expect(emitter.emit).toHaveBeenCalledWith(VOUCH_CREATED, {
         voucherId: 'u1',
         voucheeId: 'u2',
       });
-      expect(emitter.emit).toHaveBeenCalledWith(USER_PROMOTED, {
-        userId: 'u2',
-      });
     });
 
-    it('does NOT promote or emit USER_PROMOTED below the threshold', async () => {
+    it('behaves identically at a high vouch count (no threshold effect)', async () => {
       profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
-      manager.count.mockResolvedValue(1);
-      await service.createVouch('u1', 'them');
-      expect(users.promoteToActive).not.toHaveBeenCalled();
-      expect(emitter.emit).toHaveBeenCalledWith(
-        VOUCH_CREATED,
-        expect.anything(),
-      );
-      expect(emitter.emit).not.toHaveBeenCalledWith(
-        USER_PROMOTED,
-        expect.anything(),
-      );
+      manager.count.mockResolvedValue(99);
+      const result = await service.createVouch('u1', 'them');
+      expect(result).toEqual({ vouchCount: 99 });
+      expect(emitter.emit).toHaveBeenCalledTimes(1);
     });
 
     it('maps a 23505 that races past the pre-check to a 409', async () => {
@@ -150,16 +136,16 @@ describe('VouchService', () => {
       await expect(service.createVouch('u1', 'them')).rejects.toBeInstanceOf(
         ConflictException,
       );
-      expect(users.promoteToActive).not.toHaveBeenCalled();
+      expect(emitter.emit).not.toHaveBeenCalled();
     });
   });
 
   describe('withdrawVouch', () => {
     it('404s an unknown member', async () => {
       profiles.findOne.mockResolvedValue(null);
-      await expect(
-        service.withdrawVouch('u1', 'ghost'),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.withdrawVouch('u1', 'ghost')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
     });
 
     it('404s when there is no vouch to withdraw', async () => {
@@ -167,9 +153,9 @@ describe('VouchService', () => {
       (vouches as unknown as { delete: jest.Mock }).delete = jest
         .fn()
         .mockResolvedValue({ affected: 0 });
-      await expect(
-        service.withdrawVouch('u1', 'them'),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.withdrawVouch('u1', 'them')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
     });
 
     it('deletes the (voucher, vouchee) row and returns ok', async () => {

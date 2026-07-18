@@ -6,8 +6,14 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash } from 'node:crypto';
 import { DataSource } from 'typeorm';
+import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
+import {
+  DeletionRequest,
+  DeletionRequestStatus,
+} from '../account/entities/deletion-request.entity';
+import { EmailSuppression } from '../account/entities/email-suppression.entity';
 import { InvitesService } from '../membership/invites.service';
-import { UserStatus } from '../users/entities/user.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { AuthService } from './auth.service';
 import { SignupRejectedError } from './errors/signup-rejected.error';
@@ -56,10 +62,13 @@ function buildMocks() {
     createGoogleUser: jest.fn(),
   };
   // The transaction manager exposes getRepository so the atomic rotation can
-  // run its conditional claim + insert through the same (mock) repo.
+  // run its conditional claim + insert through the same (mock) repo, plus a
+  // direct `update` for the reactivate-on-sign-in path (which updates `User`
+  // and `AccountDeactivation` by entity class rather than via a repository).
+  const managerUpdate = jest.fn().mockResolvedValue({ affected: 1 });
   const dataSource = {
     transaction: jest.fn(async (cb: (m: unknown) => unknown) =>
-      cb({ getRepository: () => repo }),
+      cb({ getRepository: () => repo, update: managerUpdate }),
     ),
   };
   const invites = {
@@ -67,7 +76,26 @@ function buildMocks() {
     claimInvite: jest.fn().mockResolvedValue(undefined),
   };
   const events = { emit: jest.fn() };
-  return { repo, jwt, users, dataSource, invites, events };
+  // Erasure suppression list — empty by default, so signup is unaffected
+  // unless a test explicitly makes an address suppressed.
+  const suppressions = { findOne: jest.fn().mockResolvedValue(null) };
+  // Read-only in AuthService: they only decide whether a returning
+  // `deactivated` member is coming back from a reversible pause (reactivate)
+  // or from a pending erasure (leave alone). Empty by default.
+  const deactivations = { findOne: jest.fn().mockResolvedValue(null) };
+  const deletionRequests = { findOne: jest.fn().mockResolvedValue(null) };
+  return {
+    repo,
+    jwt,
+    users,
+    dataSource,
+    managerUpdate,
+    invites,
+    events,
+    suppressions,
+    deactivations,
+    deletionRequests,
+  };
 }
 
 async function buildService(
@@ -86,6 +114,18 @@ async function buildService(
       { provide: DataSource, useValue: mocks.dataSource },
       { provide: InvitesService, useValue: mocks.invites },
       { provide: EventEmitter2, useValue: mocks.events },
+      {
+        provide: getRepositoryToken(EmailSuppression),
+        useValue: mocks.suppressions,
+      },
+      {
+        provide: getRepositoryToken(AccountDeactivation),
+        useValue: mocks.deactivations,
+      },
+      {
+        provide: getRepositoryToken(DeletionRequest),
+        useValue: mocks.deletionRequests,
+      },
     ],
   }).compile();
   return module.get(AuthService);
@@ -286,6 +326,9 @@ describe('AuthService.validateOrCreateGoogleUser', () => {
     avatarUrl: null,
   };
 
+  /** The 18+ attestation every new signup must carry (Terms §eligibility). */
+  const attested = { ageAttested: true, termsVersion: '2.4' };
+
   beforeEach(async () => {
     mocks = buildMocks();
     service = await buildService(mocks);
@@ -300,12 +343,124 @@ describe('AuthService.validateOrCreateGoogleUser', () => {
     expect(mocks.dataSource.transaction).not.toHaveBeenCalled();
   });
 
+  // "Reactivate by signing back in with Google" vs. "you have 30 days to
+  // change your mind" — same `users.status`, opposite meanings.
+  describe('returning deactivated member', () => {
+    it('DOES reactivate a member coming back from a deactivation', async () => {
+      const existing = { id: 'u1', status: UserStatus.Deactivated };
+      mocks.users.findByGoogleId.mockResolvedValue(existing);
+      mocks.deactivations.findOne.mockResolvedValue({
+        id: 'deact-1',
+        userId: 'u1',
+        reactivatedAt: null,
+        previousStatus: UserStatus.Active,
+      });
+
+      const user = await service.validateOrCreateGoogleUser(profile);
+
+      expect(user.status).toBe(UserStatus.Active);
+      // Stamps `reactivated_at` and flips the status, both conditionally.
+      expect(mocks.managerUpdate).toHaveBeenCalledWith(
+        AccountDeactivation,
+        expect.objectContaining({ id: 'deact-1' }),
+        expect.objectContaining({ reactivatedAt: expect.any(Date) }),
+      );
+      expect(mocks.managerUpdate).toHaveBeenCalledWith(
+        User,
+        expect.objectContaining({ status: UserStatus.Deactivated }),
+        { status: UserStatus.Active },
+      );
+    });
+
+    it('restores Suspended, not Active — deactivation cannot launder a suspension', async () => {
+      const existing = { id: 'u1', status: UserStatus.Deactivated };
+      mocks.users.findByGoogleId.mockResolvedValue(existing);
+      mocks.deactivations.findOne.mockResolvedValue({
+        id: 'deact-1',
+        userId: 'u1',
+        reactivatedAt: null,
+        previousStatus: UserStatus.Suspended,
+      });
+
+      const user = await service.validateOrCreateGoogleUser(profile);
+
+      expect(user.status).toBe(UserStatus.Suspended);
+      expect(mocks.managerUpdate).toHaveBeenCalledWith(
+        User,
+        expect.anything(),
+        { status: UserStatus.Suspended },
+      );
+    });
+
+    it('does NOT reactivate a member in the deletion grace period', async () => {
+      // 🔴 Signing in must never silently cancel an erasure request. The only
+      // way back is the explicit DELETE /account/deletion-request.
+      const existing = { id: 'u1', status: UserStatus.Deactivated };
+      mocks.users.findByGoogleId.mockResolvedValue(existing);
+      mocks.deletionRequests.findOne.mockResolvedValue({
+        id: 'del-1',
+        userId: 'u1',
+        status: DeletionRequestStatus.Grace,
+        previousStatus: UserStatus.Active,
+      });
+      // Both rows present: deactivated first, then asked to be erased. The
+      // erasure request wins.
+      mocks.deactivations.findOne.mockResolvedValue({
+        id: 'deact-1',
+        userId: 'u1',
+        reactivatedAt: null,
+        previousStatus: UserStatus.Active,
+      });
+
+      const user = await service.validateOrCreateGoogleUser(profile);
+
+      expect(user.status).toBe(UserStatus.Deactivated);
+      expect(mocks.dataSource.transaction).not.toHaveBeenCalled();
+      expect(mocks.managerUpdate).not.toHaveBeenCalled();
+    });
+
+    it('leaves a deactivated member with no ledger row alone', async () => {
+      const existing = { id: 'u1', status: UserStatus.Deactivated };
+      mocks.users.findByGoogleId.mockResolvedValue(existing);
+      mocks.deactivations.findOne.mockResolvedValue(null);
+      mocks.deletionRequests.findOne.mockResolvedValue(null);
+
+      const user = await service.validateOrCreateGoogleUser(profile);
+
+      // No recorded status to restore — guessing Active would be a privilege
+      // grant.
+      expect(user.status).toBe(UserStatus.Deactivated);
+      expect(mocks.dataSource.transaction).not.toHaveBeenCalled();
+    });
+  });
+
   it('rejects a new user with no invite code (invite_required)', async () => {
     mocks.users.findByGoogleId.mockResolvedValue(null);
     await expect(
-      service.validateOrCreateGoogleUser(profile, undefined),
+      service.validateOrCreateGoogleUser(profile, undefined, attested),
     ).rejects.toMatchObject({ reason: 'invite_required' });
     expect(mocks.dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects a new user who has not attested to being 18+', async () => {
+    mocks.users.findByGoogleId.mockResolvedValue(null);
+    await expect(
+      service.validateOrCreateGoogleUser(profile, 'CODE'),
+    ).rejects.toMatchObject({ reason: 'age_attestation_required' });
+    await expect(
+      service.validateOrCreateGoogleUser(profile, 'CODE', {
+        ageAttested: false,
+      }),
+    ).rejects.toMatchObject({ reason: 'age_attestation_required' });
+    expect(mocks.dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it('lets an EXISTING member sign in without attesting (they predate the gate)', async () => {
+    const existing = { id: 'u1', status: UserStatus.Active };
+    mocks.users.findByGoogleId.mockResolvedValue(existing);
+    await expect(service.validateOrCreateGoogleUser(profile)).resolves.toBe(
+      existing,
+    );
   });
 
   it('creates an Active member, consumes the invite, and emits USER_PROMOTED', async () => {
@@ -319,7 +474,11 @@ describe('AuthService.validateOrCreateGoogleUser', () => {
       status: UserStatus.Active,
     });
 
-    const user = await service.validateOrCreateGoogleUser(profile, 'CODE');
+    const user = await service.validateOrCreateGoogleUser(
+      profile,
+      'CODE',
+      attested,
+    );
 
     expect(user).toEqual(expect.objectContaining({ id: 'new-user' }));
     expect(mocks.invites.validateInviteForSignup).toHaveBeenCalledWith(
@@ -333,6 +492,8 @@ describe('AuthService.validateOrCreateGoogleUser', () => {
         googleId: 'g-1',
         status: UserStatus.Active,
         invitedBy: 'inviter-1',
+        ageAttestedAt: expect.any(Date),
+        termsVersion: '2.4',
       }),
     );
     expect(mocks.invites.claimInvite).toHaveBeenCalledWith(
@@ -352,7 +513,7 @@ describe('AuthService.validateOrCreateGoogleUser', () => {
       new SignupRejectedError('invite_invalid'),
     );
     await expect(
-      service.validateOrCreateGoogleUser(profile, 'CODE'),
+      service.validateOrCreateGoogleUser(profile, 'CODE', attested),
     ).rejects.toMatchObject({ reason: 'invite_invalid' });
   });
 });

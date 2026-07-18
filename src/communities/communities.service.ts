@@ -17,6 +17,8 @@ import {
   CommunityJoinRequestDTO,
   CommunityStats,
   JoinResultDTO,
+  MemberRoleDTO,
+  MyCommunityDTO,
   RosterEntryDTO,
   toCommunityCard,
   toCommunityDetail,
@@ -93,6 +95,10 @@ export interface JoinCommunityInput {
 }
 
 export type JoinRequestAction = 'approve' | 'decline';
+
+/** The only roles `setMemberRole` can assign — `owner` is not grantable here
+ * (see `UpdateMemberRoleDto`). */
+export type AssignableRole = RosterRole.Member | RosterRole.Mod;
 
 @Injectable()
 export class CommunitiesService {
@@ -362,6 +368,15 @@ export class CommunitiesService {
   // `getBySlug`/`CommunityPostsService.assertViewable`. Beyond that, respects
   // `rosterVisible`: a non-member is forbidden from seeing the roster of a
   // (non-private) community that has opted to keep it members-only.
+  //
+  // DELIBERATELY NOT block/mute filtered, unlike the post feeds in
+  // `CommunityPostsService.listPosts`. A roster is a factual membership
+  // record, not a content feed: hiding a blocked member from it would tell the
+  // viewer that someone they blocked is *absent* from a space they are in fact
+  // in — actively misleading, and worse for the blocker than the truth, since
+  // deciding whether to join or post somewhere may depend on exactly that.
+  // Blocks already do the work that matters here by severing interaction; they
+  // are not a "make them disappear from the world" primitive.
   async roster(slug: string, viewerId: string): Promise<RosterEntryDTO[]> {
     const community = await this.loadOr404(slug);
     const role = await this.myRole(community.id, viewerId);
@@ -388,6 +403,13 @@ export class CommunitiesService {
       .map((m) => toRosterEntry(m, refs.get(m.userId)!));
   }
 
+  // Also NOT block/mute filtered, for a stronger reason than `roster` above:
+  // this is a moderation queue, not a feed. Silently hiding a join request
+  // because the reviewing mod happens to have blocked (or muted) the applicant
+  // would strand that request as permanently pending, with no one aware it
+  // exists — a block by one mod would become an invisible, unaccountable veto.
+  // A mod who cannot fairly triage a specific applicant should recuse
+  // themselves; the queue must still show the work.
   async listJoinRequests(
     slug: string,
     actorId: string,
@@ -496,6 +518,161 @@ export class CommunitiesService {
     await this.members.delete({ id: targetMembership.id });
   }
 
+  /**
+   * `GET /me/communities` — every community the caller is actually *on the
+   * roster of*, as a flat `{ slug, name, role, joinedAt }[]`.
+   *
+   * DELIBERATELY NOT PAGINATED, unlike `list()`. This is a membership index
+   * the client needs *whole* (it keys a slug -> role map used to decide, for
+   * any community it renders from any other source, whether the viewer is a
+   * member). Serving it a page at a time is precisely the defect this
+   * endpoint exists to fix: the previous workaround — filtering
+   * `myRole !== null` across `GET /communities` — is incomplete by
+   * construction, because that route is paginated and there is no guarantee
+   * the caller's memberships fall on the pages fetched. A member's community
+   * count is inherently small and bounded by deliberate human action (you
+   * join communities one at a time), so the whole set is a safe response
+   * size; if that ever stops being true the fix is a cap plus an explicit
+   * signal, not silent truncation.
+   *
+   * Only `community_members` rows count. A *pending* `CommunityJoinRequest`
+   * is not a membership and never appears here — it has no roster row at all,
+   * so it is excluded structurally rather than by a filter. (`myJoinRequestStatus`
+   * on the community card/detail is where a pending request surfaces.)
+   *
+   * NOT block-filtered, and there is nothing here to filter: every row
+   * describes the caller's own relationship to a community, so no other
+   * member's identity or content is exposed. (`BlockFilterService` is used in
+   * this module only by `CommunityPostsService`, over post/reply *authors* —
+   * see the notes on `roster` and `listJoinRequests` for why the membership
+   * surfaces stay unfiltered.)
+   */
+  async myCommunities(userId: string): Promise<MyCommunityDTO[]> {
+    const rows = await this.members
+      .createQueryBuilder('m')
+      .innerJoin(Community, 'c', 'c.id = m.community_id')
+      .select('c.slug', 'slug')
+      .addSelect('c.name', 'name')
+      .addSelect('m.role', 'role')
+      .addSelect('m.joined_at', 'joinedAt')
+      .where('m.user_id = :userId', { userId })
+      .orderBy('m.joined_at', 'DESC')
+      .getRawMany<{
+        slug: string;
+        name: string;
+        role: RosterRole;
+        joinedAt: Date;
+      }>();
+
+    return rows.map((r) => ({
+      slug: r.slug,
+      name: r.name,
+      role: r.role,
+      joinedAt: new Date(r.joinedAt).toISOString(),
+    }));
+  }
+
+  /**
+   * `PATCH /communities/:slug/members/:memberSlug` — promote a member to
+   * moderator, or demote a moderator back to member.
+   *
+   * Authorization rules, in the order enforced below:
+   *
+   *  1. **Actor must be owner or mod** — the same `assertOwnerOrMod` gate the
+   *     join-request review routes (`listJoinRequests`/`triageJoinRequest`)
+   *     and `update` already use. Checked *first*, before the target is even
+   *     resolved, so an unauthorized caller learns nothing about who is on
+   *     the roster (stricter than `removeMember`, which has to resolve the
+   *     target first because self-leave is an authorized path there; this
+   *     route has no self path at all — see rule 4).
+   *  2. **Target must be on this roster** — unknown/inactive member slug, or
+   *     a real member of some *other* community, both 404 `Member not found`,
+   *     mirroring `removeMember`.
+   *  3. **The owner's role is immutable.** Mirrors `removeMember`'s "the
+   *     owner cannot be removed": the owner is the community's root of
+   *     authority and `Community.ownerId` is the source of truth for it, so a
+   *     roster row can't contradict it. Without this a *mod* could demote the
+   *     owner and take over the community — the escalation this route most
+   *     obviously invites. 400, not 403: the actor is allowed to be here, the
+   *     requested change is the impossible part.
+   *  4. **Nobody changes their own role.** Redundant in today's role set
+   *     (an owner acting on themselves is caught by rule 3, a mod acting on
+   *     themselves by rule 5) but stated explicitly so the invariant survives
+   *     any future rule change — self-mutation is the classic escalation
+   *     vector. Stepping down is done by leaving (`DELETE .../members/:me`),
+   *     which is the self-service path that already exists.
+   *  5. **Only the owner may change an existing moderator's role.** A mod may
+   *     therefore only promote a plain `member` to `mod`; they may not demote
+   *     a peer. Otherwise any single mod could unilaterally dismantle the rest
+   *     of the mod team and become the sole moderator — a takeover from
+   *     inside the mod tier, quietly and with nothing on the roster to show
+   *     for it. (Note the deliberate asymmetry with `removeMember`, which does
+   *     let a mod remove a peer mod outright. Removing is loud — the target
+   *     vanishes from the roster and notices at once, and getting back in
+   *     needs a fresh request plus an approval. A silent demotion is not, and
+   *     "the same end is reachable by a noisier route" is not a reason to add
+   *     a quiet one.)
+   *
+   * The rules are evaluated against the *current* roles only, never against
+   * the role being requested, so authorization can't be steered by the body.
+   * The requested value is consulted afterwards, and only to skip a no-op
+   * write — the call is idempotent (re-promoting an existing mod, as the
+   * owner, is a 200 with no UPDATE), matching this module's posture on
+   * `join`, reaction-add and approve-triage.
+   */
+  async setMemberRole(
+    slug: string,
+    actorId: string,
+    memberSlug: string,
+    role: AssignableRole,
+  ): Promise<MemberRoleDTO> {
+    const community = await this.loadOr404(slug);
+
+    // 1. actor is owner/mod
+    const actorMembership = await this.assertOwnerOrMod(community.id, actorId);
+
+    // 2. target is on this roster
+    const targetUserId = await new MemberLookup(this.profiles).userIdForSlug(
+      memberSlug,
+    );
+    if (!targetUserId) {
+      throw new NotFoundException('Member not found');
+    }
+    const targetMembership = await this.members.findOne({
+      where: { communityId: community.id, userId: targetUserId },
+    });
+    if (!targetMembership) {
+      throw new NotFoundException('Member not found');
+    }
+
+    // 3. the owner's role can never change
+    if (targetMembership.role === RosterRole.Owner) {
+      throw new BadRequestException("The owner's role cannot be changed");
+    }
+
+    // 4. no self role change
+    if (targetUserId === actorId) {
+      throw new ForbiddenException('You cannot change your own role');
+    }
+
+    // 5. only the owner may change a moderator's role
+    if (
+      targetMembership.role === RosterRole.Mod &&
+      actorMembership.role !== RosterRole.Owner
+    ) {
+      throw new ForbiddenException(
+        "Only the owner can change a moderator's role",
+      );
+    }
+
+    if (targetMembership.role !== role) {
+      targetMembership.role = role;
+      await this.members.save(targetMembership);
+    }
+
+    return { slug: community.slug, memberSlug, role };
+  }
+
   // --- internals ---
 
   private async loadOr404(slug: string): Promise<Community> {
@@ -506,10 +683,13 @@ export class CommunitiesService {
     return community;
   }
 
+  /** Returns the actor's roster row on success, so callers that need to
+   * distinguish owner from mod (`setMemberRole`) don't re-query for it.
+   * Callers that only need the gate can keep ignoring the value. */
   private async assertOwnerOrMod(
     communityId: string,
     userId: string,
-  ): Promise<void> {
+  ): Promise<CommunityMember> {
     const membership = await this.members.findOne({
       where: { communityId, userId },
     });
@@ -520,6 +700,7 @@ export class CommunitiesService {
     ) {
       throw new ForbiddenException('Only the owner or a moderator can do that');
     }
+    return membership;
   }
 
   private async myRole(

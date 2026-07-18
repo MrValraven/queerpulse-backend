@@ -53,7 +53,7 @@ or malformed.
 | `FRONTEND_URL` | no | CORS origin + post-login redirect base |
 | `COOKIE_DOMAIN` | no | leave unset for localhost |
 | `S3_*` / `MUX_*` | no | storage + video features |
-| `VOUCH_THRESHOLD` / `INVITE_MONTHLY_QUOTA` | no | membership tuning |
+| `INVITE_MONTHLY_QUOTA` | no | membership tuning |
 
 ### Database TLS & connection pool
 
@@ -103,22 +103,23 @@ route fail at runtime on a server that reports itself healthy.
 ## Database & migrations
 
 The schema is owned entirely by migrations under `src/migrations`. **Never**
-enable `synchronize`. Every migration needs a **unique** timestamp — TypeORM
-orders by it, and ties fall back to filename order rather than anything
-deliberate.
+enable `synchronize`.
 
-> **One-off, for databases created before this note:** `AddSubprofiles` was
-> renamed from `1782800650000` to `1782800651000` to clear a duplicate timestamp
-> it shared with `AddProfileInterests`. A database that already applied it will
-> try to re-run it and fail on `CREATE TABLE ... already exists`. Fix the
-> recorded name once, per database:
+> **An applied migration's name is frozen history — never rename or renumber
+> one.** TypeORM identifies a migration solely by the `name` string on its class
+> and matches that against the `migrations` ledger table. Renaming one that has
+> already run anywhere makes it look *pending*, so `up()` re-runs and fails on
+> objects it created the first time. Because pending migrations run in timestamp
+> order, that failure blocks every migration behind it too.
 >
-> ```sql
-> UPDATE migrations SET name = 'AddSubprofiles1782800651000'
-> WHERE name = 'AddSubprofiles1782800650000';
-> ```
+> Duplicate timestamps are **harmless** — ties fall back to filename order.
+> `1782800650000` is deliberately shared by `AddSubprofiles` and
+> `AddProfileInterests`; leave it alone rather than renumbering to break the tie.
 >
-> Fresh databases need nothing.
+> If you hit an "already exists" failure, do **not** paper over it with
+> `IF NOT EXISTS` — that writes a second ledger row for work already recorded and
+> hides genuine schema drift. Diagnose the ledger mismatch instead:
+> `pnpm run typeorm migration:show`.
 
 ```bash
 pnpm run migration:run                     # apply pending migrations (dev, ts-node)

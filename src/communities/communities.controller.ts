@@ -31,6 +31,7 @@ import { ReactionDto } from './dto/reaction.dto';
 import { ReplyDto } from './dto/reply.dto';
 import { TriageJoinRequestDto } from './dto/triage-join-request.dto';
 import { UpdateCommunityDto } from './dto/update-community.dto';
+import { UpdateMemberRoleDto } from './dto/update-member-role.dto';
 import { UpdatePostDto } from './dto/update-post.dto';
 import { ReactionKey } from './entities/community-post-reaction.entity';
 
@@ -186,5 +187,23 @@ export class CommunitiesController {
     @Param('memberSlug') memberSlug: string,
   ) {
     return this.communitiesService.removeMember(slug, user.userId, memberSlug);
+  }
+
+  /** Promote a member to moderator, or demote a moderator back to member.
+   * Owner/mod only, with further restrictions on *which* members each may
+   * act on — see `CommunitiesService.setMemberRole` for the full rules. */
+  @Patch(':slug/members/:memberSlug')
+  setMemberRole(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('memberSlug') memberSlug: string,
+    @Body() dto: UpdateMemberRoleDto,
+  ) {
+    return this.communitiesService.setMemberRole(
+      slug,
+      user.userId,
+      memberSlug,
+      dto.role,
+    );
   }
 }

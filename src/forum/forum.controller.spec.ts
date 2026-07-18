@@ -42,18 +42,26 @@ describe('ForumController', () => {
     controller = module.get(ForumController);
   });
 
-  it('delegates listThreads with category/cursor/limit', async () => {
-    await controller.listThreads({
+  it('delegates listThreads with the caller id and category/cursor/limit', async () => {
+    await controller.listThreads(user, {
       category: 'housing',
       cursor: 'c1',
       limit: 10,
     });
-    expect(threadsService.list).toHaveBeenCalledWith('housing', 'c1', 10);
+    expect(threadsService.list).toHaveBeenCalledWith(
+      'user-1',
+      'housing',
+      'c1',
+      10,
+    );
   });
 
-  it('delegates getThread by slug', async () => {
-    await controller.getThread('hello-world');
-    expect(threadsService.getBySlug).toHaveBeenCalledWith('hello-world');
+  it('delegates getThread by slug with the caller id', async () => {
+    await controller.getThread(user, 'hello-world');
+    expect(threadsService.getBySlug).toHaveBeenCalledWith(
+      'hello-world',
+      'user-1',
+    );
   });
 
   it('delegates listPosts with the caller id', async () => {

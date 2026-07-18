@@ -18,6 +18,7 @@ import { ListMembersQuery } from './dto/list-members.query';
 import { SocialLinkDto } from './dto/replace-socials.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { WorkItemDto } from './dto/replace-work.dto';
+import { labelsForFacets, pruneDiscoverable } from './identities';
 import { normalizeOpenTo } from './open-to';
 import { Activity } from './entities/activity.entity';
 import { BoardPost } from './entities/board-post.entity';
@@ -50,6 +51,16 @@ const ACTIVITY_LIMIT = 6;
 // Postgres unique-violation SQLSTATE — the `profiles.slug` unique index racing a
 // concurrent username change.
 const PG_UNIQUE_VIOLATION = '23505';
+
+// Comma-separated query param -> trimmed, non-empty values.
+function csv(raw: string | undefined): string[] {
+  return raw
+    ? raw
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean)
+    : [];
+}
 
 function isUniqueViolation(err: unknown): boolean {
   return (
@@ -222,6 +233,20 @@ export class ProfilesService {
       // rather than as an empty string.
       profile.now = now.trim() || null;
     }
+    // RETRACTION. `rest` may have just replaced `identities`, and anything the
+    // member dropped from it must stop being published in the SAME write —
+    // otherwise un-declaring "Disabled or chronically ill" leaves them still
+    // findable by it, which is the precise opposite of what retracting a
+    // disclosure means, and the member has no way to see it lingering.
+    //
+    // Unconditional rather than gated on `dto.identities !== undefined`: it is
+    // idempotent when nothing changed, and a conditional here is one refactor
+    // away from being wrong. The DB CHECK would reject the row anyway — this is
+    // what turns that 500 into correct behaviour.
+    profile.discoverableIdentities = pruneDiscoverable(
+      profile.discoverableIdentities ?? [],
+      profile.identities ?? [],
+    );
     await this.profiles.save(profile);
     const vouchCount = await this.vouchService.getVouchCount(userId);
     return this.buildFullProfile(profile, vouchCount, true);
@@ -464,14 +489,32 @@ export class ProfilesService {
       );
     }
 
-    const tags = q.tags
-      ? q.tags
-          .split(',')
-          .map((t) => t.trim())
-          .filter(Boolean)
-      : [];
+    const tags = csv(q.tags);
     if (tags.length) {
       qb.andWhere('p.tags && :tags', { tags });
+    }
+
+    // Identity filter. Reads `discoverable_identities` — the subset each member
+    // OPTED IN to publishing — and never `identities`, which is private (see the
+    // entity, and AddDiscoverableIdentities1782800770000 for why pointing this
+    // at `identities` would be a special-category-data leak).
+    //
+    // The query param carries the directory's coarse facet ids
+    // (`transNonBinary`), the column stores the member's own interest labels
+    // ('Trans', 'Genderfluid', …), so facets expand to their label sets here.
+    // Unknown facet ids expand to nothing; if EVERY id was unknown the caller
+    // asked for a facet that cannot exist, and returning the unfiltered
+    // directory instead would be a silently wrong answer — so match nothing.
+    const facets = csv(q.identities);
+    if (facets.length) {
+      const identityLabels = labelsForFacets(facets);
+      if (!identityLabels.length) {
+        qb.andWhere('1 = 0');
+      } else {
+        qb.andWhere('p.discoverable_identities && :identityLabels', {
+          identityLabels,
+        });
+      }
     }
 
     qb.orderBy('p.firstName', 'ASC')

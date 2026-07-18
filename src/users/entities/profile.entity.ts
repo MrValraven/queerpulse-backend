@@ -70,6 +70,18 @@ export class Profile {
   @Column({ type: 'text', array: true, default: '{}' })
   identities: string[];
 
+  // The subset of `identities` the member has explicitly PUBLISHED for
+  // member-directory discovery — same vocabulary, opt-in per identity, empty by
+  // default. This is the ONLY identity column the directory may filter on
+  // (`GET /members?identities=`); `identities` above stays private.
+  //
+  // A DB CHECK constraint (`CHK_profiles_discoverable_subset`) enforces
+  // `discoverable_identities <@ identities`, so un-declaring a private identity
+  // MUST un-publish it in the same write — see `ProfilesService.updateMe` and
+  // `pruneDiscoverable` in src/profiles/identities.ts.
+  @Column({ type: 'text', array: true, default: '{}' })
+  discoverableIdentities: string[];
+
   @Column({ type: 'text', array: true, default: '{}' })
   lookingFor: string[];
 

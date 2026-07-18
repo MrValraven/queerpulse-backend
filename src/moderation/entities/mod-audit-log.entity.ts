@@ -21,9 +21,14 @@ export class ModAuditLog {
   @Column({ type: 'uuid' })
   reportId: string;
 
+  // Nullable since `AddDeletionErasureSupport1782800700000`: NULLed when the
+  // acting moderator erases their account (FK is `ON DELETE SET NULL`), so the
+  // action trail survives the person who wrote it. An immutable log that
+  // disappears when its author leaves is not an immutable log. Always non-null
+  // at write time; only erasure produces a NULL.
   @Index('IDX_mod_audit_logs_actor_id')
-  @Column({ type: 'uuid' })
-  actorId: string;
+  @Column({ type: 'uuid', nullable: true })
+  actorId: string | null;
 
   @Column({ type: 'varchar' })
   action: string;

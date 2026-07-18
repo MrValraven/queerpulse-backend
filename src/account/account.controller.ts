@@ -9,8 +9,10 @@ import {
   ParseUUIDPipe,
   Post,
   Req,
+  Res,
+  StreamableFile,
 } from '@nestjs/common';
-import { Request } from 'express';
+import { Request, Response } from 'express';
 import {
   CurrentUser,
   CurrentUserData,
@@ -79,6 +81,32 @@ export class AccountController {
     @Param('jobId', ParseUUIDPipe) jobId: string,
   ) {
     return this.accountService.getExportJob(user.userId, jobId);
+  }
+
+  // The `downloadUrl` that `toExportJobResponse` has been advertising all
+  // along (`account-response.ts`). The frontend renders it as a plain
+  // `<a download>` (`DataExportSections.tsx`), so this must be a GET that the
+  // browser can follow with cookie auth and get a file back — not a JSON
+  // envelope. Ownership is enforced in the service.
+  @Get('export/:jobId/download')
+  async downloadExport(
+    @CurrentUser() user: CurrentUserData,
+    @Param('jobId', ParseUUIDPipe) jobId: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const { filename, body } = await this.accountService.getExportDownload(
+      user.userId,
+      jobId,
+    );
+    res.set({
+      'Content-Type': 'application/json',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Content-Length': String(body.byteLength),
+      // The archive is the member's own personal data — never let a proxy or
+      // the browser cache keep a copy after the link expires.
+      'Cache-Control': 'no-store',
+    });
+    return new StreamableFile(body);
   }
 
   @Post('dsar')

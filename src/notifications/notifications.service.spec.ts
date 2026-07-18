@@ -2,6 +2,7 @@ import { NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Notification, NotificationType } from './entities/notification.entity';
 import { NOTIFICATION_CREATED } from './notification.events';
 import { NotificationsService } from './notifications.service';
@@ -9,6 +10,10 @@ import { NotificationsService } from './notifications.service';
 describe('NotificationsService', () => {
   let service: NotificationsService;
   let emit: jest.Mock;
+  let blockFilter: {
+    isBlockedEitherWay: jest.Mock;
+    isMutedBy: jest.Mock;
+  };
   let repo: {
     create: jest.Mock;
     save: jest.Mock;
@@ -26,11 +31,16 @@ describe('NotificationsService', () => {
       count: jest.fn().mockResolvedValue(0),
     };
     emit = jest.fn();
+    blockFilter = {
+      isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+      isMutedBy: jest.fn().mockResolvedValue(false),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         NotificationsService,
         { provide: getRepositoryToken(Notification), useValue: repo },
         { provide: EventEmitter2, useValue: { emit } },
+        { provide: BlockFilterService, useValue: blockFilter },
       ],
     }).compile();
     service = module.get(NotificationsService);
@@ -87,6 +97,97 @@ describe('NotificationsService', () => {
         userId: 'u2',
         notification: expect.objectContaining({ id: 'n2' }) as unknown,
       });
+    });
+  });
+
+  // Block/mute enforcement is at WRITE time: suppressing the row also
+  // suppresses the `NOTIFICATION_CREATED` push, which a read-time filter in
+  // `list()` could never have taken back. See `NotificationsService.create`.
+  describe('block/mute suppression', () => {
+    it('writes nothing and pushes nothing when the actor is blocked either way', async () => {
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+      const result = await service.create(
+        'u1',
+        NotificationType.VouchReceived,
+        { voucherId: 'u2' },
+        'u2',
+      );
+
+      expect(result).toBeNull();
+      expect(repo.save).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+    });
+
+    it('writes nothing when the recipient has muted the actor', async () => {
+      blockFilter.isMutedBy.mockResolvedValue(true);
+
+      const result = await service.create(
+        'u1',
+        NotificationType.VouchReceived,
+        { voucherId: 'u2' },
+        'u2',
+      );
+
+      expect(result).toBeNull();
+      expect(repo.save).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+    });
+
+    it('checks the relationship from the recipient toward the actor', async () => {
+      await service.create(
+        'u1',
+        NotificationType.VouchReceived,
+        { voucherId: 'u2' },
+        'u2',
+      );
+
+      expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith('u1', 'u2');
+      expect(blockFilter.isMutedBy).toHaveBeenCalledWith('u1', 'u2');
+    });
+
+    it('leaves actorless (system) notifications unfiltered', async () => {
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+      repo.save.mockResolvedValue({ id: 'n1', userId: 'u1' });
+
+      await service.create('u1', NotificationType.PromotedToMember);
+
+      expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();
+      expect(repo.save).toHaveBeenCalled();
+    });
+
+    it('suppresses only the recipients who blocked the actor, not the whole fan-out', async () => {
+      blockFilter.isBlockedEitherWay.mockImplementation((recipientId: string) =>
+        Promise.resolve(recipientId === 'u1'),
+      );
+      repo.save.mockResolvedValue([{ id: 'n2', userId: 'u2' }]);
+
+      await service.createForRecipients(
+        ['u1', 'u2'],
+        NotificationType.NewMessage,
+        { conversationId: 'c1' },
+        'sender-1',
+      );
+
+      expect(repo.create).toHaveBeenCalledTimes(1);
+      expect(repo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 'u2' }),
+      );
+      expect(emit).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips the write entirely when every recipient is filtered out', async () => {
+      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+
+      await service.createForRecipients(
+        ['u1', 'u2'],
+        NotificationType.NewMessage,
+        { conversationId: 'c1' },
+        'sender-1',
+      );
+
+      expect(repo.save).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
     });
 
     it('announces nothing when there are no recipients', async () => {

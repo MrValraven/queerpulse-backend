@@ -16,7 +16,6 @@ export default registerAs('app', () => {
      * member to one of them. With a single FRONTEND_URL this is unchanged.
      */
     frontendUrl: frontendOrigins[0],
-    vouchThreshold: parseInt(process.env.VOUCH_THRESHOLD ?? '2', 10),
     inviteMonthlyQuota: parseInt(process.env.INVITE_MONTHLY_QUOTA ?? '1', 10),
   };
 });
