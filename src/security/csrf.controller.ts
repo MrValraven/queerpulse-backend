@@ -4,6 +4,13 @@ import { randomBytes } from 'node:crypto';
 import { Response } from 'express';
 import { Public } from '../auth/decorators/public.decorator';
 
+// Outlive the 30d refresh token, so the CSRF cookie is never the reason a
+// still-authenticated session starts failing. Previously this was a session
+// cookie while the auth cookies persisted: after a browser restart the user was
+// still logged in but had no CSRF cookie, so their first mutation 403'd until
+// the SPA re-fetched a token.
+const CSRF_MAX_AGE = 31 * 24 * 60 * 60 * 1000; // 31d
+
 @Public()
 @Controller('csrf-token')
 export class CsrfController {
@@ -18,6 +25,7 @@ export class CsrfController {
       secure: this.config.get<string>('app.nodeEnv') === 'production',
       sameSite: 'lax',
       path: '/',
+      maxAge: CSRF_MAX_AGE,
     });
     return { csrfToken: token };
   }

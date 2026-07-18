@@ -6,6 +6,7 @@ import { Shaping, ShapingKind } from './entities/shaping.entity';
 import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
 import { WorkItem } from './entities/work-item.entity';
+import { OpenToEntry } from './open-to';
 
 export interface ProfileCard {
   slug: string;
@@ -77,7 +78,7 @@ export interface FullProfileResponse extends ProfileCard {
   bio: string | null;
   location: string | null;
   now: string | null;
-  openTo: string[];
+  openTo: OpenToEntry[];
   // Private Interests preferences — populated only when the requester is the
   // profile owner; `[]` for everyone else (see toFullProfile's `isOwner`).
   identities: string[];
@@ -112,7 +113,7 @@ export interface LimitedProfileResponse extends ProfileCard {
 // shape with extra location/openTo fields.
 export interface MemberCard extends ProfileCard {
   location: string | null;
-  openTo: string[];
+  openTo: OpenToEntry[];
 }
 
 export const SHAPING_KIND_ORDER: ShapingKind[] = [

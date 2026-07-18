@@ -92,6 +92,25 @@ see the test-database safety guard below.
   enabled). ESLint promotes `@typescript-eslint/no-floating-promises` to `error`.
 - The schema lives in migrations only. Add a migration for every schema change;
   never rely on `synchronize`.
+- **An applied migration's name is frozen history — never rename or renumber
+  it.** TypeORM identifies a migration solely by the `name` string on the class
+  and matches it against the `migrations` ledger table. Renaming a migration
+  that has already run anywhere makes it look *pending*, so `up()` re-runs and
+  fails on objects it created the first time (e.g. `CREATE TYPE` — Postgres has
+  no `CREATE TYPE IF NOT EXISTS`). Because pending migrations run in timestamp
+  order, the failure also blocks every migration behind it. Duplicate
+  timestamps between migrations are harmless — leave them alone rather than
+  renumbering to break the tie. `1782800650000` is shared by `AddSubprofiles`
+  and `AddProfileInterests` for exactly this reason.
+- Guarding migration DDL with `IF [NOT] EXISTS` is **not** the fix for an
+  "already exists" failure. It writes a second ledger row for work already
+  recorded (making `down()` runnable twice against one application) and hides
+  genuine schema drift — an object existing in the wrong *shape* would pass
+  silently. Diagnose the ledger mismatch instead:
+  `pnpm run typeorm migration:show`.
+- `pnpm run typeorm` already passes `-d src/data-source.ts`. Passing `-d` again
+  makes yargs hand `path.resolve` an array, and the command dies with an
+  unrelated-looking `ERR_INVALID_ARG_TYPE`.
 - **e2e safety:** `test/*.e2e-spec.ts` delete every table between tests. A guard
   (`test/db-safety.ts`, wired from `test/jest-e2e.json`) throws unless the target
   DB name ends in `_test` or `TEST_DATABASE_URL` is set. Use `.env.test` (see

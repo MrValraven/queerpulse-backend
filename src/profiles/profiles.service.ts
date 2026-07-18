@@ -18,6 +18,7 @@ import { ListMembersQuery } from './dto/list-members.query';
 import { SocialLinkDto } from './dto/replace-socials.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { WorkItemDto } from './dto/replace-work.dto';
+import { normalizeOpenTo } from './open-to';
 import { Activity } from './entities/activity.entity';
 import { BoardPost } from './entities/board-post.entity';
 import { Group } from './entities/group.entity';
@@ -207,7 +208,20 @@ export class ProfilesService {
     if (!profile) {
       throw new NotFoundException('Profile not found');
     }
-    Object.assign(profile, dto);
+    // `now` and `openTo` are pulled out of the blanket assign because both need
+    // an explicit `undefined` check: `{ now: '' }` CLEARS the status and
+    // `{ openTo: [] }` clears the chips, so neither empty value may be treated
+    // as "field omitted". `openTo` is a full replace, not a merge.
+    const { now, openTo, ...rest } = dto;
+    Object.assign(profile, rest);
+    if (openTo !== undefined) {
+      profile.openTo = normalizeOpenTo(openTo);
+    }
+    if (now !== undefined) {
+      // An empty status normalises to NULL so a cleared Now reads back absent
+      // rather than as an empty string.
+      profile.now = now.trim() || null;
+    }
     await this.profiles.save(profile);
     const vouchCount = await this.vouchService.getVouchCount(userId);
     return this.buildFullProfile(profile, vouchCount, true);

@@ -6,7 +6,7 @@ import {
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource, QueryFailedError } from 'typeorm';
+import { DataSource, FindOperator, QueryFailedError } from 'typeorm';
 import { ConnectionsService } from '../connections/connections.service';
 import { encodeCursor } from '../common/cursor-pagination';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -14,6 +14,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
 import { Conversation } from './entities/conversation.entity';
 import { Message } from './entities/message.entity';
+import { MessageCreatedEvent } from './messaging.events';
 import { MessagingService } from './messaging.service';
 
 /**
@@ -147,8 +148,16 @@ describe('MessagingService', () => {
           { conversationId: 'c2', userId: 'u3' },
         ]);
       conversations.find.mockResolvedValueOnce([
-        { id: 'c1', isOfficial: false },
-        { id: 'c2', isOfficial: false },
+        {
+          id: 'c1',
+          isOfficial: false,
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+        {
+          id: 'c2',
+          isOfficial: false,
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
       ]);
       profiles.find.mockResolvedValueOnce([
         {
@@ -198,9 +207,83 @@ describe('MessagingService', () => {
       expect(result.map((c) => c.id)).toEqual(['c1', 'c2']); // newest-first
       expect(result[0].unreadCount).toBe(2);
       expect(result[1].unreadCount).toBe(0); // absent from unread rows
-      expect(result[0].otherMember?.slug).toBe('alice');
+      // Contract shape: `otherParticipant` with handle/displayName, not the
+      // internal slug/firstName/lastName.
+      expect(result[0].otherParticipant).toEqual({
+        handle: 'alice',
+        displayName: 'Alice A',
+        avatarUrl: null,
+      });
+      expect(result[0].type).toBe('dm');
+      // `updatedAt` tracks last activity (the newest message).
+      expect(result[0].updatedAt).toBe('2026-01-02T00:00:00.000Z');
+      expect(result[1].updatedAt).toBe('2026-01-01T00:00:00.000Z');
       // No N+1: exactly two message queries regardless of conversation count.
       expect(messages.createQueryBuilder).toHaveBeenCalledTimes(2);
+    });
+
+    it('emits a `sender` on every lastMessage — including one the caller sent', async () => {
+      participants.find
+        .mockResolvedValueOnce([
+          { conversationId: 'c1', muted: false, lastReadAt: null },
+        ])
+        .mockResolvedValueOnce([{ conversationId: 'c1', userId: 'u2' }]);
+      conversations.find.mockResolvedValueOnce([
+        {
+          id: 'c1',
+          isOfficial: false,
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+      ]);
+      // The caller's own profile must be loaded too: they may be the sender of
+      // the last message, and `MessageResponse.sender` is non-nullable.
+      profiles.find.mockResolvedValueOnce([
+        {
+          userId: 'u2',
+          slug: 'alice',
+          firstName: 'Alice',
+          lastName: 'A',
+          avatarUrl: null,
+        },
+        {
+          userId: 'me',
+          slug: 'me-handle',
+          firstName: 'Me',
+          lastName: 'Myself',
+          avatarUrl: 'https://cdn.example/me.png',
+        },
+      ]);
+
+      const lastQb = makeQb();
+      lastQb.getMany.mockResolvedValue([
+        {
+          conversationId: 'c1',
+          id: 'm-c1',
+          senderId: 'me', // the caller sent the newest message
+          body: 'hi',
+          createdAt: new Date('2026-01-02T00:00:00Z'),
+        },
+      ]);
+      messages.createQueryBuilder
+        .mockReturnValueOnce(lastQb)
+        .mockReturnValueOnce(makeQb());
+
+      const result = await service.listConversations('me');
+
+      expect(result[0].lastMessage?.sender).toEqual({
+        handle: 'me-handle',
+        displayName: 'Me Myself',
+        avatarUrl: 'https://cdn.example/me.png',
+      });
+      expect(result[0].lastMessage?.conversationId).toBe('c1');
+      expect(result[0].lastMessage?.createdAt).toBe('2026-01-02T00:00:00.000Z');
+      // The caller is queried alongside the counterparts, in the same query.
+      const findCalls = profiles.find.mock.calls as [
+        { where: { userId: FindOperator<string> } },
+      ][];
+      expect(findCalls[0][0].where.userId.value).toEqual(
+        expect.arrayContaining(['u2', 'me']),
+      );
     });
 
     it('expresses the null-lastReadAt branch in the unread query', async () => {
@@ -210,7 +293,11 @@ describe('MessagingService', () => {
         ])
         .mockResolvedValueOnce([]);
       conversations.find.mockResolvedValueOnce([
-        { id: 'c1', isOfficial: false },
+        {
+          id: 'c1',
+          isOfficial: false,
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
       ]);
       const lastQb = makeQb();
       const unreadQb = makeQb();
@@ -226,7 +313,7 @@ describe('MessagingService', () => {
       );
     });
 
-    it('renders official/welcome threads with no otherMember (>2 participants)', async () => {
+    it('renders official/welcome threads as type "group" with no otherParticipant (>2 participants)', async () => {
       participants.find
         .mockResolvedValueOnce([
           { conversationId: 'off', muted: false, lastReadAt: null },
@@ -237,7 +324,11 @@ describe('MessagingService', () => {
           { conversationId: 'off', userId: 'y' },
         ]);
       conversations.find.mockResolvedValueOnce([
-        { id: 'off', isOfficial: true },
+        {
+          id: 'off',
+          isOfficial: true,
+          createdAt: new Date('2026-03-04T05:06:07Z'),
+        },
       ]);
       profiles.find.mockResolvedValueOnce([
         {
@@ -262,8 +353,12 @@ describe('MessagingService', () => {
       const result = await service.listConversations('me');
 
       expect(result[0].isOfficial).toBe(true);
-      expect(result[0].otherMember).toBeNull();
+      expect(result[0].type).toBe('group');
+      expect(result[0].otherParticipant).toBeNull();
       expect(result[0].lastMessage).toBeNull();
+      // No messages yet, so last activity falls back to the thread's creation
+      // (`conversations` has no updated_at column).
+      expect(result[0].updatedAt).toBe('2026-03-04T05:06:07.000Z');
     });
   });
 
@@ -378,6 +473,111 @@ describe('MessagingService', () => {
         before: '2026-01-01T00:00:00Z',
       });
     });
+
+    it('returns MessageResponses with a resolved `sender` on every message', async () => {
+      const qb = makeQb();
+      qb.getMany.mockResolvedValue([
+        {
+          id: 'm2',
+          conversationId: 'c1',
+          senderId: 'them',
+          body: 'yo',
+          createdAt: new Date('2026-01-02T00:00:00Z'),
+          editedAt: null,
+        },
+        {
+          id: 'm1',
+          conversationId: 'c1',
+          senderId: 'me',
+          body: 'hi',
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+          editedAt: null,
+        },
+      ]);
+      messages.createQueryBuilder.mockReturnValueOnce(qb);
+      profiles.find.mockResolvedValueOnce([
+        {
+          userId: 'them',
+          slug: 'tam-rivera',
+          firstName: 'Tam',
+          lastName: 'Rivera',
+          avatarUrl: null,
+        },
+        {
+          userId: 'me',
+          slug: 'me-handle',
+          firstName: 'Me',
+          lastName: 'Myself',
+          avatarUrl: null,
+        },
+      ]);
+
+      const result = await service.getMessages('c1', 'me', {});
+
+      expect(result).toEqual([
+        {
+          id: 'm2',
+          conversationId: 'c1',
+          body: 'yo',
+          sender: {
+            handle: 'tam-rivera',
+            displayName: 'Tam Rivera',
+            avatarUrl: null,
+          },
+          createdAt: '2026-01-02T00:00:00.000Z',
+        },
+        {
+          id: 'm1',
+          conversationId: 'c1',
+          body: 'hi',
+          sender: {
+            handle: 'me-handle',
+            displayName: 'Me Myself',
+            avatarUrl: null,
+          },
+          createdAt: '2026-01-01T00:00:00.000Z',
+        },
+      ]);
+      // The internal `senderId` is gone: the frontend reads `sender` only.
+      expect(result[0]).not.toHaveProperty('senderId');
+      // Senders are hydrated in ONE query for the whole page, not per message.
+      expect(profiles.find).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back to a placeholder sender rather than emitting a message with none', async () => {
+      const qb = makeQb();
+      qb.getMany.mockResolvedValue([
+        {
+          id: 'm1',
+          conversationId: 'c1',
+          senderId: 'ghost', // profile can't be resolved
+          body: 'hi',
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+          editedAt: null,
+        },
+      ]);
+      messages.createQueryBuilder.mockReturnValueOnce(qb);
+      profiles.find.mockResolvedValueOnce([]);
+
+      const result = await service.getMessages('c1', 'me', {});
+
+      // Never null/undefined — the frontend adapter reads sender.displayName
+      // unguarded and would throw a TypeError.
+      expect(result[0].sender).toEqual({
+        handle: '',
+        displayName: 'Member',
+        avatarUrl: null,
+      });
+    });
+
+    it('skips the profile query entirely for an empty page', async () => {
+      const qb = makeQb();
+      qb.getMany.mockResolvedValue([]);
+      messages.createQueryBuilder.mockReturnValueOnce(qb);
+
+      await expect(service.getMessages('c1', 'me', {})).resolves.toEqual([]);
+      expect(profiles.find).not.toHaveBeenCalled();
+    });
   });
 
   describe('markRead', () => {
@@ -471,6 +671,68 @@ describe('MessagingService', () => {
         'message.created',
         expect.objectContaining({ conversationId: 'c1' }),
       );
+    });
+
+    it('returns a MessageResponse carrying the sender, not the internal view', async () => {
+      participants.findOne
+        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
+        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+      conversations.findOne.mockResolvedValue({ id: 'c1', isOfficial: false });
+      connections.areConnected.mockResolvedValue(true);
+      messages.save.mockResolvedValueOnce({
+        id: 'm1',
+        conversationId: 'c1',
+        senderId: 'me',
+        body: 'hello',
+        createdAt: new Date('2026-01-01T00:00:00Z'),
+        editedAt: null,
+      });
+      profiles.find.mockResolvedValueOnce([
+        {
+          userId: 'me',
+          slug: 'me-handle',
+          firstName: 'Me',
+          lastName: 'Myself',
+          avatarUrl: null,
+        },
+      ]);
+
+      const result = await service.sendMessage('c1', 'me', 'hello');
+
+      expect(result).toEqual({
+        id: 'm1',
+        conversationId: 'c1',
+        body: 'hello',
+        sender: {
+          handle: 'me-handle',
+          displayName: 'Me Myself',
+          avatarUrl: null,
+        },
+        createdAt: '2026-01-01T00:00:00.000Z',
+      });
+      expect(result).not.toHaveProperty('senderId');
+    });
+
+    it('still emits the internal MessageView (with senderId) on message.created', async () => {
+      participants.findOne
+        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
+        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+      conversations.findOne.mockResolvedValue({ id: 'c1', isOfficial: false });
+      connections.areConnected.mockResolvedValue(true);
+
+      await service.sendMessage('c1', 'me', 'hello');
+
+      // The event payload is internal (chat.gateway consumers), and is
+      // deliberately NOT remapped to the frontend contract here.
+      const emitCalls = emitter.emit.mock.calls as [
+        string,
+        MessageCreatedEvent,
+      ][];
+      const [eventName, payload] = emitCalls[0];
+      expect(eventName).toBe('message.created');
+      expect(payload.conversationId).toBe('c1');
+      expect(payload.message.senderId).toBe('me');
+      expect(payload.message.body).toBe('hello');
     });
   });
 

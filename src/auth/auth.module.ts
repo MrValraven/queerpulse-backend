@@ -5,6 +5,7 @@ import { PassportModule } from '@nestjs/passport';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { UsersModule } from '../users/users.module';
 import { MembershipModule } from '../membership/membership.module';
+import { User } from '../users/entities/user.entity';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { AuthMaintenanceService } from './auth-maintenance.service';
@@ -17,7 +18,9 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     UsersModule,
     MembershipModule,
     PassportModule,
-    TypeOrmModule.forFeature([RefreshToken]),
+    // User: JwtStrategy re-reads status/role per request so bans take effect
+    // immediately rather than lagging by the access-token TTL.
+    TypeOrmModule.forFeature([RefreshToken, User]),
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
@@ -32,12 +35,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     }),
   ],
   controllers: [AuthController],
-  providers: [
-    AuthService,
-    AuthMaintenanceService,
-    GoogleStrategy,
-    JwtStrategy,
-  ],
+  providers: [AuthService, AuthMaintenanceService, GoogleStrategy, JwtStrategy],
   exports: [AuthService],
 })
 export class AuthModule {}

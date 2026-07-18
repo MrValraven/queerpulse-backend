@@ -1,11 +1,14 @@
 import { NotFoundException } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Notification, NotificationType } from './entities/notification.entity';
+import { NOTIFICATION_CREATED } from './notification.events';
 import { NotificationsService } from './notifications.service';
 
 describe('NotificationsService', () => {
   let service: NotificationsService;
+  let emit: jest.Mock;
   let repo: {
     create: jest.Mock;
     save: jest.Mock;
@@ -22,13 +25,75 @@ describe('NotificationsService', () => {
       update: jest.fn().mockResolvedValue({ affected: 1 }),
       count: jest.fn().mockResolvedValue(0),
     };
+    emit = jest.fn();
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         NotificationsService,
         { provide: getRepositoryToken(Notification), useValue: repo },
+        { provide: EventEmitter2, useValue: { emit } },
       ],
     }).compile();
     service = module.get(NotificationsService);
+  });
+
+  describe('NOTIFICATION_CREATED announcements', () => {
+    it('announces the persisted row so the gateway can push it', async () => {
+      repo.save.mockResolvedValue({
+        id: 'n1',
+        userId: 'u1',
+        type: NotificationType.VouchReceived,
+        payload: { voucherId: 'u2' },
+        read: false,
+      });
+      await service.create('u1', NotificationType.VouchReceived, {
+        voucherId: 'u2',
+      });
+      expect(emit).toHaveBeenCalledWith(NOTIFICATION_CREATED, {
+        userId: 'u1',
+        notification: expect.objectContaining({
+          id: 'n1',
+          userId: 'u1',
+        }) as unknown,
+      });
+    });
+
+    it('announces only after the write, never before', async () => {
+      const order: string[] = [];
+      repo.save.mockImplementation(() => {
+        order.push('save');
+        return Promise.resolve({ id: 'n1', userId: 'u1' });
+      });
+      emit.mockImplementation(() => order.push('emit'));
+      await service.create('u1', NotificationType.PromotedToMember);
+      expect(order).toEqual(['save', 'emit']);
+    });
+
+    it('announces once per recipient with that recipient as the target', async () => {
+      repo.save.mockResolvedValue([
+        { id: 'n1', userId: 'u1' },
+        { id: 'n2', userId: 'u2' },
+      ]);
+      await service.createForRecipients(
+        ['u1', 'u2'],
+        NotificationType.NewMessage,
+        { conversationId: 'c1' },
+      );
+      expect(emit).toHaveBeenCalledTimes(2);
+      expect(emit).toHaveBeenCalledWith(NOTIFICATION_CREATED, {
+        userId: 'u1',
+        notification: expect.objectContaining({ id: 'n1' }) as unknown,
+      });
+      expect(emit).toHaveBeenCalledWith(NOTIFICATION_CREATED, {
+        userId: 'u2',
+        notification: expect.objectContaining({ id: 'n2' }) as unknown,
+      });
+    });
+
+    it('announces nothing when there are no recipients', async () => {
+      await service.createForRecipients([], NotificationType.NewMessage);
+      expect(repo.save).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+    });
   });
 
   it('list filters to unread when requested', async () => {

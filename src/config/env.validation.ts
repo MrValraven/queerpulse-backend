@@ -10,6 +10,19 @@ import {
   validateSync,
 } from 'class-validator';
 import { missingLaunchedFeatureEnv } from '../launchedFeatures';
+import { invalidFrontendOrigins } from './frontend-origins';
+
+/**
+ * A cookie `Domain` attribute: a bare hostname, optionally leading-dotted to
+ * cover subdomains (`.queerpulse.com`). Rejects schemes, ports, paths and
+ * whitespace. `localhost` is allowed for completeness, though the correct
+ * localhost setting is to leave COOKIE_DOMAIN unset entirely.
+ */
+function isCookieDomain(value: string): boolean {
+  return /^\.?(localhost|([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})$/i.test(
+    value,
+  );
+}
 
 export enum NodeEnv {
   Development = 'development',
@@ -21,10 +34,13 @@ export class EnvironmentVariables {
   @IsEnum(NodeEnv)
   NODE_ENV: NodeEnv;
 
+  // Optional so the `?? 3000` fallbacks in app.config/main are reachable rather
+  // than dead code. Platforms that inject PORT (Railway, Heroku) still win.
+  @IsOptional()
   @IsNumber()
   @Min(0)
   @Max(65535)
-  PORT: number;
+  PORT?: number;
 
   @IsString()
   DATABASE_URL: string;
@@ -69,6 +85,10 @@ export class EnvironmentVariables {
   @IsOptional()
   @IsString()
   LOG_LEVEL?: string;
+
+  @IsOptional()
+  @IsString()
+  LOG_PRETTY?: string;
 
   @IsOptional() @IsString() S3_ENDPOINT?: string;
   @IsOptional() @IsString() S3_REGION?: string;
@@ -117,6 +137,46 @@ export function validate(
     problems.push('FRONTEND_URL is required when NODE_ENV=production');
   }
 
+  // Storage is not optional in production — profile avatars and every upload
+  // route depend on it. Left unset, the app boots healthy and uploads fail at
+  // runtime, per-request, for users. Fail at boot instead.
+  if (validated.NODE_ENV === NodeEnv.Production) {
+    const missingS3 = (
+      [
+        ['S3_BUCKET', validated.S3_BUCKET],
+        ['S3_ACCESS_KEY', validated.S3_ACCESS_KEY],
+        ['S3_SECRET_KEY', validated.S3_SECRET_KEY],
+      ] as const
+    )
+      .filter(([, value]) => !value)
+      .map(([key]) => key);
+    if (missingS3.length > 0) {
+      problems.push(
+        `${missingS3.join(', ')} ${missingS3.length === 1 ? 'is' : 'are'} required when NODE_ENV=production (uploads fail at runtime otherwise)`,
+      );
+    }
+  }
+
+  // FRONTEND_URL is a strict, comma-separated allowlist of EXACT origins. A
+  // trailing slash or a path never matches a browser `Origin` header, so a typo
+  // here reads as "CORS is broken" at runtime; fail at boot with the bad entry
+  // named instead.
+  const badOrigins = invalidFrontendOrigins(validated.FRONTEND_URL);
+  if (badOrigins.length > 0) {
+    problems.push(
+      `FRONTEND_URL must be a comma-separated list of exact origins (scheme + host, no path or trailing slash); invalid: ${badOrigins.join(', ')}`,
+    );
+  }
+
+  // COOKIE_DOMAIN is a cookie Domain attribute (e.g. `.queerpulse.com`), not a
+  // URL. Passing an origin here makes Express emit a cookie the browser drops
+  // silently — auth then "just doesn't work" with no error anywhere.
+  if (validated.COOKIE_DOMAIN && !isCookieDomain(validated.COOKIE_DOMAIN)) {
+    problems.push(
+      `COOKIE_DOMAIN must be a bare domain such as .queerpulse.com (no scheme, port or path); got: ${validated.COOKIE_DOMAIN}`,
+    );
+  }
+
   // Mux is all-or-nothing: if any credential is set, the core trio must be too,
   // otherwise webhooks 500 at runtime instead of failing fast at boot.
   const muxVars = [
@@ -150,9 +210,7 @@ export function validate(
   // src/launchedFeatures.ts). Currently only cinema declares any (Mux), and it
   // ships disabled — so this is a no-op until a feature with requiredEnv is
   // switched on.
-  problems.push(
-    ...missingLaunchedFeatureEnv(config as Record<string, unknown>),
-  );
+  problems.push(...missingLaunchedFeatureEnv(config));
 
   if (problems.length > 0) {
     throw new Error(problems.join('; '));

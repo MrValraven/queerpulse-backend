@@ -114,14 +114,28 @@ import { LaunchedFeaturesGuard } from './common/launched-features.guard';
           if (res.statusCode >= 400) return 'warn';
           return 'info';
         },
+        // pino-pretty is a devDependency and is absent from the production
+        // image, so selecting it there throws at boot ("unable to determine
+        // transport target") before a logger exists to report why. Keying that
+        // off `NODE_ENV !== 'production'` made a boot crash reachable by setting
+        // NODE_ENV=staging in a dashboard; require an explicit opt-in instead.
+        // LOG_PRETTY=true in a deployed environment is the caller's problem.
         transport:
-          process.env.NODE_ENV === 'production'
-            ? undefined
-            : { target: 'pino-pretty', options: { singleLine: true } },
+          process.env.LOG_PRETTY === 'true' ||
+          (process.env.LOG_PRETTY === undefined &&
+            process.env.NODE_ENV === 'development')
+            ? { target: 'pino-pretty', options: { singleLine: true } }
+            : undefined,
       },
     }),
     EventEmitterModule.forRoot(),
     ScheduleModule.forRoot(),
+    // SINGLE-REPLICA ONLY. No `storage` is configured, so @nestjs/throttler
+    // falls back to an in-process Map: counters reset on every deploy, and with
+    // N replicas every limit becomes N× its stated value — including the 10/60s
+    // on POST /auth/refresh, which is the only abuse control on that endpoint.
+    // Scaling out requires a shared store (e.g. @nest-lab/throttler-storage-redis)
+    // here AND a socket.io Redis adapter — see the note in ChatGateway.
     ThrottlerModule.forRoot({
       throttlers: [{ name: 'default', ttl: seconds(60), limit: 120 }],
     }),

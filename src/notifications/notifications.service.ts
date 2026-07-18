@@ -1,7 +1,12 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Notification, NotificationType } from './entities/notification.entity';
+import {
+  NOTIFICATION_CREATED,
+  NotificationCreatedEvent,
+} from './notification.events';
 
 const PAGE_SIZE = 20;
 
@@ -16,16 +21,19 @@ export class NotificationsService {
   constructor(
     @InjectRepository(Notification)
     private readonly notifications: Repository<Notification>,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
-  create(
+  async create(
     userId: string,
     type: NotificationType,
     payload: Record<string, unknown> = {},
   ): Promise<Notification> {
-    return this.notifications.save(
+    const saved = await this.notifications.save(
       this.notifications.create({ userId, type, payload }),
     );
+    this.announce(saved);
+    return saved;
   }
 
   async createForRecipients(
@@ -36,11 +44,14 @@ export class NotificationsService {
     if (!userIds.length) {
       return;
     }
-    await this.notifications.save(
+    const saved = await this.notifications.save(
       userIds.map((userId) =>
         this.notifications.create({ userId, type, payload }),
       ),
     );
+    for (const notification of saved) {
+      this.announce(notification);
+    }
   }
 
   async list(
@@ -77,5 +88,22 @@ export class NotificationsService {
   async markAllRead(userId: string): Promise<{ ok: true }> {
     await this.notifications.update({ userId, read: false }, { read: true });
     return { ok: true };
+  }
+
+  /**
+   * Announce a persisted notification on the internal event bus. The chat
+   * gateway listens and pushes it to the recipient's live sockets as
+   * `notification:new`; emitting only after the write means a pushed
+   * notification always has a row behind it.
+   *
+   * `emit` is synchronous and fire-and-forget — a listener that throws must
+   * never fail the write that produced the notification.
+   */
+  private announce(notification: Notification): void {
+    const event: NotificationCreatedEvent = {
+      userId: notification.userId,
+      notification,
+    };
+    this.eventEmitter.emit(NOTIFICATION_CREATED, event);
   }
 }

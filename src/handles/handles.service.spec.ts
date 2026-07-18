@@ -29,12 +29,24 @@ function makeManager(rows: Map<string, Handle> = new Map()): EntityManager {
       rows.set(name, { ...(data as Handle), createdAt: new Date() });
       return Promise.resolve();
     },
+    // Matches EVERY field of the where clause, not just `name` — owner-scoped
+    // deletes pass ownerKind/userId too, and a fake that ignored them would
+    // report a cross-owner delete as succeeding.
     delete: (
       _entity: unknown,
-      where: { name: string },
+      where: Partial<Handle>,
     ): Promise<{ affected: number }> => {
-      const existed = rows.delete(where.name);
-      return Promise.resolve({ affected: existed ? 1 : 0 });
+      const row = rows.get(where.name as string);
+      const matches =
+        row !== undefined &&
+        (Object.entries(where) as [keyof Handle, unknown][]).every(
+          ([key, value]) => row[key] === value,
+        );
+      if (!matches) {
+        return Promise.resolve({ affected: 0 });
+      }
+      rows.delete(where.name as string);
+      return Promise.resolve({ affected: 1 });
     },
     findOne: (
       _entity: unknown,
@@ -149,7 +161,12 @@ describe('HandlesService.rename', () => {
     seedProfile(rows, 'old-name', 'user-1');
     const { service, manager } = makeService(rows);
 
-    await service.rename(manager, 'old-name', 'new-name', profileOwner('user-1'));
+    await service.rename(
+      manager,
+      'old-name',
+      'new-name',
+      profileOwner('user-1'),
+    );
 
     expect(rows.has('old-name')).toBe(false);
     expect(rows.get('new-name')).toMatchObject({
@@ -168,7 +185,12 @@ describe('HandlesService.rename', () => {
     const rows = new Map<string, Handle>();
     seedProfile(rows, 'same-name', 'user-1');
     const { service, manager } = makeService(rows);
-    await service.rename(manager, 'same-name', 'Same-Name', profileOwner('user-1'));
+    await service.rename(
+      manager,
+      'same-name',
+      'Same-Name',
+      profileOwner('user-1'),
+    );
     expect(rows.has('same-name')).toBe(true);
   });
 });
@@ -207,5 +229,62 @@ describe('HandlesService.isTaken', () => {
     await expect(
       service.isTaken(manager, 'nightform', subprofileOwner('sp-1')),
     ).resolves.toBe(true);
+  });
+});
+
+// --- release() ownership scoping ---------------------------------------------
+
+describe('HandlesService.release ownership scoping', () => {
+  it('deletes the row when the owner matches', async () => {
+    const rows = new Map<string, Handle>();
+    seedProfile(rows, 'nightform', 'user-1');
+    const { service, manager } = makeService(rows);
+
+    await service.release(manager, 'nightform', profileOwner('user-1'));
+
+    expect(rows.has('nightform')).toBe(false);
+  });
+
+  it('leaves a row owned by someone else alone', async () => {
+    const rows = new Map<string, Handle>();
+    seedProfile(rows, 'nightform', 'user-1');
+    const { service, manager } = makeService(rows);
+
+    await service.release(manager, 'nightform', profileOwner('user-2'));
+
+    expect(rows.has('nightform')).toBe(true);
+  });
+
+  it('does not let a profile release a subprofile-owned name', async () => {
+    const rows = new Map<string, Handle>();
+    rows.set('nightform', {
+      name: 'nightform',
+      ownerKind: HandleOwnerKind.Subprofile,
+      userId: null,
+      subprofileId: 'sp-1',
+      createdAt: new Date(),
+    } as Handle);
+    const { service, manager } = makeService(rows);
+
+    await service.release(manager, 'nightform', profileOwner('user-1'));
+
+    expect(rows.has('nightform')).toBe(true);
+  });
+
+  // The reason release() is owner-scoped at all. `profiles.slug` is only
+  // case-SENSITIVELY unique, so `John` and `john` can both be live profiles
+  // while the registry holds a single lowercase `john` row. Renaming the one
+  // that does NOT own that row must not free the other's still-live username.
+  it('does not free a case-folded name owned by a different profile', async () => {
+    const rows = new Map<string, Handle>();
+    seedProfile(rows, 'john', 'user-1'); // owned by the profile slugged `john`
+
+    const { service, manager } = makeService(rows);
+
+    // user-2, slugged `John`, renames away. normalizeHandle('John') === 'john'.
+    await service.rename(manager, 'John', 'jonathan', profileOwner('user-2'));
+
+    expect(rows.get('john')).toMatchObject({ userId: 'user-1' });
+    expect(rows.get('jonathan')).toMatchObject({ userId: 'user-2' });
   });
 });

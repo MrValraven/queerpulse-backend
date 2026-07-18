@@ -11,10 +11,18 @@ import { ThrottlerGuard } from '@nestjs/throttler';
  *
  * Mirrors the `context.getType() !== 'http'` guard used by `CsrfGuard` and
  * `JwtAuthGuard`.
+ *
+ * Delegating to `super.shouldSkip` is load-bearing: that is where `@SkipThrottle()`
+ * is read. Overriding it outright silently disabled the decorator everywhere it
+ * was used — including the Mux webhook, which is HMAC-authenticated and must not
+ * be throttled on a burst of provider callbacks.
  */
 @Injectable()
 export class HttpThrottlerGuard extends ThrottlerGuard {
   protected async shouldSkip(context: ExecutionContext): Promise<boolean> {
-    return context.getType() !== 'http';
+    if (context.getType() !== 'http') {
+      return true;
+    }
+    return super.shouldSkip(context);
   }
 }

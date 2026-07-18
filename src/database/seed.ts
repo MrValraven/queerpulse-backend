@@ -3,6 +3,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { SnakeNamingStrategy } from 'typeorm-naming-strategies';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
+import { OpenToEntry } from '../profiles/open-to';
 import { Activity, ActivityKind } from '../profiles/entities/activity.entity';
 import { BoardPost, BoardKind } from '../profiles/entities/board-post.entity';
 import { Group } from '../profiles/entities/group.entity';
@@ -87,7 +88,7 @@ const MEMBERS: Array<{
   location: string | null;
   visibility: ProfileVisibility;
   tags: string[];
-  openTo: string[];
+  openTo: OpenToEntry[];
 }> = [
   {
     googleId: 'seed-tomas',
@@ -101,7 +102,7 @@ const MEMBERS: Array<{
     location: 'Lisbon',
     visibility: ProfileVisibility.Open,
     tags: ['Illustration', 'Print'],
-    openTo: ['Collaborations'],
+    openTo: [{ kind: 'preset', id: 'collaborating' }],
   },
   {
     googleId: 'seed-ana',
@@ -115,7 +116,7 @@ const MEMBERS: Array<{
     location: 'Porto',
     visibility: ProfileVisibility.Network,
     tags: ['Music', 'Performance'],
-    openTo: ['Mentoring'],
+    openTo: [{ kind: 'preset', id: 'mentoring' }],
   },
   {
     googleId: 'seed-noa',
@@ -129,7 +130,10 @@ const MEMBERS: Array<{
     location: 'Braga',
     visibility: ProfileVisibility.Open,
     tags: ['Curation'],
-    openTo: ['Collaborations', 'Hiring'],
+    openTo: [
+      { kind: 'preset', id: 'collaborating' },
+      { kind: 'custom', label: 'Hiring' },
+    ],
   },
   {
     googleId: 'seed-pending',

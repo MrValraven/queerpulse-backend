@@ -23,10 +23,24 @@ body:json {
   "bio": "Building queer spaces online and off.",
   "location": "Lisbon, PT",
   "visibility": "network",
-  "openTo": ["collaboration", "mentorship"],
+  "now": "Finishing a zine before the fair",
+  "openTo": [
+    { "kind": "preset", "id": "collaborating" },
+    { "kind": "preset", "id": "mentoring" },
+    { "kind": "custom", "label": "A nurse or two for the testing nights" }
+  ],
   "tags": ["design", "community"]
 }
 
 docs {
   Pending-ok. Send any subset of the listed fields. Returns the full profile. Use { avatarUrl } here after an upload presign + PUT.
+
+  now: free text, max 280 chars. "" CLEARS the status (it is not treated as "no change").
+
+  openTo: a full REPLACE of the list, max 12 entries. Each entry is either
+  { "kind": "preset", "id": <id> } or { "kind": "custom", "label": <max 60 chars> }.
+  Custom labels are stored verbatim (whitespace trimmed only). Send [] to clear.
+  The nine preset ids — shared with the directory filter and the connect form, so
+  they must not drift — are: collaborating, mentoring, casualMeetups, commissions,
+  clientWork, referrals, swaps, studioVisits, interviewees. An unknown id is a 400.
 }

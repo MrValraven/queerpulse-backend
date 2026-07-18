@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { join } from 'node:path';
 import { DataSource } from 'typeorm';
 import { SnakeNamingStrategy } from 'typeorm-naming-strategies';
+import { resolvePostgresSsl } from './config/database-ssl';
 
 // This data source backs the TypeORM CLI in BOTH environments:
 //   - dev:  `typeorm-ts-node-commonjs -d src/data-source.ts`  (__filename ends .ts)
@@ -17,6 +18,10 @@ export default new DataSource({
   migrations: [join(__dirname, 'migrations', `*.${ext}`)],
   namingStrategy: new SnakeNamingStrategy(),
   synchronize: false,
+  // Shared with DatabaseModule — the CLI and the app MUST negotiate TLS
+  // identically, or `migration:run:prod` succeeds against a connection the app
+  // then cannot open. See src/config/database-ssl.ts.
+  ssl: resolvePostgresSsl(),
   // Turn an undefined value in a `where` clause into an error instead of a
   // silently-dropped predicate (which would match/mutate an unintended row).
   invalidWhereValuesBehavior: { undefined: 'throw' },

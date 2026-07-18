@@ -94,14 +94,45 @@ export class HandlesService {
       return;
     }
     if (normalizedOld) {
-      await this.release(m, normalizedOld);
+      // Owner-scoped: `oldName` is the caller's own slug, but it may normalize
+      // onto a row someone else owns (see below).
+      await this.release(m, normalizedOld, owner);
     }
     await this.claim(m, normalizedNew, owner);
   }
 
-  // Frees a handle by PK. Safe to call when the row does not exist.
-  async release(m: EntityManager, name: string): Promise<void> {
-    await m.delete(Handle, { name: normalizeHandle(name) });
+  /**
+   * Frees a handle. Safe to call when the row does not exist.
+   *
+   * `owner` scopes the delete, and passing it is strongly preferred. Names are
+   * normalized (lowercased) but `profiles.slug` is stored raw and is only
+   * case-SENSITIVELY unique, so two profiles can hold `John` and `john` while
+   * the registry has a single `john` row. Deleting by name alone let the profile
+   * that did NOT own that row release it out from under the one that did —
+   * freeing a name whose `/members/<slug>` was still live, for anyone to reclaim.
+   *
+   * Omitting `owner` deletes by name regardless of ownership; only do so where
+   * the row is already known to belong to the caller.
+   */
+  async release(
+    m: EntityManager,
+    name: string,
+    owner?: HandleOwner,
+  ): Promise<void> {
+    const normalized = normalizeHandle(name);
+    if (!owner) {
+      await m.delete(Handle, { name: normalized });
+      return;
+    }
+    await m.delete(Handle, {
+      name: normalized,
+      ...(owner.kind === 'profile'
+        ? { ownerKind: HandleOwnerKind.Profile, userId: owner.userId }
+        : {
+            ownerKind: HandleOwnerKind.Subprofile,
+            subprofileId: owner.subprofileId,
+          }),
+    });
   }
 
   // True when `name` is held by someone other than `exceptOwner`. Passing the

@@ -100,7 +100,11 @@ describe('ChatGateway', () => {
 
   describe('authenticate (via handleConnection)', () => {
     it('prefers the handshake auth token over the cookie', async () => {
-      verifyAsync.mockResolvedValue({ sub: 'u1', status: 'active', exp: futureExp() });
+      verifyAsync.mockResolvedValue({
+        sub: 'u1',
+        status: 'active',
+        exp: futureExp(),
+      });
       mockedParseCookie.mockReturnValue({ access_token: 'COOKIE' });
       const client = makeClient({
         handshake: { auth: { token: 'AUTH' }, headers: { cookie: 'x' } },
@@ -115,7 +119,11 @@ describe('ChatGateway', () => {
     });
 
     it('falls back to the access_token cookie when no auth token is present', async () => {
-      verifyAsync.mockResolvedValue({ sub: 'u2', status: 'active', exp: futureExp() });
+      verifyAsync.mockResolvedValue({
+        sub: 'u2',
+        status: 'active',
+        exp: futureExp(),
+      });
       mockedParseCookie.mockReturnValue({ access_token: 'COOKIE' });
       const client = makeClient({
         handshake: { auth: {}, headers: { cookie: 'access_token=COOKIE' } },
@@ -140,14 +148,22 @@ describe('ChatGateway', () => {
 
     it('rejects an expired/invalid signature by disconnecting', async () => {
       verifyAsync.mockRejectedValue(new Error('jwt expired'));
-      const client = makeClient({ handshake: { auth: { token: 'STALE' }, headers: {} } });
+      const client = makeClient({
+        handshake: { auth: { token: 'STALE' }, headers: {} },
+      });
       await gateway.handleConnection(client as never);
       expect(client.disconnect).toHaveBeenCalledWith(true);
     });
 
     it('rejects a non-active member (membership enforced on the WS path)', async () => {
-      verifyAsync.mockResolvedValue({ sub: 'u3', status: 'pending', exp: futureExp() });
-      const client = makeClient({ handshake: { auth: { token: 'OK' }, headers: {} } });
+      verifyAsync.mockResolvedValue({
+        sub: 'u3',
+        status: 'pending',
+        exp: futureExp(),
+      });
+      const client = makeClient({
+        handshake: { auth: { token: 'OK' }, headers: {} },
+      });
       await gateway.handleConnection(client as never);
       expect(client.disconnect).toHaveBeenCalledWith(true);
       expect(client.data.userId).toBeUndefined();
@@ -156,9 +172,15 @@ describe('ChatGateway', () => {
 
   describe('presence transitions', () => {
     it('broadcasts online to accepted connections on first connect', async () => {
-      verifyAsync.mockResolvedValue({ sub: 'u1', status: 'active', exp: futureExp() });
+      verifyAsync.mockResolvedValue({
+        sub: 'u1',
+        status: 'active',
+        exp: futureExp(),
+      });
       connections.getAcceptedConnectionUserIds.mockResolvedValue(['friendA']);
-      const client = makeClient({ handshake: { auth: { token: 'OK' }, headers: {} } });
+      const client = makeClient({
+        handshake: { auth: { token: 'OK' }, headers: {} },
+      });
 
       await gateway.handleConnection(client as never);
 
@@ -208,7 +230,9 @@ describe('ChatGateway', () => {
         status: 'active',
         exp: Math.floor(Date.now() / 1000) + 1, // ~1s from the faked clock
       });
-      const client = makeClient({ handshake: { auth: { token: 'OK' }, headers: {} } });
+      const client = makeClient({
+        handshake: { auth: { token: 'OK' }, headers: {} },
+      });
 
       await gateway.handleConnection(client as never);
       expect(client.disconnect).not.toHaveBeenCalled();
@@ -296,6 +320,49 @@ describe('ChatGateway', () => {
         'message:new',
         expect.objectContaining({ conversationId: 'c1' }),
       );
+    });
+
+    it('pushes notification:new to the recipient user room on NOTIFICATION_CREATED', () => {
+      const notification = {
+        id: 'n1',
+        userId: 'u9',
+        type: 'vouch_received',
+        payload: { voucherId: 'u2' },
+        read: false,
+        createdAt: new Date(0),
+      };
+      gateway.handleNotificationCreated({
+        userId: 'u9',
+        notification,
+      } as never);
+      // The user room, not a conversation room — a notification is addressed to
+      // one member, and reaches every tab they have open.
+      expect(gateway.namespace.to).toHaveBeenCalledWith('user:u9');
+      expect(roomEmit).toHaveBeenCalledWith('notification:new', notification);
+    });
+
+    it('emits the notification row itself, not the internal event envelope', () => {
+      const notification = { id: 'n1', userId: 'u9', read: false };
+      gateway.handleNotificationCreated({
+        userId: 'u9',
+        notification,
+      } as never);
+      const [, payload] = roomEmit.mock.calls[0] as [string, unknown];
+      // The socket payload must match what GET /notifications serves, so the
+      // client can treat a pushed and a fetched notification identically.
+      expect(payload).not.toHaveProperty('notification');
+      expect(payload).toEqual(notification);
+    });
+
+    it('does not throw before the namespace is assigned', () => {
+      // @ts-expect-error simulating an event arriving pre-init
+      gateway.namespace = undefined;
+      expect(() =>
+        gateway.handleNotificationCreated({
+          userId: 'u9',
+          notification: { id: 'n1' },
+        } as never),
+      ).not.toThrow();
     });
 
     it('conversation:join rejects a non-participant', async () => {

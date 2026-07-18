@@ -19,13 +19,12 @@ import { ConversationParticipant } from './entities/conversation-participant.ent
 import { Conversation } from './entities/conversation.entity';
 import { Message } from './entities/message.entity';
 import {
-  ConversationMemberView,
+  AuthorSummary,
   ConversationResponse,
-  ConversationSummary,
+  MessageResponse,
   MessageView,
   requireAuthorSummary,
   toAuthorSummary,
-  toConversationMemberView,
   toMessageView,
 } from './message-response';
 import {
@@ -37,6 +36,15 @@ import {
 
 const DEFAULT_LIMIT = 30;
 const MAX_LIMIT = 100;
+
+/**
+ * The fields needed to build a `MessageResponse`. Structural, so both a
+ * persisted `Message` row and the internal `MessageView` satisfy it.
+ */
+type MessageLike = Pick<
+  Message,
+  'id' | 'conversationId' | 'senderId' | 'body' | 'createdAt'
+>;
 
 @Injectable()
 export class MessagingService {
@@ -54,7 +62,7 @@ export class MessagingService {
     private readonly blockFilter: BlockFilterService,
   ) {}
 
-  async listConversations(userId: string): Promise<ConversationSummary[]> {
+  async listConversations(userId: string): Promise<ConversationResponse[]> {
     const myParts = await this.participants.find({ where: { userId } });
     if (!myParts.length) {
       return [];
@@ -81,10 +89,12 @@ export class MessagingService {
         othersByConvo.set(o.conversationId, [o]);
       }
     }
-    const otherProfiles = await this.profiles.find({
-      where: { userId: In(others.map((o) => o.userId)) },
+    // Include the caller's own profile: they may be the sender of a thread's
+    // last message, and `MessageResponse.sender` is non-nullable.
+    const relevantProfiles = await this.profiles.find({
+      where: { userId: In([...others.map((o) => o.userId), userId]) },
     });
-    const profileByUser = new Map(otherProfiles.map((p) => [p.userId, p]));
+    const profileByUser = new Map(relevantProfiles.map((p) => [p.userId, p]));
 
     // One query for the newest (non-deleted) message per conversation and one
     // grouped query for this user's unread counts — replaces the previous
@@ -94,44 +104,49 @@ export class MessagingService {
       this.unreadCountsByConversation(convoIds, userId),
     ]);
 
-    const summaries: ConversationSummary[] = [];
+    const summaries: ConversationResponse[] = [];
     for (const part of myParts) {
       const convo = convoById.get(part.conversationId);
       if (!convo) {
         continue;
       }
-      let otherMember: ConversationMemberView | null = null;
+      let otherParticipant: AuthorSummary | null = null;
       if (!convo.isOfficial) {
         // 1:1 thread: the single counterpart. Official/welcome threads render
-        // with no "other member" — the client shows the org identity.
+        // with no "other participant" — the client shows the org identity.
         const first = othersByConvo.get(convo.id)?.[0];
-        otherMember = toConversationMemberView(
+        otherParticipant = toAuthorSummary(
           first ? profileByUser.get(first.userId) : undefined,
         );
       }
       const lastMessage = lastByConvo.get(convo.id) ?? null;
       summaries.push({
         id: convo.id,
-        isOfficial: convo.isOfficial,
-        otherMember,
+        type: convo.isOfficial ? 'group' : 'dm',
+        otherParticipant,
         lastMessage: lastMessage
           ? {
               id: lastMessage.id,
-              senderId: lastMessage.senderId,
+              conversationId: convo.id,
               body: lastMessage.body,
-              createdAt: lastMessage.createdAt,
+              sender: requireAuthorSummary(
+                profileByUser.get(lastMessage.senderId),
+              ),
+              createdAt: lastMessage.createdAt.toISOString(),
             }
           : null,
         unreadCount: unreadByConvo.get(convo.id) ?? 0,
+        // `conversations` has no updated_at column (schema is migration-owned
+        // and this workstream adds none), so last activity is derived: the
+        // newest message, or the thread's own creation for an empty thread.
+        updatedAt: (lastMessage?.createdAt ?? convo.createdAt).toISOString(),
+        isOfficial: convo.isOfficial,
         muted: part.muted,
       });
     }
-    // Most recently active first.
-    summaries.sort((a, b) => {
-      const at = a.lastMessage?.createdAt.getTime() ?? 0;
-      const bt = b.lastMessage?.createdAt.getTime() ?? 0;
-      return bt - at;
-    });
+    // Most recently active first. ISO-8601 UTC strings are fixed-width, so
+    // lexicographic order is chronological order.
+    summaries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     return summaries;
   }
 
@@ -189,7 +204,7 @@ export class MessagingService {
       limit?: number;
       cursor?: string;
     },
-  ): Promise<MessageView[]> {
+  ): Promise<MessageResponse[]> {
     await this.requireParticipant(conversationId, userId);
     const limit = Math.min(opts.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
     // An explicit `before`/`beforeId` wins; otherwise decode the frontend's
@@ -227,14 +242,41 @@ export class MessagingService {
       .addOrderBy('m.id', 'DESC')
       .take(limit)
       .getMany();
-    return rows.map(toMessageView);
+    return this.toMessageResponses(rows);
+  }
+
+  /**
+   * Hydrates sender profiles onto a page of messages in one query and maps to
+   * the frontend-contract `MessageResponse`. `sender` is non-nullable there —
+   * the frontend adapter reads `sender.displayName` unguarded — so this goes
+   * through `requireAuthorSummary`, which supplies a placeholder rather than
+   * emitting a message the client would throw on.
+   */
+  private async toMessageResponses(
+    rows: MessageLike[],
+  ): Promise<MessageResponse[]> {
+    if (!rows.length) {
+      return [];
+    }
+    const senderIds = [...new Set(rows.map((m) => m.senderId))];
+    const senders = await this.profiles.find({
+      where: { userId: In(senderIds) },
+    });
+    const profileByUser = new Map(senders.map((p) => [p.userId, p]));
+    return rows.map((m) => ({
+      id: m.id,
+      conversationId: m.conversationId,
+      body: m.body,
+      sender: requireAuthorSummary(profileByUser.get(m.senderId)),
+      createdAt: m.createdAt.toISOString(),
+    }));
   }
 
   async sendMessage(
     conversationId: string,
     userId: string,
     body: string,
-  ): Promise<MessageView> {
+  ): Promise<MessageResponse> {
     await this.requireParticipant(conversationId, userId);
     const convo = await this.conversations.findOne({
       where: { id: conversationId },
@@ -255,7 +297,12 @@ export class MessagingService {
         );
       }
     }
-    return this.postMessage(conversationId, userId, body);
+    // `postMessage` stays on the internal `MessageView` — it is also the
+    // MESSAGE_CREATED event payload and backs `POST /messages/request`. Only
+    // the HTTP/WS send path is mapped to the frontend contract.
+    const view = await this.postMessage(conversationId, userId, body);
+    const [response] = await this.toMessageResponses([view]);
+    return response;
   }
 
   async markRead(

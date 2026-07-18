@@ -5,6 +5,17 @@ const REFRESH_MAX_AGE = 30 * 24 * 60 * 60 * 1000; // 30d
 // The OAuth `state` nonce only needs to survive the Google consent round-trip.
 const OAUTH_STATE_MAX_AGE = 10 * 60 * 1000; // 10m
 
+/**
+ * The refresh token is only ever read by `POST /auth/refresh` and
+ * `POST /auth/logout`, so it is scoped to `/auth` rather than `/`. That keeps a
+ * 30-day credential off every ordinary API call, every socket handshake, and
+ * every proxy/APM/error-reporter that captures request headers along the way.
+ *
+ * `clearCookie` must pass the SAME path or the browser ignores it and the cookie
+ * survives logout — hence one constant, used by both set and clear.
+ */
+const REFRESH_COOKIE_PATH = '/auth';
+
 export interface AuthCookieOpts {
   secure: boolean;
   domain?: string;
@@ -20,6 +31,10 @@ function base(opts: AuthCookieOpts): CookieOptions {
   };
 }
 
+function refreshBase(opts: AuthCookieOpts): CookieOptions {
+  return { ...base(opts), path: REFRESH_COOKIE_PATH };
+}
+
 export function setAuthCookies(
   res: Response,
   tokens: { accessToken: string; refreshToken: string },
@@ -30,14 +45,14 @@ export function setAuthCookies(
     maxAge: ACCESS_MAX_AGE,
   });
   res.cookie('refresh_token', tokens.refreshToken, {
-    ...base(opts),
+    ...refreshBase(opts),
     maxAge: REFRESH_MAX_AGE,
   });
 }
 
 export function clearAuthCookies(res: Response, opts: AuthCookieOpts): void {
   res.clearCookie('access_token', base(opts));
-  res.clearCookie('refresh_token', base(opts));
+  res.clearCookie('refresh_token', refreshBase(opts));
 }
 
 /**
@@ -57,7 +72,10 @@ export function setOAuthStateCookie(
 }
 
 /** Clear the one-time `oauth_state` nonce cookie. */
-export function clearOAuthStateCookie(res: Response, opts: AuthCookieOpts): void {
+export function clearOAuthStateCookie(
+  res: Response,
+  opts: AuthCookieOpts,
+): void {
   res.clearCookie('oauth_state', base(opts));
 }
 

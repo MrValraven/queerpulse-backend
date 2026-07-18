@@ -13,9 +13,9 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `HandlesService` so the API (Task C1/C2) and the frontend (Task C3) line up.
  *
  * The `up()` also BACKFILLS existing profile slugs into the registry so live
- * usernames are represented from day one.
- *
- * DO NOT RUN — authored for review only, per the task's instructions.
+ * usernames are represented from day one. That backfill is INCOMPLETE by
+ * construction — see the note on the INSERT below; `BackfillHandleStragglers`
+ * (1782800670000) finishes the job and must stay ordered after this migration.
  */
 export class AddHandles1782800660000 implements MigrationInterface {
   name = 'AddHandles1782800660000';
@@ -67,10 +67,14 @@ export class AddHandles1782800660000 implements MigrationInterface {
     // Seed the registry from existing profile usernames. The regex guard skips
     // slugs that violate HANDLE_RE (too short/long or otherwise out of format),
     // and ON CONFLICT DO NOTHING guards the rare case where two profile slugs
-    // fold to the same lowercased name. Any profile skipped here (slug too
-    // short/long, or a lowercase collision) needs a MANUAL repair pass before
-    // its owner can rely on a username — acceptable for this review-only
-    // migration; a follow-up data fix should reconcile the stragglers.
+    // fold to the same lowercased name.
+    //
+    // Both skips leave a live /members/<slug> without a registry row.
+    // `BackfillHandleStragglers` (1782800670000) reserves the remainder and
+    // fails loudly on the collisions it cannot resolve, so the invariant "every
+    // profile owns its own name" holds by the end of the migration run. This
+    // statement is left as-authored because it has already been applied to
+    // existing databases.
     await queryRunner.query(`
       INSERT INTO "handles" ("name", "owner_kind", "user_id")
       SELECT lower("slug"), 'profile', "user_id"

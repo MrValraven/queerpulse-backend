@@ -14,6 +14,7 @@ import {
 } from '@nestjs/websockets';
 import { parseCookie } from 'cookie';
 import { Namespace, Socket } from 'socket.io';
+import { resolveFrontendOrigins } from '../config/frontend-origins';
 import { ConnectionsService } from '../connections/connections.service';
 import {
   MESSAGE_CREATED,
@@ -22,6 +23,10 @@ import {
   MessageReadEvent,
 } from '../messaging/messaging.events';
 import { MessagingService } from '../messaging/messaging.service';
+import {
+  NOTIFICATION_CREATED,
+  NotificationCreatedEvent,
+} from '../notifications/notification.events';
 import { UserStatus } from '../users/entities/user.entity';
 import {
   JoinPayload,
@@ -43,22 +48,54 @@ interface AccessTokenClaims {
 }
 
 /**
- * Resolve the allowed CORS origin at connection time rather than at
- * decorator-evaluation time — `process.env.FRONTEND_URL` is only guaranteed to
- * be populated once ConfigModule has loaded `.env`, which happens AFTER this
- * module is imported. Reading it inside the callback defers to handshake time.
+ * Enforce the frontend allowlist on the handshake itself.
+ *
+ * The `cors` block below does NOT protect this gateway: CORS is not applied to
+ * raw WebSocket upgrades, and with polling disabled engine.io never runs the
+ * cors layer at all, so that `origin` callback is effectively decorative. Until
+ * this existed, the only thing preventing cross-site WebSocket hijacking was
+ * `SameSite=Lax` on `access_token` keeping the browser from attaching the cookie
+ * cross-site — real protection, but incidental, and it would have evaporated the
+ * day someone set `sameSite: 'none'`. `allowRequest` runs on every handshake,
+ * upgrade included.
+ *
+ * A missing `Origin` is allowed: non-browser clients (native apps, tests) do not
+ * send one, and they are not the CSWSH threat model — that attack is a browser
+ * on an attacker's page, which always sends its origin.
  */
-function resolveCorsOrigin(): string {
-  return process.env.FRONTEND_URL ?? 'http://localhost:5173';
+function allowHandshakeOrigin(
+  req: { headers: Record<string, string | string[] | undefined> },
+  cb: (err: string | null, allow: boolean) => void,
+): void {
+  const raw = req.headers.origin;
+  const origin = Array.isArray(raw) ? raw[0] : raw;
+  if (!origin) {
+    cb(null, true);
+    return;
+  }
+  cb(null, resolveFrontendOrigins().includes(origin));
 }
 
 @WebSocketGateway({
   namespace: '/chat',
+  allowRequest: allowHandshakeOrigin,
   cors: {
+    // Resolve the allowlist at connection time rather than at
+    // decorator-evaluation time — `process.env.FRONTEND_URL` is only guaranteed
+    // to be populated once ConfigModule has loaded `.env`, which happens AFTER
+    // this module is imported. Reading it inside the callback defers to
+    // handshake time. Handing back the array (not a single string) makes the
+    // underlying `cors` layer do a real allowlist match and reflect only the
+    // matching origin. Shared with main.ts's HTTP CORS via
+    // `resolveFrontendOrigins` so the two can't drift.
+    //
+    // Retained for the polling transport and for correct preflight replies if
+    // `transports` is ever widened; `allowRequest` above is what actually
+    // enforces the allowlist today.
     origin: (
       _origin: string | undefined,
       cb: (err: Error | null, allow?: boolean | string | string[]) => void,
-    ) => cb(null, resolveCorsOrigin()),
+    ) => cb(null, resolveFrontendOrigins()),
     credentials: true,
   },
   transports: ['websocket'],
@@ -209,10 +246,33 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   /**
+   * Push a newly-created notification to its recipient's live sockets.
+   *
+   * Fans out to the `user:${userId}` room (joined at handshake, so this reaches
+   * every tab that member has open) rather than a conversation room — a
+   * notification is addressed to one person, not to a thread.
+   *
+   * The socket event is `notification:new`; the internal event-emitter topic it
+   * listens to is `notification.created`. Different namespaces, same as
+   * MESSAGE_CREATED → `message:new` above.
+   */
+  @OnEvent(NOTIFICATION_CREATED)
+  handleNotificationCreated(payload: NotificationCreatedEvent): void {
+    this.namespace
+      ?.to(`user:${payload.userId}`)
+      .emit('notification:new', payload.notification);
+  }
+
+  /**
    * Force-drop every live socket for a member (logout / suspension / token
    * reuse). Auth emits {@link USER_SESSION_REVOKED}; we disconnect the whole
-   * `user:${userId}` room, which fans out across instances under the Redis
-   * adapter.
+   * `user:${userId}` room.
+   *
+   * SINGLE-REPLICA ONLY. This reaches sockets held by THIS instance. There is no
+   * Redis adapter configured (see ThrottlerModule's note in app.module.ts), so
+   * with 2+ replicas a revoked member keeps a live socket on every instance that
+   * did not handle the logout. Adding replicas requires @socket.io/redis-adapter
+   * wired via `app.useWebSocketAdapter` before this is safe.
    */
   @OnEvent(USER_SESSION_REVOKED)
   handleSessionRevoked(payload: UserSessionRevokedEvent): void {

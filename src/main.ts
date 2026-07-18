@@ -1,3 +1,7 @@
+// MUST be first: initializes Sentry before express/pg are imported, so its
+// auto-instrumentation can patch them. See ./instrument.ts.
+import './instrument';
+
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
@@ -8,18 +12,13 @@ import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
+import { DEFAULT_FRONTEND_ORIGIN } from './config/frontend-origins';
+
+// How long to let Sentry drain its buffer on shutdown before giving up.
+const SENTRY_FLUSH_TIMEOUT_MS = 2000;
 
 async function bootstrap() {
   const isProd = process.env.NODE_ENV === 'production';
-
-  // Error monitoring — no-op unless SENTRY_DSN is configured.
-  if (process.env.SENTRY_DSN) {
-    Sentry.init({
-      dsn: process.env.SENTRY_DSN,
-      environment: process.env.NODE_ENV,
-      tracesSampleRate: 0,
-    });
-  }
 
   // rawBody: exposes req.rawBody for HMAC-verified webhooks (Mux).
   // bufferLogs: hold startup logs until the pino logger is attached.
@@ -31,22 +30,26 @@ async function bootstrap() {
 
   const configService = app.get(ConfigService);
 
-  // Trust the first proxy hop so req.ip (throttler keying) and X-Forwarded-Proto
-  // (`secure` cookie detection) are correct behind a load balancer.
+  // Trust the first proxy hop so req.ip reflects the client rather than the load
+  // balancer — this is what keys the throttler. (Cookie `secure` is NOT derived
+  // from this; it comes from NODE_ENV, which is more robust than trusting a
+  // forwarded header.)
   app.set('trust proxy', 1);
 
   // Security middleware before routes.
   app.use(cookieParser());
   app.use(helmet());
 
-  const frontendUrl = configService.get<string>(
-    'app.frontendUrl',
-    'http://localhost:5173',
-  );
+  // FRONTEND_URL is a comma-separated allowlist parsed by app.config via
+  // src/config/frontend-origins.ts — the same parser the chat gateway's CORS
+  // callback uses, so HTTP and socket.io can never disagree about who's allowed.
+  const frontendOrigins = configService.get<string[]>('app.frontendOrigins', [
+    DEFAULT_FRONTEND_ORIGIN,
+  ]);
   // Only trust the localhost dev origin outside production.
   const origins = isProd
-    ? [frontendUrl]
-    : Array.from(new Set([frontendUrl, 'http://localhost:5173']));
+    ? frontendOrigins
+    : Array.from(new Set([...frontendOrigins, DEFAULT_FRONTEND_ORIGIN]));
   app.enableCors({
     origin: origins,
     credentials: true,
@@ -75,6 +78,18 @@ async function bootstrap() {
   }
 
   app.enableShutdownHooks();
+
+  // Drain Sentry's transport buffer before the process exits. Without this, the
+  // errors captured in the seconds before a SIGTERM are dropped — exactly the
+  // ones from a bad rollout, which is when a restart policy is cycling and you
+  // most need to see them.
+  if (process.env.SENTRY_DSN) {
+    for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+      process.on(signal, () => {
+        void Sentry.close(SENTRY_FLUSH_TIMEOUT_MS).then(() => process.exit(0));
+      });
+    }
+  }
 
   const port = configService.get<number>('app.port') ?? 3000;
   await app.listen(port);

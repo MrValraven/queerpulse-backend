@@ -10,27 +10,6 @@ export interface MessageView {
   editedAt: Date | null;
 }
 
-export interface ConversationMemberView {
-  slug: string;
-  firstName: string;
-  lastName: string;
-  avatarUrl: string | null;
-}
-
-export interface ConversationSummary {
-  id: string;
-  isOfficial: boolean;
-  otherMember: ConversationMemberView | null;
-  lastMessage: {
-    id: string;
-    senderId: string;
-    body: string;
-    createdAt: Date;
-  } | null;
-  unreadCount: number;
-  muted: boolean;
-}
-
 export function toMessageView(m: Message): MessageView {
   return {
     id: m.id,
@@ -42,27 +21,13 @@ export function toMessageView(m: Message): MessageView {
   };
 }
 
-export function toConversationMemberView(
-  p: Profile | undefined,
-): ConversationMemberView | null {
-  if (!p) {
-    return null;
-  }
-  return {
-    slug: p.slug,
-    firstName: p.firstName,
-    lastName: p.lastName,
-    avatarUrl: p.avatarUrl,
-  };
-}
-
 // ── Frontend-contract shapes ─────────────────────────────────────────────
 // These mirror `AuthorSummary`/`MessageResponse`/`ConversationResponse` from
 // the frontend's `src/shared/contracts/contracts.ts` exactly (field names
 // included — `handle`/`displayName`, not this backend's internal
-// `slug`/`firstName`+`lastName`), for the `POST /conversations`
-// create-or-return endpoint. Distinct from `MessageView`/`ConversationSummary`
-// above, which back the pre-existing internal endpoints.
+// `slug`/`firstName`+`lastName`). Every messaging HTTP read path returns these
+// shapes; `MessageView` above is internal only (the MESSAGE_CREATED event
+// payload and `POST /messages/request`).
 
 export interface AuthorSummary {
   handle: string;
@@ -85,6 +50,12 @@ export interface ConversationResponse {
   lastMessage: MessageResponse | null;
   unreadCount: number;
   updatedAt: string;
+  // Backend extras beyond the frontend contract, which ignores unknown fields.
+  // `isOfficial` distinguishes the org/welcome thread `type: 'group'` covers
+  // coarsely; `muted` is this caller's per-conversation preference and is only
+  // present where a participant row was already loaded (i.e. the list path).
+  isOfficial?: boolean;
+  muted?: boolean;
 }
 
 const UNKNOWN_AUTHOR: AuthorSummary = {

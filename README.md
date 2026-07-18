@@ -57,13 +57,30 @@ or malformed.
 
 ### Database TLS & connection pool
 
-TLS defaults to **on in production with certificate verification enabled**.
+TLS defaults to **on in production with certificate verification enabled**. The
+same settings apply to the app and to the migration CLI — both resolve TLS
+through `src/config/database-ssl.ts`, so `migration:run:prod` can never connect
+differently from the server it is migrating for.
+
+> **Managed Postgres (Railway, Render, Fly, …): the default will not connect.**
+> Verification-on TLS fails against these providers and the app crash-loops at
+> boot with no useful error. Set one of:
+>
+> - `DATABASE_SSL=false` — reaching the DB over the provider's **private
+>   network** (e.g. `postgres.railway.internal`), which speaks plaintext.
+>   Traffic never leaves their network.
+> - `DATABASE_SSL_INSECURE=true` — reaching it over a **public proxy /
+>   external host**, which presents a self-signed cert. Still encrypted; only
+>   certificate verification is skipped.
+>
+> Prefer `DATABASE_SSL_CA` wherever the provider publishes a CA bundle — that
+> keeps verification on.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `DATABASE_SSL` | (prod → on) | explicit `true`/`false` override for TLS negotiation |
 | `DATABASE_SSL_CA` | — | CA bundle: inline PEM or a file path |
-| `DATABASE_SSL_INSECURE` | `false` | `true` disables cert verification — local/self-signed only, never production |
+| `DATABASE_SSL_INSECURE` | `false` | `true` keeps TLS but skips cert verification (self-signed managed Postgres) |
 | `DATABASE_POOL_MAX` | `10` | max pool connections |
 | `DATABASE_POOL_MIN` | `0` | min pool connections |
 | `DATABASE_CONNECTION_TIMEOUT_MS` | `10000` | acquire timeout |
@@ -76,12 +93,32 @@ TLS defaults to **on in production with certificate verification enabled**.
 | --- | --- |
 | `SENTRY_DSN` | enables Sentry error reporting when set |
 | `LOG_LEVEL` | pino level (`info`, `debug`, …) |
+| `LOG_PRETTY` | `true` for pino-pretty output; defaults on when `NODE_ENV=development`. **Never set in a deployed environment** — `pino-pretty` is a devDependency, absent from the production image, and selecting it crashes at boot |
 | `ENABLE_SWAGGER` | serve the OpenAPI/Swagger UI when set |
+
+Storage (`S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) is **required when
+`NODE_ENV=production`** — boot fails without it rather than letting every upload
+route fail at runtime on a server that reports itself healthy.
 
 ## Database & migrations
 
 The schema is owned entirely by migrations under `src/migrations`. **Never**
-enable `synchronize`.
+enable `synchronize`. Every migration needs a **unique** timestamp — TypeORM
+orders by it, and ties fall back to filename order rather than anything
+deliberate.
+
+> **One-off, for databases created before this note:** `AddSubprofiles` was
+> renamed from `1782800650000` to `1782800651000` to clear a duplicate timestamp
+> it shared with `AddProfileInterests`. A database that already applied it will
+> try to re-run it and fail on `CREATE TABLE ... already exists`. Fix the
+> recorded name once, per database:
+>
+> ```sql
+> UPDATE migrations SET name = 'AddSubprofiles1782800651000'
+> WHERE name = 'AddSubprofiles1782800650000';
+> ```
+>
+> Fresh databases need nothing.
 
 ```bash
 pnpm run migration:run                     # apply pending migrations (dev, ts-node)
@@ -147,6 +184,24 @@ instances so the schema is in place before any new code serves traffic.
 > After dependency changes, run `pnpm install` and **commit the updated
 > `pnpm-lock.yaml`** — CI installs with `--frozen-lockfile` and fails on a stale
 > lockfile.
+
+### Run exactly ONE replica
+
+The app holds shared state in process and has no distributed backing store. At
+two or more replicas these break, quietly:
+
+| State | Where | Effect at N replicas |
+| --- | --- | --- |
+| Rate-limit counters | `ThrottlerModule` (in-memory) | every limit becomes N× — including the 10/60s on `POST /auth/refresh`, the only abuse control there |
+| Socket.io rooms / session revocation | `ChatGateway` (no Redis adapter) | a logged-out or **suspended** member keeps a live socket on every instance that didn't handle the logout |
+| Chat presence | `PresenceService` (in-memory `Map`) | members appear offline to anyone on another instance |
+| WS rate limiter | `TokenBucketLimiter` (process-local) | per-socket limits multiply by N |
+| Cron jobs | `@nestjs/schedule` | every replica runs every job — the event-reminder claim is race-safe, the refresh purge is idempotent, but nothing else is guaranteed |
+
+Scaling out requires a shared store: `@nest-lab/throttler-storage-redis` for the
+throttler, `@socket.io/redis-adapter` via `app.useWebSocketAdapter` for the
+gateway and presence, and a distributed lock (or a dedicated worker) for the
+crons. Until then, keep the replica count at 1.
 
 ### Health probes
 

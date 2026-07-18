@@ -4,9 +4,17 @@ import {
   HealthCheckService,
   TypeOrmHealthIndicator,
 } from '@nestjs/terminus';
+import { SkipThrottle } from '@nestjs/throttler';
 import { Public } from '../auth/decorators/public.decorator';
 
+/**
+ * Probes are never rate-limited. The throttler guard does not honour `@Public()`
+ * and keys on `req.ip`, so behind a proxy the orchestrator's probes would draw
+ * from a bucket shared with other traffic resolving to that IP. A 429 here fails
+ * the healthcheck and gets a perfectly healthy instance killed.
+ */
 @Public()
+@SkipThrottle()
 @Controller('health')
 export class HealthController {
   constructor(

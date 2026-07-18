@@ -6,6 +6,7 @@ import { Shaping, ShapingKind } from './entities/shaping.entity';
 import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
 import { WorkItem } from './entities/work-item.entity';
+import { OpenToEntry } from './open-to';
 import {
   ProfileRelations,
   sortShapings,
@@ -28,7 +29,7 @@ const profile = (overrides: Partial<Profile> = {}): Profile =>
     now: 'building things',
     avatarUrl: 'https://x/a.png',
     visibility: ProfileVisibility.Open,
-    openTo: ['Collaboration'],
+    openTo: [{ kind: 'preset', id: 'collaborating' }] as OpenToEntry[],
     identities: ['Queer'],
     lookingFor: ['Community & friendship'],
     tags: ['React', 'TypeScript'],
@@ -187,7 +188,7 @@ describe('profile-response mappers', () => {
       1,
     );
     expect(openCard.location).toBe('Arroios');
-    expect(openCard.openTo).toEqual(['Collaboration']);
+    expect(openCard.openTo).toEqual([{ kind: 'preset', id: 'collaborating' }]);
   });
 
   it('toMemberCard blanks location/openTo for network and private cards', () => {

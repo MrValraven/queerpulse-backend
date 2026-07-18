@@ -11,7 +11,15 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * API (Task A2) and the frontend (Task B1) line up. Both FKs cascade on
  * account/parent deletion.
  *
- * DO NOT RUN — authored for review only, per the task's instructions.
+ * NOTE ON THE TIMESTAMP: this shares 1782800650000 with AddProfileInterests.
+ * Do NOT renumber it to break the tie. TypeORM identifies a migration purely by
+ * the `name` string below and matches it against the `migrations` ledger — this
+ * one is already applied under `AddSubprofiles1782800650000`, so renaming it
+ * makes TypeORM treat it as pending and re-run `up()`, which fails on
+ * `CREATE TYPE "subprofiles_kind_enum"` (Postgres has no CREATE TYPE IF NOT
+ * EXISTS). An applied migration's name is frozen history. The duplicate
+ * timestamp is harmless: both sort before AddHandles1782800660000, so the
+ * handles -> subprofiles FK ordering holds on a fresh database either way.
  */
 export class AddSubprofiles1782800650000 implements MigrationInterface {
   name = 'AddSubprofiles1782800650000';

@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { ConnectionsService } from '../connections/connections.service';
+import { HandlesService } from '../handles/handles.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { VouchService } from '../vouch/vouch.service';
@@ -110,6 +111,7 @@ describe('ProfilesService.getBySlug visibility', () => {
         },
         { provide: ConnectionsService, useValue: connections },
         { provide: BlockFilterService, useValue: blockFilter },
+        { provide: HandlesService, useValue: { rename: jest.fn() } },
       ],
     }).compile();
     service = module.get(ProfilesService);
@@ -218,6 +220,92 @@ describe('ProfilesService.getBySlug visibility', () => {
     // updateMe is always the owner, so private fields come back.
     expect(full.identities).toEqual(['Trans']);
     expect(full.lookingFor).toEqual(['Creative collaboration']);
+  });
+
+  it('updateMe clears now when sent an empty string', async () => {
+    const p = profile({ now: 'old status' });
+    profiles.findOne.mockResolvedValue(p);
+    (profiles as unknown as { save: jest.Mock }).save = jest
+      .fn()
+      .mockResolvedValue(p);
+
+    const res = await service.updateMe('owner-1', { now: '' });
+
+    expect(p.now).toBeNull();
+    const full = res as Extract<typeof res, { limited: false }>;
+    expect(full.now).toBeNull();
+  });
+
+  it('updateMe leaves now untouched when the field is omitted', async () => {
+    const p = profile({ now: 'old status' });
+    profiles.findOne.mockResolvedValue(p);
+    (profiles as unknown as { save: jest.Mock }).save = jest
+      .fn()
+      .mockResolvedValue(p);
+
+    await service.updateMe('owner-1', { tagline: 'new tagline' });
+
+    expect(p.now).toBe('old status');
+  });
+
+  it('updateMe replaces openTo wholesale and keeps custom labels verbatim', async () => {
+    const p = profile({ openTo: [{ kind: 'preset', id: 'swaps' }] });
+    profiles.findOne.mockResolvedValue(p);
+    (profiles as unknown as { save: jest.Mock }).save = jest
+      .fn()
+      .mockResolvedValue(p);
+
+    const res = await service.updateMe('owner-1', {
+      openTo: [
+        { kind: 'preset', id: 'mentoring' },
+        { kind: 'custom', label: 'A nurse or two for the testing nights' },
+      ],
+    });
+
+    // A REPLACE, not a merge: the previous `swaps` chip is gone.
+    expect(p.openTo).toEqual([
+      { kind: 'preset', id: 'mentoring' },
+      { kind: 'custom', label: 'A nurse or two for the testing nights' },
+    ]);
+    const full = res as Extract<typeof res, { limited: false }>;
+    expect(full.openTo).toEqual([
+      { kind: 'preset', id: 'mentoring' },
+      { kind: 'custom', label: 'A nurse or two for the testing nights' },
+    ]);
+  });
+
+  it('updateMe clears openTo when sent an empty list', async () => {
+    const p = profile({ openTo: [{ kind: 'preset', id: 'swaps' }] });
+    profiles.findOne.mockResolvedValue(p);
+    (profiles as unknown as { save: jest.Mock }).save = jest
+      .fn()
+      .mockResolvedValue(p);
+
+    await service.updateMe('owner-1', { openTo: [] });
+
+    expect(p.openTo).toEqual([]);
+  });
+
+  it('updateMe normalizes openTo before saving', async () => {
+    const p = profile();
+    profiles.findOne.mockResolvedValue(p);
+    (profiles as unknown as { save: jest.Mock }).save = jest
+      .fn()
+      .mockResolvedValue(p);
+
+    await service.updateMe('owner-1', {
+      openTo: [
+        { kind: 'preset', id: 'mentoring' },
+        { kind: 'preset', id: 'mentoring' },
+        { kind: 'custom', label: '  Darkroom time  ' },
+        { kind: 'custom', label: '   ' },
+      ],
+    });
+
+    expect(p.openTo).toEqual([
+      { kind: 'preset', id: 'mentoring' },
+      { kind: 'custom', label: 'Darkroom time' },
+    ]);
   });
 
   describe('searchMembers', () => {
@@ -329,6 +417,7 @@ describe('ProfilesService replace-list endpoints', () => {
             excludeBlocked: jest.fn((qb: unknown) => qb),
           },
         },
+        { provide: HandlesService, useValue: { rename: jest.fn() } },
       ],
     }).compile();
     return module.get(ProfilesService);

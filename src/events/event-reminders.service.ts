@@ -21,6 +21,19 @@ export class EventRemindersService {
 
   @Cron(CronExpression.EVERY_30_MINUTES)
   async sendDueReminders(): Promise<void> {
+    // @nestjs/schedule does not wrap handlers, so an escaping rejection becomes
+    // an unhandledRejection — which, absent a Sentry listener, takes the process
+    // down. A DB blip must not restart the server; the next tick retries.
+    try {
+      await this.fanOutDueReminders();
+    } catch (err) {
+      this.logger.error(
+        `Event reminder sweep failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+      );
+    }
+  }
+
+  private async fanOutDueReminders(): Promise<void> {
     const now = new Date();
     const horizon = new Date(now.getTime() + REMINDER_WINDOW_MS);
     const due = await this.events.find({
@@ -42,20 +55,29 @@ export class EventRemindersService {
       if (claim.affected !== 1) {
         continue;
       }
-      const attendees = await this.rsvps.find({
-        where: {
-          eventId: event.id,
-          status: In([RsvpStatus.Going, RsvpStatus.Maybe]),
-        },
-      });
-      await this.notifications.createForRecipients(
-        attendees.map((a) => a.userId),
-        NotificationType.EventReminder,
-        { eventId: event.id, startAt: event.startAt.toISOString() },
-      );
-      this.logger.log(
-        `Sent ${attendees.length} reminder(s) for event ${event.slug}`,
-      );
+      // Isolate each event: one event's fan-out failing must not strand the rest
+      // of the batch. The claim above is already stamped, so this event's
+      // reminder is forfeited rather than retried (at-most-once, by design).
+      try {
+        const attendees = await this.rsvps.find({
+          where: {
+            eventId: event.id,
+            status: In([RsvpStatus.Going, RsvpStatus.Maybe]),
+          },
+        });
+        await this.notifications.createForRecipients(
+          attendees.map((a) => a.userId),
+          NotificationType.EventReminder,
+          { eventId: event.id, startAt: event.startAt.toISOString() },
+        );
+        this.logger.log(
+          `Sent ${attendees.length} reminder(s) for event ${event.slug}`,
+        );
+      } catch (err) {
+        this.logger.error(
+          `Reminder fan-out failed for event ${event.slug}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+        );
+      }
     }
   }
 }

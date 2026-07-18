@@ -11,5 +11,8 @@ get {
 }
 
 docs {
-  Active-only. Returns ConversationSummary[] (last message + unreadCount + muted + otherMember).
+  Active-only. Returns ConversationResponse[]: id, type ("dm" | "group"),
+  otherParticipant { handle, displayName, avatarUrl }, lastMessage (with its
+  own `sender`), unreadCount, updatedAt, plus the backend extras isOfficial
+  and muted. Sorted most-recently-active first.
 }

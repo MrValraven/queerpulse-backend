@@ -154,11 +154,7 @@ export class SubprofilesService {
         // (re)publish and claim a handle — leave it unpublished until then.
         sp.status = SubprofileStatus.Draft;
       }
-    } else if (
-      wasPublishedUnlinked &&
-      prevHandle &&
-      sp.handle !== prevHandle
-    ) {
+    } else if (wasPublishedUnlinked && prevHandle && sp.handle !== prevHandle) {
       // RULE (chosen): changing the `handle` of an already-published, UNLINKED
       // persona invalidates its live listing. Mirroring the existing
       // "must re-validate" rule, we revert it to DRAFT and RELEASE the old
@@ -172,7 +168,10 @@ export class SubprofilesService {
       try {
         await this.dataSource.transaction(async (m) => {
           for (const name of releases) {
-            await this.handles.release(m, name);
+            await this.handles.release(m, name, {
+              kind: 'subprofile',
+              subprofileId: sp.id,
+            });
           }
           await m.save(sp);
         });
@@ -196,16 +195,13 @@ export class SubprofilesService {
   ): Promise<SubprofileView> {
     const sp = await this.getOwned(userId, id);
 
-    if (!Object.values(SubprofileSection).includes(section as SubprofileSection)) {
+    if (
+      !Object.values(SubprofileSection).includes(section as SubprofileSection)
+    ) {
       throw new BadRequestException(`Unknown section: ${section}`);
     }
     const sectionEnum = section as SubprofileSection;
-    if (
-      !isSectionAllowed(
-        sp.kind as unknown as SubprofileKindKey,
-        sectionEnum as unknown as SubprofileSectionKey,
-      )
-    ) {
+    if (!isSectionAllowed(sp.kind, sectionEnum)) {
       throw new BadRequestException(
         `Section "${section}" is not valid for kind "${sp.kind}"`,
       );
@@ -255,10 +251,14 @@ export class SubprofilesService {
     // this persona's own owner lets a re-publish of the same name pass.
     let handleTaken = false;
     if (unlinked && sp.handle) {
-      handleTaken = await this.handles.isTaken(this.dataSource.manager, sp.handle, {
-        kind: 'subprofile',
-        subprofileId: sp.id,
-      });
+      handleTaken = await this.handles.isTaken(
+        this.dataSource.manager,
+        sp.handle,
+        {
+          kind: 'subprofile',
+          subprofileId: sp.id,
+        },
+      );
     }
 
     const unmet = validatePublish(sp, items, handleTaken);
@@ -310,15 +310,15 @@ export class SubprofilesService {
 
   async unpublish(userId: string, id: string): Promise<SubprofileView> {
     const sp = await this.getOwned(userId, id);
-    if (
-      sp.linkVisibility === SubprofileLinkVisibility.Unlinked &&
-      sp.handle
-    ) {
+    if (sp.linkVisibility === SubprofileLinkVisibility.Unlinked && sp.handle) {
       // Free the global name AND null the handle + draft the status in ONE
       // transaction, so the registry and the row can never disagree.
       const handle = sp.handle;
       await this.dataSource.transaction(async (m) => {
-        await this.handles.release(m, handle);
+        await this.handles.release(m, handle, {
+          kind: 'subprofile',
+          subprofileId: sp.id,
+        });
         await m.update(
           Subprofile,
           { id: sp.id },
@@ -372,9 +372,7 @@ export class SubprofilesService {
       slug: profile.slug,
       name: `${profile.firstName} ${profile.lastName}`.trim(),
     };
-    return sps.map((sp) =>
-      toPublicDTO(sp, byId.get(sp.id) ?? [], owner),
-    );
+    return sps.map((sp) => toPublicDTO(sp, byId.get(sp.id) ?? [], owner));
   }
 
   // Unlinked + published persona reachable by its global handle. Owner-stripped.

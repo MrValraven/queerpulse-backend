@@ -8,6 +8,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 import { User } from './user.entity';
+import { OpenToEntry } from '../../profiles/open-to';
 
 export enum ProfileVisibility {
   Open = 'open',
@@ -57,8 +58,11 @@ export class Profile {
   })
   visibility: ProfileVisibility;
 
-  @Column({ type: 'text', array: true, default: '{}' })
-  openTo: string[];
+  // Availability chips — a preset/custom union stored verbatim as jsonb so the
+  // member's chip order and their exact custom wording both survive a
+  // round-trip. See src/profiles/open-to.ts for the shared vocabulary.
+  @Column({ type: 'jsonb', default: () => "'[]'::jsonb" })
+  openTo: OpenToEntry[];
 
   // Private Settings → Interests preferences — never shown on the public profile,
   // only returned to the owner (see toFullProfile). Distinct from the public
