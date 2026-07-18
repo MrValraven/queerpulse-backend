@@ -60,6 +60,13 @@ export function toExportJobResponse(job: DataExportJob): ExportJobResponse {
     status: job.status,
     requestedAt: job.requestedAt.toISOString(),
     downloadUrl: ready ? `/account/export/${job.id}/download` : undefined,
+    // The size of the STORED payload, which is always JSON — not of the file
+    // the download route will actually serve. For `format: 'csv'`/`'both'` that
+    // route streams a zip whose size is only known once it has been deflated,
+    // so reporting it here would mean compressing the whole archive on every
+    // status poll. This over-reports (text zips ~10x) rather than under-
+    // reports, which is the safe direction for a "this is how big your
+    // download is" hint.
     sizeBytes:
       ready && job.data
         ? Buffer.byteLength(JSON.stringify(job.data))

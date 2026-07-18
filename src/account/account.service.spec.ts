@@ -13,7 +13,10 @@ import { AccountExportService } from './account-export.service';
 import { AccountService, DEFAULT_EMAIL_PREFERENCES } from './account.service';
 import { AccountDeactivation } from './entities/account-deactivation.entity';
 import { AccountReauthToken } from './entities/account-reauth-token.entity';
-import { DataExportJob } from './entities/data-export-job.entity';
+import {
+  DataExportFormat,
+  DataExportJob,
+} from './entities/data-export-job.entity';
 import {
   DeletionRequest,
   DeletionRequestStatus,
@@ -553,6 +556,80 @@ describe('AccountService', () => {
       expect(result.status).toBe('processing');
       expect(result.downloadUrl).toBeUndefined();
       expect(result.expiresAt).toBeUndefined();
+    });
+
+    describe('getExportDownload', () => {
+      const readyJob = (format: DataExportFormat) => ({
+        id: 'job-1',
+        userId: 'u1',
+        status: 'ready',
+        format,
+        categories: ['profile'],
+        generatedAt: now,
+        requestedAt: now,
+        data: { manifest: { schemaVersion: '1.0' }, profile: { email: 'a@b' } },
+        error: null,
+      });
+
+      it('scopes the lookup to the owning user', async () => {
+        // A job id is a uuid, but it is not a capability.
+        exportJobs.findOne.mockResolvedValue(readyJob(DataExportFormat.Json));
+        await service.getExportDownload('u1', 'job-1');
+        expect(exportJobs.findOne).toHaveBeenCalledWith({
+          where: { id: 'job-1', userId: 'u1' },
+        });
+      });
+
+      it('404s for an unknown or foreign job', async () => {
+        exportJobs.findOne.mockResolvedValue(null);
+        await expect(
+          service.getExportDownload('u1', 'nope'),
+        ).rejects.toBeInstanceOf(NotFoundException);
+      });
+
+      it('404s while the job is not ready, and when the payload is missing', async () => {
+        exportJobs.findOne.mockResolvedValue({
+          ...readyJob(DataExportFormat.Json),
+          status: 'processing',
+        });
+        await expect(
+          service.getExportDownload('u1', 'job-1'),
+        ).rejects.toBeInstanceOf(NotFoundException);
+
+        exportJobs.findOne.mockResolvedValue({
+          ...readyJob(DataExportFormat.Json),
+          data: null,
+        });
+        await expect(
+          service.getExportDownload('u1', 'job-1'),
+        ).rejects.toBeInstanceOf(NotFoundException);
+      });
+
+      it("serves a single .json for format 'json'", async () => {
+        exportJobs.findOne.mockResolvedValue(readyJob(DataExportFormat.Json));
+        const result = await service.getExportDownload('u1', 'job-1');
+        expect(result.kind).toBe('json');
+        expect(result.filename).toBe('queerpulse-export-job-1.json');
+        expect(result.contentType).toBe('application/json');
+      });
+
+      it("serves a .zip for formats 'csv' and 'both'", async () => {
+        for (const format of [DataExportFormat.Csv, DataExportFormat.Both]) {
+          exportJobs.findOne.mockResolvedValue(readyJob(format));
+          const result = await service.getExportDownload('u1', 'job-1');
+          expect(result.kind).toBe('zip');
+          expect(result.filename).toBe('queerpulse-export-job-1.zip');
+          expect(result.contentType).toBe('application/zip');
+        }
+      });
+
+      it('stores nothing extra — the zip is derived at download time', async () => {
+        // The payload stays inline `jsonb`; no archive is persisted, so the
+        // size ceiling documented on `AccountExportService.build` is unchanged.
+        exportJobs.findOne.mockResolvedValue(readyJob(DataExportFormat.Both));
+        await service.getExportDownload('u1', 'job-1');
+        expect(exportJobs.save).not.toHaveBeenCalled();
+      });
     });
   });
 

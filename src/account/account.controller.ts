@@ -5,19 +5,21 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Logger,
   Param,
   ParseUUIDPipe,
   Post,
   Req,
   Res,
-  StreamableFile,
 } from '@nestjs/common';
+import archiver from 'archiver';
 import { Request, Response } from 'express';
 import {
   CurrentUser,
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { AccountService } from './account.service';
+import { ExportEntry } from './export-archive';
 import { DeactivateDto } from './dto/deactivate.dto';
 import { ReauthDto } from './dto/reauth.dto';
 import { RequestDeletionDto } from './dto/request-deletion.dto';
@@ -30,6 +32,8 @@ import { UpdateEmailPreferenceDto } from './dto/update-email-preferences.dto';
 // by a pending member, same as `consent`/`notifications`.
 @Controller('account')
 export class AccountController {
+  private readonly logger = new Logger(AccountController.name);
+
   constructor(private readonly accountService: AccountService) {}
 
   @Post('reauth')
@@ -88,25 +92,127 @@ export class AccountController {
   // `<a download>` (`DataExportSections.tsx`), so this must be a GET that the
   // browser can follow with cookie auth and get a file back — not a JSON
   // envelope. Ownership is enforced in the service.
+  //
+  // `format: 'json'` serves the single `.json` exactly as it always has;
+  // `csv`/`both` serve a `.zip` streamed through `archiver`. `@Res()` is used
+  // WITHOUT `passthrough` because the zip path owns the response lifecycle
+  // itself — see `streamZip` for why Nest must not try to finish it for us.
   @Get('export/:jobId/download')
   async downloadExport(
     @CurrentUser() user: CurrentUserData,
     @Param('jobId', ParseUUIDPipe) jobId: string,
-    @Res({ passthrough: true }) res: Response,
-  ): Promise<StreamableFile> {
-    const { filename, body } = await this.accountService.getExportDownload(
+    @Res() res: Response,
+  ): Promise<void> {
+    // Resolve and authorise FIRST. This is the last point at which a failure
+    // can still become a 404 instead of a truncated file.
+    const download = await this.accountService.getExportDownload(
       user.userId,
       jobId,
     );
     res.set({
-      'Content-Type': 'application/json',
-      'Content-Disposition': `attachment; filename="${filename}"`,
-      'Content-Length': String(body.byteLength),
+      'Content-Type': download.contentType,
+      'Content-Disposition': `attachment; filename="${download.filename}"`,
       // The archive is the member's own personal data — never let a proxy or
       // the browser cache keep a copy after the link expires.
       'Cache-Control': 'no-store',
     });
-    return new StreamableFile(body);
+
+    if (download.kind === 'json') {
+      res.set('Content-Length', String(download.body.byteLength));
+      res.end(download.body);
+      return;
+    }
+
+    // No `Content-Length` for the zip: the compressed size is only known once
+    // the last deflate block is written, and pre-computing it would mean
+    // building the whole archive in memory — the exact thing we are avoiding.
+    // Express therefore falls back to chunked transfer-encoding, which is also
+    // what makes a mid-stream abort detectable by the client (below).
+    await this.streamZip(download.entries, download.modifiedAt, res);
+  }
+
+  /**
+   * Stream the entries as a zip into an already-headered response.
+   *
+   * BACKPRESSURE: `archive.pipe(res)` is the whole mechanism — `pipe` stops
+   * pulling from the archiver whenever `res.write()` returns false and resumes
+   * on `drain`, so a slow client throttles compression instead of growing an
+   * unbounded output buffer. We never call `toBuffer()`/`concat` on the zip.
+   *
+   * FAILURE AFTER HEADERS: by the time anything in here can fail, `200` plus
+   * `Content-Type: application/zip` are already on the wire, so there is no
+   * status code left to change and throwing would only hand Nest's exception
+   * filter a response it cannot write to ("Cannot set headers after they are
+   * sent"). Instead we destroy the socket: the chunked response ends without
+   * its terminating zero-length chunk, which every HTTP client — browsers
+   * included — surfaces as a failed download. A visibly broken transfer is
+   * strictly better than a `200 OK` carrying a silently truncated, unopenable
+   * `.zip`. The returned promise therefore RESOLVES on failure; it never
+   * rejects, deliberately.
+   */
+  private streamZip(
+    entries: ExportEntry[],
+    modifiedAt: Date,
+    res: Response,
+  ): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const archive = archiver('zip', {
+        // Deflate default. The payload is JSON/CSV text and compresses ~10x at
+        // this level; level 9 buys single-digit percent for several times the
+        // CPU, on a request that is already synchronous.
+        zlib: { level: 6 },
+      });
+
+      let settled = false;
+      const settle = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve();
+      };
+      const fail = (error: Error) => {
+        if (settled) {
+          return;
+        }
+        this.logger.error(
+          `Export archive stream failed: ${error.message}`,
+          error.stack,
+        );
+        archive.destroy();
+        res.destroy(error);
+        settle();
+      };
+
+      archive.on('error', fail);
+      // `warning` is archiver's non-fatal channel, and it is non-fatal for
+      // FILE sources (a missing path). We only ever append in-memory strings,
+      // so there is no benign warning available to us — anything arriving here
+      // means the archive is not what we promised, and shipping it anyway
+      // would be shipping a corrupt export.
+      archive.on('warning', fail);
+      res.on('error', fail);
+      res.on('finish', settle);
+      // The member closed the tab or cancelled the download. Stop compressing
+      // for a socket nobody is reading.
+      res.on('close', () => {
+        if (!res.writableFinished) {
+          archive.abort();
+          settle();
+        }
+      });
+
+      archive.pipe(res);
+      for (const entry of entries) {
+        // `date` is pinned to the job's generation time so the same job always
+        // yields a byte-identical zip.
+        archive.append(entry.content, { name: entry.name, date: modifiedAt });
+      }
+      // `finalize` rejects with the same error already delivered to the
+      // `error` handler; `fail` is idempotent, and catching keeps it off the
+      // unhandled-rejection path.
+      archive.finalize().catch(fail);
+    });
   }
 
   @Post('dsar')

@@ -1,5 +1,7 @@
+import { Logger, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { Request } from 'express';
+import { Request, Response } from 'express';
+import { PassThrough } from 'node:stream';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { AccountController } from './account.controller';
 import { AccountService } from './account.service';
@@ -14,6 +16,7 @@ describe('AccountController', () => {
     cancelDeletionRequest: jest.Mock;
     requestExport: jest.Mock;
     getExportJob: jest.Mock;
+    getExportDownload: jest.Mock;
     submitDsar: jest.Mock;
     listDsar: jest.Mock;
     listSessions: jest.Mock;
@@ -44,6 +47,7 @@ describe('AccountController', () => {
       cancelDeletionRequest: jest.fn(),
       requestExport: jest.fn(),
       getExportJob: jest.fn(),
+      getExportDownload: jest.fn(),
       submitDsar: jest.fn(),
       listDsar: jest.fn(),
       listSessions: jest.fn(),
@@ -143,6 +147,163 @@ describe('AccountController', () => {
     expect(service.getExportJob).toHaveBeenCalledWith('u1', 'job-1');
     expect(result.jobId).toBe('job-1');
     expect(result.downloadUrl).toBe('/account/export/job-1/download');
+  });
+
+  describe('GET /export/:jobId/download', () => {
+    // A response stub that is a real writable stream, so the zip path is
+    // exercised through `archive.pipe(res)` for real rather than against a
+    // mock that cannot apply backpressure.
+    type ResponseStub = Response & {
+      set: jest.Mock;
+      headers: Record<string, string>;
+      collected: () => Buffer;
+    };
+
+    function responseStub(): ResponseStub {
+      const sink = new PassThrough();
+      const chunks: Buffer[] = [];
+      sink.on('data', (c: Buffer) => chunks.push(c));
+      const headers: Record<string, string> = {};
+      return Object.assign(sink, {
+        headers,
+        collected: () => Buffer.concat(chunks),
+        set: jest.fn((key: unknown, value?: unknown) => {
+          if (typeof key === 'string') {
+            headers[key] = String(value);
+          } else {
+            Object.assign(headers, key as Record<string, string>);
+          }
+          return sink;
+        }),
+      }) as unknown as ResponseStub;
+    }
+
+    it('serves format json as a single .json with a Content-Length', async () => {
+      const body = Buffer.from('{"a":1}', 'utf8');
+      service.getExportDownload.mockResolvedValue({
+        kind: 'json',
+        filename: 'queerpulse-export-job-1.json',
+        contentType: 'application/json',
+        body,
+      });
+      const res = responseStub();
+      await controller.downloadExport(user, 'job-1', res);
+
+      expect(service.getExportDownload).toHaveBeenCalledWith('u1', 'job-1');
+      expect(res.headers['Content-Type']).toBe('application/json');
+      expect(res.headers['Content-Disposition']).toBe(
+        'attachment; filename="queerpulse-export-job-1.json"',
+      );
+      expect(res.headers['Content-Length']).toBe(String(body.byteLength));
+      // The archive is personal data — no proxy or browser cache may keep it.
+      expect(res.headers['Cache-Control']).toBe('no-store');
+      expect(res.collected().toString('utf8')).toBe('{"a":1}');
+    });
+
+    it('serves format csv/both as a streamed .zip with no Content-Length', async () => {
+      service.getExportDownload.mockResolvedValue({
+        kind: 'zip',
+        filename: 'queerpulse-export-job-1.zip',
+        contentType: 'application/zip',
+        entries: [
+          { name: 'messages.csv', content: '\uFEFFid\r\nm1\r\n' },
+          { name: 'manifest.json', content: '{}' },
+        ],
+        modifiedAt: new Date('2026-07-15T12:00:00.000Z'),
+      });
+      const res = responseStub();
+      await controller.downloadExport(user, 'job-1', res);
+
+      expect(res.headers['Content-Type']).toBe('application/zip');
+      expect(res.headers['Content-Disposition']).toBe(
+        'attachment; filename="queerpulse-export-job-1.zip"',
+      );
+      // Deliberately absent: the deflated size is unknown until the last block,
+      // and pre-computing it would mean buffering the whole archive.
+      expect(res.headers['Content-Length']).toBeUndefined();
+
+      const zip = res.collected();
+      // Local file header magic — this really is a zip, not a JSON blob with a
+      // zip content type.
+      expect(zip.subarray(0, 4)).toEqual(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+      // Entry names survive into the central directory.
+      expect(zip.includes(Buffer.from('messages.csv'))).toBe(true);
+      expect(zip.includes(Buffer.from('manifest.json'))).toBe(true);
+    });
+
+    it('produces a byte-identical zip for the same job twice', async () => {
+      const download = {
+        kind: 'zip' as const,
+        filename: 'queerpulse-export-job-1.zip',
+        contentType: 'application/zip' as const,
+        entries: [{ name: 'messages.csv', content: '\uFEFFid\r\nm1\r\n' }],
+        modifiedAt: new Date('2026-07-15T12:00:00.000Z'),
+      };
+      service.getExportDownload.mockResolvedValue(download);
+      const first = responseStub();
+      await controller.downloadExport(user, 'job-1', first);
+      const second = responseStub();
+      await controller.downloadExport(user, 'job-1', second);
+      // Only true because entry mtimes are pinned to `modifiedAt`.
+      expect(first.collected()).toEqual(second.collected());
+    });
+
+    it('never writes headers when the job is missing or not the caller’s', async () => {
+      // Ownership/readiness is resolved BEFORE any byte is written, which is
+      // the only window in which a failure can still be a 404 rather than a
+      // truncated download.
+      service.getExportDownload.mockRejectedValue(
+        new NotFoundException('Export job not found'),
+      );
+      const res = responseStub();
+      await expect(
+        controller.downloadExport(user, 'job-1', res),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(res.set).not.toHaveBeenCalled();
+      expect(res.collected()).toHaveLength(0);
+    });
+
+    it('destroys the socket instead of throwing when the stream fails mid-flight', async () => {
+      // Headers are already on the wire, so there is no status code left to
+      // change. Aborting the chunked response is what makes the client see a
+      // failed download rather than a valid-looking truncated zip.
+      service.getExportDownload.mockResolvedValue({
+        kind: 'zip',
+        filename: 'queerpulse-export-job-1.zip',
+        contentType: 'application/zip',
+        entries: [{ name: 'messages.csv', content: 'id\r\nm1\r\n' }],
+        modifiedAt: new Date('2026-07-15T12:00:00.000Z'),
+      });
+      const res = responseStub();
+      const destroy = jest.spyOn(res, 'destroy');
+      const logError = jest
+        .spyOn(Logger.prototype, 'error')
+        .mockImplementation(() => undefined);
+
+      // Fail the socket on the first byte archiver hands us — i.e. strictly
+      // after the response headers have been committed.
+      const socketError = new Error('socket closed');
+      res.write = jest.fn(() => {
+        res.emit('error', socketError);
+        return false;
+      });
+
+      // Resolves — it must NOT reject. A rejection here would hand Nest's
+      // exception filter a response it can no longer write to, producing a
+      // "Cannot set headers after they are sent" crash on top of the original
+      // failure.
+      await expect(
+        controller.downloadExport(user, 'job-1', res),
+      ).resolves.toBeUndefined();
+
+      expect(res.headers['Content-Type']).toBe('application/zip');
+      expect(destroy).toHaveBeenCalledWith(socketError);
+      expect(logError).toHaveBeenCalledWith(
+        expect.stringContaining('Export archive stream failed'),
+        expect.anything(),
+      );
+      logError.mockRestore();
+    });
   });
 
   it('POST /dsar delegates to the service', async () => {

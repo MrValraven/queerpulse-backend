@@ -71,10 +71,16 @@ export class PreferencesService {
     return toPublicProfileDTO(await this.loadOrDefault(userId));
   }
 
-  // Persists the member's stated intent. To be explicit about what this does
-  // NOT do: nothing server-side reads `publicProfileEnabled` today, so this
-  // does not publish the profile to unauthenticated callers. See the doc
-  // comment on the column.
+  // ⚠️ THIS NOW PUBLISHES TO THE OPEN WEB. `publicProfileEnabled` stopped being
+  // inert when `GET /public/profiles/:slug` landed: it is the gate on that
+  // unauthenticated route (`PublicProfilesService.getBySlug`). Setting it true
+  // makes the member's name, pronouns, tagline, avatar, bio, links and work
+  // readable by anyone with no account — provided their `users.status` is still
+  // `active` AND their `profiles.visibility` is `open`, both of which that
+  // service also requires.
+  //
+  // Setting it false un-publishes immediately: the public route holds no cache
+  // and sends `Cache-Control: no-store`, so the next request 404s.
   async updatePublicProfile(
     userId: string,
     dto: UpdatePublicProfileDto,

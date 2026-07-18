@@ -53,6 +53,7 @@ import {
 } from './entities/deletion-request.entity';
 import { DsarRequest, DsarStatus } from './entities/dsar-request.entity';
 import { EmailPreference } from './entities/email-preference.entity';
+import { ExportDownload, describeExportDownload } from './export-archive';
 
 // Re-exported for tests/consumers that historically imported the default
 // matrix from this module.
@@ -287,10 +288,11 @@ export class AccountService {
   // risk that carries.
   //
   // FORMAT: `dto.format` (`json` | `csv` | `both`) is persisted on the job and
-  // then IGNORED — this backend only ever produces JSON. A member who picks
-  // `csv` or `both` gets a `.json` archive. The column is kept because the
-  // frontend sends it and the eventual worker will need it; nothing downstream
-  // reads it today. Do not assume CSV works because the enum has a value for it.
+  // honoured at DOWNLOAD time, not here. The stored payload is always the same
+  // JSON object regardless of format — `describeExportDownload` renders it as a
+  // single `.json`, or as a `.zip` of per-category CSVs (plus the `.json` for
+  // `both`), when the member actually fetches it. Nothing format-specific is
+  // persisted, so re-reading a job never has to reproduce a zip byte-for-byte.
   async requestExport(
     userId: string,
     dto: RequestExportDto,
@@ -316,15 +318,22 @@ export class AccountService {
   }
 
   /**
-   * Backs `GET /account/export/:jobId/download`. Returns the raw archive for
-   * the controller to stream, scoped to the owning user by the same
-   * `{ id, userId }` lookup `getExportJob` uses — a job id is a uuid, but it is
-   * not a capability, so ownership is checked rather than assumed.
+   * Backs `GET /account/export/:jobId/download`. Describes the file to serve —
+   * a `.json` body or the entry list for a `.zip` — for the controller to
+   * stream, scoped to the owning user by the same `{ id, userId }` lookup
+   * `getExportJob` uses: a job id is a uuid, but it is not a capability, so
+   * ownership is checked rather than assumed.
+   *
+   * Every failure mode lives in here, BEFORE the controller writes a single
+   * response byte. That ordering is load-bearing for the zip path: once headers
+   * are on the wire an exception filter has no status code left to change, so
+   * "not yours" and "not ready" have to be decided while a 404 is still
+   * possible.
    */
   async getExportDownload(
     userId: string,
     jobId: string,
-  ): Promise<{ filename: string; body: Buffer }> {
+  ): Promise<ExportDownload> {
     const job = await this.exportJobs.findOne({ where: { id: jobId, userId } });
     if (!job) {
       throw new NotFoundException('Export job not found');
@@ -332,10 +341,7 @@ export class AccountService {
     if (job.status !== DataExportStatus.Ready || !job.data) {
       throw new NotFoundException('Export archive is not ready');
     }
-    return {
-      filename: `queerpulse-export-${job.id}.json`,
-      body: Buffer.from(JSON.stringify(job.data, null, 2), 'utf8'),
-    };
+    return describeExportDownload(job);
   }
 
   async getExportJob(

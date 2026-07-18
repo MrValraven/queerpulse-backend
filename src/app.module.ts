@@ -19,6 +19,7 @@ import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { MembershipModule } from './membership/membership.module';
 import { ProfilesModule } from './profiles/profiles.module';
+import { PublicProfilesModule } from './public-profiles/public-profiles.module';
 import { SubprofilesModule } from './subprofiles/subprofiles.module';
 import { HandlesModule } from './handles/handles.module';
 import { VouchModule } from './vouch/vouch.module';
@@ -146,6 +147,7 @@ import { LaunchedFeaturesGuard } from './common/launched-features.guard';
     AuthModule,
     MembershipModule,
     ProfilesModule,
+    PublicProfilesModule,
     SubprofilesModule,
     HandlesModule,
     VouchModule,

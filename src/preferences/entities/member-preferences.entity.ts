@@ -59,27 +59,29 @@ export class MemberPreferences {
   // --- Public-profile visibility (GET/PUT /me/public-profile) ---------------
 
   /**
-   * 🔴 READ THIS BEFORE BUILDING ANYTHING THAT TRUSTS THIS FLAG.
+   * 🔴 THIS FLAG PUBLISHES TO THE OPEN WEB. It is no longer inert.
    *
-   * Today this column is INERT. It records the member's stated intent and
-   * nothing else: no read path anywhere in this backend consults it, and there
-   * is no unauthenticated profile endpoint for it to gate. Every profile read
-   * (`GET /profiles/:slug`, `GET /members`, all of `/subprofiles/*`) sits behind
-   * the global `JwtAuthGuard` plus `ActiveMemberGuard`; the only `@Public()`
-   * routes in the app are the auth/OAuth callbacks, `POST /auth/refresh`,
-   * `POST /auth/logout`, the Mux webhook, `GET /invites/:code`,
-   * `POST /join-requests`, `GET /csrf-token` and `/health*`. None of them serve
-   * a member profile.
+   * It gates `GET /public/profiles/:slug` (`src/public-profiles`) — the one
+   * unauthenticated route in this API that serves member data. When it is
+   * `true`, anyone with no account, no invite and no audit trail can read the
+   * member's display name, pronouns, tagline, avatar, bio, links and public
+   * work. Every other profile read (`GET /profiles/:slug`, `GET /members`, all
+   * of `/subprofiles/*`) still sits behind `JwtAuthGuard` + `ActiveMemberGuard`
+   * and ignores this column.
    *
-   * So flipping this to `true` changes NOTHING about who can see the member's
-   * data. It does not widen `profiles.visibility` (which still decides
-   * full-vs-limited detail for an already-authenticated active member), and it
-   * does not publish anything to the open web.
+   * It is a NECESSARY, NOT SUFFICIENT condition, and it never widens anything.
+   * The public route requires all three of:
+   *   1. this flag `true` (absent row ⇒ `false` ⇒ not published);
+   *   2. `users.status = 'active'`, so deactivation and the erasure grace
+   *      period hide the member from the open web immediately;
+   *   3. `profiles.visibility = 'open'` — the flag INTERSECTS visibility rather
+   *      than overriding it, so an anonymous viewer can never see more than the
+   *      least privileged signed-in member. `network`/`private` 404 publicly.
    *
-   * Whoever adds the first public read path owns making this true: it must be
-   * the gate on that path, and it must be combined with — never substituted
-   * for — `profiles.visibility`. Until then, do not let UI copy or any other
-   * service imply this flag has published anything.
+   * If you add a field to that endpoint's response, you are making a
+   * publish-to-the-world decision — see the allowlist in
+   * `src/public-profiles/public-profile-response.ts`, which names every field
+   * on purpose so a new `profiles` column cannot auto-appear.
    */
   @Column({ type: 'boolean', default: DEFAULT_PUBLIC_PROFILE_ENABLED })
   publicProfileEnabled: boolean;
