@@ -78,6 +78,26 @@ export class User {
   @JoinColumn({ name: 'invited_by' })
   invitedBy: User | null;
 
+  /**
+   * When a moderation suspension lapses. Only meaningful while
+   * `status = Suspended`, where it is the *only* thing distinguishing the two
+   * enforcement actions: `suspend` sets it from the action's `duration`,
+   * `ban` leaves it NULL meaning permanent.
+   *
+   * Expiry is lazy with write-through in `JwtStrategy.validate` rather than a
+   * scheduled sweep — the suspended member's own next request restores them and
+   * writes `status`/`suspended_until` back, so the directory, feed and search
+   * (which read `status` directly, never through the strategy) see them again
+   * too. A member who never returns keeps a stale row and stays hidden; that
+   * self-corrects the moment they come back.
+   *
+   * Never set this without also setting `status` — a `suspended_until` on an
+   * `active` row enforces nothing, and a `Suspended` row whose expiry was
+   * meant to be set but wasn't is an accidental permanent ban.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  suspendedUntil: Date | null;
+
   @Column({ type: 'timestamptz', nullable: true })
   activatedAt: Date | null;
 

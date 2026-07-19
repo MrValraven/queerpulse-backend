@@ -24,6 +24,7 @@ import {
 } from '../account/entities/deletion-request.entity';
 import { SignupRejectedError } from './errors/signup-rejected.error';
 import { RefreshToken } from './entities/refresh-token.entity';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 
 export interface GoogleUserInput {
   googleId: string;
@@ -61,6 +62,7 @@ export class AuthService {
     private readonly deactivations: Repository<AccountDeactivation>,
     @InjectRepository(DeletionRequest)
     private readonly deletionRequests: Repository<DeletionRequest>,
+    private readonly platformSettings: PlatformSettingsService,
   ) {}
 
   // The suppression list is a plain lookup table with no service of its own,
@@ -84,6 +86,27 @@ export class AuthService {
       // Returning member — invite not required. May also be coming back from a
       // deactivation, which signing in is the documented way to undo.
       return this.reactivateIfDeactivated(existing);
+    }
+    // Registration kill switch. Placed first among the new-account checks so a
+    // closed platform reports itself as closed, rather than telling applicants
+    // they need an invite that could not be redeemed right now anyway. The
+    // `existing` return above means this never affects a member who already
+    // has an account.
+    //
+    // A LOCKDOWN CLOSES THIS PATH TOO. `AuthController` is `@LockdownExempt()`
+    // — correctly, since an admin has to be able to authenticate in order to
+    // lift a lockdown — so `PlatformLockdownGuard` never sees this request, and
+    // without the check here anyone holding a valid invite would still create a
+    // `User` row on a fully locked platform. Lockdown implies no signups.
+    //
+    // Both conditions reuse the `registration_disabled` reason rather than
+    // inventing a lockdown-specific one: the frontend already handles it, and
+    // the applicant's situation is identical either way — signups are closed,
+    // try later. It must stay AFTER the `existing` short-circuit above, or an
+    // admin enabling lockdown would lock themselves out of signing back in.
+    const settings = await this.platformSettings.get();
+    if (!settings.registrationEnabled || settings.lockdownEnabled) {
+      throw new SignupRejectedError('registration_disabled');
     }
     if (!inviteCode) {
       throw new SignupRejectedError('invite_required');

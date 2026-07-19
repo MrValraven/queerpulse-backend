@@ -5,7 +5,10 @@ export type SignupRejectedReason =
   // The address is on the erasure suppression list: this person deleted their
   // account, and letting a fresh Google sign-in re-create it would quietly
   // undo that. See `../../account/entities/email-suppression.entity.ts`.
-  | 'account_suppressed';
+  | 'account_suppressed'
+  // An admin has switched registration off (`platform_settings`). Existing
+  // members are unaffected — this is only reachable on the new-account path.
+  | 'registration_disabled';
 
 /**
  * Thrown when a brand-new Google sign-in is not allowed to create an account.

@@ -8,6 +8,7 @@ import { DeletionRequest } from '../account/entities/deletion-request.entity';
 import { EmailSuppression } from '../account/entities/email-suppression.entity';
 import { UsersModule } from '../users/users.module';
 import { MembershipModule } from '../membership/membership.module';
+import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
 import { User } from '../users/entities/user.entity';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
@@ -20,6 +21,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
   imports: [
     UsersModule,
     MembershipModule,
+    PlatformSettingsModule,
     PassportModule,
     // User: JwtStrategy re-reads status/role per request so bans take effect
     // immediately rather than lagging by the access-token TTL.

@@ -18,6 +18,7 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AuditLogQuery } from './dto/audit-log.query';
+import { LiftSuspensionDto } from './dto/lift-suspension.dto';
 import { ListModReportsQuery } from './dto/list-mod-reports.query';
 import { ModActionDto } from './dto/mod-action.dto';
 import { ModBulkActionDto } from './dto/mod-bulk-action.dto';
@@ -65,6 +66,23 @@ export class ModerationController {
     @Body() dto: ModBulkActionDto,
   ) {
     return this.moderationService.bulkActOnReports(user.userId, dto);
+  }
+
+  // Lift a suspension or ban. Without this a `ban` would be irreversible
+  // through the API: it never expires, and the only other route back — an
+  // appeal overturn — is unreachable while nothing creates appeals.
+  //
+  // Note this sits under the class-level `@Roles(Moderator, Admin)`, so a
+  // moderator can undo another moderator's ban. That is deliberate: the
+  // alternative (admin-only) leaves a mistaken ban standing for however long
+  // an admin takes to appear.
+  @Patch('users/:userId/suspension')
+  liftSuspension(
+    @CurrentUser() user: CurrentUserData,
+    @Param('userId', ParseUUIDPipe) userId: string,
+    @Body() dto: LiftSuspensionDto,
+  ) {
+    return this.moderationService.liftSuspension(userId, user.userId, dto);
   }
 
   @Get('appeals')

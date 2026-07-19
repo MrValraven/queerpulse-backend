@@ -46,5 +46,6 @@ import { ProfilesService } from './profiles.service';
     DiscoverableIdentitiesController,
   ],
   providers: [ProfilesService, DiscoverableIdentitiesService],
+  exports: [ProfilesService],
 })
 export class ProfilesModule {}

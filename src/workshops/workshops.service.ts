@@ -20,6 +20,7 @@ import {
   WorkshopSession,
   WorkshopTier,
 } from './entities/workshop.entity';
+import { WorkshopRsvpsService } from './workshop-rsvps.service';
 import { toWorkshopDTO, WorkshopDTO } from './workshop-response';
 
 // Postgres unique-violation SQLSTATE. Mirrors `JobsService`'s identical
@@ -129,6 +130,7 @@ export class WorkshopsService {
     private readonly workshops: Repository<Workshop>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly blockFilter: BlockFilterService,
+    private readonly rsvps: WorkshopRsvpsService,
   ) {}
 
   async create(hostId: string, dto: CreateWorkshopInput): Promise<WorkshopDTO> {
@@ -164,8 +166,6 @@ export class WorkshopsService {
             mode: dto.mode,
             weeks: dto.weeks,
             spotsTotal: dto.spotsTotal,
-            // A brand-new cohort is always empty — never client-supplied.
-            spotsFilled: 0,
             blurb: dto.blurb,
             about: dto.about,
             heroPlaceholder: dto.heroPlaceholder ?? null,
@@ -221,11 +221,22 @@ export class WorkshopsService {
 
     return paginate(qb, page, async (rows) => {
       if (!rows.length) return [];
-      const hosts = await new MemberLookup(this.profiles).byUserIds(
-        rows.map((w) => w.hostId),
-      );
+      // Two grouped queries for the page, never one per row.
+      const [hosts, filled] = await Promise.all([
+        new MemberLookup(this.profiles).byUserIds(rows.map((w) => w.hostId)),
+        this.rsvps.spotsFilledForMany(rows.map((w) => w.id)),
+      ]);
       return rows.map((w) =>
-        toWorkshopDTO(w, hosts.get(w.hostId) ?? null, w.hostId === viewerId),
+        toWorkshopDTO(
+          w,
+          hosts.get(w.hostId) ?? null,
+          w.hostId === viewerId,
+          filled.get(w.id) ?? 0,
+          // `myRsvpStatus` stays null on cards. It would cost a third query for
+          // a value the catalogue never renders — the reserve control lives on
+          // the workshop's own page, which uses the detail route.
+          null,
+        ),
       );
     });
   }
@@ -284,6 +295,13 @@ export class WorkshopsService {
   // 204, no body (`WorkshopsController.remove`'s `@HttpCode`). Hard delete,
   // matching `ListingsService.remove` — a workshop is member-owned catalogue
   // copy, not moderation history, so there is nothing to retain.
+  //
+  // Since `AddWorkshopRsvps` this also destroys every booking on the workshop,
+  // via `workshop_rsvps.workshop_id`'s ON DELETE CASCADE. The host is told how
+  // many people that is *before* they confirm — the confirmation modal reads
+  // `spotsFilled` off the detail DTO it already has, so no extra route is
+  // needed here. Nobody is notified: there is no email service and no workshop
+  // notification type, and the copy says so rather than implying otherwise.
   async remove(slug: string, hostId: string): Promise<void> {
     const workshop = await this.assertHost(slug, hostId, 'delete');
     await this.workshops.remove(workshop);
@@ -318,13 +336,22 @@ export class WorkshopsService {
     workshop: Workshop,
     viewerId: string,
   ): Promise<WorkshopDTO> {
-    const hostProfile = await this.profiles.findOne({
-      where: { userId: workshop.hostId },
-    });
+    const isHost = workshop.hostId === viewerId;
+    const [hostProfile, spotsFilled, myRsvpStatus] = await Promise.all([
+      this.profiles.findOne({ where: { userId: workshop.hostId } }),
+      this.rsvps.spotsFilledFor(workshop.id),
+      // The host cannot book their own workshop, so there is never a row to
+      // look for — skip the query rather than ask a question with one answer.
+      isHost
+        ? Promise.resolve(null)
+        : this.rsvps.myStatusFor(workshop.id, viewerId),
+    ]);
     return toWorkshopDTO(
       workshop,
       toMemberRef(hostProfile),
-      workshop.hostId === viewerId,
+      isHost,
+      spotsFilled,
+      myRsvpStatus,
     );
   }
 }

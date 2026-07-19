@@ -5,7 +5,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Request } from 'express';
 import { ExtractJwt, JwtFromRequestFunction, Strategy } from 'passport-jwt';
 import { Repository } from 'typeorm';
-import { User } from '../../users/entities/user.entity';
+import { User, UserStatus } from '../../users/entities/user.entity';
 import { CurrentUserData } from '../decorators/current-user.decorator';
 
 const cookieExtractor: JwtFromRequestFunction = (req: Request) =>
@@ -54,18 +54,64 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     // the cost of making a ban take effect immediately.
     const user = await this.users.findOne({
       where: { id: payload.sub },
-      select: { id: true, email: true, status: true, role: true },
+      select: {
+        id: true,
+        email: true,
+        status: true,
+        role: true,
+        suspendedUntil: true,
+      },
     });
     if (!user) {
       // Deleted user holding a still-valid token.
       throw new UnauthorizedException('User no longer exists');
     }
 
+    const status = await this.liftExpiredSuspension(user);
+
     return {
       userId: user.id,
       email: user.email,
-      status: user.status,
+      status,
       role: user.role,
     };
+  }
+
+  /**
+   * Lazy expiry for moderation suspensions, with write-through.
+   *
+   * A suspension ends by the clock, and this is the only thing that ends it
+   * (there is no cron sweep). Writing the row back — rather than merely
+   * treating the member as active for this request — matters because
+   * everything else in the codebase reads `users.status` directly: the member
+   * directory, the feed, member refs, cohost/invite eligibility, the chat
+   * handshake. Without the write-back a member whose suspension had lapsed
+   * could sign in and use the site while remaining invisible to everyone else,
+   * which is a worse and far more confusing failure than staying suspended.
+   *
+   * `suspendedUntil === null` while suspended is a permanent ban and never
+   * expires — that is the whole distinction between `ban` and `suspend`.
+   *
+   * The UPDATE runs only on the rare request that first observes a lapsed
+   * suspension; every other request costs the one PK lookup it already did.
+   */
+  private async liftExpiredSuspension(user: User): Promise<UserStatus> {
+    if (
+      user.status !== UserStatus.Suspended ||
+      user.suspendedUntil === null ||
+      user.suspendedUntil > new Date()
+    ) {
+      return user.status;
+    }
+
+    await this.users.update(
+      // Conditional on still being suspended so a concurrent moderator action
+      // (a fresh suspension landing between the read above and this write)
+      // is not clobbered by a stale expiry decision.
+      { id: user.id, status: UserStatus.Suspended },
+      { status: UserStatus.Active, suspendedUntil: null },
+    );
+
+    return UserStatus.Active;
   }
 }

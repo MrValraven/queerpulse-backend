@@ -30,6 +30,6 @@ import { SocialService } from './social.service';
   ],
   controllers: [BlocksController, MutesController],
   providers: [SocialService, BlockFilterService],
-  exports: [BlockFilterService],
+  exports: [BlockFilterService, SocialService],
 })
 export class SocialModule {}

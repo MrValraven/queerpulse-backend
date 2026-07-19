@@ -12,6 +12,7 @@ import {
   WorkshopHeroTint,
   WorkshopMode,
 } from './entities/workshop.entity';
+import { WorkshopRsvpsService } from './workshop-rsvps.service';
 import { WorkshopsService } from './workshops.service';
 
 // A chainable query-builder stub whose terminal methods resolve to empty
@@ -41,6 +42,13 @@ describe('WorkshopsService', () => {
     find: jest.Mock;
   };
   let blockFilter: { excludeHidden: jest.Mock };
+  // `spotsFilled` is derived from `workshop_rsvps` now, so the catalogue
+  // service reads it through here rather than off a stored column.
+  let rsvps: {
+    spotsFilledFor: jest.Mock;
+    spotsFilledForMany: jest.Mock;
+    myStatusFor: jest.Mock;
+  };
 
   const baseWorkshopDto = {
     title: 'Risograph from nothing to a zine',
@@ -77,6 +85,11 @@ describe('WorkshopsService', () => {
       find: jest.fn().mockResolvedValue([]),
     };
     blockFilter = { excludeHidden: jest.fn((qb: unknown) => qb) };
+    rsvps = {
+      spotsFilledFor: jest.fn().mockResolvedValue(0),
+      spotsFilledForMany: jest.fn().mockResolvedValue(new Map()),
+      myStatusFor: jest.fn().mockResolvedValue(null),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -84,6 +97,7 @@ describe('WorkshopsService', () => {
         { provide: getRepositoryToken(Workshop), useValue: workshops },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: BlockFilterService, useValue: blockFilter },
+        { provide: WorkshopRsvpsService, useValue: rsvps },
       ],
     }).compile();
     service = module.get(WorkshopsService);
@@ -100,7 +114,6 @@ describe('WorkshopsService', () => {
           titleEm: '',
           currency: 'EUR',
           heroTint: WorkshopHeroTint.Default,
-          spotsFilled: 0,
           tiers: [],
           sessions: [],
           needs: [],

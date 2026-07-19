@@ -10,6 +10,9 @@ import { ConfigService } from '@nestjs/config';
 import { parseCookie } from 'cookie';
 import { ConnectionsService } from '../connections/connections.service';
 import { MessagingService } from '../messaging/messaging.service';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import { UserRole } from '../users/entities/user.entity';
+import { UsersService } from '../users/users.service';
 import { ChatGateway } from './chat.gateway';
 import { PresenceService } from './presence.service';
 
@@ -54,9 +57,12 @@ describe('ChatGateway', () => {
     isParticipant: jest.Mock;
   };
   let connections: { getAcceptedConnectionUserIds: jest.Mock };
+  let users: { findById: jest.Mock };
+  let platformSettings: { get: jest.Mock };
   let presence: PresenceService;
   let roomEmit: jest.Mock;
   let disconnectSockets: jest.Mock;
+  let disconnectAllSockets: jest.Mock;
 
   beforeEach(async () => {
     verifyAsync = jest.fn();
@@ -68,6 +74,16 @@ describe('ChatGateway', () => {
     connections = {
       getAcceptedConnectionUserIds: jest.fn().mockResolvedValue([]),
     };
+    // Lockdown off by default so existing auth/presence/etc. tests are
+    // unaffected by the Task 8 check — `findById` is never even reached
+    // unless a test flips `lockdownEnabled` to true.
+    users = { findById: jest.fn().mockResolvedValue(null) };
+    platformSettings = {
+      get: jest.fn().mockResolvedValue({
+        lockdownEnabled: false,
+        lockdownAllowsModerators: false,
+      }),
+    };
     mockedParseCookie.mockReturnValue({});
 
     const module: TestingModule = await Test.createTestingModule({
@@ -78,6 +94,8 @@ describe('ChatGateway', () => {
         { provide: ConfigService, useValue: { getOrThrow: () => 'secret' } },
         { provide: MessagingService, useValue: messaging },
         { provide: ConnectionsService, useValue: connections },
+        { provide: UsersService, useValue: users },
+        { provide: PlatformSettingsService, useValue: platformSettings },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
       ],
     }).compile();
@@ -87,10 +105,13 @@ describe('ChatGateway', () => {
     // Stub the namespace the gateway broadcasts through.
     roomEmit = jest.fn();
     disconnectSockets = jest.fn();
+    disconnectAllSockets = jest.fn();
     // @ts-expect-error assigning the injected namespace for the test
     gateway.namespace = {
       to: jest.fn().mockReturnValue({ emit: roomEmit }),
       in: jest.fn().mockReturnValue({ disconnectSockets }),
+      // Namespace-level (not room-scoped) — the blanket lockdown disconnect.
+      disconnectSockets: disconnectAllSockets,
     };
   });
 
@@ -167,6 +188,151 @@ describe('ChatGateway', () => {
       await gateway.handleConnection(client as never);
       expect(client.disconnect).toHaveBeenCalledWith(true);
       expect(client.data.userId).toBeUndefined();
+    });
+  });
+
+  // The same matrix PlatformLockdownGuard's spec runs, repeated here because
+  // the WS path enforces the rule independently — the global guard skips
+  // non-HTTP contexts entirely.
+  describe('platform lockdown (handshake)', () => {
+    const lock = (flags: Record<string, unknown> = {}) =>
+      platformSettings.get.mockResolvedValue({
+        lockdownEnabled: true,
+        lockdownAllowsModerators: false,
+        lockdownMessage: null,
+        ...flags,
+      });
+
+    const connectAs = async (role?: UserRole) => {
+      verifyAsync.mockResolvedValue({
+        sub: 'u1',
+        status: 'active',
+        exp: futureExp(),
+      });
+      users.findById.mockResolvedValue(role ? { id: 'u1', role } : null);
+      const client = makeClient({
+        handshake: { auth: { token: 'OK' }, headers: {} },
+      });
+      await gateway.handleConnection(client as never);
+      return client;
+    };
+
+    it('refuses a member while locked down', async () => {
+      lock();
+      const client = await connectAs(UserRole.Member);
+
+      expect(client.disconnect).toHaveBeenCalledWith(true);
+      expect(client.data.userId).toBeUndefined();
+      expect(client.join).not.toHaveBeenCalled();
+    });
+
+    it('allows an admin while locked down', async () => {
+      lock();
+      const client = await connectAs(UserRole.Admin);
+
+      expect(client.disconnect).not.toHaveBeenCalled();
+      expect(client.data.userId).toBe('u1');
+      clearTimeout(client.data.expiryTimer as NodeJS.Timeout);
+    });
+
+    it('refuses a moderator while locked down when moderators are not allowed', async () => {
+      lock({ lockdownAllowsModerators: false });
+      const client = await connectAs(UserRole.Moderator);
+
+      expect(client.disconnect).toHaveBeenCalledWith(true);
+      expect(client.data.userId).toBeUndefined();
+    });
+
+    it('allows a moderator while locked down when moderators are allowed', async () => {
+      lock({ lockdownAllowsModerators: true });
+      const client = await connectAs(UserRole.Moderator);
+
+      expect(client.disconnect).not.toHaveBeenCalled();
+      expect(client.data.userId).toBe('u1');
+      clearTimeout(client.data.expiryTimer as NodeJS.Timeout);
+    });
+
+    it('refuses a member even when moderators are allowed through', async () => {
+      lock({ lockdownAllowsModerators: true });
+      const client = await connectAs(UserRole.Member);
+
+      expect(client.disconnect).toHaveBeenCalledWith(true);
+    });
+
+    it('allows a member when lockdown is off, without looking the user up', async () => {
+      // Lockdown off is the default mock; the DB read must be skipped entirely.
+      const client = await connectAs(UserRole.Member);
+
+      expect(client.disconnect).not.toHaveBeenCalled();
+      expect(client.data.userId).toBe('u1');
+      expect(users.findById).not.toHaveBeenCalled();
+      clearTimeout(client.data.expiryTimer as NodeJS.Timeout);
+    });
+
+    it('fails closed when the user row is gone (deleted mid-session)', async () => {
+      // No row means no role, and an absent role is not staff — the token alone
+      // must never be enough to walk through a lockdown.
+      lock({ lockdownAllowsModerators: true });
+      const client = await connectAs(undefined);
+
+      expect(users.findById).toHaveBeenCalledWith('u1');
+      expect(client.disconnect).toHaveBeenCalledWith(true);
+      expect(client.data.userId).toBeUndefined();
+    });
+
+    it('tells the client it was a lockdown, not an auth failure', async () => {
+      // Otherwise socket.io auto-reconnect + token refresh loops for the whole
+      // lockdown, and the admin's message never reaches the member.
+      lock({ lockdownMessage: 'Back in an hour.' });
+      const client = await connectAs(UserRole.Member);
+
+      expect(client.emit).toHaveBeenCalledWith('exception', {
+        status: 'error',
+        code: 'PLATFORM_LOCKED',
+        message: 'Back in an hour.',
+      });
+    });
+
+    it('falls back to the default copy when the admin message is empty', async () => {
+      lock({ lockdownMessage: '' });
+      const client = await connectAs(UserRole.Member);
+
+      expect(client.emit).toHaveBeenCalledWith(
+        'exception',
+        expect.objectContaining({
+          code: 'PLATFORM_LOCKED',
+          message: expect.stringContaining('temporarily unavailable'),
+        }),
+      );
+    });
+
+    it('keeps every other rejection generic', async () => {
+      // Widening the lockdown payload must not widen what a bad token reveals.
+      verifyAsync.mockRejectedValue(new Error('jwt expired'));
+      const client = makeClient({
+        handshake: { auth: { token: 'STALE' }, headers: {} },
+      });
+
+      await gateway.handleConnection(client as never);
+
+      expect(client.emit).toHaveBeenCalledWith('exception', {
+        status: 'error',
+        message: 'Unauthorized',
+      });
+    });
+
+    it('disconnects every live socket when lockdown is switched on', async () => {
+      gateway.handleLockdownEnabled({ actorId: 'admin-1' });
+
+      expect(disconnectAllSockets).toHaveBeenCalledWith(true);
+    });
+
+    it('does not throw before the namespace is assigned', () => {
+      // @ts-expect-error simulating the event arriving pre-init
+      gateway.namespace = undefined;
+      expect(() =>
+        gateway.handleLockdownEnabled({ actorId: 'admin-1' }),
+      ).not.toThrow();
     });
   });
 

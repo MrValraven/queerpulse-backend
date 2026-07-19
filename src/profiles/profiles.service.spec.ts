@@ -344,6 +344,26 @@ describe('ProfilesService.getBySlug visibility', () => {
       expect(detail.tagline).toBe('');
     });
   });
+
+  describe('getMine', () => {
+    it('resolves the caller own slug and returns the full profile', async () => {
+      profiles.findOne.mockResolvedValue({ slug: 'tiago-costa', userId: 'u1' });
+      const spy = jest
+        .spyOn(service, 'getBySlug')
+        .mockResolvedValue({ limited: false } as never);
+
+      const res = await service.getMine('u1');
+
+      expect(profiles.findOne).toHaveBeenCalledWith({ where: { userId: 'u1' } });
+      expect(spy).toHaveBeenCalledWith('tiago-costa', 'u1');
+      expect(res).toEqual({ limited: false });
+    });
+
+    it('throws NotFound when the caller has no profile row', async () => {
+      profiles.findOne.mockResolvedValue(null);
+      await expect(service.getMine('u1')).rejects.toThrow(NotFoundException);
+    });
+  });
 });
 
 describe('ProfilesService replace-list endpoints', () => {

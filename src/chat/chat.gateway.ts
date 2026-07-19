@@ -14,6 +14,7 @@ import {
 } from '@nestjs/websockets';
 import { parseCookie } from 'cookie';
 import { Namespace, Socket } from 'socket.io';
+import { DEFAULT_LOCKDOWN_MESSAGE } from '../common/lockdown.constants';
 import { resolveFrontendOrigins } from '../config/frontend-origins';
 import { ConnectionsService } from '../connections/connections.service';
 import {
@@ -27,7 +28,13 @@ import {
   NOTIFICATION_CREATED,
   NotificationCreatedEvent,
 } from '../notifications/notification.events';
-import { UserStatus } from '../users/entities/user.entity';
+import {
+  PLATFORM_LOCKDOWN_ENABLED,
+  PlatformLockdownEnabledEvent,
+} from '../platform-settings/platform-settings.events';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import { UserRole, UserStatus } from '../users/entities/user.entity';
+import { UsersService } from '../users/users.service';
 import {
   JoinPayload,
   ReadPayload,
@@ -38,6 +45,28 @@ import { PresenceService } from './presence.service';
 import { USER_SESSION_REVOKED, UserSessionRevokedEvent } from './session.events';
 import { TokenBucketLimiter } from './ws-rate-limiter';
 import { WsAllExceptionsFilter } from './ws-exception.filter';
+
+/**
+ * Handshake refusal that the client can TELL APART from an auth failure.
+ *
+ * Every other handshake rejection is flattened to a generic `Unauthorized` on
+ * purpose — an unauthenticated caller learns nothing about why. A lockdown is
+ * the exception: it is not the client's credentials that are wrong, and a
+ * client that cannot distinguish the two will treat the refusal as an expired
+ * token, refresh, and reconnect — in a loop, for the whole lockdown, each
+ * attempt costing a JWT verify, a settings read and a user lookup at exactly
+ * the moment you want less load. Carrying `PLATFORM_LOCKED` (and the admin's
+ * message, which the member is meant to see) lets it back off instead.
+ */
+export class PlatformLockedWsException extends WsException {
+  constructor(lockdownMessage: string) {
+    super({
+      status: 'error',
+      code: 'PLATFORM_LOCKED',
+      message: lockdownMessage,
+    });
+  }
+}
 
 /** Verified access-token claims we depend on for the WS handshake. */
 interface AccessTokenClaims {
@@ -129,6 +158,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly presence: PresenceService,
     private readonly messaging: MessagingService,
     private readonly connections: ConnectionsService,
+    private readonly users: UsersService,
+    private readonly platformSettings: PlatformSettingsService,
   ) {}
 
   async handleConnection(client: Socket): Promise<void> {
@@ -149,7 +180,14 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.logger.debug(
         `WS handshake auth rejected: ${err instanceof Error ? err.message : 'unknown error'}`,
       );
-      client.emit('exception', { status: 'error', message: 'Unauthorized' });
+      // A lockdown says so explicitly; everything else stays a generic
+      // `Unauthorized` — do not widen what other failures disclose.
+      client.emit(
+        'exception',
+        err instanceof PlatformLockedWsException
+          ? err.getError()
+          : { status: 'error', message: 'Unauthorized' },
+      );
       client.disconnect(true);
     }
   }
@@ -279,6 +317,34 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.namespace?.in(`user:${payload.userId}`).disconnectSockets(true);
   }
 
+  /**
+   * Drop every live socket the moment an admin turns the lockdown on.
+   *
+   * `assertNotLockedOut` only runs at the handshake, so without this a socket
+   * opened before the flip keeps sending and receiving for the remaining life
+   * of its 15-minute access token: HTTP would go dark within one request while
+   * chat stayed live for a quarter of an hour.
+   *
+   * A BLANKET disconnect, not a filtered one. Staff reconnect immediately and
+   * pass the handshake check on their way back in, so filtering by role here
+   * would buy nothing and would cost a database lookup per connected socket at
+   * the worst possible moment.
+   *
+   * SINGLE-REPLICA ONLY, for the same reason as `handleSessionRevoked` above:
+   * this reaches sockets held by THIS instance, and there is no Redis adapter
+   * configured (see ThrottlerModule's note in app.module.ts). With 2+ replicas,
+   * sockets on instances that did not handle the PATCH survive until their
+   * token expires. Adding replicas requires @socket.io/redis-adapter wired via
+   * `app.useWebSocketAdapter` before this is safe.
+   */
+  @OnEvent(PLATFORM_LOCKDOWN_ENABLED)
+  handleLockdownEnabled(payload: PlatformLockdownEnabledEvent): void {
+    this.logger.warn(
+      `Lockdown enabled by ${payload.actorId} — disconnecting all live sockets`,
+    );
+    this.namespace?.disconnectSockets(true);
+  }
+
   // --- internals ---
 
   private requireUserId(client: Socket): string {
@@ -308,7 +374,57 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (payload.status !== UserStatus.Active) {
       throw new WsException('Active membership required');
     }
+    // Platform lockdown, repeated here because PlatformLockdownGuard governs
+    // HTTP only — without this, websockets stay wide open during a lockdown.
+    // The role has to come from the database: the access token carries `sub`,
+    // `status` and `exp`, but no role claim.
+    await this.assertNotLockedOut(payload.sub);
     return { userId: payload.sub, exp: payload.exp };
+  }
+
+  /**
+   * Throws unless the platform is unlocked, or this user is staff allowed
+   * through it.
+   *
+   * SHARED with `PlatformLockdownGuard`: the predicate (admins always pass;
+   * moderators pass only when `lockdownAllowsModerators`; everyone else is
+   * refused), the default copy (`DEFAULT_LOCKDOWN_MESSAGE`), and the
+   * `PLATFORM_LOCKED` code. Change the rule in one and you must change the
+   * other.
+   *
+   * NOT shared, and deliberately so:
+   * - **Scope.** The guard reads `req.user.role`, already populated by
+   *   `JwtStrategy`. There is no request here, so the role has to be fetched
+   *   from the database — the access token carries `sub`, `status` and `exp`,
+   *   but no role claim. A deleted user therefore fails closed here.
+   * - **Timing.** The guard runs per request, so HTTP goes dark immediately.
+   *   This runs once, at the handshake. Sockets already open when lockdown is
+   *   enabled are dropped by the {@link PLATFORM_LOCKDOWN_ENABLED} listener
+   *   instead, not by this method.
+   * - **Error shape.** The guard throws an HTTP 503; this throws a
+   *   {@link PlatformLockedWsException}, which `handleConnection` emits to the
+   *   client as a socket `exception` frame. There is no status code on a
+   *   WebSocket to carry the 503.
+   * - **Exemptions.** `@LockdownExempt()` has no meaning here; there is no
+   *   handler metadata on a handshake.
+   */
+  private async assertNotLockedOut(userId: string): Promise<void> {
+    const settings = await this.platformSettings.get();
+    if (!settings.lockdownEnabled) {
+      return;
+    }
+    const user = await this.users.findById(userId);
+    const role = user?.role;
+    if (role === UserRole.Admin) {
+      return;
+    }
+    if (role === UserRole.Moderator && settings.lockdownAllowsModerators) {
+      return;
+    }
+    // `||`, not `??`: an admin who clears the message textarea sends `''`.
+    throw new PlatformLockedWsException(
+      settings.lockdownMessage || DEFAULT_LOCKDOWN_MESSAGE,
+    );
   }
 
   private scheduleTokenExpiry(client: Socket, exp: number): void {

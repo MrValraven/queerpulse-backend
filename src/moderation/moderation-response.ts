@@ -100,7 +100,14 @@ export function toModReportDTO(
 // `createdAt`→`at`, added `actorName` (I7).
 export interface AuditEntryDTO {
   id: string;
-  reportId: string;
+  /**
+   * `null` for a moderator action not tied to a specific report — today only
+   * `suspension_lifted` (see `ModAuditLog.reportId`). Such an entry is never
+   * actually returned by `GET /mod/reports/audit`, which filters by report;
+   * the field is widened because the DTO mirrors the entity, and narrowing it
+   * here would be a lie that only holds while no global audit feed exists.
+   */
+  reportId: string | null;
   /**
    * `null` once the acting moderator has erased their account — the log entry
    * survives them (see `ModAuditLog.actorId`). `actorName` is then

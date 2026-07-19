@@ -6,6 +6,7 @@ import {
 } from '@nestjs/terminus';
 import { SkipThrottle } from '@nestjs/throttler';
 import { Public } from '../auth/decorators/public.decorator';
+import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 
 /**
  * Probes are never rate-limited. The throttler guard does not honour `@Public()`
@@ -15,6 +16,7 @@ import { Public } from '../auth/decorators/public.decorator';
  */
 @Public()
 @SkipThrottle()
+@LockdownExempt()
 @Controller('health')
 export class HealthController {
   constructor(

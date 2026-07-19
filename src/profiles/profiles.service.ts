@@ -93,6 +93,26 @@ export class ProfilesService {
     private readonly handles: HandlesService,
   ) {}
 
+  /**
+   * The caller's own profile. `CurrentUserData` carries no slug, so resolve it
+   * from the profile row first and delegate — the viewer is themselves, so
+   * `canViewFull` always passes and this is always the full response.
+   *
+   * The extra `findOne` is deliberate: duplicating `getBySlug`'s assembly to
+   * save one indexed primary-key lookup would be two code paths that must stay
+   * identical forever, which is exactly the drift the bootstrap payload cannot
+   * afford.
+   */
+  async getMine(
+    userId: string,
+  ): Promise<FullProfileResponse | LimitedProfileResponse> {
+    const profile = await this.profiles.findOne({ where: { userId } });
+    if (!profile) {
+      throw new NotFoundException('Profile not found');
+    }
+    return this.getBySlug(profile.slug, userId);
+  }
+
   async getBySlug(
     slug: string,
     viewerUserId: string,

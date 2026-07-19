@@ -31,7 +31,9 @@ import { GoogleAuthGuard } from './guards/google-auth.guard';
 import { decodeOAuthState } from './oauth-state';
 import { resolvePostLoginRedirect, signInErrorUrl } from './safe-redirect';
 import { Throttle, seconds } from '@nestjs/throttler';
+import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 
+@LockdownExempt()
 @Controller('auth')
 export class AuthController {
   constructor(

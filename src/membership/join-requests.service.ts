@@ -16,6 +16,7 @@ import {
   toJoinRequestView,
   toSubmittedJoinRequestView,
 } from './join-request-response';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 
 const MIN_AGE_YEARS = 18;
 
@@ -54,6 +55,7 @@ export class JoinRequestsService {
     private readonly joinRequests: Repository<JoinRequest>,
     private readonly invitesService: InvitesService,
     private readonly dataSource: DataSource,
+    private readonly platformSettings: PlatformSettingsService,
   ) {}
 
   /**
@@ -64,6 +66,28 @@ export class JoinRequestsService {
    * cannot redeem.
    */
   async submit(dto: CreateJoinRequestDto): Promise<SubmittedJoinRequestView> {
+    // Join-request kill switch. First statement in the method, before any
+    // query: this endpoint is the unauthenticated one, so it is where a spam
+    // flood lands, and a rejected submission should not still cost a
+    // duplicate-check round trip.
+    //
+    // 403 rather than the lockdown's 503 — the submission is genuinely
+    // refused, not deferred, and the applicant is not being asked to retry in
+    // a minute.
+    const settings = await this.platformSettings.get();
+    if (!settings.joinRequestsEnabled) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Forbidden',
+        code: 'JOIN_REQUESTS_CLOSED',
+        // `||`, not `??`: an admin who clears the message textarea sends `''`,
+        // and a blank rejection tells the applicant nothing.
+        message:
+          settings.registrationClosedMessage ||
+          'We are not accepting new invite requests right now',
+      });
+    }
+
     // Normalised once, here, so the stored value always matches what
     // `lower(email)` in UQ_join_requests_pending_email indexes.
     const email = dto.email.trim().toLowerCase();

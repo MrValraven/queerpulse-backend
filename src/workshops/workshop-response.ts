@@ -31,6 +31,8 @@ export interface WorkshopDTO {
   titleEm: string;
   mode: WorkshopMode;
   weeks: number;
+  /** Seats actually taken — a live COUNT over `workshop_rsvps`, never a stored
+   *  counter (see `Workshop.spotsTotal`'s comment). */
   spotsFilled: number;
   spotsTotal: number;
   blurb: string;
@@ -57,6 +59,15 @@ export interface WorkshopDTO {
   /** Whether the viewer is the host (gates the edit/delete affordances).
    *  Mirrors `JobDetailDTO.isPoster`. */
   isHost: boolean;
+  /**
+   * The viewer's own standing on this workshop — `null` when they have no
+   * booking (including one they cancelled). Lets the sidebar render the right
+   * control on first paint instead of flashing "Reserve a spot" at somebody who
+   * already has a seat. Mirrors `EventSummary.myRsvpStatus`.
+   *
+   * Always `null` for the host, who cannot book their own workshop.
+   */
+  myRsvpStatus: 'going' | 'waitlist' | null;
   createdAt: string;
 }
 
@@ -64,6 +75,8 @@ export function toWorkshopDTO(
   workshop: Workshop,
   host: MemberRef | null,
   isHost: boolean,
+  spotsFilled: number,
+  myRsvpStatus: 'going' | 'waitlist' | null = null,
 ): WorkshopDTO {
   return {
     slug: workshop.slug,
@@ -72,7 +85,7 @@ export function toWorkshopDTO(
     titleEm: workshop.titleEm,
     mode: workshop.mode,
     weeks: workshop.weeks,
-    spotsFilled: workshop.spotsFilled,
+    spotsFilled,
     spotsTotal: workshop.spotsTotal,
     blurb: workshop.blurb,
     heroPlaceholder: workshop.heroPlaceholder,
@@ -92,6 +105,7 @@ export function toWorkshopDTO(
     host,
     hostRole: workshop.hostRole,
     isHost,
+    myRsvpStatus,
     createdAt: workshop.createdAt.toISOString(),
   };
 }

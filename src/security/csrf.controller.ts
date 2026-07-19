@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { randomBytes } from 'node:crypto';
 import { Response } from 'express';
 import { Public } from '../auth/decorators/public.decorator';
+import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 
 // Outlive the 30d refresh token, so the CSRF cookie is never the reason a
 // still-authenticated session starts failing. Previously this was a session
@@ -12,6 +13,7 @@ import { Public } from '../auth/decorators/public.decorator';
 const CSRF_MAX_AGE = 31 * 24 * 60 * 60 * 1000; // 31d
 
 @Public()
+@LockdownExempt()
 @Controller('csrf-token')
 export class CsrfController {
   constructor(private readonly config: ConfigService) {}

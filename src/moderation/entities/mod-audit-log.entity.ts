@@ -17,9 +17,19 @@ export class ModAuditLog {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
+  // Nullable since `AddModerationEnforcement1782800800000`: lifting a
+  // suspension (`PATCH /mod/users/:userId/suspension`) is a moderator action
+  // that need not be a response to any particular report. A placeholder id
+  // would put a fabricated link into an immutable trail.
+  //
+  // Consequence: a row with a NULL `reportId` appears in no
+  // `GET /mod/reports/audit` response, since that endpoint filters by report.
+  // There is no global audit feed yet — the lift DTO therefore takes an
+  // optional `reportId` so a moderator acting on a specific report can keep
+  // the two linked.
   @Index('IDX_mod_audit_logs_report_id')
-  @Column({ type: 'uuid' })
-  reportId: string;
+  @Column({ type: 'uuid', nullable: true })
+  reportId: string | null;
 
   // Nullable since `AddDeletionErasureSupport1782800700000`: NULLed when the
   // acting moderator erases their account (FK is `ON DELETE SET NULL`), so the

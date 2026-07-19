@@ -10,6 +10,7 @@ import { CreateJoinRequestDto } from './dto/create-join-request.dto';
 import { JoinRequest, JoinRequestStatus } from './entities/join-request.entity';
 import { InvitesService } from './invites.service';
 import { JoinRequestsService } from './join-requests.service';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 
 const uniqueViolation = () =>
   new QueryFailedError('insert', [], {
@@ -42,6 +43,7 @@ describe('JoinRequestsService', () => {
   let inviteRepo: { find: jest.Mock };
   let dataSource: { transaction: jest.Mock; getRepository: jest.Mock };
   let manager: { getRepository: jest.Mock };
+  let platformSettings: { get: jest.Mock };
 
   beforeEach(async () => {
     qb = {
@@ -75,12 +77,21 @@ describe('JoinRequestsService', () => {
       transaction: jest.fn().mockImplementation(async (cb) => cb(manager)),
       getRepository: jest.fn(() => inviteRepo),
     };
+    // Join-request kill switch — on by default, so submission is unaffected
+    // unless a test explicitly turns it off.
+    platformSettings = {
+      get: jest.fn().mockResolvedValue({
+        joinRequestsEnabled: true,
+        registrationClosedMessage: null,
+      }),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         JoinRequestsService,
         { provide: getRepositoryToken(JoinRequest), useValue: repo },
         { provide: InvitesService, useValue: invites },
         { provide: DataSource, useValue: dataSource },
+        { provide: PlatformSettingsService, useValue: platformSettings },
       ],
     }).compile();
     service = module.get(JoinRequestsService);
@@ -187,6 +198,62 @@ describe('JoinRequestsService', () => {
         await expect(service.submit(dto())).resolves.toEqual(
           expect.objectContaining({ status: JoinRequestStatus.Pending }),
         );
+      });
+    });
+
+    describe('join-requests kill switch', () => {
+      it('rejects a submission with JOIN_REQUESTS_CLOSED when join requests are off', async () => {
+        platformSettings.get.mockResolvedValue({
+          joinRequestsEnabled: false,
+          registrationClosedMessage: 'Paused while we clear out spam.',
+        });
+
+        await expect(service.submit(dto())).rejects.toMatchObject({
+          status: 403,
+          response: {
+            code: 'JOIN_REQUESTS_CLOSED',
+            message: 'Paused while we clear out spam.',
+          },
+        });
+      });
+
+      it('checks the switch before touching the database', async () => {
+        // A spam flood is exactly when you do not want every rejected
+        // submission to still cost a duplicate-check query.
+        platformSettings.get.mockResolvedValue({
+          joinRequestsEnabled: false,
+          registrationClosedMessage: null,
+        });
+
+        // Assert the fallback copy itself, not just "it threw": with no admin
+        // message set, this default string is the entire user-facing
+        // explanation, and nothing else in the suite covers it.
+        await expect(service.submit(dto())).rejects.toMatchObject({
+          status: 403,
+          response: {
+            code: 'JOIN_REQUESTS_CLOSED',
+            message: 'We are not accepting new invite requests right now',
+          },
+        });
+
+        expect(repo.createQueryBuilder).not.toHaveBeenCalled();
+        expect(repo.save).not.toHaveBeenCalled();
+      });
+
+      it('falls back to the default copy when the admin message is an empty string', async () => {
+        // Clearing the message textarea sends '' — `??` would not catch it and
+        // the applicant would get a blank rejection.
+        platformSettings.get.mockResolvedValue({
+          joinRequestsEnabled: false,
+          registrationClosedMessage: '',
+        });
+
+        await expect(service.submit(dto())).rejects.toMatchObject({
+          response: {
+            code: 'JOIN_REQUESTS_CLOSED',
+            message: 'We are not accepting new invite requests right now',
+          },
+        });
       });
     });
   });

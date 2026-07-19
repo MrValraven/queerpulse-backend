@@ -19,7 +19,20 @@ export class AllExceptionsFilter extends BaseExceptionFilter {
       const isHttp = exception instanceof HttpException;
       const status = isHttp ? exception.getStatus() : 500;
 
-      if (!isHttp || status >= 500) {
+      // A platform lockdown rejection (503, code PLATFORM_LOCKED) is a
+      // deliberate operator action, not an incident: while the switch is on,
+      // every rejected request would otherwise log an error-level stack trace
+      // and burn a Sentry event, which is exactly when the incident log needs
+      // to stay readable. Do not "restore" this logging.
+      const responseBody = isHttp ? exception.getResponse() : undefined;
+      const isLockdownRejection =
+        isHttp &&
+        status === 503 &&
+        typeof responseBody === 'object' &&
+        responseBody !== null &&
+        (responseBody as { code?: unknown }).code === 'PLATFORM_LOCKED';
+
+      if ((!isHttp || status >= 500) && !isLockdownRejection) {
         this.logger.error(
           exception instanceof Error
             ? (exception.stack ?? exception.message)

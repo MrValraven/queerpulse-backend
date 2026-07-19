@@ -1,6 +1,12 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
+import { AuthService } from '../auth/auth.service';
 import {
   Report,
   ReportSeverity,
@@ -8,7 +14,7 @@ import {
   ReportSubjectType,
 } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
-import { User } from '../users/entities/user.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import { Appeal, AppealStatus } from './entities/appeal.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
 import { ModerationService } from './moderation.service';
@@ -66,6 +72,8 @@ describe('ModerationService', () => {
   };
   let users: { findOne: jest.Mock };
   let profiles: { findOne: jest.Mock };
+  let revokeAllForUser: jest.Mock;
+  let managerUpdate: jest.Mock;
 
   beforeEach(async () => {
     reports = {
@@ -90,6 +98,31 @@ describe('ModerationService', () => {
     };
     users = { findOne: jest.fn().mockResolvedValue(null) };
     profiles = { findOne: jest.fn().mockResolvedValue(null) };
+    revokeAllForUser = jest.fn().mockResolvedValue(undefined);
+    managerUpdate = jest.fn().mockResolvedValue({ affected: 1 });
+
+    // `actOnReport`/`bulkActOnReports`/`reviewAppeal` now run inside
+    // `dataSource.transaction` so the report status, the enforcement against
+    // the member, and the audit row commit together. This manager double
+    // delegates back to the same repository stubs, so assertions written
+    // against `reports.save` / `auditLogs.save` keep working unchanged.
+    const manager = {
+      save: (e: unknown): Promise<unknown> => {
+        const sample = Array.isArray(e) ? (e[0] as object) : (e as object);
+        // Reports carry `subjectType`; appeals do not. Enough to route a
+        // double, and it keeps both entities' existing assertions intact.
+        return sample && 'subjectType' in sample
+          ? (reports.save(e) as Promise<unknown>)
+          : (appeals.save(e) as Promise<unknown>);
+      },
+      update: managerUpdate,
+      findOne: (entity: unknown, opts: unknown): Promise<unknown> =>
+        entity === User
+          ? (users.findOne(opts) as Promise<unknown>)
+          : (reports.findOne(opts) as Promise<unknown>),
+      getRepository: (entity: unknown) =>
+        entity === ModAuditLog ? auditLogs : reports,
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -99,10 +132,29 @@ describe('ModerationService', () => {
         { provide: getRepositoryToken(ModAuditLog), useValue: auditLogs },
         { provide: getRepositoryToken(User), useValue: users },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        {
+          provide: DataSource,
+          useValue: {
+            transaction: (cb: (m: unknown) => unknown) => cb(manager),
+          },
+        },
+        { provide: AuthService, useValue: { revokeAllForUser } },
       ],
     }).compile();
     service = module.get(ModerationService);
   });
+
+  interface UserPatch {
+    status: UserStatus;
+    suspendedUntil: Date | null;
+  }
+  type UpdateCall = [unknown, { id: string }, UserPatch];
+
+  /** `manager.update(User, ...)` calls — i.e. actual account enforcement. */
+  const userUpdates = (): UpdateCall[] =>
+    (managerUpdate.mock.calls as UpdateCall[]).filter(
+      ([entity]) => entity === User,
+    );
 
   describe('list', () => {
     it('maps tab=open to an open/escalated status filter', async () => {
@@ -332,7 +384,19 @@ describe('ModerationService', () => {
     });
 
     it('persists an optional duration', async () => {
-      reports.findOne.mockResolvedValue(baseReport());
+      // Was written against a `Post` report, which now correctly rejects a
+      // suspend (you cannot suspend a post). Retargeted at a member report so
+      // it still tests what it means to test: that `duration` reaches the log.
+      reports.findOne.mockResolvedValue(
+        baseReport({
+          subjectType: ReportSubjectType.Member,
+          subjectId: 'reported-member',
+        }),
+      );
+      profiles.findOne.mockResolvedValue({
+        userId: 'user-1',
+        slug: 'reported-member',
+      });
 
       await service.actOnReport('report-1', 'actor-1', {
         action: 'suspend',
@@ -544,6 +608,283 @@ describe('ModerationService', () => {
       expect(res.reportId).toBe('');
       expect(res.actionId).toBe('');
       expect(res.appellant).toEqual({ handle: 'member' });
+      expect(auditLogs.save).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * `suspend` and `ban` used to do nothing to the reported member: they closed
+   * the report, wrote a convincing audit row, and left the account fully
+   * active. Any moderator who banned someone believed it took effect; it did
+   * not. The assertions on `users.status` below are the point of this block.
+   */
+  describe('enforcement against the reported member', () => {
+    const memberReport = () =>
+      baseReport({
+        subjectType: ReportSubjectType.Member,
+        subjectId: 'reported-member',
+      });
+
+    beforeEach(() => {
+      reports.findOne.mockResolvedValue(memberReport());
+      profiles.findOne.mockResolvedValue({
+        userId: 'user-1',
+        slug: 'reported-member',
+      });
+    });
+
+    it('suspend sets the member suspended with an expiry from the duration', async () => {
+      await service.actOnReport('report-1', 'actor-1', {
+        action: 'suspend',
+        reasonCode: 'harassment',
+        note: 'Seven days.',
+        duration: '7d',
+      });
+
+      const [[, where, patch]] = userUpdates();
+      expect(where).toEqual({ id: 'user-1' });
+      expect(patch.status).toBe(UserStatus.Suspended);
+      expect(patch.suspendedUntil).toBeInstanceOf(Date);
+      const days =
+        ((patch.suspendedUntil as Date).getTime() - Date.now()) /
+        (24 * 60 * 60 * 1000);
+      expect(days).toBeGreaterThan(6.9);
+      expect(days).toBeLessThan(7.1);
+    });
+
+    it('ban suspends permanently — no expiry', async () => {
+      await service.actOnReport('report-1', 'actor-1', {
+        action: 'ban',
+        reasonCode: 'harassment',
+        note: 'Out.',
+      });
+
+      const [[, , patch]] = userUpdates();
+      expect(patch).toEqual({
+        status: UserStatus.Suspended,
+        suspendedUntil: null,
+      });
+    });
+
+    it('revokes the suspended member’s live sessions', async () => {
+      await service.actOnReport('report-1', 'actor-1', {
+        action: 'ban',
+        reasonCode: 'harassment',
+        note: 'Out.',
+      });
+
+      expect(revokeAllForUser).toHaveBeenCalledWith('user-1');
+    });
+
+    it('keeps an open deactivation row’s previousStatus in step', async () => {
+      await service.actOnReport('report-1', 'actor-1', {
+        action: 'ban',
+        reasonCode: 'harassment',
+        note: 'Out.',
+      });
+
+      // Otherwise the member deactivates, signs back in, is restored to
+      // `active`, and the ban is laundered away in one click.
+      const call = (managerUpdate.mock.calls as UpdateCall[]).find(
+        ([entity]) => entity !== User,
+      );
+      expect(call?.[2]).toEqual({ previousStatus: UserStatus.Suspended });
+    });
+
+    it('rejects a suspension with no duration rather than making it permanent', async () => {
+      await expect(
+        service.actOnReport('report-1', 'actor-1', {
+          action: 'suspend',
+          reasonCode: 'harassment',
+          note: 'n',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(userUpdates()).toHaveLength(0);
+      expect(revokeAllForUser).not.toHaveBeenCalled();
+    });
+
+    it('rejects a malformed duration', async () => {
+      await expect(
+        service.actOnReport('report-1', 'actor-1', {
+          action: 'suspend',
+          reasonCode: 'harassment',
+          note: 'n',
+          duration: 'forever',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(userUpdates()).toHaveLength(0);
+    });
+
+    it('rejects a ban carrying a duration', async () => {
+      await expect(
+        service.actOnReport('report-1', 'actor-1', {
+          action: 'ban',
+          reasonCode: 'harassment',
+          note: 'n',
+          duration: '7d',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('rejects suspend on a non-member report instead of silently no-op-ing', async () => {
+      reports.findOne.mockResolvedValue(baseReport()); // subjectType: Post
+
+      await expect(
+        service.actOnReport('report-1', 'actor-1', {
+          action: 'suspend',
+          reasonCode: 'harassment',
+          note: 'n',
+          duration: '7d',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(userUpdates()).toHaveLength(0);
+    });
+
+    it('rejects suspend when the member cannot be resolved to an account', async () => {
+      profiles.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.actOnReport('report-1', 'actor-1', {
+          action: 'suspend',
+          reasonCode: 'harassment',
+          note: 'n',
+          duration: '7d',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    // Guards the other direction: these must NOT touch the account.
+    it.each(['dismiss', 'warn', 'escalate', 'hide_content', 'remove_content'])(
+      '%s never touches users.status',
+      async (action) => {
+        await service.actOnReport('report-1', 'actor-1', {
+          action,
+          reasonCode: 'harassment',
+          note: 'n',
+        } as never);
+
+        expect(userUpdates()).toHaveLength(0);
+        expect(revokeAllForUser).not.toHaveBeenCalled();
+      },
+    );
+
+    it('restrict remains unenforced — a known gap, asserted so it is not mistaken for done', async () => {
+      await service.actOnReport('report-1', 'actor-1', {
+        action: 'restrict',
+        reasonCode: 'harassment',
+        note: 'n',
+        duration: '7d',
+      });
+
+      expect(userUpdates()).toHaveLength(0);
+    });
+
+    it('preserves a member-initiated deactivation rather than overwriting it', async () => {
+      users.findOne.mockResolvedValue({
+        id: 'user-1',
+        status: UserStatus.Deactivated,
+      });
+
+      await service.actOnReport('report-1', 'actor-1', {
+        action: 'ban',
+        reasonCode: 'harassment',
+        note: 'Out.',
+      });
+
+      // `status` is untouched — they asked to be hidden — but the suspension is
+      // still recorded, so reactivating brings them back suspended.
+      const [[, , patch]] = userUpdates();
+      expect(patch).not.toHaveProperty('status');
+      expect(patch.suspendedUntil).toBeNull();
+      const deactivationCall = (managerUpdate.mock.calls as UpdateCall[]).find(
+        ([entity]) => entity !== User,
+      );
+      expect(deactivationCall?.[2]).toEqual({
+        previousStatus: UserStatus.Suspended,
+      });
+    });
+
+    it('bulk suspend fails the whole batch when one subject is unenforceable', async () => {
+      reports.find.mockResolvedValue([
+        memberReport(),
+        baseReport({ id: 'report-2' }), // a Post — unenforceable
+      ]);
+
+      await expect(
+        service.bulkActOnReports('actor-1', {
+          ids: ['report-1', 'report-2'],
+          action: 'suspend',
+          reasonCode: 'harassment',
+          note: 'n',
+          duration: '7d',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(revokeAllForUser).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('liftSuspension', () => {
+    it('404s an unknown user', async () => {
+      users.findOne.mockResolvedValue(null);
+      await expect(
+        service.liftSuspension('nope', 'actor-1', {
+          reasonCode: 'harassment',
+          note: 'n',
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('restores a suspended member to active', async () => {
+      users.findOne.mockResolvedValue({
+        id: 'user-1',
+        status: UserStatus.Suspended,
+      });
+
+      const res = await service.liftSuspension('user-1', 'actor-1', {
+        reasonCode: 'harassment',
+        note: 'Lifted on review.',
+      });
+
+      expect(res).toEqual({ userId: 'user-1', status: UserStatus.Active });
+      const [[, , patch]] = userUpdates();
+      expect(patch).toEqual({
+        status: UserStatus.Active,
+        suspendedUntil: null,
+      });
+    });
+
+    it('writes an audit row with a null reportId when none is given', async () => {
+      users.findOne.mockResolvedValue({
+        id: 'user-1',
+        status: UserStatus.Suspended,
+      });
+
+      await service.liftSuspension('user-1', 'actor-1', {
+        reasonCode: 'harassment',
+        note: 'n',
+      });
+
+      expect(auditLogs.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reportId: null,
+          action: 'suspension_lifted',
+        }),
+      );
+    });
+
+    it('is idempotent for a member who is not suspended', async () => {
+      users.findOne.mockResolvedValue({
+        id: 'user-1',
+        status: UserStatus.Active,
+      });
+
+      const res = await service.liftSuspension('user-1', 'actor-1', {
+        reasonCode: 'harassment',
+        note: 'n',
+      });
+
+      expect(res.status).toBe(UserStatus.Active);
+      expect(userUpdates()).toHaveLength(0);
       expect(auditLogs.save).not.toHaveBeenCalled();
     });
   });

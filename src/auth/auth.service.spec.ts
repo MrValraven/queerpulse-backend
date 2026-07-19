@@ -13,6 +13,7 @@ import {
 } from '../account/entities/deletion-request.entity';
 import { EmailSuppression } from '../account/entities/email-suppression.entity';
 import { InvitesService } from '../membership/invites.service';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { AuthService } from './auth.service';
@@ -84,6 +85,11 @@ function buildMocks() {
   // or from a pending erasure (leave alone). Empty by default.
   const deactivations = { findOne: jest.fn().mockResolvedValue(null) };
   const deletionRequests = { findOne: jest.fn().mockResolvedValue(null) };
+  // Registration kill switch — on by default, so signup is unaffected unless
+  // a test explicitly turns it off.
+  const platformSettings = {
+    get: jest.fn().mockResolvedValue({ registrationEnabled: true }),
+  };
   return {
     repo,
     jwt,
@@ -95,6 +101,7 @@ function buildMocks() {
     suppressions,
     deactivations,
     deletionRequests,
+    platformSettings,
   };
 }
 
@@ -125,6 +132,10 @@ async function buildService(
       {
         provide: getRepositoryToken(DeletionRequest),
         useValue: mocks.deletionRequests,
+      },
+      {
+        provide: PlatformSettingsService,
+        useValue: mocks.platformSettings,
       },
     ],
   }).compile();
@@ -515,5 +526,100 @@ describe('AuthService.validateOrCreateGoogleUser', () => {
     await expect(
       service.validateOrCreateGoogleUser(profile, 'CODE', attested),
     ).rejects.toMatchObject({ reason: 'invite_invalid' });
+  });
+
+  describe('registration kill switch', () => {
+    it('rejects a new signup with registration_disabled when registration is off', async () => {
+      mocks.platformSettings.get.mockResolvedValue({
+        registrationEnabled: false,
+      });
+      mocks.users.findByGoogleId.mockResolvedValue(null);
+
+      await expect(
+        service.validateOrCreateGoogleUser(
+          {
+            googleId: 'g-new',
+            email: 'new@example.com',
+            firstName: 'New',
+            lastName: 'Person',
+          },
+          'INVITE123',
+          { ageAttested: true },
+        ),
+      ).rejects.toMatchObject({ reason: 'registration_disabled' });
+    });
+
+    it('still signs in a returning member while registration is off', async () => {
+      // The whole point of the flag: stop new accounts, do not lock out the
+      // community. This asserts the check sits AFTER the existing-user return.
+      const existing = { id: 'u-1', status: UserStatus.Active } as User;
+      mocks.platformSettings.get.mockResolvedValue({
+        registrationEnabled: false,
+      });
+      mocks.users.findByGoogleId.mockResolvedValue(existing);
+
+      await expect(
+        service.validateOrCreateGoogleUser({
+          googleId: 'g-existing',
+          email: 'existing@example.com',
+          firstName: 'Existing',
+          lastName: 'Member',
+        }),
+      ).resolves.toBe(existing);
+    });
+
+    it('rejects a new signup while locked down even though registration is enabled', async () => {
+      // AuthController is @LockdownExempt() so PlatformLockdownGuard never sees
+      // this request — without the lockdown arm of this check, anyone holding a
+      // valid invite would still create a User row on a fully locked platform.
+      mocks.platformSettings.get.mockResolvedValue({
+        registrationEnabled: true,
+        lockdownEnabled: true,
+      });
+      mocks.users.findByGoogleId.mockResolvedValue(null);
+
+      await expect(
+        service.validateOrCreateGoogleUser(profile, 'INVITE123', attested),
+      ).rejects.toMatchObject({ reason: 'registration_disabled' });
+      // Rejected before any account was written.
+      expect(mocks.dataSource.transaction).not.toHaveBeenCalled();
+      expect(mocks.users.createGoogleUser).not.toHaveBeenCalled();
+    });
+
+    it('still signs in a returning member while locked down', async () => {
+      // Essential: an admin has to be able to authenticate in order to LIFT the
+      // lockdown. The check must stay after the existing-googleId short-circuit.
+      const existing = { id: 'u-1', status: UserStatus.Active } as User;
+      mocks.platformSettings.get.mockResolvedValue({
+        registrationEnabled: true,
+        lockdownEnabled: true,
+      });
+      mocks.users.findByGoogleId.mockResolvedValue(existing);
+
+      await expect(service.validateOrCreateGoogleUser(profile)).resolves.toBe(
+        existing,
+      );
+      // The settings row is never even read on the returning-member path.
+      expect(mocks.platformSettings.get).not.toHaveBeenCalled();
+    });
+
+    it('rejects with registration_disabled before invite_required', async () => {
+      // Registration being off beats every other new-account rejection: an
+      // applicant with no invite should be told signups are closed, not that
+      // they need an invite they cannot currently redeem anyway.
+      mocks.platformSettings.get.mockResolvedValue({
+        registrationEnabled: false,
+      });
+      mocks.users.findByGoogleId.mockResolvedValue(null);
+
+      await expect(
+        service.validateOrCreateGoogleUser({
+          googleId: 'g-new',
+          email: 'new@example.com',
+          firstName: 'New',
+          lastName: 'Person',
+        }),
+      ).rejects.toMatchObject({ reason: 'registration_disabled' });
+    });
   });
 });

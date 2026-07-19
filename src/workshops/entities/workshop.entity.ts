@@ -122,11 +122,14 @@ export class Workshop {
   @Column({ type: 'integer' })
   weeks: number;
 
+  // The cap. `spotsFilled` is deliberately NOT a column beside it: it is
+  // derived with a COUNT over `workshop_rsvps` rows with status 'going' (see
+  // `WorkshopRsvpsService.spotsFilledFor`). It used to be a stored integer that
+  // nothing incremented; `AddWorkshopRsvps` (1782800780000) drops it rather
+  // than leave a denormalized counter to drift away from the bookings it
+  // counts. Same treatment `volunteering` gives its own `spotsFilled`.
   @Column({ type: 'integer' })
   spotsTotal: number;
-
-  @Column({ type: 'integer', default: 0 })
-  spotsFilled: number;
 
   @Column({ type: 'text' })
   blurb: string;
