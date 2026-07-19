@@ -18,6 +18,7 @@ import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { MembershipModule } from './membership/membership.module';
+import { PlatformSettingsModule } from './platform-settings/platform-settings.module';
 import { ProfilesModule } from './profiles/profiles.module';
 import { PublicProfilesModule } from './public-profiles/public-profiles.module';
 import { SubprofilesModule } from './subprofiles/subprofiles.module';
@@ -32,6 +33,7 @@ import { CommunityModule } from './community/community.module';
 import { CompaniesModule } from './companies/companies.module';
 import { CultureModule } from './culture/culture.module';
 import { GovernanceModule } from './governance/governance.module';
+import { AdminCommunitiesModule } from './admin-communities/admin-communities.module';
 import { EventsModule } from './events/events.module';
 import { JobsModule } from './jobs/jobs.module';
 import { WorkshopsModule } from './workshops/workshops.module';
@@ -59,8 +61,10 @@ import { ListingsModule } from './listings/listings.module';
 import { MagazineModule } from './magazine/magazine.module';
 import { ResourcesModule } from './resources/resources.module';
 import { ContentModule } from './content/content.module';
+import { BootstrapModule } from './bootstrap/bootstrap.module';
 import { AllExceptionsFilter } from './common/all-exceptions.filter';
 import { LaunchedFeaturesGuard } from './common/launched-features.guard';
+import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
 
 @Module({
   imports: [
@@ -143,6 +147,7 @@ import { LaunchedFeaturesGuard } from './common/launched-features.guard';
       throttlers: [{ name: 'default', ttl: seconds(60), limit: 120 }],
     }),
     DatabaseModule,
+    PlatformSettingsModule,
     UsersModule,
     AuthModule,
     MembershipModule,
@@ -172,6 +177,7 @@ import { LaunchedFeaturesGuard } from './common/launched-features.guard';
     AccountModule,
     ConsentModule,
     SavedModule,
+    BootstrapModule,
     PreferencesModule,
     DraftsModule,
     RecognitionModule,
@@ -185,17 +191,21 @@ import { LaunchedFeaturesGuard } from './common/launched-features.guard';
     CultureModule,
     GovernanceModule,
     CommunityModule,
+    AdminCommunitiesModule,
   ],
   providers: [
     // Guards run in registration order. Throttle first (cheapest, and it must
     // count requests that CSRF/JWT would otherwise reject before they do), then
     // the launched-feature gate (an unlaunched feature 404s before auth runs,
     // so callers get "not available yet" instead of a misleading 401/403), then
-    // CSRF (double-submit, independent of auth), then JWT authentication.
+    // CSRF (double-submit, independent of auth), then JWT authentication, and
+    // finally the platform kill switch — which must run last because it is the
+    // only guard that needs `req.user.role`, populated by JwtAuthGuard.
     { provide: APP_GUARD, useClass: HttpThrottlerGuard },
     { provide: APP_GUARD, useClass: LaunchedFeaturesGuard },
     { provide: APP_GUARD, useClass: CsrfGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: PlatformLockdownGuard },
     // Adds error logging + Sentry capture, then defers to Nest's default filter.
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],
