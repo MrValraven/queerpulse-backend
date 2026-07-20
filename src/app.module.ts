@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { APP_FILTER, APP_GUARD } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule, seconds } from '@nestjs/throttler';
@@ -34,12 +34,14 @@ import { CompaniesModule } from './companies/companies.module';
 import { CultureModule } from './culture/culture.module';
 import { GovernanceModule } from './governance/governance.module';
 import { AdminCommunitiesModule } from './admin-communities/admin-communities.module';
+import { PlatformStaffModule } from './platform-staff/platform-staff.module';
 import { EventsModule } from './events/events.module';
 import { JobsModule } from './jobs/jobs.module';
 import { WorkshopsModule } from './workshops/workshops.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PartnersModule } from './partners/partners.module';
 import { StorageModule } from './storage/storage.module';
+import { StorageKeyOwnershipInterceptor } from './storage/storage-key-ownership.interceptor';
 import { UsersModule } from './users/users.module';
 import { VolunteeringModule } from './volunteering/volunteering.module';
 import { CsrfGuard } from './security/csrf.guard';
@@ -63,6 +65,7 @@ import { ResourcesModule } from './resources/resources.module';
 import { ContentModule } from './content/content.module';
 import { BootstrapModule } from './bootstrap/bootstrap.module';
 import { AllExceptionsFilter } from './common/all-exceptions.filter';
+import { CommonModule } from './common/common.module';
 import { LaunchedFeaturesGuard } from './common/launched-features.guard';
 import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
 
@@ -147,6 +150,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
       throttlers: [{ name: 'default', ttl: seconds(60), limit: 120 }],
     }),
     DatabaseModule,
+    CommonModule,
     PlatformSettingsModule,
     UsersModule,
     AuthModule,
@@ -192,6 +196,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     GovernanceModule,
     CommunityModule,
     AdminCommunitiesModule,
+    PlatformStaffModule,
   ],
   providers: [
     // Guards run in registration order. Throttle first (cheapest, and it must
@@ -208,6 +213,11 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     { provide: APP_GUARD, useClass: PlatformLockdownGuard },
     // Adds error logging + Sentry capture, then defers to Nest's default filter.
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
+    // Runs after the guards above (interceptors run after guards in the Nest
+    // lifecycle), so `request.user` is populated. Rejects any request whose
+    // body references a storage key it did not upload — see the invariant
+    // documented at the top of the interceptor itself.
+    { provide: APP_INTERCEPTOR, useClass: StorageKeyOwnershipInterceptor },
   ],
 })
 export class AppModule {}

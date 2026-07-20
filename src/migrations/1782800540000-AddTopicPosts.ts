@@ -64,6 +64,8 @@ export class AddTopicPosts1782800540000 implements MigrationInterface {
       `ALTER TABLE "topic_post" DROP CONSTRAINT "FK_topic_post_topic_id"`,
     );
     await queryRunner.query(`DROP TABLE "topic_post"`);
-    await queryRunner.query(`ALTER TABLE "topics" DROP COLUMN "follower_count"`);
+    await queryRunner.query(
+      `ALTER TABLE "topics" DROP COLUMN "follower_count"`,
+    );
   }
 }

@@ -269,10 +269,7 @@ describe('AuthController.logout', () => {
   it('still logs out (clears cookies, ok) when no refresh cookie is present', async () => {
     const { controller, authService } = build();
     const res = makeRes();
-    const out = await controller.logout(
-      makeReq(),
-      res as unknown as Response,
-    );
+    const out = await controller.logout(makeReq(), res as unknown as Response);
     expect(authService.revokeRefreshToken).not.toHaveBeenCalled();
     expect(res.clearCookie).toHaveBeenCalledWith(
       'csrf_token',

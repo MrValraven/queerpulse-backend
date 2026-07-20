@@ -74,6 +74,8 @@ export class EnvironmentVariables {
   @IsString()
   FRONTEND_URL?: string;
 
+  @IsOptional() @IsString() API_URL?: string;
+
   @IsOptional()
   @IsString()
   COOKIE_DOMAIN?: string;
@@ -90,12 +92,11 @@ export class EnvironmentVariables {
   @IsString()
   LOG_PRETTY?: string;
 
-  @IsOptional() @IsString() S3_ENDPOINT?: string;
-  @IsOptional() @IsString() S3_REGION?: string;
-  @IsOptional() @IsString() S3_BUCKET?: string;
-  @IsOptional() @IsString() S3_ACCESS_KEY?: string;
-  @IsOptional() @IsString() S3_SECRET_KEY?: string;
-  @IsOptional() @IsString() S3_PUBLIC_URL?: string;
+  @IsOptional() @IsString() ENDPOINT?: string;
+  @IsOptional() @IsString() REGION?: string;
+  @IsOptional() @IsString() BUCKET?: string;
+  @IsOptional() @IsString() ACCESS_KEY_ID?: string;
+  @IsOptional() @IsString() SECRET_ACCESS_KEY?: string;
 
   @IsOptional() @IsString() MUX_TOKEN_ID?: string;
   @IsOptional() @IsString() MUX_TOKEN_SECRET?: string;
@@ -133,22 +134,31 @@ export function validate(
     problems.push('FRONTEND_URL is required when NODE_ENV=production');
   }
 
+  if (validated.NODE_ENV === NodeEnv.Production && !validated.API_URL) {
+    problems.push(
+      'API_URL is required when NODE_ENV=production (image URLs would point at localhost otherwise)',
+    );
+  }
+
   // Storage is not optional in production — profile avatars and every upload
   // route depend on it. Left unset, the app boots healthy and uploads fail at
-  // runtime, per-request, for users. Fail at boot instead.
+  // runtime, per-request, for users. Fail at boot instead. ENDPOINT and REGION
+  // are required too: Railway is never reachable at a provider default.
   if (validated.NODE_ENV === NodeEnv.Production) {
-    const missingS3 = (
+    const missingStorage = (
       [
-        ['S3_BUCKET', validated.S3_BUCKET],
-        ['S3_ACCESS_KEY', validated.S3_ACCESS_KEY],
-        ['S3_SECRET_KEY', validated.S3_SECRET_KEY],
+        ['ENDPOINT', validated.ENDPOINT],
+        ['REGION', validated.REGION],
+        ['BUCKET', validated.BUCKET],
+        ['ACCESS_KEY_ID', validated.ACCESS_KEY_ID],
+        ['SECRET_ACCESS_KEY', validated.SECRET_ACCESS_KEY],
       ] as const
     )
       .filter(([, value]) => !value)
-      .map(([key]) => key);
-    if (missingS3.length > 0) {
+      .map(([name]) => name);
+    if (missingStorage.length > 0) {
       problems.push(
-        `${missingS3.join(', ')} ${missingS3.length === 1 ? 'is' : 'are'} required when NODE_ENV=production (uploads fail at runtime otherwise)`,
+        `${missingStorage.join(', ')} ${missingStorage.length === 1 ? 'is' : 'are'} required when NODE_ENV=production (uploads fail at runtime otherwise)`,
       );
     }
   }

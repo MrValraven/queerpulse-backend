@@ -205,9 +205,9 @@ describe('RsvpService', () => {
       capacity: null,
     });
     managerExists.mockResolvedValue(false); // not a co-host, not invited
-    await expect(
-      service.rsvp('e', 'stranger', 'going'),
-    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(service.rsvp('e', 'stranger', 'going')).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
   });
 
   it('allows an invited member to RSVP to an invite-only event', async () => {

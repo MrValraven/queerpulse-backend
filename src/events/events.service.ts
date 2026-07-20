@@ -256,11 +256,7 @@ export class EventsService {
         .innerJoin(EventRsvp, 'r', 'r.event_id = e.id')
         .where('r.user_id = :userId', { userId })
         .andWhere('r.status IN (:...statuses)', {
-          statuses: [
-            RsvpStatus.Going,
-            RsvpStatus.Maybe,
-            RsvpStatus.Waitlisted,
-          ],
+          statuses: [RsvpStatus.Going, RsvpStatus.Maybe, RsvpStatus.Waitlisted],
         })
         .andWhere('e.start_at < :now', { now })
         .orderBy('e.start_at', 'DESC')

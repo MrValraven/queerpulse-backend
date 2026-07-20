@@ -1,3 +1,4 @@
+import { toImageUrl } from '../common/image-url';
 import { Profile } from '../users/entities/profile.entity';
 import { Connection, ConnectionStatus } from './entities/connection.entity';
 
@@ -47,7 +48,7 @@ export function toConnectionListItem(
       slug: otherProfile?.slug ?? '',
       firstName: otherProfile?.firstName ?? '',
       lastName: otherProfile?.lastName ?? '',
-      avatarUrl: otherProfile?.avatarUrl ?? null,
+      avatarUrl: toImageUrl(otherProfile?.avatarUrl),
       pronouns: otherProfile?.pronouns ?? null,
       tagline: otherProfile?.tagline ?? null,
     },
@@ -56,7 +57,7 @@ export function toConnectionListItem(
           slug: introducerProfile.slug,
           firstName: introducerProfile.firstName,
           lastName: introducerProfile.lastName,
-          avatarUrl: introducerProfile.avatarUrl ?? null,
+          avatarUrl: toImageUrl(introducerProfile.avatarUrl),
           pronouns: introducerProfile.pronouns ?? null,
           tagline: introducerProfile.tagline ?? null,
         }

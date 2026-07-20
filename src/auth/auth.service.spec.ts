@@ -45,7 +45,10 @@ function buildMocks() {
     // Every update resolves an UpdateResult-shaped object with `affected`.
     update: jest.fn().mockResolvedValue({ affected: 1 }),
     create: jest.fn((v: Record<string, unknown>) => v),
-    save: jest.fn(async (v: Record<string, unknown>) => ({ id: 'new-row', ...v })),
+    save: jest.fn(async (v: Record<string, unknown>) => ({
+      id: 'new-row',
+      ...v,
+    })),
   };
   const jwt: JwtMock = {
     verifyAsync: jest.fn().mockResolvedValue({ sub: 'u1' }),

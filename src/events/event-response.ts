@@ -1,3 +1,4 @@
+import { toImageUrl } from '../common/image-url';
 import { Profile } from '../users/entities/profile.entity';
 import { Event } from './entities/event.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
@@ -45,14 +46,14 @@ export interface AttendeeView {
 }
 
 export function toOrganizerView(
-  p: Profile | undefined,
+  profile: Profile | undefined,
 ): EventOrganizerView | null {
-  if (!p) return null;
+  if (!profile) return null;
   return {
-    slug: p.slug,
-    firstName: p.firstName,
-    lastName: p.lastName,
-    avatarUrl: p.avatarUrl,
+    slug: profile.slug,
+    firstName: profile.firstName,
+    lastName: profile.lastName,
+    avatarUrl: toImageUrl(profile.avatarUrl),
   };
 }
 
@@ -69,7 +70,7 @@ export function toEventSummary(
     timezone: e.timezone,
     venue: e.venue,
     isOnline: e.isOnline,
-    coverImageUrl: e.coverImageUrl,
+    coverImageUrl: toImageUrl(e.coverImageUrl),
     visibility: e.visibility,
     status: e.status,
     capacity: e.capacity,
@@ -80,13 +81,13 @@ export function toEventSummary(
 
 export function toAttendeeView(
   rsvp: EventRsvp,
-  p: Profile | undefined,
+  profile: Profile | undefined,
 ): AttendeeView {
   return {
-    slug: p?.slug ?? '',
-    firstName: p?.firstName ?? '',
-    lastName: p?.lastName ?? '',
-    avatarUrl: p?.avatarUrl ?? null,
+    slug: profile?.slug ?? '',
+    firstName: profile?.firstName ?? '',
+    lastName: profile?.lastName ?? '',
+    avatarUrl: toImageUrl(profile?.avatarUrl),
     status: rsvp.status,
     waitlistPosition: rsvp.waitlistPosition,
   };

@@ -48,8 +48,6 @@ describe('AuthMaintenanceService.purgeExpiredRefreshTokens', () => {
     const service = new AuthMaintenanceService(
       repo as unknown as Repository<RefreshToken>,
     );
-    await expect(
-      service.purgeExpiredRefreshTokens(),
-    ).resolves.toBeUndefined();
+    await expect(service.purgeExpiredRefreshTokens()).resolves.toBeUndefined();
   });
 });

@@ -1,3 +1,4 @@
+import { toImageUrl } from '../common/image-url';
 import { Profile } from '../users/entities/profile.entity';
 import { SocialLink } from '../profiles/entities/social-link.entity';
 import { WorkItem } from '../profiles/entities/work-item.entity';
@@ -93,17 +94,17 @@ export function toPublicProfile(
     displayName: `${profile.firstName} ${profile.lastName}`.trim(),
     pronouns: profile.pronouns,
     tagline: profile.tagline,
-    avatarUrl: profile.avatarUrl,
+    avatarUrl: toImageUrl(profile.avatarUrl),
     bio: profile.bio,
     socials: socials.map((s) => ({
       platform: s.platform,
       urlOrHandle: s.urlOrHandle,
     })),
-    work: work.map((w) => ({
-      category: w.category,
-      title: w.title,
-      year: w.year,
-      imageUrl: w.imageUrl,
+    work: work.map((workItem) => ({
+      category: workItem.category,
+      title: workItem.title,
+      year: workItem.year,
+      imageUrl: toImageUrl(workItem.imageUrl),
     })),
   };
 }

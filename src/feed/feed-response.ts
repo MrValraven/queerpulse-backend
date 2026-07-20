@@ -1,3 +1,4 @@
+import { toImageUrl } from '../common/image-url';
 import { MemberRef } from '../common/member-ref';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { Community } from '../communities/entities/community.entity';
@@ -33,7 +34,7 @@ export function toAuthorSummary(
   return {
     handle: ref.slug,
     displayName: `${ref.firstName} ${ref.lastName}`.trim(),
-    avatarUrl: ref.avatarUrl,
+    avatarUrl: toImageUrl(ref.avatarUrl),
   };
 }
 

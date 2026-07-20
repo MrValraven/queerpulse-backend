@@ -204,7 +204,11 @@ describe('Platform kill switches (e2e)', () => {
       // not /auth/me — AuthController is @LockdownExempt() at class level, so
       // it would bypass PlatformLockdownGuard whether locked or not and prove
       // nothing as a before/after baseline.
-      const member = await signInAs('m-1', 'member@example.com', UserRole.Member);
+      const member = await signInAs(
+        'm-1',
+        'member@example.com',
+        UserRole.Member,
+      );
       await request(app.getHttpServer())
         .get('/connections')
         .set('Cookie', member.cookies)
@@ -213,7 +217,11 @@ describe('Platform kill switches (e2e)', () => {
 
     it('returns 503 PLATFORM_LOCKED to a member while locked', async () => {
       const admin = await signInAs('a-1', 'admin@example.com', UserRole.Admin);
-      const member = await signInAs('m-1', 'member@example.com', UserRole.Member);
+      const member = await signInAs(
+        'm-1',
+        'member@example.com',
+        UserRole.Member,
+      );
       await setFlags(admin, {
         lockdownEnabled: true,
         lockdownMessage: 'Back soon.',
@@ -244,7 +252,11 @@ describe('Platform kill switches (e2e)', () => {
       // The self-lockout guarantee: if this fails, enabling lockdown is a
       // one-way door and the only recovery is a manual database edit.
       const admin = await signInAs('a-1', 'admin@example.com', UserRole.Admin);
-      const member = await signInAs('m-1', 'member@example.com', UserRole.Member);
+      const member = await signInAs(
+        'm-1',
+        'member@example.com',
+        UserRole.Member,
+      );
       await setFlags(admin, { lockdownEnabled: true });
 
       // Prove the platform was actually locked before lifting it — otherwise a
@@ -380,7 +392,11 @@ describe('Platform kill switches (e2e)', () => {
 
   describe('admin API access', () => {
     it('refuses a member', async () => {
-      const member = await signInAs('m-1', 'member@example.com', UserRole.Member);
+      const member = await signInAs(
+        'm-1',
+        'member@example.com',
+        UserRole.Member,
+      );
       await request(app.getHttpServer())
         .get('/admin/platform-settings')
         .set('Cookie', member.cookies)

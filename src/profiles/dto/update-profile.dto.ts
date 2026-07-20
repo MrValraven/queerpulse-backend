@@ -10,6 +10,7 @@ import {
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
+import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 import { ProfileVisibility } from '../../users/entities/profile.entity';
 import { INTEREST_LABELS } from '../identities';
 import {
@@ -49,6 +50,10 @@ export class UpdateProfileDto {
   @IsOptional() @IsString() @MaxLength(160) tagline?: string;
   @IsOptional() @IsString() @MaxLength(5000) bio?: string;
   @IsOptional() @IsString() @MaxLength(120) location?: string;
+
+  // `@IsOptional()` treats both `undefined` and `null` as "skip", so `null` and
+  // `''` both clear the avatar back to the Google OAuth fallback.
+  @IsOptional() @IsImageReference() avatarUrl?: string | null;
 
   // `''` is meaningful — it CLEARS the status (the frontend hides the whole Now
   // section when empty), so this is not treated as "no change". See

@@ -16,6 +16,12 @@ export default registerAs('app', () => {
      * member to one of them. With a single FRONTEND_URL this is unchanged.
      */
     frontendUrl: frontendOrigins[0],
+    /**
+     * This API's own public origin — where a browser reaches `GET /files/*`.
+     * Distinct from `frontendUrl`, which is where the browser's *app* lives;
+     * the two are different hosts and must never be substituted for each other.
+     */
+    apiUrl: (process.env.API_URL ?? 'http://localhost:3000').replace(/\/$/, ''),
     inviteMonthlyQuota: parseInt(process.env.INVITE_MONTHLY_QUOTA ?? '1', 10),
   };
 });

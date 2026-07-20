@@ -312,7 +312,10 @@ describe('CinemaService', () => {
       // A prior replacement already produced a pending asset; re-uploading must
       // delete it at Mux so the abandoned asset is not billed forever.
       titles.findOne.mockResolvedValue(
-        makeTitle({ pendingMuxUploadId: 'up-old', pendingMuxAssetId: 'as-old' }),
+        makeTitle({
+          pendingMuxUploadId: 'up-old',
+          pendingMuxAssetId: 'as-old',
+        }),
       );
       await service.requestUpload('title-1');
       expect(mux.deleteAsset).toHaveBeenCalledWith('as-old');

@@ -9,6 +9,7 @@ import {
   MinLength,
   ValidateNested,
 } from 'class-validator';
+import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 
 export class CompanyValueDto {
   @IsString() @MinLength(1) @MaxLength(80) title: string;
@@ -22,7 +23,7 @@ export class CompanyInfoItemDto {
 
 export class CompanyWorkItemDto {
   @IsString() @MinLength(1) @MaxLength(200) label: string;
-  @IsOptional() @IsString() @MaxLength(500) imageUrl?: string;
+  @IsOptional() @IsImageReference() imageUrl?: string;
 }
 
 export class HiringContactDto {

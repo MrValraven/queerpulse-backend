@@ -104,10 +104,14 @@ export class AuthController {
 
     let user: User;
     try {
-      user = await this.authService.validateOrCreateGoogleUser(profile, invite, {
-        ageAttested,
-        termsVersion,
-      });
+      user = await this.authService.validateOrCreateGoogleUser(
+        profile,
+        invite,
+        {
+          ageAttested,
+          termsVersion,
+        },
+      );
     } catch (err) {
       if (err instanceof SignupRejectedError) {
         res.redirect(

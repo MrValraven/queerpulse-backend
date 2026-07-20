@@ -42,7 +42,10 @@ import {
   TypingPayload,
 } from './dto/chat-payloads';
 import { PresenceService } from './presence.service';
-import { USER_SESSION_REVOKED, UserSessionRevokedEvent } from './session.events';
+import {
+  USER_SESSION_REVOKED,
+  UserSessionRevokedEvent,
+} from './session.events';
 import { TokenBucketLimiter } from './ws-rate-limiter';
 import { WsAllExceptionsFilter } from './ws-exception.filter';
 

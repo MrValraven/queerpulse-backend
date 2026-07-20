@@ -70,9 +70,7 @@ function makeItem(overrides: Partial<SubprofileItem> = {}): SubprofileItem {
 }
 
 const contentItems = (n: number): SubprofileItem[] =>
-  Array.from({ length: n }, (_, i) =>
-    makeItem({ id: `it-${i}`, position: i }),
-  );
+  Array.from({ length: n }, (_, i) => makeItem({ id: `it-${i}`, position: i }));
 
 // A subprofile that passes every unlinked publish requirement.
 function completeUnlinked(overrides: Partial<Subprofile> = {}): Subprofile {

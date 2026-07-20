@@ -1,3 +1,4 @@
+import { toImageUrl } from '../common/image-url';
 import {
   CinemaTitle,
   TitleKind,
@@ -50,7 +51,7 @@ export function toTitleListItem(
     kind: title.kind,
     title: title.title,
     description: title.description,
-    coverImageUrl: title.coverImageUrl,
+    coverImageUrl: toImageUrl(title.coverImageUrl),
     durationSeconds: title.durationSeconds,
     publishedAt: title.publishedAt,
     viewCount: title.viewCount,

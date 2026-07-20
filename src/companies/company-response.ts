@@ -1,3 +1,4 @@
+import { toImageUrl } from '../common/image-url';
 import { MemberRef } from '../common/member-ref';
 import { JobCardDTO } from '../jobs/job-response';
 import { CompanyReview } from './entities/company-review.entity';
@@ -80,6 +81,13 @@ function toBadges(c: Company): CompanyBadges {
   return { queerRun: c.queerRun, queerLed: c.queerLed, verified: c.verified };
 }
 
+function toWorkItemView(workItem: CompanyWorkItem): CompanyWorkItem {
+  return {
+    label: workItem.label,
+    imageUrl: toImageUrl(workItem.imageUrl),
+  };
+}
+
 export function toCompanyCard(
   c: Company,
   aggregates: CompanyReviewAggregates,
@@ -112,7 +120,7 @@ export function toCompanyDetail(
     team,
     teamCount: c.teamCount,
     hiringContact: c.hiringContact,
-    work: c.work,
+    work: c.work.map(toWorkItemView),
     reviewBars: aggregates.reviewBars,
     openRoles,
     owner,

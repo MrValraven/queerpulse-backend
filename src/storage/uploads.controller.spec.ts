@@ -17,8 +17,9 @@ const user: CurrentUserData = {
 };
 
 const PRESIGNED: PresignedUpload = {
-  uploadUrl: 'https://s3.example.com/bucket/key?X-Amz-Signature=abc',
-  publicUrl: 'https://cdn.example.com/key',
+  uploadUrl:
+    'https://queerpulse-prod.storage.railway.app/avatars/key?X-Amz-Signature=abc',
+  key: 'avatars/user-1/abc.jpg',
   expiresIn: 300,
 };
 
@@ -83,18 +84,14 @@ describe('UploadsController', () => {
       },
     );
 
-    it('returns a response containing uploadUrl + publicUrl', async () => {
+    it('returns the storage key rather than a public URL', async () => {
       const result = await controller.presign(user, {
         kind: 'avatar',
-        contentType: 'image/png',
+        contentType: 'image/jpeg',
         byteSize: 1024,
       });
-      expect(result).toEqual(
-        expect.objectContaining({
-          uploadUrl: PRESIGNED.uploadUrl,
-          publicUrl: PRESIGNED.publicUrl,
-        }),
-      );
+      expect(result.key).toBe(PRESIGNED.key);
+      expect(result).not.toHaveProperty('publicUrl');
     });
 
     it.each(Object.keys(UPLOAD_KIND_SPECS) as UploadKind[])(

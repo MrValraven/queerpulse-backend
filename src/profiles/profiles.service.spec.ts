@@ -2,6 +2,10 @@ import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+} from '../common/image-url';
 import { ConnectionsService } from '../connections/connections.service';
 import { HandlesService } from '../handles/handles.service';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -354,7 +358,9 @@ describe('ProfilesService.getBySlug visibility', () => {
 
       const res = await service.getMine('u1');
 
-      expect(profiles.findOne).toHaveBeenCalledWith({ where: { userId: 'u1' } });
+      expect(profiles.findOne).toHaveBeenCalledWith({
+        where: { userId: 'u1' },
+      });
       expect(spy).toHaveBeenCalledWith('tiago-costa', 'u1');
       expect(res).toEqual({ limited: false });
     });
@@ -384,22 +390,43 @@ describe('ProfilesService replace-list endpoints', () => {
     }),
   });
 
-  type RepoMock = { find?: jest.Mock; createQueryBuilder?: jest.Mock };
+  beforeEach(() => {
+    setImageUrlBase('https://api.test');
+  });
+
+  afterEach(() => {
+    resetImageUrlBaseForTesting();
+  });
+
+  type RepoMock = {
+    find?: jest.Mock;
+    findOne?: jest.Mock;
+    createQueryBuilder?: jest.Mock;
+    save?: jest.Mock;
+  };
   const build = async (overrides: {
+    profiles?: RepoMock;
     skills?: RepoMock;
     shapings?: RepoMock;
     groups?: RepoMock;
     groupMemberships?: RepoMock;
+    workItems?: RepoMock;
   }) => {
     const module = await Test.createTestingModule({
       providers: [
         ProfilesService,
         {
           provide: getRepositoryToken(Profile),
-          useValue: { findOne: jest.fn(), createQueryBuilder: jest.fn() },
+          useValue: overrides.profiles ?? {
+            findOne: jest.fn(),
+            createQueryBuilder: jest.fn(),
+          },
         },
         { provide: getRepositoryToken(SocialLink), useValue: findEmpty() },
-        { provide: getRepositoryToken(WorkItem), useValue: findEmpty() },
+        {
+          provide: getRepositoryToken(WorkItem),
+          useValue: overrides.workItems ?? findEmpty(),
+        },
         {
           provide: getRepositoryToken(Skill),
           useValue: overrides.skills ?? findEmpty(),
@@ -460,6 +487,119 @@ describe('ProfilesService replace-list endpoints', () => {
       { name: 'Web dev', meta: 'React' },
     ]);
     expect(res).toEqual([{ name: 'Web dev', meta: 'React' }]);
+  });
+
+  it('replaceWork converts a stored image key to an API files URL on return', async () => {
+    const key =
+      'work/11111111-2222-3333-4444-555555555555/66666666-7777-8888-9999-000000000000.png';
+    const workItemsRepo = {
+      find: jest.fn().mockResolvedValue([
+        {
+          id: 'w1',
+          userId: 'u1',
+          category: 'Dev',
+          title: 'X',
+          year: '2022',
+          imageUrl: key,
+          position: 0,
+        },
+      ]),
+    };
+    service = await build({ workItems: workItemsRepo });
+
+    const res = await service.replaceWork('u1', [
+      { category: 'Dev', title: 'X', year: '2022', imageUrl: key },
+    ]);
+
+    expect(res[0].imageUrl).toBe(`https://api.test/files/${key}`);
+  });
+
+  it('updateMe persists an uploaded avatar key to Profile.avatarUrl and returns it as a files URL', async () => {
+    const key =
+      'avatars/11111111-2222-3333-4444-555555555555/77777777-8888-9999-aaaa-bbbbbbbbbbbb.jpg';
+    const p = {
+      userId: 'u1',
+      slug: 'jo',
+      firstName: 'Jo',
+      lastName: 'Lee',
+      pronouns: null,
+      tagline: null,
+      bio: null,
+      location: null,
+      now: null,
+      avatarUrl: null,
+      visibility: ProfileVisibility.Open,
+      openTo: [],
+      identities: [],
+      discoverableIdentities: [],
+      lookingFor: [],
+      tags: [],
+      verified: false,
+      joinedAt: new Date('2024-03-01T00:00:00.000Z'),
+    } as unknown as Profile;
+    const profilesRepo = {
+      findOne: jest.fn().mockResolvedValue(p),
+      createQueryBuilder: jest.fn(() => qbStub()),
+      save: jest.fn().mockResolvedValue(p),
+    };
+    service = await build({
+      profiles: profilesRepo,
+      // buildFullProfile -> loadGroups needs a real chainable stub; the
+      // default groupMemberships override only stubs `createQueryBuilder` as
+      // a bare jest.fn(), which resolves to undefined and breaks the chain.
+      groupMemberships: {
+        find: jest.fn().mockResolvedValue([]),
+        createQueryBuilder: jest.fn(() => qbStub()),
+      },
+    });
+
+    const res = await service.updateMe('u1', { avatarUrl: key });
+
+    // The DTO's avatarUrl rides in on `rest` via `Object.assign(profile, rest)`
+    // — no dedicated service code, exactly like SubprofilesService.update.
+    expect(p.avatarUrl).toBe(key);
+    expect(profilesRepo.save).toHaveBeenCalledWith(p);
+    expect(res.avatarUrl).toBe(`https://api.test/files/${key}`);
+  });
+
+  it('updateMe clears the avatar back to null when sent null', async () => {
+    const p = {
+      userId: 'u1',
+      slug: 'jo',
+      firstName: 'Jo',
+      lastName: 'Lee',
+      pronouns: null,
+      tagline: null,
+      bio: null,
+      location: null,
+      now: null,
+      avatarUrl: 'avatars/11111111-2222-3333-4444-555555555555/old.jpg',
+      visibility: ProfileVisibility.Open,
+      openTo: [],
+      identities: [],
+      discoverableIdentities: [],
+      lookingFor: [],
+      tags: [],
+      verified: false,
+      joinedAt: new Date('2024-03-01T00:00:00.000Z'),
+    } as unknown as Profile;
+    const profilesRepo = {
+      findOne: jest.fn().mockResolvedValue(p),
+      createQueryBuilder: jest.fn(() => qbStub()),
+      save: jest.fn().mockResolvedValue(p),
+    };
+    service = await build({
+      profiles: profilesRepo,
+      groupMemberships: {
+        find: jest.fn().mockResolvedValue([]),
+        createQueryBuilder: jest.fn(() => qbStub()),
+      },
+    });
+
+    const res = await service.updateMe('u1', { avatarUrl: null });
+
+    expect(p.avatarUrl).toBeNull();
+    expect(res.avatarUrl).toBeNull();
   });
 
   it('replaceShapings rejects a duplicate kind with 400', async () => {

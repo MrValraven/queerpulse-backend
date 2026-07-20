@@ -7,36 +7,54 @@
 
 // kind enum values
 export type SubprofileKind =
-  | 'developer' | 'writer' | 'musician' | 'visual_artist'
-  | 'filmmaker' | 'designer' | 'maker' | 'generic';
+  | 'developer'
+  | 'writer'
+  | 'musician'
+  | 'visual_artist'
+  | 'filmmaker'
+  | 'designer'
+  | 'maker'
+  | 'generic';
 
 // section enum values (union across all kinds + the universal 'links')
 export type SubprofileSection =
-  | 'projects' | 'open_source'          // developer
-  | 'publications' | 'readings'         // writer
-  | 'discography' | 'gigs'              // musician
-  | 'portfolio' | 'exhibitions'        // visual_artist
-  | 'filmography' | 'screenings'       // filmmaker
-  | 'selected_work' | 'clients'        // designer
-  | 'collections' | 'workshops'        // maker
-  | 'showcase'                          // generic
-  | 'links';                            // every kind
+  | 'projects'
+  | 'open_source' // developer
+  | 'publications'
+  | 'readings' // writer
+  | 'discography'
+  | 'gigs' // musician
+  | 'portfolio'
+  | 'exhibitions' // visual_artist
+  | 'filmography'
+  | 'screenings' // filmmaker
+  | 'selected_work'
+  | 'clients' // designer
+  | 'collections'
+  | 'workshops' // maker
+  | 'showcase' // generic
+  | 'links'; // every kind
 
 // kind -> ordered content sections (excludes the universal 'links')
 export const KIND_SECTIONS: Record<SubprofileKind, SubprofileSection[]> = {
-  developer:     ['projects', 'open_source'],
-  writer:        ['publications', 'readings'],
-  musician:      ['discography', 'gigs'],
+  developer: ['projects', 'open_source'],
+  writer: ['publications', 'readings'],
+  musician: ['discography', 'gigs'],
   visual_artist: ['portfolio', 'exhibitions'],
-  filmmaker:     ['filmography', 'screenings'],
-  designer:      ['selected_work', 'clients'],
-  maker:         ['collections', 'workshops'],
-  generic:       ['showcase'],
+  filmmaker: ['filmography', 'screenings'],
+  designer: ['selected_work', 'clients'],
+  maker: ['collections', 'workshops'],
+  generic: ['showcase'],
 };
 
 // helpers (both repos)
-export const sectionsForKind = (k: SubprofileKind): SubprofileSection[] =>
-  [...KIND_SECTIONS[k], 'links'];
-export const isSectionAllowed = (k: SubprofileKind, s: SubprofileSection): boolean =>
-  sectionsForKind(k).includes(s);
-export const isContentSection = (s: SubprofileSection): boolean => s !== 'links';
+export const sectionsForKind = (k: SubprofileKind): SubprofileSection[] => [
+  ...KIND_SECTIONS[k],
+  'links',
+];
+export const isSectionAllowed = (
+  k: SubprofileKind,
+  s: SubprofileSection,
+): boolean => sectionsForKind(k).includes(s);
+export const isContentSection = (s: SubprofileSection): boolean =>
+  s !== 'links';

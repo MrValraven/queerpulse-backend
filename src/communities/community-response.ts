@@ -1,3 +1,4 @@
+import { toImageUrl } from '../common/image-url';
 import { MemberRef } from '../common/member-ref';
 import {
   AccessTier,
@@ -250,7 +251,7 @@ export function toCommunityPost(
     id: post.id,
     author,
     body: post.body,
-    image: post.image,
+    image: toImageUrl(post.image),
     kind: post.kind,
     pinned: post.pinned,
     createdAt: post.createdAt.toISOString(),

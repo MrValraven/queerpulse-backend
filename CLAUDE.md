@@ -8,7 +8,7 @@ QueerPulse backend — a [NestJS](https://nestjs.com/) (v11) + TypeScript API fo
 invite-only community platform. It is a full domain application (not a scaffold):
 Google OAuth + JWT cookie auth, invite-gated membership and vouching, profiles,
 connections, messaging (REST + socket.io chat), events with RSVPs, notifications,
-S3 uploads, and Mux-backed video ("cinema").
+Railway Buckets uploads, and Mux-backed video ("cinema").
 
 Persistence is **PostgreSQL via TypeORM**. The schema is owned entirely by
 migrations in `src/migrations` — `synchronize` is never enabled. Entities use the

@@ -1,4 +1,12 @@
-import { IsEnum, IsInt, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import {
+  IsEnum,
+  IsInt,
+  IsOptional,
+  IsString,
+  MaxLength,
+  Min,
+} from 'class-validator';
+import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 import {
   SubprofileLinkVisibility,
   SubprofileVisibility,
@@ -15,7 +23,7 @@ export class UpdateSubprofileDTO {
 
   @IsOptional() @IsString() @MaxLength(30) handle?: string;
 
-  @IsOptional() @IsString() @MaxLength(1000) avatarUrl?: string | null;
+  @IsOptional() @IsImageReference() avatarUrl?: string | null;
 
   @IsOptional() @IsString() @MaxLength(200) tagline?: string | null;
 

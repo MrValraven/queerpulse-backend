@@ -7,6 +7,7 @@ import {
   MaxLength,
   ValidateNested,
 } from 'class-validator';
+import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 import { MAX_ITEMS_PER_SECTION } from '../subprofile-validation';
 
 // One item of a section. `section` comes from the URL, not the body (C4).
@@ -19,7 +20,7 @@ export class SubprofileItemInputDTO {
 
   @IsOptional() @IsString() @MaxLength(1000) url?: string;
 
-  @IsOptional() @IsString() @MaxLength(1000) imageUrl?: string;
+  @IsOptional() @IsImageReference() imageUrl?: string;
 
   @IsOptional() @IsString() @MaxLength(40) date?: string;
 

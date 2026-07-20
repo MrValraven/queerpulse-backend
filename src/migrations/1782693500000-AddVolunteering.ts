@@ -124,9 +124,7 @@ export class AddVolunteering1782693500000 implements MigrationInterface {
     await queryRunner.query(`DROP TABLE "volunteer_opportunity_team"`);
     await queryRunner.query(`DROP TABLE "volunteer_opportunities"`);
 
-    await queryRunner.query(
-      `DROP TYPE "volunteer_opportunities_status_enum"`,
-    );
+    await queryRunner.query(`DROP TYPE "volunteer_opportunities_status_enum"`);
     await queryRunner.query(`DROP TYPE "volunteer_opportunities_commit_enum"`);
     await queryRunner.query(`DROP TYPE "volunteer_opportunities_cause_enum"`);
   }

@@ -20,8 +20,7 @@ export type OpenToPresetId = (typeof OPEN_TO_PRESET_IDS)[number];
 // ("A nurse or two for the testing nights") — they are the house voice and are
 // stored verbatim.
 export type OpenToEntry =
-  | { kind: 'preset'; id: OpenToPresetId }
-  | { kind: 'custom'; label: string };
+  { kind: 'preset'; id: OpenToPresetId } | { kind: 'custom'; label: string };
 
 // The loose shape that arrives from the DTO. `kind` is narrowed and `id` is
 // range-checked by class-validator before this reaches normalizeOpenTo, so the

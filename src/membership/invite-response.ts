@@ -1,3 +1,4 @@
+import { toImageUrl } from '../common/image-url';
 import { User } from '../users/entities/user.entity';
 import { Invite, InviteStatus } from './entities/invite.entity';
 
@@ -106,7 +107,7 @@ export function toPublicInviteView(
       slug: profile?.slug ?? '',
       firstName: profile?.firstName ?? '',
       lastName: profile?.lastName ?? '',
-      avatarUrl: profile?.avatarUrl ?? null,
+      avatarUrl: toImageUrl(profile?.avatarUrl),
       ...(memberSince ? { memberSince } : {}),
     },
     note: invite.note ?? null,

@@ -1,3 +1,4 @@
+import { toImageUrl } from '../common/image-url';
 import { Profile } from '../users/entities/profile.entity';
 import { Message } from './entities/message.entity';
 
@@ -64,11 +65,11 @@ const UNKNOWN_AUTHOR: AuthorSummary = {
   avatarUrl: null,
 };
 
-function authorSummaryFrom(p: Profile): AuthorSummary {
+function authorSummaryFrom(profile: Profile): AuthorSummary {
   return {
-    handle: p.slug,
-    displayName: `${p.firstName} ${p.lastName}`.trim(),
-    avatarUrl: p.avatarUrl,
+    handle: profile.slug,
+    displayName: `${profile.firstName} ${profile.lastName}`.trim(),
+    avatarUrl: toImageUrl(profile.avatarUrl),
   };
 }
 

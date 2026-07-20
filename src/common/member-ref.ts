@@ -1,6 +1,7 @@
 import { In, Repository } from 'typeorm';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
+import { toImageUrl } from './image-url';
 
 /** Compact, cross-domain-safe view of a member, embedded wherever another
  * domain needs to display "who" (an event host, a vouch's voucher, a
@@ -17,13 +18,15 @@ export interface MemberRef {
  * (e.g. an optional join came back empty) — lets callers `?? null` through
  * without a separate null check.
  */
-export function toMemberRef(p: Profile | undefined | null): MemberRef | null {
-  if (!p) return null;
+export function toMemberRef(
+  profile: Profile | undefined | null,
+): MemberRef | null {
+  if (!profile) return null;
   return {
-    slug: p.slug,
-    firstName: p.firstName,
-    lastName: p.lastName,
-    avatarUrl: p.avatarUrl,
+    slug: profile.slug,
+    firstName: profile.firstName,
+    lastName: profile.lastName,
+    avatarUrl: toImageUrl(profile.avatarUrl),
   };
 }
 

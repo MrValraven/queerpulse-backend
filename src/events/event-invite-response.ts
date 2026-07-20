@@ -1,3 +1,4 @@
+import { toImageUrl } from '../common/image-url';
 import { Profile } from '../users/entities/profile.entity';
 import { EventOrganizerView, toOrganizerView } from './event-response';
 import { EventInvite, EventInviteStatus } from './entities/event-invite.entity';
@@ -38,7 +39,7 @@ function toInvitedEventView(e: Event): InvitedEventView {
     timezone: e.timezone,
     venue: e.venue,
     isOnline: e.isOnline,
-    coverImageUrl: e.coverImageUrl,
+    coverImageUrl: toImageUrl(e.coverImageUrl),
     status: e.status,
     visibility: e.visibility,
   };

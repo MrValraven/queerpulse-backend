@@ -8,6 +8,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, QueryFailedError, Repository } from 'typeorm';
 import { handleFormatError, normalizeHandle } from '../common/handles';
+import { toImageUrl } from '../common/image-url';
 import { ConnectionsService } from '../connections/connections.service';
 import { HandlesService } from '../handles/handles.service';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -374,12 +375,12 @@ export class ProfilesService {
       where: { userId },
       order: { position: 'ASC' },
     });
-    return saved.map((w) => ({
-      category: w.category,
-      title: w.title,
-      year: w.year,
-      imageUrl: w.imageUrl,
-      position: w.position,
+    return saved.map((workItem) => ({
+      category: workItem.category,
+      title: workItem.title,
+      year: workItem.year,
+      imageUrl: toImageUrl(workItem.imageUrl),
+      position: workItem.position,
     }));
   }
 

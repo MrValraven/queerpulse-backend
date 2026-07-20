@@ -13,11 +13,7 @@ import { UsersService } from '../users/users.service';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
 import { EventRsvp } from './entities/event-rsvp.entity';
-import {
-  Event,
-  EventStatus,
-  EventVisibility,
-} from './entities/event.entity';
+import { Event, EventStatus, EventVisibility } from './entities/event.entity';
 import { EventsService } from './events.service';
 import { RsvpService } from './rsvp.service';
 

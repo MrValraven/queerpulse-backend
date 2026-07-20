@@ -10,9 +10,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN — authored for review only, per the task's instructions.
  */
-export class AddCommissionInterest1782800610000
-  implements MigrationInterface
-{
+export class AddCommissionInterest1782800610000 implements MigrationInterface {
   name = 'AddCommissionInterest1782800610000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

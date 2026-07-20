@@ -2,6 +2,7 @@
 // (mirrored by the frontend `subprofiles.api.ts` types) so the API and UI never
 // drift. No DB access, no side effects — safe to unit-test directly.
 
+import { toImageUrl } from '../common/image-url';
 import {
   Subprofile,
   SubprofileKind,
@@ -73,17 +74,17 @@ export interface SubprofileOwnerRef {
   name: string;
 }
 
-function toItemView(it: SubprofileItem): SubprofileItemView {
+function toItemView(item: SubprofileItem): SubprofileItemView {
   return {
-    section: it.section,
-    title: it.title,
-    subtitle: it.subtitle,
-    description: it.description,
-    url: it.url,
-    imageUrl: it.imageUrl,
-    date: it.date,
-    meta: it.meta,
-    tags: it.tags ?? [],
+    section: item.section,
+    title: item.title,
+    subtitle: item.subtitle,
+    description: item.description,
+    url: item.url,
+    imageUrl: toImageUrl(item.imageUrl),
+    date: item.date,
+    meta: item.meta,
+    tags: item.tags ?? [],
   };
 }
 
@@ -98,57 +99,57 @@ function sortItems(items: SubprofileItem[]): SubprofileItem[] {
 }
 
 export function toSubprofileDTO(
-  sp: Subprofile,
+  subprofile: Subprofile,
   items: SubprofileItem[],
 ): SubprofileView {
   return {
-    id: sp.id,
-    kind: sp.kind,
-    slug: sp.slug,
-    handle: sp.handle,
-    displayName: sp.displayName,
-    avatarUrl: sp.avatarUrl,
-    tagline: sp.tagline,
-    bio: sp.bio,
-    linkVisibility: sp.linkVisibility,
-    visibility: sp.visibility,
-    status: sp.status,
-    position: sp.position,
+    id: subprofile.id,
+    kind: subprofile.kind,
+    slug: subprofile.slug,
+    handle: subprofile.handle,
+    displayName: subprofile.displayName,
+    avatarUrl: toImageUrl(subprofile.avatarUrl),
+    tagline: subprofile.tagline,
+    bio: subprofile.bio,
+    linkVisibility: subprofile.linkVisibility,
+    visibility: subprofile.visibility,
+    status: subprofile.status,
+    position: subprofile.position,
     items: sortItems(items).map(toItemView),
   };
 }
 
 export function toPublicDTO(
-  sp: Subprofile,
+  subprofile: Subprofile,
   items: SubprofileItem[],
   owner?: SubprofileOwnerRef,
 ): SubprofilePublicView {
   const view: SubprofilePublicView = {
-    kind: sp.kind,
-    slug: sp.slug,
-    handle: sp.handle,
-    displayName: sp.displayName,
-    avatarUrl: sp.avatarUrl,
-    tagline: sp.tagline,
-    bio: sp.bio,
-    linkVisibility: sp.linkVisibility,
+    kind: subprofile.kind,
+    slug: subprofile.slug,
+    handle: subprofile.handle,
+    displayName: subprofile.displayName,
+    avatarUrl: toImageUrl(subprofile.avatarUrl),
+    tagline: subprofile.tagline,
+    bio: subprofile.bio,
+    linkVisibility: subprofile.linkVisibility,
     items: sortItems(items).map(toItemView),
   };
   // Owner identity is exposed ONLY for linked personas — never leak the tie for
   // an unlinked (pseudonymous) persona (design spec §4).
-  if (sp.linkVisibility === SubprofileLinkVisibility.Linked && owner) {
+  if (subprofile.linkVisibility === SubprofileLinkVisibility.Linked && owner) {
     view.ownerSlug = owner.slug;
     view.ownerName = owner.name;
   }
   return view;
 }
 
-export function toCardDTO(sp: Subprofile): SubprofileCardView {
+export function toCardDTO(subprofile: Subprofile): SubprofileCardView {
   return {
-    handle: sp.handle ?? '',
-    kind: sp.kind,
-    displayName: sp.displayName,
-    avatarUrl: sp.avatarUrl,
-    tagline: sp.tagline,
+    handle: subprofile.handle ?? '',
+    kind: subprofile.kind,
+    displayName: subprofile.displayName,
+    avatarUrl: toImageUrl(subprofile.avatarUrl),
+    tagline: subprofile.tagline,
   };
 }

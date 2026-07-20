@@ -1,3 +1,4 @@
+import { toImageUrl } from '../common/image-url';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { directoryBlurb } from './directory-blurb';
 import { Activity } from './entities/activity.entity';
@@ -135,17 +136,20 @@ export function sortShapings(rows: Shaping[]): Shaping[] {
 // Do NOT resolve the directory blurb fallback here: the profile editor seeds its
 // short-bio input from this field, so borrowed bio text would let a member save
 // words they never typed. The fallback belongs to the list path — toMemberCard.
-export function toProfileCard(p: Profile, vouchCount: number): ProfileCard {
+export function toProfileCard(
+  profile: Profile,
+  vouchCount: number,
+): ProfileCard {
   return {
-    slug: p.slug,
-    firstName: p.firstName,
-    lastName: p.lastName,
-    pronouns: p.pronouns,
-    tagline: p.tagline,
-    avatarUrl: p.avatarUrl,
-    tags: p.tags,
+    slug: profile.slug,
+    firstName: profile.firstName,
+    lastName: profile.lastName,
+    pronouns: profile.pronouns,
+    tagline: profile.tagline,
+    avatarUrl: toImageUrl(profile.avatarUrl),
+    tags: profile.tags,
     vouchCount,
-    visibility: p.visibility,
+    visibility: profile.visibility,
   };
 }
 
@@ -188,11 +192,11 @@ export function toFullProfile(
       platform: s.platform,
       urlOrHandle: s.urlOrHandle,
     })),
-    work: rels.work.map((w) => ({
-      category: w.category,
-      title: w.title,
-      year: w.year,
-      imageUrl: w.imageUrl,
+    work: rels.work.map((workItem) => ({
+      category: workItem.category,
+      title: workItem.title,
+      year: workItem.year,
+      imageUrl: toImageUrl(workItem.imageUrl),
     })),
     board: rels.board.map((b) => ({
       kind: b.kind,

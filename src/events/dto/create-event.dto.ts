@@ -12,6 +12,7 @@ import {
   Min,
   MinLength,
 } from 'class-validator';
+import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 import { EventStatus, EventVisibility } from '../entities/event.entity';
 
 export class CreateEventDto {
@@ -30,5 +31,5 @@ export class CreateEventDto {
   @IsOptional() @IsEnum(EventVisibility) visibility?: EventVisibility;
   @IsOptional() @IsIn([EventStatus.Draft, EventStatus.Published]) status?:
     EventStatus.Draft | EventStatus.Published;
-  @IsOptional() @IsString() @MaxLength(500) coverImageUrl?: string;
+  @IsOptional() @IsImageReference() coverImageUrl?: string;
 }

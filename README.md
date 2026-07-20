@@ -52,7 +52,9 @@ or malformed.
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_CALLBACK_URL` | yes | OAuth |
 | `FRONTEND_URL` | no | CORS origin + post-login redirect base |
 | `COOKIE_DOMAIN` | no | leave unset for localhost |
-| `S3_*` / `MUX_*` | no | storage + video features |
+| `API_URL` | prod | this API's own public origin; required when `NODE_ENV=production` — see below |
+| `ENDPOINT` / `REGION` / `BUCKET` / `ACCESS_KEY_ID` / `SECRET_ACCESS_KEY` | prod | Railway Buckets storage — see below |
+| `MUX_*` | no | video features |
 | `INVITE_MONTHLY_QUOTA` | no | membership tuning |
 
 ### Database TLS & connection pool
@@ -96,9 +98,35 @@ differently from the server it is migrating for.
 | `LOG_PRETTY` | `true` for pino-pretty output; defaults on when `NODE_ENV=development`. **Never set in a deployed environment** — `pino-pretty` is a devDependency, absent from the production image, and selecting it crashes at boot |
 | `ENABLE_SWAGGER` | serve the OpenAPI/Swagger UI when set |
 
-Storage (`S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) is **required when
-`NODE_ENV=production`** — boot fails without it rather than letting every upload
-route fail at runtime on a server that reports itself healthy.
+### Object storage — Railway Buckets
+
+Uploads (avatars, work images, story covers, gathering photos) go to a
+[Railway Bucket](https://docs.railway.com/reference/buckets) — S3-compatible
+object storage, kept **private** (no public URL). Linking a Bucket to this
+service in the Railway dashboard auto-injects all five variables below; set
+them by hand only for local development.
+
+| Variable | Notes |
+| --- | --- |
+| `ENDPOINT` | e.g. `https://storage.railway.app` |
+| `REGION` | Railway's buckets are region `auto` — do not guess a different region |
+| `BUCKET` | bucket name |
+| `ACCESS_KEY_ID` | |
+| `SECRET_ACCESS_KEY` | |
+
+These five are **required when `NODE_ENV=production`** — boot fails without
+all of them rather than letting every upload route fail at runtime on a server
+that reports itself healthy.
+
+Images are never served from a public bucket URL. The client uploads via a
+presigned `PUT`, then sends the object's storage `key` back on the normal
+domain payload; the server resolves that key to `GET /files/<key>` — an
+authenticated route on this API — whenever it builds a response containing an
+image.
+
+`API_URL` (this API's own public origin) **must be set in production** — every
+`GET /files/<key>` URL in a response is built from it, so a wrong or missing
+value silently produces unreachable images rather than an error.
 
 ## Database & migrations
 

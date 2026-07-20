@@ -60,7 +60,11 @@ function makeGuard(options: {
     }),
   } as unknown as ExecutionContext;
 
-  return { guard: new PlatformLockdownGuard(reflector, settings), context, settings };
+  return {
+    guard: new PlatformLockdownGuard(reflector, settings),
+    context,
+    settings,
+  };
 }
 
 describe('PlatformLockdownGuard', () => {

@@ -1,3 +1,4 @@
+import { toImageUrl } from '../common/image-url';
 import { MemberRef } from '../common/member-ref';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
@@ -36,7 +37,7 @@ export function toAuthorSummary(
   return {
     handle: ref.slug,
     displayName: `${ref.firstName} ${ref.lastName}`.trim(),
-    avatarUrl: ref.avatarUrl,
+    avatarUrl: toImageUrl(ref.avatarUrl),
   };
 }
 

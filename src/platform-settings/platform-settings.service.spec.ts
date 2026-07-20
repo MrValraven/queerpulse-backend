@@ -23,9 +23,7 @@ function makeRow(overrides: Partial<PlatformSettings> = {}): PlatformSettings {
 
 describe('PlatformSettingsService', () => {
   let settingsRepo: jest.Mocked<Pick<Repository<PlatformSettings>, 'findOne'>>;
-  let changesRepo: jest.Mocked<
-    Pick<Repository<PlatformSettingChange>, 'find'>
-  >;
+  let changesRepo: jest.Mocked<Pick<Repository<PlatformSettingChange>, 'find'>>;
   let manager: {
     findOneOrFail: jest.Mock;
     create: jest.Mock;
@@ -109,14 +107,18 @@ describe('PlatformSettingsService', () => {
       await service.get();
 
       jest.advanceTimersByTime(10_001);
-      settingsRepo.findOne.mockRejectedValue(new Error('connection terminated'));
+      settingsRepo.findOne.mockRejectedValue(
+        new Error('connection terminated'),
+      );
 
       await expect(service.get()).resolves.toBe(row);
       expect(settingsRepo.findOne).toHaveBeenCalledTimes(2);
     });
 
     it('propagates the query error when there is no cached copy to fall back to', async () => {
-      settingsRepo.findOne.mockRejectedValue(new Error('connection terminated'));
+      settingsRepo.findOne.mockRejectedValue(
+        new Error('connection terminated'),
+      );
 
       await expect(service.get()).rejects.toThrow('connection terminated');
     });
@@ -181,7 +183,11 @@ describe('PlatformSettingsService', () => {
       manager.findOneOrFail.mockResolvedValue(makeRow());
 
       await service.update(
-        { lockdownEnabled: true, joinRequestsEnabled: false, note: 'spam wave' },
+        {
+          lockdownEnabled: true,
+          joinRequestsEnabled: false,
+          note: 'spam wave',
+        },
         'admin-1',
       );
 
@@ -210,7 +216,9 @@ describe('PlatformSettingsService', () => {
       manager.findOneOrFail.mockResolvedValue(makeRow());
       await service.update({ lockdownEnabled: true }, 'admin-1');
 
-      settingsRepo.findOne.mockResolvedValue(makeRow({ lockdownEnabled: true }));
+      settingsRepo.findOne.mockResolvedValue(
+        makeRow({ lockdownEnabled: true }),
+      );
       const after = await service.get();
 
       expect(settingsRepo.findOne).toHaveBeenCalledTimes(2);
@@ -239,8 +247,7 @@ describe('PlatformSettingsService', () => {
         manager.save.mock.calls
           .map(([arg]) => arg)
           .find((arg) => Array.isArray(arg)) as
-          | PlatformSettingChange[]
-          | undefined;
+          PlatformSettingChange[] | undefined;
 
       it('writes one audit row with newValue null when a message is cleared', async () => {
         manager.findOneOrFail.mockResolvedValue(

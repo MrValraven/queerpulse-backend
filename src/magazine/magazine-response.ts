@@ -1,3 +1,4 @@
+import { toImageUrl } from '../common/image-url';
 import { MagazineArticle } from './entities/magazine-article.entity';
 import { MagazineAuthor } from './entities/magazine-author.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
@@ -61,7 +62,7 @@ export function toAuthorSummary(author: MagazineAuthor): AuthorSummary {
   return {
     handle: author.slug,
     displayName: author.name,
-    avatarUrl: author.avatarUrl,
+    avatarUrl: toImageUrl(author.avatarUrl),
   };
 }
 
@@ -70,7 +71,7 @@ export function toAuthorResponse(author: MagazineAuthor): AuthorResponse {
     slug: author.slug,
     name: author.name,
     bio: author.bio,
-    avatarUrl: author.avatarUrl,
+    avatarUrl: toImageUrl(author.avatarUrl),
   };
 }
 
@@ -80,7 +81,7 @@ export function toIssueResponse(issue: MagazineIssue): IssueResponse {
     title: issue.title,
     dek: issue.dek,
     publishedOn: issue.publishedOn,
-    coverUrl: issue.coverUrl,
+    coverUrl: toImageUrl(issue.coverUrl),
   };
 }
 

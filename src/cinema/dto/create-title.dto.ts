@@ -5,6 +5,7 @@ import {
   IsString,
   MaxLength,
 } from 'class-validator';
+import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 import { TitleKind } from '../entities/cinema-title.entity';
 
 export class CreateTitleDto {
@@ -21,9 +22,9 @@ export class CreateTitleDto {
   @MaxLength(5000)
   description?: string;
 
-  // From the existing image upload flow (S3 presign) — not a Mux artifact.
+  // From the existing image upload flow (Railway Buckets presign) — not a Mux
+  // artifact.
   @IsOptional()
-  @IsString()
-  @MaxLength(2048)
+  @IsImageReference()
   coverImageUrl?: string;
 }

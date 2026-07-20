@@ -1,3 +1,7 @@
+import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+} from '../common/image-url';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { DIRECTORY_BLURB_MAX_CHARS, truncateAtWord } from './directory-blurb';
 import { Activity, ActivityKind } from './entities/activity.entity';
@@ -53,6 +57,21 @@ const emptyRels: ProfileRelations = {
 };
 
 describe('profile-response mappers', () => {
+  beforeEach(() => {
+    setImageUrlBase('https://api.test');
+  });
+
+  afterEach(() => {
+    resetImageUrlBaseForTesting();
+  });
+
+  it('converts a storage key to an API files URL', () => {
+    const key =
+      'avatars/11111111-2222-3333-4444-555555555555/66666666-7777-8888-9999-000000000000.jpg';
+    const card = toProfileCard(profile({ avatarUrl: key }), 0);
+    expect(card.avatarUrl).toBe(`https://api.test/files/${key}`);
+  });
+
   it('toProfileCard returns exactly the 9 card fields', () => {
     const card = toProfileCard(profile(), 2);
     expect(card).toEqual({

@@ -1,3 +1,4 @@
+import { toImageUrl } from '../common/image-url';
 import { MemberRef } from '../common/member-ref';
 import {
   Listing,
@@ -7,6 +8,20 @@ import {
   ListingStatus,
   ListingWitLine,
 } from './entities/listing.entity';
+
+/**
+ * Response-side shape of `photos` — `normalizePhotoSet` (listings.service.ts)
+ * defaults missing slots to `''`, and `toImageUrl('')` returns `null`, so the
+ * response widens each field to `string | null`. The entity's own
+ * `ListingPhotoSet` (still `string` fields, storage keys/external URLs as
+ * persisted) is unchanged.
+ */
+export interface ListingPhotoSetView {
+  wide: string | null;
+  d1: string | null;
+  d2: string | null;
+  vibe: string | null;
+}
 
 /**
  * `ListingDTO` — matches the frontend's `ListingDTO` in
@@ -39,7 +54,7 @@ export interface ListingDTO {
   hours: Record<string, ListingDayHours>;
   hoursNote: string;
   social: ListingSocial;
-  photos: ListingPhotoSet;
+  photos: ListingPhotoSetView;
   alt: ListingPhotoSet;
   rel: string;
   ownerName: string;
@@ -83,7 +98,12 @@ export function toListingDTO(
     hours: listing.hours,
     hoursNote: listing.hoursNote,
     social: listing.social,
-    photos: listing.photos,
+    photos: {
+      wide: toImageUrl(listing.photos.wide),
+      d1: toImageUrl(listing.photos.d1),
+      d2: toImageUrl(listing.photos.d2),
+      vibe: toImageUrl(listing.photos.vibe),
+    },
     alt: listing.alt,
     rel: listing.rel,
     ownerName: listing.ownerName,

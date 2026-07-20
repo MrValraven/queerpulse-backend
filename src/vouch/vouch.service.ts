@@ -7,6 +7,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, In, QueryFailedError, Repository } from 'typeorm';
+import { toImageUrl } from '../common/image-url';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { Vouch } from './entities/vouch.entity';
@@ -228,7 +229,7 @@ export class VouchService {
       slug: profile?.slug ?? '',
       firstName: profile?.firstName ?? '',
       lastName: profile?.lastName ?? '',
-      avatarUrl: profile?.avatarUrl ?? null,
+      avatarUrl: toImageUrl(profile?.avatarUrl),
       note,
       createdAt,
     };

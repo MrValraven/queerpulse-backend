@@ -12,7 +12,9 @@ import { PlatformStatusController } from './platform-status.controller';
  * `JoinRequestsService`, and `ChatGateway` all read the flags.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([PlatformSettings, PlatformSettingChange])],
+  imports: [
+    TypeOrmModule.forFeature([PlatformSettings, PlatformSettingChange]),
+  ],
   providers: [PlatformSettingsService],
   controllers: [PlatformSettingsController, PlatformStatusController],
   exports: [PlatformSettingsService],

@@ -11,6 +11,7 @@ import {
   MinLength,
   ValidateNested,
 } from 'class-validator';
+import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 
 // Fixed-shape nested pieces of `ListingDraft` — each maps 1:1 to a frontend
 // interface (`WitLine`, `ListingDraft["social"]`, the `PhotoKey`-keyed photo
@@ -28,7 +29,29 @@ export class ListingSocialDto {
   @IsOptional() @IsString() @MaxLength(60) phone?: string;
 }
 
+/**
+ * The four uploaded-image slots themselves (`photos`) — each value is either
+ * one of our storage keys or an external `https://` URL, so every field is
+ * validated with `@IsImageReference()`. Do NOT reuse this for `alt`: alt text
+ * is free-form accessibility copy, never an image reference, and running it
+ * through `@IsImageReference()` rejects every real alt string. See
+ * `ListingPhotoAltSetDto` below for that.
+ */
 export class ListingPhotoSetDto {
+  @IsOptional() @IsImageReference() wide?: string;
+  @IsOptional() @IsImageReference() d1?: string;
+  @IsOptional() @IsImageReference() d2?: string;
+  @IsOptional() @IsImageReference() vibe?: string;
+}
+
+/**
+ * Accessibility alt text for the same four photo slots (`alt`) — plain
+ * descriptive strings, not image references. Kept as a separate class from
+ * `ListingPhotoSetDto` on purpose: the two share field names by coincidence
+ * (both mirror the `PhotoKey`-keyed shape) but validate completely different
+ * kinds of data. Do NOT merge them back together.
+ */
+export class ListingPhotoAltSetDto {
   @IsOptional() @IsString() @MaxLength(2000) wide?: string;
   @IsOptional() @IsString() @MaxLength(2000) d1?: string;
   @IsOptional() @IsString() @MaxLength(2000) d2?: string;
@@ -108,8 +131,8 @@ export class CreateListingDto {
 
   @IsOptional()
   @ValidateNested()
-  @Type(() => ListingPhotoSetDto)
-  alt?: ListingPhotoSetDto;
+  @Type(() => ListingPhotoAltSetDto)
+  alt?: ListingPhotoAltSetDto;
 
   @IsOptional() @IsIn(['own', 'run', 'work', 'regular', '']) rel?: string;
   @IsOptional() @IsString() @MaxLength(120) ownerName?: string;

@@ -7,12 +7,13 @@ import {
   MaxLength,
   ValidateNested,
 } from 'class-validator';
+import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 
 export class WorkItemDto {
   @IsString() @MaxLength(80) category: string;
   @IsString() @MaxLength(200) title: string;
   @IsString() @MaxLength(20) year: string;
-  @IsOptional() @IsString() @MaxLength(500) imageUrl?: string;
+  @IsOptional() @IsImageReference() imageUrl?: string;
 }
 
 export class ReplaceWorkDto {

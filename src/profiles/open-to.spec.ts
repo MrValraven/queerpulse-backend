@@ -122,7 +122,7 @@ describe('normalizeOpenTo', () => {
     ).toEqual([{ kind: 'custom', label: 'Zine trades' }]);
   });
 
-  it('does not cap the number of entries — that is UpdateProfileDto\'s @ArrayMaxSize job', () => {
+  it("does not cap the number of entries — that is UpdateProfileDto's @ArrayMaxSize job", () => {
     const entries = Array.from({ length: 13 }, (_, i) => ({
       kind: 'custom',
       label: `Custom ${i}`,

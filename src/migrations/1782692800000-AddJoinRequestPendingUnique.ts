@@ -1,8 +1,6 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
-export class AddJoinRequestPendingUnique1782692800000
-  implements MigrationInterface
-{
+export class AddJoinRequestPendingUnique1782692800000 implements MigrationInterface {
   name = 'AddJoinRequestPendingUnique1782692800000';
 
   // Enforce at most one *pending* join request per user at the database level.

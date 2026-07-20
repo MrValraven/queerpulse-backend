@@ -37,7 +37,9 @@ export const TOGGLEABLE_KEYS = [
 
 export type SettingKey = (typeof TOGGLEABLE_KEYS)[number];
 
-function stringifyValue(value: boolean | string | null | undefined): string | null {
+function stringifyValue(
+  value: boolean | string | null | undefined,
+): string | null {
   return value === null || value === undefined ? null : String(value);
 }
 

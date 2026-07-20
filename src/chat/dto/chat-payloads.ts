@@ -1,4 +1,10 @@
-import { IsBoolean, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
+import {
+  IsBoolean,
+  IsString,
+  IsUUID,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 
 export class JoinPayload {
   @IsUUID('4')

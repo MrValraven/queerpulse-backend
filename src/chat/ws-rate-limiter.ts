@@ -30,7 +30,10 @@ export class TokenBucketLimiter {
   tryConsume(key: string, now: number = Date.now()): boolean {
     const bucket = this.buckets.get(key);
     if (!bucket) {
-      this.buckets.set(key, { tokens: this.config.capacity - 1, updatedAt: now });
+      this.buckets.set(key, {
+        tokens: this.config.capacity - 1,
+        updatedAt: now,
+      });
       return true;
     }
     const elapsedSeconds = Math.max(0, now - bucket.updatedAt) / 1000;

@@ -1,3 +1,4 @@
+import { ValidationPipe } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { UpdateProfileDto } from './update-profile.dto';
@@ -21,6 +22,79 @@ describe('UpdateProfileDto — now', () => {
 
   it('accepts an empty string, which is the clearing write', async () => {
     expect(await check({ now: '' })).toHaveLength(0);
+  });
+});
+
+describe('UpdateProfileDto — avatarUrl', () => {
+  it('accepts a well-formed storage key', async () => {
+    const errors = await check({
+      avatarUrl:
+        'avatars/11111111-2222-3333-4444-555555555555/66666666-7777-8888-9999-000000000000.jpg',
+    });
+    expect(errors).toHaveLength(0);
+  });
+
+  it('accepts null to clear the avatar', async () => {
+    expect(await check({ avatarUrl: null })).toHaveLength(0);
+  });
+
+  it('accepts an empty string to clear the avatar', async () => {
+    expect(await check({ avatarUrl: '' })).toHaveLength(0);
+  });
+
+  it('accepts an external https URL', async () => {
+    expect(
+      await check({ avatarUrl: 'https://images.unsplash.com/photo-1611178' }),
+    ).toHaveLength(0);
+  });
+
+  it('rejects a javascript: URI', async () => {
+    const errors = await check({ avatarUrl: 'javascript:alert(1)' });
+    expect(errors).toHaveLength(1);
+    expect(errors[0].property).toBe('avatarUrl');
+  });
+
+  it('rejects a data: URI', async () => {
+    const errors = await check({
+      avatarUrl: 'data:image/svg+xml,<svg/>',
+    });
+    expect(errors).toHaveLength(1);
+    expect(errors[0].property).toBe('avatarUrl');
+  });
+
+  it('survives the ValidationPipe whitelist, which is what silently dropped it before', async () => {
+    // REGRESSION TEST for the bug that shipped: `UpdateProfileDto` had no
+    // `avatarUrl` field, so a member's uploaded photo was silently discarded
+    // on save while the UI confirmed success.
+    //
+    // The mechanism that dropped it was the global ValidationPipe's
+    // `whitelist: true` (see main.ts), which STRIPS any property carrying no
+    // validation decorator. So this test must run the real pipe.
+    //
+    // Two weaker formulations that look like guards but are NOT, both worth
+    // naming so nobody "simplifies" this back into one of them:
+    //   - Asserting on ProfilesService: it applies `Object.assign(profile,
+    //     rest)`, which copies `avatarUrl` whether or not the DTO declares it.
+    //   - Asserting `plainToInstance(...).avatarUrl`: class-transformer copies
+    //     UNDECLARED properties onto the instance too, unless
+    //     `excludeExtraneousValues` is set. It would pass with the field gone.
+    const storageKey =
+      'avatars/11111111-2222-3333-4444-555555555555/66666666-7777-8888-9999-000000000000.jpg';
+    const pipe = new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    });
+
+    const transformed = (await pipe.transform(
+      { avatarUrl: storageKey },
+      { type: 'body', metatype: UpdateProfileDto },
+    )) as UpdateProfileDto;
+
+    // Delete `avatarUrl` from the DTO and the pipe rejects the payload outright
+    // (forbidNonWhitelisted), so this line never even runs — which is exactly
+    // the failure we want.
+    expect(transformed.avatarUrl).toBe(storageKey);
   });
 });
 

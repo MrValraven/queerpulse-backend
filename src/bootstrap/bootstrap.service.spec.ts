@@ -13,7 +13,9 @@ describe('BootstrapService', () => {
   const emptyPage = { items: [], total: 0, page: 1, pageSize: 20 };
 
   beforeEach(async () => {
-    profiles = { getMine: jest.fn().mockResolvedValue({ slug: 'me', limited: false }) };
+    profiles = {
+      getMine: jest.fn().mockResolvedValue({ slug: 'me', limited: false }),
+    };
     saved = { list: jest.fn().mockResolvedValue(emptyPage) };
     social = {
       listBlocks: jest.fn().mockResolvedValue(emptyPage),
