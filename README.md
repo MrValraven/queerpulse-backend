@@ -5,6 +5,22 @@ The API for QueerPulse — an invite-only community platform. Built with
 [TypeORM](https://typeorm.io/), Google OAuth + JWT cookie sessions, WebSocket
 chat (socket.io), and Mux-backed video ("cinema").
 
+- [Prerequisites](#prerequisites)
+- [Quickstart](#quickstart)
+- [Running](#running)
+- [Configuration](#configuration)
+  - [Core variables](#core-variables)
+  - [Database TLS & connection pool](#database-tls--connection-pool)
+  - [Object storage — Railway Buckets](#object-storage--railway-buckets)
+  - [Observability & feature flags](#observability--feature-flags)
+- [Database & migrations](#database--migrations)
+- [Testing](#testing)
+- [Deployment](#deployment)
+  - [Docker](#docker)
+  - [Run exactly ONE replica](#run-exactly-one-replica)
+  - [Health probes](#health-probes)
+- [CI](#ci)
+
 ## Prerequisites
 
 - **Node.js** `>= 20.11`
@@ -15,8 +31,7 @@ chat (socket.io), and Mux-backed video ("cinema").
 ## Quickstart
 
 ```bash
-# 1. Install dependencies (required — recent changes added new dependencies,
-#    so re-run this even if you have an older node_modules).
+# 1. Install dependencies
 pnpm install
 
 # 2. Configure environment
@@ -36,11 +51,24 @@ pnpm run start:dev        # watch mode
 The server listens on `PORT` (default `3000`). Health check:
 `GET http://localhost:3000/health`.
 
-## Environment variables
+## Running
+
+```bash
+pnpm run start:dev        # watch/hot-reload
+pnpm run start            # run once (no watch)
+pnpm run build            # compile to dist/
+pnpm run start:prod       # node dist/main (from a build)
+pnpm run lint             # eslint with --fix
+pnpm run format           # prettier over src/ and test/
+```
+
+## Configuration
 
 Copy `.env.example` and fill these in. Required values are validated at boot
 (`src/config/env.validation.ts`) — the app refuses to start if any are missing
 or malformed.
+
+### Core variables
 
 | Variable | Required | Notes |
 | --- | --- | --- |
@@ -52,8 +80,8 @@ or malformed.
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_CALLBACK_URL` | yes | OAuth |
 | `FRONTEND_URL` | no | CORS origin + post-login redirect base |
 | `COOKIE_DOMAIN` | no | leave unset for localhost |
-| `API_URL` | prod | this API's own public origin; required when `NODE_ENV=production` — see below |
-| `ENDPOINT` / `REGION` / `BUCKET` / `ACCESS_KEY_ID` / `SECRET_ACCESS_KEY` | prod | Railway Buckets storage — see below |
+| `API_URL` | prod | this API's own public origin — see [Object storage](#object-storage--railway-buckets) |
+| `ENDPOINT` / `REGION` / `BUCKET` / `ACCESS_KEY_ID` / `SECRET_ACCESS_KEY` | prod | Railway Buckets — see [Object storage](#object-storage--railway-buckets) |
 | `MUX_*` | no | video features |
 | `INVITE_MONTHLY_QUOTA` | no | membership tuning |
 
@@ -89,15 +117,6 @@ differently from the server it is migrating for.
 | `DATABASE_IDLE_TIMEOUT_MS` | `30000` | idle client timeout |
 | `DATABASE_STATEMENT_TIMEOUT_MS` | `30000` | per-statement server timeout |
 
-### Observability / feature flags
-
-| Variable | Notes |
-| --- | --- |
-| `SENTRY_DSN` | enables Sentry error reporting when set |
-| `LOG_LEVEL` | pino level (`info`, `debug`, …) |
-| `LOG_PRETTY` | `true` for pino-pretty output; defaults on when `NODE_ENV=development`. **Never set in a deployed environment** — `pino-pretty` is a devDependency, absent from the production image, and selecting it crashes at boot |
-| `ENABLE_SWAGGER` | serve the OpenAPI/Swagger UI when set |
-
 ### Object storage — Railway Buckets
 
 Uploads (avatars, work images, story covers, gathering photos) go to a
@@ -128,10 +147,32 @@ image.
 `GET /files/<key>` URL in a response is built from it, so a wrong or missing
 value silently produces unreachable images rather than an error.
 
+### Observability & feature flags
+
+| Variable | Notes |
+| --- | --- |
+| `SENTRY_DSN` | enables Sentry error reporting when set |
+| `LOG_LEVEL` | pino level (`info`, `debug`, …) |
+| `LOG_PRETTY` | `true` for pino-pretty output; defaults on when `NODE_ENV=development`. **Never set in a deployed environment** — `pino-pretty` is a devDependency, absent from the production image, and selecting it crashes at boot |
+| `ENABLE_SWAGGER` | serve the OpenAPI/Swagger UI when set |
+
 ## Database & migrations
 
 The schema is owned entirely by migrations under `src/migrations`. **Never**
 enable `synchronize`.
+
+```bash
+pnpm run migration:run                              # apply pending migrations (dev, ts-node)
+pnpm run migration:revert                           # revert the last migration
+pnpm run migration:generate src/migrations/<Name>   # diff entities -> migration
+pnpm run migration:create   src/migrations/<Name>   # empty migration
+pnpm run migration:run:prod                         # apply migrations from compiled dist/
+pnpm run seed                                       # local fixture members (refuses NODE_ENV=production)
+```
+
+`pnpm run typeorm ...` is the raw CLI wrapper (`-d src/data-source.ts`). The
+`*:prod` variants run the TypeORM CLI against `dist/data-source.js` and are what
+you use in a built/containerized deploy.
 
 > **An applied migration's name is frozen history — never rename or renumber
 > one.** TypeORM identifies a migration solely by the `name` string on its class
@@ -149,34 +190,16 @@ enable `synchronize`.
 > hides genuine schema drift. Diagnose the ledger mismatch instead:
 > `pnpm run typeorm migration:show`.
 
-```bash
-pnpm run migration:run                     # apply pending migrations (dev, ts-node)
-pnpm run migration:revert                   # revert the last migration
-pnpm run migration:generate src/migrations/<Name>   # diff entities -> migration
-pnpm run migration:create   src/migrations/<Name>   # empty migration
-pnpm run migration:run:prod                 # apply migrations from compiled dist/
-pnpm run seed                               # local fixture members (refuses NODE_ENV=production)
-```
-
-`pnpm run typeorm ...` is the raw CLI wrapper (`-d src/data-source.ts`). The
-`*:prod` variants run the TypeORM CLI against `dist/data-source.js` and are what
-you use in a built/containerized deploy.
-
-## Running
-
-```bash
-pnpm run start:dev        # watch/hot-reload
-pnpm run start            # run once (no watch)
-pnpm run build            # compile to dist/
-pnpm run start:prod       # node dist/main (from a build)
-```
-
-## Tests
+## Testing
 
 ```bash
 pnpm run test             # unit tests (*.spec.ts, colocated under src/)
+pnpm run test:watch       # unit tests in watch mode
 pnpm run test:cov         # unit tests + coverage
 pnpm run test:e2e         # e2e tests (boots the full app, runInBand)
+
+pnpm run test -- src/auth/auth.service.spec.ts   # a single file
+pnpm run test -- -t "should return"              # tests matching a name
 ```
 
 ### e2e test database safety
@@ -214,6 +237,20 @@ instances so the schema is in place before any new code serves traffic.
 > `pnpm-lock.yaml`** — CI installs with `--frozen-lockfile` and fails on a stale
 > lockfile.
 
+### Docker
+
+```bash
+docker compose up --build     # app + postgres; app migrates then starts
+```
+
+Or build just the image (multi-stage; runs `node dist/main`):
+
+```bash
+docker build -t queerpulse-backend .
+docker run --rm -p 3000:3000 --env-file .env queerpulse-backend
+# migrate first: docker run --rm --env-file .env queerpulse-backend npm run migration:run:prod
+```
+
 ### Run exactly ONE replica
 
 The app holds shared state in process and has no distributed backing store. At
@@ -237,20 +274,6 @@ crons. Until then, keep the replica count at 1.
 - `GET /health` — full check incl. DB ping (backwards-compatible)
 - `GET /health/live` — liveness (no external deps)
 - `GET /health/ready` — readiness (DB reachable)
-
-## Docker
-
-```bash
-docker compose up --build     # app + postgres; app migrates then starts
-```
-
-Or build just the image (multi-stage; runs `node dist/main`):
-
-```bash
-docker build -t queerpulse-backend .
-docker run --rm -p 3000:3000 --env-file .env queerpulse-backend
-# migrate first: docker run --rm --env-file .env queerpulse-backend npm run migration:run:prod
-```
 
 ## CI
 
