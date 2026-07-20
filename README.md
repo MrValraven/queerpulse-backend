@@ -81,7 +81,7 @@ or malformed.
 | `FRONTEND_URL` | no | CORS origin + post-login redirect base |
 | `COOKIE_DOMAIN` | no | leave unset for localhost |
 | `API_URL` | prod | this API's own public origin — see [Object storage](#object-storage--railway-buckets) |
-| `ENDPOINT` / `REGION` / `BUCKET` / `ACCESS_KEY_ID` / `SECRET_ACCESS_KEY` | prod | Railway Buckets — see [Object storage](#object-storage--railway-buckets) |
+| `AWS_ENDPOINT_URL` / `AWS_DEFAULT_REGION` / `AWS_S3_BUCKET_NAME` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | prod | Railway Buckets — see [Object storage](#object-storage--railway-buckets) |
 | `MUX_*` | no | video features |
 | `INVITE_MONTHLY_QUOTA` | no | membership tuning |
 
@@ -127,11 +127,11 @@ them by hand only for local development.
 
 | Variable | Notes |
 | --- | --- |
-| `ENDPOINT` | e.g. `https://storage.railway.app` |
-| `REGION` | Railway's buckets are region `auto` — do not guess a different region |
-| `BUCKET` | bucket name |
-| `ACCESS_KEY_ID` | |
-| `SECRET_ACCESS_KEY` | |
+| `AWS_ENDPOINT_URL` | e.g. `https://storage.railway.app` |
+| `AWS_DEFAULT_REGION` | Railway's buckets are region `auto` — do not guess a different region |
+| `AWS_S3_BUCKET_NAME` | bucket name |
+| `AWS_ACCESS_KEY_ID` | |
+| `AWS_SECRET_ACCESS_KEY` | |
 
 These five are **required when `NODE_ENV=production`** — boot fails without
 all of them rather than letting every upload route fail at runtime on a server

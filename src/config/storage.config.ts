@@ -5,9 +5,9 @@ import { registerAs } from '@nestjs/config';
 // region default: Railway's value is `auto`, and guessing a wrong region fails
 // more confusingly than a missing one.
 export default registerAs('storage', () => ({
-  endpoint: process.env.ENDPOINT,
-  region: process.env.REGION,
-  bucket: process.env.BUCKET,
-  accessKey: process.env.ACCESS_KEY_ID,
-  secretKey: process.env.SECRET_ACCESS_KEY,
+  endpoint: process.env.AWS_ENDPOINT_URL,
+  region: process.env.AWS_DEFAULT_REGION,
+  bucket: process.env.AWS_S3_BUCKET_NAME,
+  accessKey: process.env.AWS_ACCESS_KEY_ID,
+  secretKey: process.env.AWS_SECRET_ACCESS_KEY,
 }));

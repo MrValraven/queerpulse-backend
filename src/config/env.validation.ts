@@ -92,11 +92,11 @@ export class EnvironmentVariables {
   @IsString()
   LOG_PRETTY?: string;
 
-  @IsOptional() @IsString() ENDPOINT?: string;
-  @IsOptional() @IsString() REGION?: string;
-  @IsOptional() @IsString() BUCKET?: string;
-  @IsOptional() @IsString() ACCESS_KEY_ID?: string;
-  @IsOptional() @IsString() SECRET_ACCESS_KEY?: string;
+  @IsOptional() @IsString() AWS_ENDPOINT_URL?: string;
+  @IsOptional() @IsString() AWS_DEFAULT_REGION?: string;
+  @IsOptional() @IsString() AWS_S3_BUCKET_NAME?: string;
+  @IsOptional() @IsString() AWS_ACCESS_KEY_ID?: string;
+  @IsOptional() @IsString() AWS_SECRET_ACCESS_KEY?: string;
 
   @IsOptional() @IsString() MUX_TOKEN_ID?: string;
   @IsOptional() @IsString() MUX_TOKEN_SECRET?: string;
@@ -142,16 +142,17 @@ export function validate(
 
   // Storage is not optional in production — profile avatars and every upload
   // route depend on it. Left unset, the app boots healthy and uploads fail at
-  // runtime, per-request, for users. Fail at boot instead. ENDPOINT and REGION
-  // are required too: Railway is never reachable at a provider default.
+  // runtime, per-request, for users. Fail at boot instead. AWS_ENDPOINT_URL and
+  // AWS_DEFAULT_REGION are required too: Railway is never reachable at a
+  // provider default.
   if (validated.NODE_ENV === NodeEnv.Production) {
     const missingStorage = (
       [
-        ['ENDPOINT', validated.ENDPOINT],
-        ['REGION', validated.REGION],
-        ['BUCKET', validated.BUCKET],
-        ['ACCESS_KEY_ID', validated.ACCESS_KEY_ID],
-        ['SECRET_ACCESS_KEY', validated.SECRET_ACCESS_KEY],
+        ['AWS_ENDPOINT_URL', validated.AWS_ENDPOINT_URL],
+        ['AWS_DEFAULT_REGION', validated.AWS_DEFAULT_REGION],
+        ['AWS_S3_BUCKET_NAME', validated.AWS_S3_BUCKET_NAME],
+        ['AWS_ACCESS_KEY_ID', validated.AWS_ACCESS_KEY_ID],
+        ['AWS_SECRET_ACCESS_KEY', validated.AWS_SECRET_ACCESS_KEY],
       ] as const
     )
       .filter(([, value]) => !value)
