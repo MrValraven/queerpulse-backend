@@ -10,8 +10,7 @@ WORKDIR /app
 # ---- Dependencies: full install (incl. dev) for the build ------------------
 FROM base AS deps
 COPY package.json pnpm-lock.yaml ./
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
-    pnpm install --frozen-lockfile
+RUN pnpm install --frozen-lockfile
 
 # ---- Build: compile TypeScript -> dist/ ------------------------------------
 FROM base AS build
@@ -22,8 +21,7 @@ RUN pnpm run build
 # ---- Prod deps: production-only node_modules for the runtime image ---------
 FROM base AS prod-deps
 COPY package.json pnpm-lock.yaml ./
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
-    pnpm install --frozen-lockfile --prod
+RUN pnpm install --frozen-lockfile --prod
 
 # ---- Runtime: minimal image running the compiled output --------------------
 FROM node:20-alpine AS runtime
