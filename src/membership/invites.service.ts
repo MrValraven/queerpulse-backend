@@ -107,6 +107,10 @@ export class InvitesService {
    * together (no "approved but no invite" stuck state). Returns the id as well
    * as the code because the caller records it on `join_requests.invite_id`.
    *
+   * Also used by `GenesisService` for the one-time founder bootstrap invite,
+   * which needs identical semantics (quota-exempt, email-pinned, minted in the
+   * caller's transaction). No behaviour here is genesis-specific.
+   *
    * Two deliberate differences from `createInvite`:
    *
    * 1. The monthly quota is skipped. This is not the admin spending a personal

@@ -64,6 +64,7 @@ import { MagazineModule } from './magazine/magazine.module';
 import { ResourcesModule } from './resources/resources.module';
 import { ContentModule } from './content/content.module';
 import { BootstrapModule } from './bootstrap/bootstrap.module';
+import { GenesisModule } from './genesis/genesis.module';
 import { AllExceptionsFilter } from './common/all-exceptions.filter';
 import { CommonModule } from './common/common.module';
 import { LaunchedFeaturesGuard } from './common/launched-features.guard';
@@ -182,6 +183,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     ConsentModule,
     SavedModule,
     BootstrapModule,
+    GenesisModule,
     PreferencesModule,
     DraftsModule,
     RecognitionModule,

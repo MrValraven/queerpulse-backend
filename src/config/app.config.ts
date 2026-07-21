@@ -23,5 +23,13 @@ export default registerAs('app', () => {
      */
     apiUrl: (process.env.API_URL ?? 'http://localhost:3000').replace(/\/$/, ''),
     inviteMonthlyQuota: parseInt(process.env.INVITE_MONTHLY_QUOTA ?? '1', 10),
+    /**
+     * The founder's email during one-time platform bootstrap — see
+     * `src/genesis/`. Unset in every normal environment, and that absence is
+     * what makes the genesis endpoints 404. Lowercased here so every
+     * downstream comparison is a plain `===` rather than a repeated
+     * `.toLowerCase()` that one caller will eventually forget.
+     */
+    genesisEmail: process.env.GENESIS_EMAIL?.trim().toLowerCase() || null,
   };
 });

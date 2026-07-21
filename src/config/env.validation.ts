@@ -1,5 +1,6 @@
 import { plainToInstance } from 'class-transformer';
 import {
+  IsEmail,
   IsEnum,
   IsNumber,
   IsOptional,
@@ -108,6 +109,13 @@ export class EnvironmentVariables {
   @IsNumber()
   @Min(0)
   INVITE_MONTHLY_QUOTA?: number;
+
+  // Optional because it is absent in every environment except during one-time
+  // founder bootstrap — absence is the normal, safe state, and it is what makes
+  // the genesis endpoints 404.
+  @IsOptional()
+  @IsEmail()
+  GENESIS_EMAIL?: string;
 }
 
 export function validate(
