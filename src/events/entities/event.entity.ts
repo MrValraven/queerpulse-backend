@@ -50,6 +50,14 @@ export class Event {
   @Column({ type: 'varchar', nullable: true })
   venue: string | null;
 
+  // Optional link to the directory listing (business) hosting this event, so a
+  // listing's detail page can show its upcoming events. Free-text `venue` is
+  // kept for events not tied to a listed venue; null here means "not at a
+  // listed venue".
+  @Index('IDX_events_listing_id')
+  @Column({ type: 'uuid', nullable: true })
+  listingId: string | null;
+
   @Column({ type: 'boolean', default: false })
   isOnline: boolean;
 

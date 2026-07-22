@@ -13,6 +13,7 @@ import {
 } from '../account/entities/deletion-request.entity';
 import { EmailSuppression } from '../account/entities/email-suppression.entity';
 import { InvitesService } from '../membership/invites.service';
+import { VouchService } from '../vouch/vouch.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
@@ -79,6 +80,11 @@ function buildMocks() {
     validateInviteForSignup: jest.fn(),
     claimInvite: jest.fn().mockResolvedValue(undefined),
   };
+  // Auto-vouch on personal-invite signup. Returns true (a row was inserted) by
+  // default; tests for the non-personal path assert it is never called.
+  const vouch = {
+    createVouchInTransaction: jest.fn().mockResolvedValue(true),
+  };
   const events = { emit: jest.fn() };
   // Erasure suppression list — empty by default, so signup is unaffected
   // unless a test explicitly makes an address suppressed.
@@ -100,6 +106,7 @@ function buildMocks() {
     dataSource,
     managerUpdate,
     invites,
+    vouch,
     events,
     suppressions,
     deactivations,
@@ -123,6 +130,7 @@ async function buildService(
       },
       { provide: DataSource, useValue: mocks.dataSource },
       { provide: InvitesService, useValue: mocks.invites },
+      { provide: VouchService, useValue: mocks.vouch },
       { provide: EventEmitter2, useValue: mocks.events },
       {
         provide: getRepositoryToken(EmailSuppression),
@@ -482,6 +490,8 @@ describe('AuthService.validateOrCreateGoogleUser', () => {
     mocks.invites.validateInviteForSignup.mockResolvedValue({
       inviteId: 'inv-1',
       inviterId: 'inviter-1',
+      personal: true,
+      vouch: 'you belong here',
     });
     mocks.users.createGoogleUser.mockResolvedValue({
       id: 'new-user',
@@ -518,6 +528,57 @@ describe('AuthService.validateOrCreateGoogleUser', () => {
     expect(mocks.events.emit).toHaveBeenCalledWith(
       'user.promoted',
       expect.objectContaining({ userId: 'new-user' }),
+    );
+  });
+
+  it('auto-vouches the inviter for the new member on a personal invite', async () => {
+    mocks.users.findByGoogleId.mockResolvedValue(null);
+    mocks.invites.validateInviteForSignup.mockResolvedValue({
+      inviteId: 'inv-1',
+      inviterId: 'inviter-1',
+      personal: true,
+      vouch: 'you belong here',
+    });
+    mocks.users.createGoogleUser.mockResolvedValue({
+      id: 'new-user',
+      status: UserStatus.Active,
+    });
+
+    await service.validateOrCreateGoogleUser(profile, 'CODE', attested);
+
+    // The inviter vouches for the new member, carrying the invite's vouch note.
+    expect(mocks.vouch.createVouchInTransaction).toHaveBeenCalledWith(
+      expect.anything(),
+      'inviter-1',
+      'new-user',
+      'you belong here',
+    );
+    // And the vouch is announced only after the transaction commits.
+    expect(mocks.events.emit).toHaveBeenCalledWith(
+      'vouch.created',
+      expect.objectContaining({ voucherId: 'inviter-1', voucheeId: 'new-user' }),
+    );
+  });
+
+  it('does NOT auto-vouch when the invite is not personal (admin approval)', async () => {
+    mocks.users.findByGoogleId.mockResolvedValue(null);
+    mocks.invites.validateInviteForSignup.mockResolvedValue({
+      inviteId: 'inv-1',
+      inviterId: 'admin-1',
+      personal: false,
+      vouch: null,
+    });
+    mocks.users.createGoogleUser.mockResolvedValue({
+      id: 'new-user',
+      status: UserStatus.Active,
+    });
+
+    await service.validateOrCreateGoogleUser(profile, 'CODE', attested);
+
+    expect(mocks.vouch.createVouchInTransaction).not.toHaveBeenCalled();
+    expect(mocks.events.emit).not.toHaveBeenCalledWith(
+      'vouch.created',
+      expect.anything(),
     );
   });
 

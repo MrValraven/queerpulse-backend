@@ -8,6 +8,7 @@ import { DeletionRequest } from '../account/entities/deletion-request.entity';
 import { EmailSuppression } from '../account/entities/email-suppression.entity';
 import { UsersModule } from '../users/users.module';
 import { MembershipModule } from '../membership/membership.module';
+import { VouchModule } from '../vouch/vouch.module';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
 import { User } from '../users/entities/user.entity';
 import { AuthController } from './auth.controller';
@@ -21,6 +22,10 @@ import { JwtStrategy } from './strategies/jwt.strategy';
   imports: [
     UsersModule,
     MembershipModule,
+    // VouchModule: signup auto-vouches the inviter for the member they
+    // personally invited (AuthService.validateOrCreateGoogleUser). VouchModule
+    // depends only on UsersModule, so this adds no dependency cycle.
+    VouchModule,
     PlatformSettingsModule,
     PassportModule,
     // User: JwtStrategy re-reads status/role per request so bans take effect

@@ -1,5 +1,19 @@
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, IsString, Min } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, IsString, Min } from 'class-validator';
+
+/**
+ * Directory sort orders. The directory is paginated, so the ordering MUST be
+ * applied server-side — a client can only ever see one page and cannot reorder
+ * across the whole set. There is no "recently active" option: the platform
+ * tracks no last-active timestamp, so it can't be honoured (see the frontend's
+ * SortKey, which drops it for the same reason).
+ */
+export enum MemberSort {
+  RecentlyJoined = 'recentlyJoined',
+  ClosestMutuals = 'closestMutuals',
+  AToZ = 'aToZ',
+  MostVouched = 'mostVouched',
+}
 
 export class ListMembersQuery {
   @IsOptional() @IsString() query?: string;
@@ -18,6 +32,9 @@ export class ListMembersQuery {
   // never `profiles.identities`. Accepted values are range-checked in the
   // service against DIRECTORY_IDENTITY_FACETS.
   @IsOptional() @IsString() identities?: string;
+
+  // Directory sort order; defaults to RecentlyJoined when omitted.
+  @IsOptional() @IsEnum(MemberSort) sort?: MemberSort;
 
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) page?: number;
 }

@@ -265,6 +265,7 @@ export class AccountExportService {
           c.requesterId === userId ? c.addresseeId : c.requesterId,
         status: c.status,
         requestMessage: c.requestMessage,
+        requestReason: c.requestReason,
         createdAt: c.createdAt.toISOString(),
         respondedAt: c.respondedAt ? c.respondedAt.toISOString() : null,
       })),

@@ -81,7 +81,7 @@ export class InvitesService {
     const trimmedVouch = opts.vouch?.trim();
     const vouch = trimmedVouch ? trimmedVouch : null;
     const email = opts.email ?? null;
-    const fields = { email, note, vouch, skipQuota: false };
+    const fields = { email, note, vouch, skipQuota: false, personal: true };
 
     for (let attempt = 1; ; attempt++) {
       const code = await this.generateUniqueCode();
@@ -133,7 +133,9 @@ export class InvitesService {
       manager,
       inviterId,
       await this.generateUniqueCode(),
-      { email, note: null, vouch: null, skipQuota: true },
+      // personal: false — an approval/bootstrap invite is not the inviter's
+      // personal endorsement, so redeeming it must not auto-vouch them.
+      { email, note: null, vouch: null, skipQuota: true, personal: false },
     );
     return { id: saved.id, code: saved.code };
   }
@@ -147,6 +149,7 @@ export class InvitesService {
       note: string | null;
       vouch: string | null;
       skipQuota: boolean;
+      personal: boolean;
     },
   ): Promise<Invite> {
     // Quota check + insert run under a per-inviter row lock so parallel
@@ -161,6 +164,7 @@ export class InvitesService {
       email: fields.email,
       note: fields.note,
       vouch: fields.vouch,
+      personal: fields.personal,
       status: InviteStatus.Pending,
       expiresAt: new Date(Date.now() + INVITE_TTL_MS),
     });
@@ -210,12 +214,21 @@ export class InvitesService {
    * transaction. Returns the inviteId + inviterId so the caller can create the
    * member (with invitedBy) and then claim the invite. Does NOT claim here —
    * the claim needs the new user's id for acceptedBy (see claimInvite).
+   *
+   * Also returns `personal` and `vouch` so the caller can auto-vouch the
+   * inviter for the new member on personal invites, carrying the inviter's
+   * "why I'm inviting you" note onto the vouch.
    */
   async validateInviteForSignup(
     manager: EntityManager,
     code: string,
     email: string,
-  ): Promise<{ inviteId: string; inviterId: string }> {
+  ): Promise<{
+    inviteId: string;
+    inviterId: string;
+    personal: boolean;
+    vouch: string | null;
+  }> {
     const repo = manager.getRepository(Invite);
     const invite = await repo.findOne({ where: { code } });
     if (!invite || invite.status !== InviteStatus.Pending) {
@@ -239,7 +252,12 @@ export class InvitesService {
     if (!inviter || inviter.status !== UserStatus.Active) {
       throw new SignupRejectedError('invite_invalid');
     }
-    return { inviteId: invite.id, inviterId: invite.inviterId };
+    return {
+      inviteId: invite.id,
+      inviterId: invite.inviterId,
+      personal: invite.personal,
+      vouch: invite.vouch,
+    };
   }
 
   /**

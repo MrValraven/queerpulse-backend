@@ -16,6 +16,7 @@ export interface ConnectionListItem {
   status: ConnectionStatus;
   direction: 'incoming' | 'outgoing' | 'connected';
   requestMessage: string | null;
+  requestReason: string | null;
   createdAt: Date;
   respondedAt: Date | null;
   member: ConnectionMemberView;
@@ -42,6 +43,7 @@ export function toConnectionListItem(
     status: conn.status,
     direction,
     requestMessage: conn.requestMessage,
+    requestReason: conn.requestReason,
     createdAt: conn.createdAt,
     respondedAt: conn.respondedAt,
     member: {

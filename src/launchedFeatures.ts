@@ -40,6 +40,7 @@ export const launchedFeatures = {
   forum: { launched: true },
   feed: { launched: true },
   listings: { launched: true },
+  housing: { launched: true },
   magazine: { launched: true },
   resources: { launched: true },
   content: { launched: true },

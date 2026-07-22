@@ -493,7 +493,7 @@ describe('InvitesService.validateInviteForSignup + claimInvite', () => {
         }),
       }) as any;
 
-    it('returns inviteId + inviterId for a valid pending invite', async () => {
+    it('returns inviteId, inviterId, personal, and vouch for a valid pending invite', async () => {
       usersService.findById = jest
         .fn()
         .mockResolvedValue({ id: 'inviter-1', status: UserStatus.Active });
@@ -502,12 +502,19 @@ describe('InvitesService.validateInviteForSignup + claimInvite', () => {
         inviterId: 'inviter-1',
         status: InviteStatus.Pending,
         email: null,
+        personal: true,
+        vouch: 'you belong here',
         expiresAt: new Date(Date.now() + 60_000),
       });
 
       await expect(
         service.validateInviteForSignup(manager, 'CODE', 'a@b.c'),
-      ).resolves.toEqual({ inviteId: 'inv-1', inviterId: 'inviter-1' });
+      ).resolves.toEqual({
+        inviteId: 'inv-1',
+        inviterId: 'inviter-1',
+        personal: true,
+        vouch: 'you belong here',
+      });
     });
 
     it('rejects an unknown / non-pending invite', async () => {

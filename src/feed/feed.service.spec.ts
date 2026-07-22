@@ -80,6 +80,7 @@ const baseEvent = (overrides: Partial<Event> = {}): Event => ({
   endAt: null,
   timezone: 'Europe/Lisbon',
   venue: 'Livraria Trama',
+  listingId: null,
   isOnline: false,
   onlineUrl: null,
   capacity: null,

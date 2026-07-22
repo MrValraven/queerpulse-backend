@@ -6,7 +6,13 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { DataSource, In, QueryFailedError, Repository } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  In,
+  QueryFailedError,
+  Repository,
+} from 'typeorm';
 import { toImageUrl } from '../common/image-url';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -118,6 +124,37 @@ export class VouchService {
       voucheeId,
     } satisfies VouchCreatedEvent);
     return { vouchCount };
+  }
+
+  /**
+   * Insert a vouch inside the CALLER'S transaction, addressed by user ids
+   * rather than a slug. The signup flow uses this to auto-vouch an inviter for
+   * the member they brought in, so the vouch commits or rolls back together
+   * with the account creation and invite claim.
+   *
+   * Deliberately does NOT emit VOUCH_CREATED — an event fired here would survive
+   * a rollback of the caller's transaction. The caller emits it after commit
+   * (see AuthService), the same way it emits USER_PROMOTED.
+   *
+   * Returns true when a row was inserted. Skips (returns false) a self-vouch;
+   * this can't happen for a brand-new signup, but keeps the helper safe for any
+   * caller. No duplicate handling: the target member is created in the same
+   * transaction, so no prior (voucher, vouchee) row can exist.
+   */
+  async createVouchInTransaction(
+    manager: EntityManager,
+    voucherId: string,
+    voucheeId: string,
+    note?: string | null,
+  ): Promise<boolean> {
+    if (voucherId === voucheeId) {
+      return false;
+    }
+    // Empty/whitespace-only notes are stored as null, not "" — same as createVouch.
+    const trimmedNote = note?.trim();
+    const cleanNote = trimmedNote ? trimmedNote : null;
+    await manager.insert(Vouch, { voucherId, voucheeId, note: cleanNote });
+    return true;
   }
 
   async withdrawVouch(

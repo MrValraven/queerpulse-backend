@@ -39,6 +39,7 @@ describe('ConnectionsService', () => {
     update: jest.Mock;
     delete: jest.Mock;
     find: jest.Mock;
+    findAndCount: jest.Mock;
   };
   let profiles: { findOne: jest.Mock; find: jest.Mock };
   let vouches: { find: jest.Mock };
@@ -53,6 +54,7 @@ describe('ConnectionsService', () => {
       update: jest.fn().mockResolvedValue({ affected: 1 }),
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
       find: jest.fn().mockResolvedValue([]),
+      findAndCount: jest.fn().mockResolvedValue([[], 0]),
     };
     profiles = { findOne: jest.fn(), find: jest.fn().mockResolvedValue([]) };
     vouches = { find: jest.fn().mockResolvedValue([]) };
@@ -399,21 +401,23 @@ describe('ConnectionsService', () => {
   });
 
   describe('list', () => {
-    it('incoming: pending where the user is addressee, with pagination', async () => {
-      connections.find.mockResolvedValue([]);
-      await service.list('me', 'incoming', { limit: 5, offset: 10 });
-      expect(connections.find).toHaveBeenCalledWith(
+    it('incoming: pending where the user is addressee, paginated by page', async () => {
+      connections.findAndCount.mockResolvedValue([[], 0]);
+      // page 3 → skip (3-1)*20 = 40, take 20.
+      const res = await service.list('me', 'incoming', { page: 3 });
+      expect(connections.findAndCount).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { addresseeId: 'me', status: ConnectionStatus.Pending },
-          take: 5,
-          skip: 10,
+          take: 20,
+          skip: 40,
         }),
       );
+      expect(res).toEqual({ items: [], total: 0, page: 3, pageSize: 20 });
     });
 
-    it('outgoing: pending where the user is requester', async () => {
+    it('outgoing: pending where the user is requester, defaulted page', async () => {
       await service.list('me', 'outgoing');
-      expect(connections.find).toHaveBeenCalledWith(
+      expect(connections.findAndCount).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { requesterId: 'me', status: ConnectionStatus.Pending },
           take: 20,
@@ -424,40 +428,57 @@ describe('ConnectionsService', () => {
 
     it('all: accepted connections, defaulted page', async () => {
       await service.list('me', 'all');
-      expect(connections.find).toHaveBeenCalledWith(
+      expect(connections.findAndCount).toHaveBeenCalledWith(
         expect.objectContaining({ take: 20, skip: 0 }),
       );
     });
 
-    it('vouched: filters the accepted page to members the user vouched for', async () => {
+    it('all: returns the paginated envelope with the server total', async () => {
+      connections.findAndCount.mockResolvedValue([
+        [{ id: 'x', requesterId: 'me', addresseeId: 'a', status: 'accepted' }],
+        7,
+      ]);
+      const res = await service.list('me', 'all', { page: 1 });
+      expect(res.total).toBe(7);
+      expect(res.page).toBe(1);
+      expect(res.pageSize).toBe(20);
+      expect(res.items).toHaveLength(1);
+    });
+
+    it('vouched: filters accepted connections to members the user vouched for, with an honest total', async () => {
       connections.find.mockResolvedValue([
         { id: 'x', requesterId: 'me', addresseeId: 'a', status: 'accepted' },
         { id: 'y', requesterId: 'me', addresseeId: 'b', status: 'accepted' },
       ]);
       vouches.find.mockResolvedValue([{ voucheeId: 'a' }]);
       const res = await service.list('me', 'vouched');
-      expect(res).toHaveLength(1);
-      expect(res[0].id).toBe('x');
+      expect(res.total).toBe(1);
+      expect(res.items).toHaveLength(1);
+      expect(res.items[0].id).toBe('x');
     });
 
     it('includes the introducer member view on incoming requests', async () => {
-      connections.find.mockResolvedValue([
-        {
-          id: 'c1',
-          status: ConnectionStatus.Pending,
-          requesterId: 'them',
-          addresseeId: 'me',
-          introducedBy: 'intro',
-          createdAt: new Date(),
-          respondedAt: null,
-          requestMessage: null,
-        },
+      connections.findAndCount.mockResolvedValue([
+        [
+          {
+            id: 'c1',
+            status: ConnectionStatus.Pending,
+            requesterId: 'them',
+            addresseeId: 'me',
+            introducedBy: 'intro',
+            createdAt: new Date(),
+            respondedAt: null,
+            requestMessage: null,
+          },
+        ],
+        1,
       ]);
       profiles.find.mockResolvedValue([
         { userId: 'them', slug: 'them', firstName: 'T', lastName: 'Hem' },
         { userId: 'intro', slug: 'intro', firstName: 'In', lastName: 'Tro' },
       ]);
-      const [item] = await service.list('me', 'incoming');
+      const { items } = await service.list('me', 'incoming');
+      const [item] = items;
       expect(item.introducedBy).not.toBeNull();
       expect(item.introducedBy?.slug).toBe('intro');
     });

@@ -10,12 +10,13 @@ import { DataSource, In, QueryFailedError, Repository } from 'typeorm';
 import { handleFormatError, normalizeHandle } from '../common/handles';
 import { toImageUrl } from '../common/image-url';
 import { ConnectionsService } from '../connections/connections.service';
+import { ConnectionStatus } from '../connections/entities/connection.entity';
 import { HandlesService } from '../handles/handles.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { VouchService } from '../vouch/vouch.service';
-import { ListMembersQuery } from './dto/list-members.query';
+import { ListMembersQuery, MemberSort } from './dto/list-members.query';
 import { SocialLinkDto } from './dto/replace-socials.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { WorkItemDto } from './dto/replace-work.dto';
@@ -538,7 +539,64 @@ export class ProfilesService {
       }
     }
 
-    qb.orderBy('p.firstName', 'ASC')
+    // Ordering. Applied here rather than on the client because the directory is
+    // paginated — the client only ever holds one page and cannot sort across the
+    // whole set. Every branch ends with a `p.slug` tiebreaker so pages stay
+    // deterministic when the primary key ties (otherwise the same member could
+    // straddle a page boundary).
+    switch (q.sort) {
+      case MemberSort.AToZ:
+        qb.orderBy('p.firstName', 'ASC').addOrderBy('p.lastName', 'ASC');
+        break;
+      case MemberSort.MostVouched:
+        // Correlated count of vouches received; ties fall back to name order.
+        qb.orderBy(
+          '(SELECT COUNT(*) FROM vouches vc WHERE vc.vouchee_id = p.user_id)',
+          'DESC',
+        ).addOrderBy('p.firstName', 'ASC');
+        break;
+      case MemberSort.ClosestMutuals: {
+        // Rank by how many of the viewer's own accepted connections each
+        // candidate is also connected to. With no connections of your own,
+        // nobody shares any — the ranking would be a uniform zero, so fall back
+        // to newest-joined rather than returning an arbitrary order.
+        const viewerConnectionIds =
+          await this.connectionsService.getAcceptedConnectionUserIds(
+            viewerUserId,
+          );
+        if (viewerConnectionIds.length) {
+          // Build a named placeholder per id: raw ORDER BY fragments don't get
+          // TypeORM's `:...list` array expansion, so expand it ourselves.
+          const placeholders = viewerConnectionIds
+            .map((_, index) => `:mutual${index}`)
+            .join(', ');
+          const parameters: Record<string, string> = {
+            mutualAccepted: ConnectionStatus.Accepted,
+          };
+          viewerConnectionIds.forEach((id, index) => {
+            parameters[`mutual${index}`] = id;
+          });
+          qb.orderBy(
+            `(SELECT COUNT(*) FROM connections mc
+                WHERE mc.status = :mutualAccepted
+                  AND ((mc.requester_id = p.user_id AND mc.addressee_id IN (${placeholders}))
+                    OR (mc.addressee_id = p.user_id AND mc.requester_id IN (${placeholders}))))`,
+            'DESC',
+          )
+            .setParameters(parameters)
+            .addOrderBy('p.joinedAt', 'DESC');
+        } else {
+          qb.orderBy('p.joinedAt', 'DESC');
+        }
+        break;
+      }
+      case MemberSort.RecentlyJoined:
+      default:
+        qb.orderBy('p.joinedAt', 'DESC');
+        break;
+    }
+
+    qb.addOrderBy('p.slug', 'ASC')
       .skip((page - 1) * PAGE_SIZE)
       .take(PAGE_SIZE);
 

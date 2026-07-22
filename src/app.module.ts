@@ -30,10 +30,15 @@ import { ChatModule } from './chat/chat.module';
 import { CinemaModule } from './cinema/cinema.module';
 import { CommunitiesModule } from './communities/communities.module';
 import { CommunityModule } from './community/community.module';
+import { ChangemakersModule } from './changemakers/changemakers.module';
 import { CompaniesModule } from './companies/companies.module';
 import { CultureModule } from './culture/culture.module';
 import { GovernanceModule } from './governance/governance.module';
 import { AdminCommunitiesModule } from './admin-communities/admin-communities.module';
+import { AdminMembersModule } from './admin-members/admin-members.module';
+import { AdminOverviewModule } from './admin-overview/admin-overview.module';
+import { AdminBotsModule } from './admin-bots/admin-bots.module';
+import { AdminHousingModule } from './admin-housing/admin-housing.module';
 import { PlatformStaffModule } from './platform-staff/platform-staff.module';
 import { EventsModule } from './events/events.module';
 import { JobsModule } from './jobs/jobs.module';
@@ -59,6 +64,7 @@ import { RecognitionModule } from './recognition/recognition.module';
 import { AffiliationModule } from './affiliation/affiliation.module';
 import { ForumModule } from './forum/forum.module';
 import { FeedModule } from './feed/feed.module';
+import { HousingModule } from './housing/housing.module';
 import { ListingsModule } from './listings/listings.module';
 import { MagazineModule } from './magazine/magazine.module';
 import { ResourcesModule } from './resources/resources.module';
@@ -99,6 +105,13 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
           'req.headers.authorization',
           'res.headers["set-cookie"]',
         ],
+        // Emit the level as its label ("info"/"warn"/"error") rather than
+        // pino's default numeric level (30/40/50). Railway's log explorer
+        // detects severity from a string `level` attribute; it can't map the
+        // numbers, so without this every JSON line falls back to Info.
+        formatters: {
+          level: (label: string) => ({ level: label }),
+        },
         // Log only essential fields per request. reqId and responseTime are
         // emitted at the top level by pino-http and survive automatically.
         serializers: {
@@ -191,13 +204,19 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     ForumModule,
     FeedModule,
     ListingsModule,
+    HousingModule,
     MagazineModule,
     ResourcesModule,
     ContentModule,
     CultureModule,
     GovernanceModule,
     CommunityModule,
+    ChangemakersModule,
     AdminCommunitiesModule,
+    AdminMembersModule,
+    AdminOverviewModule,
+    AdminBotsModule,
+    AdminHousingModule,
     PlatformStaffModule,
   ],
   providers: [

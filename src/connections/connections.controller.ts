@@ -47,6 +47,7 @@ export class ConnectionsController {
       dto.toSlug,
       dto.message,
       dto.introducerSlug,
+      dto.reason,
     );
   }
 

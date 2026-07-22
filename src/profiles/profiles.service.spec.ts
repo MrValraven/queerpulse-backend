@@ -33,6 +33,8 @@ const qbStub = () => {
     'where',
     'andWhere',
     'orderBy',
+    'addOrderBy',
+    'setParameters',
     'take',
     'skip',
   ]) {

@@ -12,6 +12,7 @@ import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { Profile } from '../users/entities/profile.entity';
 import { CreateListingDto } from './dto/create-listing.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
+import { UpdateSafeSpaceDto } from './dto/update-safe-space.dto';
 import {
   Listing,
   ListingDayHours,
@@ -19,6 +20,7 @@ import {
   ListingSocial,
   ListingStatus,
   ListingWitLine,
+  SafeSpaceStatus,
 } from './entities/listing.entity';
 import { ListingDTO, toListingDTO } from './listing-response';
 
@@ -55,7 +57,29 @@ function normalizeCreate(
   dto: CreateListingDto,
 ): Omit<
   Listing,
-  'id' | 'ref' | 'slug' | 'ownerId' | 'status' | 'createdAt' | 'updatedAt'
+  | 'id'
+  | 'ref'
+  | 'slug'
+  | 'ownerId'
+  | 'status'
+  | 'createdAt'
+  | 'updatedAt'
+  // Partner-space fields are an ops/moderation concern, never part of the
+  // member-submission wizard — they default at the DB level on create.
+  | 'isPartneredWithQueerpulse'
+  | 'spaceType'
+  | 'capacity'
+  | 'hostNote'
+  // Safe-space fields are likewise an ops/moderation concern, never part of
+  // the member-submission wizard — they default at the DB level on create.
+  | 'safeSpaceStatus'
+  | 'safeSpaceTier'
+  | 'safeSpaceVerifier'
+  | 'safeSpaceReVerifiedAt'
+  | 'safeSpaceSub'
+  | 'safeSpacePromises'
+  | 'safeSpaceVouches'
+  | 'safeSpaceRemoval'
 > {
   return {
     path: dto.path ?? '',
@@ -227,6 +251,75 @@ export class ListingsService {
     listing.status = status;
     const saved = await this.listings.save(listing);
     return this.buildDTO(saved);
+  }
+
+  // Moderator/admin-only (`ListingsController.setSafeSpace`'s `RolesGuard`
+  // gate). Setting `status: none` clears every safe-space column back to its
+  // entity default; any other status applies only the fields present on the
+  // body (mirrors `applyUpdate`'s conditional-assign idiom). `removed`
+  // composes `safeSpaceRemoval` from the admin UI's `reason` field, preserving
+  // whatever richer sub-fields a seed already populated.
+  async setSafeSpace(ref: string, dto: UpdateSafeSpaceDto): Promise<ListingDTO> {
+    const listing = await this.loadOr404(ref);
+
+    listing.safeSpaceStatus = dto.status;
+
+    if (dto.status === SafeSpaceStatus.None) {
+      listing.safeSpaceTier = null;
+      listing.safeSpaceVerifier = '';
+      listing.safeSpaceReVerifiedAt = null;
+      listing.safeSpaceSub = '';
+      listing.safeSpacePromises = [];
+      listing.safeSpaceVouches = [];
+      listing.safeSpaceRemoval = null;
+    } else {
+      if (dto.tier !== undefined) listing.safeSpaceTier = dto.tier;
+      if (dto.verifier !== undefined) listing.safeSpaceVerifier = dto.verifier;
+      if (dto.reVerifiedAt !== undefined)
+        listing.safeSpaceReVerifiedAt = dto.reVerifiedAt;
+      if (dto.sub !== undefined) listing.safeSpaceSub = dto.sub;
+      if (dto.promises !== undefined) listing.safeSpacePromises = dto.promises;
+      if (dto.vouches !== undefined) listing.safeSpaceVouches = dto.vouches;
+
+      if (dto.status === SafeSpaceStatus.Removed) {
+        listing.safeSpaceRemoval = {
+          reason: dto.reason ?? listing.safeSpaceRemoval?.reason ?? '',
+          removedDate: listing.safeSpaceRemoval?.removedDate ?? '',
+          listedSince: listing.safeSpaceRemoval?.listedSince ?? '',
+          flags: listing.safeSpaceRemoval?.flags ?? 0,
+          reasonLong: listing.safeSpaceRemoval?.reasonLong ?? [],
+          timeline: listing.safeSpaceRemoval?.timeline ?? [],
+          whatNow: listing.safeSpaceRemoval?.whatNow ?? '',
+        };
+      }
+    }
+
+    const saved = await this.listings.save(listing);
+    return this.buildDTO(saved);
+  }
+
+  /** Moderator/admin-only: every live listing plus its current safe-space
+   * status, for the admin toggle UI's candidate picker. */
+  async listSafeSpaceCandidates(): Promise<
+    {
+      ref: string;
+      slug: string;
+      name: string;
+      hood: string;
+      safeSpaceStatus: SafeSpaceStatus;
+    }[]
+  > {
+    const liveListings = await this.listings.find({
+      where: { status: ListingStatus.Live },
+      order: { name: 'ASC' },
+    });
+    return liveListings.map((listing) => ({
+      ref: listing.ref,
+      slug: listing.slug,
+      name: listing.name,
+      hood: listing.hood,
+      safeSpaceStatus: listing.safeSpaceStatus,
+    }));
   }
 
   // --- internals ---

@@ -40,6 +40,12 @@ export class Invite {
   @Column({ type: 'varchar', length: 280, nullable: true })
   vouch: string | null;
 
+  // True for an invite a member created themselves; false for one the system
+  // minted for them (admin join-request approval, genesis bootstrap). Only
+  // personal invites auto-vouch the inviter for the redeeming member at signup.
+  @Column({ type: 'boolean', default: true })
+  personal: boolean;
+
   @Column({
     type: 'enum',
     enum: InviteStatus,

@@ -23,17 +23,10 @@ import {
   toConnectionListItem,
 } from './connection-response';
 import { Connection, ConnectionStatus } from './entities/connection.entity';
+import { Paginated, PAGE_SIZE, normalizePage } from '../common/pagination';
 
 export type ConnectionAction = 'accept' | 'decline' | 'block' | 'unblock';
 export type ConnectionTab = 'all' | 'incoming' | 'outgoing' | 'vouched';
-
-// Bounds otherwise-unbounded list reads; callers may narrow with limit/offset.
-const DEFAULT_PAGE_SIZE = 20;
-
-export interface PageParams {
-  limit?: number;
-  offset?: number;
-}
 
 function isUniqueViolation(err: unknown): boolean {
   return (
@@ -58,6 +51,7 @@ export class ConnectionsService {
     toSlug: string,
     message?: string,
     introducerSlug?: string,
+    reason?: string,
   ): Promise<Connection> {
     const target = await this.profiles.findOne({
       where: { slug: toSlug },
@@ -108,6 +102,7 @@ export class ConnectionsService {
           existing.addresseeId = addresseeId;
           existing.status = ConnectionStatus.Pending;
           existing.requestMessage = message ?? null;
+          existing.requestReason = reason ?? null;
           existing.respondedAt = null;
           existing.blockedBy = null;
           existing.introducedBy = gate.introducedBy;
@@ -133,6 +128,7 @@ export class ConnectionsService {
       userHigh: high,
       status: ConnectionStatus.Pending,
       requestMessage: message ?? null,
+      requestReason: reason ?? null,
       introducedBy: gate.introducedBy,
       flagged: gate.flagged,
     });
@@ -304,28 +300,52 @@ export class ConnectionsService {
   async list(
     userId: string,
     tab: ConnectionTab,
-    page?: PageParams,
-  ): Promise<ConnectionListItem[]> {
-    const take = page?.limit ?? DEFAULT_PAGE_SIZE;
-    const skip = page?.offset ?? 0;
+    query?: { page?: number },
+  ): Promise<Paginated<ConnectionListItem>> {
+    const page = normalizePage(query?.page);
+    const take = PAGE_SIZE;
+    const skip = (page - 1) * PAGE_SIZE;
+
     let rows: Connection[];
+    let total: number;
     if (tab === 'incoming') {
-      rows = await this.connections.find({
+      [rows, total] = await this.connections.findAndCount({
         where: { addresseeId: userId, status: ConnectionStatus.Pending },
         order: { createdAt: 'DESC' },
         take,
         skip,
       });
     } else if (tab === 'outgoing') {
-      rows = await this.connections.find({
+      [rows, total] = await this.connections.findAndCount({
         where: { requesterId: userId, status: ConnectionStatus.Pending },
         order: { createdAt: 'DESC' },
         take,
         skip,
       });
+    } else if (tab === 'vouched') {
+      // The vouched filter (members the viewer has vouched for) can't run in
+      // SQL alongside the accepted-connection query, so fetch the full accepted
+      // set, filter it, and paginate in memory — this keeps `total` honest so
+      // the client's infinite scroll stops at the real end.
+      const accepted = await this.connections.find({
+        where: [
+          { requesterId: userId, status: ConnectionStatus.Accepted },
+          { addresseeId: userId, status: ConnectionStatus.Accepted },
+        ],
+        order: { respondedAt: 'DESC' },
+      });
+      const given = await this.vouches.find({
+        where: { voucherId: userId },
+      });
+      const vouchedIds = new Set(given.map((v) => v.voucheeId));
+      const filtered = accepted.filter((c) =>
+        vouchedIds.has(this.otherId(c, userId)),
+      );
+      total = filtered.length;
+      rows = filtered.slice(skip, skip + take);
     } else {
-      // all + vouched both start from accepted connections the user is in.
-      rows = await this.connections.find({
+      // all: accepted connections the user is in.
+      [rows, total] = await this.connections.findAndCount({
         where: [
           { requesterId: userId, status: ConnectionStatus.Accepted },
           { addresseeId: userId, status: ConnectionStatus.Accepted },
@@ -334,16 +354,6 @@ export class ConnectionsService {
         take,
         skip,
       });
-      if (tab === 'vouched') {
-        // Filters the current (bounded) page to members the viewer has vouched
-        // for. NOTE: filtering happens after the DB page, so a page can contain
-        // fewer than `take` vouched rows — acceptable for the MVP tab.
-        const given = await this.vouches.find({
-          where: { voucherId: userId },
-        });
-        const vouchedIds = new Set(given.map((v) => v.voucheeId));
-        rows = rows.filter((c) => vouchedIds.has(this.otherId(c, userId)));
-      }
     }
 
     const otherIds = rows.map((c) => this.otherId(c, userId));
@@ -354,7 +364,7 @@ export class ConnectionsService {
       ...otherIds,
       ...introducerIds,
     ]);
-    return rows.map((c) =>
+    const items = rows.map((c) =>
       toConnectionListItem(
         c,
         userId,
@@ -362,6 +372,7 @@ export class ConnectionsService {
         c.introducedBy ? profilesById.get(c.introducedBy) : undefined,
       ),
     );
+    return { items, total, page, pageSize: PAGE_SIZE };
   }
 
   async areConnected(a: string, b: string): Promise<boolean> {

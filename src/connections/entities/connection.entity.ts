@@ -50,6 +50,12 @@ export class Connection {
   @Column({ type: 'text', nullable: true })
   requestMessage: string | null;
 
+  // Why the requester reached out: an "open to" preset (`open:<id>`), a member's
+  // own words (`custom:<label>`), or a generic reason id. Surfaced to the
+  // addressee alongside the request message.
+  @Column({ type: 'text', nullable: true })
+  requestReason: string | null;
+
   // The mutual connection who introduced the requester to a `network`-visibility
   // target (single-step intro). Null for open/private/already-connected requests.
   @Column({ type: 'uuid', nullable: true })

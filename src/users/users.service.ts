@@ -5,7 +5,11 @@ import { Profile } from './entities/profile.entity';
 import { User, UserStatus } from './entities/user.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 
-// Bounds the slug-collision retry loop (see insertProfileWithUniqueSlug).
+// Bounds the slug-collision retry loop (see insertProfileWithUniqueSlug). This
+// caps CONCURRENT contention only — each retry recomputes the next slug from the
+// current max, so it is NOT a ceiling on how many same-named members can exist.
+// It would only be exhausted by this many sign-ups racing the exact same base
+// slug in the same instant.
 const MAX_SLUG_ATTEMPTS = 5;
 
 export interface CreateGoogleUserInput {
@@ -61,6 +65,7 @@ export class UsersService {
       invitedBy?: string | null;
       ageAttestedAt?: Date | null;
       termsVersion?: string | null;
+      isSystem?: boolean;
     },
   ): Promise<User> {
     const status = input.status ?? UserStatus.Active;
@@ -71,18 +76,16 @@ export class UsersService {
       activatedAt: status === UserStatus.Active ? new Date() : null,
       ageAttestedAt: input.ageAttestedAt ?? null,
       termsVersion: input.termsVersion ?? null,
+      isSystem: input.isSystem ?? false,
       ...(input.invitedBy
         ? { invitedBy: { id: input.invitedBy } as User }
         : {}),
     });
     const saved = await manager.save(user);
 
-    const baseSlug = await this.generateUniqueSlug(
-      manager.getRepository(Profile),
-      input.firstName,
-      input.lastName,
-    );
-    await this.insertProfileWithUniqueSlug(manager, saved.id, baseSlug, input);
+    const base = this.slugify(`${input.firstName} ${input.lastName}`) || 'member';
+    const slug = await this.nextAvailableSlug(manager, base);
+    await this.insertProfileWithUniqueSlug(manager, saved.id, base, slug, input);
 
     return saved;
   }
@@ -94,10 +97,10 @@ export class UsersService {
   private async insertProfileWithUniqueSlug(
     manager: EntityManager,
     userId: string,
-    baseSlug: string,
+    base: string,
+    slug: string,
     input: CreateGoogleUserInput,
   ): Promise<void> {
-    let slug = baseSlug;
     for (let attempt = 1; ; attempt++) {
       try {
         await manager.transaction(async (m) => {
@@ -124,7 +127,10 @@ export class UsersService {
         return;
       } catch (err) {
         if (isUniqueViolation(err) && attempt < MAX_SLUG_ATTEMPTS) {
-          slug = `${baseSlug}-${attempt + 1}`;
+          // A concurrent sign-up claimed `slug` between our query and this
+          // insert. Recompute from the CURRENT max and retry, so only true
+          // contention — never the count of same-named members — bounds us.
+          slug = await this.nextAvailableSlug(manager, base);
           continue;
         }
         throw err;
@@ -132,18 +138,38 @@ export class UsersService {
     }
   }
 
-  private async generateUniqueSlug(
-    repo: Repository<Profile>,
-    firstName: string,
-    lastName: string,
+  // Picks the next free slug for `base` by finding the highest suffix already
+  // taken and adding 1: `base`, then `base-1`, `base-2`, ... — so the Nth
+  // "Tiago Costa" is `tiago-costa-(N-1)` regardless of how many already exist,
+  // in a single query rather than probing one candidate at a time. Queries the
+  // `handles` registry (not just `profiles`) because that is the ONE global
+  // username namespace: a subprofile handle can occupy a suffix no profile holds.
+  private async nextAvailableSlug(
+    manager: EntityManager,
+    base: string,
   ): Promise<string> {
-    const base = this.slugify(`${firstName} ${lastName}`) || 'member';
-    let slug = base;
-    let suffix = 1;
-    while (await repo.exists({ where: { slug } })) {
-      slug = `${base}-${suffix++}`;
+    const taken = await manager
+      .getRepository(Handle)
+      .createQueryBuilder('handle')
+      .select('handle.name', 'name')
+      .where('handle.name = :base', { base })
+      .orWhere('handle.name LIKE :prefix', { prefix: `${base}-%` })
+      .getRawMany<{ name: string }>();
+
+    // `base` itself counts as suffix 0; `base-<n>` counts as <n>. `base` is
+    // slugified to [a-z0-9-] only, so it is safe to embed in the regex as-is.
+    const suffixOf = new RegExp(`^${base}-(\\d+)$`);
+    let maxSuffix = -1; // -1 => nothing taken, `base` is free
+    for (const { name } of taken) {
+      if (name === base) {
+        maxSuffix = Math.max(maxSuffix, 0);
+        continue;
+      }
+      const match = suffixOf.exec(name);
+      if (match) maxSuffix = Math.max(maxSuffix, Number(match[1]));
     }
-    return slug;
+
+    return maxSuffix < 0 ? base : `${base}-${maxSuffix + 1}`;
   }
 
   private slugify(value: string): string {

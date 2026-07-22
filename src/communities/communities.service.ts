@@ -250,7 +250,7 @@ export class CommunitiesService {
       qb.andWhere('c.access_tier = :access', { access: query.access });
     }
 
-    qb.orderBy('c.created_at', 'DESC');
+    qb.orderBy('c.createdAt', 'DESC');
 
     return paginate(qb, page, async (rows) => {
       if (!rows.length) return [];

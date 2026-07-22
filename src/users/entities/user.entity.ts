@@ -119,6 +119,17 @@ export class User {
   @Column({ type: 'integer', nullable: true })
   inviteMonthlyQuota: number | null;
 
+  /**
+   * Marks a non-human platform account (currently only the permanent
+   * QueerPulse house account created by genesis). Orthogonal to `role`, which
+   * stays `member`: this is an account *type*, not a permission level, so it
+   * never rides through `RolesGuard` or `role === UserRole.X` checks. Its only
+   * effect is to make the account editable by admins via the `admin/bots`
+   * surface; everywhere else it remains an ordinary member.
+   */
+  @Column({ type: 'boolean', default: false })
+  isSystem: boolean;
+
   @OneToOne(() => Profile, (profile) => profile.user)
   profile: Profile;
 

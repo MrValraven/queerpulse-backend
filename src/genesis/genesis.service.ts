@@ -119,8 +119,11 @@ export class GenesisService {
           // Active is REQUIRED, not cosmetic: `validateInviteForSignup`
           // rejects an invite whose inviter is not active. Role is left to the
           // column default (`member`) — the account never acts, and an idle
-          // admin is standing privilege for no benefit.
+          // admin is standing privilege for no benefit. `isSystem` marks it as
+          // the platform's non-human account so admins can edit its public
+          // profile via `admin/bots` (its permission level stays `member`).
           status: UserStatus.Active,
+          isSystem: true,
         }));
 
       // Reused verbatim rather than reimplemented: this already means

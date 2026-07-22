@@ -80,5 +80,72 @@ describe('UsersService', () => {
       // a Profile row was also saved
       expect(saved.some((r) => r.id === 'new-profile')).toBe(true);
     });
+
+    it('creates a system account when isSystem is passed', async () => {
+      const saved: any[] = [];
+      const profileRepo = { exists: jest.fn().mockResolvedValue(false) };
+      const manager = {
+        create: jest.fn((_entity, v) => v),
+        save: jest.fn(async (v) => {
+          const row = {
+            id: saved.length === 0 ? 'new-user' : 'new-profile',
+            ...v,
+          };
+          saved.push(row);
+          return row;
+        }),
+        getRepository: jest.fn(() => profileRepo),
+        transaction: jest.fn(async (cb: (m: unknown) => Promise<void>) =>
+          cb(manager),
+        ),
+      } as any;
+
+      const created = await service.createGoogleUser(manager, {
+        googleId: 'system:example',
+        email: 'system@example.com',
+        firstName: 'Example',
+        lastName: '',
+        isSystem: true,
+      });
+
+      expect(created.isSystem).toBe(true);
+      expect(manager.create).toHaveBeenCalledWith(
+        User,
+        expect.objectContaining({ isSystem: true }),
+      );
+    });
+
+    it('defaults isSystem to false for an ordinary member', async () => {
+      const saved: any[] = [];
+      const profileRepo = { exists: jest.fn().mockResolvedValue(false) };
+      const manager = {
+        create: jest.fn((_entity, v) => v),
+        save: jest.fn(async (v) => {
+          const row = {
+            id: saved.length === 0 ? 'new-user' : 'new-profile',
+            ...v,
+          };
+          saved.push(row);
+          return row;
+        }),
+        getRepository: jest.fn(() => profileRepo),
+        transaction: jest.fn(async (cb: (m: unknown) => Promise<void>) =>
+          cb(manager),
+        ),
+      } as any;
+
+      const created = await service.createGoogleUser(manager, {
+        googleId: 'google-123',
+        email: 'member@example.com',
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+      });
+
+      expect(created.isSystem).toBeFalsy();
+      expect(manager.create).toHaveBeenCalledWith(
+        User,
+        expect.objectContaining({ isSystem: false }),
+      );
+    });
   });
 });

@@ -24,6 +24,7 @@ import { CreateListingDto } from './dto/create-listing.dto';
 import { ListMyListingsQuery } from './dto/list-my-listings.query';
 import { UpdateListingStatusDto } from './dto/update-listing-status.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
+import { UpdateSafeSpaceDto } from './dto/update-safe-space.dto';
 import { ListingsService } from './listings.service';
 
 /**
@@ -55,6 +56,18 @@ export class ListingsController {
     return this.listingsService.listMine(user.userId, query);
   }
 
+  // Moderator-only, same rationale as `setStatus` below. Declared before
+  // `:ref` (mirrors `mine`'s ordering) so Nest's route matching resolves the
+  // literal `admin/safe-space-candidates` segment rather than the `:ref`
+  // param, even though the two-segment path wouldn't actually collide with
+  // any single-segment `:ref` route.
+  @Get('admin/safe-space-candidates')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.Moderator, UserRole.Admin)
+  listSafeSpaceCandidates() {
+    return this.listingsService.listSafeSpaceCandidates();
+  }
+
   @Get(':ref')
   get(@CurrentUser() user: CurrentUserData, @Param('ref') ref: string) {
     return this.listingsService.getByRef(ref, user.userId);
@@ -84,5 +97,14 @@ export class ListingsController {
   @Roles(UserRole.Moderator, UserRole.Admin)
   setStatus(@Param('ref') ref: string, @Body() dto: UpdateListingStatusDto) {
     return this.listingsService.setStatus(ref, dto.status);
+  }
+
+  // Moderator-only, same rationale as `setStatus` above — only the
+  // moderation surface toggles a listing's safe-space badge.
+  @Patch(':ref/safe-space')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.Moderator, UserRole.Admin)
+  setSafeSpace(@Param('ref') ref: string, @Body() dto: UpdateSafeSpaceDto) {
+    return this.listingsService.setSafeSpace(ref, dto);
   }
 }

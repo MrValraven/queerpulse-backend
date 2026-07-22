@@ -72,6 +72,34 @@ import {
   PartnerStatus,
   PartnerTimelineItem,
 } from '../partners/entities/partner.entity';
+import { Listing, ListingStatus } from '../listings/entities/listing.entity';
+import { ListingReview } from '../listings/entities/listing-review.entity';
+import {
+  Event,
+  EventStatus,
+  EventVisibility,
+} from '../events/entities/event.entity';
+import { Vouch } from '../vouch/entities/vouch.entity';
+import {
+  Report,
+  ReportStatus,
+  ReportSubjectType,
+} from '../reports/entities/report.entity';
+import { ReasonCode } from '../reports/reason-catalogue';
+import { deriveSeverity, slaDueAtFor } from '../reports/report-severity';
+import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
+import { ModActionCode } from '../moderation/dto/mod-action.dto';
+import {
+  Changemaker,
+  ChangemakerStatus,
+  ChangemakerTint,
+} from '../changemakers/entities/changemaker.entity';
+import {
+  CHANGEMAKER_SETTINGS_ID,
+  ChangemakerDirectorySettings,
+} from '../changemakers/entities/changemaker-directory-settings.entity';
+import { HousingCoop } from '../housing/entities/housing-coop.entity';
+import { CoopJoinRequest } from '../housing/entities/coop-join-request.entity';
 
 // Representative members for local frontend integration. Replace/extend with the
 // prototype's mock members (frontend src/features/members/data/members.ts) as
@@ -89,6 +117,13 @@ const MEMBERS: Array<{
   visibility: ProfileVisibility;
   tags: string[];
   openTo: OpenToEntry[];
+  // Optional so the original three fixtures (whose verified/joinedAt are set
+  // via the tomas-mendes special-case block below, or left at column
+  // defaults for ana-rocha/noa-silva) stay untouched. Every member added
+  // below for Task C1 (live-mode admin data) sets both explicitly so the
+  // member-growth chart, "new this week" count, and verified mix are real.
+  verified?: boolean;
+  joinedAt?: string;
 }> = [
   {
     googleId: 'seed-tomas',
@@ -142,6 +177,290 @@ const MEMBERS: Array<{
   // the slug (no community roster, reaction, or reply), so it is dropped rather
   // than converted. To exercise the admin queue locally, POST to the now-public
   // `/join-requests` instead.
+
+  // --- Task C1: live-mode admin data ---------------------------------------
+  // The 14 members below exist so the admin Members list, vouch graph,
+  // flagged/reports view, and moderation response-time chart all have real
+  // data instead of the 3-member fixture above. `joinedAt` is spread across
+  // the last ~10 weeks, with three members joined in the last 7 days (for the
+  // "new this week" stat + member-growth chart); `verified` is a genuine mix.
+  {
+    googleId: 'seed-beatriz',
+    email: 'beatriz.coelho@example.com',
+    status: UserStatus.Active,
+    slug: 'beatriz-coelho',
+    firstName: 'Beatriz',
+    lastName: 'Coelho',
+    pronouns: 'she/her',
+    tagline: 'Community organizer',
+    location: 'Faro',
+    visibility: ProfileVisibility.Open,
+    tags: ['Organizing', 'Events'],
+    openTo: [{ kind: 'preset', id: 'collaborating' }],
+    verified: true,
+    joinedAt: '2026-05-20T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-diogo',
+    email: 'diogo.antunes@example.com',
+    status: UserStatus.Active,
+    slug: 'diogo-antunes',
+    firstName: 'Diogo',
+    lastName: 'Antunes',
+    pronouns: 'he/him',
+    tagline: 'Backend developer, weekend DJ',
+    location: 'Lisbon',
+    visibility: ProfileVisibility.Open,
+    tags: ['Engineering', 'Music'],
+    openTo: [{ kind: 'preset', id: 'mentoring' }],
+    verified: true,
+    joinedAt: '2026-05-29T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-marta',
+    email: 'marta.esteves@example.com',
+    status: UserStatus.Active,
+    slug: 'marta-esteves',
+    firstName: 'Marta',
+    lastName: 'Esteves',
+    pronouns: 'she/they',
+    tagline: 'Peer support volunteer',
+    location: 'Porto',
+    visibility: ProfileVisibility.Network,
+    tags: ['Peer support', 'Mental health'],
+    openTo: [{ kind: 'preset', id: 'casualMeetups' }],
+    verified: false,
+    joinedAt: '2026-06-04T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-rui',
+    email: 'rui.cardoso@example.com',
+    status: UserStatus.Active,
+    slug: 'rui-cardoso',
+    firstName: 'Rui',
+    lastName: 'Cardoso',
+    pronouns: 'he/him',
+    tagline: 'Barista & zine collector',
+    location: 'Braga',
+    visibility: ProfileVisibility.Open,
+    tags: ['Coffee', 'Zines'],
+    openTo: [{ kind: 'preset', id: 'swaps' }],
+    verified: false,
+    joinedAt: '2026-06-18T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-sofia',
+    email: 'sofia.pinheiro@example.com',
+    status: UserStatus.Active,
+    slug: 'sofia-pinheiro',
+    firstName: 'Sofia',
+    lastName: 'Pinheiro',
+    pronouns: 'she/her',
+    tagline: 'Physiotherapist, trail runner',
+    location: 'Coimbra',
+    visibility: ProfileVisibility.Open,
+    tags: ['Health', 'Running'],
+    openTo: [{ kind: 'preset', id: 'clientWork' }],
+    verified: true,
+    joinedAt: '2026-05-19T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-kai',
+    email: 'kai.duarte@example.com',
+    status: UserStatus.Active,
+    slug: 'kai-duarte',
+    firstName: 'Kai',
+    lastName: 'Duarte',
+    pronouns: 'they/them',
+    tagline: 'Game designer',
+    location: 'Lisbon',
+    visibility: ProfileVisibility.Network,
+    tags: ['Games', 'Design'],
+    openTo: [{ kind: 'preset', id: 'collaborating' }],
+    verified: false,
+    joinedAt: '2026-06-14T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-leonor',
+    email: 'leonor.vaz@example.com',
+    status: UserStatus.Active,
+    slug: 'leonor-vaz',
+    firstName: 'Leonor',
+    lastName: 'Vaz',
+    pronouns: 'she/her',
+    tagline: 'High school teacher',
+    location: 'Porto',
+    visibility: ProfileVisibility.Open,
+    tags: ['Education'],
+    openTo: [{ kind: 'preset', id: 'mentoring' }],
+    verified: true,
+    joinedAt: '2026-06-02T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-vasco',
+    email: 'vasco.marinho@example.com',
+    status: UserStatus.Active,
+    slug: 'vasco-marinho',
+    firstName: 'Vasco',
+    lastName: 'Marinho',
+    pronouns: 'he/him',
+    tagline: 'Carpenter, community garden lead',
+    location: 'Setúbal',
+    visibility: ProfileVisibility.Open,
+    tags: ['Woodworking', 'Gardening'],
+    openTo: [{ kind: 'preset', id: 'commissions' }],
+    verified: false,
+    joinedAt: '2026-07-03T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-catarina',
+    email: 'catarina.sequeira@example.com',
+    status: UserStatus.Active,
+    slug: 'catarina-sequeira',
+    firstName: 'Catarina',
+    lastName: 'Sequeira',
+    pronouns: 'she/her',
+    tagline: 'Nurse',
+    location: 'Lisbon',
+    visibility: ProfileVisibility.Network,
+    tags: ['Health'],
+    openTo: [{ kind: 'preset', id: 'casualMeetups' }],
+    verified: false,
+    joinedAt: '2026-05-12T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-duarte',
+    email: 'duarte.freitas@example.com',
+    status: UserStatus.Active,
+    slug: 'duarte-freitas',
+    firstName: 'Duarte',
+    lastName: 'Freitas',
+    pronouns: 'he/him',
+    tagline: 'Freelance photographer',
+    location: 'Braga',
+    visibility: ProfileVisibility.Open,
+    tags: ['Photography'],
+    openTo: [{ kind: 'preset', id: 'clientWork' }],
+    verified: true,
+    joinedAt: '2026-06-13T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-renata',
+    email: 'renata.salgado@example.com',
+    status: UserStatus.Active,
+    slug: 'renata-salgado',
+    firstName: 'Renata',
+    lastName: 'Salgado',
+    pronouns: 'she/her',
+    tagline: 'Bar manager',
+    location: 'Porto',
+    visibility: ProfileVisibility.Open,
+    tags: ['Hospitality'],
+    openTo: [{ kind: 'preset', id: 'casualMeetups' }],
+    verified: false,
+    joinedAt: '2026-06-09T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-miguel',
+    email: 'miguel.tavares@example.com',
+    status: UserStatus.Active,
+    slug: 'miguel-tavares',
+    firstName: 'Miguel',
+    lastName: 'Tavares',
+    pronouns: 'he/him',
+    tagline: 'Software QA',
+    location: 'Lisbon',
+    visibility: ProfileVisibility.Network,
+    tags: ['Engineering', 'Games'],
+    openTo: [{ kind: 'preset', id: 'referrals' }],
+    verified: false,
+    joinedAt: '2026-06-08T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-ines',
+    email: 'ines.barroso@example.com',
+    status: UserStatus.Active,
+    slug: 'ines-barroso',
+    firstName: 'Inês',
+    lastName: 'Barroso',
+    pronouns: 'she/her',
+    tagline: 'Midwife',
+    location: 'Coimbra',
+    visibility: ProfileVisibility.Open,
+    tags: ['Health'],
+    openTo: [{ kind: 'preset', id: 'mentoring' }],
+    verified: true,
+    joinedAt: '2026-05-21T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-tiago',
+    email: 'tiago.nogueira@example.com',
+    status: UserStatus.Active,
+    slug: 'tiago-nogueira',
+    firstName: 'Tiago',
+    lastName: 'Nogueira',
+    pronouns: 'he/him',
+    tagline: 'Union organizer',
+    location: 'Lisbon',
+    visibility: ProfileVisibility.Network,
+    tags: ['Organizing', 'Advocacy'],
+    openTo: [{ kind: 'preset', id: 'interviewees' }],
+    verified: false,
+    joinedAt: '2026-06-30T09:00:00.000Z',
+  },
+  // These 3 are the "joined in the last 7 days" cohort (see the note on the
+  // interface above): unlike the 14 members above, whose vouch/report history
+  // needs weeks of runway to spread over, these three are genuinely brand new
+  // — a couple of very recent vouches each and no report history, which is
+  // the realistic state for someone who joined days ago.
+  {
+    googleId: 'seed-nadia',
+    email: 'nadia.ramos@example.com',
+    status: UserStatus.Active,
+    slug: 'nadia-ramos',
+    firstName: 'Nádia',
+    lastName: 'Ramos',
+    pronouns: 'she/her',
+    tagline: 'Illustrator, new to the city',
+    location: 'Lisbon',
+    visibility: ProfileVisibility.Open,
+    tags: ['Illustration'],
+    openTo: [{ kind: 'preset', id: 'casualMeetups' }],
+    verified: false,
+    joinedAt: '2026-07-19T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-oscar',
+    email: 'oscar.baptista@example.com',
+    status: UserStatus.Active,
+    slug: 'oscar-baptista',
+    firstName: 'Óscar',
+    lastName: 'Baptista',
+    pronouns: 'he/him',
+    tagline: 'Community-college student',
+    location: 'Porto',
+    visibility: ProfileVisibility.Network,
+    tags: ['Student'],
+    openTo: [{ kind: 'preset', id: 'casualMeetups' }],
+    verified: false,
+    joinedAt: '2026-07-17T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-iris',
+    email: 'iris.cabral@example.com',
+    status: UserStatus.Active,
+    slug: 'iris-cabral',
+    firstName: 'Iris',
+    lastName: 'Cabral',
+    pronouns: 'they/she',
+    tagline: 'Freelance translator',
+    location: 'Braga',
+    visibility: ProfileVisibility.Open,
+    tags: ['Translation', 'Languages'],
+    openTo: [{ kind: 'preset', id: 'clientWork' }],
+    verified: false,
+    joinedAt: '2026-07-15T09:00:00.000Z',
+  },
 ];
 
 // Representative communities for local frontend integration, owned by the
@@ -476,6 +795,461 @@ async function seedCommunities(
 
     console.log(`Seeded community ${c.slug}`);
   }
+}
+
+// Task C1: attaches the 14 live-mode members (added to MEMBERS above) to the
+// communities seeded above, with a couple of `mod` roles thrown in — so the
+// admin drawer's communities section and card meta line have real data.
+// Kept as its own idempotent pass (rather than folded into each
+// `CommunitySeedDefinition.roster`) because `seedCommunities` skips a
+// community entirely once it already exists, which would silently skip these
+// roster rows on any re-run against a database seeded before this task.
+interface LiveCommunityMembershipSeed {
+  memberSlug: string;
+  communitySlug: string;
+  role: RosterRole;
+}
+
+const LIVE_COMMUNITY_MEMBERSHIPS: LiveCommunityMembershipSeed[] = [
+  // Queer Artists Lisbon
+  { memberSlug: 'beatriz-coelho', communitySlug: 'queer-artists-lisbon', role: RosterRole.Member },
+  { memberSlug: 'diogo-antunes', communitySlug: 'queer-artists-lisbon', role: RosterRole.Mod },
+  { memberSlug: 'rui-cardoso', communitySlug: 'queer-artists-lisbon', role: RosterRole.Member },
+  { memberSlug: 'duarte-freitas', communitySlug: 'queer-artists-lisbon', role: RosterRole.Member },
+  // Sober Queers Porto
+  { memberSlug: 'marta-esteves', communitySlug: 'sober-queers-porto', role: RosterRole.Mod },
+  { memberSlug: 'renata-salgado', communitySlug: 'sober-queers-porto', role: RosterRole.Member },
+  { memberSlug: 'catarina-sequeira', communitySlug: 'sober-queers-porto', role: RosterRole.Member },
+  // Queer Professionals Network
+  { memberSlug: 'sofia-pinheiro', communitySlug: 'queer-professionals-network', role: RosterRole.Member },
+  { memberSlug: 'leonor-vaz', communitySlug: 'queer-professionals-network', role: RosterRole.Mod },
+  { memberSlug: 'ines-barroso', communitySlug: 'queer-professionals-network', role: RosterRole.Member },
+  { memberSlug: 'tiago-nogueira', communitySlug: 'queer-professionals-network', role: RosterRole.Member },
+  // Queer Sports Braga
+  { memberSlug: 'kai-duarte', communitySlug: 'queer-sports-braga', role: RosterRole.Member },
+  { memberSlug: 'vasco-marinho', communitySlug: 'queer-sports-braga', role: RosterRole.Mod },
+  { memberSlug: 'miguel-tavares', communitySlug: 'queer-sports-braga', role: RosterRole.Member },
+];
+
+async function seedLiveCommunityMemberships(
+  manager: EntityManager,
+  memberIdBySlug: Map<string, string>,
+): Promise<void> {
+  const communities = manager.getRepository(Community);
+  const communityMembers = manager.getRepository(CommunityMember);
+
+  let insertedCount = 0;
+  for (const membership of LIVE_COMMUNITY_MEMBERSHIPS) {
+    const userId = memberIdBySlug.get(membership.memberSlug);
+    if (!userId) {
+      throw new Error(
+        `Cannot seed live community membership: no seeded member with slug "${membership.memberSlug}"`,
+      );
+    }
+    const community = await communities.findOne({
+      where: { slug: membership.communitySlug },
+    });
+    if (!community) {
+      throw new Error(
+        `Cannot seed live community membership: no seeded community with slug "${membership.communitySlug}"`,
+      );
+    }
+
+    // Idempotent: skip if this member is already on this community's roster.
+    const existing = await communityMembers.findOne({
+      where: { communityId: community.id, userId },
+    });
+    if (existing) {
+      continue;
+    }
+
+    await communityMembers.save(
+      communityMembers.create({
+        communityId: community.id,
+        userId,
+        role: membership.role,
+      }),
+    );
+    insertedCount += 1;
+  }
+  console.log(`Seeded ${insertedCount} live-mode community memberships`);
+}
+
+// Task C1: a connected vouch graph across every seeded member (the original 3
+// plus the 17 live-mode members above) so the admin vouch graph and vouch
+// feed have real data. Each member is vouched for by 2-12 others; two members
+// (`diogo-antunes`, `ines-barroso`) are deliberately high-count hubs. The 3
+// members who joined within the last 7 days (`nadia-ramos`, `oscar-baptista`,
+// `iris-cabral`) deliberately have only a couple of very recent incoming
+// vouches each and no deep history, since they haven't been members long
+// enough to have accrued one.
+// `createdAt` is a `@CreateDateColumn`, which TypeORM always overwrites with
+// `new Date()` on insert (see `SubjectExecutor`) — so each row is saved first,
+// then its `created_at` is set with a follow-up `repository.update()`, which
+// goes through a plain `UpdateQueryBuilder` and (unlike `.save()`) never
+// touches create-date columns, letting the explicit value stick.
+interface VouchEdgeSeed {
+  voucherSlug: string;
+  voucheeSlug: string;
+  daysAgo: number;
+}
+
+const VOUCH_EDGES: VouchEdgeSeed[] = [
+  // Founding triangle
+  { voucherSlug: 'tomas-mendes', voucheeSlug: 'ana-rocha', daysAgo: 60 },
+  { voucherSlug: 'ana-rocha', voucheeSlug: 'noa-silva', daysAgo: 55 },
+  { voucherSlug: 'noa-silva', voucheeSlug: 'tomas-mendes', daysAgo: 50 },
+  // Founders vouching for one live-mode member each
+  { voucherSlug: 'tomas-mendes', voucheeSlug: 'beatriz-coelho', daysAgo: 58 },
+  { voucherSlug: 'ana-rocha', voucheeSlug: 'diogo-antunes', daysAgo: 3 },
+  { voucherSlug: 'noa-silva', voucheeSlug: 'marta-esteves', daysAgo: 40 },
+  { voucherSlug: 'tomas-mendes', voucheeSlug: 'rui-cardoso', daysAgo: 2 },
+  { voucherSlug: 'ana-rocha', voucheeSlug: 'sofia-pinheiro', daysAgo: 45 },
+  { voucherSlug: 'noa-silva', voucheeSlug: 'kai-duarte', daysAgo: 25 },
+  { voucherSlug: 'tomas-mendes', voucheeSlug: 'leonor-vaz', daysAgo: 35 },
+  { voucherSlug: 'ana-rocha', voucheeSlug: 'vasco-marinho', daysAgo: 4 },
+  { voucherSlug: 'noa-silva', voucheeSlug: 'catarina-sequeira', daysAgo: 65 },
+  { voucherSlug: 'tomas-mendes', voucheeSlug: 'duarte-freitas', daysAgo: 10 },
+  { voucherSlug: 'ana-rocha', voucheeSlug: 'renata-salgado', daysAgo: 38 },
+  { voucherSlug: 'noa-silva', voucheeSlug: 'miguel-tavares', daysAgo: 7 },
+  { voucherSlug: 'tomas-mendes', voucheeSlug: 'ines-barroso', daysAgo: 48 },
+  { voucherSlug: 'ana-rocha', voucheeSlug: 'tiago-nogueira', daysAgo: 18 },
+  // Hub: diogo-antunes (12 vouchers total)
+  { voucherSlug: 'tomas-mendes', voucheeSlug: 'diogo-antunes', daysAgo: 4 },
+  { voucherSlug: 'noa-silva', voucheeSlug: 'diogo-antunes', daysAgo: 3 },
+  { voucherSlug: 'beatriz-coelho', voucheeSlug: 'diogo-antunes', daysAgo: 20 },
+  { voucherSlug: 'marta-esteves', voucheeSlug: 'diogo-antunes', daysAgo: 15 },
+  { voucherSlug: 'rui-cardoso', voucheeSlug: 'diogo-antunes', daysAgo: 1 },
+  { voucherSlug: 'sofia-pinheiro', voucheeSlug: 'diogo-antunes', daysAgo: 22 },
+  { voucherSlug: 'kai-duarte', voucheeSlug: 'diogo-antunes', daysAgo: 12 },
+  { voucherSlug: 'leonor-vaz', voucheeSlug: 'diogo-antunes', daysAgo: 17 },
+  { voucherSlug: 'vasco-marinho', voucheeSlug: 'diogo-antunes', daysAgo: 3 },
+  { voucherSlug: 'catarina-sequeira', voucheeSlug: 'diogo-antunes', daysAgo: 30 },
+  { voucherSlug: 'duarte-freitas', voucheeSlug: 'diogo-antunes', daysAgo: 6 },
+  // Hub: ines-barroso (10 vouchers total)
+  { voucherSlug: 'ana-rocha', voucheeSlug: 'ines-barroso', daysAgo: 33 },
+  { voucherSlug: 'noa-silva', voucheeSlug: 'ines-barroso', daysAgo: 28 },
+  { voucherSlug: 'diogo-antunes', voucheeSlug: 'ines-barroso', daysAgo: 9 },
+  { voucherSlug: 'marta-esteves', voucheeSlug: 'ines-barroso', daysAgo: 14 },
+  { voucherSlug: 'sofia-pinheiro', voucheeSlug: 'ines-barroso', daysAgo: 11 },
+  { voucherSlug: 'kai-duarte', voucheeSlug: 'ines-barroso', daysAgo: 8 },
+  { voucherSlug: 'vasco-marinho', voucheeSlug: 'ines-barroso', daysAgo: 6 },
+  { voucherSlug: 'renata-salgado', voucheeSlug: 'ines-barroso', daysAgo: 13 },
+  { voucherSlug: 'miguel-tavares', voucheeSlug: 'ines-barroso', daysAgo: 5 },
+  // Remaining cross-vouches (each brings a member to 3+ incoming vouches)
+  { voucherSlug: 'sofia-pinheiro', voucheeSlug: 'beatriz-coelho', daysAgo: 26 },
+  { voucherSlug: 'leonor-vaz', voucheeSlug: 'beatriz-coelho', daysAgo: 19 },
+  { voucherSlug: 'vasco-marinho', voucheeSlug: 'rui-cardoso', daysAgo: 2 },
+  { voucherSlug: 'diogo-antunes', voucheeSlug: 'rui-cardoso', daysAgo: 1 },
+  { voucherSlug: 'beatriz-coelho', voucheeSlug: 'sofia-pinheiro', daysAgo: 24 },
+  { voucherSlug: 'catarina-sequeira', voucheeSlug: 'sofia-pinheiro', daysAgo: 36 },
+  { voucherSlug: 'beatriz-coelho', voucheeSlug: 'leonor-vaz', daysAgo: 21 },
+  { voucherSlug: 'renata-salgado', voucheeSlug: 'leonor-vaz', daysAgo: 16 },
+  { voucherSlug: 'rui-cardoso', voucheeSlug: 'vasco-marinho', daysAgo: 3 },
+  { voucherSlug: 'tiago-nogueira', voucheeSlug: 'vasco-marinho', daysAgo: 9 },
+  { voucherSlug: 'duarte-freitas', voucheeSlug: 'catarina-sequeira', daysAgo: 12 },
+  { voucherSlug: 'marta-esteves', voucheeSlug: 'catarina-sequeira', daysAgo: 44 },
+  { voucherSlug: 'miguel-tavares', voucheeSlug: 'duarte-freitas', daysAgo: 6 },
+  { voucherSlug: 'renata-salgado', voucheeSlug: 'duarte-freitas', daysAgo: 11 },
+  { voucherSlug: 'catarina-sequeira', voucheeSlug: 'renata-salgado', daysAgo: 14 },
+  { voucherSlug: 'tiago-nogueira', voucheeSlug: 'renata-salgado', daysAgo: 7 },
+  { voucherSlug: 'kai-duarte', voucheeSlug: 'miguel-tavares', daysAgo: 10 },
+  { voucherSlug: 'duarte-freitas', voucheeSlug: 'miguel-tavares', daysAgo: 5 },
+  { voucherSlug: 'leonor-vaz', voucheeSlug: 'tiago-nogueira', daysAgo: 13 },
+  { voucherSlug: 'vasco-marinho', voucheeSlug: 'tiago-nogueira', daysAgo: 8 },
+  { voucherSlug: 'rui-cardoso', voucheeSlug: 'marta-esteves', daysAgo: 16 },
+  { voucherSlug: 'kai-duarte', voucheeSlug: 'marta-esteves', daysAgo: 23 },
+  { voucherSlug: 'marta-esteves', voucheeSlug: 'kai-duarte', daysAgo: 27 },
+  { voucherSlug: 'miguel-tavares', voucheeSlug: 'kai-duarte', daysAgo: 14 },
+  { voucherSlug: 'diogo-antunes', voucheeSlug: 'tomas-mendes', daysAgo: 5 },
+  { voucherSlug: 'beatriz-coelho', voucheeSlug: 'tomas-mendes', daysAgo: 42 },
+  { voucherSlug: 'ines-barroso', voucheeSlug: 'ana-rocha', daysAgo: 31 },
+  { voucherSlug: 'sofia-pinheiro', voucheeSlug: 'ana-rocha', daysAgo: 29 },
+  { voucherSlug: 'kai-duarte', voucheeSlug: 'noa-silva', daysAgo: 34 },
+  { voucherSlug: 'marta-esteves', voucheeSlug: 'noa-silva', daysAgo: 37 },
+  // The "joined in the last 7 days" cohort: a couple of very recent vouches
+  // each, all comfortably within their own short tenure.
+  { voucherSlug: 'tomas-mendes', voucheeSlug: 'nadia-ramos', daysAgo: 1 },
+  { voucherSlug: 'beatriz-coelho', voucheeSlug: 'nadia-ramos', daysAgo: 1 },
+  { voucherSlug: 'ana-rocha', voucheeSlug: 'oscar-baptista', daysAgo: 2 },
+  { voucherSlug: 'diogo-antunes', voucheeSlug: 'oscar-baptista', daysAgo: 1 },
+  { voucherSlug: 'noa-silva', voucheeSlug: 'iris-cabral', daysAgo: 3 },
+  { voucherSlug: 'marta-esteves', voucheeSlug: 'iris-cabral', daysAgo: 2 },
+];
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+async function seedVouches(
+  manager: EntityManager,
+  memberIdBySlug: Map<string, string>,
+): Promise<void> {
+  const vouches = manager.getRepository(Vouch);
+  const now = Date.now();
+
+  const userId = (slug: string): string => {
+    const id = memberIdBySlug.get(slug);
+    if (!id) {
+      throw new Error(`Cannot seed vouches: no seeded member with slug "${slug}"`);
+    }
+    return id;
+  };
+
+  let insertedCount = 0;
+  for (const edge of VOUCH_EDGES) {
+    const voucherId = userId(edge.voucherSlug);
+    const voucheeId = userId(edge.voucheeSlug);
+
+    // Idempotent: skip if this (voucher, vouchee) pair already exists.
+    const existing = await vouches.findOne({ where: { voucherId, voucheeId } });
+    if (existing) {
+      continue;
+    }
+
+    const saved = await vouches.save(
+      vouches.create({ voucherId, voucheeId, note: null }),
+    );
+    const createdAt = new Date(now - edge.daysAgo * MS_PER_DAY);
+    await vouches.update({ id: saved.id }, { createdAt });
+    insertedCount += 1;
+  }
+  console.log(`Seeded ${insertedCount} vouches`);
+}
+
+// Task C1: ~10 reports against seeded members so the admin flagged tab, vouch
+// graph deemphasis, reasonCode breakdown, and response-time chart all have
+// real data. `subjectType` is always `Member` and `subjectId` is the
+// reported member's profile slug (moderation's `resolveMemberSubject` checks
+// `{ slug: subjectId }` for any non-UUID subjectId, so a slug round-trips
+// correctly). Only reason codes `reasonsFor(ReportSubjectType.Member)`
+// actually offers are used (outing, harassment, unwanted_contact,
+// impersonation, discrimination, other) — the brief's "spam"/"hate_speech"
+// examples are Post/Community-only reasons per `reason-catalogue.ts` and
+// would misrepresent what a member-report can carry, so they're intentionally
+// left out here. `doxxing` (also Member-eligible) is left out too: it's
+// emergency-severity like `outing`, and the brief calls for exactly one
+// emergency report.
+interface ReportResolutionSeed {
+  actorSlug: string;
+  action: ModActionCode;
+  resolutionReasonCode: ReasonCode;
+  note: string;
+  duration?: string;
+  hoursAfter: number;
+}
+
+interface ReportSeed {
+  targetSlug: string;
+  reporterSlug: string;
+  reasonCode: ReasonCode;
+  detail: string;
+  daysAgo: number;
+  status: ReportStatus;
+  resolution?: ReportResolutionSeed;
+}
+
+const REPORTS: ReportSeed[] = [
+  // Flagged pair, left Open: diogo-antunes (2 open reports)
+  {
+    targetSlug: 'diogo-antunes',
+    reporterSlug: 'beatriz-coelho',
+    reasonCode: 'outing',
+    detail: 'Shared a screenshot outing another member’s legal name in a group chat.',
+    daysAgo: 50,
+    status: ReportStatus.Open,
+  },
+  {
+    targetSlug: 'diogo-antunes',
+    reporterSlug: 'sofia-pinheiro',
+    reasonCode: 'harassment',
+    detail: 'Repeated pointed comments after being asked to stop.',
+    daysAgo: 45,
+    status: ReportStatus.Open,
+  },
+  // Flagged pair, left Open: miguel-tavares (2 open reports)
+  {
+    targetSlug: 'miguel-tavares',
+    reporterSlug: 'catarina-sequeira',
+    reasonCode: 'discrimination',
+    detail: 'Made a dismissive comment about a member’s pronouns in a community post.',
+    daysAgo: 40,
+    status: ReportStatus.Open,
+  },
+  {
+    targetSlug: 'miguel-tavares',
+    reporterSlug: 'duarte-freitas',
+    reasonCode: 'impersonation',
+    detail: 'Appears to be using another member’s photos on an off-platform profile.',
+    daysAgo: 35,
+    status: ReportStatus.Open,
+  },
+  // One more Open report, not part of either flagged pair
+  {
+    targetSlug: 'vasco-marinho',
+    reporterSlug: 'tiago-nogueira',
+    reasonCode: 'unwanted_contact',
+    detail: 'Kept messaging after being told to stop.',
+    daysAgo: 8,
+    status: ReportStatus.Open,
+  },
+  // Resolved, each with a matching resolving ModAuditLog
+  {
+    targetSlug: 'rui-cardoso',
+    reporterSlug: 'leonor-vaz',
+    reasonCode: 'harassment',
+    detail: 'Sent aggressive DMs after a disagreement in a community thread.',
+    daysAgo: 30,
+    status: ReportStatus.Resolved,
+    resolution: {
+      actorSlug: 'noa-silva',
+      action: 'warn',
+      resolutionReasonCode: 'harassment',
+      note: 'Formal warning issued; member acknowledged and apologized.',
+      hoursAfter: 30,
+    },
+  },
+  {
+    targetSlug: 'kai-duarte',
+    reporterSlug: 'marta-esteves',
+    reasonCode: 'other',
+    detail: 'Made the reporter uncomfortable at a meetup; hard to pin to one category.',
+    daysAgo: 25,
+    status: ReportStatus.Resolved,
+    resolution: {
+      actorSlug: 'ana-rocha',
+      action: 'dismiss',
+      resolutionReasonCode: 'other',
+      note: 'Reviewed with both members; no policy violation found.',
+      hoursAfter: 72,
+    },
+  },
+  {
+    targetSlug: 'renata-salgado',
+    reporterSlug: 'ines-barroso',
+    reasonCode: 'unwanted_contact',
+    detail: 'Continued contacting the reporter across two communities after being asked to stop.',
+    daysAgo: 20,
+    status: ReportStatus.Resolved,
+    resolution: {
+      actorSlug: 'noa-silva',
+      action: 'restrict',
+      resolutionReasonCode: 'unwanted_contact',
+      note: 'Messaging restricted for 7 days pending a check-in.',
+      duration: '7d',
+      hoursAfter: 6,
+    },
+  },
+  {
+    targetSlug: 'leonor-vaz',
+    reporterSlug: 'vasco-marinho',
+    reasonCode: 'discrimination',
+    detail: 'Misgendered a member repeatedly after being corrected.',
+    daysAgo: 15,
+    status: ReportStatus.Resolved,
+    resolution: {
+      actorSlug: 'ana-rocha',
+      action: 'warn',
+      resolutionReasonCode: 'discrimination',
+      note: 'Warned about repeated misgendering; member committed to doing better.',
+      hoursAfter: 48,
+    },
+  },
+  {
+    targetSlug: 'beatriz-coelho',
+    reporterSlug: 'noa-silva',
+    reasonCode: 'harassment',
+    detail: 'Escalating public callouts of another member across two community threads.',
+    daysAgo: 10,
+    status: ReportStatus.Resolved,
+    resolution: {
+      actorSlug: 'tomas-mendes',
+      action: 'suspend',
+      resolutionReasonCode: 'harassment',
+      note: 'Suspended for a week after a second escalation despite an earlier warning.',
+      duration: '7d',
+      hoursAfter: 20,
+    },
+  },
+];
+
+async function seedReports(
+  manager: EntityManager,
+  memberIdBySlug: Map<string, string>,
+): Promise<void> {
+  const reports = manager.getRepository(Report);
+  const modAuditLogs = manager.getRepository(ModAuditLog);
+  const now = Date.now();
+
+  const userId = (slug: string): string => {
+    const id = memberIdBySlug.get(slug);
+    if (!id) {
+      throw new Error(`Cannot seed reports: no seeded member with slug "${slug}"`);
+    }
+    return id;
+  };
+
+  let insertedReportCount = 0;
+  let insertedAuditLogCount = 0;
+  for (const r of REPORTS) {
+    const reporterId = userId(r.reporterSlug);
+
+    // Idempotent: skip if this reporter already filed this exact reasonCode
+    // against this subject (a real reporter could file more than one report
+    // against the same member over time, but never twice with the same
+    // reason — that's the natural key here since there's no other unique
+    // constraint to key off).
+    const existing = await reports.findOne({
+      where: {
+        subjectType: ReportSubjectType.Member,
+        subjectId: r.targetSlug,
+        reasonCode: r.reasonCode,
+        reporterId,
+      },
+    });
+    if (existing) {
+      continue;
+    }
+
+    const createdAt = new Date(now - r.daysAgo * MS_PER_DAY);
+    const severity = deriveSeverity(r.reasonCode);
+
+    const saved = await reports.save(
+      reports.create({
+        subjectType: ReportSubjectType.Member,
+        subjectId: r.targetSlug,
+        reasonCode: r.reasonCode,
+        detail: r.detail,
+        severity,
+        slaDueAt: slaDueAtFor(severity, createdAt),
+        status: r.status,
+        reporterId,
+      }),
+    );
+    // createdAt is a `@CreateDateColumn` — see the comment above VOUCH_EDGES
+    // for why this needs a follow-up `.update()` rather than being set here.
+    await reports.update({ id: saved.id }, { createdAt });
+    insertedReportCount += 1;
+
+    if (r.resolution) {
+      const auditLog = await modAuditLogs.save(
+        modAuditLogs.create({
+          reportId: saved.id,
+          actorId: userId(r.resolution.actorSlug),
+          action: r.resolution.action,
+          reasonCode: r.resolution.resolutionReasonCode,
+          note: r.resolution.note,
+          duration: r.resolution.duration ?? null,
+        }),
+      );
+      const resolvedAt = new Date(
+        createdAt.getTime() + r.resolution.hoursAfter * 60 * 60 * 1000,
+      );
+      await modAuditLogs.update({ id: auditLog.id }, { createdAt: resolvedAt });
+      insertedAuditLogCount += 1;
+    }
+  }
+  console.log(
+    `Seeded ${insertedReportCount} reports (${insertedAuditLogCount} resolved with a matching mod audit log)`,
+  );
 }
 
 // Representative companies for local frontend integration, owned by the
@@ -2019,6 +2793,818 @@ async function backfillVolunteeringPartnerLinks(
   console.log('Back-filled partner_id on seeded volunteer opportunities');
 }
 
+// Representative businesses for the public directory (`/local/directory`) and
+// the host page's "Partner spaces" card. Mirrors real entries from the
+// frontend fixture `queerpulse/src/features/marketing/directoryPlaces.ts` so
+// the live directory reads recognisably. All are `live` (publicly visible);
+// three are flagged `isPartneredWithQueerpulse` with venue capacity so the
+// host page renders real partner venues instead of the old fabricated card.
+interface ListingSeedDefinition {
+  ref: string;
+  slug: string;
+  ownerSlug: string;
+  name: string;
+  cats: string[];
+  hood: string;
+  price: string;
+  blurb: string;
+  tagline: string;
+  ownerName: string;
+  ownerRole: string;
+  ownerBio: string;
+  address: string;
+  hoursNote: string;
+  tags: string[];
+  whatItIs: string[];
+  goodFor: string[];
+  /** Gallery caption cells (the prototype renders captions, not images). */
+  gallery: string[];
+  social: {
+    instagram?: string;
+    website?: string;
+    email?: string;
+    phone?: string;
+  };
+  // Partner-space fields — set only on the venues that host gatherings.
+  isPartneredWithQueerpulse?: boolean;
+  spaceType?: string;
+  capacity?: number;
+  hostNote?: string;
+}
+
+const LISTINGS: ListingSeedDefinition[] = [
+  {
+    ref: 'QPL-2026-1001',
+    slug: 'atelier-pulso',
+    ownerSlug: 'tomas-mendes',
+    name: 'Atelier Pulso',
+    cats: ['design'],
+    hood: 'Príncipe Real',
+    price: '€€',
+    blurb:
+      'Graphic design studio for cultural institutions and small presses. Open by appointment.',
+    tagline: 'A queer design studio for the people making culture in this city.',
+    ownerName: 'Inês Faro',
+    ownerRole: 'Founder · designer',
+    ownerBio:
+      'Designer for cultural institutions and small presses. Believes good design is a form of care.',
+    address: 'R. da Escola Politécnica 84 · Príncipe Real',
+    hoursNote: 'Open by appointment — message to arrange a time.',
+    tags: ['Design studio', 'By appointment', 'Step-free entrance'],
+    whatItIs: [
+      'Inês runs Atelier Pulso as a small studio doing brand identity and editorial design — mostly for cultural institutions, small presses, and queer projects.',
+      'It is genuinely open by appointment: message ahead to see the print archive or talk about a project. Riso and letterpress on site.',
+    ],
+    goodFor: [
+      'Brand identity for a queer project',
+      'Editorial & book design',
+      'Seeing a working print archive',
+    ],
+    gallery: ['Studio · main desk', 'Print archive', 'Type wall', 'Window onto Príncipe Real'],
+    social: {
+      instagram: '@atelierpulso',
+      website: 'atelierpulso.pt',
+      email: 'ola@atelierpulso.pt',
+    },
+    isPartneredWithQueerpulse: true,
+    spaceType: 'Studio',
+    capacity: 15,
+    hostNote: 'member-run',
+  },
+  {
+    ref: 'QPL-2026-1002',
+    slug: 'queer-supper-club',
+    ownerSlug: 'tomas-mendes',
+    name: 'Queer Supper Club',
+    cats: ['food'],
+    hood: 'Mouraria',
+    price: '€€€',
+    blurb:
+      'Monthly intimate dinners — twelve seats, seasonal menu, honest cooking. The most important table in Mouraria.',
+    tagline: 'Twelve seats, one long table, the best night out sitting down.',
+    ownerName: 'Tomás Beto',
+    ownerRole: 'Chef · host',
+    ownerBio:
+      'Chef and supper-club host. Cooks the way his avó did, for people who need a table.',
+    address: 'Address shared with ticket · Mouraria',
+    hoursNote: 'Monthly seatings — book a seat for the next dinner.',
+    tags: ['Supper club', 'Monthly · ticketed', 'Dietary-friendly'],
+    whatItIs: [
+      'Once a month Tomás opens his Mouraria home and cooks a seasonal menu for twelve strangers who leave as something closer to friends.',
+      'Tickets go fast and the list is half community, half newcomers placed deliberately next to people they should meet.',
+    ],
+    goodFor: [
+      'Meeting people without the bar',
+      'A special-occasion dinner',
+      'Solo diners (you’ll be seated well)',
+    ],
+    gallery: ['The long table', 'Open kitchen', 'Mouraria courtyard', 'Dessert course'],
+    social: { instagram: '@queersupperclub', email: 'table@queersupper.pt' },
+    isPartneredWithQueerpulse: true,
+    spaceType: 'Kitchen + dining room',
+    capacity: 20,
+    hostNote: 'ticketed',
+  },
+  {
+    ref: 'QPL-2026-1003',
+    slug: 'galeria-lume',
+    ownerSlug: 'ana-rocha',
+    name: 'Galeria Lume',
+    cats: ['culture'],
+    hood: 'Marvila',
+    price: '€',
+    blurb:
+      'Artist-run gallery in a Marvila warehouse. Programming focuses on emerging queer and feminist artists.',
+    tagline: 'A warehouse gallery that bets on queer artists before the market does.',
+    ownerName: 'Lume collective',
+    ownerRole: 'Artist-run',
+    ownerBio:
+      'Run by an artist collective; several members are on QueerPulse and overlap with Rainbow Arts.',
+    address: 'R. do Açúcar 76 · Marvila',
+    hoursNote: 'Open Wed–Sun afternoons. Openings run late.',
+    tags: ['Gallery', 'Free entry', 'Step-free · large'],
+    whatItIs: [
+      'Lume is an artist-run gallery in a Marvila warehouse, programming queer and feminist work with a bias toward emerging artists.',
+      'Entry is free, the openings are generous, and the project room is often someone’s first-ever solo show.',
+    ],
+    goodFor: [
+      'Seeing emerging queer art',
+      'Generous, social openings',
+      'A first solo show as an artist',
+    ],
+    gallery: ['Main hall', 'Current show', 'Project room', 'Marvila exterior'],
+    social: {
+      instagram: '@galerialume',
+      website: 'galerialume.pt',
+      email: 'ola@galerialume.pt',
+    },
+    isPartneredWithQueerpulse: true,
+    spaceType: 'Warehouse',
+    capacity: 50,
+    hostNote: 'events only',
+  },
+  {
+    ref: 'QPL-2026-1004',
+    slug: 'livraria-bertha',
+    ownerSlug: 'noa-silva',
+    name: 'Livraria Bertha',
+    cats: ['culture'],
+    hood: 'Príncipe Real',
+    price: '€€',
+    blurb:
+      'Queer-run independent bookshop with a strong feminist and LGBTQ+ section. Regular readings and launches.',
+    tagline: 'The bookshop that keeps the section you came for at the front.',
+    ownerName: 'Bertha collective',
+    ownerRole: 'Worker co-op',
+    ownerBio:
+      'Run as a small worker co-operative. Several of the booksellers are QueerPulse members.',
+    address: 'R. da Imprensa Nacional 48 · Príncipe Real',
+    hoursNote: 'Open Tue–Sun. Event nights run later.',
+    tags: ['Bookshop', 'Events space', 'Step-free'],
+    whatItIs: [
+      'Bertha is a small queer-run independent bookshop where the feminist and LGBTQ+ titles are the front table, curated by people who’ve read them.',
+      'Most weeks there’s a reading, a launch, or a book club squeezed between the stacks.',
+    ],
+    goodFor: [
+      'Finding queer & feminist titles',
+      'Readings and launches',
+      'A staff recommendation',
+    ],
+    gallery: ['Front table', 'Queer & feminist wall', 'Reading corner', 'Event night'],
+    social: {
+      instagram: '@livrariabertha',
+      website: 'livrariabertha.pt',
+      email: 'ola@livrariabertha.pt',
+    },
+  },
+  {
+    ref: 'QPL-2026-1005',
+    slug: 'a-farinha',
+    ownerSlug: 'ana-rocha',
+    name: 'A Farinha',
+    cats: ['food'],
+    hood: 'Arroios',
+    price: '€€€',
+    blurb:
+      'Queer-owned natural wine bar and small-plates kitchen. Seasonal menu, opinionated wine list.',
+    tagline: 'Natural wine, small plates, and a room that wants you to stay.',
+    ownerName: 'Marco & Renato',
+    ownerRole: 'Owners',
+    ownerBio:
+      'A couple who left restaurant kitchens to open the room they wanted to drink in. One is a QueerPulse member.',
+    address: 'R. de Arroios 142 · Arroios',
+    hoursNote: 'Evenings, Tue–Sun. Closed Mondays.',
+    tags: ['Wine bar · small plates', 'Evenings', 'Ground floor'],
+    whatItIs: [
+      'A Farinha is a queer-owned natural wine bar and small-plates kitchen in Arroios — a short seasonal menu and a long, opinionated wine list.',
+      'It’s the place for a second date, a celebration, or a slow Tuesday that turns into something.',
+    ],
+    goodFor: [
+      'A great second date',
+      'Natural wine guidance',
+      'Celebrating something',
+    ],
+    gallery: ['The bar', 'Small plates', 'Wine wall', 'Arroios corner'],
+    social: {
+      instagram: '@afarinha.lisboa',
+      website: 'afarinha.pt',
+      email: 'reservas@afarinha.pt',
+      phone: '+351 21 099 8877',
+    },
+  },
+  {
+    ref: 'QPL-2026-1006',
+    slug: 'bairro-alto-studio',
+    ownerSlug: 'noa-silva',
+    name: 'Bairro Alto Studio',
+    cats: ['tech'],
+    hood: 'Bairro Alto',
+    price: '€€',
+    blurb:
+      'Music production studio available for session hire, specialising in electronic and experimental work.',
+    tagline: 'A queer-run music studio where experimental isn’t a dirty word.',
+    ownerName: 'Diogo Reis',
+    ownerRole: 'Producer · engineer',
+    ownerBio:
+      'Music producer and Queer Runners regular. Specialises in electronic and experimental work.',
+    address: 'R. da Atalaia 90 · Bairro Alto',
+    hoursNote: 'Session hire by booking, day and night slots.',
+    tags: ['Music studio', 'Session hire', 'Lift access'],
+    whatItIs: [
+      'Diogo runs a session-hire production studio leaning electronic and experimental, with a serious modular wall and a punchy live room.',
+      'Rates are fair, and community members get priority booking and a sliding scale for first records.',
+    ],
+    goodFor: [
+      'Recording an electronic record',
+      'Mixing & mastering',
+      'First-record sliding scale',
+    ],
+    gallery: ['The desk', 'Live room', 'Modular wall', 'Bairro Alto rooftop'],
+    social: {
+      instagram: '@bairroaltostudio',
+      website: 'bairroalto.studio',
+      email: 'book@bairroalto.studio',
+    },
+  },
+  {
+    ref: 'QPL-2026-1007',
+    slug: 'navalha',
+    ownerSlug: 'tomas-mendes',
+    name: 'Navalha',
+    cats: ['grooming'],
+    hood: 'Príncipe Real',
+    price: '€€',
+    blurb:
+      'Queer-owned barbershop known for trans haircuts done right. No awkward questions, no gendered pricing.',
+    tagline: 'The cut you ask for is the cut you get — no negotiation.',
+    ownerName: 'Vasco Lima',
+    ownerRole: 'Owner · barber',
+    ownerBio:
+      'Opened Navalha after years of sending friends across town for a safe cut. QueerPulse member from day one.',
+    address: 'R. do Século 120 · Príncipe Real',
+    hoursNote: 'Tue–Sat, walk-ins welcome, booking advised.',
+    tags: ['Barbershop', 'Walk-in & booking', 'Ground floor'],
+    whatItIs: [
+      'Navalha is a queer-owned barbershop built on giving trans and non-binary clients the haircut they actually asked for, without the interrogation.',
+      'Pricing is by service, never by gender or hair length.',
+    ],
+    goodFor: [
+      'Trans & non-binary cuts done right',
+      'A first big chop, held gently',
+      'Gender-neutral pricing',
+    ],
+    gallery: ['The chairs', 'Mirror wall', 'Príncipe Real window', 'Product shelf'],
+    social: {
+      instagram: '@navalha.barbearia',
+      email: 'ola@navalha.pt',
+      phone: '+351 21 347 2200',
+    },
+  },
+  {
+    ref: 'QPL-2026-1008',
+    slug: 'movimento',
+    ownerSlug: 'ana-rocha',
+    name: 'Movimento',
+    cats: ['fitness'],
+    hood: 'Alfama',
+    price: '€',
+    blurb:
+      'Yoga, capoeira, and weights in a converted Alfama warehouse. Queer-run, sliding-scale memberships.',
+    tagline: 'Yoga, capoeira, and iron under one Alfama roof — pay what you can.',
+    ownerName: 'Rui & Pedro',
+    ownerRole: 'Co-founders',
+    ownerBio:
+      'Two friends who wanted one room for all the ways they move. Queer-run, sliding-scale on principle.',
+    address: 'Beco do Mexias 4 · Alfama',
+    hoursNote: 'Class schedule Mon–Sat; weights room open daily.',
+    tags: ['Movement studio', 'Sliding scale', 'Ramp access'],
+    whatItIs: [
+      'Movimento is a queer-run movement space in a converted Alfama warehouse: yoga at dawn, capoeira in the evening, free weights in between.',
+      'Memberships are sliding-scale and nobody checks your maths, so the room ends up genuinely mixed.',
+    ],
+    goodFor: [
+      'Mixing yoga, capoeira & weights',
+      'Pay-what-you-can access',
+      'A genuinely mixed room',
+    ],
+    gallery: ['Warehouse floor', 'Capoeira roda', 'Weights corner', 'Alfama rooftop'],
+    social: {
+      instagram: '@movimento.alfama',
+      website: 'movimento.pt',
+      email: 'ola@movimento.pt',
+    },
+  },
+];
+
+// Two reviews per seeded listing, keyed by slug. Imported/client reviews carry
+// no member link (reviewer_id stays null); the aggregate star rating on the
+// directory detail page is computed from these.
+interface ListingReviewSeed {
+  name: string;
+  byline: string;
+  stars: number;
+  text: string;
+  helpful: number;
+}
+
+const LISTING_REVIEWS: Record<string, ListingReviewSeed[]> = {
+  'atelier-pulso': [
+    {
+      name: 'André Quintela',
+      byline: 'he/him · client',
+      stars: 5,
+      text: 'Inês rebuilt my studio identity and made it feel more like me than my old one did. Patient, fast, honest about what wasn’t working.',
+      helpful: 12,
+    },
+    {
+      name: 'Livraria Bertha',
+      byline: 'partner',
+      stars: 5,
+      text: 'Designed our entire signage and event series. Every queer press in Lisbon should be working with her.',
+      helpful: 7,
+    },
+  ],
+  'queer-supper-club': [
+    {
+      name: 'Carla Nunes',
+      byline: 'she/her · regular',
+      stars: 5,
+      text: 'I came alone to my first one terrified and left with three numbers and a full heart. Tomás seats you like he’s thought about it all week.',
+      helpful: 28,
+    },
+    {
+      name: 'Kai Oliveira',
+      byline: 'they/them · 2 visits',
+      stars: 5,
+      text: 'The food is genuinely excellent and the room is the point. Best twelve euros-an-hour my social life has ever spent.',
+      helpful: 15,
+    },
+  ],
+  'galeria-lume': [
+    {
+      name: 'Luísa Marques',
+      byline: 'she/her · curator',
+      stars: 5,
+      text: 'Lume shows the work the big institutions will claim to have discovered in five years. Go now and be smug later.',
+      helpful: 12,
+    },
+    {
+      name: 'Beatriz Pinto',
+      byline: 'she/her · artist',
+      stars: 5,
+      text: 'They gave me my first solo room and treated it like it mattered. Openings feel like a community, not a market.',
+      helpful: 8,
+    },
+  ],
+  'livraria-bertha': [
+    {
+      name: 'Sofia Castaño',
+      byline: 'she/her · regular',
+      stars: 5,
+      text: 'I have never left empty-handed and never left poorer in spirit. The recommendations card by the till is a hazard.',
+      helpful: 17,
+    },
+    {
+      name: 'Nuno Ferreira',
+      byline: 'he/him · 4 visits',
+      stars: 5,
+      text: 'Came for one book, stayed for a launch I didn’t know was happening, met half a reading group. That’s Bertha.',
+      helpful: 11,
+    },
+  ],
+  'a-farinha': [
+    {
+      name: 'Anika Rao',
+      byline: 'she/her · regular',
+      stars: 5,
+      text: 'Told Renato "something orange and a bit weird" and he changed my whole opinion of wine. The plates kept coming and I let them.',
+      helpful: 16,
+    },
+    {
+      name: 'Sofia Castaño',
+      byline: 'she/her · 3 visits',
+      stars: 5,
+      text: 'Brought a date, then my friends, then my mother. Passed every test. Hospitality you can feel.',
+      helpful: 9,
+    },
+  ],
+  'bairro-alto-studio': [
+    {
+      name: 'Kai Oliveira',
+      byline: 'they/them · artist',
+      stars: 5,
+      text: 'Diogo got a sound out of my demos I’d been chasing for two years. The modular wall alone is worth the trip.',
+      helpful: 10,
+    },
+    {
+      name: 'Rita Sousa',
+      byline: 'she/her · client',
+      stars: 5,
+      text: 'First-record sliding scale meant I could afford to make the thing properly. Patient with a total beginner.',
+      helpful: 8,
+    },
+  ],
+  navalha: [
+    {
+      name: 'Kai Oliveira',
+      byline: 'they/them · regular',
+      stars: 5,
+      text: 'Asked for a cut I’d been too scared to ask for anywhere. Vasco just nodded and did it perfectly. I cried a little in the chair.',
+      helpful: 41,
+    },
+    {
+      name: 'Nuno Ferreira',
+      byline: 'he/him · monthly',
+      stars: 5,
+      text: 'Same price as my old place, none of the awkwardness, twice the skill. Never going anywhere else.',
+      helpful: 13,
+    },
+  ],
+  movimento: [
+    {
+      name: 'Kai Oliveira',
+      byline: 'they/them · member',
+      stars: 5,
+      text: 'Where else can you do sun salutations and then deadlift in the same hour for whatever you can pay? Alfama’s best-kept secret.',
+      helpful: 15,
+    },
+    {
+      name: 'Tomás Beto',
+      byline: 'he/him · capoeira',
+      stars: 4,
+      text: 'The roda on Sundays is pure joy and properly mixed — ages, bodies, levels. Sliding scale means everyone’s actually there.',
+      helpful: 8,
+    },
+  ],
+};
+
+// Upcoming events hosted at a listing's venue, keyed by listing slug. `inDays`
+// is relative to seed-run time so seeded events are always in the future (the
+// directory detail page only shows upcoming, published events).
+interface ListingEventSeed {
+  slug: string;
+  title: string;
+  description: string;
+  inDays: number;
+  hour: number;
+}
+
+const LISTING_EVENTS: Record<string, ListingEventSeed[]> = {
+  'galeria-lume': [
+    {
+      slug: 'lume-group-show-opening',
+      title: 'Opening — group show, eight emerging artists',
+      description:
+        'The summer group show opens with eight emerging queer and feminist artists. Free entry, generous openings.',
+      inDays: 12,
+      hour: 18,
+    },
+  ],
+  'livraria-bertha': [
+    {
+      slug: 'bertha-queer-poetry-reading',
+      title: 'Reading — new queer poetry in translation',
+      description: 'An evening of new queer poetry in translation, read between the stacks.',
+      inDays: 5,
+      hour: 19,
+    },
+    {
+      slug: 'bertha-stone-butch-book-club',
+      title: 'Book club · "Stone Butch Blues"',
+      description: 'This month the book club reads Leslie Feinberg’s "Stone Butch Blues".',
+      inDays: 14,
+      hour: 17,
+    },
+  ],
+  'queer-supper-club': [
+    {
+      slug: 'supper-club-summer-dinner',
+      title: 'Summer dinner — the market decides',
+      description: 'The next monthly seating: a seasonal menu for twelve, the market decides the courses.',
+      inDays: 9,
+      hour: 20,
+    },
+  ],
+};
+
+async function seedListings(
+  manager: EntityManager,
+  memberIdBySlug: Map<string, string>,
+): Promise<void> {
+  const listings = manager.getRepository(Listing);
+  const reviews = manager.getRepository(ListingReview);
+  const events = manager.getRepository(Event);
+
+  const userId = (slug: string): string => {
+    const id = memberIdBySlug.get(slug);
+    if (!id) {
+      throw new Error(
+        `Cannot seed listings: no seeded member with slug "${slug}"`,
+      );
+    }
+    return id;
+  };
+
+  for (const listing of LISTINGS) {
+    const existing = await listings.findOne({ where: { slug: listing.slug } });
+    if (existing) {
+      continue;
+    }
+
+    const saved = await listings.save(
+      listings.create({
+        ref: listing.ref,
+        slug: listing.slug,
+        ownerId: userId(listing.ownerSlug),
+        status: ListingStatus.Live,
+        name: listing.name,
+        cats: listing.cats,
+        hood: listing.hood,
+        price: listing.price,
+        blurb: listing.blurb,
+        tagline: listing.tagline,
+        tags: listing.tags,
+        goodFor: listing.goodFor,
+        whatItIs: listing.whatItIs.map((text, index) => ({
+          id: `wit-${index}`,
+          text,
+        })),
+        address: listing.address,
+        hoursNote: listing.hoursNote,
+        // The prototype's gallery is caption cells (no images), so the seed's
+        // captions map onto the four alt-text slots; `photos` stays empty.
+        alt: {
+          wide: listing.gallery[0] ?? '',
+          d1: listing.gallery[1] ?? '',
+          d2: listing.gallery[2] ?? '',
+          vibe: listing.gallery[3] ?? '',
+        },
+        social: {
+          instagram: listing.social.instagram ?? '',
+          website: listing.social.website ?? '',
+          email: listing.social.email ?? '',
+          phone: listing.social.phone ?? '',
+        },
+        ownerName: listing.ownerName,
+        ownerRole: listing.ownerRole,
+        ownerBio: listing.ownerBio,
+        // Seeded businesses are all community-owned / member-run, so link them
+        // to their owner's profile — this is what surfaces the "queer-owned"
+        // badge and "run by a member" line on the directory grid.
+        linkToProfile: true,
+        isPartneredWithQueerpulse: listing.isPartneredWithQueerpulse ?? false,
+        spaceType: listing.spaceType ?? '',
+        capacity: listing.capacity ?? null,
+        hostNote: listing.hostNote ?? '',
+      }),
+    );
+
+    const listingReviews = LISTING_REVIEWS[listing.slug] ?? [];
+    for (const review of listingReviews) {
+      await reviews.save(
+        reviews.create({
+          listingId: saved.id,
+          reviewerId: null,
+          reviewerName: review.name,
+          byline: review.byline,
+          stars: review.stars,
+          text: review.text,
+          helpful: review.helpful,
+        }),
+      );
+    }
+
+    const listingEvents = LISTING_EVENTS[listing.slug] ?? [];
+    for (const listingEvent of listingEvents) {
+      const startAt = new Date();
+      startAt.setDate(startAt.getDate() + listingEvent.inDays);
+      startAt.setHours(listingEvent.hour, 0, 0, 0);
+      await events.save(
+        events.create({
+          hostId: userId(listing.ownerSlug),
+          listingId: saved.id,
+          slug: listingEvent.slug,
+          title: listingEvent.title,
+          description: listingEvent.description,
+          startAt,
+          timezone: 'Europe/Lisbon',
+          venue: listing.name,
+          status: EventStatus.Published,
+          visibility: EventVisibility.Public,
+        }),
+      );
+    }
+
+    console.log(
+      `Seeded listing ${listing.slug}` +
+        (listing.isPartneredWithQueerpulse ? ' (partner space)' : '') +
+        ` with ${listingReviews.length} reviews, ${listingEvents.length} events`,
+    );
+  }
+}
+
+// Task 6 (changemakers real-data plan): a handful of published Change Makers
+// directory profiles so the live `/changemakers` page has real content during
+// development, converted from the frontend mock
+// `changemakerStories.part1.data.tsx` (JSX `lead`/`body` flattened to plain
+// strings — the entity stores plain text, not ReactNode). Three distinct
+// `cause` values so `causeAreas` > 1 on the computed stats.
+interface ChangemakerSeedDefinition {
+  slug: string;
+  name: string;
+  initials: string;
+  cause: string;
+  tint: ChangemakerTint;
+  tags: string[];
+  summary: string;
+  impact: string[];
+  byline: string;
+  heroNote: string;
+  lead: string;
+  body: string[];
+  pullQuoteText: string;
+  pullQuoteCite: string;
+  isFeatured: boolean;
+  sortOrder: number;
+}
+
+const CHANGEMAKERS: ChangemakerSeedDefinition[] = [
+  {
+    slug: 'catarina-vaz',
+    name: 'Catarina Vaz',
+    initials: 'CV',
+    cause: 'Housing Rights · Mouraria',
+    tint: 'coral',
+    tags: ['Housing', 'Organising', 'Policy'],
+    summary:
+      "When Catarina's neighbours started receiving eviction notices in 2022, she didn't wait for someone else to act. She knocked on every door, mapped every situation, and built a coalition that eventually made it to the Câmara Municipal. Today she runs Mouraria's most active queer residents' network.",
+    impact: [
+      'Helped 14 queer households navigate legal challenges to eviction notices',
+      'Testified twice at Câmara Municipal on the impact of short-term rentals on queer residents',
+      'Co-authoring a housing rights brief for LGBTQ+ people with ILGA Portugal',
+    ],
+    byline: 'Words by Marta Reis',
+    heroNote: 'Catarina on her street in Mouraria',
+    lead: "She turned a stack of eviction notices into a residents' coalition the city council could not ignore.",
+    body: [
+      'In the spring of 2022, three of Catarina\'s neighbours got the same letter within a week — a notice to vacate, dressed up in the language of "building works." She recognised it for what it was: the slow, legal pushing-out of the people who had made Mouraria what it is. Many of them were older, many were queer, and almost all had lived on the same street for decades.',
+      'She could have signed a petition. Instead she started knocking on doors. Not to organise a protest — to map the situation. Who had received what, when, from which landlord, under which clause. By the end of the month she had a spreadsheet that did something no individual tenant could do alone: it showed a pattern.',
+      'That spreadsheet became a coalition. The coalition became a delegation to the Câmara Municipal, where Catarina testified — twice — on how short-term rentals were hollowing out the neighbourhood\'s queer community. She is not a lawyer and has never claimed to be one. What she is, is impossible to brush aside, because she always arrives with the receipts.',
+      "Today her residents' network is the most active in Mouraria. It runs a phone tree for anyone who gets a notice, a shared folder of documentation, and a standing relationship with ILGA Portugal's legal team. None of it existed three years ago. All of it exists because one person decided that the neighbourhood that raised us should still have room for us.",
+      "We highlight Catarina because her work is the kind that rarely gets seen: patient, unglamorous, and built entirely on showing up for the people next door. She didn't wait to be qualified. She started, and the qualification followed.",
+    ],
+    pullQuoteText:
+      'The neighbourhood that raised us should still have room for us.',
+    pullQuoteCite: '— Catarina Vaz',
+    isFeatured: true,
+    sortOrder: 0,
+  },
+  {
+    slug: 'jonas-ferreira',
+    name: 'Jonas Ferreira',
+    initials: 'JF',
+    cause: 'Trans Healthcare',
+    tint: 'jade',
+    tags: ['Health', 'Advocacy', 'Policy'],
+    summary:
+      'Founded the "Saúde Trans" information project and has personally trained over 40 GPs in trans-affirming care. Pushing hard on public health system reform.',
+    impact: [
+      'Personally trained 40+ GPs in trans-affirming primary care',
+      'Built "Saúde Trans", the plain-language guide most members send to their doctors',
+      'Sits on a working group advising the SNS on trans care pathways',
+    ],
+    byline: 'Words by Catarina Vaz',
+    heroNote: 'Jonas at a GP training session',
+    lead: "He decided that the fifteen minutes trans patients spend explaining themselves should be the doctor's job to remove, not the patient's to endure.",
+    body: [
+      'Jonas started counting. Every appointment, every trans person he knew described the same tax: the first ten or fifteen minutes spent not on their health, but on explaining themselves — their identity, their history, their words — to a clinician who should already have known.',
+      "So he built the thing that didn't exist: Saúde Trans, a plain-language resource that trans patients could hand to a GP, and that GPs could actually use. Not an academic paper. A practical guide — what to ask, what not to ask, what to write down, who to refer to.",
+      'Then he did the harder thing. He started training doctors, one practice at a time. Over forty GPs have now sat through his session, which is less a lecture than a series of uncomfortable, useful corrections. Several of them now run clinics that members travel across the city to reach.',
+      'He is not satisfied with individual clinics, though. Reform is the point. Jonas now sits on a working group advising the public health service on trans care pathways — the slow, bureaucratic, deeply unglamorous arena where the fifteen minutes actually get abolished for everyone, not just the people lucky enough to find a good doctor.',
+      'We highlight Jonas because he turned a private frustration into a public protocol. He measured the harm, named it, and then did the patient work of removing it from the system itself.',
+    ],
+    pullQuoteText: "Explaining yourself shouldn't be the price of getting care.",
+    pullQuoteCite: '— Jonas Ferreira',
+    isFeatured: false,
+    sortOrder: 1,
+  },
+  {
+    slug: 'luisa-gomes',
+    name: 'Luísa Gomes',
+    initials: 'LG',
+    cause: 'Arts & Culture',
+    tint: 'coral',
+    tags: ['Arts', 'Curating', 'Culture'],
+    summary:
+      'Programmed the first queer season at a major Lisbon museum and co-founded the Rainbow Arts Collective. Making queer art central, not marginal.',
+    impact: [
+      'Curated the first dedicated queer season at a major Lisbon museum',
+      'Co-founded the Rainbow Arts Collective and its open-crit programme',
+      'Mentors emerging queer artists into mainstream institutional shows',
+    ],
+    byline: 'Words by André Bento',
+    heroNote: 'Luísa in the gallery, mid-install',
+    lead: 'She refused the sidebar. Queer art, she insists, belongs in the main hall — and she has spent a decade putting it there.',
+    body: [
+      'For most of Luísa\'s career, "queer programming" in Lisbon meant a corner during Pride, a panel after hours, a side room. She found the arrangement quietly insulting — not because the work was bad, but because the placement said something about where it belonged.',
+      "So when she finally had the keys, she programmed the first dedicated queer season at a major Lisbon museum — in the main galleries, in the main season, on the main posters. Not as a theme to be visited and left, but as part of the city's cultural record.",
+      "Alongside the institutional work, she co-founded the Rainbow Arts Collective, which does the opposite job: it builds rooms from nothing, in borrowed spaces, for artists who don't yet have the keys. The two halves of her work feed each other — the collective is where the museum's next show often begins.",
+      "What ties it together is a refusal of the margin. Luísa treats queer art as central to Lisbon's story, and then makes the institutions act as if that were obviously true.",
+      "We highlight Luísa because changing what hangs on the main wall changes what a city thinks of itself. She didn't ask for a bigger sidebar. She moved the work to the centre.",
+    ],
+    pullQuoteText: "We're not a sidebar to this city. We're part of the main story.",
+    pullQuoteCite: '— Luísa Gomes',
+    isFeatured: false,
+    sortOrder: 2,
+  },
+];
+
+// The two curated hero stats (`peopleHelped`, `activeCampaigns`) that
+// `toDirectoryStatsDTO` cannot compute from the profiles themselves — matches
+// the frontend demo-mode figures in `useChangemakers.ts`'s `DEMO_STATS`
+// (1.2k / 12) so live mode shows comparable numbers locally.
+const CHANGEMAKER_DIRECTORY_SETTINGS = {
+  peopleHelped: 1200,
+  activeCampaigns: 12,
+};
+
+async function seedChangemakers(manager: EntityManager): Promise<void> {
+  const changemakers = manager.getRepository(Changemaker);
+  const settings = manager.getRepository(ChangemakerDirectorySettings);
+
+  let insertedCount = 0;
+  for (const definition of CHANGEMAKERS) {
+    // Idempotent: skip if a changemaker with this slug already exists.
+    const existing = await changemakers.findOne({
+      where: { slug: definition.slug },
+    });
+    if (existing) {
+      continue;
+    }
+
+    await changemakers.save(
+      changemakers.create({
+        slug: definition.slug,
+        name: definition.name,
+        initials: definition.initials,
+        cause: definition.cause,
+        tint: definition.tint,
+        tags: definition.tags,
+        summary: definition.summary,
+        imageUrl: null,
+        impact: definition.impact,
+        byline: definition.byline,
+        heroNote: definition.heroNote,
+        lead: definition.lead,
+        body: definition.body,
+        pullQuoteText: definition.pullQuoteText,
+        pullQuoteCite: definition.pullQuoteCite,
+        status: ChangemakerStatus.Published,
+        isFeatured: definition.isFeatured,
+        sortOrder: definition.sortOrder,
+        publishedAt: new Date(),
+      }),
+    );
+    insertedCount += 1;
+  }
+  console.log(`Seeded ${insertedCount} changemakers`);
+
+  // Idempotent: the settings row is a singleton keyed by CHANGEMAKER_SETTINGS_ID.
+  const existingSettings = await settings.findOne({
+    where: { id: CHANGEMAKER_SETTINGS_ID },
+  });
+  if (!existingSettings) {
+    await settings.save(
+      settings.create({
+        id: CHANGEMAKER_SETTINGS_ID,
+        peopleHelped: CHANGEMAKER_DIRECTORY_SETTINGS.peopleHelped,
+        activeCampaigns: CHANGEMAKER_DIRECTORY_SETTINGS.activeCampaigns,
+      }),
+    );
+    console.log('Seeded changemaker directory settings');
+  }
+}
+
 async function seed(): Promise<void> {
   // Guard: the seed inserts fixture members and must never touch a production
   // database. Refuse to run when NODE_ENV signals production.
@@ -2040,6 +3626,9 @@ async function seed(): Promise<void> {
       Activity,
       Group,
       GroupMembership,
+      Vouch,
+      Report,
+      ModAuditLog,
       Community,
       CommunityMember,
       CommunityPost,
@@ -2055,6 +3644,13 @@ async function seed(): Promise<void> {
       VolunteerOpportunityTeam,
       VolunteerSignup,
       Partner,
+      Listing,
+      ListingReview,
+      Event,
+      Changemaker,
+      ChangemakerDirectorySettings,
+      HousingCoop,
+      CoopJoinRequest,
     ],
     namingStrategy: new SnakeNamingStrategy(),
     synchronize: false,
@@ -2107,6 +3703,12 @@ async function seed(): Promise<void> {
             tags: m.tags,
             openTo: m.openTo,
             avatarUrl: null,
+            // Falls back to the column defaults (false / now()) for the
+            // original 3 fixtures, which don't set these — tomas-mendes then
+            // gets overridden by the special-case block below, matching its
+            // prior behavior exactly.
+            verified: m.verified ?? false,
+            joinedAt: m.joinedAt ? new Date(m.joinedAt) : new Date(),
           }),
         );
 
@@ -2166,21 +3768,29 @@ async function seed(): Promise<void> {
         console.log(`Seeded member ${m.slug}`);
       }
 
-      // Communities are owned by / rostered with the seeded active members
-      // above; resolve their userIds by slug via the Profile repo.
+      // Communities, companies, jobs, etc. are owned by / rostered with the
+      // seeded active members above; resolve every member's userId by slug via
+      // the Profile repo. (Originally just the first 3 fixtures — extended to
+      // every seeded slug for Task C1's vouches/reports/memberships, which
+      // reference the full member roster.)
       const memberIdBySlug = new Map<string, string>();
-      for (const slug of ['tomas-mendes', 'ana-rocha', 'noa-silva']) {
-        const profile = await profiles.findOne({ where: { slug } });
+      for (const m of MEMBERS) {
+        const profile = await profiles.findOne({ where: { slug: m.slug } });
         if (profile) {
-          memberIdBySlug.set(slug, profile.userId);
+          memberIdBySlug.set(m.slug, profile.userId);
         }
       }
       await seedCommunities(manager, memberIdBySlug);
+      await seedLiveCommunityMemberships(manager, memberIdBySlug);
+      await seedVouches(manager, memberIdBySlug);
+      await seedReports(manager, memberIdBySlug);
       await seedCompanies(manager, memberIdBySlug);
       await seedJobs(manager, memberIdBySlug);
       await seedVolunteering(manager, memberIdBySlug);
       const partnerIdBySlug = await seedPartners(manager, memberIdBySlug);
       await backfillVolunteeringPartnerLinks(manager, partnerIdBySlug);
+      await seedListings(manager, memberIdBySlug);
+      await seedChangemakers(manager);
     });
 
     console.log('Seed complete.');

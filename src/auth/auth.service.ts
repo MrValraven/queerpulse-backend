@@ -13,6 +13,8 @@ import {
   UserSessionRevokedEvent,
 } from '../chat/session.events';
 import { InvitesService } from '../membership/invites.service';
+import { VouchService } from '../vouch/vouch.service';
+import { VOUCH_CREATED, VouchCreatedEvent } from '../vouch/vouch.events';
 import {
   EmailSuppression,
   hashSuppressedEmail,
@@ -51,6 +53,7 @@ export class AuthService {
     private readonly refreshTokens: Repository<RefreshToken>,
     private readonly dataSource: DataSource,
     private readonly invitesService: InvitesService,
+    private readonly vouchService: VouchService,
     private readonly eventEmitter: EventEmitter2,
     @InjectRepository(EmailSuppression)
     private readonly emailSuppressions: Repository<EmailSuppression>,
@@ -127,33 +130,59 @@ export class AuthService {
     }
     const attestedAt = new Date();
 
-    const user = await this.dataSource.transaction(async (manager) => {
-      const { inviteId, inviterId } =
-        await this.invitesService.validateInviteForSignup(
-          manager,
-          inviteCode,
-          profile.email,
-        );
-      const created = await this.usersService.createGoogleUser(manager, {
-        googleId: profile.googleId,
-        email: profile.email,
-        firstName: profile.firstName,
-        lastName: profile.lastName,
-        avatarUrl: profile.avatarUrl ?? null,
-        status: UserStatus.Active,
-        invitedBy: inviterId,
-        ageAttestedAt: attestedAt,
-        termsVersion: attestation.termsVersion ?? null,
-      });
-      await this.invitesService.claimInvite(manager, inviteId, created.id);
-      return created;
-    });
+    const { user, vouched, inviterId } = await this.dataSource.transaction(
+      async (manager) => {
+        const { inviteId, inviterId, personal, vouch } =
+          await this.invitesService.validateInviteForSignup(
+            manager,
+            inviteCode,
+            profile.email,
+          );
+        const created = await this.usersService.createGoogleUser(manager, {
+          googleId: profile.googleId,
+          email: profile.email,
+          firstName: profile.firstName,
+          lastName: profile.lastName,
+          avatarUrl: profile.avatarUrl ?? null,
+          status: UserStatus.Active,
+          invitedBy: inviterId,
+          ageAttestedAt: attestedAt,
+          termsVersion: attestation.termsVersion ?? null,
+        });
+        await this.invitesService.claimInvite(manager, inviteId, created.id);
+        // The inviter vouches for the member they personally brought in — the
+        // real endorsement edge behind the "X vouched for you" card the new
+        // member sees during onboarding, carrying over the invite's vouch note.
+        // Only for personal invites: an admin approving a join request (or the
+        // genesis bootstrap) is not a personal endorsement. Part of this
+        // transaction so a failed signup never leaves a dangling vouch.
+        const vouched =
+          personal &&
+          (await this.vouchService.createVouchInTransaction(
+            manager,
+            inviterId,
+            created.id,
+            vouch,
+          ));
+        return { user: created, vouched, inviterId };
+      },
+    );
 
     // Parity with the accept flow: the new member gets the "PromotedToMember"
     // notification via the existing USER_PROMOTED listener.
     this.eventEmitter.emit(USER_PROMOTED, {
       userId: user.id,
     } satisfies UserPromotedEvent);
+
+    // Emitted only after the transaction commits (a mid-transaction emit would
+    // survive a rollback): fans out the "VouchReceived" notification and keeps
+    // vouch counts consistent, exactly as a normal vouch does.
+    if (vouched) {
+      this.eventEmitter.emit(VOUCH_CREATED, {
+        voucherId: inviterId,
+        voucheeId: user.id,
+      } satisfies VouchCreatedEvent);
+    }
 
     return user;
   }

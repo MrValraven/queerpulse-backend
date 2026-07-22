@@ -21,6 +21,38 @@ export enum ListingStatus {
   Live = 'live',
 }
 
+/** Safe-space badge lifecycle on a business listing. `none` = not a safe space. */
+export enum SafeSpaceStatus {
+  None = 'none',
+  Verified = 'verified',
+  Removed = 'removed',
+}
+
+/** One "what you can rely on" promise shown on the safe-space detail page. */
+export interface SafeSpacePromise {
+  title: string;
+  desc: string;
+}
+
+/** A member vouch for a safe space. `initials`/`tint` are derived server-side. */
+export interface SafeSpaceVouch {
+  name: string;
+  byline: string;
+  text: string;
+  when: string;
+}
+
+/** Removal narrative, populated only when `safeSpaceStatus = removed`. */
+export interface SafeSpaceRemoval {
+  reason: string;
+  removedDate: string;
+  listedSince: string;
+  flags: number;
+  reasonLong: string[];
+  timeline: { date: string; event: string }[];
+  whatNow: string;
+}
+
 /** A single "what it actually is" bullet — mirrors the frontend's `WitLine`. */
 export interface ListingWitLine {
   id: string;
@@ -187,6 +219,63 @@ export class Listing {
 
   @Column({ type: 'boolean', default: false })
   consentGuide: boolean;
+
+  // --- Partner-space fields (host directory) ---
+  // A listing flagged as a QueerPulse partner venue surfaces on the public
+  // host page's "Partner spaces" card (`GET /directory/spaces`). These are an
+  // ops/moderation decision, not part of the member-submission wizard, so they
+  // default to unpartnered/empty and are set by seed or a future admin toggle.
+
+  @Index('IDX_listings_is_partnered_with_queerpulse')
+  @Column({ type: 'boolean', default: false })
+  isPartneredWithQueerpulse: boolean;
+
+  /** Human venue type shown on the host card, e.g. "Warehouse". */
+  @Column({ type: 'varchar', default: '' })
+  spaceType: string;
+
+  /** Max guests the venue hosts ("up to N"); null when not specified. */
+  @Column({ type: 'int', nullable: true })
+  capacity: number | null;
+
+  /** Trailing qualifier on the host card, e.g. "events only". */
+  @Column({ type: 'varchar', default: '' })
+  hostNote: string;
+
+  // --- Safe-space fields (safety directory) ---
+  // A listing a moderator has vetted as a safe space surfaces on the public
+  // Safe Spaces page (`GET /directory/safe-spaces`). `none` by default; set by
+  // the moderator toggle (`PATCH /listings/:ref/safe-space`) or seed.
+
+  @Index('IDX_listings_safe_space_status')
+  @Column({
+    type: 'enum',
+    enum: SafeSpaceStatus,
+    enumName: 'listings_safe_space_status_enum',
+    default: SafeSpaceStatus.None,
+  })
+  safeSpaceStatus: SafeSpaceStatus;
+
+  @Column({ type: 'int', nullable: true })
+  safeSpaceTier: number | null;
+
+  @Column({ type: 'varchar', default: '' })
+  safeSpaceVerifier: string;
+
+  @Column({ type: 'date', nullable: true })
+  safeSpaceReVerifiedAt: string | null;
+
+  @Column({ type: 'text', default: '' })
+  safeSpaceSub: string;
+
+  @Column({ type: 'jsonb', default: () => "'[]'" })
+  safeSpacePromises: SafeSpacePromise[];
+
+  @Column({ type: 'jsonb', default: () => "'[]'" })
+  safeSpaceVouches: SafeSpaceVouch[];
+
+  @Column({ type: 'jsonb', nullable: true })
+  safeSpaceRemoval: SafeSpaceRemoval | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
