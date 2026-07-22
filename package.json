@@ -35,6 +35,7 @@
     "migration:create": "typeorm-ts-node-commonjs migration:create",
     "migration:run:prod": "typeorm -d dist/data-source.js migration:run",
     "migration:revert:prod": "typeorm -d dist/data-source.js migration:revert",
+    "storage:cors": "node scripts/set-bucket-cors.mjs",
     "seed": "ts-node -r tsconfig-paths/register src/database/seed.ts",
     "seed:safe-spaces": "ts-node -r tsconfig-paths/register src/database/seed-safe-spaces.ts"
   },

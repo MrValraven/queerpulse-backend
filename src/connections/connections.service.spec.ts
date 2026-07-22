@@ -301,6 +301,8 @@ describe('ConnectionsService', () => {
           pronouns: 'they/them',
           tagline: 'here to help',
         },
+        mutuals: 0,
+        vouchBadge: null,
         introducedBy: null,
       });
     });
@@ -575,6 +577,70 @@ describe('ConnectionsService', () => {
       const [item] = items;
       expect(item.introducedBy).not.toBeNull();
       expect(item.introducedBy?.slug).toBe('intro');
+    });
+
+    it('counts accepted connections shared with the viewer as mutuals', async () => {
+      connections.findAndCount.mockResolvedValue([
+        [
+          {
+            id: 'c1',
+            status: ConnectionStatus.Accepted,
+            requesterId: 'me',
+            addresseeId: 'a',
+            introducedBy: null,
+            createdAt: new Date(),
+            respondedAt: new Date(),
+            requestMessage: null,
+            requestReason: null,
+          },
+        ],
+        1,
+      ]);
+      // First find: the viewer is accepted-connected to x and a.
+      // Second find: `a` is also connected to x — the one shared mutual.
+      connections.find
+        .mockResolvedValueOnce([
+          { requesterId: 'me', addresseeId: 'x' },
+          { requesterId: 'me', addresseeId: 'a' },
+        ])
+        .mockResolvedValueOnce([
+          { requesterId: 'a', addresseeId: 'x', status: 'accepted' },
+        ]);
+      profiles.find.mockResolvedValue([
+        { userId: 'a', slug: 'a', firstName: 'A', lastName: 'Ok' },
+      ]);
+
+      const { items } = await service.list('me', 'all');
+      expect(items[0].mutuals).toBe(1);
+    });
+
+    it('derives a mutual vouch badge from vouches in both directions', async () => {
+      connections.findAndCount.mockResolvedValue([
+        [
+          {
+            id: 'c1',
+            status: ConnectionStatus.Accepted,
+            requesterId: 'me',
+            addresseeId: 'a',
+            introducedBy: null,
+            createdAt: new Date(),
+            respondedAt: new Date(),
+            requestMessage: null,
+            requestReason: null,
+          },
+        ],
+        1,
+      ]);
+      vouches.find.mockResolvedValue([
+        { voucherId: 'me', voucheeId: 'a' },
+        { voucherId: 'a', voucheeId: 'me' },
+      ]);
+      profiles.find.mockResolvedValue([
+        { userId: 'a', slug: 'a', firstName: 'A', lastName: 'Ok' },
+      ]);
+
+      const { items } = await service.list('me', 'all');
+      expect(items[0].vouchBadge).toBe('mutual');
     });
   });
 

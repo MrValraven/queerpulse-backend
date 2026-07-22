@@ -2,6 +2,7 @@ import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
+  IsBoolean,
   IsEnum,
   IsIn,
   IsOptional,
@@ -101,4 +102,9 @@ export class UpdateProfileDto {
   @IsString({ each: true })
   @MaxLength(60, { each: true })
   lookingFor?: string[];
+
+  // Whether `lookingFor` is shown on the profile to other viewers.
+  @IsOptional()
+  @IsBoolean()
+  lookingForPublic?: boolean;
 }

@@ -221,17 +221,27 @@ pnpm run test:e2e
 
 ## Deployment
 
-Order matters: **build → migrate → start**.
+Order matters: **build → migrate → apply bucket CORS → start**.
 
 ```bash
 pnpm install --frozen-lockfile
 pnpm run build
 pnpm run migration:run:prod        # apply migrations against the target DB
+pnpm run storage:cors              # apply the bucket's browser-CORS policy
 pnpm run start:prod                # node dist/main
 ```
 
 Run `migration:run:prod` as a discrete step before rolling out new app
 instances so the schema is in place before any new code serves traffic.
+
+`storage:cors` applies the object-storage bucket's CORS policy (so the browser
+can PUT directly to presigned upload URLs). It's a provisioning step, not app
+logic — it runs once per deploy with bucket-admin credentials, **not** on every
+server boot, so the running app never needs `PutBucketCors` rights. It's
+idempotent (re-applying replaces the whole policy) and reads its allowed origins
+from `FRONTEND_URL`, the same allowlist the API uses for CORS — so the two can
+never drift. With no `AWS_*` bucket vars set it skips cleanly, so it's safe to
+leave in the deploy chain of a storage-less environment.
 
 > After dependency changes, run `pnpm install` and **commit the updated
 > `pnpm-lock.yaml`** — CI installs with `--frozen-lockfile` and fails on a stale
@@ -248,7 +258,9 @@ Or build just the image (multi-stage; runs `node dist/main`):
 ```bash
 docker build -t queerpulse-backend .
 docker run --rm -p 3000:3000 --env-file .env queerpulse-backend
-# migrate first: docker run --rm --env-file .env queerpulse-backend npm run migration:run:prod
+# migrate + apply CORS first:
+#   docker run --rm --env-file .env queerpulse-backend npm run migration:run:prod
+#   docker run --rm --env-file .env queerpulse-backend npm run storage:cors
 ```
 
 ### Run exactly ONE replica

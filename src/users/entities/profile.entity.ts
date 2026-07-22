@@ -85,6 +85,11 @@ export class Profile {
   @Column({ type: 'text', array: true, default: '{}' })
   lookingFor: string[];
 
+  // Member-controlled: when true, `lookingFor` is shown on the profile to other
+  // viewers. Default false — private until the member opts in. See toFullProfile.
+  @Column({ type: 'boolean', default: false })
+  lookingForPublic: boolean;
+
   @Column({ type: 'text', array: true, default: '{}' })
   tags: string[];
 

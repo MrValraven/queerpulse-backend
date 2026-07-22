@@ -39,12 +39,17 @@ RUN apk add --no-cache tini
 COPY --chown=node:node package.json pnpm-lock.yaml ./
 COPY --chown=node:node --from=prod-deps /app/node_modules ./node_modules
 COPY --chown=node:node --from=build /app/dist ./dist
+# One-off provisioning scripts (e.g. `npm run storage:cors`) run as deploy steps
+# alongside migrations, so they must exist in the runtime image.
+COPY --chown=node:node scripts ./scripts
 
 USER node
 EXPOSE 3000
 
-# Deploy order is migrate -> start. Run migrations out-of-band before rollout:
+# Deploy order is migrate -> apply-bucket-CORS -> start. Run the out-of-band
+# steps before rollout (both are idempotent):
 #   docker run ... npm run migration:run:prod
+#   docker run ... npm run storage:cors
 # then start the server (this default CMD). See README "Deployment".
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "dist/main"]

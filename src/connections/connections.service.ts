@@ -20,6 +20,8 @@ import { UserStatus } from '../users/entities/user.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import {
   ConnectionListItem,
+  ConnectionRelationship,
+  VouchBadge,
   toConnectionListItem,
 } from './connection-response';
 import { Connection, ConnectionStatus } from './entities/connection.entity';
@@ -34,6 +36,9 @@ function isUniqueViolation(err: unknown): boolean {
     (err.driverError as { code?: string })?.code === '23505'
   );
 }
+
+/** The relationship for a member the viewer shares nothing with (yet). */
+const NO_RELATIONSHIP: ConnectionRelationship = { mutuals: 0, vouchBadge: null };
 
 @Injectable()
 export class ConnectionsService {
@@ -168,15 +173,19 @@ export class ConnectionsService {
       reason,
     );
     const otherUserId = this.otherId(connection, requesterId);
-    const profilesById = await this.profilesByUserIds(
-      [otherUserId, connection.introducedBy].filter(
-        (userId): userId is string => userId !== null && userId !== undefined,
+    const [profilesById, relationshipsByUserId] = await Promise.all([
+      this.profilesByUserIds(
+        [otherUserId, connection.introducedBy].filter(
+          (userId): userId is string => userId !== null && userId !== undefined,
+        ),
       ),
-    );
+      this.relationshipsByUserIds(requesterId, [otherUserId]),
+    ]);
     return toConnectionListItem(
       connection,
       requesterId,
       profilesById.get(otherUserId),
+      relationshipsByUserId.get(otherUserId) ?? NO_RELATIONSHIP,
       connection.introducedBy
         ? profilesById.get(connection.introducedBy)
         : undefined,
@@ -397,18 +406,20 @@ export class ConnectionsService {
     const introducerIds = rows
       .map((c) => c.introducedBy)
       .filter((id): id is string => id !== null && id !== undefined);
-    const profilesById = await this.profilesByUserIds([
-      ...otherIds,
-      ...introducerIds,
+    const [profilesById, relationshipsByUserId] = await Promise.all([
+      this.profilesByUserIds([...otherIds, ...introducerIds]),
+      this.relationshipsByUserIds(userId, otherIds),
     ]);
-    const items = rows.map((c) =>
-      toConnectionListItem(
+    const items = rows.map((c) => {
+      const otherUserId = this.otherId(c, userId);
+      return toConnectionListItem(
         c,
         userId,
-        profilesById.get(this.otherId(c, userId)),
+        profilesById.get(otherUserId),
+        relationshipsByUserId.get(otherUserId) ?? NO_RELATIONSHIP,
         c.introducedBy ? profilesById.get(c.introducedBy) : undefined,
-      ),
-    );
+      );
+    });
     return { items, total, page, pageSize: PAGE_SIZE };
   }
 
@@ -465,5 +476,118 @@ export class ConnectionsService {
       where: { userId: In(userIds) },
     });
     return new Map(found.map((p) => [p.userId, p]));
+  }
+
+  /**
+   * The viewer-relative relationship (shared connections + vouch badge) for each
+   * of `otherIds`, batched into one map. Members with nothing shared are simply
+   * absent — callers default to {@link NO_RELATIONSHIP}.
+   */
+  private async relationshipsByUserIds(
+    viewerUserId: string,
+    otherIds: string[],
+  ): Promise<Map<string, ConnectionRelationship>> {
+    const relationships = new Map<string, ConnectionRelationship>();
+    if (!otherIds.length) {
+      return relationships;
+    }
+    const [mutualCounts, vouchBadges] = await Promise.all([
+      this.mutualCountsByUserIds(viewerUserId, otherIds),
+      this.vouchBadgesByUserIds(viewerUserId, otherIds),
+    ]);
+    for (const otherId of new Set(otherIds)) {
+      const mutuals = mutualCounts.get(otherId) ?? 0;
+      const vouchBadge = vouchBadges.get(otherId) ?? null;
+      if (mutuals || vouchBadge) {
+        relationships.set(otherId, { mutuals, vouchBadge });
+      }
+    }
+    return relationships;
+  }
+
+  /**
+   * Shared accepted-connection counts between the viewer and each of `otherIds`.
+   * Loads the viewer's accepted set once, then every accepted edge touching an
+   * other member, and counts the edges whose far end is one of the viewer's
+   * connections. The direct viewer↔other edge is excluded for free — the viewer
+   * is never a member of their own connection set.
+   */
+  private async mutualCountsByUserIds(
+    viewerUserId: string,
+    otherIds: string[],
+  ): Promise<Map<string, number>> {
+    const counts = new Map<string, number>();
+    if (!otherIds.length) {
+      return counts;
+    }
+    const viewerConnections = new Set(
+      await this.getAcceptedConnectionUserIds(viewerUserId),
+    );
+    if (!viewerConnections.size) {
+      return counts;
+    }
+    const otherSet = new Set(otherIds);
+    const edges = await this.connections.find({
+      where: [
+        { requesterId: In(otherIds), status: ConnectionStatus.Accepted },
+        { addresseeId: In(otherIds), status: ConnectionStatus.Accepted },
+      ],
+    });
+    for (const edge of edges) {
+      for (const candidate of [edge.requesterId, edge.addresseeId]) {
+        if (!otherSet.has(candidate)) {
+          continue;
+        }
+        const farEnd =
+          candidate === edge.requesterId ? edge.addresseeId : edge.requesterId;
+        if (viewerConnections.has(farEnd)) {
+          counts.set(candidate, (counts.get(candidate) ?? 0) + 1);
+        }
+      }
+    }
+    return counts;
+  }
+
+  /**
+   * The vouch badge between the viewer and each of `otherIds`: `you-vouched`
+   * when the viewer vouched for them, `vouched-for-you` the other way, `mutual`
+   * for both. One query loads every vouch in either direction across the set.
+   */
+  private async vouchBadgesByUserIds(
+    viewerUserId: string,
+    otherIds: string[],
+  ): Promise<Map<string, VouchBadge>> {
+    const badges = new Map<string, VouchBadge>();
+    if (!otherIds.length) {
+      return badges;
+    }
+    const vouches = await this.vouches.find({
+      where: [
+        { voucherId: viewerUserId, voucheeId: In(otherIds) },
+        { voucheeId: viewerUserId, voucherId: In(otherIds) },
+      ],
+    });
+    const youVouched = new Set<string>();
+    const vouchedForYou = new Set<string>();
+    for (const vouch of vouches) {
+      if (vouch.voucherId === viewerUserId) {
+        youVouched.add(vouch.voucheeId);
+      }
+      if (vouch.voucheeId === viewerUserId) {
+        vouchedForYou.add(vouch.voucherId);
+      }
+    }
+    for (const otherId of new Set(otherIds)) {
+      const gave = youVouched.has(otherId);
+      const received = vouchedForYou.has(otherId);
+      if (gave && received) {
+        badges.set(otherId, 'mutual');
+      } else if (gave) {
+        badges.set(otherId, 'you-vouched');
+      } else if (received) {
+        badges.set(otherId, 'vouched-for-you');
+      }
+    }
+    return badges;
   }
 }

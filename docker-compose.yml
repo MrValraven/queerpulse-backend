@@ -46,8 +46,10 @@ services:
       FRONTEND_URL: http://localhost:5173
     ports:
       - '3000:3000'
-    # Deploy order: run migrations, then start the server.
-    command: sh -c "npm run migration:run:prod && node dist/main"
+    # Deploy order: run migrations, apply the bucket CORS policy, then start the
+    # server. `storage:cors` is idempotent and reads its origins from
+    # FRONTEND_URL; it's a no-op unless the AWS_* bucket vars are also set.
+    command: sh -c "npm run migration:run:prod && npm run storage:cors && node dist/main"
 
 volumes:
   pgdata:

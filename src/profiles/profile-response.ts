@@ -84,6 +84,8 @@ export interface FullProfileResponse extends ProfileCard {
   // profile owner; `[]` for everyone else (see toFullProfile's `isOwner`).
   identities: string[];
   lookingFor: string[];
+  // Member's own choice of whether the above is visible to other viewers.
+  lookingForPublic: boolean;
   socials: SocialLinkView[];
   work: WorkView[];
   board: BoardView[];
@@ -187,7 +189,10 @@ export function toFullProfile(
     now: p.now,
     openTo: p.openTo,
     identities: isOwner ? (p.identities ?? []) : [],
-    lookingFor: isOwner ? (p.lookingFor ?? []) : [],
+    // Owner always sees their own list; others see it only when the member has
+    // opted in via lookingForPublic.
+    lookingFor: isOwner || p.lookingForPublic ? (p.lookingFor ?? []) : [],
+    lookingForPublic: p.lookingForPublic ?? false,
     socials: rels.socials.map((s) => ({
       platform: s.platform,
       urlOrHandle: s.urlOrHandle,
