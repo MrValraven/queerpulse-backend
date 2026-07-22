@@ -812,23 +812,79 @@ interface LiveCommunityMembershipSeed {
 
 const LIVE_COMMUNITY_MEMBERSHIPS: LiveCommunityMembershipSeed[] = [
   // Queer Artists Lisbon
-  { memberSlug: 'beatriz-coelho', communitySlug: 'queer-artists-lisbon', role: RosterRole.Member },
-  { memberSlug: 'diogo-antunes', communitySlug: 'queer-artists-lisbon', role: RosterRole.Mod },
-  { memberSlug: 'rui-cardoso', communitySlug: 'queer-artists-lisbon', role: RosterRole.Member },
-  { memberSlug: 'duarte-freitas', communitySlug: 'queer-artists-lisbon', role: RosterRole.Member },
+  {
+    memberSlug: 'beatriz-coelho',
+    communitySlug: 'queer-artists-lisbon',
+    role: RosterRole.Member,
+  },
+  {
+    memberSlug: 'diogo-antunes',
+    communitySlug: 'queer-artists-lisbon',
+    role: RosterRole.Mod,
+  },
+  {
+    memberSlug: 'rui-cardoso',
+    communitySlug: 'queer-artists-lisbon',
+    role: RosterRole.Member,
+  },
+  {
+    memberSlug: 'duarte-freitas',
+    communitySlug: 'queer-artists-lisbon',
+    role: RosterRole.Member,
+  },
   // Sober Queers Porto
-  { memberSlug: 'marta-esteves', communitySlug: 'sober-queers-porto', role: RosterRole.Mod },
-  { memberSlug: 'renata-salgado', communitySlug: 'sober-queers-porto', role: RosterRole.Member },
-  { memberSlug: 'catarina-sequeira', communitySlug: 'sober-queers-porto', role: RosterRole.Member },
+  {
+    memberSlug: 'marta-esteves',
+    communitySlug: 'sober-queers-porto',
+    role: RosterRole.Mod,
+  },
+  {
+    memberSlug: 'renata-salgado',
+    communitySlug: 'sober-queers-porto',
+    role: RosterRole.Member,
+  },
+  {
+    memberSlug: 'catarina-sequeira',
+    communitySlug: 'sober-queers-porto',
+    role: RosterRole.Member,
+  },
   // Queer Professionals Network
-  { memberSlug: 'sofia-pinheiro', communitySlug: 'queer-professionals-network', role: RosterRole.Member },
-  { memberSlug: 'leonor-vaz', communitySlug: 'queer-professionals-network', role: RosterRole.Mod },
-  { memberSlug: 'ines-barroso', communitySlug: 'queer-professionals-network', role: RosterRole.Member },
-  { memberSlug: 'tiago-nogueira', communitySlug: 'queer-professionals-network', role: RosterRole.Member },
+  {
+    memberSlug: 'sofia-pinheiro',
+    communitySlug: 'queer-professionals-network',
+    role: RosterRole.Member,
+  },
+  {
+    memberSlug: 'leonor-vaz',
+    communitySlug: 'queer-professionals-network',
+    role: RosterRole.Mod,
+  },
+  {
+    memberSlug: 'ines-barroso',
+    communitySlug: 'queer-professionals-network',
+    role: RosterRole.Member,
+  },
+  {
+    memberSlug: 'tiago-nogueira',
+    communitySlug: 'queer-professionals-network',
+    role: RosterRole.Member,
+  },
   // Queer Sports Braga
-  { memberSlug: 'kai-duarte', communitySlug: 'queer-sports-braga', role: RosterRole.Member },
-  { memberSlug: 'vasco-marinho', communitySlug: 'queer-sports-braga', role: RosterRole.Mod },
-  { memberSlug: 'miguel-tavares', communitySlug: 'queer-sports-braga', role: RosterRole.Member },
+  {
+    memberSlug: 'kai-duarte',
+    communitySlug: 'queer-sports-braga',
+    role: RosterRole.Member,
+  },
+  {
+    memberSlug: 'vasco-marinho',
+    communitySlug: 'queer-sports-braga',
+    role: RosterRole.Mod,
+  },
+  {
+    memberSlug: 'miguel-tavares',
+    communitySlug: 'queer-sports-braga',
+    role: RosterRole.Member,
+  },
 ];
 
 async function seedLiveCommunityMemberships(
@@ -924,7 +980,11 @@ const VOUCH_EDGES: VouchEdgeSeed[] = [
   { voucherSlug: 'kai-duarte', voucheeSlug: 'diogo-antunes', daysAgo: 12 },
   { voucherSlug: 'leonor-vaz', voucheeSlug: 'diogo-antunes', daysAgo: 17 },
   { voucherSlug: 'vasco-marinho', voucheeSlug: 'diogo-antunes', daysAgo: 3 },
-  { voucherSlug: 'catarina-sequeira', voucheeSlug: 'diogo-antunes', daysAgo: 30 },
+  {
+    voucherSlug: 'catarina-sequeira',
+    voucheeSlug: 'diogo-antunes',
+    daysAgo: 30,
+  },
   { voucherSlug: 'duarte-freitas', voucheeSlug: 'diogo-antunes', daysAgo: 6 },
   // Hub: ines-barroso (10 vouchers total)
   { voucherSlug: 'ana-rocha', voucheeSlug: 'ines-barroso', daysAgo: 33 },
@@ -942,16 +1002,32 @@ const VOUCH_EDGES: VouchEdgeSeed[] = [
   { voucherSlug: 'vasco-marinho', voucheeSlug: 'rui-cardoso', daysAgo: 2 },
   { voucherSlug: 'diogo-antunes', voucheeSlug: 'rui-cardoso', daysAgo: 1 },
   { voucherSlug: 'beatriz-coelho', voucheeSlug: 'sofia-pinheiro', daysAgo: 24 },
-  { voucherSlug: 'catarina-sequeira', voucheeSlug: 'sofia-pinheiro', daysAgo: 36 },
+  {
+    voucherSlug: 'catarina-sequeira',
+    voucheeSlug: 'sofia-pinheiro',
+    daysAgo: 36,
+  },
   { voucherSlug: 'beatriz-coelho', voucheeSlug: 'leonor-vaz', daysAgo: 21 },
   { voucherSlug: 'renata-salgado', voucheeSlug: 'leonor-vaz', daysAgo: 16 },
   { voucherSlug: 'rui-cardoso', voucheeSlug: 'vasco-marinho', daysAgo: 3 },
   { voucherSlug: 'tiago-nogueira', voucheeSlug: 'vasco-marinho', daysAgo: 9 },
-  { voucherSlug: 'duarte-freitas', voucheeSlug: 'catarina-sequeira', daysAgo: 12 },
-  { voucherSlug: 'marta-esteves', voucheeSlug: 'catarina-sequeira', daysAgo: 44 },
+  {
+    voucherSlug: 'duarte-freitas',
+    voucheeSlug: 'catarina-sequeira',
+    daysAgo: 12,
+  },
+  {
+    voucherSlug: 'marta-esteves',
+    voucheeSlug: 'catarina-sequeira',
+    daysAgo: 44,
+  },
   { voucherSlug: 'miguel-tavares', voucheeSlug: 'duarte-freitas', daysAgo: 6 },
   { voucherSlug: 'renata-salgado', voucheeSlug: 'duarte-freitas', daysAgo: 11 },
-  { voucherSlug: 'catarina-sequeira', voucheeSlug: 'renata-salgado', daysAgo: 14 },
+  {
+    voucherSlug: 'catarina-sequeira',
+    voucheeSlug: 'renata-salgado',
+    daysAgo: 14,
+  },
   { voucherSlug: 'tiago-nogueira', voucheeSlug: 'renata-salgado', daysAgo: 7 },
   { voucherSlug: 'kai-duarte', voucheeSlug: 'miguel-tavares', daysAgo: 10 },
   { voucherSlug: 'duarte-freitas', voucheeSlug: 'miguel-tavares', daysAgo: 5 },
@@ -989,7 +1065,9 @@ async function seedVouches(
   const userId = (slug: string): string => {
     const id = memberIdBySlug.get(slug);
     if (!id) {
-      throw new Error(`Cannot seed vouches: no seeded member with slug "${slug}"`);
+      throw new Error(
+        `Cannot seed vouches: no seeded member with slug "${slug}"`,
+      );
     }
     return id;
   };
@@ -1053,7 +1131,8 @@ const REPORTS: ReportSeed[] = [
     targetSlug: 'diogo-antunes',
     reporterSlug: 'beatriz-coelho',
     reasonCode: 'outing',
-    detail: 'Shared a screenshot outing another member’s legal name in a group chat.',
+    detail:
+      'Shared a screenshot outing another member’s legal name in a group chat.',
     daysAgo: 50,
     status: ReportStatus.Open,
   },
@@ -1070,7 +1149,8 @@ const REPORTS: ReportSeed[] = [
     targetSlug: 'miguel-tavares',
     reporterSlug: 'catarina-sequeira',
     reasonCode: 'discrimination',
-    detail: 'Made a dismissive comment about a member’s pronouns in a community post.',
+    detail:
+      'Made a dismissive comment about a member’s pronouns in a community post.',
     daysAgo: 40,
     status: ReportStatus.Open,
   },
@@ -1078,7 +1158,8 @@ const REPORTS: ReportSeed[] = [
     targetSlug: 'miguel-tavares',
     reporterSlug: 'duarte-freitas',
     reasonCode: 'impersonation',
-    detail: 'Appears to be using another member’s photos on an off-platform profile.',
+    detail:
+      'Appears to be using another member’s photos on an off-platform profile.',
     daysAgo: 35,
     status: ReportStatus.Open,
   },
@@ -1111,7 +1192,8 @@ const REPORTS: ReportSeed[] = [
     targetSlug: 'kai-duarte',
     reporterSlug: 'marta-esteves',
     reasonCode: 'other',
-    detail: 'Made the reporter uncomfortable at a meetup; hard to pin to one category.',
+    detail:
+      'Made the reporter uncomfortable at a meetup; hard to pin to one category.',
     daysAgo: 25,
     status: ReportStatus.Resolved,
     resolution: {
@@ -1126,7 +1208,8 @@ const REPORTS: ReportSeed[] = [
     targetSlug: 'renata-salgado',
     reporterSlug: 'ines-barroso',
     reasonCode: 'unwanted_contact',
-    detail: 'Continued contacting the reporter across two communities after being asked to stop.',
+    detail:
+      'Continued contacting the reporter across two communities after being asked to stop.',
     daysAgo: 20,
     status: ReportStatus.Resolved,
     resolution: {
@@ -1157,7 +1240,8 @@ const REPORTS: ReportSeed[] = [
     targetSlug: 'beatriz-coelho',
     reporterSlug: 'noa-silva',
     reasonCode: 'harassment',
-    detail: 'Escalating public callouts of another member across two community threads.',
+    detail:
+      'Escalating public callouts of another member across two community threads.',
     daysAgo: 10,
     status: ReportStatus.Resolved,
     resolution: {
@@ -1182,7 +1266,9 @@ async function seedReports(
   const userId = (slug: string): string => {
     const id = memberIdBySlug.get(slug);
     if (!id) {
-      throw new Error(`Cannot seed reports: no seeded member with slug "${slug}"`);
+      throw new Error(
+        `Cannot seed reports: no seeded member with slug "${slug}"`,
+      );
     }
     return id;
   };
@@ -2843,7 +2929,8 @@ const LISTINGS: ListingSeedDefinition[] = [
     price: '€€',
     blurb:
       'Graphic design studio for cultural institutions and small presses. Open by appointment.',
-    tagline: 'A queer design studio for the people making culture in this city.',
+    tagline:
+      'A queer design studio for the people making culture in this city.',
     ownerName: 'Inês Faro',
     ownerRole: 'Founder · designer',
     ownerBio:
@@ -2860,7 +2947,12 @@ const LISTINGS: ListingSeedDefinition[] = [
       'Editorial & book design',
       'Seeing a working print archive',
     ],
-    gallery: ['Studio · main desk', 'Print archive', 'Type wall', 'Window onto Príncipe Real'],
+    gallery: [
+      'Studio · main desk',
+      'Print archive',
+      'Type wall',
+      'Window onto Príncipe Real',
+    ],
     social: {
       instagram: '@atelierpulso',
       website: 'atelierpulso.pt',
@@ -2898,7 +2990,12 @@ const LISTINGS: ListingSeedDefinition[] = [
       'A special-occasion dinner',
       'Solo diners (you’ll be seated well)',
     ],
-    gallery: ['The long table', 'Open kitchen', 'Mouraria courtyard', 'Dessert course'],
+    gallery: [
+      'The long table',
+      'Open kitchen',
+      'Mouraria courtyard',
+      'Dessert course',
+    ],
     social: { instagram: '@queersupperclub', email: 'table@queersupper.pt' },
     isPartneredWithQueerpulse: true,
     spaceType: 'Kitchen + dining room',
@@ -2915,7 +3012,8 @@ const LISTINGS: ListingSeedDefinition[] = [
     price: '€',
     blurb:
       'Artist-run gallery in a Marvila warehouse. Programming focuses on emerging queer and feminist artists.',
-    tagline: 'A warehouse gallery that bets on queer artists before the market does.',
+    tagline:
+      'A warehouse gallery that bets on queer artists before the market does.',
     ownerName: 'Lume collective',
     ownerRole: 'Artist-run',
     ownerBio:
@@ -2970,7 +3068,12 @@ const LISTINGS: ListingSeedDefinition[] = [
       'Readings and launches',
       'A staff recommendation',
     ],
-    gallery: ['Front table', 'Queer & feminist wall', 'Reading corner', 'Event night'],
+    gallery: [
+      'Front table',
+      'Queer & feminist wall',
+      'Reading corner',
+      'Event night',
+    ],
     social: {
       instagram: '@livrariabertha',
       website: 'livrariabertha.pt',
@@ -3073,7 +3176,12 @@ const LISTINGS: ListingSeedDefinition[] = [
       'A first big chop, held gently',
       'Gender-neutral pricing',
     ],
-    gallery: ['The chairs', 'Mirror wall', 'Príncipe Real window', 'Product shelf'],
+    gallery: [
+      'The chairs',
+      'Mirror wall',
+      'Príncipe Real window',
+      'Product shelf',
+    ],
     social: {
       instagram: '@navalha.barbearia',
       email: 'ola@navalha.pt',
@@ -3090,7 +3198,8 @@ const LISTINGS: ListingSeedDefinition[] = [
     price: '€',
     blurb:
       'Yoga, capoeira, and weights in a converted Alfama warehouse. Queer-run, sliding-scale memberships.',
-    tagline: 'Yoga, capoeira, and iron under one Alfama roof — pay what you can.',
+    tagline:
+      'Yoga, capoeira, and iron under one Alfama roof — pay what you can.',
     ownerName: 'Rui & Pedro',
     ownerRole: 'Co-founders',
     ownerBio:
@@ -3107,7 +3216,12 @@ const LISTINGS: ListingSeedDefinition[] = [
       'Pay-what-you-can access',
       'A genuinely mixed room',
     ],
-    gallery: ['Warehouse floor', 'Capoeira roda', 'Weights corner', 'Alfama rooftop'],
+    gallery: [
+      'Warehouse floor',
+      'Capoeira roda',
+      'Weights corner',
+      'Alfama rooftop',
+    ],
     social: {
       instagram: '@movimento.alfama',
       website: 'movimento.pt',
@@ -3284,14 +3398,16 @@ const LISTING_EVENTS: Record<string, ListingEventSeed[]> = {
     {
       slug: 'bertha-queer-poetry-reading',
       title: 'Reading — new queer poetry in translation',
-      description: 'An evening of new queer poetry in translation, read between the stacks.',
+      description:
+        'An evening of new queer poetry in translation, read between the stacks.',
       inDays: 5,
       hour: 19,
     },
     {
       slug: 'bertha-stone-butch-book-club',
       title: 'Book club · "Stone Butch Blues"',
-      description: 'This month the book club reads Leslie Feinberg’s "Stone Butch Blues".',
+      description:
+        'This month the book club reads Leslie Feinberg’s "Stone Butch Blues".',
       inDays: 14,
       hour: 17,
     },
@@ -3300,7 +3416,8 @@ const LISTING_EVENTS: Record<string, ListingEventSeed[]> = {
     {
       slug: 'supper-club-summer-dinner',
       title: 'Summer dinner — the market decides',
-      description: 'The next monthly seating: a seasonal menu for twelve, the market decides the courses.',
+      description:
+        'The next monthly seating: a seasonal menu for twelve, the market decides the courses.',
       inDays: 9,
       hour: 20,
     },
@@ -3469,7 +3586,7 @@ const CHANGEMAKERS: ChangemakerSeedDefinition[] = [
     body: [
       'In the spring of 2022, three of Catarina\'s neighbours got the same letter within a week — a notice to vacate, dressed up in the language of "building works." She recognised it for what it was: the slow, legal pushing-out of the people who had made Mouraria what it is. Many of them were older, many were queer, and almost all had lived on the same street for decades.',
       'She could have signed a petition. Instead she started knocking on doors. Not to organise a protest — to map the situation. Who had received what, when, from which landlord, under which clause. By the end of the month she had a spreadsheet that did something no individual tenant could do alone: it showed a pattern.',
-      'That spreadsheet became a coalition. The coalition became a delegation to the Câmara Municipal, where Catarina testified — twice — on how short-term rentals were hollowing out the neighbourhood\'s queer community. She is not a lawyer and has never claimed to be one. What she is, is impossible to brush aside, because she always arrives with the receipts.',
+      "That spreadsheet became a coalition. The coalition became a delegation to the Câmara Municipal, where Catarina testified — twice — on how short-term rentals were hollowing out the neighbourhood's queer community. She is not a lawyer and has never claimed to be one. What she is, is impossible to brush aside, because she always arrives with the receipts.",
       "Today her residents' network is the most active in Mouraria. It runs a phone tree for anyone who gets a notice, a shared folder of documentation, and a standing relationship with ILGA Portugal's legal team. None of it existed three years ago. All of it exists because one person decided that the neighbourhood that raised us should still have room for us.",
       "We highlight Catarina because her work is the kind that rarely gets seen: patient, unglamorous, and built entirely on showing up for the people next door. She didn't wait to be qualified. She started, and the qualification followed.",
     ],
@@ -3503,7 +3620,8 @@ const CHANGEMAKERS: ChangemakerSeedDefinition[] = [
       'He is not satisfied with individual clinics, though. Reform is the point. Jonas now sits on a working group advising the public health service on trans care pathways — the slow, bureaucratic, deeply unglamorous arena where the fifteen minutes actually get abolished for everyone, not just the people lucky enough to find a good doctor.',
       'We highlight Jonas because he turned a private frustration into a public protocol. He measured the harm, named it, and then did the patient work of removing it from the system itself.',
     ],
-    pullQuoteText: "Explaining yourself shouldn't be the price of getting care.",
+    pullQuoteText:
+      "Explaining yourself shouldn't be the price of getting care.",
     pullQuoteCite: '— Jonas Ferreira',
     isFeatured: false,
     sortOrder: 1,
@@ -3532,7 +3650,8 @@ const CHANGEMAKERS: ChangemakerSeedDefinition[] = [
       "What ties it together is a refusal of the margin. Luísa treats queer art as central to Lisbon's story, and then makes the institutions act as if that were obviously true.",
       "We highlight Luísa because changing what hangs on the main wall changes what a city thinks of itself. She didn't ask for a bigger sidebar. She moved the work to the centre.",
     ],
-    pullQuoteText: "We're not a sidebar to this city. We're part of the main story.",
+    pullQuoteText:
+      "We're not a sidebar to this city. We're part of the main story.",
     pullQuoteCite: '— Luísa Gomes',
     isFeatured: false,
     sortOrder: 2,

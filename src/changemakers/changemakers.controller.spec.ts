@@ -22,7 +22,15 @@ describe('ChangemakersController', () => {
   });
 
   it('GET / delegates to listPublic with no arguments', async () => {
-    const listResponse = { profiles: [], stats: { profiled: 0, causeAreas: 0, peopleHelped: 0, activeCampaigns: 0 } };
+    const listResponse = {
+      profiles: [],
+      stats: {
+        profiled: 0,
+        causeAreas: 0,
+        peopleHelped: 0,
+        activeCampaigns: 0,
+      },
+    };
     service.listPublic.mockResolvedValue(listResponse);
 
     const result = await controller.list();

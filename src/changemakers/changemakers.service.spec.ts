@@ -32,7 +32,7 @@ function buildProfile(overrides: Partial<Changemaker> = {}): Changemaker {
     createdAt: new Date('2026-01-01T00:00:00Z'),
     updatedAt: new Date('2026-01-01T00:00:00Z'),
     ...overrides,
-  } as Changemaker;
+  };
 }
 
 describe('ChangemakersService', () => {
@@ -60,8 +60,8 @@ describe('ChangemakersService', () => {
     // `toChangemakerDTO` has something to call `.toISOString()` on — the two
     // existing tests above never call `.create()`, so this is a no-op for
     // them.
-    changemakerRepo.create.mockImplementation(
-      (value: Partial<Changemaker>) => buildProfile(value),
+    changemakerRepo.create.mockImplementation((value: Partial<Changemaker>) =>
+      buildProfile(value),
     );
     // Reset `.save()` to identity every test — `jest.clearAllMocks()` above
     // clears call history but NOT a previously-set `mockImplementation`/

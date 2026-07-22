@@ -189,6 +189,65 @@ describe('InvitesService.resolveInvite', () => {
   });
 });
 
+describe('InvitesService.getQuota', () => {
+  let service: InvitesService;
+  let invitesRepo: { count: jest.Mock };
+  let users: { findById: jest.Mock };
+  let config: { get: jest.Mock };
+
+  const build = async () => {
+    invitesRepo = { count: jest.fn().mockResolvedValue(0) };
+    users = { findById: jest.fn().mockResolvedValue(null) };
+    config = { get: jest.fn(() => 5) };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        InvitesService,
+        { provide: getRepositoryToken(Invite), useValue: invitesRepo },
+        { provide: UsersService, useValue: users },
+        { provide: DataSource, useValue: {} },
+        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        { provide: ConfigService, useValue: config },
+      ],
+    }).compile();
+    service = module.get(InvitesService);
+  };
+
+  beforeEach(build);
+
+  it('uses the config default when the member has no override', async () => {
+    users.findById.mockResolvedValue(null);
+    invitesRepo.count.mockResolvedValue(2);
+    const quota = await service.getQuota('inviter');
+    expect(quota.limit).toBe(5);
+    expect(quota.used).toBe(2);
+    expect(quota.remaining).toBe(3);
+  });
+
+  it('prefers the per-user override over the config default', async () => {
+    users.findById.mockResolvedValue({ inviteMonthlyQuota: 1 });
+    invitesRepo.count.mockResolvedValue(0);
+    const quota = await service.getQuota('inviter');
+    expect(quota.limit).toBe(1);
+    expect(quota.remaining).toBe(1);
+  });
+
+  it('floors remaining at 0 when the allowance is spent', async () => {
+    users.findById.mockResolvedValue({ inviteMonthlyQuota: 2 });
+    invitesRepo.count.mockResolvedValue(3); // over the limit
+    const quota = await service.getQuota('inviter');
+    expect(quota.remaining).toBe(0);
+  });
+
+  it('resetsAt is the 1st of next month (UTC), rolling the year over in Dec', async () => {
+    const quota = await service.getQuota('inviter');
+    // resetsAt is always the 1st at 00:00 UTC of some month...
+    const reset = new Date(quota.resetsAt);
+    expect(reset.getUTCDate()).toBe(1);
+    expect(reset.getUTCHours()).toBe(0);
+    expect(reset.getUTCMinutes()).toBe(0);
+  });
+});
+
 describe('InvitesService.createInvite', () => {
   let service: InvitesService;
   let invitesRepo: { exists: jest.Mock };

@@ -19,9 +19,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * not issue `SET CONSTRAINTS ... DEFERRED`, so the constraint must default to
  * deferred for the check to land at commit.
  */
-export class MakeRefreshTokenReplacedByFkDeferrable1782800830000
-  implements MigrationInterface
-{
+export class MakeRefreshTokenReplacedByFkDeferrable1782800830000 implements MigrationInterface {
   name = 'MakeRefreshTokenReplacedByFkDeferrable1782800830000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

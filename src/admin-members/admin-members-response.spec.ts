@@ -151,8 +151,8 @@ describe('toAdminMemberDetail', () => {
       graph: { center: vouchAvatar, nodes: [vouchAvatar] },
     });
 
-    expect(detail.contributions[0]!.at).toBe('2025-03-05T00:00:00.000Z');
-    expect(detail.moderationTimeline[0]!.at).toBe('2025-03-06T00:00:00.000Z');
+    expect(detail.contributions[0].at).toBe('2025-03-05T00:00:00.000Z');
+    expect(detail.moderationTimeline[0].at).toBe('2025-03-06T00:00:00.000Z');
     expect(detail.name).toBe('Devon Rae');
   });
 });

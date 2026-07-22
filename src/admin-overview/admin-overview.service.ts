@@ -221,7 +221,7 @@ export class AdminOverviewService {
       (openReport) => openReport.severity === ReportSeverity.Emergency,
     ).length;
     const oldestOpenHours = openReportRows.length
-      ? (now.getTime() - openReportRows[0]!.createdAt.getTime()) / HOUR_MS
+      ? (now.getTime() - openReportRows[0].createdAt.getTime()) / HOUR_MS
       : null;
 
     // --- responseTime / stats.medianResponseHours ---
@@ -251,7 +251,7 @@ export class AdminOverviewService {
       );
       if (bucketIndex === null) continue;
       const categoryIndex = reasonCodeToCategoryIndex(reportRow.reasonCode);
-      reportsByTypeBuckets[bucketIndex]!.value[categoryIndex] += 1;
+      reportsByTypeBuckets[bucketIndex].value[categoryIndex] += 1;
     }
     const reportsByTypeWeeks = reportsByTypeBuckets.map((bucket) => ({
       weekStart: new Date(bucket.weekStartMs).toISOString(),
@@ -271,7 +271,7 @@ export class AdminOverviewService {
         MEMBER_GROWTH_WEEK_COUNT,
       );
       if (bucketIndex === null) continue;
-      memberGrowthBuckets[bucketIndex]!.value += 1;
+      memberGrowthBuckets[bucketIndex].value += 1;
     }
     let spikeBucketIndex = 0;
     for (
@@ -280,8 +280,8 @@ export class AdminOverviewService {
       bucketIndex += 1
     ) {
       if (
-        memberGrowthBuckets[bucketIndex]!.value >
-        memberGrowthBuckets[spikeBucketIndex]!.value
+        memberGrowthBuckets[bucketIndex].value >
+        memberGrowthBuckets[spikeBucketIndex].value
       ) {
         spikeBucketIndex = bucketIndex;
       }
@@ -355,7 +355,9 @@ export class AdminOverviewService {
 
     const resolvingAuditRows = await this.modAuditLogs.find({
       where: {
-        reportId: In(resolvedReports.map((resolvedReport) => resolvedReport.id)),
+        reportId: In(
+          resolvedReports.map((resolvedReport) => resolvedReport.id),
+        ),
         action: In([...REPORT_RESOLVING_ACTIONS]),
       },
       order: { createdAt: 'ASC' },
@@ -435,7 +437,10 @@ export class AdminOverviewService {
     }
 
     const recentResolutionsForFeed = [...input.reportResolutions]
-      .sort((first, second) => second.resolvedAt.getTime() - first.resolvedAt.getTime())
+      .sort(
+        (first, second) =>
+          second.resolvedAt.getTime() - first.resolvedAt.getTime(),
+      )
       .slice(0, FEED_SOURCE_FETCH_LIMIT);
     for (const resolution of recentResolutionsForFeed) {
       feedCandidates.push({
@@ -532,7 +537,10 @@ export class AdminOverviewService {
     const actorAndTargetUserIds = [
       ...new Set(
         feedCandidates
-          .flatMap((candidate) => [candidate.actorUserId, candidate.targetUserId])
+          .flatMap((candidate) => [
+            candidate.actorUserId,
+            candidate.targetUserId,
+          ])
           .filter((userId): userId is string => userId !== null),
       ),
     ];

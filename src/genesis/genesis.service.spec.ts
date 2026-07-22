@@ -52,7 +52,7 @@ describe('GenesisService', () => {
           provide: DataSource,
           useValue: {
             transaction: (runInTransaction: (manager: unknown) => unknown) =>
-              runInTransaction({} as unknown),
+              runInTransaction({}),
           },
         },
         {
@@ -185,9 +185,9 @@ describe('GenesisService', () => {
   describe('claimAdmin', () => {
     it('404s when GENESIS_EMAIL is unset', async () => {
       configuredEmail = null;
-      await expect(
-        service.claimAdmin('user-1', GENESIS_EMAIL),
-      ).rejects.toThrow(NotFoundException);
+      await expect(service.claimAdmin('user-1', GENESIS_EMAIL)).rejects.toThrow(
+        NotFoundException,
+      );
     });
 
     it('rejects a caller whose email is not the genesis email', async () => {
@@ -207,9 +207,9 @@ describe('GenesisService', () => {
 
     it('rejects once any admin already exists', async () => {
       users.count.mockResolvedValue(1);
-      await expect(
-        service.claimAdmin('user-1', GENESIS_EMAIL),
-      ).rejects.toThrow(ForbiddenException);
+      await expect(service.claimAdmin('user-1', GENESIS_EMAIL)).rejects.toThrow(
+        ForbiddenException,
+      );
       expect(users.update).not.toHaveBeenCalled();
     });
 

@@ -556,7 +556,10 @@ describe('AuthService.validateOrCreateGoogleUser', () => {
     // And the vouch is announced only after the transaction commits.
     expect(mocks.events.emit).toHaveBeenCalledWith(
       'vouch.created',
-      expect.objectContaining({ voucherId: 'inviter-1', voucheeId: 'new-user' }),
+      expect.objectContaining({
+        voucherId: 'inviter-1',
+        voucheeId: 'new-user',
+      }),
     );
   });
 

@@ -266,6 +266,100 @@ describe('ConnectionsService', () => {
     });
   });
 
+  describe('requestConnectionView', () => {
+    // The profile the mapper resolves for the addressee (`them`).
+    const otherMemberProfile = {
+      userId: 'them',
+      slug: 'them',
+      firstName: 'Thea',
+      lastName: 'Oxton',
+      avatarUrl: null,
+      pronouns: 'they/them',
+      tagline: 'here to help',
+    };
+
+    it('returns the same ConnectionListItem shape the list path uses', async () => {
+      profiles.findOne.mockResolvedValue(targetProfile());
+      connections.findOne.mockResolvedValue(null);
+      profiles.find.mockResolvedValue([otherMemberProfile]);
+
+      const result = await service.requestConnectionView('me', 'them', 'hi');
+
+      expect(result).toEqual({
+        id: 'c1',
+        status: ConnectionStatus.Pending,
+        direction: 'outgoing',
+        requestMessage: 'hi',
+        requestReason: null,
+        createdAt: undefined,
+        respondedAt: undefined,
+        member: {
+          slug: 'them',
+          firstName: 'Thea',
+          lastName: 'Oxton',
+          avatarUrl: null,
+          pronouns: 'they/them',
+          tagline: 'here to help',
+        },
+        introducedBy: null,
+      });
+    });
+
+    it('never leaks raw entity columns', async () => {
+      profiles.findOne.mockResolvedValue(targetProfile());
+      connections.findOne.mockResolvedValue(null);
+      profiles.find.mockResolvedValue([otherMemberProfile]);
+
+      const result = await service.requestConnectionView('me', 'them', 'hi');
+
+      for (const leaked of [
+        'userLow',
+        'userHigh',
+        'blockedBy',
+        'flagged',
+        'requesterId',
+        'addresseeId',
+      ]) {
+        expect(result).not.toHaveProperty(leaked);
+      }
+    });
+
+    it('resolves the introducer profile for an introduced request', async () => {
+      // Network target + an introducer connected to both sides passes the gate.
+      profiles.findOne
+        .mockResolvedValueOnce(
+          targetProfile({ visibility: ProfileVisibility.Network }),
+        )
+        .mockResolvedValueOnce({ userId: 'intro', slug: 'intro' }); // introducer
+      connections.findOne
+        .mockResolvedValueOnce(null) // existing pair lookup
+        .mockResolvedValueOnce({ status: ConnectionStatus.Accepted }) // me<->intro
+        .mockResolvedValueOnce({ status: ConnectionStatus.Accepted }); // them<->intro
+      profiles.find.mockResolvedValue([
+        otherMemberProfile,
+        {
+          userId: 'intro',
+          slug: 'intro',
+          firstName: 'Ira',
+          lastName: 'Voss',
+          avatarUrl: null,
+          pronouns: null,
+          tagline: null,
+        },
+      ]);
+
+      const result = await service.requestConnectionView(
+        'me',
+        'them',
+        undefined,
+        'intro',
+      );
+
+      expect(result.member.slug).toBe('them');
+      expect(result.introducedBy?.slug).toBe('intro');
+    });
+  });
+
   describe('respond', () => {
     it('404s an unknown connection', async () => {
       connections.findOne.mockResolvedValue(null);

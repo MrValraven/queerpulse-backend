@@ -114,3 +114,28 @@ export function toPublicInviteView(
     vouch: invite.vouch ?? null,
   };
 }
+
+// The invite-quota panel on the compose page: how many personal invites the
+// member has left this calendar month, and when the allowance resets. `used`
+// counts every invite created since the UTC month start regardless of status
+// (matching enforcement in InvitesService.assertWithinMonthlyQuota), so the
+// number shown can never disagree with the number enforced.
+export interface InviteQuotaView {
+  limit: number;
+  used: number;
+  remaining: number;
+  resetsAt: string; // ISO — 00:00 UTC on the 1st of next month
+}
+
+export function toInviteQuotaView(
+  limit: number,
+  used: number,
+  resetsAt: Date,
+): InviteQuotaView {
+  return {
+    limit,
+    used,
+    remaining: Math.max(0, limit - used),
+    resetsAt: resetsAt.toISOString(),
+  };
+}

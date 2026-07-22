@@ -222,7 +222,7 @@ const SAFE_SPACE_LISTINGS: SafeSpaceListingSeed[] = [
     tags: ['Queer-owned', 'Sober-friendly', 'Accessible', 'Community board'],
     blurb:
       'A calm, queer-owned café good for laptop work or a quiet coffee, with a community notice board and a fully accessible room.',
-    address: "R. da Escola Politécnica 56, Príncipe Real, Lisbon",
+    address: 'R. da Escola Politécnica 56, Príncipe Real, Lisbon',
     langs: ['pt', 'en', 'es'],
     hoursNote: 'Open 7 days',
     hours: OPEN_DAILY_MORNING_TO_EVENING,
@@ -295,7 +295,7 @@ const SAFE_SPACE_LISTINGS: SafeSpaceListingSeed[] = [
       flags: 5,
       reasonLong: [
         'In April 2026 a verified member was refused entry after a doorman challenged whether the photo on their ID "matched". A second member witnessed it. Both filed reports the same night.',
-        "What moved this from a flag to a removal was the response. When moderators raised it, the owner defended the doorman and declined to retrain the door team or apologise. A verified space can survive a bad night; it cannot survive management that stands behind one.",
+        'What moved this from a flag to a removal was the response. When moderators raised it, the owner defended the doorman and declined to retrain the door team or apologise. A verified space can survive a bad night; it cannot survive management that stands behind one.',
       ],
       timeline: [
         {

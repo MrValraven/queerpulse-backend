@@ -18,6 +18,12 @@ export enum SubprofileKind {
   Filmmaker = 'filmmaker',
   Designer = 'designer',
   Maker = 'maker',
+  Drag = 'drag',
+  Dj = 'dj',
+  Dancer = 'dancer',
+  Performer = 'performer',
+  Photographer = 'photographer',
+  Videomaker = 'videomaker',
   Generic = 'generic',
 }
 

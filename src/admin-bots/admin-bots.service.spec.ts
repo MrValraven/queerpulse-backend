@@ -25,7 +25,7 @@ describe('AdminBotsService', () => {
     users = {
       findOne: jest.fn(),
       find: jest.fn(),
-    } as unknown as jest.Mocked<Pick<Repository<User>, 'findOne' | 'find'>>;
+    };
     profiles = {
       updateMe: jest.fn().mockResolvedValue({ ok: true }),
       updateUsername: jest.fn().mockResolvedValue({ ok: true }),
@@ -34,7 +34,7 @@ describe('AdminBotsService', () => {
       replaceSkills: jest.fn().mockResolvedValue({ ok: true }),
       replaceShapings: jest.fn().mockResolvedValue({ ok: true }),
       replaceGroups: jest.fn().mockResolvedValue({ ok: true }),
-    } as unknown as jest.Mocked<ProfilesServiceWriteMethods>;
+    };
     service = new AdminBotsService(
       users as unknown as Repository<User>,
       profiles as unknown as ProfilesService,
@@ -43,16 +43,16 @@ describe('AdminBotsService', () => {
 
   it('throws NotFound when the target is not a system account', async () => {
     users.findOne.mockResolvedValue({ id: 'user-1', isSystem: false } as User);
-    await expect(
-      service.updateBotProfile('user-1', {} as never),
-    ).rejects.toBeInstanceOf(NotFoundException);
+    await expect(service.updateBotProfile('user-1', {})).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
     expect(profiles.updateMe).not.toHaveBeenCalled();
   });
 
   it('throws NotFound when the target user does not exist', async () => {
     users.findOne.mockResolvedValue(null);
     await expect(
-      service.updateBotProfile('missing', {} as never),
+      service.updateBotProfile('missing', {}),
     ).rejects.toBeInstanceOf(NotFoundException);
     expect(profiles.updateMe).not.toHaveBeenCalled();
   });
@@ -92,7 +92,9 @@ describe('AdminBotsService', () => {
   const writeMethods: Array<{
     name: string;
     invoke: (userId: string) => Promise<unknown>;
-    profilesMock: () => jest.Mock;
+    // The typed method mocks from `jest.Mocked<...>` are `MockInstance`s, not
+    // the constructable `jest.Mock`; widen to match what they actually are.
+    profilesMock: () => jest.MockInstance<any, any[]>;
     expectedArgs: unknown[];
   }> = [
     {
@@ -103,35 +105,31 @@ describe('AdminBotsService', () => {
     },
     {
       name: 'replaceBotSocials',
-      invoke: (userId) =>
-        service.replaceBotSocials(userId, socialsDto as never),
+      invoke: (userId) => service.replaceBotSocials(userId, socialsDto),
       profilesMock: () => profiles.replaceSocials,
       expectedArgs: ['bot-1', socialsDto.items],
     },
     {
       name: 'replaceBotWork',
-      invoke: (userId) => service.replaceBotWork(userId, workDto as never),
+      invoke: (userId) => service.replaceBotWork(userId, workDto),
       profilesMock: () => profiles.replaceWork,
       expectedArgs: ['bot-1', workDto.items],
     },
     {
       name: 'replaceBotSkills',
-      invoke: (userId) =>
-        service.replaceBotSkills(userId, skillsDto as never),
+      invoke: (userId) => service.replaceBotSkills(userId, skillsDto),
       profilesMock: () => profiles.replaceSkills,
       expectedArgs: ['bot-1', skillsDto.items],
     },
     {
       name: 'replaceBotShapings',
-      invoke: (userId) =>
-        service.replaceBotShapings(userId, shapingsDto as never),
+      invoke: (userId) => service.replaceBotShapings(userId, shapingsDto),
       profilesMock: () => profiles.replaceShapings,
       expectedArgs: ['bot-1', shapingsDto.items],
     },
     {
       name: 'replaceBotGroups',
-      invoke: (userId) =>
-        service.replaceBotGroups(userId, groupsDto as never),
+      invoke: (userId) => service.replaceBotGroups(userId, groupsDto),
       profilesMock: () => profiles.replaceGroups,
       expectedArgs: ['bot-1', groupsDto.items],
     },

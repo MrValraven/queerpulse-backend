@@ -146,6 +146,43 @@ export class ConnectionsService {
     }
   }
 
+  /**
+   * `POST /connections` wrapper: creates the request, then maps it to the same
+   * `ConnectionListItem` shape the list path returns. This keeps the create
+   * response from leaking raw entity columns (`userLow`/`userHigh`/`blockedBy`/
+   * `flagged`) — `requestConnection` itself still returns the entity because
+   * the messaging flow relies on it.
+   */
+  async requestConnectionView(
+    requesterId: string,
+    toSlug: string,
+    message?: string,
+    introducerSlug?: string,
+    reason?: string,
+  ): Promise<ConnectionListItem> {
+    const connection = await this.requestConnection(
+      requesterId,
+      toSlug,
+      message,
+      introducerSlug,
+      reason,
+    );
+    const otherUserId = this.otherId(connection, requesterId);
+    const profilesById = await this.profilesByUserIds(
+      [otherUserId, connection.introducedBy].filter(
+        (userId): userId is string => userId !== null && userId !== undefined,
+      ),
+    );
+    return toConnectionListItem(
+      connection,
+      requesterId,
+      profilesById.get(otherUserId),
+      connection.introducedBy
+        ? profilesById.get(connection.introducedBy)
+        : undefined,
+    );
+  }
+
   // §8 request gate. Returns the fields to persist on the connection:
   //  - open     → allowed, no introducer, not flagged.
   //  - network  → existing connections re-open freely; a stranger must name an

@@ -42,7 +42,7 @@ export class ConnectionsController {
     @CurrentUser() user: CurrentUserData,
     @Body() dto: CreateConnectionDto,
   ) {
-    return this.connectionsService.requestConnection(
+    return this.connectionsService.requestConnectionView(
       user.userId,
       dto.toSlug,
       dto.message,

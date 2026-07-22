@@ -7,6 +7,6 @@ import { setupTestEnv } from './db-safety';
  */
 export default function globalSetup(): void {
   const dbName = setupTestEnv();
-  // eslint-disable-next-line no-console
+
   console.log(`\n[e2e] Verified test database "${dbName}".\n`);
 }

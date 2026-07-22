@@ -463,6 +463,33 @@ export class MessagingService {
     };
   }
 
+  /**
+   * Delivers a one-off message from `fromUserId` to `toUserId`, addressed by
+   * userId (not slug), creating the 1:1 conversation if needed. Unlike
+   * `sendMessage`/`messageRequest`, this intentionally does NOT require the two
+   * to be accepted connections — it backs cold cross-domain contact such as a
+   * housing enquiry, where a pre-existing friendship must not be a precondition.
+   * A block either way is still a hard stop.
+   */
+  async deliverEnquiry(
+    fromUserId: string,
+    toUserId: string,
+    body: string,
+  ): Promise<{ conversationId: string }> {
+    if (fromUserId === toUserId) {
+      throw new BadRequestException('You cannot send an enquiry to yourself');
+    }
+    if (await this.blockFilter.isBlockedEitherWay(fromUserId, toUserId)) {
+      throw new ForbiddenException('You cannot contact this member');
+    }
+    const { conversation } = await this.getOrCreateConversation(
+      fromUserId,
+      toUserId,
+    );
+    await this.postMessage(conversation.id, fromUserId, body);
+    return { conversationId: conversation.id };
+  }
+
   @OnEvent(CONNECTION_ACCEPTED)
   async handleConnectionAccepted(
     payload: ConnectionAcceptedEvent,

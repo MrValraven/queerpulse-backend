@@ -1,8 +1,6 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
-export class AddListingPartnerSpaceFields1782800850000
-  implements MigrationInterface
-{
+export class AddListingPartnerSpaceFields1782800850000 implements MigrationInterface {
   name = 'AddListingPartnerSpaceFields1782800850000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
@@ -12,9 +10,7 @@ export class AddListingPartnerSpaceFields1782800850000
     await queryRunner.query(
       `ALTER TABLE "listings" ADD "space_type" character varying NOT NULL DEFAULT ''`,
     );
-    await queryRunner.query(
-      `ALTER TABLE "listings" ADD "capacity" integer`,
-    );
+    await queryRunner.query(`ALTER TABLE "listings" ADD "capacity" integer`);
     await queryRunner.query(
       `ALTER TABLE "listings" ADD "host_note" character varying NOT NULL DEFAULT ''`,
     );

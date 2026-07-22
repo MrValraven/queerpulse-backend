@@ -13,6 +13,12 @@ import { HousingCoop } from './entities/housing-coop.entity';
 import { CreateCoopDto } from './dto/create-coop.dto';
 import { UpdateCoopDto } from './dto/update-coop.dto';
 import { CreateJoinRequestDto } from './dto/create-join-request.dto';
+import {
+  AdminJoinRequestDTO,
+  HousingCoopDTO,
+  toAdminJoinRequestDTO,
+  toHousingCoopDTO,
+} from './housing-coop-response';
 
 // Postgres unique-violation SQLSTATE. Mirrors `ListingsService`'s/
 // `CompaniesService`'s identical file-local helper (not shared/exported, kept
@@ -31,15 +37,17 @@ export class HousingService {
     private readonly joinRequests: Repository<CoopJoinRequest>,
   ) {}
 
-  listPublished(): Promise<HousingCoop[]> {
-    return this.coops.find({
+  async listPublished(): Promise<HousingCoopDTO[]> {
+    const coops = await this.coops.find({
       where: { published: true },
       order: { createdAt: 'ASC' },
     });
+    return coops.map(toHousingCoopDTO);
   }
 
-  listAllForAdmin(): Promise<HousingCoop[]> {
-    return this.coops.find({ order: { createdAt: 'ASC' } });
+  async listAllForAdmin(): Promise<HousingCoopDTO[]> {
+    const coops = await this.coops.find({ order: { createdAt: 'ASC' } });
+    return coops.map(toHousingCoopDTO);
   }
 
   async createJoinRequest(
@@ -62,11 +70,11 @@ export class HousingService {
     return { id: saved.id };
   }
 
-  async createCoop(dto: CreateCoopDto): Promise<HousingCoop> {
+  async createCoop(dto: CreateCoopDto): Promise<HousingCoopDTO> {
     const existing = await this.coops.findOne({ where: { slug: dto.slug } });
     if (existing) throw new ConflictException('Slug already in use');
     try {
-      return await this.coops.save(
+      const saved = await this.coops.save(
         this.coops.create({
           ...dto,
           nameEm: dto.nameEm ?? null,
@@ -77,6 +85,7 @@ export class HousingService {
           faces: dto.faces ?? [],
         }),
       );
+      return toHousingCoopDTO(saved);
     } catch (err) {
       // The pre-check above can race with a concurrent create of the same
       // slug; the unique index is the real backstop. Map 23505 to a clean
@@ -88,12 +97,12 @@ export class HousingService {
     }
   }
 
-  async updateCoop(id: string, dto: UpdateCoopDto): Promise<HousingCoop> {
+  async updateCoop(id: string, dto: UpdateCoopDto): Promise<HousingCoopDTO> {
     const coop = await this.coops.findOne({ where: { id } });
     if (!coop) throw new NotFoundException('Co-op not found');
     Object.assign(coop, dto);
     try {
-      return await this.coops.save(coop);
+      return toHousingCoopDTO(await this.coops.save(coop));
     } catch (err) {
       if (isUniqueViolation(err)) {
         throw new ConflictException('Slug already in use');
@@ -107,19 +116,20 @@ export class HousingService {
     if (!result.affected) throw new NotFoundException('Co-op not found');
   }
 
-  listJoinRequests(coopSlug?: string): Promise<CoopJoinRequest[]> {
+  async listJoinRequests(coopSlug?: string): Promise<AdminJoinRequestDTO[]> {
     const query = this.joinRequests
       .createQueryBuilder('request')
       .leftJoinAndSelect('request.coop', 'coop')
       .orderBy('request.createdAt', 'DESC');
     if (coopSlug) query.where('coop.slug = :coopSlug', { coopSlug });
-    return query.getMany();
+    const requests = await query.getMany();
+    return requests.map(toAdminJoinRequestDTO);
   }
 
   async triageJoinRequest(
     id: string,
     action: 'accepted' | 'declined',
-  ): Promise<CoopJoinRequest> {
+  ): Promise<AdminJoinRequestDTO> {
     const request = await this.joinRequests.findOne({ where: { id } });
     if (!request) throw new NotFoundException('Join request not found');
     request.status =
@@ -131,6 +141,6 @@ export class HousingService {
       where: { id },
       relations: { coop: true },
     });
-    return updated!;
+    return toAdminJoinRequestDTO(updated!);
   }
 }

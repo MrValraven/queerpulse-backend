@@ -13,10 +13,14 @@ export function initialsFor(firstName: string, lastName: string): string {
  *  member keeps the same colour across requests without storing one. */
 export function toneFor(seed: string): BadgeTone {
   let hash = 0;
-  for (let characterIndex = 0; characterIndex < seed.length; characterIndex += 1) {
+  for (
+    let characterIndex = 0;
+    characterIndex < seed.length;
+    characterIndex += 1
+  ) {
     hash = (hash * 31 + seed.charCodeAt(characterIndex)) >>> 0;
   }
-  return BADGE_TONES[hash % BADGE_TONES.length]!;
+  return BADGE_TONES[hash % BADGE_TONES.length];
 }
 
 /** A frozen (auto-frozen) account always reads as frozen, regardless of the

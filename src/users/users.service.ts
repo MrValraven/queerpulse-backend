@@ -83,9 +83,16 @@ export class UsersService {
     });
     const saved = await manager.save(user);
 
-    const base = this.slugify(`${input.firstName} ${input.lastName}`) || 'member';
+    const base =
+      this.slugify(`${input.firstName} ${input.lastName}`) || 'member';
     const slug = await this.nextAvailableSlug(manager, base);
-    await this.insertProfileWithUniqueSlug(manager, saved.id, base, slug, input);
+    await this.insertProfileWithUniqueSlug(
+      manager,
+      saved.id,
+      base,
+      slug,
+      input,
+    );
 
     return saved;
   }

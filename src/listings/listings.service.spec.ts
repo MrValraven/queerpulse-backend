@@ -3,7 +3,11 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Profile } from '../users/entities/profile.entity';
-import { Listing, ListingStatus } from './entities/listing.entity';
+import {
+  Listing,
+  ListingStatus,
+  SafeSpaceStatus,
+} from './entities/listing.entity';
 import { ListingsService } from './listings.service';
 
 // A chainable query-builder stub whose terminal methods resolve to empty
@@ -58,6 +62,14 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   spaceType: '',
   capacity: null,
   hostNote: '',
+  safeSpaceStatus: SafeSpaceStatus.None,
+  safeSpaceTier: null,
+  safeSpaceVerifier: '',
+  safeSpaceReVerifiedAt: null,
+  safeSpaceSub: '',
+  safeSpacePromises: [],
+  safeSpaceVouches: [],
+  safeSpaceRemoval: null,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   updatedAt: new Date('2026-01-01T00:00:00.000Z'),
   ...overrides,

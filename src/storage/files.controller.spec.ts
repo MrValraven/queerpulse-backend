@@ -95,7 +95,7 @@ describe('FilesController', () => {
     it('joins an array param — the real Express 5 / path-to-regexp 8 shape — and resolves', async () => {
       await controller.serve(
         AVATAR_KEY.split('/'),
-        null as never,
+        null,
         response as unknown as Response,
       );
       expect(storage.createPresignedDownload).toHaveBeenCalledWith(AVATAR_KEY);
@@ -103,11 +103,7 @@ describe('FilesController', () => {
     });
 
     it('still resolves when handed a single string param (defensive)', async () => {
-      await controller.serve(
-        AVATAR_KEY,
-        null as never,
-        response as unknown as Response,
-      );
+      await controller.serve(AVATAR_KEY, null, response as unknown as Response);
       expect(storage.createPresignedDownload).toHaveBeenCalledWith(AVATAR_KEY);
       expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
     });

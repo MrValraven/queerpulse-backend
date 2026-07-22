@@ -190,6 +190,21 @@ describe('EventInvitesService', () => {
     expect(result.status).toBe(EventInviteStatus.Accepted);
   });
 
+  it('respondInvite returns only { id, status } — no raw entity columns', async () => {
+    invites.findOne.mockResolvedValue({
+      id: 'i1',
+      eventId: 'e1',
+      inviterId: 'host',
+      inviteeId: 'u1',
+      status: EventInviteStatus.Pending,
+    });
+    const result = await service.respondInvite('i1', 'u1', 'decline');
+    expect(result).toEqual({ id: 'i1', status: EventInviteStatus.Declined });
+    expect(result).not.toHaveProperty('inviterId');
+    expect(result).not.toHaveProperty('inviteeId');
+    expect(result).not.toHaveProperty('eventId');
+  });
+
   it('listMyPendingInvites maps invite id, event and inviter', async () => {
     invites.find.mockResolvedValue([
       {

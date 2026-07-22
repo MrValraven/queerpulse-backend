@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Param, Patch, Put, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Put,
+  UseGuards,
+} from '@nestjs/common';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { ReplaceGroupsDto } from '../profiles/dto/replace-groups.dto';
@@ -53,10 +61,7 @@ export class AdminBotsController {
   }
 
   @Put(':userId/work')
-  replaceBotWork(
-    @Param('userId') userId: string,
-    @Body() dto: ReplaceWorkDto,
-  ) {
+  replaceBotWork(@Param('userId') userId: string, @Body() dto: ReplaceWorkDto) {
     return this.adminBots.replaceBotWork(userId, dto);
   }
 

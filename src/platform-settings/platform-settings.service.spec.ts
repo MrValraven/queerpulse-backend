@@ -18,7 +18,7 @@ function makeRow(overrides: Partial<PlatformSettings> = {}): PlatformSettings {
     updatedAt: new Date('2026-07-19T00:00:00Z'),
     updatedBy: null,
     ...overrides,
-  } as PlatformSettings;
+  };
 }
 
 describe('PlatformSettingsService', () => {
@@ -37,8 +37,8 @@ describe('PlatformSettingsService', () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2026-07-19T12:00:00Z'));
 
-    settingsRepo = { findOne: jest.fn() } as never;
-    changesRepo = { find: jest.fn() } as never;
+    settingsRepo = { findOne: jest.fn() };
+    changesRepo = { find: jest.fn() };
     manager = {
       findOneOrFail: jest.fn(),
       create: jest.fn((_entity, data) => data),

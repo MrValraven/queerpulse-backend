@@ -65,6 +65,9 @@ import { AffiliationModule } from './affiliation/affiliation.module';
 import { ForumModule } from './forum/forum.module';
 import { FeedModule } from './feed/feed.module';
 import { HousingModule } from './housing/housing.module';
+import { HousingListingsModule } from './housing-listings/housing-listings.module';
+import { FlatmateProfilesModule } from './flatmate-profiles/flatmate-profiles.module';
+import { LandlordsModule } from './landlords/landlords.module';
 import { ListingsModule } from './listings/listings.module';
 import { MagazineModule } from './magazine/magazine.module';
 import { ResourcesModule } from './resources/resources.module';
@@ -205,6 +208,9 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     FeedModule,
     ListingsModule,
     HousingModule,
+    HousingListingsModule,
+    FlatmateProfilesModule,
+    LandlordsModule,
     MagazineModule,
     ResourcesModule,
     ContentModule,

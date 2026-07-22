@@ -6,10 +6,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
-import {
-  Changemaker,
-  ChangemakerStatus,
-} from './entities/changemaker.entity';
+import { Changemaker, ChangemakerStatus } from './entities/changemaker.entity';
 import {
   CHANGEMAKER_SETTINGS_ID,
   ChangemakerDirectorySettings,
@@ -97,7 +94,9 @@ export class ChangemakersService {
     profile.status = published
       ? ChangemakerStatus.Published
       : ChangemakerStatus.Draft;
-    profile.publishedAt = published ? (profile.publishedAt ?? new Date()) : null;
+    profile.publishedAt = published
+      ? (profile.publishedAt ?? new Date())
+      : null;
     const saved = await this.changemakers.save(profile);
     return toChangemakerDTO(saved);
   }

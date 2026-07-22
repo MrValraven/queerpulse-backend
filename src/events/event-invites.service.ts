@@ -142,7 +142,7 @@ export class EventInvitesService {
     inviteId: string,
     userId: string,
     action: 'accept' | 'decline',
-  ): Promise<EventInvite> {
+  ): Promise<{ id: string; status: EventInviteStatus }> {
     const invite = await this.invites.findOne({ where: { id: inviteId } });
     if (!invite) {
       throw new NotFoundException('Invite not found');
@@ -157,6 +157,9 @@ export class EventInvitesService {
       action === 'accept'
         ? EventInviteStatus.Accepted
         : EventInviteStatus.Declined;
-    return this.invites.save(invite);
+    // Return only what the client needs (the new status), not the raw entity —
+    // which would leak `inviterId`/`inviteeId`/`eventId` internal columns.
+    const saved = await this.invites.save(invite);
+    return { id: saved.id, status: saved.status };
   }
 }

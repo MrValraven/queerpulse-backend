@@ -89,8 +89,7 @@ export class GenesisService {
         const notExpired =
           !existingInvite.expiresAt ||
           existingInvite.expiresAt.getTime() > Date.now();
-        const pinMatches =
-          existingInvite.email?.toLowerCase() === genesisEmail;
+        const pinMatches = existingInvite.email?.toLowerCase() === genesisEmail;
         // Idempotent: clicking the button twice must not litter the table with
         // invites, and must keep handing back a code that still works.
         if (notExpired && pinMatches) {

@@ -114,7 +114,7 @@ export class User {
   termsVersion: string | null;
 
   // Per-user override for the monthly invite quota. NULL means "use the global
-  // default" (app.inviteMonthlyQuota, itself defaulting to 1). Set directly in
+  // default" (app.inviteMonthlyQuota, itself defaulting to 5). Set directly in
   // the database to grant a member a higher (or lower) allowance.
   @Column({ type: 'integer', nullable: true })
   inviteMonthlyQuota: number | null;

@@ -122,7 +122,12 @@ function initialsForName(name: string): string {
 
 /** First name of the owner, for the "run by <first>" card line. */
 function ownerFirstName(ownerName: string): string {
-  return ownerName.trim().split(/[\s&·]+/).filter(Boolean)[0] ?? '';
+  return (
+    ownerName
+      .trim()
+      .split(/[\s&·]+/)
+      .filter(Boolean)[0] ?? ''
+  );
 }
 
 /**
@@ -292,10 +297,7 @@ export function toDirectoryDetail(
     ...toDirectoryCard(listing),
     tagline: listing.tagline,
     // Price tier first (when set), then the listing's own tags, as detail pills.
-    pills: [
-      ...(listing.price ? [listing.price] : []),
-      ...listing.tags,
-    ],
+    pills: [...(listing.price ? [listing.price] : []), ...listing.tags],
     // The gallery renders caption cells (no images in the prototype), so we
     // surface the alt-text captions, dropping empty slots.
     gallery: [
@@ -377,12 +379,7 @@ export function toListingDTO(
 }
 
 export type SafeSpaceCategory =
-  | 'Bar'
-  | 'Club'
-  | 'Cafe'
-  | 'Health'
-  | 'Services'
-  | 'Arts';
+  'Bar' | 'Club' | 'Cafe' | 'Health' | 'Services' | 'Arts';
 
 /** Map a listing's own category vocabulary to the coarse safe-space facet. */
 export function mapSafeSpaceCategory(
@@ -521,7 +518,10 @@ export function toSafeSpaceDetail(
     { label: 'Languages', value: listing.langs.join(' · ') },
   ];
   if (listing.safeSpaceReVerifiedAt) {
-    glance.push({ label: 'Last verified', value: listing.safeSpaceReVerifiedAt });
+    glance.push({
+      label: 'Last verified',
+      value: listing.safeSpaceReVerifiedAt,
+    });
   }
   return {
     ...card,

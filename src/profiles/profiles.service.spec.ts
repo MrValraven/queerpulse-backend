@@ -221,7 +221,7 @@ describe('ProfilesService.getBySlug visibility', () => {
     expect(p.now).toBe('new now');
     expect(p.identities).toEqual(['Trans']);
     expect(res.limited).toBe(false);
-    const full = res as Extract<typeof res, { limited: false }>;
+    const full = res;
     expect(full.now).toBe('new now');
     // updateMe is always the owner, so private fields come back.
     expect(full.identities).toEqual(['Trans']);
@@ -238,7 +238,7 @@ describe('ProfilesService.getBySlug visibility', () => {
     const res = await service.updateMe('owner-1', { now: '' });
 
     expect(p.now).toBeNull();
-    const full = res as Extract<typeof res, { limited: false }>;
+    const full = res;
     expect(full.now).toBeNull();
   });
 
@@ -273,7 +273,7 @@ describe('ProfilesService.getBySlug visibility', () => {
       { kind: 'preset', id: 'mentoring' },
       { kind: 'custom', label: 'A nurse or two for the testing nights' },
     ]);
-    const full = res as Extract<typeof res, { limited: false }>;
+    const full = res;
     expect(full.openTo).toEqual([
       { kind: 'preset', id: 'mentoring' },
       { kind: 'custom', label: 'A nurse or two for the testing nights' },

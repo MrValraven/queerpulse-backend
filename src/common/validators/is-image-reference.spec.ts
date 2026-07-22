@@ -71,7 +71,7 @@ describe('IsImageReference', () => {
     expect(firstError(`https://example.com/${'a'.repeat(2100)}`)).toBeDefined();
   });
 
-  describe('without @IsOptional() (the decorator\'s own null/empty handling)', () => {
+  describe("without @IsOptional() (the decorator's own null/empty handling)", () => {
     it('accepts null directly, not merely via @IsOptional() short-circuiting', () => {
       expect(firstRequiredError(null)).toBeUndefined();
     });

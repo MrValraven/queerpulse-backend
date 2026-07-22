@@ -17,7 +17,7 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Public } from '../auth/decorators/public.decorator';
 import { CreateInviteDto } from './dto/create-invite.dto';
 import { PaginationQuery } from './dto/pagination.query';
-import { PublicInviteView } from './invite-response';
+import { InviteQuotaView, PublicInviteView } from './invite-response';
 import { InvitesService } from './invites.service';
 
 @Controller('invites')
@@ -39,6 +39,12 @@ export class InvitesController {
   @UseGuards(ActiveMemberGuard)
   list(@CurrentUser() user: CurrentUserData, @Query() page: PaginationQuery) {
     return this.invitesService.listMyInvites(user.userId, page);
+  }
+
+  @Get('quota')
+  @UseGuards(ActiveMemberGuard)
+  quota(@CurrentUser() user: CurrentUserData): Promise<InviteQuotaView> {
+    return this.invitesService.getQuota(user.userId);
   }
 
   // Public, unauthenticated: the recipient's landing page resolves their invite

@@ -105,7 +105,11 @@ function makeQueryBuilderStub(
 
 describe('AdminMembersService', () => {
   let service: AdminMembersService;
-  let profiles: { find: jest.Mock; findOne: jest.Mock; createQueryBuilder: jest.Mock };
+  let profiles: {
+    find: jest.Mock;
+    findOne: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
   let users: { find: jest.Mock };
   let vouches: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let communityMembers: { createQueryBuilder: jest.Mock };
@@ -240,14 +244,14 @@ describe('AdminMembersService', () => {
 
       const [flaggedMember] = await service.listFlagged();
 
-      expect(flaggedMember!.slug).toBe('kai-devon');
-      expect(flaggedMember!.openReportCount).toBe(0);
+      expect(flaggedMember.slug).toBe('kai-devon');
+      expect(flaggedMember.openReportCount).toBe(0);
       // Suspended with no open reports left driving it reads as frozen, per
       // the documented heuristic in the service.
-      expect(flaggedMember!.moderationState).toBe('frozen');
+      expect(flaggedMember.moderationState).toBe('frozen');
     });
 
-    it('discovers a member by their reports\' subjectId (slug), and surfaces the most frequent reason and latest detail', async () => {
+    it("discovers a member by their reports' subjectId (slug), and surfaces the most frequent reason and latest detail", async () => {
       const flaggedProfile = makeProfile({
         userId: 'user-devon',
         slug: 'devon-rae',
@@ -274,14 +278,14 @@ describe('AdminMembersService', () => {
 
       const [flaggedMember] = await service.listFlagged();
 
-      expect(flaggedMember!.slug).toBe('devon-rae');
-      expect(flaggedMember!.openReportCount).toBe(2);
-      expect(flaggedMember!.topReasonCode).toBe('harassment');
-      expect(flaggedMember!.latestReportDetail).toBe(
+      expect(flaggedMember.slug).toBe('devon-rae');
+      expect(flaggedMember.openReportCount).toBe(2);
+      expect(flaggedMember.topReasonCode).toBe('harassment');
+      expect(flaggedMember.latestReportDetail).toBe(
         'Second complaint, same reason.',
       );
       // Neither suspended nor frozen — just under active review.
-      expect(flaggedMember!.moderationState).toBe('under_review');
+      expect(flaggedMember.moderationState).toBe('under_review');
     });
   });
 
@@ -322,7 +326,9 @@ describe('AdminMembersService', () => {
         result.moderationTimeline.some((entry) => entry.action === 'verified'),
       ).toBe(true);
       expect(
-        result.moderationTimeline.some((entry) => entry.action === 'no_reports'),
+        result.moderationTimeline.some(
+          (entry) => entry.action === 'no_reports',
+        ),
       ).toBe(true);
     });
   });

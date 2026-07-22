@@ -22,6 +22,8 @@ export type ReasonCode =
   | 'venue_safety'
   | 'venue_staff'
   | 'venue_accessibility'
+  | 'housing_unsafe'
+  | 'housing_scam'
   | 'other';
 
 /** Every valid `ReasonCode`, for `@IsIn` validation (no native string enum). */
@@ -38,6 +40,8 @@ export const REASON_CODES: readonly ReasonCode[] = [
   'venue_safety',
   'venue_staff',
   'venue_accessibility',
+  'housing_unsafe',
+  'housing_scam',
   'other',
 ];
 
@@ -61,6 +65,8 @@ const REASON_LABELS: Record<ReasonCode, string> = {
   venue_safety: 'A harassment or safety incident at the space',
   venue_staff: "Staff didn't intervene when needed",
   venue_accessibility: 'An accessibility problem',
+  housing_unsafe: 'Unsafe, discriminatory, or misrepresented housing',
+  housing_scam: 'Scam or fake listing',
   other: 'Something else — explained in detail',
 };
 
@@ -116,6 +122,27 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'other',
   ],
   [ReportSubjectType.Community]: ['hate_speech', 'spam', 'other'],
+  [ReportSubjectType.Housing]: [
+    'housing_unsafe',
+    'harassment',
+    'discrimination',
+    'housing_scam',
+    'other',
+  ],
+  [ReportSubjectType.Flatmate]: [
+    'harassment',
+    'discrimination',
+    'impersonation',
+    'unwanted_contact',
+    'other',
+  ],
+  [ReportSubjectType.Landlord]: [
+    'discrimination',
+    'harassment',
+    'impersonation',
+    'spam',
+    'other',
+  ],
 };
 
 /** The reason options a given subject type should offer, as `{code, label}`. */

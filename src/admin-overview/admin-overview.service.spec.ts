@@ -188,12 +188,18 @@ describe('AdminOverviewService', () => {
         if (
           where?.status &&
           typeof where.status === 'object' &&
-          'value' in (where.status as object)
+          'value' in where.status
         ) {
           // status: In([Open, Escalated])
           return Promise.resolve([
-            makeReport({ severity: ReportSeverity.Emergency, status: ReportStatus.Open }),
-            makeReport({ severity: ReportSeverity.Low, status: ReportStatus.Open }),
+            makeReport({
+              severity: ReportSeverity.Emergency,
+              status: ReportStatus.Open,
+            }),
+            makeReport({
+              severity: ReportSeverity.Low,
+              status: ReportStatus.Open,
+            }),
           ]);
         }
         return Promise.resolve([]);

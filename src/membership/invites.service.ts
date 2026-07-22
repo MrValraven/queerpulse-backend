@@ -18,10 +18,12 @@ import { UsersService } from '../users/users.service';
 import { SignupRejectedError } from '../auth/errors/signup-rejected.error';
 import { Invite, InviteStatus } from './entities/invite.entity';
 import {
+  InviteQuotaView,
   MyInviteView,
   PublicInviteStatus,
   PublicInviteView,
   resolveInviteStatus,
+  toInviteQuotaView,
   toMyInviteView,
   toPublicInviteView,
 } from './invite-response';
@@ -37,6 +39,19 @@ const DEFAULT_PAGE_SIZE = 20;
 
 // Whole-operation retries if a freshly-minted code collides on insert (23505).
 const MAX_CODE_ATTEMPTS = 5;
+
+// Start of the current UTC calendar month — the lower bound of the "invites
+// used this month" count. UTC (not local) so the reset instant is deterministic
+// across deploy regions.
+function currentMonthStart(now: Date): Date {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+}
+
+// Start of the NEXT UTC calendar month — when the allowance resets. Month index
+// 12 rolls the year over correctly via Date.UTC normalization (Dec → next Jan).
+function nextMonthStart(now: Date): Date {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+}
 
 export interface PageParams {
   limit?: number;
@@ -209,6 +224,21 @@ export class InvitesService {
     return invites.map((invite) => toMyInviteView(invite, now));
   }
 
+  // Read-only quota snapshot for the compose page's "N invites available this
+  // month" panel. Deliberately takes NO row lock (unlike enforcement) — a stale
+  // read here at worst shows a number one off for a moment, and the real POST
+  // still serializes through the locked check. Reuses resolveMonthlyLimit +
+  // currentMonthStart so the displayed number matches the enforced one.
+  async getQuota(inviterId: string): Promise<InviteQuotaView> {
+    const now = new Date();
+    const inviter = await this.usersService.findById(inviterId);
+    const limit = this.resolveMonthlyLimit(inviter);
+    const used = await this.invites.count({
+      where: { inviterId, createdAt: MoreThanOrEqual(currentMonthStart(now)) },
+    });
+    return toInviteQuotaView(limit, used, nextMonthStart(now));
+  }
+
   /**
    * Validate an invite for a *new* Google sign-up, inside the caller's
    * transaction. Returns the inviteId + inviterId so the caller can create the
@@ -281,6 +311,16 @@ export class InvitesService {
     }
   }
 
+  // Per-user override wins; NULL (or a missing user) falls back to the global
+  // default configured via INVITE_MONTHLY_QUOTA. Shared by the enforcement path
+  // (assertWithinMonthlyQuota) and the read path (getQuota) so they never drift.
+  private resolveMonthlyLimit(inviter: User | null): number {
+    return (
+      inviter?.inviteMonthlyQuota ??
+      this.config.get<number>('app.inviteMonthlyQuota', 5)
+    );
+  }
+
   // Enforces "N invites per calendar month". Counts every invite the member
   // created since the start of the current UTC month regardless of status, so
   // revoking or letting one expire can't reclaim a slot. Runs inside the
@@ -292,18 +332,14 @@ export class InvitesService {
   ): Promise<void> {
     // Lock the inviter's row for the duration of the transaction. Per-user
     // override wins; NULL (or a missing user) falls back to the global default
-    // configured via INVITE_MONTHLY_QUOTA (itself defaulting to 1).
+    // configured via INVITE_MONTHLY_QUOTA (itself defaulting to 5).
     const inviter = await manager.getRepository(User).findOne({
       where: { id: inviterId },
       lock: { mode: 'pessimistic_write' },
     });
-    const limit =
-      inviter?.inviteMonthlyQuota ??
-      this.config.get<number>('app.inviteMonthlyQuota', 1);
+    const limit = this.resolveMonthlyLimit(inviter);
     const now = new Date();
-    const monthStart = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
-    );
+    const monthStart = currentMonthStart(now);
     const used = await manager.count(Invite, {
       where: { inviterId, createdAt: MoreThanOrEqual(monthStart) },
     });

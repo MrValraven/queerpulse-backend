@@ -3,16 +3,18 @@ import { AdminBotsService } from './admin-bots.service';
 
 describe('AdminBotsController', () => {
   let controller: AdminBotsController;
-  let service: jest.Mocked<Pick<AdminBotsService, 'listBots' | 'updateBotProfile'>>;
+  let service: jest.Mocked<
+    Pick<AdminBotsService, 'listBots' | 'updateBotProfile'>
+  >;
 
   beforeEach(() => {
     service = {
       listBots: jest.fn().mockResolvedValue([]),
       updateBotProfile: jest.fn().mockResolvedValue({ ok: true }),
-    } as unknown as jest.Mocked<
-      Pick<AdminBotsService, 'listBots' | 'updateBotProfile'>
-    >;
-    controller = new AdminBotsController(service as unknown as AdminBotsService);
+    };
+    controller = new AdminBotsController(
+      service as unknown as AdminBotsService,
+    );
   });
 
   it('lists system accounts', async () => {

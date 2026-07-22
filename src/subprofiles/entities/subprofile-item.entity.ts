@@ -24,6 +24,20 @@ export enum SubprofileSection {
   // maker
   Collections = 'collections',
   Workshops = 'workshops',
+  // drag
+  Shows = 'shows',
+  Looks = 'looks',
+  // dj
+  Mixes = 'mixes',
+  // dancer + performer
+  Performances = 'performances',
+  Reel = 'reel',
+  // performer
+  Appearances = 'appearances',
+  // photographer
+  Series = 'series',
+  // videomaker
+  Videos = 'videos',
   // generic
   Showcase = 'showcase',
   // every kind

@@ -16,6 +16,7 @@ const HIGH_REASONS: ReadonlySet<ReasonCode> = new Set([
   'harassment',
   'unwanted_contact',
   'venue_safety',
+  'housing_unsafe',
 ]);
 
 const MEDIUM_REASONS: ReadonlySet<ReasonCode> = new Set([
@@ -24,6 +25,7 @@ const MEDIUM_REASONS: ReadonlySet<ReasonCode> = new Set([
   'impersonation',
   'venue_staff',
   'venue_accessibility',
+  'housing_scam',
 ]);
 
 export function deriveSeverity(reasonCode: ReasonCode): ReportSeverity {

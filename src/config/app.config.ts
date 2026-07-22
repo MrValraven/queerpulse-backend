@@ -22,7 +22,7 @@ export default registerAs('app', () => {
      * the two are different hosts and must never be substituted for each other.
      */
     apiUrl: (process.env.API_URL ?? 'http://localhost:3000').replace(/\/$/, ''),
-    inviteMonthlyQuota: parseInt(process.env.INVITE_MONTHLY_QUOTA ?? '1', 10),
+    inviteMonthlyQuota: parseInt(process.env.INVITE_MONTHLY_QUOTA ?? '5', 10),
     /**
      * The founder's email during one-time platform bootstrap — see
      * `src/genesis/`. Unset in every normal environment, and that absence is

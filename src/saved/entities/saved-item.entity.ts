@@ -18,6 +18,9 @@ export enum SavedKind {
   Post = 'post',
   Event = 'event',
   Group = 'group',
+  Housing = 'housing',
+  Flatmate = 'flatmate',
+  Landlord = 'landlord',
 }
 
 /**

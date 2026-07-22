@@ -1,4 +1,11 @@
-import { IsInt, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
+import {
+  IsInt,
+  IsString,
+  Max,
+  MaxLength,
+  Min,
+  MinLength,
+} from 'class-validator';
 
 /** Body for `POST /directory/:slug/reviews` — a member leaving a review. */
 export class CreateReviewDto {

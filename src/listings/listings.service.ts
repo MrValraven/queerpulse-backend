@@ -53,9 +53,7 @@ function normalizePhotoSet(input?: Partial<ListingPhotoSet>): ListingPhotoSet {
 /** Bridges `CreateListingDto`'s optional fields to `Listing`'s
  * fully-populated columns (mirrors `PartnersService.createWithUniqueSlug`'s
  * inline defaulting). */
-function normalizeCreate(
-  dto: CreateListingDto,
-): Omit<
+function normalizeCreate(dto: CreateListingDto): Omit<
   Listing,
   | 'id'
   | 'ref'
@@ -259,7 +257,10 @@ export class ListingsService {
   // body (mirrors `applyUpdate`'s conditional-assign idiom). `removed`
   // composes `safeSpaceRemoval` from the admin UI's `reason` field, preserving
   // whatever richer sub-fields a seed already populated.
-  async setSafeSpace(ref: string, dto: UpdateSafeSpaceDto): Promise<ListingDTO> {
+  async setSafeSpace(
+    ref: string,
+    dto: UpdateSafeSpaceDto,
+  ): Promise<ListingDTO> {
     const listing = await this.loadOr404(ref);
 
     listing.safeSpaceStatus = dto.status;

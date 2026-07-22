@@ -196,9 +196,8 @@ export class AdminMembersService {
       suspendedUsers.map((suspendedUser) => suspendedUser.id),
     );
 
-    const reportsByOwnerUserId = await this.groupReportsByDiscoveredOwner(
-      openMemberReports,
-    );
+    const reportsByOwnerUserId =
+      await this.groupReportsByDiscoveredOwner(openMemberReports);
 
     const flaggedUserIds = [
       ...new Set([...reportsByOwnerUserId.keys(), ...suspendedUserIds]),
@@ -266,36 +265,32 @@ export class AdminMembersService {
       communityRows,
       vouchesGiven,
     ] = await Promise.all([
-        this.vouchService.getVouchCount(profile.userId),
-        this.vouches.find({
-          where: { voucheeId: profile.userId },
-          order: { createdAt: 'DESC' },
-          take: GRAPH_NODE_LIMIT,
-        }),
-        this.reports.find({
-          where: {
-            subjectType: ReportSubjectType.Member,
-            subjectId: In([profile.slug, profile.userId]),
-          },
-          order: { createdAt: 'DESC' },
-        }),
-        this.communityMembers
-          .createQueryBuilder('member')
-          .innerJoin(
-            Community,
-            'community',
-            'community.id = member.community_id',
-          )
-          .select('member.role', 'role')
-          .addSelect('community.name', 'name')
-          .where('member.user_id = :userId', { userId: profile.userId })
-          .getRawMany<{ role: RosterRole; name: string }>(),
-        this.vouches.find({
-          where: { voucherId: profile.userId },
-          order: { createdAt: 'DESC' },
-          take: CONTRIBUTION_LIMIT,
-        }),
-      ]);
+      this.vouchService.getVouchCount(profile.userId),
+      this.vouches.find({
+        where: { voucheeId: profile.userId },
+        order: { createdAt: 'DESC' },
+        take: GRAPH_NODE_LIMIT,
+      }),
+      this.reports.find({
+        where: {
+          subjectType: ReportSubjectType.Member,
+          subjectId: In([profile.slug, profile.userId]),
+        },
+        order: { createdAt: 'DESC' },
+      }),
+      this.communityMembers
+        .createQueryBuilder('member')
+        .innerJoin(Community, 'community', 'community.id = member.community_id')
+        .select('member.role', 'role')
+        .addSelect('community.name', 'name')
+        .where('member.user_id = :userId', { userId: profile.userId })
+        .getRawMany<{ role: RosterRole; name: string }>(),
+      this.vouches.find({
+        where: { voucherId: profile.userId },
+        order: { createdAt: 'DESC' },
+        take: CONTRIBUTION_LIMIT,
+      }),
+    ]);
 
     const openReportCount = memberReports.filter(
       (report) =>
@@ -444,10 +439,7 @@ export class AdminMembersService {
     );
 
     const profileWhereConditions = uuidShapedSubjectIds.length
-      ? [
-          { slug: In(distinctSubjectIds) },
-          { userId: In(uuidShapedSubjectIds) },
-        ]
+      ? [{ slug: In(distinctSubjectIds) }, { userId: In(uuidShapedSubjectIds) }]
       : [{ slug: In(distinctSubjectIds) }];
     const matchingProfiles = await this.profiles.find({
       where: profileWhereConditions,
@@ -595,8 +587,8 @@ export class AdminMembersService {
       countRows.map((countRow) => [countRow.subjectId, Number(countRow.count)]),
     );
     for (let rowIndex = 0; rowIndex < userIds.length; rowIndex += 1) {
-      const userId = userIds[rowIndex]!;
-      const slug = slugs[rowIndex]!;
+      const userId = userIds[rowIndex];
+      const slug = slugs[rowIndex];
       openReportCountByUserId.set(
         userId,
         (countBySubjectId.get(userId) ?? 0) + (countBySubjectId.get(slug) ?? 0),
@@ -614,11 +606,7 @@ export class AdminMembersService {
 
     const rows = await this.communityMembers
       .createQueryBuilder('member')
-      .innerJoin(
-        Community,
-        'community',
-        'community.id = member.community_id',
-      )
+      .innerJoin(Community, 'community', 'community.id = member.community_id')
       .select('member.user_id', 'userId')
       .addSelect('community.name', 'name')
       .where('member.user_id IN (:...userIds)', { userIds })

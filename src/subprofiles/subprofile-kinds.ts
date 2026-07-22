@@ -14,6 +14,12 @@ export type SubprofileKind =
   | 'filmmaker'
   | 'designer'
   | 'maker'
+  | 'drag'
+  | 'dj'
+  | 'dancer'
+  | 'performer'
+  | 'photographer'
+  | 'videomaker'
   | 'generic';
 
 // section enum values (union across all kinds + the universal 'links')
@@ -23,15 +29,23 @@ export type SubprofileSection =
   | 'publications'
   | 'readings' // writer
   | 'discography'
-  | 'gigs' // musician
+  | 'gigs' // musician + dj
   | 'portfolio'
-  | 'exhibitions' // visual_artist
+  | 'exhibitions' // visual_artist + photographer
   | 'filmography'
-  | 'screenings' // filmmaker
+  | 'screenings' // filmmaker + videomaker
   | 'selected_work'
   | 'clients' // designer
   | 'collections'
   | 'workshops' // maker
+  | 'shows'
+  | 'looks' // drag
+  | 'mixes' // dj
+  | 'performances'
+  | 'reel' // dancer + performer
+  | 'appearances' // performer
+  | 'series' // photographer
+  | 'videos' // videomaker
   | 'showcase' // generic
   | 'links'; // every kind
 
@@ -44,6 +58,12 @@ export const KIND_SECTIONS: Record<SubprofileKind, SubprofileSection[]> = {
   filmmaker: ['filmography', 'screenings'],
   designer: ['selected_work', 'clients'],
   maker: ['collections', 'workshops'],
+  drag: ['shows', 'looks'],
+  dj: ['mixes', 'gigs'],
+  dancer: ['performances', 'reel'],
+  performer: ['appearances', 'reel'],
+  photographer: ['series', 'exhibitions'],
+  videomaker: ['videos', 'screenings'],
   generic: ['showcase'],
 };
 
