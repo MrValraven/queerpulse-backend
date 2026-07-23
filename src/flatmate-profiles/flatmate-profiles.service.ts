@@ -19,12 +19,23 @@ import {
 } from './flatmate-profile-response';
 
 const DEFAULT_GREETING =
-  "Hi! I saw your flatmate profile on QueerPulse and wanted to say hello.";
+  'Hi! I saw your flatmate profile on QueerPulse and wanted to say hello.';
 
-function isUniqueViolation(err: unknown): boolean {
-  const e = err as { code?: string; driverError?: { code?: string } };
-  return e?.code === '23505' || e?.driverError?.code === '23505';
+function isUniqueViolation(err: unknown, constraint?: string): boolean {
+  const e = err as {
+    code?: string;
+    constraint?: string;
+    driverError?: { code?: string; constraint?: string };
+  };
+  const code = e?.code ?? e?.driverError?.code;
+  if (code !== '23505') return false;
+  if (!constraint) return true;
+  return (
+    e?.constraint === constraint || e?.driverError?.constraint === constraint
+  );
 }
+
+const OWNER_ID_UNIQUE_CONSTRAINT = 'UQ_flatmate_profiles_owner_id';
 
 /**
  * A member's single flatmate profile. `PUT /mine` is an upsert (create-then-
@@ -49,8 +60,23 @@ export class FlatmateProfilesService {
       const saved = await this.flatmates.save(existing);
       return this.buildDTO(saved);
     }
-    const saved = await this.createWithUniqueSlug(ownerId, dto);
-    return this.buildDTO(saved);
+    try {
+      const saved = await this.createWithUniqueSlug(ownerId, dto);
+      return this.buildDTO(saved);
+    } catch (err) {
+      // A concurrent first-upsert by the same owner can 23505 on the unique
+      // ownerId index (not the slug). Treat that as a lost create-vs-create
+      // race and fall back to updating the row the winner just inserted.
+      if (isUniqueViolation(err, OWNER_ID_UNIQUE_CONSTRAINT)) {
+        const raced = await this.flatmates.findOne({ where: { ownerId } });
+        if (raced) {
+          applyProfile(raced, dto);
+          const saved = await this.flatmates.save(raced);
+          return this.buildDTO(saved);
+        }
+      }
+      throw err;
+    }
   }
 
   async getMine(ownerId: string): Promise<FlatmateProfileDTO | null> {
@@ -93,7 +119,11 @@ export class FlatmateProfilesService {
     ]);
     // matchScore is null on the owner's own view — it is only computed on the
     // member directory browse relative to the viewer's profile.
-    return toFlatmateProfileDTO(profile, refs.get(profile.ownerId) ?? null, null);
+    return toFlatmateProfileDTO(
+      profile,
+      refs.get(profile.ownerId) ?? null,
+      null,
+    );
   }
 
   /** Seeds the slug from the owner's display name (the profile has no name of
@@ -117,6 +147,13 @@ export class FlatmateProfilesService {
         applyProfile(created, dto);
         return await this.flatmates.save(created);
       } catch (err) {
+        // A conflict on the owner-id unique index isn't a slug collision — a
+        // new slug will never resolve it, so let it propagate to upsertMine,
+        // which re-runs this as an update against the profile that won the
+        // race.
+        if (isUniqueViolation(err, OWNER_ID_UNIQUE_CONSTRAINT)) {
+          throw err;
+        }
         if (isUniqueViolation(err)) {
           if (attempt < MAX_ATTEMPTS) continue;
           throw new ConflictException(

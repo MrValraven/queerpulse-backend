@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
+import { ForumPostEdit } from './entities/forum-post-edit.entity';
 import { ForumPostVote } from './entities/forum-post-vote.entity';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
@@ -11,7 +12,12 @@ import { ForumThreadsService } from './forum-threads.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ForumThread, ForumPost, ForumPostVote]),
+    TypeOrmModule.forFeature([
+      ForumThread,
+      ForumPost,
+      ForumPostVote,
+      ForumPostEdit,
+    ]),
     // Gives access to `Repository<Profile>` (exported by `UsersModule`) for
     // resolving thread/post authors to `AuthorSummary` — mirrors
     // `EventsModule`'s import, not `CommunitiesModule`'s redundant

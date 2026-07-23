@@ -17,6 +17,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Feature } from '../common/feature.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { CreateLandlordDto } from './dto/create-landlord.dto';
+import { ListIntroRequestsQuery } from './dto/list-intro-requests.query';
 import { TriageIntroRequestDto } from './dto/triage-intro-request.dto';
 import { UpdateLandlordStatusDto } from './dto/update-landlord-status.dto';
 import { UpdateLandlordDto } from './dto/update-landlord.dto';
@@ -42,8 +43,8 @@ export class AdminLandlordsController {
 
   // Literal `intro-requests` routes declared before `:id` so they win the match.
   @Get('intro-requests')
-  listIntroRequests(@Query('landlord') landlord?: string) {
-    return this.service.listIntroRequests(landlord);
+  listIntroRequests(@Query() query: ListIntroRequestsQuery) {
+    return this.service.listIntroRequests(query.landlord);
   }
 
   @Patch('intro-requests/:id')

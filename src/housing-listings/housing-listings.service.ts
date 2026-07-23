@@ -33,7 +33,10 @@ function isUniqueViolation(err: unknown): boolean {
 
 /** Applies only the fields present on a PATCH body (mirrors
  * `ListingsService.applyUpdate`'s conditional-spread idiom). */
-function applyUpdate(listing: HousingListing, dto: UpdateHousingListingDto): void {
+function applyUpdate(
+  listing: HousingListing,
+  dto: UpdateHousingListingDto,
+): void {
   Object.assign(listing, {
     ...(dto.type !== undefined ? { type: dto.type } : {}),
     ...(dto.title !== undefined ? { title: dto.title } : {}),
@@ -189,9 +192,7 @@ export class HousingListingsService {
     }
   }
 
-  private async mapRows(
-    rows: HousingListing[],
-  ): Promise<HousingListingDTO[]> {
+  private async mapRows(rows: HousingListing[]): Promise<HousingListingDTO[]> {
     if (!rows.length) return [];
     const refs = await new MemberLookup(this.profiles).byUserIds(
       rows.map((r) => r.ownerId),

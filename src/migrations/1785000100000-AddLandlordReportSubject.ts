@@ -6,9 +6,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * PostgreSQL 12+); plain `ADD VALUE` matches repo convention. Reasons reuse
  * existing codes (no DB change). `down()` is a documented no-op.
  */
-export class AddLandlordReportSubject1785000100000
-  implements MigrationInterface
-{
+export class AddLandlordReportSubject1785000100000 implements MigrationInterface {
   name = 'AddLandlordReportSubject1785000100000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

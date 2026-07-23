@@ -4,6 +4,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { UsersModule } from '../users/users.module';
 import { Partner } from './entities/partner.entity';
 import {
+  AdminPartnersController,
   PartnerApplicationsController,
   PartnersController,
 } from './partners.controller';
@@ -11,7 +12,11 @@ import { PartnersService } from './partners.service';
 
 @Module({
   imports: [TypeOrmModule.forFeature([Partner, Profile]), UsersModule],
-  controllers: [PartnersController, PartnerApplicationsController],
+  controllers: [
+    PartnersController,
+    PartnerApplicationsController,
+    AdminPartnersController,
+  ],
   providers: [PartnersService],
   // `VolunteeringModule` imports this module to resolve `partnerSlug` ->
   // `partner_id` and `partner_id` -> `{slug,name}` refs (one-way; `Partners`

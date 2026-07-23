@@ -15,6 +15,7 @@ import {
 import { InvitesService } from '../membership/invites.service';
 import { VouchService } from '../vouch/vouch.service';
 import { VOUCH_CREATED, VouchCreatedEvent } from '../vouch/vouch.events';
+import { ConnectionsService } from '../connections/connections.service';
 import {
   EmailSuppression,
   hashSuppressedEmail,
@@ -54,6 +55,7 @@ export class AuthService {
     private readonly dataSource: DataSource,
     private readonly invitesService: InvitesService,
     private readonly vouchService: VouchService,
+    private readonly connectionsService: ConnectionsService,
     private readonly eventEmitter: EventEmitter2,
     @InjectRepository(EmailSuppression)
     private readonly emailSuppressions: Repository<EmailSuppression>,
@@ -164,6 +166,21 @@ export class AuthService {
             created.id,
             vouch,
           ));
+        // The inviter and the member they personally brought in become mutually
+        // connected the moment the account exists — no request, no acceptance
+        // step. Silent (no CONNECTION_ACCEPTED): this is an implicit link, not a
+        // user action, and an event fired here would survive a rollback of this
+        // transaction. Personal invites only, matching the auto-vouch: an admin
+        // approving a join request (or the genesis bootstrap) is not a personal
+        // connection. Part of this transaction so a failed signup never leaves a
+        // dangling connection.
+        if (personal) {
+          await this.connectionsService.createConnectionInTransaction(
+            manager,
+            inviterId,
+            created.id,
+          );
+        }
         return { user: created, vouched, inviterId };
       },
     );

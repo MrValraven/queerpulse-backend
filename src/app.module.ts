@@ -45,6 +45,7 @@ import { JobsModule } from './jobs/jobs.module';
 import { WorkshopsModule } from './workshops/workshops.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PartnersModule } from './partners/partners.module';
+import { OrgTiersModule } from './org-tiers/org-tiers.module';
 import { StorageModule } from './storage/storage.module';
 import { StorageKeyOwnershipInterceptor } from './storage/storage-key-ownership.interceptor';
 import { UsersModule } from './users/users.module';
@@ -186,6 +187,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     JobsModule,
     WorkshopsModule,
     PartnersModule,
+    OrgTiersModule,
     VolunteeringModule,
     NotificationsModule,
     StorageModule,

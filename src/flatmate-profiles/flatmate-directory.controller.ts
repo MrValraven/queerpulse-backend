@@ -25,10 +25,7 @@ export class FlatmateDirectoryController {
   }
 
   @Get(':slug')
-  detail(
-    @CurrentUser() user: CurrentUserData,
-    @Param('slug') slug: string,
-  ) {
+  detail(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.service.detail(user.userId, slug);
   }
 }

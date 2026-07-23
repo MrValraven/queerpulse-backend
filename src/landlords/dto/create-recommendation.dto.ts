@@ -1,4 +1,11 @@
-import { IsInt, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
+import {
+  IsInt,
+  IsString,
+  Max,
+  MaxLength,
+  Min,
+  MinLength,
+} from 'class-validator';
 
 /** POST /landlords/:slug/recommendations — upserts my one recommendation. */
 export class CreateRecommendationDto {

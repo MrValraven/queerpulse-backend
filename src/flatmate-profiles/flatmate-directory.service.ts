@@ -66,7 +66,10 @@ export class FlatmateDirectoryService {
       if (b.score === null) return -1;
       return b.score - a.score;
     });
-    const total = scored.length;
+    // Only the top MATCH_CANDIDATE_CAP candidates are ranked, but `total`
+    // must reflect the full filtered count, not the capped/scored set — recount
+    // over the same filters (unlimited) rather than using scored.length.
+    const total = await this.filteredQb(viewerId, query).getCount();
     const start = (page - 1) * PAGE_SIZE;
     const pageSlice = scored.slice(start, start + PAGE_SIZE);
     const items = await this.mapRows(

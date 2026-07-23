@@ -16,9 +16,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * them. New sections are validated against `KIND_SECTIONS` per kind, so
  * existing personas are unaffected.
  */
-export class AddSubprofilePerformanceKinds1785000110000
-  implements MigrationInterface
-{
+export class AddSubprofilePerformanceKinds1785000110000 implements MigrationInterface {
   name = 'AddSubprofilePerformanceKinds1785000110000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

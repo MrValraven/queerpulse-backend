@@ -9,6 +9,7 @@ import { EmailSuppression } from '../account/entities/email-suppression.entity';
 import { UsersModule } from '../users/users.module';
 import { MembershipModule } from '../membership/membership.module';
 import { VouchModule } from '../vouch/vouch.module';
+import { ConnectionsModule } from '../connections/connections.module';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
 import { User } from '../users/entities/user.entity';
 import { AuthController } from './auth.controller';
@@ -26,6 +27,11 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     // personally invited (AuthService.validateOrCreateGoogleUser). VouchModule
     // depends only on UsersModule, so this adds no dependency cycle.
     VouchModule,
+    // ConnectionsModule: signup auto-connects the inviter with the member they
+    // personally invited (AuthService.validateOrCreateGoogleUser), alongside the
+    // auto-vouch. ConnectionsModule imports only Users/Social — neither imports
+    // AuthModule — so this adds no dependency cycle.
+    ConnectionsModule,
     PlatformSettingsModule,
     PassportModule,
     // User: JwtStrategy re-reads status/role per request so bans take effect

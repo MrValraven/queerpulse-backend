@@ -1,0 +1,17 @@
+meta {
+  name: Connection Counts
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{baseUrl}}/connections/counts
+  body: none
+  auth: none
+}
+
+docs {
+  Active-only. Per-tab totals for the connections page badges:
+  { all, incoming, outgoing, vouched }. "blocked" is owned by the blocks
+  resource, not this endpoint.
+}

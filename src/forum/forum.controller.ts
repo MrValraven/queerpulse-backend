@@ -1,9 +1,11 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Query,
   UseGuards,
@@ -18,6 +20,8 @@ import { CreateThreadDto } from './dto/create-thread.dto';
 import { ListPostsQuery } from './dto/list-posts.query';
 import { ListThreadsQuery } from './dto/list-threads.query';
 import { ReplyThreadDto } from './dto/reply-thread.dto';
+import { UpdatePostDto } from './dto/update-post.dto';
+import { UpdateThreadDto } from './dto/update-thread.dto';
 import { VotePostDto } from './dto/vote-post.dto';
 import { ForumPostsService } from './forum-posts.service';
 import { ForumThreadsService } from './forum-threads.service';
@@ -55,12 +59,7 @@ export class ForumController {
     @Param('slug') slug: string,
     @Query() query: ListPostsQuery,
   ) {
-    return this.postsService.listPosts(
-      slug,
-      user.userId,
-      query.cursor,
-      query.limit,
-    );
+    return this.postsService.listPosts(slug, user, query.cursor, query.limit);
   }
 
   @Post('threads')
@@ -77,7 +76,7 @@ export class ForumController {
     @Param('slug') slug: string,
     @Body() dto: ReplyThreadDto,
   ) {
-    return this.postsService.reply(slug, user.userId, dto.body);
+    return this.postsService.reply(slug, user, dto.body);
   }
 
   @Post('posts/:id/vote')
@@ -87,5 +86,47 @@ export class ForumController {
     @Body() dto: VotePostDto,
   ) {
     return this.postsService.vote(id, user.userId, dto.value);
+  }
+
+  @Patch('posts/:id')
+  updatePost(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdatePostDto,
+  ) {
+    return this.postsService.updatePostBody(id, user, dto.body);
+  }
+
+  @Delete('posts/:id')
+  deletePost(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.postsService.tombstonePost(id, user);
+  }
+
+  @Post('posts/:id/restore')
+  restorePost(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.postsService.restorePost(id, user);
+  }
+
+  @Get('posts/:id/history')
+  postHistory(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.postsService.listHistory(id, user);
+  }
+
+  @Patch('threads/:slug')
+  updateThread(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: UpdateThreadDto,
+  ) {
+    return this.threadsService.updateThreadTitle(slug, user, dto.title);
   }
 }

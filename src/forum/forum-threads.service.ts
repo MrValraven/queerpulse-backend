@@ -1,15 +1,18 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
+import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { CursorPage, cursorPaginate } from '../common/cursor-pagination';
 import { MemberLookup } from '../common/member-ref';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
+import { ForumPostEdit } from './entities/forum-post-edit.entity';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
 import { ForumThreadResponse, toForumThreadResponse } from './forum-response';
@@ -37,6 +40,8 @@ export class ForumThreadsService {
     private readonly posts: Repository<ForumPost>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
+    @InjectRepository(ForumPostEdit)
+    private readonly edits: Repository<ForumPostEdit>,
     private readonly dataSource: DataSource,
     private readonly blockFilter: BlockFilterService,
   ) {}
@@ -67,7 +72,7 @@ export class ForumThreadsService {
     );
 
     return {
-      data: await this.toThreadResponses(rows),
+      data: await this.toThreadResponses(rows, viewerId),
       pageInfo: { nextCursor, hasMore },
     };
   }
@@ -81,7 +86,11 @@ export class ForumThreadsService {
     const authors = await new MemberLookup(this.profiles).byUserIds([
       thread.authorId,
     ]);
-    return toForumThreadResponse(thread, authors.get(thread.authorId) ?? null);
+    return toForumThreadResponse(
+      thread,
+      authors.get(thread.authorId) ?? null,
+      viewerId,
+    );
   }
 
   // POST /forum/threads — creates the thread row *and* its OP post (the
@@ -94,7 +103,11 @@ export class ForumThreadsService {
   ): Promise<ForumThreadResponse> {
     const thread = await this.createWithUniqueSlug(authorId, input);
     const authors = await new MemberLookup(this.profiles).byUserIds([authorId]);
-    return toForumThreadResponse(thread, authors.get(authorId) ?? null);
+    return toForumThreadResponse(
+      thread,
+      authors.get(authorId) ?? null,
+      authorId,
+    );
   }
 
   /**
@@ -133,6 +146,49 @@ export class ForumThreadsService {
   async markActivity(threadId: string): Promise<void> {
     await this.threads.increment({ id: threadId }, 'replyCount', 1);
     await this.threads.update({ id: threadId }, { lastActivityAt: new Date() });
+  }
+
+  // PATCH /forum/threads/:slug — author-only title edit. The title lives on the
+  // thread; edit-history is anchored to the OP post (the oldest `ForumPost`),
+  // so a title change is snapshotted there with `previousTitle` set.
+  async updateThreadTitle(
+    slug: string,
+    user: CurrentUserData,
+    title: string,
+  ): Promise<ForumThreadResponse> {
+    const thread = await this.loadOr404(slug, user.userId);
+    if (thread.authorId !== user.userId) {
+      throw new ForbiddenException('Only the author can edit this thread');
+    }
+
+    const opPost = await this.posts.findOne({
+      where: { threadId: thread.id },
+      order: { createdAt: 'ASC' },
+    });
+    if (opPost) {
+      await this.edits.save(
+        this.edits.create({
+          postId: opPost.id,
+          previousBody: opPost.body,
+          previousTitle: thread.title,
+          editorId: user.userId,
+        }),
+      );
+      opPost.editedAt = new Date();
+      await this.posts.save(opPost);
+    }
+
+    thread.title = title;
+    await this.threads.save(thread);
+
+    const authors = await new MemberLookup(this.profiles).byUserIds([
+      thread.authorId,
+    ]);
+    return toForumThreadResponse(
+      thread,
+      authors.get(thread.authorId) ?? null,
+      user.userId,
+    );
   }
 
   // --- internals ---
@@ -193,12 +249,13 @@ export class ForumThreadsService {
   // `CommunityPostsService.toPostDTOs`).
   private async toThreadResponses(
     rows: ForumThread[],
+    viewerId: string,
   ): Promise<ForumThreadResponse[]> {
     if (!rows.length) return [];
     const authorIds = [...new Set(rows.map((t) => t.authorId))];
     const authors = await new MemberLookup(this.profiles).byUserIds(authorIds);
     return rows.map((t) =>
-      toForumThreadResponse(t, authors.get(t.authorId) ?? null),
+      toForumThreadResponse(t, authors.get(t.authorId) ?? null, viewerId),
     );
   }
 }

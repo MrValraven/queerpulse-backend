@@ -23,6 +23,15 @@ const UNKNOWN_AUTHOR: AuthorSummary = {
   avatarUrl: null,
 };
 
+// Author identity hidden on a tombstoned post. The frontend branches on the
+// `deleted` flag and renders its own "[deleted]" label, so these values are
+// only a safe fallback, never shown verbatim.
+const DELETED_AUTHOR: AuthorSummary = {
+  handle: '',
+  displayName: '',
+  avatarUrl: null,
+};
+
 /**
  * Maps a `MemberRef` (from `common/member-ref.ts`'s `MemberLookup`) to an
  * `AuthorSummary`. Falls back to a generic placeholder in the defensive case
@@ -52,11 +61,13 @@ export interface ForumThreadResponse {
   replyCount: number;
   lastActivityAt: string;
   createdAt: string;
+  canEdit: boolean;
 }
 
 export function toForumThreadResponse(
   thread: ForumThread,
   author: MemberRef | null,
+  viewerId: string,
 ): ForumThreadResponse {
   return {
     id: thread.id,
@@ -69,7 +80,13 @@ export function toForumThreadResponse(
     replyCount: thread.replyCount,
     lastActivityAt: thread.lastActivityAt.toISOString(),
     createdAt: thread.createdAt.toISOString(),
+    canEdit: thread.authorId === viewerId,
   };
+}
+
+export interface ForumPostViewer {
+  userId: string;
+  isModerator: boolean;
 }
 
 export interface ForumPostResponse {
@@ -80,20 +97,67 @@ export interface ForumPostResponse {
   voteCount: number;
   myVote: number;
   createdAt: string;
+  editedAt: string | null;
+  deleted: boolean;
+  canEdit: boolean;
+  canDelete: boolean;
+  canRestore: boolean;
+  canViewHistory: boolean;
 }
 
 export function toForumPostResponse(
   post: ForumPost,
   author: MemberRef | null,
   myVote: number,
+  viewer: ForumPostViewer,
 ): ForumPostResponse {
+  const deleted = post.deletedAt != null;
+  const isAuthor = post.authorId === viewer.userId;
+  const canModerate = isAuthor || viewer.isModerator;
   return {
     id: post.id,
     threadId: post.threadId,
-    author: toAuthorSummary(author),
-    body: post.body,
+    author: deleted ? DELETED_AUTHOR : toAuthorSummary(author),
+    body: deleted ? '' : post.body,
     voteCount: post.voteCount,
     myVote,
     createdAt: post.createdAt.toISOString(),
+    editedAt: post.editedAt ? post.editedAt.toISOString() : null,
+    deleted,
+    canEdit: isAuthor && !deleted, // edit is author-only
+    canDelete: canModerate && !deleted,
+    canRestore: canModerate && deleted,
+    canViewHistory: canModerate && post.editedAt != null,
+  };
+}
+
+export interface ForumPostHistoryEntry {
+  id: string;
+  previousBody: string;
+  previousTitle: string | null;
+  editor: AuthorSummary;
+  createdAt: string;
+}
+
+export interface ForumPostHistoryResponse {
+  revisions: ForumPostHistoryEntry[];
+}
+
+export function toForumPostHistoryEntry(
+  edit: {
+    id: string;
+    previousBody: string;
+    previousTitle: string | null;
+    editorId: string | null;
+    createdAt: Date;
+  },
+  editor: MemberRef | null,
+): ForumPostHistoryEntry {
+  return {
+    id: edit.id,
+    previousBody: edit.previousBody,
+    previousTitle: edit.previousTitle,
+    editor: toAuthorSummary(editor),
+    createdAt: edit.createdAt.toISOString(),
   };
 }

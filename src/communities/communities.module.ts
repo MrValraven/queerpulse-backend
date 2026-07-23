@@ -9,7 +9,9 @@ import { CommunityPostsController } from './community-posts.controller';
 import { CommunityPostsService } from './community-posts.service';
 import { CommunityJoinRequest } from './entities/community-join-request.entity';
 import { CommunityMember } from './entities/community-member.entity';
+import { CommunityPostEdit } from './entities/community-post-edit.entity';
 import { CommunityPostReaction } from './entities/community-post-reaction.entity';
+import { CommunityPostReplyEdit } from './entities/community-post-reply-edit.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { CommunityPost } from './entities/community-post.entity';
 import { Community } from './entities/community.entity';
@@ -23,6 +25,8 @@ import { MeCommunitiesController } from './me-communities.controller';
       CommunityPost,
       CommunityPostReaction,
       CommunityPostReply,
+      CommunityPostEdit,
+      CommunityPostReplyEdit,
       CommunityJoinRequest,
       Profile,
     ]),

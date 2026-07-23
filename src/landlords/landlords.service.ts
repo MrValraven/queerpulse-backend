@@ -135,21 +135,38 @@ export class LandlordsService {
     dto: CreateRecommendationDto,
   ): Promise<RecommendationDTO> {
     const landlord = await this.loadLiveOr404(slug);
-    let rec = await this.recommendations.findOne({
+    const rec = await this.recommendations.findOne({
       where: { landlordId: landlord.id, authorUserId },
     });
+    let saved: LandlordRecommendation;
     if (rec) {
       rec.stars = dto.stars;
       rec.text = dto.text;
+      saved = await this.recommendations.save(rec);
     } else {
-      rec = this.recommendations.create({
+      const created = this.recommendations.create({
         landlordId: landlord.id,
         authorUserId,
         stars: dto.stars,
         text: dto.text,
       });
+      try {
+        saved = await this.recommendations.save(created);
+      } catch (err) {
+        // Two concurrent first-recommends by the same author can both miss
+        // the find above and both attempt an insert; the loser trips
+        // UQ_landlord_recommendations_author. Re-find and update instead of
+        // letting it surface as a 500.
+        if (!isUniqueViolation(err)) throw err;
+        const raced = await this.recommendations.findOne({
+          where: { landlordId: landlord.id, authorUserId },
+        });
+        if (!raced) throw err;
+        raced.stars = dto.stars;
+        raced.text = dto.text;
+        saved = await this.recommendations.save(raced);
+      }
     }
-    const saved = await this.recommendations.save(rec);
     const members = await new MemberLookup(this.profiles).byUserIds([
       authorUserId,
     ]);
@@ -323,9 +340,7 @@ export class LandlordsService {
     return map;
   }
 
-  private async landlordsByIds(
-    ids: string[],
-  ): Promise<Map<string, Landlord>> {
+  private async landlordsByIds(ids: string[]): Promise<Map<string, Landlord>> {
     const map = new Map<string, Landlord>();
     if (!ids.length) return map;
     const rows = await this.landlords.find({ where: { id: In(ids) } });
@@ -340,17 +355,24 @@ export class LandlordsService {
   ): Promise<Landlord> {
     const MAX_ATTEMPTS = 5;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const slug = await allocateUniqueSlug(slugify(dto.name, 'landlord'), (s) =>
-        this.landlords.exists({ where: { slug: s } }),
+      const slug = await allocateUniqueSlug(
+        slugify(dto.name, 'landlord'),
+        (s) => this.landlords.exists({ where: { slug: s } }),
       );
       try {
-        const landlord = this.landlords.create({ slug, status, submittedByUserId });
+        const landlord = this.landlords.create({
+          slug,
+          status,
+          submittedByUserId,
+        });
         applyLandlord(landlord, dto);
         return await this.landlords.save(landlord);
       } catch (err) {
         if (isUniqueViolation(err)) {
           if (attempt < MAX_ATTEMPTS) continue;
-          throw new ConflictException('Could not allocate a unique landlord slug');
+          throw new ConflictException(
+            'Could not allocate a unique landlord slug',
+          );
         }
         throw err;
       }

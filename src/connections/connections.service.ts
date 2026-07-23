@@ -7,7 +7,13 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { In, QueryFailedError, Repository } from 'typeorm';
+import {
+  EntityManager,
+  FindOptionsWhere,
+  In,
+  QueryFailedError,
+  Repository,
+} from 'typeorm';
 import {
   CONNECTION_ACCEPTED,
   ConnectionAcceptedEvent,
@@ -19,6 +25,7 @@ import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import {
+  ConnectionCounts,
   ConnectionListItem,
   ConnectionRelationship,
   VouchBadge,
@@ -38,7 +45,10 @@ function isUniqueViolation(err: unknown): boolean {
 }
 
 /** The relationship for a member the viewer shares nothing with (yet). */
-const NO_RELATIONSHIP: ConnectionRelationship = { mutuals: 0, vouchBadge: null };
+const NO_RELATIONSHIP: ConnectionRelationship = {
+  mutuals: 0,
+  vouchBadge: null,
+};
 
 @Injectable()
 export class ConnectionsService {
@@ -423,6 +433,50 @@ export class ConnectionsService {
     return { items, total, page, pageSize: PAGE_SIZE };
   }
 
+  /**
+   * The total behind each tab, in one shot — powers the client's tab badges
+   * without fetching any list. Each count mirrors the matching `tab` filter in
+   * {@link list} exactly, so a badge and its opened list always agree. "blocked"
+   * is intentionally absent: blocks are owned by the social/blocks resource, not
+   * this endpoint.
+   */
+  async counts(userId: string): Promise<ConnectionCounts> {
+    const accepted: FindOptionsWhere<Connection>[] = [
+      { requesterId: userId, status: ConnectionStatus.Accepted },
+      { addresseeId: userId, status: ConnectionStatus.Accepted },
+    ];
+    const [all, incoming, outgoing, vouched] = await Promise.all([
+      this.connections.count({ where: accepted }),
+      this.connections.count({
+        where: { addresseeId: userId, status: ConnectionStatus.Pending },
+      }),
+      this.connections.count({
+        where: { requesterId: userId, status: ConnectionStatus.Pending },
+      }),
+      this.countVouched(userId, accepted),
+    ]);
+    return { all, incoming, outgoing, vouched };
+  }
+
+  /**
+   * How many of the viewer's accepted connections they've also vouched for. The
+   * vouched filter can't run in SQL alongside the accepted-connection query (see
+   * the `vouched` branch of {@link list}), so it's computed the same way: load
+   * the accepted set and the viewer's vouches, then intersect.
+   */
+  private async countVouched(
+    userId: string,
+    acceptedWhere: FindOptionsWhere<Connection>[],
+  ): Promise<number> {
+    const [accepted, given] = await Promise.all([
+      this.connections.find({ where: acceptedWhere }),
+      this.vouches.find({ where: { voucherId: userId } }),
+    ]);
+    const vouchedIds = new Set(given.map((vouch) => vouch.voucheeId));
+    return accepted.filter((conn) => vouchedIds.has(this.otherId(conn, userId)))
+      .length;
+  }
+
   async areConnected(a: string, b: string): Promise<boolean> {
     const conn = await this.findPair(a, b);
     return conn?.status === ConnectionStatus.Accepted;
@@ -438,6 +492,21 @@ export class ConnectionsService {
     return rows.map((c) =>
       c.requesterId === userId ? c.addresseeId : c.requesterId,
     );
+  }
+
+  /**
+   * The slugs of the viewer's accepted connections — the minimal signal the
+   * client needs to flip a member's "Say hello" button to "Message". Mirrors
+   * `getAcceptedConnectionUserIds`, resolving each counterpart user-id to its
+   * profile slug. The viewer's own slug never appears.
+   */
+  async getAcceptedConnectionSlugs(userId: string): Promise<string[]> {
+    const counterpartUserIds = await this.getAcceptedConnectionUserIds(userId);
+    if (counterpartUserIds.length === 0) return [];
+    const profilesByUserId = await this.profilesByUserIds(counterpartUserIds);
+    return counterpartUserIds
+      .map((counterpartUserId) => profilesByUserId.get(counterpartUserId)?.slug)
+      .filter((slug): slug is string => typeof slug === 'string');
   }
 
   // --- internals ---
@@ -457,6 +526,46 @@ export class ConnectionsService {
 
   private pair(a: string, b: string): { low: string; high: string } {
     return a < b ? { low: a, high: b } : { low: b, high: a };
+  }
+
+  /**
+   * Create an already-`Accepted` connection inside the CALLER'S transaction,
+   * addressed by user ids. The signup flow uses this to auto-connect an inviter
+   * with the member they personally brought in, so the connection commits or
+   * rolls back together with the account creation, invite claim, and auto-vouch.
+   *
+   * Deliberately silent: it does NOT emit `CONNECTION_ACCEPTED`. That event
+   * materializes a conversation (§7) and would survive a rollback of the
+   * caller's transaction — and an auto-connect is an implicit link, not a user
+   * action, so it produces no notification or conversation.
+   *
+   * Bare insert, no duplicate handling: the member is created in the same
+   * transaction, so no prior `(userLow, userHigh)` row can exist. Skips (returns
+   * false) a self-connection — impossible for a brand-new signup, but keeps the
+   * helper safe for any caller.
+   */
+  async createConnectionInTransaction(
+    manager: EntityManager,
+    inviterId: string,
+    memberId: string,
+  ): Promise<boolean> {
+    if (inviterId === memberId) {
+      return false;
+    }
+    const { low, high } = this.pair(inviterId, memberId);
+    await manager.insert(Connection, {
+      requesterId: inviterId,
+      addresseeId: memberId,
+      userLow: low,
+      userHigh: high,
+      status: ConnectionStatus.Accepted,
+      respondedAt: new Date(),
+      requestMessage: null,
+      requestReason: null,
+      introducedBy: null,
+      flagged: false,
+    });
+    return true;
   }
 
   private findPair(a: string, b: string): Promise<Connection | null> {

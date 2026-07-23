@@ -150,6 +150,22 @@ export class Partner {
   @Column({ type: 'text', nullable: true })
   reviewNote: string | null;
 
+  @Column({ type: 'boolean', default: false })
+  featured: boolean;
+
+  // Optional featured testimonial shown on the For Organisations page. All
+  // three are populated together or all null; the service never writes a
+  // partial quote (no author without a quote). Plain display strings — not
+  // i18n'd, same precedent as the rest of a partner's owned content.
+  @Column({ type: 'text', nullable: true })
+  testimonialQuote: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  testimonialAuthor: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  testimonialRole: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 

@@ -1,18 +1,24 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { BlockFilterService } from '../social/block-filter.service';
+import { Profile } from '../users/entities/profile.entity';
 import { Notification, NotificationType } from './entities/notification.entity';
 import {
   NOTIFICATION_CREATED,
   NotificationCreatedEvent,
 } from './notification.events';
+import {
+  NotificationResponse,
+  actorIdOf,
+  toNotificationResponse,
+} from './notification-response';
 
 const PAGE_SIZE = 20;
 
 export interface NotificationsPage {
-  items: Notification[];
+  items: NotificationResponse[];
   page: number;
   hasMore: boolean;
 }
@@ -22,6 +28,8 @@ export class NotificationsService {
   constructor(
     @InjectRepository(Notification)
     private readonly notifications: Repository<Notification>,
+    @InjectRepository(Profile)
+    private readonly profiles: Repository<Profile>,
     private readonly eventEmitter: EventEmitter2,
     private readonly blockFilter: BlockFilterService,
   ) {}
@@ -104,7 +112,35 @@ export class NotificationsService {
       take: PAGE_SIZE + 1,
     });
     const hasMore = rows.length > PAGE_SIZE;
-    return { items: hasMore ? rows.slice(0, PAGE_SIZE) : rows, page, hasMore };
+    const items = hasMore ? rows.slice(0, PAGE_SIZE) : rows;
+    return { items: await this.attachActors(items), page, hasMore };
+  }
+
+  /**
+   * Resolve each row's acting member into an `actor` (name, slug, avatar) for
+   * display. One batched profile query per page, not one per row. Rows with no
+   * actor — or whose actor's profile is gone — keep `actor: null` and still
+   * render through their generic copy.
+   */
+  private async attachActors(
+    rows: Notification[],
+  ): Promise<NotificationResponse[]> {
+    const actorIds = [
+      ...new Set(rows.map(actorIdOf).filter((id): id is string => id !== null)),
+    ];
+    const profiles = actorIds.length
+      ? await this.profiles.find({ where: { userId: In(actorIds) } })
+      : [];
+    const byUserId = new Map(
+      profiles.map((profile) => [profile.userId, profile]),
+    );
+    return rows.map((row) => {
+      const actorId = actorIdOf(row);
+      return toNotificationResponse(
+        row,
+        actorId ? byUserId.get(actorId) : undefined,
+      );
+    });
   }
 
   unreadCount(userId: string): Promise<number> {

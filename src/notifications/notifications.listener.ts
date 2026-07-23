@@ -1,18 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Not, Repository } from 'typeorm';
 import {
   CONNECTION_ACCEPTED,
   CONNECTION_REQUESTED,
   ConnectionAcceptedEvent,
   ConnectionRequestedEvent,
 } from '../connections/connection.events';
-import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
-import {
-  MESSAGE_CREATED,
-  MessageCreatedEvent,
-} from '../messaging/messaging.events';
 import {
   EVENT_INVITED,
   EVENT_WAITLIST_PROMOTED,
@@ -26,11 +19,7 @@ import { NotificationsService } from './notifications.service';
 
 @Injectable()
 export class NotificationsListener {
-  constructor(
-    private readonly notifications: NotificationsService,
-    @InjectRepository(ConversationParticipant)
-    private readonly participants: Repository<ConversationParticipant>,
-  ) {}
+  constructor(private readonly notifications: NotificationsService) {}
 
   // Every `create`/`createForRecipients` call below passes the acting member as
   // the trailing `actorId` argument so `NotificationsService` can suppress the
@@ -90,26 +79,11 @@ export class NotificationsListener {
     );
   }
 
-  @OnEvent(MESSAGE_CREATED)
-  async onMessageCreated(e: MessageCreatedEvent): Promise<void> {
-    const others = await this.participants.find({
-      where: {
-        conversationId: e.conversationId,
-        userId: Not(e.message.senderId),
-      },
-    });
-    const recipientIds = others.filter((p) => !p.muted).map((p) => p.userId);
-    await this.notifications.createForRecipients(
-      recipientIds,
-      NotificationType.NewMessage,
-      {
-        conversationId: e.conversationId,
-        messageId: e.message.id,
-        senderId: e.message.senderId,
-      },
-      e.message.senderId,
-    );
-  }
+  // New direct messages deliberately do NOT create a bell notification: the
+  // Messages inbox (with its own unread count) is the sole surface for them.
+  // Adding a `NewMessage` row per message duplicated that inbox and flooded the
+  // bell on any active thread. The `NewMessage` enum value + its frontend
+  // rendering stay for the demo-mode mock list; nothing writes it in live mode.
 
   @OnEvent(EVENT_INVITED)
   async onEventInvited(e: EventInvitedEvent): Promise<void> {

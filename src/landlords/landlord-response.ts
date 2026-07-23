@@ -31,9 +31,10 @@ function memberName(member: MemberRef | null): string {
 
 /** Aggregate star rating: mean to one decimal + count. Mirrors `listings`
  * `ratingFromReviews`. */
-export function ratingFromRecommendations(
-  recs: LandlordRecommendation[],
-): { score: string; count: number } {
+export function ratingFromRecommendations(recs: LandlordRecommendation[]): {
+  score: string;
+  count: number;
+} {
   if (recs.length === 0) return { score: '0', count: 0 };
   const total = recs.reduce((sum, rec) => sum + rec.stars, 0);
   return { score: (total / recs.length).toFixed(1), count: recs.length };

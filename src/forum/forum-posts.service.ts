@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository, SelectQueryBuilder } from 'typeorm';
+import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import {
   CursorPage,
   decodeCursor,
@@ -13,16 +14,34 @@ import {
 import { MemberLookup } from '../common/member-ref';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
+import { UserRole } from '../users/entities/user.entity';
+import { ForumPostEdit } from './entities/forum-post-edit.entity';
 import { ForumPostVote } from './entities/forum-post-vote.entity';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThreadsService } from './forum-threads.service';
-import { ForumPostResponse, toForumPostResponse } from './forum-response';
+import {
+  ForumPostHistoryResponse,
+  ForumPostResponse,
+  ForumPostViewer,
+  toForumPostHistoryEntry,
+  toForumPostResponse,
+} from './forum-response';
 
 const DEFAULT_LIMIT = 20;
 
 export interface VoteResult {
   voteCount: number;
   myVote: number;
+}
+
+const MODERATOR_ROLES: readonly string[] = [UserRole.Moderator, UserRole.Admin];
+
+function isModeratorRole(role: string): boolean {
+  return MODERATOR_ROLES.includes(role);
+}
+
+function viewerOf(user: CurrentUserData): ForumPostViewer {
+  return { userId: user.userId, isModerator: isModeratorRole(user.role) };
 }
 
 @Injectable()
@@ -36,6 +55,8 @@ export class ForumPostsService {
     private readonly profiles: Repository<Profile>,
     private readonly threadsService: ForumThreadsService,
     private readonly blockFilter: BlockFilterService,
+    @InjectRepository(ForumPostEdit)
+    private readonly edits: Repository<ForumPostEdit>,
   ) {}
 
   // GET /forum/threads/:slug/posts?cursor= — OP + replies, oldest-first.
@@ -47,11 +68,11 @@ export class ForumPostsService {
   // identical) but walks `(createdAt, id) ASC` instead.
   async listPosts(
     threadSlug: string,
-    viewerId: string,
+    user: CurrentUserData,
     cursor: string | undefined,
     limit: number | undefined,
   ): Promise<CursorPage<ForumPostResponse>> {
-    const thread = await this.threadsService.loadOr404(threadSlug, viewerId);
+    const thread = await this.threadsService.loadOr404(threadSlug, user.userId);
 
     const qb = this.posts
       .createQueryBuilder('p')
@@ -63,7 +84,7 @@ export class ForumPostsService {
     // author's thread is still reachable by direct navigation (see
     // `ForumThreadsService.loadOr404`), but their posts stay silenced, which is
     // exactly what a mute means.
-    this.blockFilter.excludeHidden(qb, viewerId, '"p"."author_id"');
+    this.blockFilter.excludeHidden(qb, user.userId, '"p"."author_id"');
 
     const { rows, nextCursor, hasMore } = await this.paginateOldestFirst(
       qb,
@@ -73,7 +94,7 @@ export class ForumPostsService {
     );
 
     return {
-      data: await this.toPostResponses(rows, viewerId),
+      data: await this.toPostResponses(rows, user),
       pageInfo: { nextCursor, hasMore },
     };
   }
@@ -82,24 +103,36 @@ export class ForumPostsService {
   // created alongside the thread by `ForumThreadsService.create`).
   async reply(
     threadSlug: string,
-    authorId: string,
+    user: CurrentUserData,
     body: string,
   ): Promise<ForumPostResponse> {
     // Passing the replier as viewer 404s the thread when its author is blocked
     // either way — a block is a hard severance, so it has to gate the write
     // path too, not just the reads above.
-    const thread = await this.threadsService.loadOr404(threadSlug, authorId);
+    const thread = await this.threadsService.loadOr404(threadSlug, user.userId);
     if (thread.isLocked) {
       throw new ForbiddenException('This thread is locked');
     }
 
     const saved = await this.posts.save(
-      this.posts.create({ threadId: thread.id, authorId, body, voteCount: 0 }),
+      this.posts.create({
+        threadId: thread.id,
+        authorId: user.userId,
+        body,
+        voteCount: 0,
+      }),
     );
     await this.threadsService.markActivity(thread.id);
 
-    const authors = await new MemberLookup(this.profiles).byUserIds([authorId]);
-    return toForumPostResponse(saved, authors.get(authorId) ?? null, 0);
+    const authors = await new MemberLookup(this.profiles).byUserIds([
+      user.userId,
+    ]);
+    return toForumPostResponse(
+      saved,
+      authors.get(user.userId) ?? null,
+      0,
+      viewerOf(user),
+    );
   }
 
   // POST /forum/posts/:id/vote — `value` is +1 (upvote) or 0 (remove vote).
@@ -128,6 +161,127 @@ export class ForumPostsService {
     }
 
     return { voteCount: post.voteCount, myVote: value };
+  }
+
+  // PATCH /forum/posts/:id — author-only body edit. Snapshots the pre-edit
+  // body to `forum_post_edit`, stamps `editedAt`.
+  async updatePostBody(
+    postId: string,
+    user: CurrentUserData,
+    body: string,
+  ): Promise<ForumPostResponse> {
+    const post = await this.loadPostOr404(postId);
+    if (post.deletedAt) {
+      throw new NotFoundException('Post not found');
+    }
+    if (post.authorId !== user.userId) {
+      throw new ForbiddenException('Only the author can edit this post');
+    }
+
+    await this.edits.save(
+      this.edits.create({
+        postId: post.id,
+        previousBody: post.body,
+        previousTitle: null,
+        editorId: user.userId,
+      }),
+    );
+    post.body = body;
+    post.editedAt = new Date();
+    await this.posts.save(post);
+
+    return this.mapOne(post, user);
+  }
+
+  // DELETE /forum/posts/:id — soft tombstone. Author or platform staff.
+  async tombstonePost(
+    postId: string,
+    user: CurrentUserData,
+  ): Promise<ForumPostResponse> {
+    const post = await this.loadPostOr404(postId);
+    this.assertCanModerate(post, user);
+    if (!post.deletedAt) {
+      post.deletedAt = new Date();
+      await this.posts.save(post);
+    }
+    return this.mapOne(post, user);
+  }
+
+  // POST /forum/posts/:id/restore — clear the tombstone. Author or staff.
+  async restorePost(
+    postId: string,
+    user: CurrentUserData,
+  ): Promise<ForumPostResponse> {
+    const post = await this.loadPostOr404(postId);
+    this.assertCanModerate(post, user);
+    if (post.deletedAt) {
+      post.deletedAt = null;
+      await this.posts.save(post);
+    }
+    return this.mapOne(post, user);
+  }
+
+  // GET /forum/posts/:id/history — revisions, newest-first. Author or staff.
+  async listHistory(
+    postId: string,
+    user: CurrentUserData,
+  ): Promise<ForumPostHistoryResponse> {
+    const post = await this.loadPostOr404(postId);
+    this.assertCanModerate(post, user);
+
+    const rows = await this.edits.find({
+      where: { postId },
+      order: { createdAt: 'DESC' },
+    });
+    const editorIds = [
+      ...new Set(
+        rows.map((row) => row.editorId).filter((id): id is string => !!id),
+      ),
+    ];
+    const editors = await new MemberLookup(this.profiles).byUserIds(editorIds);
+
+    return {
+      revisions: rows.map((row) =>
+        toForumPostHistoryEntry(
+          row,
+          row.editorId ? (editors.get(row.editorId) ?? null) : null,
+        ),
+      ),
+    };
+  }
+
+  private assertCanModerate(post: ForumPost, user: CurrentUserData): void {
+    if (post.authorId !== user.userId && !isModeratorRole(user.role)) {
+      throw new ForbiddenException(
+        'Only the author or a moderator can do that',
+      );
+    }
+  }
+
+  private async loadPostOr404(postId: string): Promise<ForumPost> {
+    const post = await this.posts.findOne({ where: { id: postId } });
+    if (!post) {
+      throw new NotFoundException('Post not found');
+    }
+    return post;
+  }
+
+  private async mapOne(
+    post: ForumPost,
+    user: CurrentUserData,
+  ): Promise<ForumPostResponse> {
+    const authors = await new MemberLookup(this.profiles).byUserIds([
+      post.authorId,
+    ]);
+    const vote = await this.votes.findOne({
+      where: { postId: post.id, userId: user.userId },
+    });
+    return toForumPostResponse(
+      post,
+      authors.get(post.authorId) ?? null,
+      vote?.value ?? 0,
+      viewerOf(user),
+    );
   }
 
   // --- internals ---
@@ -169,24 +323,28 @@ export class ForumPostsService {
   // lookups (mirrors `CommunityPostsService.toPostDTOs`).
   private async toPostResponses(
     rows: ForumPost[],
-    viewerId: string,
+    user: CurrentUserData,
   ): Promise<ForumPostResponse[]> {
     if (!rows.length) return [];
-    const postIds = rows.map((p) => p.id);
-    const authorIds = [...new Set(rows.map((p) => p.authorId))];
+    const postIds = rows.map((post) => post.id);
+    const authorIds = [...new Set(rows.map((post) => post.authorId))];
 
     const [authors, myVoteRows] = await Promise.all([
       new MemberLookup(this.profiles).byUserIds(authorIds),
-      this.votes.find({ where: { postId: In(postIds), userId: viewerId } }),
+      this.votes.find({ where: { postId: In(postIds), userId: user.userId } }),
     ]);
 
-    const myVoteByPost = new Map(myVoteRows.map((v) => [v.postId, v.value]));
+    const myVoteByPost = new Map(
+      myVoteRows.map((row) => [row.postId, row.value]),
+    );
+    const viewer = viewerOf(user);
 
     return rows.map((post) =>
       toForumPostResponse(
         post,
         authors.get(post.authorId) ?? null,
         myVoteByPost.get(post.id) ?? 0,
+        viewer,
       ),
     );
   }

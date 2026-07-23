@@ -22,6 +22,10 @@ export interface PartnerCardDTO {
   tags: string[];
   tier: string;
   since: string;
+  featured: boolean;
+  testimonialQuote: string | null;
+  testimonialAuthor: string | null;
+  testimonialRole: string | null;
 }
 
 export interface PartnerDetailDTO extends PartnerCardDTO {
@@ -64,6 +68,10 @@ export function toPartnerCard(p: Partner): PartnerCardDTO {
     tags: p.tags,
     tier: p.tier,
     since: p.since,
+    featured: p.featured,
+    testimonialQuote: p.testimonialQuote,
+    testimonialAuthor: p.testimonialAuthor,
+    testimonialRole: p.testimonialRole,
   };
 }
 

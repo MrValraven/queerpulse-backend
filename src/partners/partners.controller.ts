@@ -21,6 +21,7 @@ import { UserRole } from '../users/entities/user.entity';
 import { CreatePartnerApplicationDto } from './dto/create-partner-application.dto';
 import { ListPartnersQuery } from './dto/list-partners.query';
 import { TriagePartnerApplicationDto } from './dto/triage-partner-application.dto';
+import { UpdatePartnerAdminDto } from './dto/update-partner-admin.dto';
 import { PartnersService } from './partners.service';
 
 // Public directory: approved partners only. Any active member can browse it,
@@ -76,5 +77,24 @@ export class PartnerApplicationsController {
     @Body() dto: TriagePartnerApplicationDto,
   ) {
     return this.partnersService.triage(id, dto.action, dto.note);
+  }
+}
+
+// Admin edit of an approved partner's featured/testimonial marketing fields.
+// Separate controller for the same reason the applications admin routes are
+// split out: a distinct guard shape (admin-only) and path prefix.
+@Feature('partners')
+@Controller('admin/partners')
+@UseGuards(ActiveMemberGuard, RolesGuard)
+@Roles(UserRole.Admin)
+export class AdminPartnersController {
+  constructor(private readonly partnersService: PartnersService) {}
+
+  @Patch(':id')
+  update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdatePartnerAdminDto,
+  ) {
+    return this.partnersService.updateAdminFields(id, dto);
   }
 }

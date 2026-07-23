@@ -20,6 +20,29 @@ import {
 } from './entities/community-post-reaction.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 
+/** The viewer, as the post/reply mappers need them: their user id plus their
+ *  roster role in *this* community (null when they aren't a member — e.g. a
+ *  non-member browsing a public-tier feed). Owner/mod unlocks delete/restore/
+ *  history; edit stays author-only regardless of role. */
+export interface CommunityPostViewer {
+  userId: string;
+  role: RosterRole | null;
+}
+
+function isOwnerOrMod(role: RosterRole | null): boolean {
+  return role === RosterRole.Owner || role === RosterRole.Mod;
+}
+
+// Author identity hidden on a tombstoned post/reply. The frontend branches on
+// the `deleted` flag and renders its own "[deleted]" label, so these values are
+// only a safe fallback, never shown verbatim.
+const DELETED_MEMBER: MemberRef = {
+  slug: '',
+  firstName: '',
+  lastName: '',
+  avatarUrl: null,
+};
+
 /**
  * The three derived numbers every card/detail view needs
  * (`EventsService.summarize`'s grouped-count pattern, batched per page by
@@ -176,6 +199,12 @@ export interface CommunityReplyDTO {
   author: MemberRef | null;
   text: string;
   createdAt: string;
+  editedAt: string | null;
+  deleted: boolean;
+  canEdit: boolean;
+  canDelete: boolean;
+  canRestore: boolean;
+  canViewHistory: boolean;
 }
 
 export interface CommunityPostDTO {
@@ -186,6 +215,12 @@ export interface CommunityPostDTO {
   kind: PostKind;
   pinned: boolean;
   createdAt: string;
+  editedAt: string | null;
+  deleted: boolean;
+  canEdit: boolean;
+  canDelete: boolean;
+  canRestore: boolean;
+  canViewHistory: boolean;
   reactions: CommunityReactionSummary[]; // always all 4 keys, count + mine
   replies: CommunityReplyDTO[];
   replyCount: number;
@@ -225,12 +260,23 @@ export function toReactionSummaries(
 export function toCommunityReply(
   reply: CommunityPostReply,
   author: MemberRef | null,
+  viewerId: string,
+  viewerRole: RosterRole | null,
 ): CommunityReplyDTO {
+  const deleted = reply.deletedAt != null;
+  const isAuthor = reply.authorId === viewerId;
+  const canManage = isAuthor || isOwnerOrMod(viewerRole);
   return {
     id: reply.id,
-    author,
-    text: reply.text,
+    author: deleted ? DELETED_MEMBER : author,
+    text: deleted ? '' : reply.text,
     createdAt: reply.createdAt.toISOString(),
+    editedAt: reply.editedAt ? reply.editedAt.toISOString() : null,
+    deleted,
+    canEdit: isAuthor && !deleted, // edit is author-only (owner/mod excluded)
+    canDelete: canManage && !deleted,
+    canRestore: canManage && deleted,
+    canViewHistory: canManage && reply.editedAt != null,
   };
 }
 
@@ -246,17 +292,83 @@ export function toCommunityPost(
   reactionRows: Pick<CommunityPostReaction, 'key' | 'userId'>[],
   replies: CommunityReplyDTO[],
   viewerId: string,
+  viewerRole: RosterRole | null,
 ): CommunityPostDTO {
+  const deleted = post.deletedAt != null;
+  const isAuthor = post.authorId === viewerId;
+  const canManage = isAuthor || isOwnerOrMod(viewerRole);
   return {
     id: post.id,
-    author,
-    body: post.body,
-    image: toImageUrl(post.image),
+    author: deleted ? DELETED_MEMBER : author,
+    body: deleted ? '' : post.body,
+    image: deleted ? null : toImageUrl(post.image),
     kind: post.kind,
     pinned: post.pinned,
     createdAt: post.createdAt.toISOString(),
+    editedAt: post.editedAt ? post.editedAt.toISOString() : null,
+    deleted,
+    canEdit: isAuthor && !deleted, // edit is author-only (owner/mod excluded)
+    canDelete: canManage && !deleted,
+    canRestore: canManage && deleted,
+    canViewHistory: canManage && post.editedAt != null,
     reactions: toReactionSummaries(reactionRows, viewerId),
     replies,
     replyCount: replies.length,
+  };
+}
+
+export interface CommunityPostHistoryEntry {
+  id: string;
+  author: MemberRef | null;
+  previousBody: string;
+  createdAt: string;
+}
+
+export interface CommunityPostHistoryResponse {
+  revisions: CommunityPostHistoryEntry[];
+}
+
+export function toCommunityPostHistoryEntry(
+  edit: {
+    id: string;
+    previousBody: string;
+    editorId: string | null;
+    createdAt: Date;
+  },
+  author: MemberRef | null,
+): CommunityPostHistoryEntry {
+  return {
+    id: edit.id,
+    author,
+    previousBody: edit.previousBody,
+    createdAt: edit.createdAt.toISOString(),
+  };
+}
+
+export interface CommunityReplyHistoryEntry {
+  id: string;
+  author: MemberRef | null;
+  previousText: string;
+  createdAt: string;
+}
+
+export interface CommunityReplyHistoryResponse {
+  revisions: CommunityReplyHistoryEntry[];
+}
+
+export function toCommunityReplyHistoryEntry(
+  edit: {
+    id: string;
+    previousText: string;
+    editorId: string | null;
+    createdAt: Date;
+  },
+  author: MemberRef | null,
+): CommunityReplyHistoryEntry {
+  return {
+    id: edit.id,
+    author,
+    previousText: edit.previousText,
+    createdAt: edit.createdAt.toISOString(),
   };
 }

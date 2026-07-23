@@ -142,6 +142,95 @@ export class CommunitiesController {
     return this.communityPostsService.addReply(slug, id, user.userId, dto.text);
   }
 
+  @Delete(':slug/posts/:id')
+  deletePost(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.communityPostsService.deletePost(slug, id, user.userId);
+  }
+
+  @Post(':slug/posts/:id/restore')
+  restorePost(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.communityPostsService.restorePost(slug, id, user.userId);
+  }
+
+  @Get(':slug/posts/:id/history')
+  postHistory(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.communityPostsService.listPostHistory(slug, id, user.userId);
+  }
+
+  @Patch(':slug/posts/:id/replies/:replyId')
+  updateReply(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('replyId', ParseUUIDPipe) replyId: string,
+    @Body() dto: ReplyDto,
+  ) {
+    return this.communityPostsService.updateReply(
+      slug,
+      id,
+      replyId,
+      user.userId,
+      dto.text,
+    );
+  }
+
+  @Delete(':slug/posts/:id/replies/:replyId')
+  deleteReply(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('replyId', ParseUUIDPipe) replyId: string,
+  ) {
+    return this.communityPostsService.deleteReply(
+      slug,
+      id,
+      replyId,
+      user.userId,
+    );
+  }
+
+  @Post(':slug/posts/:id/replies/:replyId/restore')
+  restoreReply(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('replyId', ParseUUIDPipe) replyId: string,
+  ) {
+    return this.communityPostsService.restoreReply(
+      slug,
+      id,
+      replyId,
+      user.userId,
+    );
+  }
+
+  @Get(':slug/posts/:id/replies/:replyId/history')
+  replyHistory(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('replyId', ParseUUIDPipe) replyId: string,
+  ) {
+    return this.communityPostsService.listReplyHistory(
+      slug,
+      id,
+      replyId,
+      user.userId,
+    );
+  }
+
   @Get(':slug/roster')
   roster(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.communitiesService.roster(slug, user.userId);

@@ -77,6 +77,14 @@ export interface CreatePartnerApplicationInput {
 export interface PartnerListQuery {
   region?: PartnerRegion;
   page?: number;
+  featured?: boolean;
+}
+
+export interface UpdatePartnerAdminInput {
+  featured?: boolean;
+  testimonialQuote?: string | null;
+  testimonialAuthor?: string | null;
+  testimonialRole?: string | null;
 }
 
 /** Bridges `PartnerContactInput`'s optional subfields to the entity column's
@@ -109,6 +117,10 @@ export class PartnersService {
 
     if (query.region) {
       qb.andWhere('p.region = :region', { region: query.region });
+    }
+
+    if (query.featured) {
+      qb.andWhere('p.featured = :featured', { featured: true });
     }
 
     return paginate(qb, page, (rows) => rows.map(toPartnerCard));
@@ -162,6 +174,35 @@ export class PartnersService {
     } else {
       partner.status = PartnerStatus.Rejected;
       partner.reviewNote = note ?? null;
+    }
+
+    const saved = await this.partners.save(partner);
+    return this.buildApplication(saved);
+  }
+
+  // Admin edit of an approved partner's featured flag + testimonial. Only the
+  // provided fields change (PATCH). A quote with no author is rejected — the
+  // For Organisations card renders "<quote> — <author>, <role>" and a
+  // dangling quote would print an orphaned em-dash.
+  async updateAdminFields(
+    id: string,
+    dto: UpdatePartnerAdminInput,
+  ): Promise<PartnerApplicationDTO> {
+    const partner = await this.partners.findOne({ where: { id } });
+    if (!partner) {
+      throw new NotFoundException('Partner not found');
+    }
+
+    if (dto.featured !== undefined) partner.featured = dto.featured;
+    if (dto.testimonialQuote !== undefined)
+      partner.testimonialQuote = dto.testimonialQuote;
+    if (dto.testimonialAuthor !== undefined)
+      partner.testimonialAuthor = dto.testimonialAuthor;
+    if (dto.testimonialRole !== undefined)
+      partner.testimonialRole = dto.testimonialRole;
+
+    if (partner.testimonialQuote && !partner.testimonialAuthor) {
+      throw new ConflictException('A testimonial quote requires an author');
     }
 
     const saved = await this.partners.save(partner);

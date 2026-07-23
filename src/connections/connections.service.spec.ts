@@ -644,6 +644,36 @@ describe('ConnectionsService', () => {
     });
   });
 
+  describe('getAcceptedConnectionSlugs', () => {
+    it('returns slugs of both counterparts of accepted edges and excludes pending/declined', async () => {
+      // viewer 'u-viewer' has an accepted edge with 'u-alina' (slug 'alina') and a
+      // pending edge with 'u-mara'. Mock the connections repo find to return only the
+      // accepted rows (mirrors getAcceptedConnectionUserIds' where-clause) and
+      // profilesByUserIds to resolve 'u-alina' -> { slug: 'alina' }.
+      connections.find.mockResolvedValue([
+        {
+          requesterId: 'u-viewer',
+          addresseeId: 'u-alina',
+          status: ConnectionStatus.Accepted,
+        },
+      ]);
+      profiles.find.mockResolvedValue([{ userId: 'u-alina', slug: 'alina' }]);
+
+      const slugs = await service.getAcceptedConnectionSlugs('u-viewer');
+
+      expect(slugs).toEqual(['alina']);
+    });
+
+    it('returns an empty array with no accepted connections, skipping the profile lookup', async () => {
+      connections.find.mockResolvedValue([]);
+
+      const slugs = await service.getAcceptedConnectionSlugs('u-viewer');
+
+      expect(slugs).toEqual([]);
+      expect(profiles.find).not.toHaveBeenCalled();
+    });
+  });
+
   describe('areConnected', () => {
     it('is true only for an accepted pair', async () => {
       connections.findOne.mockResolvedValue({

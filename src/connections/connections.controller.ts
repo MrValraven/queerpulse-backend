@@ -36,6 +36,16 @@ export class ConnectionsController {
     return this.connectionsService.list(user.userId, query.tab ?? 'all', query);
   }
 
+  @Get('counts')
+  counts(@CurrentUser() user: CurrentUserData) {
+    return this.connectionsService.counts(user.userId);
+  }
+
+  @Get('accepted')
+  accepted(@CurrentUser() user: CurrentUserData): Promise<string[]> {
+    return this.connectionsService.getAcceptedConnectionSlugs(user.userId);
+  }
+
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Post()
   create(

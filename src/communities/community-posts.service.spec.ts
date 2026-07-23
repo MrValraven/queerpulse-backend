@@ -8,10 +8,12 @@ import {
   CommunityMember,
   RosterRole,
 } from './entities/community-member.entity';
+import { CommunityPostEdit } from './entities/community-post-edit.entity';
 import {
   CommunityPostReaction,
   ReactionKey,
 } from './entities/community-post-reaction.entity';
+import { CommunityPostReplyEdit } from './entities/community-post-reply-edit.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { CommunityPost, PostKind } from './entities/community-post.entity';
 import {
@@ -77,6 +79,18 @@ const POST: CommunityPost = {
   kind: PostKind.Post,
   pinned: false,
   createdAt: new Date('2026-01-02T00:00:00.000Z'),
+  editedAt: null,
+  deletedAt: null,
+};
+
+const REPLY: CommunityPostReply = {
+  id: 'r1',
+  postId: 'p1',
+  authorId: 'author-1',
+  text: 'a reply',
+  createdAt: new Date('2026-01-02T12:00:00.000Z'),
+  editedAt: null,
+  deletedAt: null,
 };
 
 describe('CommunityPostsService', () => {
@@ -95,12 +109,19 @@ describe('CommunityPostsService', () => {
     count: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
-  let replies: { find: jest.Mock; create: jest.Mock; save: jest.Mock };
+  let replies: {
+    findOne: jest.Mock;
+    find: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+  };
   let profiles: { find: jest.Mock };
   let blockFilter: {
     excludeHidden: jest.Mock;
     hiddenUserIds: jest.Mock;
   };
+  let postEdits: { create: jest.Mock; save: jest.Mock; find: jest.Mock };
+  let replyEdits: { create: jest.Mock; save: jest.Mock; find: jest.Mock };
 
   beforeEach(async () => {
     communities = { findOne: jest.fn().mockResolvedValue(COMMUNITY) };
@@ -124,6 +145,7 @@ describe('CommunityPostsService', () => {
       createQueryBuilder: jest.fn(() => insertQbStub()),
     };
     replies = {
+      findOne: jest.fn().mockResolvedValue(REPLY),
       find: jest.fn().mockResolvedValue([]),
       create: jest.fn((v: object) => v),
       save: jest.fn((v: unknown) =>
@@ -139,6 +161,16 @@ describe('CommunityPostsService', () => {
       excludeHidden: jest.fn((qb: unknown) => qb),
       hiddenUserIds: jest.fn().mockResolvedValue(new Set<string>()),
     };
+    postEdits = {
+      create: jest.fn((v: object) => v),
+      save: jest.fn().mockResolvedValue(undefined),
+      find: jest.fn().mockResolvedValue([]),
+    };
+    replyEdits = {
+      create: jest.fn((v: object) => v),
+      save: jest.fn().mockResolvedValue(undefined),
+      find: jest.fn().mockResolvedValue([]),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -153,6 +185,11 @@ describe('CommunityPostsService', () => {
         { provide: getRepositoryToken(CommunityPostReply), useValue: replies },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: BlockFilterService, useValue: blockFilter },
+        { provide: getRepositoryToken(CommunityPostEdit), useValue: postEdits },
+        {
+          provide: getRepositoryToken(CommunityPostReplyEdit),
+          useValue: replyEdits,
+        },
       ],
     }).compile();
     service = module.get(CommunityPostsService);
@@ -358,6 +395,169 @@ describe('CommunityPostsService', () => {
         }),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
+
+    it('snapshots a community_post_edit revision (with the pre-edit body) before mutating the body, and stamps editedAt', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      const res = await service.updatePost('queer-devs', 'p1', 'author-1', {
+        body: 'edited body',
+      });
+      expect(postEdits.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          postId: 'p1',
+          previousBody: 'hello', // POST.body, captured before the mutation
+          editorId: 'author-1',
+        }),
+      );
+      expect(posts.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: 'edited body',
+          editedAt: expect.any(Date),
+        }),
+      );
+      expect(res.editedAt).not.toBeNull();
+    });
+
+    it('does not snapshot a revision when the body is unchanged (kind-only edit)', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      await service.updatePost('queer-devs', 'p1', 'author-1', {
+        kind: PostKind.Announcement,
+      });
+      expect(postEdits.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('deletePost / restorePost / listPostHistory', () => {
+    it('deletePost rejects a plain member who is not the author', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'stranger',
+        role: RosterRole.Member,
+      });
+      await expect(
+        service.deletePost('queer-devs', 'p1', 'stranger'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(posts.save).not.toHaveBeenCalled();
+    });
+
+    it('deletePost allows the author to tombstone their own post', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      const res = await service.deletePost('queer-devs', 'p1', 'author-1');
+      expect(posts.save).toHaveBeenCalledWith(
+        expect.objectContaining({ deletedAt: expect.any(Date) }),
+      );
+      expect(res.deleted).toBe(true);
+    });
+
+    it('deletePost allows a community mod to tombstone another member post', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'mod-1',
+        role: RosterRole.Mod,
+      });
+      await service.deletePost('queer-devs', 'p1', 'mod-1');
+      expect(posts.save).toHaveBeenCalledWith(
+        expect.objectContaining({ deletedAt: expect.any(Date) }),
+      );
+    });
+
+    it('deletePost is idempotent — a second delete does not re-save', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      posts.findOne.mockResolvedValue({ ...POST, deletedAt: new Date() });
+      await service.deletePost('queer-devs', 'p1', 'author-1');
+      expect(posts.save).not.toHaveBeenCalled();
+    });
+
+    it('restorePost allows the author to clear their own tombstone', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      posts.findOne.mockResolvedValue({ ...POST, deletedAt: new Date() });
+      const res = await service.restorePost('queer-devs', 'p1', 'author-1');
+      expect(posts.save).toHaveBeenCalledWith(
+        expect.objectContaining({ deletedAt: null }),
+      );
+      expect(res.deleted).toBe(false);
+    });
+
+    it('restorePost rejects a plain member who is not the author', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'stranger',
+        role: RosterRole.Member,
+      });
+      posts.findOne.mockResolvedValue({ ...POST, deletedAt: new Date() });
+      await expect(
+        service.restorePost('queer-devs', 'p1', 'stranger'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(posts.save).not.toHaveBeenCalled();
+    });
+
+    it('restorePost is idempotent — restoring a live post does not re-save', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      await service.restorePost('queer-devs', 'p1', 'author-1');
+      expect(posts.save).not.toHaveBeenCalled();
+    });
+
+    it('listPostHistory returns revisions newest-first for the author', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      postEdits.find.mockResolvedValue([
+        {
+          id: 'edit-2',
+          postId: 'p1',
+          previousBody: 'second-to-last body',
+          editorId: 'author-1',
+          createdAt: new Date('2026-01-03T00:00:00.000Z'),
+        },
+        {
+          id: 'edit-1',
+          postId: 'p1',
+          previousBody: 'original body',
+          editorId: 'author-1',
+          createdAt: new Date('2026-01-02T00:00:00.000Z'),
+        },
+      ]);
+
+      const res = await service.listPostHistory('queer-devs', 'p1', 'author-1');
+
+      expect(postEdits.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { postId: 'p1' },
+          order: { createdAt: 'DESC' },
+        }),
+      );
+      expect(res.revisions.map((r) => r.id)).toEqual(['edit-2', 'edit-1']);
+      expect(res.revisions[0].previousBody).toBe('second-to-last body');
+    });
+
+    it('listPostHistory rejects a plain member who is not the author', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'stranger',
+        role: RosterRole.Member,
+      });
+      await expect(
+        service.listPostHistory('queer-devs', 'p1', 'stranger'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('listPostHistory allows a community owner to view another member post history', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'owner-1',
+        role: RosterRole.Owner,
+      });
+      await expect(
+        service.listPostHistory('queer-devs', 'p1', 'owner-1'),
+      ).resolves.toEqual({ revisions: [] });
+    });
   });
 
   describe('addReply', () => {
@@ -390,6 +590,158 @@ describe('CommunityPostsService', () => {
       expect(res.author).toEqual(
         expect.objectContaining({ slug: 'jo', firstName: 'Jo' }),
       );
+    });
+  });
+
+  describe('updateReply / deleteReply / restoreReply / listReplyHistory', () => {
+    it('updateReply rejects a non-author (edit is author-only, not owner/mod)', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'mod-1',
+        role: RosterRole.Mod,
+      });
+      await expect(
+        service.updateReply('queer-devs', 'p1', 'r1', 'mod-1', 'edited'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(replies.save).not.toHaveBeenCalled();
+    });
+
+    it('updateReply snapshots a community_post_reply_edit revision before mutating the text, and stamps editedAt', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      const res = await service.updateReply(
+        'queer-devs',
+        'p1',
+        'r1',
+        'author-1',
+        'edited reply',
+      );
+      expect(replyEdits.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          replyId: 'r1',
+          previousText: 'a reply', // REPLY.text, captured before the mutation
+          editorId: 'author-1',
+        }),
+      );
+      expect(replies.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: 'edited reply',
+          editedAt: expect.any(Date),
+        }),
+      );
+      expect(res.editedAt).not.toBeNull();
+    });
+
+    it('updateReply 404s a deleted reply', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      replies.findOne.mockResolvedValue({ ...REPLY, deletedAt: new Date() });
+      await expect(
+        service.updateReply('queer-devs', 'p1', 'r1', 'author-1', 'edited'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('deleteReply rejects a plain member who is not the author', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'stranger',
+        role: RosterRole.Member,
+      });
+      await expect(
+        service.deleteReply('queer-devs', 'p1', 'r1', 'stranger'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(replies.save).not.toHaveBeenCalled();
+    });
+
+    it('deleteReply allows a community mod to tombstone another member reply', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'mod-1',
+        role: RosterRole.Mod,
+      });
+      const res = await service.deleteReply('queer-devs', 'p1', 'r1', 'mod-1');
+      expect(replies.save).toHaveBeenCalledWith(
+        expect.objectContaining({ deletedAt: expect.any(Date) }),
+      );
+      expect(res.deleted).toBe(true);
+    });
+
+    it('deleteReply is idempotent — a second delete does not re-save', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      replies.findOne.mockResolvedValue({ ...REPLY, deletedAt: new Date() });
+      await service.deleteReply('queer-devs', 'p1', 'r1', 'author-1');
+      expect(replies.save).not.toHaveBeenCalled();
+    });
+
+    it('restoreReply allows the author to clear their own tombstone', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      replies.findOne.mockResolvedValue({ ...REPLY, deletedAt: new Date() });
+      const res = await service.restoreReply(
+        'queer-devs',
+        'p1',
+        'r1',
+        'author-1',
+      );
+      expect(replies.save).toHaveBeenCalledWith(
+        expect.objectContaining({ deletedAt: null }),
+      );
+      expect(res.deleted).toBe(false);
+    });
+
+    it('listReplyHistory rejects a plain member who is not the author', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'stranger',
+        role: RosterRole.Member,
+      });
+      await expect(
+        service.listReplyHistory('queer-devs', 'p1', 'r1', 'stranger'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('listReplyHistory returns revisions newest-first, tolerating a null editorId', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      replyEdits.find.mockResolvedValue([
+        {
+          id: 'redit-2',
+          replyId: 'r1',
+          previousText: 'second-to-last text',
+          editorId: null,
+          createdAt: new Date('2026-01-03T00:00:00.000Z'),
+        },
+        {
+          id: 'redit-1',
+          replyId: 'r1',
+          previousText: 'original text',
+          editorId: 'author-1',
+          createdAt: new Date('2026-01-02T00:00:00.000Z'),
+        },
+      ]);
+
+      const res = await service.listReplyHistory(
+        'queer-devs',
+        'p1',
+        'r1',
+        'author-1',
+      );
+
+      expect(replyEdits.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { replyId: 'r1' },
+          order: { createdAt: 'DESC' },
+        }),
+      );
+      expect(res.revisions.map((r) => r.id)).toEqual(['redit-2', 'redit-1']);
+      expect(res.revisions[0].author).toBeNull();
     });
   });
 

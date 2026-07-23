@@ -24,4 +24,12 @@ export class CommunityPostReply {
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  editedAt: Date | null;
+
+  // Soft-tombstone marker (see `CommunityPostsService.deleteReply`). The `text`
+  // above is preserved for restore + history.
+  @Column({ type: 'timestamptz', nullable: true })
+  deletedAt: Date | null;
 }

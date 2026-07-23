@@ -11,18 +11,24 @@ import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
   CommunityPostDTO,
+  CommunityPostHistoryResponse,
   CommunityReplyDTO,
+  CommunityReplyHistoryResponse,
   toCommunityPost,
+  toCommunityPostHistoryEntry,
   toCommunityReply,
+  toCommunityReplyHistoryEntry,
 } from './community-response';
 import {
   CommunityMember,
   RosterRole,
 } from './entities/community-member.entity';
+import { CommunityPostEdit } from './entities/community-post-edit.entity';
 import {
   CommunityPostReaction,
   ReactionKey,
 } from './entities/community-post-reaction.entity';
+import { CommunityPostReplyEdit } from './entities/community-post-reply-edit.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { CommunityPost, PostKind } from './entities/community-post.entity';
 import { AccessTier, Community } from './entities/community.entity';
@@ -61,6 +67,10 @@ export class CommunityPostsService {
     private readonly replies: Repository<CommunityPostReply>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly blockFilter: BlockFilterService,
+    @InjectRepository(CommunityPostEdit)
+    private readonly postEdits: Repository<CommunityPostEdit>,
+    @InjectRepository(CommunityPostReplyEdit)
+    private readonly replyEdits: Repository<CommunityPostReplyEdit>,
   ) {}
 
   async listPosts(
@@ -83,8 +93,9 @@ export class CommunityPostsService {
     // report a `total` the caller can never page through.
     this.blockFilter.excludeHidden(qb, viewerId, '"p"."author_id"');
 
+    const viewerRole = await this.viewerRoleIn(community.id, viewerId);
     return paginate(qb, normalizedPage, (rows) =>
-      this.toPostDTOs(rows, viewerId),
+      this.toPostDTOs(rows, viewerId, viewerRole),
     );
   }
 
@@ -94,7 +105,7 @@ export class CommunityPostsService {
     dto: CreatePostInput,
   ): Promise<CommunityPostDTO> {
     const community = await this.loadCommunityOr404(slug);
-    await this.assertMember(community.id, authorId);
+    const membership = await this.assertMember(community.id, authorId);
 
     const saved = await this.posts.save(
       this.posts.create({
@@ -106,7 +117,7 @@ export class CommunityPostsService {
         pinned: false,
       }),
     );
-    return this.buildPostDTO(saved, authorId);
+    return this.buildPostDTO(saved, authorId, membership.role);
   }
 
   async updatePost(
@@ -133,12 +144,220 @@ export class CommunityPostsService {
       if (post.authorId !== actorId) {
         throw new ForbiddenException('Only the author can edit this post');
       }
-      if (dto.body !== undefined) post.body = dto.body;
+      if (dto.body !== undefined && dto.body !== post.body) {
+        await this.postEdits.save(
+          this.postEdits.create({
+            postId: post.id,
+            previousBody: post.body,
+            editorId: actorId,
+          }),
+        );
+        post.body = dto.body;
+        post.editedAt = new Date();
+      }
       if (dto.kind !== undefined) post.kind = dto.kind;
     }
 
     const saved = await this.posts.save(post);
-    return this.buildPostDTO(saved, actorId);
+    return this.buildPostDTO(saved, actorId, membership.role);
+  }
+
+  // DELETE /communities/:slug/posts/:id — soft tombstone. Author or owner/mod.
+  async deletePost(
+    slug: string,
+    postId: string,
+    actorId: string,
+  ): Promise<CommunityPostDTO> {
+    const community = await this.loadCommunityOr404(slug);
+    const post = await this.loadPostOr404(community.id, postId);
+    const membership = await this.assertMember(community.id, actorId);
+    this.assertAuthorOrOwnerMod(post.authorId, membership);
+
+    if (!post.deletedAt) {
+      post.deletedAt = new Date();
+      await this.posts.save(post);
+    }
+    return this.buildPostDTO(post, actorId, membership.role);
+  }
+
+  // POST /communities/:slug/posts/:id/restore — clear the tombstone.
+  async restorePost(
+    slug: string,
+    postId: string,
+    actorId: string,
+  ): Promise<CommunityPostDTO> {
+    const community = await this.loadCommunityOr404(slug);
+    const post = await this.loadPostOr404(community.id, postId);
+    const membership = await this.assertMember(community.id, actorId);
+    this.assertAuthorOrOwnerMod(post.authorId, membership);
+
+    if (post.deletedAt) {
+      post.deletedAt = null;
+      await this.posts.save(post);
+    }
+    return this.buildPostDTO(post, actorId, membership.role);
+  }
+
+  // GET /communities/:slug/posts/:id/history — revisions, newest-first.
+  async listPostHistory(
+    slug: string,
+    postId: string,
+    actorId: string,
+  ): Promise<CommunityPostHistoryResponse> {
+    const community = await this.loadCommunityOr404(slug);
+    const post = await this.loadPostOr404(community.id, postId);
+    const membership = await this.assertMember(community.id, actorId);
+    this.assertAuthorOrOwnerMod(post.authorId, membership);
+
+    const rows = await this.postEdits.find({
+      where: { postId },
+      order: { createdAt: 'DESC' },
+    });
+    const editorIds = [
+      ...new Set(
+        rows.map((row) => row.editorId).filter((id): id is string => !!id),
+      ),
+    ];
+    const editors = await new MemberLookup(this.profiles).byUserIds(editorIds);
+
+    return {
+      revisions: rows.map((row) =>
+        toCommunityPostHistoryEntry(
+          row,
+          row.editorId ? (editors.get(row.editorId) ?? null) : null,
+        ),
+      ),
+    };
+  }
+
+  // PATCH /communities/:slug/posts/:id/replies/:replyId — author-only text
+  // edit. Snapshots the pre-edit text to `community_post_reply_edit`, stamps
+  // editedAt.
+  async updateReply(
+    slug: string,
+    postId: string,
+    replyId: string,
+    actorId: string,
+    text: string,
+  ): Promise<CommunityReplyDTO> {
+    const community = await this.loadCommunityOr404(slug);
+    const post = await this.loadPostOr404(community.id, postId);
+    const reply = await this.loadReplyOr404(post.id, replyId);
+    const membership = await this.assertMember(community.id, actorId);
+
+    if (reply.deletedAt) {
+      throw new NotFoundException('Reply not found');
+    }
+    if (reply.authorId !== actorId) {
+      throw new ForbiddenException('Only the author can edit this reply');
+    }
+    if (text !== reply.text) {
+      await this.replyEdits.save(
+        this.replyEdits.create({
+          replyId: reply.id,
+          previousText: reply.text,
+          editorId: actorId,
+        }),
+      );
+      reply.text = text;
+      reply.editedAt = new Date();
+      await this.replies.save(reply);
+    }
+    return this.mapReply(reply, actorId, membership.role);
+  }
+
+  // DELETE /communities/:slug/posts/:id/replies/:replyId — soft tombstone.
+  async deleteReply(
+    slug: string,
+    postId: string,
+    replyId: string,
+    actorId: string,
+  ): Promise<CommunityReplyDTO> {
+    const community = await this.loadCommunityOr404(slug);
+    const post = await this.loadPostOr404(community.id, postId);
+    const reply = await this.loadReplyOr404(post.id, replyId);
+    const membership = await this.assertMember(community.id, actorId);
+    this.assertAuthorOrOwnerMod(reply.authorId, membership);
+
+    if (!reply.deletedAt) {
+      reply.deletedAt = new Date();
+      await this.replies.save(reply);
+    }
+    return this.mapReply(reply, actorId, membership.role);
+  }
+
+  // POST /communities/:slug/posts/:id/replies/:replyId/restore — clear
+  // tombstone.
+  async restoreReply(
+    slug: string,
+    postId: string,
+    replyId: string,
+    actorId: string,
+  ): Promise<CommunityReplyDTO> {
+    const community = await this.loadCommunityOr404(slug);
+    const post = await this.loadPostOr404(community.id, postId);
+    const reply = await this.loadReplyOr404(post.id, replyId);
+    const membership = await this.assertMember(community.id, actorId);
+    this.assertAuthorOrOwnerMod(reply.authorId, membership);
+
+    if (reply.deletedAt) {
+      reply.deletedAt = null;
+      await this.replies.save(reply);
+    }
+    return this.mapReply(reply, actorId, membership.role);
+  }
+
+  // GET /communities/:slug/posts/:id/replies/:replyId/history —
+  // newest-first.
+  async listReplyHistory(
+    slug: string,
+    postId: string,
+    replyId: string,
+    actorId: string,
+  ): Promise<CommunityReplyHistoryResponse> {
+    const community = await this.loadCommunityOr404(slug);
+    const post = await this.loadPostOr404(community.id, postId);
+    const reply = await this.loadReplyOr404(post.id, replyId);
+    const membership = await this.assertMember(community.id, actorId);
+    this.assertAuthorOrOwnerMod(reply.authorId, membership);
+
+    const rows = await this.replyEdits.find({
+      where: { replyId },
+      order: { createdAt: 'DESC' },
+    });
+    const editorIds = [
+      ...new Set(
+        rows.map((row) => row.editorId).filter((id): id is string => !!id),
+      ),
+    ];
+    const editors = await new MemberLookup(this.profiles).byUserIds(editorIds);
+
+    return {
+      revisions: rows.map((row) =>
+        toCommunityReplyHistoryEntry(
+          row,
+          row.editorId ? (editors.get(row.editorId) ?? null) : null,
+        ),
+      ),
+    };
+  }
+
+  // Resolve a single reply's author and map it (with the actor's role) so the
+  // returned DTO's flags are correct for the actor.
+  private async mapReply(
+    reply: CommunityPostReply,
+    viewerId: string,
+    viewerRole: RosterRole | null,
+  ): Promise<CommunityReplyDTO> {
+    const authors = await new MemberLookup(this.profiles).byUserIds([
+      reply.authorId,
+    ]);
+    return toCommunityReply(
+      reply,
+      authors.get(reply.authorId) ?? null,
+      viewerId,
+      viewerRole,
+    );
   }
 
   async addReaction(
@@ -149,7 +368,7 @@ export class CommunityPostsService {
   ): Promise<CommunityPostDTO> {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
-    await this.assertMember(community.id, userId);
+    const membership = await this.assertMember(community.id, userId);
 
     // Idempotent per (post,user,key): `ON CONFLICT DO NOTHING` absorbs a
     // re-react (or a race between two concurrent ones) without a pre-check +
@@ -162,7 +381,7 @@ export class CommunityPostsService {
       .orIgnore()
       .execute();
 
-    return this.buildPostDTO(post, userId);
+    return this.buildPostDTO(post, userId, membership.role);
   }
 
   async removeReaction(
@@ -173,11 +392,11 @@ export class CommunityPostsService {
   ): Promise<CommunityPostDTO> {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
-    await this.assertMember(community.id, userId);
+    const membership = await this.assertMember(community.id, userId);
 
     await this.reactions.delete({ postId: post.id, userId, key });
 
-    return this.buildPostDTO(post, userId);
+    return this.buildPostDTO(post, userId, membership.role);
   }
 
   async addReply(
@@ -188,13 +407,18 @@ export class CommunityPostsService {
   ): Promise<CommunityReplyDTO> {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
-    await this.assertMember(community.id, userId);
+    const membership = await this.assertMember(community.id, userId);
 
     const saved = await this.replies.save(
       this.replies.create({ postId: post.id, authorId: userId, text }),
     );
     const authors = await new MemberLookup(this.profiles).byUserIds([userId]);
-    return toCommunityReply(saved, authors.get(userId) ?? null);
+    return toCommunityReply(
+      saved,
+      authors.get(userId) ?? null,
+      userId,
+      membership.role,
+    );
   }
 
   // --- flat aliases (`POST /community-posts*` — see `CommunityPostsController`) ---
@@ -329,6 +553,19 @@ export class CommunityPostsService {
     return post;
   }
 
+  private async loadReplyOr404(
+    postId: string,
+    replyId: string,
+  ): Promise<CommunityPostReply> {
+    const reply = await this.replies.findOne({
+      where: { id: replyId, postId },
+    });
+    if (!reply) {
+      throw new NotFoundException('Reply not found');
+    }
+    return reply;
+  }
+
   private async assertMember(
     communityId: string,
     userId: string,
@@ -340,6 +577,36 @@ export class CommunityPostsService {
       throw new ForbiddenException('Only roster members can do that');
     }
     return membership;
+  }
+
+  // The viewer's roster role in a community, or null if they aren't a member.
+  // Used to compute the DTO's delete/restore/history flags for feed reads,
+  // where the viewer may be a non-member on a non-private tier.
+  private async viewerRoleIn(
+    communityId: string,
+    userId: string,
+  ): Promise<RosterRole | null> {
+    const membership = await this.members.findOne({
+      where: { communityId, userId },
+    });
+    return membership?.role ?? null;
+  }
+
+  // Delete / restore / history authz: the author, or the community's owner/mod.
+  // (Editing stays author-only and is checked inline, NOT here.)
+  private assertAuthorOrOwnerMod(
+    authorId: string,
+    membership: CommunityMember,
+  ): void {
+    const isAuthor = authorId === membership.userId;
+    const isOwnerMod =
+      membership.role === RosterRole.Owner ||
+      membership.role === RosterRole.Mod;
+    if (!isAuthor && !isOwnerMod) {
+      throw new ForbiddenException(
+        'Only the author or a community owner/mod can do that',
+      );
+    }
   }
 
   // Private communities are 404 (not 403) to a non-member, mirroring
@@ -384,6 +651,7 @@ export class CommunityPostsService {
   private async buildPostDTO(
     post: CommunityPost,
     viewerId: string,
+    viewerRole: RosterRole | null,
   ): Promise<CommunityPostDTO> {
     const [reactionRows, allReplyRows] = await Promise.all([
       this.reactions.find({ where: { postId: post.id } }),
@@ -398,7 +666,12 @@ export class CommunityPostsService {
     const authors = await new MemberLookup(this.profiles).byUserIds(authorIds);
 
     const replies = replyRows.map((r) =>
-      toCommunityReply(r, authors.get(r.authorId) ?? null),
+      toCommunityReply(
+        r,
+        authors.get(r.authorId) ?? null,
+        viewerId,
+        viewerRole,
+      ),
     );
     return toCommunityPost(
       post,
@@ -406,6 +679,7 @@ export class CommunityPostsService {
       reactionRows,
       replies,
       viewerId,
+      viewerRole,
     );
   }
 
@@ -415,6 +689,7 @@ export class CommunityPostsService {
   private async toPostDTOs(
     rows: CommunityPost[],
     viewerId: string,
+    viewerRole: RosterRole | null,
   ): Promise<CommunityPostDTO[]> {
     if (!rows.length) return [];
     const postIds = rows.map((p) => p.id);
@@ -440,7 +715,12 @@ export class CommunityPostsService {
 
     return rows.map((post) => {
       const replies = (repliesByPost.get(post.id) ?? []).map((r) =>
-        toCommunityReply(r, authors.get(r.authorId) ?? null),
+        toCommunityReply(
+          r,
+          authors.get(r.authorId) ?? null,
+          viewerId,
+          viewerRole,
+        ),
       );
       return toCommunityPost(
         post,
@@ -448,6 +728,7 @@ export class CommunityPostsService {
         reactionsByPost.get(post.id) ?? [],
         replies,
         viewerId,
+        viewerRole,
       );
     });
   }

@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Profile } from '../users/entities/profile.entity';
@@ -104,6 +104,29 @@ describe('PartnersService', () => {
         region: PartnerRegion.Eu,
       });
     });
+
+    it('adds a featured filter when provided', async () => {
+      await service.list({ featured: true });
+
+      const qb = partners.createQueryBuilder.mock.results[0].value as {
+        andWhere: jest.Mock;
+      };
+      expect(qb.andWhere).toHaveBeenCalledWith('p.featured = :featured', {
+        featured: true,
+      });
+    });
+
+    it('omits the featured filter when not provided', async () => {
+      await service.list({});
+
+      const qb = partners.createQueryBuilder.mock.results[0].value as {
+        andWhere: jest.Mock;
+      };
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        'p.featured = :featured',
+        expect.anything(),
+      );
+    });
   });
 
   describe('getBySlug', () => {
@@ -158,12 +181,69 @@ describe('PartnersService', () => {
         status: PartnerStatus.Approved,
         submittedById: 'submitter-1',
         reviewNote: null,
+        featured: true,
+        testimonialQuote: 'They showed up when no one else did.',
+        testimonialAuthor: 'Marta Silva',
+        testimonialRole: 'Community organizer',
         createdAt: new Date('2026-01-01T00:00:00.000Z'),
       });
 
       const detail = await service.getBySlug('ilga-portugal');
       expect(detail.slug).toBe('ilga-portugal');
       expect(detail.name).toBe('ILGA Portugal');
+      expect(detail.featured).toBe(true);
+      expect(detail.testimonialQuote).toBe(
+        'They showed up when no one else did.',
+      );
+      expect(detail.testimonialAuthor).toBe('Marta Silva');
+      expect(detail.testimonialRole).toBe('Community organizer');
+    });
+
+    it('surfaces a non-featured partner with no testimonial as null', async () => {
+      partners.findOne.mockResolvedValue({
+        id: 'partner-2',
+        slug: 'trans-lisboa',
+        name: 'Trans Lisboa',
+        logo: 'TL',
+        region: PartnerRegion.Pt,
+        regionLabel: 'Portugal',
+        city: 'Lisbon',
+        desc: 'Peer support for trans people.',
+        tags: [],
+        tier: 'Community partner',
+        since: '2021',
+        eyebrow: 'Peer support',
+        tagline: 'By us, for us.',
+        about: [],
+        stats: [],
+        aboutMore: [],
+        jointWork: [],
+        timeline: [],
+        how: [],
+        funding: '',
+        atGlance: [],
+        contact: {
+          phone: null,
+          phoneNote: null,
+          email: null,
+          website: null,
+          address: null,
+        },
+        status: PartnerStatus.Approved,
+        submittedById: 'submitter-2',
+        reviewNote: null,
+        featured: false,
+        testimonialQuote: null,
+        testimonialAuthor: null,
+        testimonialRole: null,
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+
+      const detail = await service.getBySlug('trans-lisboa');
+      expect(detail.featured).toBe(false);
+      expect(detail.testimonialQuote).toBeNull();
+      expect(detail.testimonialAuthor).toBeNull();
+      expect(detail.testimonialRole).toBeNull();
     });
   });
 
@@ -262,6 +342,108 @@ describe('PartnersService', () => {
           reviewNote: 'Not a fit for the directory',
         }),
       );
+    });
+  });
+
+  describe('updateAdminFields', () => {
+    it('404s an unknown id', async () => {
+      partners.findOne.mockResolvedValue(null);
+      await expect(
+        service.updateAdminFields('nope', { featured: true }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('sets featured and saves', async () => {
+      partners.findOne.mockResolvedValue({
+        id: 'partner-1',
+        submittedById: 'submitter-1',
+        featured: false,
+        testimonialQuote: null,
+        testimonialAuthor: null,
+        testimonialRole: null,
+      });
+
+      const res = await service.updateAdminFields('partner-1', {
+        featured: true,
+      });
+
+      expect(res.featured).toBe(true);
+      expect(partners.save).toHaveBeenCalledWith(
+        expect.objectContaining({ featured: true }),
+      );
+    });
+
+    it('sets a full testimonial (quote + author + role) and saves', async () => {
+      partners.findOne.mockResolvedValue({
+        id: 'partner-1',
+        submittedById: 'submitter-1',
+        featured: false,
+        testimonialQuote: null,
+        testimonialAuthor: null,
+        testimonialRole: null,
+      });
+
+      const res = await service.updateAdminFields('partner-1', {
+        testimonialQuote: 'They showed up when no one else did.',
+        testimonialAuthor: 'Marta Silva',
+        testimonialRole: 'Community organizer',
+      });
+
+      expect(res.testimonialQuote).toBe('They showed up when no one else did.');
+      expect(res.testimonialAuthor).toBe('Marta Silva');
+      expect(res.testimonialRole).toBe('Community organizer');
+      expect(partners.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          testimonialQuote: 'They showed up when no one else did.',
+          testimonialAuthor: 'Marta Silva',
+          testimonialRole: 'Community organizer',
+        }),
+      );
+    });
+
+    it('clears the testimonial when all three fields are passed as null', async () => {
+      partners.findOne.mockResolvedValue({
+        id: 'partner-1',
+        submittedById: 'submitter-1',
+        featured: true,
+        testimonialQuote: 'They showed up when no one else did.',
+        testimonialAuthor: 'Marta Silva',
+        testimonialRole: 'Community organizer',
+      });
+
+      const res = await service.updateAdminFields('partner-1', {
+        testimonialQuote: null,
+        testimonialAuthor: null,
+        testimonialRole: null,
+      });
+
+      expect(res.testimonialQuote).toBeNull();
+      expect(res.testimonialAuthor).toBeNull();
+      expect(res.testimonialRole).toBeNull();
+      expect(partners.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          testimonialQuote: null,
+          testimonialAuthor: null,
+          testimonialRole: null,
+        }),
+      );
+    });
+
+    it('throws ConflictException when a quote is set without an author', async () => {
+      partners.findOne.mockResolvedValue({
+        id: 'partner-1',
+        submittedById: 'submitter-1',
+        featured: false,
+        testimonialQuote: null,
+        testimonialAuthor: null,
+        testimonialRole: null,
+      });
+
+      await expect(
+        service.updateAdminFields('partner-1', {
+          testimonialQuote: 'They showed up when no one else did.',
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
     });
   });
 

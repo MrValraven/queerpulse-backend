@@ -15,6 +15,18 @@ export interface ConnectionMemberView {
 export type VouchBadge = 'vouched-for-you' | 'you-vouched' | 'mutual';
 
 /**
+ * The per-tab totals for the connections page badges, keyed by the same `tab`
+ * values the list endpoint accepts — minus "blocked", which the blocks resource
+ * owns — so each count lines up with the list it summarizes.
+ */
+export interface ConnectionCounts {
+  all: number;
+  incoming: number;
+  outgoing: number;
+  vouched: number;
+}
+
+/**
  * The viewer-relative relationship signals a card shows beyond the raw
  * connection: how many accepted connections the two share, and the vouch
  * relationship between them. Computed per-viewer, so they live outside the

@@ -3,6 +3,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { BlockFilterService } from '../social/block-filter.service';
+import { Profile } from '../users/entities/profile.entity';
 import { Notification, NotificationType } from './entities/notification.entity';
 import { NOTIFICATION_CREATED } from './notification.events';
 import { NotificationsService } from './notifications.service';
@@ -21,6 +22,7 @@ describe('NotificationsService', () => {
     update: jest.Mock;
     count: jest.Mock;
   };
+  let profileRepo: { find: jest.Mock };
 
   beforeEach(async () => {
     repo = {
@@ -30,6 +32,7 @@ describe('NotificationsService', () => {
       update: jest.fn().mockResolvedValue({ affected: 1 }),
       count: jest.fn().mockResolvedValue(0),
     };
+    profileRepo = { find: jest.fn().mockResolvedValue([]) };
     emit = jest.fn();
     blockFilter = {
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
@@ -39,6 +42,7 @@ describe('NotificationsService', () => {
       providers: [
         NotificationsService,
         { provide: getRepositoryToken(Notification), useValue: repo },
+        { provide: getRepositoryToken(Profile), useValue: profileRepo },
         { provide: EventEmitter2, useValue: { emit } },
         { provide: BlockFilterService, useValue: blockFilter },
       ],
@@ -213,6 +217,53 @@ describe('NotificationsService', () => {
     expect(repo.find).toHaveBeenCalledWith(
       expect.objectContaining({ skip: 0, take: 21 }),
     );
+  });
+
+  it('enriches list rows with the acting member (name, slug, avatar)', async () => {
+    repo.find.mockResolvedValue([
+      {
+        id: 'n1',
+        userId: 'u1',
+        type: NotificationType.ConnectionAccepted,
+        payload: { byUserId: 'u2', connectionId: 'c1' },
+        read: false,
+        createdAt: new Date('2026-07-20T00:00:00.000Z'),
+      },
+    ]);
+    profileRepo.find.mockResolvedValue([
+      {
+        userId: 'u2',
+        slug: 'ines',
+        firstName: 'Inês',
+        lastName: 'Tavares',
+        avatarUrl: null,
+      },
+    ]);
+
+    const page = await service.list('u1');
+
+    expect(profileRepo.find).toHaveBeenCalledTimes(1);
+    expect(page.items[0].actor).toEqual(
+      expect.objectContaining({ slug: 'ines', firstName: 'Inês' }),
+    );
+  });
+
+  it('leaves system notifications with a null actor and skips the profile lookup', async () => {
+    repo.find.mockResolvedValue([
+      {
+        id: 'n1',
+        userId: 'u1',
+        type: NotificationType.WaitlistPromoted,
+        payload: { eventId: 'e1' },
+        read: false,
+        createdAt: new Date('2026-07-20T00:00:00.000Z'),
+      },
+    ]);
+
+    const page = await service.list('u1');
+
+    expect(page.items[0].actor).toBeNull();
+    expect(profileRepo.find).not.toHaveBeenCalled();
   });
 
   it('unreadCount counts unread notifications for the owner', async () => {

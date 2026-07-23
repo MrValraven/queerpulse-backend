@@ -48,4 +48,14 @@ export class CommunityPost {
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  editedAt: Date | null;
+
+  // Soft-tombstone marker. When set, the post renders as "[deleted]" but the
+  // `body` above is preserved so the author (or the community's owner/mod) can
+  // restore it and its edit history stays readable
+  // (see `CommunityPostsService.deletePost`).
+  @Column({ type: 'timestamptz', nullable: true })
+  deletedAt: Date | null;
 }

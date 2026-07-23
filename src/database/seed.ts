@@ -100,6 +100,7 @@ import {
 } from '../changemakers/entities/changemaker-directory-settings.entity';
 import { HousingCoop } from '../housing/entities/housing-coop.entity';
 import { CoopJoinRequest } from '../housing/entities/coop-join-request.entity';
+import { OrgTier, OrgTierCtaType } from '../org-tiers/entities/org-tier.entity';
 
 // Representative members for local frontend integration. Replace/extend with the
 // prototype's mock members (frontend src/features/members/data/members.ts) as
@@ -2550,172 +2551,184 @@ interface PartnerSeedDefinition {
   status: PartnerStatus;
   submittedBySlug: string;
   reviewNote: string | null;
+  featured: boolean;
+  testimonialQuote: string | null;
+  testimonialAuthor: string | null;
+  testimonialRole: string | null;
 }
 
 const PARTNERS: PartnerSeedDefinition[] = [
   {
-    slug: 'ilga-portugal-partner',
-    name: 'ILGA Portugal',
-    logo: 'IP',
+    slug: 'northside-lgbti-association',
+    name: 'Northside LGBTI+ Association',
+    logo: 'NA',
     region: PartnerRegion.Pt,
     regionLabel: 'Portugal',
     city: 'Lisbon',
-    desc: 'Advocacy and support for LGBTI+ rights across Portugal.',
+    desc: 'An illustrative advocacy and support partnership for LGBTI+ rights.',
     tags: ['Advocacy', 'Support'],
-    tier: 'Founding partner',
-    since: '2019',
+    tier: 'Operational · founding',
+    since: 'Illustrative partner',
     eyebrow: 'Rights & advocacy',
-    tagline: 'Rights, not favors.',
+    tagline: 'Rights, not favours.',
     about: [
-      'ILGA Portugal has run legal advocacy and peer-support services since 1995.',
-      'QueerPulse members volunteer on their helpline and co-host events with them.',
+      'A sample advocacy organisation used to illustrate how an operational partnership renders. Not a real partner.',
     ],
     stats: [
-      { value: '30+', label: 'Years of advocacy' },
-      { value: '1.2k', label: 'People supported / year' },
+      { value: 'Multi-year', label: 'Illustrative tenure' },
+      { value: 'Hundreds', label: 'People supported / year (sample)' },
     ],
     aboutMore: [
       {
         heading: 'Why we partner',
-        body: 'Their legal advocacy work backs several of the protections our members rely on.',
+        body: 'Illustrative operational partnership — legal advocacy that backs member protections.',
       },
     ],
     jointWork: [
       {
         kicker: 'Helpline',
-        title: 'Staffing the LGBTI+ helpline together',
-        dek: 'QueerPulse volunteers rotate shifts alongside ILGA staff.',
-        footLeft: 'Since 2023',
-        footRight: '4 volunteers/month',
+        title: 'Staffing a helpline together (sample)',
+        dek: 'Volunteers rotate shifts alongside partner staff.',
+        footLeft: 'Illustrative',
+        footRight: 'Sample cadence',
       },
     ],
     timeline: [
       {
-        date: '2023',
-        title: 'Helpline partnership begins',
-        body: 'First QueerPulse volunteers join the rotation.',
+        date: 'Year one',
+        title: 'Partnership begins (illustrative)',
+        body: 'First volunteers join the rotation.',
       },
     ],
     how: [
       {
         heading: 'Volunteer',
-        body: 'Sign up for a helpline shift or a peer-support training cohort.',
+        body: 'Sign up for a shift or a peer-support training cohort.',
       },
     ],
-    funding: 'Grants, membership dues, and community fundraising.',
+    funding: 'Grants, membership dues, and community fundraising (illustrative).',
     atGlance: [
-      { label: 'Founded', value: '1995' },
+      { label: 'Founded', value: 'Illustrative' },
       { label: 'Focus', value: 'Legal advocacy, peer support' },
     ],
     contact: {
       phone: null,
       phoneNote: null,
-      email: 'geral@ilga-portugal.pt',
-      website: 'https://ilga-portugal.pt',
+      email: 'hello@example.org',
+      website: 'https://example.org',
       address: 'Lisbon, Portugal',
     },
     status: PartnerStatus.Approved,
     submittedBySlug: 'ana-rocha',
     reviewNote: null,
+    featured: true,
+    testimonialQuote:
+      "What QueerPulse asked us for at the start was unusual: not money, not co-branding — a commitment to specific operational changes in how our helpline handed off to a community. It took a year. It's the partnership we're proudest of.",
+    testimonialAuthor: 'Programme Director',
+    testimonialRole: 'Northside LGBTI+ Association',
   },
   {
-    slug: 'casa-arco-iris-partner',
-    name: 'Casa Arco-Íris',
-    logo: 'CA',
+    slug: 'community-health-collective',
+    name: 'Community Health Collective',
+    logo: 'CH',
     region: PartnerRegion.Pt,
     regionLabel: 'Portugal',
     city: 'Porto',
-    desc: 'A shelter for queer youth experiencing housing instability.',
-    tags: ['Housing', 'Youth'],
-    tier: 'Community partner',
-    since: '2021',
-    eyebrow: 'Housing & shelter',
-    tagline: 'A safe place to land.',
+    desc: 'An illustrative peer-health and harm-reduction partnership for queer residents.',
+    tags: ['Health', 'Support'],
+    tier: 'Community · sample',
+    since: 'Illustrative partner',
+    eyebrow: 'Health & wellbeing',
+    tagline: 'Care that meets you where you are.',
     about: [
-      'Casa Arco-Íris runs a small shelter for queer youth in Porto, with weekend meal and upkeep support run largely by volunteers.',
+      'A sample health collective used to illustrate a community-level wellbeing partnership, run largely by volunteers. Not a real partner.',
     ],
-    stats: [{ value: '18', label: 'Residents housed / year' }],
+    stats: [{ value: 'A few hundred', label: 'People supported / year (sample)' }],
     aboutMore: [
       {
         heading: 'Why we partner',
-        body: 'Weekend staffing is thin, and consistent volunteers make a visible difference for residents.',
+        body: 'Illustrative community partnership — consistent volunteers make a visible difference for drop-in visitors.',
       },
     ],
     jointWork: [
       {
-        kicker: 'Weekend support',
-        title: 'Weekend meals and light upkeep',
-        dek: 'QueerPulse volunteers cover Saturday or Sunday shifts.',
-        footLeft: 'Since 2024',
-        footRight: '5 volunteers/month',
+        kicker: 'Drop-in support',
+        title: 'Weekend drop-in hours (sample)',
+        dek: 'Volunteers cover Saturday or Sunday shifts alongside partner staff.',
+        footLeft: 'Illustrative',
+        footRight: 'Sample cadence',
       },
     ],
     timeline: [
       {
-        date: '2024',
-        title: 'Weekend volunteer rotation begins',
-        body: 'First QueerPulse volunteers sign up for weekend shifts.',
+        date: 'Year one',
+        title: 'Drop-in rotation begins (illustrative)',
+        body: 'First volunteers sign up for weekend shifts.',
       },
     ],
     how: [
       {
         heading: 'Volunteer',
-        body: 'Sign up for a weekend meal or upkeep shift.',
+        body: 'Sign up for a drop-in support shift.',
       },
     ],
-    funding: 'Municipal grants and individual donations.',
+    funding: 'Grants and individual donations (illustrative).',
     atGlance: [
-      { label: 'Founded', value: '2021' },
-      { label: 'Focus', value: 'Youth housing' },
+      { label: 'Founded', value: 'Illustrative' },
+      { label: 'Focus', value: 'Peer health, harm reduction' },
     ],
     contact: {
       phone: null,
       phoneNote: null,
-      email: 'contacto@casaarcoiris.example.com',
+      email: 'hello@example.org',
       website: null,
       address: 'Porto, Portugal',
     },
     status: PartnerStatus.Approved,
     submittedBySlug: 'noa-silva',
     reviewNote: null,
+    featured: true,
+    testimonialQuote: null,
+    testimonialAuthor: null,
+    testimonialRole: null,
   },
   {
-    slug: 'livraria-devagar-partner',
-    name: 'Livraria Devagar',
-    logo: 'LD',
+    slug: 'regional-arts-foundation',
+    name: 'Regional Arts Foundation',
+    logo: 'RA',
     region: PartnerRegion.Pt,
     regionLabel: 'Portugal',
     city: 'Braga',
-    desc: 'A queer-run independent bookshop hosting a monthly zine workshop.',
+    desc: 'An illustrative arts and community partnership hosting a monthly workshop.',
     tags: ['Arts', 'Community'],
-    tier: 'Community partner',
-    since: '2022',
+    tier: 'Community · sample',
+    since: 'Illustrative partner',
     eyebrow: 'Arts & community',
-    tagline: 'Slow reading, together.',
+    tagline: 'Slow making, together.',
     about: [
-      'Livraria Devagar is a small independent bookshop specializing in queer literature, zines, and community events.',
+      'A sample arts foundation used to illustrate a community-level cultural partnership. Not a real partner.',
     ],
-    stats: [{ value: '12', label: 'Workshops hosted' }],
+    stats: [{ value: 'A dozen or so', label: 'Workshops hosted (sample)' }],
     aboutMore: [
       {
         heading: 'Why we partner',
-        body: 'Their monthly zine workshop is one of the few hands-on, low-pressure gathering spaces we co-host.',
+        body: 'Illustrative community partnership — a monthly workshop is one of the few hands-on, low-pressure gathering spaces we co-host.',
       },
     ],
     jointWork: [
       {
         kicker: 'Workshop',
-        title: 'Monthly drop-in zine-making workshop',
-        dek: 'QueerPulse members co-facilitate alongside shop staff.',
-        footLeft: 'Since 2024',
+        title: 'Monthly drop-in workshop (sample)',
+        dek: 'Members co-facilitate alongside partner staff.',
+        footLeft: 'Illustrative',
         footRight: 'Monthly',
       },
     ],
     timeline: [
       {
-        date: '2024',
-        title: 'Zine workshop partnership begins',
-        body: 'First QueerPulse-facilitated session runs at the shop.',
+        date: 'Year one',
+        title: 'Workshop partnership begins (illustrative)',
+        body: 'First co-facilitated session runs at the venue.',
       },
     ],
     how: [
@@ -2724,9 +2737,9 @@ const PARTNERS: PartnerSeedDefinition[] = [
         body: 'Co-facilitate a monthly workshop session.',
       },
     ],
-    funding: 'Retail sales and event ticket revenue.',
+    funding: 'Retail sales and event ticket revenue (illustrative).',
     atGlance: [
-      { label: 'Founded', value: '2019' },
+      { label: 'Founded', value: 'Illustrative' },
       { label: 'Focus', value: 'Arts & literature' },
     ],
     contact: {
@@ -2739,22 +2752,26 @@ const PARTNERS: PartnerSeedDefinition[] = [
     status: PartnerStatus.Approved,
     submittedBySlug: 'noa-silva',
     reviewNote: null,
+    featured: true,
+    testimonialQuote: null,
+    testimonialAuthor: null,
+    testimonialRole: null,
   },
   {
-    slug: 'queer-youth-collective-application',
-    name: 'Queer Youth Collective',
-    logo: 'QY',
+    slug: 'community-arts-space-application',
+    name: 'Community Arts Space',
+    logo: 'CS',
     region: PartnerRegion.Pt,
     regionLabel: 'Portugal',
     city: 'Lisbon',
-    desc: 'A peer-mentoring collective pairing queer youth with adult mentors.',
-    tags: ['Youth', 'Mentoring'],
+    desc: 'An illustrative applicant offering a shared studio and gathering space.',
+    tags: ['Arts', 'Space'],
     tier: 'Applicant',
-    since: '2025',
-    eyebrow: 'Youth & mentoring',
-    tagline: 'A steady, judgment-free presence.',
+    since: 'Illustrative applicant',
+    eyebrow: 'Arts & space',
+    tagline: 'A room of our own, on loan.',
     about: [
-      'Queer Youth Collective pairs queer teens with vetted adult mentors for low-pressure, ongoing 1:1 relationships.',
+      'A sample applicant used to illustrate the "pending" review state. Not a real applicant.',
     ],
     stats: [],
     aboutMore: [],
@@ -2766,7 +2783,7 @@ const PARTNERS: PartnerSeedDefinition[] = [
     contact: {
       phone: null,
       phoneNote: null,
-      email: 'hello@queeryouthcollective.example.com',
+      email: 'hello@example.org',
       website: null,
       address: null,
     },
@@ -2775,6 +2792,10 @@ const PARTNERS: PartnerSeedDefinition[] = [
     status: PartnerStatus.Pending,
     submittedBySlug: 'ana-rocha',
     reviewNote: null,
+    featured: false,
+    testimonialQuote: null,
+    testimonialAuthor: null,
+    testimonialRole: null,
   },
 ];
 
@@ -2834,6 +2855,10 @@ async function seedPartners(
         status: p.status,
         submittedById: userId(p.submittedBySlug),
         reviewNote: p.reviewNote,
+        featured: p.featured,
+        testimonialQuote: p.testimonialQuote,
+        testimonialAuthor: p.testimonialAuthor,
+        testimonialRole: p.testimonialRole,
       }),
     );
     partnerIdBySlug.set(p.slug, partner.id);
@@ -2859,11 +2884,11 @@ async function backfillVolunteeringPartnerLinks(
   const links: Array<{ opportunitySlug: string; partnerSlug: string }> = [
     {
       opportunitySlug: 'lgbti-rights-helpline',
-      partnerSlug: 'ilga-portugal-partner',
+      partnerSlug: 'northside-lgbti-association',
     },
     {
       opportunitySlug: 'queer-shelter-weekend-support',
-      partnerSlug: 'casa-arco-iris-partner',
+      partnerSlug: 'community-health-collective',
     },
   ];
 
@@ -3724,6 +3749,121 @@ async function seedChangemakers(manager: EntityManager): Promise<void> {
   }
 }
 
+// Illustrative partnership tiers for the org/partner-facing pricing page.
+// Sample figures and copy only — not real pricing or audited commitments.
+const ORG_TIERS: Array<{
+  slug: string;
+  name: string;
+  priceDisplay: string;
+  pricePeriod: string;
+  dek: string;
+  bullets: string[];
+  footnote: string;
+  ctaType: OrgTierCtaType;
+  ctaTarget: string | null;
+  ctaLabel: string;
+  featured: boolean;
+  sortOrder: number;
+  published: boolean;
+}> = [
+  {
+    slug: 'employer',
+    name: 'Employer',
+    priceDisplay: '€2.4k',
+    pricePeriod: 'per year',
+    dek: 'For workplaces that want to back the community materially, not with a logo.',
+    bullets: [
+      'A verified employer profile members can vouch for',
+      'Two open clinic / advice nights a year',
+      'Quarterly impact note (no vanity metrics)',
+      'Named contact for member escalations',
+      'Illustrative tier — figures are sample values',
+    ],
+    footnote: 'Reviewed annually. Either side can end it.',
+    ctaType: OrgTierCtaType.Toast,
+    ctaTarget: null,
+    ctaLabel: 'Request a review',
+    featured: false,
+    sortOrder: 0,
+    published: true,
+  },
+  {
+    slug: 'partner',
+    name: 'Operational partner',
+    priceDisplay: 'Custom',
+    pricePeriod: 'scoped per partnership',
+    dek: 'A committed operational seam — the partnership this whole page is about.',
+    bullets: [
+      'Specific operational changes, agreed in writing',
+      'Joint case-bridge or referral pathway',
+      'Shared reporting, member-visible',
+      'A year-long build, not a launch',
+      'Illustrative tier — terms are sample values',
+    ],
+    footnote: 'Proposed, not purchased. We say no often.',
+    ctaType: OrgTierCtaType.Propose,
+    ctaTarget: null,
+    ctaLabel: 'Propose a partnership',
+    featured: true,
+    sortOrder: 1,
+    published: true,
+  },
+  {
+    slug: 'funder',
+    name: 'Programme funder',
+    priceDisplay: '€15k+',
+    pricePeriod: 'per year',
+    dek: 'For funders backing a specific programme, with real accountability.',
+    bullets: [
+      'Restricted grant to a named programme',
+      'Quarterly reports + annual audit',
+      'No say over moderation or editorial',
+      'Public funding-transparency entry',
+      'Illustrative tier — figures are sample values',
+    ],
+    footnote: 'Multi-year commitments preferred.',
+    ctaType: OrgTierCtaType.Toast,
+    ctaTarget: null,
+    ctaLabel: 'Discuss funding',
+    featured: false,
+    sortOrder: 2,
+    published: true,
+  },
+];
+
+async function seedOrgTiers(manager: EntityManager): Promise<void> {
+  const orgTiers = manager.getRepository(OrgTier);
+
+  let insertedCount = 0;
+  for (const tier of ORG_TIERS) {
+    // Idempotent: skip if a tier with this slug already exists.
+    const existing = await orgTiers.findOne({ where: { slug: tier.slug } });
+    if (existing) {
+      continue;
+    }
+
+    await orgTiers.save(
+      orgTiers.create({
+        slug: tier.slug,
+        name: tier.name,
+        priceDisplay: tier.priceDisplay,
+        pricePeriod: tier.pricePeriod,
+        dek: tier.dek,
+        bullets: tier.bullets,
+        footnote: tier.footnote,
+        ctaType: tier.ctaType,
+        ctaTarget: tier.ctaTarget,
+        ctaLabel: tier.ctaLabel,
+        featured: tier.featured,
+        sortOrder: tier.sortOrder,
+        published: tier.published,
+      }),
+    );
+    insertedCount += 1;
+  }
+  console.log(`Seeded ${insertedCount} org tiers`);
+}
+
 async function seed(): Promise<void> {
   // Guard: the seed inserts fixture members and must never touch a production
   // database. Refuse to run when NODE_ENV signals production.
@@ -3908,6 +4048,7 @@ async function seed(): Promise<void> {
       await seedVolunteering(manager, memberIdBySlug);
       const partnerIdBySlug = await seedPartners(manager, memberIdBySlug);
       await backfillVolunteeringPartnerLinks(manager, partnerIdBySlug);
+      await seedOrgTiers(manager);
       await seedListings(manager, memberIdBySlug);
       await seedChangemakers(manager);
     });
