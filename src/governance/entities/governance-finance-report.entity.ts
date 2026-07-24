@@ -51,6 +51,24 @@ export interface FinanceEventNote {
   body: string;
 }
 
+/** The operational-reserve progress figures rendered under the income/expense
+ *  breakdown ("€4,380 of €12,450 target"). Raw numbers — the frontend formats
+ *  them with `useFormat().currency()`, never pre-baked strings. */
+export interface FinanceReserve {
+  current: number;
+  target: number;
+}
+
+/** One disclosed restricted-grant partner ("Fundação Calouste Gulbenkian —
+ *  €400 · Mental Health Fund"). `name`/`amount` are non-translatable data;
+ *  `scopeKey` is the i18n key for the restriction description. Mirrors the
+ *  frontend's `FinancePartner` shape. */
+export interface FinancePartner {
+  name: string;
+  amount: number;
+  scopeKey: string;
+}
+
 /**
  * A published quarterly financial-transparency snapshot — backs
  * `GET /governance/finances` (see `src/governance/`), read by
@@ -86,6 +104,17 @@ export class GovernanceFinanceReport {
 
   @Column({ type: 'jsonb', name: 'event_notes' })
   eventNotes: FinanceEventNote[];
+
+  // Reserve progress + disclosed partners render inside `FinancesSection`
+  // alongside the income/expense breakdown, and (like the reserve total) they
+  // shift quarter to quarter, so they live on the quarterly report rather than
+  // the evergreen `governance_overview`. Added after the initial table, hence
+  // nullable — the seeded Q2 2026 row is backfilled by the seed.
+  @Column({ type: 'jsonb', nullable: true })
+  reserve: FinanceReserve | null;
+
+  @Column({ type: 'jsonb', nullable: true })
+  partners: FinancePartner[] | null;
 
   @Column({ type: 'timestamptz', name: 'published_at' })
   publishedAt: Date;

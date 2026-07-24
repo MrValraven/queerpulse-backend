@@ -684,7 +684,13 @@ export class ModerationService {
     if (!userId) return 'Deleted member';
     const profile = await this.profiles.findOne({ where: { userId } });
     if (profile) return `${profile.firstName} ${profile.lastName}`.trim();
-    const user = await this.users.findOne({ where: { id: userId } });
+    // `addSelect('user.email')` re-includes the `select: false` email column —
+    // it is the last-resort display name for a member with no profile row.
+    const user = await this.users
+      .createQueryBuilder('user')
+      .addSelect('user.email')
+      .where('user.id = :userId', { userId })
+      .getOne();
     return user?.email ?? 'Member';
   }
 

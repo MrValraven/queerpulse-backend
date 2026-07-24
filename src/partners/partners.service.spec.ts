@@ -296,6 +296,44 @@ describe('PartnersService', () => {
     });
   });
 
+  describe('listApproved', () => {
+    it('lists only approved partners, newest first', async () => {
+      await service.listApproved();
+      expect(partners.find).toHaveBeenCalledWith({
+        where: { status: PartnerStatus.Approved },
+        order: { createdAt: 'DESC' },
+      });
+    });
+
+    it('returns an empty array when there are no approved partners', async () => {
+      partners.find.mockResolvedValue([]);
+      const res = await service.listApproved();
+      expect(res).toEqual([]);
+    });
+
+    it('maps rows through buildApplications into the application shape', async () => {
+      partners.find.mockResolvedValue([
+        {
+          id: 'partner-1',
+          status: PartnerStatus.Approved,
+          submittedById: 'submitter-1',
+          reviewNote: null,
+          createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        },
+      ]);
+
+      const res = await service.listApproved();
+
+      expect(res).toHaveLength(1);
+      expect(res[0]).toEqual(
+        expect.objectContaining({
+          id: 'partner-1',
+          status: PartnerStatus.Approved,
+        }),
+      );
+    });
+  });
+
   describe('triage', () => {
     it('404s an unknown id', async () => {
       partners.findOne.mockResolvedValue(null);

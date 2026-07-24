@@ -52,10 +52,20 @@ export class User {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'varchar', unique: true })
+  // `googleId` and `email` are the only PII on the auth row, and they are
+  // `select: false` as column-level defense-in-depth: there is no global
+  // serializer here — every endpoint hand-maps entities to DTOs — so the ONLY
+  // thing standing between a future `return usersService.findById()` and a
+  // leaked auth row is that these columns are not loaded unless a query opts
+  // back in. A reader that legitimately needs them says so explicitly, either
+  // with `addSelect('user.email')` on a QueryBuilder or `select: { email: true }`
+  // in find options (both re-include a `select: false` column). Grep for those
+  // to enumerate every place that reads real PII. `googleId` currently has NO
+  // value-reader in app code (only WHERE clauses, which are unaffected).
+  @Column({ type: 'varchar', unique: true, select: false })
   googleId: string;
 
-  @Column({ type: 'varchar', unique: true })
+  @Column({ type: 'varchar', unique: true, select: false })
   email: string;
 
   @Column({

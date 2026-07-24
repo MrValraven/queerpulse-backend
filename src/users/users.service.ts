@@ -33,12 +33,31 @@ export class UsersService {
     @InjectRepository(User) private readonly usersRepo: Repository<User>,
   ) {}
 
+  // Sign-in lookup for a returning member. `addSelect('user.email')` re-includes
+  // the `select: false` email column (see User.email) because the caller mints
+  // an access token from the returned row, and the token embeds the email claim.
   findByGoogleId(googleId: string): Promise<User | null> {
-    return this.usersRepo.findOne({ where: { googleId } });
+    return this.usersRepo
+      .createQueryBuilder('user')
+      .addSelect('user.email')
+      .where('user.googleId = :googleId', { googleId })
+      .getOne();
   }
 
   findById(id: string): Promise<User | null> {
     return this.usersRepo.findOne({ where: { id } });
+  }
+
+  // Like `findById`, but re-includes the `select: false` email column — for the
+  // token-refresh path, which re-mints an access token (with its email claim)
+  // from a freshly loaded row. Ordinary `findById` deliberately omits email so
+  // the PII stays unloaded everywhere that does not explicitly need it.
+  findByIdWithEmail(id: string): Promise<User | null> {
+    return this.usersRepo
+      .createQueryBuilder('user')
+      .addSelect('user.email')
+      .where('user.id = :id', { id })
+      .getOne();
   }
 
   findByIdWithProfile(id: string): Promise<User | null> {

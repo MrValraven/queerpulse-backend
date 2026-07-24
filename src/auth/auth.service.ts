@@ -324,7 +324,9 @@ export class AuthService {
     }
 
     // 4. Load the user fresh (current status/role) before minting a new pair.
-    const user = await this.usersService.findById(row.userId);
+    //    `findByIdWithEmail`, not `findById`: the new access token embeds an
+    //    email claim, and email is `select: false` (see User.email).
+    const user = await this.usersService.findByIdWithEmail(row.userId);
     if (!user) {
       throw new UnauthorizedException('User no longer exists');
     }

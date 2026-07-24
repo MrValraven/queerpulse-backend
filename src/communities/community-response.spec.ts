@@ -82,6 +82,12 @@ describe('toCommunityPost / toCommunityReply permission flags', () => {
     expect(dto.canDelete).toBe(false);
   });
 
+  it('an ex-member author (left the community) can no longer edit or delete', () => {
+    const dto = toCommunityPost(makePost(), null, [], [], 'author-1', null);
+    expect(dto.canEdit).toBe(false);
+    expect(dto.canDelete).toBe(false);
+  });
+
   it('tombstoned post hides body/author and offers restore to owner/mod', () => {
     const dto = toCommunityPost(
       makePost({ deletedAt: new Date() }),

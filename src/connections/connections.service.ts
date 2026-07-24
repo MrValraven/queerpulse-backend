@@ -332,6 +332,40 @@ export class ConnectionsService {
     }
   }
 
+  /**
+   * `PATCH /connections/:id` wrapper: performs the action, then maps the result
+   * to the same `ConnectionListItem` shape the list/create paths return. Like
+   * {@link requestConnectionView}, this keeps the response from leaking raw
+   * entity columns (`userLow`/`userHigh`/`blockedBy`/`flagged`/`introducedBy`)
+   * to the client. `respond` itself still returns the entity for internal
+   * callers that need it.
+   */
+  async respondView(
+    connectionId: string,
+    actorId: string,
+    action: ConnectionAction,
+  ): Promise<ConnectionListItem> {
+    const connection = await this.respond(connectionId, actorId, action);
+    const otherUserId = this.otherId(connection, actorId);
+    const [profilesById, relationshipsByUserId] = await Promise.all([
+      this.profilesByUserIds(
+        [otherUserId, connection.introducedBy].filter(
+          (userId): userId is string => userId !== null && userId !== undefined,
+        ),
+      ),
+      this.relationshipsByUserIds(actorId, [otherUserId]),
+    ]);
+    return toConnectionListItem(
+      connection,
+      actorId,
+      profilesById.get(otherUserId),
+      relationshipsByUserId.get(otherUserId) ?? NO_RELATIONSHIP,
+      connection.introducedBy
+        ? profilesById.get(connection.introducedBy)
+        : undefined,
+    );
+  }
+
   async remove(connectionId: string, actorId: string): Promise<{ ok: true }> {
     const conn = await this.connections.findOne({
       where: { id: connectionId },

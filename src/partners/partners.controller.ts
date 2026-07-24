@@ -90,6 +90,11 @@ export class PartnerApplicationsController {
 export class AdminPartnersController {
   constructor(private readonly partnersService: PartnersService) {}
 
+  @Get()
+  list() {
+    return this.partnersService.listApproved();
+  }
+
   @Patch(':id')
   update(
     @Param('id', ParseUUIDPipe) id: string,

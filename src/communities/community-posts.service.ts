@@ -141,6 +141,9 @@ export class CommunityPostsService {
     }
 
     if (dto.body !== undefined || dto.kind !== undefined) {
+      if (post.deletedAt) {
+        throw new NotFoundException('Post not found');
+      }
       if (post.authorId !== actorId) {
         throw new ForbiddenException('Only the author can edit this post');
       }

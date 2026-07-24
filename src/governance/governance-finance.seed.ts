@@ -1,6 +1,8 @@
 import {
   FinanceEventNote,
   FinanceLine,
+  FinancePartner,
+  FinanceReserve,
   FinanceStat,
 } from './entities/governance-finance-report.entity';
 
@@ -12,16 +14,17 @@ import {
  * `INCOME`, `EXPENSE`, `EVENTS`) — the Q2 2026 quarterly transparency
  * snapshot that `FinancesSection` renders.
  *
- * DO NOT RUN as-is against a live table — this file only exports data; it is
- * not wired into `src/database/seed.ts` (per the task's "seed, do not run"
- * instruction). A future integration would insert `governanceFinanceSeed`
- * via `manager.getRepository(GovernanceFinanceReport).save(...)` alongside
- * the other domain fixtures in that file.
+ * Wired into `src/database/seed.ts` via `seedGovernanceFinance()`, which
+ * inserts this snapshot idempotently (keyed on `quarter`) alongside the other
+ * domain fixtures. Run `pnpm run seed` to populate `governance_finance_report`
+ * so `GET /governance/finances` returns the latest quarter instead of 404ing.
  *
- * The reserve-bar prose ("Operational reserve: €4,380 of €12,450 target")
- * and the two named partner-support disclosures are hardcoded JSX in
- * `GovernanceSections.tsx`, not part of `governance.data.ts` — left as
- * static prose per the task's instructions, not synthesized into this seed.
+ * The operational-reserve figures and the two named partner-support
+ * disclosures now travel on this report too (`reserve`/`partners`) — they
+ * render inside `FinancesSection` and shift quarter to quarter, so they belong
+ * with the quarterly report rather than the evergreen `governance_overview`.
+ * `partner.scopeKey` stays an i18n key (the restriction wording is translated);
+ * `name`/`amount`/reserve figures are non-translatable data.
  */
 
 export const financeStatsSeed: FinanceStat[] = [
@@ -340,11 +343,36 @@ export const financeEventNotesSeed: FinanceEventNote[] = [
   },
 ];
 
+// Operational reserve progress ("€4,380 of €12,450 target") — raw numbers,
+// formatted on the frontend. Transcribed from `RESERVE_CURRENT`/`RESERVE_TARGET`
+// in `governance.data.ts`.
+export const financeReserveSeed: FinanceReserve = {
+  current: 4380,
+  target: 12450,
+};
+
+// Disclosed restricted-grant partners. Transcribed from `FINANCE_PARTNERS` in
+// `governance.data.ts`; `scopeKey` stays an i18n key resolved on the frontend.
+export const financePartnersSeed: FinancePartner[] = [
+  {
+    name: 'Fundação Calouste Gulbenkian',
+    amount: 400,
+    scopeKey: 'governance:sections.finances.partnerScope.mentalHealthFund',
+  },
+  {
+    name: 'ILGA Portugal',
+    amount: 200,
+    scopeKey: 'governance:sections.finances.partnerScope.communityEvents',
+  },
+];
+
 export const governanceFinanceReportSeed = {
   quarter: '2026-Q2',
   stats: financeStatsSeed,
   income: financeIncomeSeed,
   expense: financeExpenseSeed,
   eventNotes: financeEventNotesSeed,
+  reserve: financeReserveSeed,
+  partners: financePartnersSeed,
   publishedAt: new Date('2026-07-01T00:00:00.000Z'),
 };

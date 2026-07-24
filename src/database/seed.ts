@@ -101,6 +101,10 @@ import {
 import { HousingCoop } from '../housing/entities/housing-coop.entity';
 import { CoopJoinRequest } from '../housing/entities/coop-join-request.entity';
 import { OrgTier, OrgTierCtaType } from '../org-tiers/entities/org-tier.entity';
+import { GovernanceFinanceReport } from '../governance/entities/governance-finance-report.entity';
+import { governanceFinanceReportSeed } from '../governance/governance-finance.seed';
+import { GovernanceOverview } from '../governance/entities/governance-overview.entity';
+import { governanceOverviewSeed } from '../governance/governance-overview.seed';
 
 // Representative members for local frontend integration. Replace/extend with the
 // prototype's mock members (frontend src/features/members/data/members.ts) as
@@ -3864,6 +3868,60 @@ async function seedOrgTiers(manager: EntityManager): Promise<void> {
   console.log(`Seeded ${insertedCount} org tiers`);
 }
 
+// Inserts the Q2 2026 quarterly financial-transparency snapshot that backs
+// `GET /governance/finances` (the one backend-wired section of the Governance
+// page — `FinancesSection`). Read-only fixture, keyed on `quarter`, mirroring
+// every other seeder's idempotent skip-if-present pattern.
+async function seedGovernanceFinance(manager: EntityManager): Promise<void> {
+  const reports = manager.getRepository(GovernanceFinanceReport);
+
+  const existing = await reports.findOne({
+    where: { quarter: governanceFinanceReportSeed.quarter },
+  });
+  if (existing) {
+    // Backfill `reserve`/`partners` on a row seeded before those columns
+    // existed, so a re-run against an older database populates them.
+    if (existing.reserve === null || existing.partners === null) {
+      await reports.update(
+        { id: existing.id },
+        {
+          reserve: governanceFinanceReportSeed.reserve,
+          partners: governanceFinanceReportSeed.partners,
+        },
+      );
+      console.log(
+        'Backfilled governance finance report reserve + partners (already present)',
+      );
+    } else {
+      console.log('Seeded 0 governance finance reports (already present)');
+    }
+    return;
+  }
+
+  await reports.save(reports.create(governanceFinanceReportSeed));
+  console.log(
+    `Seeded governance finance report ${governanceFinanceReportSeed.quarter}`,
+  );
+}
+
+// Inserts the singleton `governance_overview` document (health snapshot,
+// moderation steps, advisory council, principles, decision log) that backs
+// `GET /governance/overview`. Idempotent, keyed on the fixed singleton id.
+async function seedGovernanceOverview(manager: EntityManager): Promise<void> {
+  const overviews = manager.getRepository(GovernanceOverview);
+
+  const existing = await overviews.findOne({
+    where: { id: governanceOverviewSeed.id },
+  });
+  if (existing) {
+    console.log('Seeded 0 governance overview (already present)');
+    return;
+  }
+
+  await overviews.save(overviews.create(governanceOverviewSeed));
+  console.log('Seeded governance overview');
+}
+
 async function seed(): Promise<void> {
   // Guard: the seed inserts fixture members and must never touch a production
   // database. Refuse to run when NODE_ENV signals production.
@@ -3910,6 +3968,8 @@ async function seed(): Promise<void> {
       ChangemakerDirectorySettings,
       HousingCoop,
       CoopJoinRequest,
+      GovernanceFinanceReport,
+      GovernanceOverview,
     ],
     namingStrategy: new SnakeNamingStrategy(),
     synchronize: false,
@@ -4051,6 +4111,8 @@ async function seed(): Promise<void> {
       await seedOrgTiers(manager);
       await seedListings(manager, memberIdBySlug);
       await seedChangemakers(manager);
+      await seedGovernanceFinance(manager);
+      await seedGovernanceOverview(manager);
     });
 
     console.log('Seed complete.');

@@ -155,6 +155,19 @@ export class PartnersService {
     return this.buildApplications(rows);
   }
 
+  // Admin: every APPROVED partner, newest first — the editable directory for
+  // setting featured/testimonial (unlike listApplications, which is the
+  // pending-triage queue). Returns the full application shape so the admin UI
+  // has each partner's id + featured + testimonial.
+  async listApproved(): Promise<PartnerApplicationDTO[]> {
+    const rows = await this.partners.find({
+      where: { status: PartnerStatus.Approved },
+      order: { createdAt: 'DESC' },
+    });
+    if (!rows.length) return [];
+    return this.buildApplications(rows);
+  }
+
   // `approve` publishes the partner into the public directory; `reject`
   // records the admin's `note` as `reviewNote`. Mirrors the spec's endpoint
   // table verbatim: approve only flips `status`, reject flips `status` AND

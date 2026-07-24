@@ -265,7 +265,8 @@ export function toCommunityReply(
 ): CommunityReplyDTO {
   const deleted = reply.deletedAt != null;
   const isAuthor = reply.authorId === viewerId;
-  const canManage = isAuthor || isOwnerOrMod(viewerRole);
+  const isMember = viewerRole != null;
+  const canManage = (isAuthor || isOwnerOrMod(viewerRole)) && isMember;
   return {
     id: reply.id,
     author: deleted ? DELETED_MEMBER : author,
@@ -273,7 +274,7 @@ export function toCommunityReply(
     createdAt: reply.createdAt.toISOString(),
     editedAt: reply.editedAt ? reply.editedAt.toISOString() : null,
     deleted,
-    canEdit: isAuthor && !deleted, // edit is author-only (owner/mod excluded)
+    canEdit: isAuthor && isMember && !deleted, // edit is author-only (owner/mod excluded)
     canDelete: canManage && !deleted,
     canRestore: canManage && deleted,
     canViewHistory: canManage && reply.editedAt != null,
@@ -296,7 +297,8 @@ export function toCommunityPost(
 ): CommunityPostDTO {
   const deleted = post.deletedAt != null;
   const isAuthor = post.authorId === viewerId;
-  const canManage = isAuthor || isOwnerOrMod(viewerRole);
+  const isMember = viewerRole != null;
+  const canManage = (isAuthor || isOwnerOrMod(viewerRole)) && isMember;
   return {
     id: post.id,
     author: deleted ? DELETED_MEMBER : author,
@@ -307,7 +309,7 @@ export function toCommunityPost(
     createdAt: post.createdAt.toISOString(),
     editedAt: post.editedAt ? post.editedAt.toISOString() : null,
     deleted,
-    canEdit: isAuthor && !deleted, // edit is author-only (owner/mod excluded)
+    canEdit: isAuthor && isMember && !deleted, // edit is author-only (owner/mod excluded)
     canDelete: canManage && !deleted,
     canRestore: canManage && deleted,
     canViewHistory: canManage && post.editedAt != null,

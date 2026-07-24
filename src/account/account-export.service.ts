@@ -107,7 +107,13 @@ export class AccountExportService {
     userId: string,
   ): Promise<Record<string, unknown> | null> {
     const [user, profile] = await Promise.all([
-      this.users.findOne({ where: { id: userId } }),
+      // `addSelect('user.email')` re-includes the `select: false` email column —
+      // the member's own email is core to the data-export archive they receive.
+      this.users
+        .createQueryBuilder('user')
+        .addSelect('user.email')
+        .where('user.id = :userId', { userId })
+        .getOne(),
       this.profiles.findOne({ where: { userId } }),
     ]);
     if (!user) {

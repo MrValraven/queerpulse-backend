@@ -67,7 +67,7 @@ export class ConnectionsController {
     @CurrentUser() user: CurrentUserData,
     @Body() dto: RespondConnectionDto,
   ) {
-    return this.connectionsService.respond(id, user.userId, dto.action);
+    return this.connectionsService.respondView(id, user.userId, dto.action);
   }
 
   @Delete(':id')

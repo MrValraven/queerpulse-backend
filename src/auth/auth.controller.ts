@@ -209,7 +209,10 @@ export class AuthController {
     }
     return {
       id: user.id,
-      email: user.email,
+      // From the JWT (re-read from the DB every request by JwtStrategy), not the
+      // entity: `User.email` is `select: false`, and `findByIdWithProfile` is
+      // also used by a public invite view that must not load it.
+      email: current.email,
       status: user.status,
       role: user.role,
       // NULL for accounts created before the 18+ gate shipped — the frontend

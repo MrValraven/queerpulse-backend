@@ -15,6 +15,8 @@ function makeReport(
     income: governanceFinanceReportSeed.income,
     expense: governanceFinanceReportSeed.expense,
     eventNotes: governanceFinanceReportSeed.eventNotes,
+    reserve: governanceFinanceReportSeed.reserve,
+    partners: governanceFinanceReportSeed.partners,
     publishedAt: governanceFinanceReportSeed.publishedAt,
     createdAt: governanceFinanceReportSeed.publishedAt,
     updatedAt: governanceFinanceReportSeed.publishedAt,
@@ -24,10 +26,10 @@ function makeReport(
 
 describe('GovernanceFinanceService', () => {
   let service: GovernanceFinanceService;
-  let repo: { findOne: jest.Mock };
+  let repo: { findOne: jest.Mock; find: jest.Mock };
 
   beforeEach(async () => {
-    repo = { findOne: jest.fn() };
+    repo = { findOne: jest.fn(), find: jest.fn() };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         GovernanceFinanceService,
@@ -43,19 +45,25 @@ describe('GovernanceFinanceService', () => {
   describe('getFinances', () => {
     it('fetches the most recently published report when no quarter is given', async () => {
       const report = makeReport();
-      repo.findOne.mockResolvedValue(report);
+      repo.find.mockResolvedValue([report]);
 
       const result = await service.getFinances();
 
-      expect(repo.findOne).toHaveBeenCalledWith({
+      // The "latest" path has no selection conditions, so it must go through
+      // `find({ take: 1 })` — `findOne` without a `where` throws in TypeORM 0.3.
+      expect(repo.find).toHaveBeenCalledWith({
         order: { publishedAt: 'DESC' },
+        take: 1,
       });
+      expect(repo.findOne).not.toHaveBeenCalled();
       expect(result).toEqual({
         quarter: '2026-Q2',
         stats: governanceFinanceReportSeed.stats,
         income: governanceFinanceReportSeed.income,
         expense: governanceFinanceReportSeed.expense,
         eventNotes: governanceFinanceReportSeed.eventNotes,
+        reserve: governanceFinanceReportSeed.reserve,
+        partners: governanceFinanceReportSeed.partners,
         publishedAt: governanceFinanceReportSeed.publishedAt.toISOString(),
       });
     });
@@ -73,7 +81,7 @@ describe('GovernanceFinanceService', () => {
     });
 
     it('404s when no report exists yet', async () => {
-      repo.findOne.mockResolvedValue(null);
+      repo.find.mockResolvedValue([]);
       await expect(service.getFinances()).rejects.toThrow(NotFoundException);
     });
 

@@ -102,7 +102,15 @@ export class AccountDeletionProcessorService {
    */
   private async eraseAccount(userId: string): Promise<void> {
     await this.dataSource.transaction(async (manager) => {
-      const user = await manager.findOne(User, { where: { id: userId } });
+      // `addSelect('user.email')` re-includes the `select: false` email column:
+      // the suppression row is keyed on `hashSuppressedEmail(user.email)`, so an
+      // unloaded email here would hash `undefined` and let the erased account
+      // silently re-register on the same address.
+      const user = await manager
+        .createQueryBuilder(User, 'user')
+        .addSelect('user.email')
+        .where('user.id = :userId', { userId })
+        .getOne();
       if (!user) {
         // Already gone (manual DB surgery, or a prior partial run that got as
         // far as the delete). Nothing to erase — treat as success so the
