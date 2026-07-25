@@ -30,7 +30,11 @@ export class VouchController {
     @Param('slug') slug: string,
     @Body() dto: CreateVouchDto,
   ) {
-    return this.vouchService.createVouch(user.userId, slug, dto.note);
+    return this.vouchService.createVouch(user.userId, slug, {
+      note: dto.note,
+      relationship: dto.relationship,
+      anonymous: dto.anonymous,
+    });
   }
 
   @Delete(':slug/vouch')

@@ -36,6 +36,7 @@ import { CultureModule } from './culture/culture.module';
 import { GovernanceModule } from './governance/governance.module';
 import { AdminCommunitiesModule } from './admin-communities/admin-communities.module';
 import { AdminMembersModule } from './admin-members/admin-members.module';
+import { AdminTrustNetworkModule } from './admin-trust-network/admin-trust-network.module';
 import { AdminOverviewModule } from './admin-overview/admin-overview.module';
 import { AdminBotsModule } from './admin-bots/admin-bots.module';
 import { AdminHousingModule } from './admin-housing/admin-housing.module';
@@ -222,6 +223,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     ChangemakersModule,
     AdminCommunitiesModule,
     AdminMembersModule,
+    AdminTrustNetworkModule,
     AdminOverviewModule,
     AdminBotsModule,
     AdminHousingModule,

@@ -1,5 +1,6 @@
 import {
   IsEnum,
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
@@ -11,6 +12,11 @@ import {
   SubprofileLinkVisibility,
   SubprofileVisibility,
 } from '../entities/subprofile.entity';
+import {
+  ACCENT_KEYS,
+  AVAILABILITY_KEYS,
+  MAX_CTA_LABEL,
+} from '../subprofile-validation';
 
 // All fields optional (PATCH semantics). Field names match GLOBAL CONTRACT C4.
 // `@IsOptional()` treats both `undefined` and `null` as "skip", so nullable
@@ -36,4 +42,18 @@ export class UpdateSubprofileDTO {
   @IsOptional() @IsEnum(SubprofileVisibility) visibility?: SubprofileVisibility;
 
   @IsOptional() @IsInt() @Min(0) position?: number;
+
+  @IsOptional() @IsImageReference() coverUrl?: string | null;
+
+  @IsOptional()
+  @IsIn([...ACCENT_KEYS, null])
+  accent?: string | null;
+
+  @IsOptional()
+  @IsIn([...AVAILABILITY_KEYS, null])
+  availability?: string | null;
+
+  @IsOptional() @IsString() @MaxLength(MAX_CTA_LABEL) ctaLabel?: string | null;
+
+  @IsOptional() @IsString() @MaxLength(1000) ctaUrl?: string | null;
 }

@@ -7,7 +7,15 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Repository } from 'typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { DataSource, In, IsNull, Not, Repository } from 'typeorm';
+import { toImageUrl } from '../common/image-url';
+import { AccessTier, Community } from '../communities/entities/community.entity';
+import {
+  Event,
+  EventStatus,
+  EventVisibility,
+} from '../events/entities/event.entity';
 import { HandlesService } from '../handles/handles.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -15,6 +23,9 @@ import { CreateSubprofileDTO } from './dto/create-subprofile.dto';
 import { ListDirectoryQuery } from './dto/list-directory.query';
 import { SubprofileItemInputDTO } from './dto/replace-items.dto';
 import { UpdateSubprofileDTO } from './dto/update-subprofile.dto';
+import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
+import { SubprofileEndorsement } from './entities/subprofile-endorsement.entity';
+import { SubprofileFollower } from './entities/subprofile-follower.entity';
 import {
   Subprofile,
   SubprofileLinkVisibility,
@@ -25,18 +36,32 @@ import {
   SubprofileItem,
   SubprofileSection,
 } from './entities/subprofile-item.entity';
+import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 import type {
   SubprofileKind as SubprofileKindKey,
   SubprofileSection as SubprofileSectionKey,
 } from './subprofile-kinds';
 import { isSectionAllowed } from './subprofile-kinds';
 import {
+  SUBPROFILE_ENDORSED,
+  SUBPROFILE_FOLLOWED,
+  SubprofileEndorsedEvent,
+  SubprofileFollowedEvent,
+} from './subprofile.events';
+import {
+  ACCENT_KEYS,
+  AVAILABILITY_KEYS,
+  isValidAffiliation,
+  MAX_AFFILIATIONS,
   MAX_ITEMS_PER_SECTION,
   MAX_SUBPROFILES,
   slugifyDisplayName,
   validatePublish,
+  validateSocialLinks,
 } from './subprofile-validation';
 import {
+  AffiliationView,
+  EndorserView,
   SubprofileCardView,
   SubprofilePublicView,
   SubprofileView,
@@ -44,6 +69,11 @@ import {
   toPublicDTO,
   toSubprofileDTO,
 } from './subprofile-response';
+
+// Endorser lists are capped, newest-first — mirrors the vouch page-size
+// convention but fixed (not caller-tunable) since the endorse UI shows a
+// single avatar cluster, not a paginated page.
+const ENDORSERS_LIST_CAP = 50;
 
 // Postgres unique-violation SQLSTATE (a duplicate handle races past the
 // partial unique index `UQ_subprofiles_handle`).
@@ -64,11 +94,24 @@ export class SubprofilesService {
     private readonly subprofiles: Repository<Subprofile>,
     @InjectRepository(SubprofileItem)
     private readonly items: Repository<SubprofileItem>,
+    @InjectRepository(SubprofileSocialLink)
+    private readonly socialLinks: Repository<SubprofileSocialLink>,
+    @InjectRepository(SubprofileEndorsement)
+    private readonly endorsements: Repository<SubprofileEndorsement>,
+    @InjectRepository(SubprofileFollower)
+    private readonly followers: Repository<SubprofileFollower>,
+    @InjectRepository(SubprofileAffiliation)
+    private readonly affiliations: Repository<SubprofileAffiliation>,
+    @InjectRepository(Event)
+    private readonly events: Repository<Event>,
+    @InjectRepository(Community)
+    private readonly communities: Repository<Community>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
     private readonly dataSource: DataSource,
     private readonly blockFilter: BlockFilterService,
     private readonly handles: HandlesService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   // ---- owner reads ---------------------------------------------------------
@@ -78,8 +121,19 @@ export class SubprofilesService {
       where: { userId },
       order: { position: 'ASC', createdAt: 'ASC' },
     });
-    const byId = await this.loadItemsFor(sps.map((s) => s.id));
-    return sps.map((sp) => toSubprofileDTO(sp, byId.get(sp.id) ?? []));
+    const subprofileIds = sps.map((sp) => sp.id);
+    const itemsById = await this.loadItemsFor(subprofileIds);
+    const socialLinksById = await this.loadSocialLinksFor(subprofileIds);
+    const endorsementCountsById =
+      await this.loadEndorsementCountsFor(subprofileIds);
+    return sps.map((sp) =>
+      toSubprofileDTO(
+        sp,
+        itemsById.get(sp.id) ?? [],
+        socialLinksById.get(sp.id) ?? [],
+        endorsementCountsById.get(sp.id) ?? 0,
+      ),
+    );
   }
 
   async getOwned(userId: string, id: string): Promise<Subprofile> {
@@ -135,7 +189,39 @@ export class SubprofilesService {
       sp.status === SubprofileStatus.Published &&
       prevLink === SubprofileLinkVisibility.Unlinked;
     const { linkVisibility, ...rest } = dto;
+
+    if (
+      rest.accent !== undefined &&
+      rest.accent !== null &&
+      !ACCENT_KEYS.includes(rest.accent as (typeof ACCENT_KEYS)[number])
+    ) {
+      throw new BadRequestException(`Unknown accent: ${rest.accent}`);
+    }
+    if (
+      rest.availability !== undefined &&
+      rest.availability !== null &&
+      !AVAILABILITY_KEYS.includes(
+        rest.availability as (typeof AVAILABILITY_KEYS)[number],
+      )
+    ) {
+      throw new BadRequestException(
+        `Unknown availability: ${rest.availability}`,
+      );
+    }
+
     Object.assign(sp, rest);
+
+    // ctaLabel/ctaUrl are a pair: a contact CTA needs both a label and a target,
+    // never just one — checked against the merged (post-assign) state so a PATCH
+    // that only touches one field is still validated against whatever the other
+    // field ends up holding (either just-updated or carried over unchanged).
+    const hasCtaLabel =
+      typeof sp.ctaLabel === 'string' && sp.ctaLabel.trim().length > 0;
+    const hasCtaUrl =
+      typeof sp.ctaUrl === 'string' && sp.ctaUrl.trim().length > 0;
+    if (hasCtaLabel !== hasCtaUrl) {
+      throw new BadRequestException('ctaLabel and ctaUrl must be set together');
+    }
 
     // Global-namespace names to free as a side effect of this update.
     const releases: string[] = [];
@@ -211,6 +297,12 @@ export class SubprofilesService {
         `A section can have at most ${MAX_ITEMS_PER_SECTION} items`,
       );
     }
+    // At most one featured item may arrive in a single section payload. Checked
+    // up front (before the delete/insert) so a bad payload fails fast.
+    const incomingFeaturedCount = items.filter((it) => it.isFeatured).length;
+    if (incomingFeaturedCount > 1) {
+      throw new BadRequestException('Only one item can be featured');
+    }
 
     await this.dataSource.transaction(async (manager) => {
       await manager.delete(SubprofileItem, {
@@ -229,6 +321,154 @@ export class SubprofilesService {
           date: it.date ?? null,
           meta: it.meta ?? null,
           tags: it.tags ?? [],
+          isFeatured:
+            sectionEnum === SubprofileSection.Links
+              ? false
+              : (it.isFeatured ?? false),
+          position: index,
+        }),
+      );
+      if (rows.length) {
+        await manager.save(rows);
+      }
+      // If this section now holds the spotlight, clear it everywhere else so at
+      // most one item across the whole persona is featured. Do NOT clear other
+      // sections when the incoming section has no featured item — the spotlight
+      // may legitimately live elsewhere.
+      if (
+        incomingFeaturedCount === 1 &&
+        sectionEnum !== SubprofileSection.Links
+      ) {
+        await manager
+          .createQueryBuilder()
+          .update(SubprofileItem)
+          .set({ isFeatured: false })
+          // Raw snake_case column names — an aliasless UpdateQueryBuilder does
+          // not map camelCase property names (repo convention: see
+          // cinema.service.ts / auth-maintenance.service.ts).
+          .where('subprofile_id = :id AND section != :section', {
+            id,
+            section: sectionEnum,
+          })
+          .execute();
+      }
+    });
+
+    return this.ownerDTO(sp);
+  }
+
+  async replaceSocialLinks(
+    userId: string,
+    id: string,
+    items: { platform: string; urlOrHandle: string }[],
+  ): Promise<SubprofileView> {
+    const sp = await this.getOwned(userId, id);
+
+    if (!validateSocialLinks(items)) {
+      throw new BadRequestException('Invalid social links');
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      await manager.delete(SubprofileSocialLink, { subprofileId: id });
+      const rows = items.map((item, index) =>
+        manager.create(SubprofileSocialLink, {
+          subprofileId: id,
+          platform: item.platform,
+          urlOrHandle: item.urlOrHandle,
+          position: index,
+        }),
+      );
+      if (rows.length) {
+        await manager.save(rows);
+      }
+    });
+
+    return this.ownerDTO(sp);
+  }
+
+  // Replace-all for a persona's event/community links (design plan Phase 3c).
+  // Each target is resolved + validated at SAVE time (must exist, be publicly
+  // visible, and not be owned by someone this persona's owner has blocked
+  // either way) — mirrors `replaceSocialLinks`'s delete-then-insert shape, but
+  // with per-target existence/visibility/block checks `replaceSocialLinks`
+  // doesn't need (a social-link platform is just a string, never a live
+  // entity). Bounded at `MAX_AFFILIATIONS` (12), so per-item lookups here are
+  // fine — the batched, N+1-sensitive path is the READ side
+  // (`resolveAffiliationsFor`), not this bounded write.
+  async replaceAffiliations(
+    userId: string,
+    id: string,
+    items: { targetType: string; targetSlug: string; role: string }[],
+  ): Promise<SubprofileView> {
+    const sp = await this.getOwned(userId, id);
+
+    if (items.length > MAX_AFFILIATIONS) {
+      throw new BadRequestException(
+        `You can have at most ${MAX_AFFILIATIONS} affiliations`,
+      );
+    }
+    for (const item of items) {
+      if (!isValidAffiliation(item)) {
+        throw new BadRequestException(
+          `Invalid affiliation: ${item.targetType}:${item.targetSlug}`,
+        );
+      }
+    }
+
+    // Resolve + validate every target before writing anything: existence,
+    // public visibility (mirrors the criteria `EventsService`/
+    // `CommunitiesService` use for their own public reads), and not
+    // block-filtered against this persona's owner.
+    for (const item of items) {
+      const label = `${item.targetType}:${item.targetSlug}`;
+      if (item.targetType === 'event') {
+        const event = await this.events.findOne({
+          where: { slug: item.targetSlug },
+        });
+        if (
+          !event ||
+          event.status !== EventStatus.Published ||
+          event.visibility === EventVisibility.InviteOnly
+        ) {
+          throw new BadRequestException(
+            `Affiliation target not found or not visible: ${label}`,
+          );
+        }
+        if (await this.blockFilter.isBlockedEitherWay(sp.userId, event.hostId)) {
+          throw new BadRequestException(
+            `Affiliation target not found or not visible: ${label}`,
+          );
+        }
+      } else {
+        const community = await this.communities.findOne({
+          where: { slug: item.targetSlug },
+        });
+        if (!community || community.accessTier === AccessTier.Private) {
+          throw new BadRequestException(
+            `Affiliation target not found or not visible: ${label}`,
+          );
+        }
+        if (
+          await this.blockFilter.isBlockedEitherWay(
+            sp.userId,
+            community.ownerId,
+          )
+        ) {
+          throw new BadRequestException(
+            `Affiliation target not found or not visible: ${label}`,
+          );
+        }
+      }
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      await manager.delete(SubprofileAffiliation, { subprofileId: id });
+      const rows = items.map((item, index) =>
+        manager.create(SubprofileAffiliation, {
+          subprofileId: id,
+          targetType: item.targetType,
+          targetSlug: item.targetSlug,
+          role: item.role,
           position: index,
         }),
       );
@@ -243,6 +483,10 @@ export class SubprofilesService {
   async publish(userId: string, id: string): Promise<SubprofileView> {
     const sp = await this.getOwned(userId, id);
     const items = await this.items.find({ where: { subprofileId: id } });
+    const socialLinkRows = await this.socialLinks.find({
+      where: { subprofileId: id },
+      order: { position: 'ASC' },
+    });
 
     const unlinked = sp.linkVisibility === SubprofileLinkVisibility.Unlinked;
 
@@ -271,7 +515,7 @@ export class SubprofilesService {
       sp.handle = null;
       sp.status = SubprofileStatus.Published;
       await this.saveSubprofile(sp);
-      return toSubprofileDTO(sp, items);
+      return toSubprofileDTO(sp, items, socialLinkRows);
     }
 
     // Unlinked: claim the validated handle in the global registry AND flip to
@@ -305,7 +549,7 @@ export class SubprofilesService {
       throw err;
     }
     sp.status = SubprofileStatus.Published;
-    return toSubprofileDTO(sp, items);
+    return toSubprofileDTO(sp, items, socialLinkRows);
   }
 
   async unpublish(userId: string, id: string): Promise<SubprofileView> {
@@ -367,12 +611,41 @@ export class SubprofilesService {
       },
       order: { position: 'ASC', createdAt: 'ASC' },
     });
-    const byId = await this.loadItemsFor(sps.map((s) => s.id));
+    const subprofileIds = sps.map((sp) => sp.id);
+    const itemsById = await this.loadItemsFor(subprofileIds);
+    const socialLinksById = await this.loadSocialLinksFor(subprofileIds);
+    const endorsementCountsById =
+      await this.loadEndorsementCountsFor(subprofileIds);
+    const viewerEndorsedIds = await this.viewerEndorsedFor(
+      viewerId,
+      subprofileIds,
+    );
+    const followerCountsById = await this.loadFollowerCountsFor(subprofileIds);
+    const viewerFollowingIds = await this.viewerFollowingFor(
+      viewerId,
+      subprofileIds,
+    );
+    const affiliationsById = await this.resolveAffiliationsFor(
+      viewerId,
+      subprofileIds,
+    );
     const owner = {
       slug: profile.slug,
       name: `${profile.firstName} ${profile.lastName}`.trim(),
     };
-    return sps.map((sp) => toPublicDTO(sp, byId.get(sp.id) ?? [], owner));
+    return sps.map((sp) =>
+      toPublicDTO(
+        sp,
+        itemsById.get(sp.id) ?? [],
+        owner,
+        socialLinksById.get(sp.id) ?? [],
+        endorsementCountsById.get(sp.id) ?? 0,
+        viewerEndorsedIds.has(sp.id),
+        followerCountsById.get(sp.id) ?? 0,
+        viewerFollowingIds.has(sp.id),
+        affiliationsById.get(sp.id) ?? [],
+      ),
+    );
   }
 
   // Unlinked + published persona reachable by its global handle. Owner-stripped.
@@ -395,7 +668,34 @@ export class SubprofilesService {
       throw new NotFoundException('Subprofile not found');
     }
     const items = await this.items.find({ where: { subprofileId: sp.id } });
-    return toPublicDTO(sp, items); // no owner → owner fields omitted
+    const socialLinkRows = await this.socialLinks.find({
+      where: { subprofileId: sp.id },
+      order: { position: 'ASC' },
+    });
+    const endorsementCount =
+      (await this.loadEndorsementCountsFor([sp.id])).get(sp.id) ?? 0;
+    const viewerEndorsed = (
+      await this.viewerEndorsedFor(viewerId, [sp.id])
+    ).has(sp.id);
+    const followerCount =
+      (await this.loadFollowerCountsFor([sp.id])).get(sp.id) ?? 0;
+    const viewerFollowing = (
+      await this.viewerFollowingFor(viewerId, [sp.id])
+    ).has(sp.id);
+    const affiliations =
+      (await this.resolveAffiliationsFor(viewerId, [sp.id])).get(sp.id) ?? [];
+    // no owner → owner fields omitted
+    return toPublicDTO(
+      sp,
+      items,
+      undefined,
+      socialLinkRows,
+      endorsementCount,
+      viewerEndorsed,
+      followerCount,
+      viewerFollowing,
+      affiliations,
+    );
   }
 
   // Directory of standalone (unlinked + published + open) personas.
@@ -433,14 +733,450 @@ export class SubprofilesService {
 
     qb.orderBy('sp.displayName', 'ASC');
     const rows = await qb.getMany();
-    return { items: rows.map(toCardDTO) };
+    const socialCountsById = await this.loadSocialCountsFor(
+      rows.map((row) => row.id),
+    );
+    const tagsById = await this.loadContentTagsFor(rows.map((row) => row.id));
+    return {
+      items: rows.map((row) =>
+        toCardDTO(
+          row,
+          socialCountsById.get(row.id) ?? 0,
+          tagsById.get(row.id) ?? [],
+        ),
+      ),
+    };
+  }
+
+  // ---- endorsements ----------------------------------------------------------
+
+  async endorse(
+    endorserId: string,
+    id: string,
+    note?: string,
+  ): Promise<{ endorsementCount: number; viewerEndorsed: boolean }> {
+    const persona = await this.resolveEndorsablePersona(endorserId, id);
+    if (persona.userId === endorserId) {
+      throw new BadRequestException('You cannot endorse your own persona');
+    }
+
+    // Empty/whitespace-only notes are stored as null, not "" — mirrors
+    // `VouchService.createVouch`.
+    const trimmedNote = note?.trim();
+    const cleanNote = trimmedNote ? trimmedNote : null;
+
+    const existing = await this.endorsements.findOne({
+      where: { subprofileId: id, endorserId },
+    });
+
+    // Upsert mirroring `VouchService.createVouch`, EXCEPT for the
+    // already-active case: a vouch 409s on a duplicate, but endorsing is a
+    // one-tap UX action, so re-tapping an already-endorsed persona is treated
+    // as idempotent success (current count, viewerEndorsed: true) rather than
+    // an error. `justActivated` tracks whether a real active→inactive
+    // transition happened, so the notification event fires once per genuine
+    // endorse (not on every repeat tap).
+    let justActivated = false;
+    if (existing && existing.withdrawnAt === null) {
+      // Already active — idempotent no-op.
+    } else if (existing) {
+      // Withdrawn → reactivate in place (keeps id/createdAt).
+      await this.dataSource.transaction(async (manager) => {
+        await manager.update(
+          SubprofileEndorsement,
+          { id: existing.id },
+          { withdrawnAt: null, note: cleanNote },
+        );
+      });
+      justActivated = true;
+    } else {
+      try {
+        await this.dataSource.transaction(async (manager) => {
+          await manager.insert(SubprofileEndorsement, {
+            subprofileId: id,
+            endorserId,
+            note: cleanNote,
+          });
+        });
+        justActivated = true;
+      } catch (err) {
+        if (!isUniqueViolation(err)) {
+          throw err;
+        }
+        // Lost a race to a concurrent endorse for the same (persona, endorser)
+        // pair — the row now exists and is active; treat as idempotent
+        // success rather than surfacing a 409.
+      }
+    }
+
+    const endorsementCount =
+      (await this.loadEndorsementCountsFor([id])).get(id) ?? 0;
+
+    if (justActivated) {
+      this.eventEmitter.emit(SUBPROFILE_ENDORSED, {
+        subprofileId: id,
+        endorserId,
+        ownerId: persona.userId,
+      } satisfies SubprofileEndorsedEvent);
+    }
+
+    return { endorsementCount, viewerEndorsed: true };
+  }
+
+  async withdrawEndorsement(
+    endorserId: string,
+    id: string,
+  ): Promise<{ endorsementCount: number; viewerEndorsed: boolean }> {
+    // No-op if there is no active endorsement to withdraw — unlike
+    // `VouchService.withdrawVouch`, this never 404s (the endorse control is a
+    // toggle; withdrawing a non-existent/already-withdrawn endorsement should
+    // just settle into the "not endorsed" state).
+    const active = await this.endorsements.findOne({
+      where: { subprofileId: id, endorserId, withdrawnAt: IsNull() },
+    });
+    if (active) {
+      await this.endorsements.update(
+        { id: active.id },
+        { withdrawnAt: new Date() },
+      );
+    }
+    const endorsementCount =
+      (await this.loadEndorsementCountsFor([id])).get(id) ?? 0;
+    return { endorsementCount, viewerEndorsed: false };
+  }
+
+  async listEndorsers(
+    viewerId: string,
+    id: string,
+  ): Promise<{ count: number; endorsers: EndorserView[] }> {
+    // In-query block filtering (mirrors `directory()`) so `LIMIT` counts only
+    // visible rows and `count` reflects the viewer's actually-visible total,
+    // not the raw active tally.
+    const qb = this.endorsements
+      .createQueryBuilder('se')
+      .where('se.subprofileId = :id', { id })
+      .andWhere('se.withdrawnAt IS NULL');
+    this.blockFilter.excludeBlocked(qb, viewerId, '"se"."endorser_id"');
+    qb.orderBy('se.createdAt', 'DESC');
+
+    const count = await qb.getCount();
+    const rows = await qb.take(ENDORSERS_LIST_CAP).getMany();
+
+    const endorserProfiles = await this.profiles.find({
+      where: { userId: In(rows.map((row) => row.endorserId)) },
+    });
+    const profileByUserId = new Map(
+      endorserProfiles.map((profile) => [profile.userId, profile]),
+    );
+    const endorsers = rows.map((row) => {
+      const profile = profileByUserId.get(row.endorserId);
+      return {
+        slug: profile?.slug ?? '',
+        name: `${profile?.firstName ?? ''} ${profile?.lastName ?? ''}`.trim(),
+        avatarUrl: toImageUrl(profile?.avatarUrl),
+        note: row.note,
+      };
+    });
+    return { count, endorsers };
+  }
+
+  // ---- followers -------------------------------------------------------------
+
+  async follow(
+    followerId: string,
+    id: string,
+  ): Promise<{ followerCount: number; viewerFollowing: boolean }> {
+    const persona = await this.resolveEndorsablePersona(followerId, id);
+    if (persona.userId === followerId) {
+      throw new BadRequestException('You cannot follow your own persona');
+    }
+
+    // Following is a one-way, instant toggle with no note/soft-withdraw (see
+    // the entity): a genuine insert emits the notification event once;
+    // re-tapping an already-followed persona (or losing a race to a
+    // concurrent follow for the same pair) is idempotent success, no event.
+    let justFollowed = false;
+    try {
+      await this.dataSource.transaction(async (manager) => {
+        await manager.insert(SubprofileFollower, {
+          subprofileId: id,
+          followerId,
+        });
+      });
+      justFollowed = true;
+    } catch (err) {
+      if (!isUniqueViolation(err)) {
+        throw err;
+      }
+      // Already following — idempotent success.
+    }
+
+    const followerCount =
+      (await this.loadFollowerCountsFor([id])).get(id) ?? 0;
+
+    if (justFollowed) {
+      this.eventEmitter.emit(SUBPROFILE_FOLLOWED, {
+        subprofileId: id,
+        followerId,
+        ownerId: persona.userId,
+      } satisfies SubprofileFollowedEvent);
+    }
+
+    return { followerCount, viewerFollowing: true };
+  }
+
+  async unfollow(
+    followerId: string,
+    id: string,
+  ): Promise<{ followerCount: number; viewerFollowing: boolean }> {
+    // No-op if there is no follow row to remove — mirrors
+    // `withdrawEndorsement`: the follow control is a toggle, so unfollowing a
+    // persona the viewer never followed just settles into "not following".
+    await this.followers.delete({ subprofileId: id, followerId });
+    const followerCount =
+      (await this.loadFollowerCountsFor([id])).get(id) ?? 0;
+    return { followerCount, viewerFollowing: false };
   }
 
   // ---- internals -----------------------------------------------------------
 
+  // Fetches a persona by id AND enforces it is publicly endorsable: published,
+  // and not block-either-way between `userId` (the endorser/viewer) and the
+  // persona's owner. Mirrors the gate `getByHandle` applies.
+  private async resolveEndorsablePersona(
+    userId: string,
+    id: string,
+  ): Promise<Subprofile> {
+    const persona = await this.subprofiles.findOne({
+      where: { id, status: SubprofileStatus.Published },
+    });
+    if (!persona) {
+      throw new NotFoundException('Subprofile not found');
+    }
+    if (await this.blockFilter.isBlockedEitherWay(userId, persona.userId)) {
+      throw new NotFoundException('Subprofile not found');
+    }
+    return persona;
+  }
+
+  // Batches the active-endorsement COUNT for many personas into ONE query
+  // (mirrors `loadSocialCountsFor`) — avoids an N+1 across every read path
+  // (`listMine`, `listForProfile`, `getByHandle`, `ownerDTO`) and is reused
+  // even for a single-persona read by passing a one-element id array.
+  private async loadEndorsementCountsFor(
+    ids: string[],
+  ): Promise<Map<string, number>> {
+    const counts = new Map<string, number>();
+    if (!ids.length) return counts;
+    const rows = await this.endorsements.find({
+      where: { subprofileId: In(ids), withdrawnAt: IsNull() },
+      select: { subprofileId: true },
+    });
+    for (const row of rows)
+      counts.set(row.subprofileId, (counts.get(row.subprofileId) ?? 0) + 1);
+    return counts;
+  }
+
+  // Batches "did this viewer endorse this persona" for many personas into ONE
+  // query — the `viewerEndorsed` companion to `loadEndorsementCountsFor`.
+  private async viewerEndorsedFor(
+    viewerId: string,
+    ids: string[],
+  ): Promise<Set<string>> {
+    const set = new Set<string>();
+    if (!ids.length) return set;
+    const rows = await this.endorsements.find({
+      where: {
+        subprofileId: In(ids),
+        endorserId: viewerId,
+        withdrawnAt: IsNull(),
+      },
+      select: { subprofileId: true },
+    });
+    for (const row of rows) set.add(row.subprofileId);
+    return set;
+  }
+
+  // Batches the follower COUNT for many personas into ONE query (mirrors
+  // `loadEndorsementCountsFor`) — there is no `withdrawnAt`: every row in
+  // `subprofile_followers` is active, so this counts rows directly.
+  private async loadFollowerCountsFor(
+    ids: string[],
+  ): Promise<Map<string, number>> {
+    const counts = new Map<string, number>();
+    if (!ids.length) return counts;
+    const rows = await this.followers.find({
+      where: { subprofileId: In(ids) },
+      select: { subprofileId: true },
+    });
+    for (const row of rows)
+      counts.set(row.subprofileId, (counts.get(row.subprofileId) ?? 0) + 1);
+    return counts;
+  }
+
+  // Batches "is this viewer following this persona" for many personas into
+  // ONE query — the `viewerFollowing` companion to `loadFollowerCountsFor`.
+  private async viewerFollowingFor(
+    viewerId: string,
+    ids: string[],
+  ): Promise<Set<string>> {
+    const set = new Set<string>();
+    if (!ids.length) return set;
+    const rows = await this.followers.find({
+      where: { subprofileId: In(ids), followerId: viewerId },
+      select: { subprofileId: true },
+    });
+    for (const row of rows) set.add(row.subprofileId);
+    return set;
+  }
+
+  // Batches the resolved event/community links for many personas into TWO
+  // entity queries total (one `events.find`, one `communities.find`), never
+  // per-affiliation-row or per-persona — mirrors `loadSocialCountsFor` /
+  // `loadContentTagsFor`. A target is DROPPED (not surfaced) from the result
+  // if it no longer exists, is no longer publicly visible, or its owner is
+  // block-filtered against `viewerId` — the read-side mirror of the
+  // existence/visibility/block checks `replaceAffiliations` applies at save
+  // time, so a target that goes private/gets deleted/becomes blocked after
+  // linking silently disappears rather than 500ing or leaking it.
+  private async resolveAffiliationsFor(
+    viewerId: string,
+    subprofileIds: string[],
+  ): Promise<Map<string, AffiliationView[]>> {
+    const affiliationsBySubprofileId = new Map<string, AffiliationView[]>();
+    if (!subprofileIds.length) {
+      return affiliationsBySubprofileId;
+    }
+    const rows = await this.affiliations.find({
+      where: { subprofileId: In(subprofileIds) },
+      order: { position: 'ASC' },
+    });
+    if (!rows.length) {
+      return affiliationsBySubprofileId;
+    }
+
+    const eventSlugs = [
+      ...new Set(
+        rows
+          .filter((row) => row.targetType === 'event')
+          .map((row) => row.targetSlug),
+      ),
+    ];
+    const communitySlugs = [
+      ...new Set(
+        rows
+          .filter((row) => row.targetType === 'community')
+          .map((row) => row.targetSlug),
+      ),
+    ];
+
+    // The two entity queries — ONE for events, ONE for communities,
+    // regardless of how many personas/rows are being resolved.
+    const [eventRows, communityRows] = await Promise.all([
+      eventSlugs.length
+        ? this.events.find({ where: { slug: In(eventSlugs) } })
+        : Promise.resolve([]),
+      communitySlugs.length
+        ? this.communities.find({ where: { slug: In(communitySlugs) } })
+        : Promise.resolve([]),
+    ]);
+
+    // slug -> resolved (name/imageUrl/ownerId), but ONLY for targets that are
+    // still publicly visible (mirrors the criteria `EventsService` /
+    // `CommunitiesService` use for their own public reads) — an invisible
+    // target simply has no map entry below, so it is dropped.
+    type ResolvedTarget = { name: string; imageUrl: string | null; ownerId: string };
+    const eventBySlug = new Map<string, ResolvedTarget>(
+      eventRows
+        .filter(
+          (event) =>
+            event.status === EventStatus.Published &&
+            event.visibility !== EventVisibility.InviteOnly,
+        )
+        .map((event) => [
+          event.slug,
+          {
+            name: event.title,
+            imageUrl: toImageUrl(event.coverImageUrl),
+            ownerId: event.hostId,
+          },
+        ]),
+    );
+    const communityBySlug = new Map<string, ResolvedTarget>(
+      communityRows
+        .filter((community) => community.accessTier !== AccessTier.Private)
+        .map((community) => [
+          community.slug,
+          // Communities have no image column — `imageUrl` is always null.
+          { name: community.name, imageUrl: null, ownerId: community.ownerId },
+        ]),
+    );
+
+    // Batched block-filter over the DISTINCT set of target owners (one query
+    // total via `BlockFilterService.blockedUserIds`), not per affiliation row.
+    const ownerIds = [
+      ...new Set([
+        ...[...eventBySlug.values()].map((target) => target.ownerId),
+        ...[...communityBySlug.values()].map((target) => target.ownerId),
+      ]),
+    ];
+    const blockedOwnerIds = await this.blockFilter.blockedUserIds(
+      viewerId,
+      ownerIds,
+    );
+
+    for (const row of rows) {
+      const target =
+        row.targetType === 'event'
+          ? eventBySlug.get(row.targetSlug)
+          : row.targetType === 'community'
+            ? communityBySlug.get(row.targetSlug)
+            : undefined;
+      if (!target || blockedOwnerIds.has(target.ownerId)) {
+        continue;
+      }
+      const view: AffiliationView = {
+        targetType: row.targetType,
+        targetSlug: row.targetSlug,
+        role: row.role,
+        name: target.name,
+        imageUrl: target.imageUrl,
+      };
+      const bucket = affiliationsBySubprofileId.get(row.subprofileId);
+      if (bucket) {
+        bucket.push(view);
+      } else {
+        affiliationsBySubprofileId.set(row.subprofileId, [view]);
+      }
+    }
+
+    return affiliationsBySubprofileId;
+  }
+
   private async ownerDTO(sp: Subprofile): Promise<SubprofileView> {
     const items = await this.items.find({ where: { subprofileId: sp.id } });
-    return toSubprofileDTO(sp, items);
+    const socialLinkRows = await this.socialLinks.find({
+      where: { subprofileId: sp.id },
+      order: { position: 'ASC' },
+    });
+    const endorsementCount =
+      (await this.loadEndorsementCountsFor([sp.id])).get(sp.id) ?? 0;
+    const followerCount =
+      (await this.loadFollowerCountsFor([sp.id])).get(sp.id) ?? 0;
+    // Owner viewing their own persona: block-filter against the OWNER's own
+    // user id (mirrors the design plan's `viewerId` param — here the "viewer"
+    // is the owner). Consistent with the read paths below: a target that
+    // becomes blocked/invisible after linking drops out for the owner too.
+    const affiliations =
+      (await this.resolveAffiliationsFor(sp.userId, [sp.id])).get(sp.id) ?? [];
+    return toSubprofileDTO(
+      sp,
+      items,
+      socialLinkRows,
+      endorsementCount,
+      followerCount,
+      affiliations,
+    );
   }
 
   private async loadItemsFor(
@@ -462,6 +1198,81 @@ export class SubprofilesService {
       }
     }
     return byId;
+  }
+
+  // Batches the social-link rows for many subprofiles into ONE query (mirrors
+  // `loadItemsFor`) — avoids an N+1 in `listMine`/`listForProfile`.
+  private async loadSocialLinksFor(
+    subprofileIds: string[],
+  ): Promise<Map<string, SubprofileSocialLink[]>> {
+    const socialLinksBySubprofileId = new Map<string, SubprofileSocialLink[]>();
+    if (!subprofileIds.length) {
+      return socialLinksBySubprofileId;
+    }
+    const rows = await this.socialLinks.find({
+      where: { subprofileId: In(subprofileIds) },
+      order: { position: 'ASC' },
+    });
+    for (const row of rows) {
+      const bucket = socialLinksBySubprofileId.get(row.subprofileId);
+      if (bucket) {
+        bucket.push(row);
+      } else {
+        socialLinksBySubprofileId.set(row.subprofileId, [row]);
+      }
+    }
+    return socialLinksBySubprofileId;
+  }
+
+  // Batches a per-subprofile social-link COUNT into ONE query (used by
+  // `directory`, which only needs the count, not the rows themselves).
+  private async loadSocialCountsFor(
+    subprofileIds: string[],
+  ): Promise<Map<string, number>> {
+    const socialCountsBySubprofileId = new Map<string, number>();
+    if (!subprofileIds.length) {
+      return socialCountsBySubprofileId;
+    }
+    const rows = await this.socialLinks.find({
+      where: { subprofileId: In(subprofileIds) },
+      select: { subprofileId: true },
+    });
+    for (const row of rows) {
+      socialCountsBySubprofileId.set(
+        row.subprofileId,
+        (socialCountsBySubprofileId.get(row.subprofileId) ?? 0) + 1,
+      );
+    }
+    return socialCountsBySubprofileId;
+  }
+
+  // Batches distinct, non-links content tags per subprofile into ONE query
+  // (mirrors `loadSocialCountsFor`) — avoids an N+1 in `directory`. Caps each
+  // subprofile's tag list at 12, deduped.
+  private async loadContentTagsFor(
+    subprofileIds: string[],
+  ): Promise<Map<string, string[]>> {
+    const tagsBySubprofileId = new Map<string, string[]>();
+    if (!subprofileIds.length) {
+      return tagsBySubprofileId;
+    }
+    const rows = await this.items.find({
+      where: {
+        subprofileId: In(subprofileIds),
+        section: Not(SubprofileSection.Links),
+      },
+      select: { subprofileId: true, tags: true },
+    });
+    for (const row of rows) {
+      const existing = tagsBySubprofileId.get(row.subprofileId) ?? [];
+      for (const tag of row.tags ?? []) {
+        if (existing.length < 12 && !existing.includes(tag)) {
+          existing.push(tag);
+        }
+      }
+      tagsBySubprofileId.set(row.subprofileId, existing);
+    }
+    return tagsBySubprofileId;
   }
 
   private async generateSlug(

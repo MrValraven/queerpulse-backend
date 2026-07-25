@@ -19,9 +19,13 @@ import { resolveFrontendOrigins } from '../config/frontend-origins';
 import { ConnectionsService } from '../connections/connections.service';
 import {
   MESSAGE_CREATED,
+  MESSAGE_DELETED,
   MESSAGE_READ,
+  MESSAGE_REACTION,
   MessageCreatedEvent,
+  MessageDeletedEvent,
   MessageReadEvent,
+  MessageReactionEvent,
 } from '../messaging/messaging.events';
 import { MessagingService } from '../messaging/messaging.service';
 import {
@@ -284,6 +288,16 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @OnEvent(MESSAGE_READ)
   handleMessageRead(payload: MessageReadEvent): void {
     this.namespace?.to(payload.conversationId).emit('read', payload);
+  }
+
+  @OnEvent(MESSAGE_REACTION)
+  handleMessageReaction(payload: MessageReactionEvent): void {
+    this.namespace?.to(payload.conversationId).emit('reaction', payload);
+  }
+
+  @OnEvent(MESSAGE_DELETED)
+  handleMessageDeleted(payload: MessageDeletedEvent): void {
+    this.namespace?.to(payload.conversationId).emit('message:deleted', payload);
   }
 
   /**

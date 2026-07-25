@@ -141,6 +141,9 @@ describe('ProfilesService.getBySlug visibility', () => {
     const full = res as Extract<typeof res, { limited: false }>;
     expect(full.identities).toEqual([]);
     expect(full.lookingFor).toEqual([]);
+    // privateNetwork is a private preference — omitted entirely, not just
+    // false, for a non-owner viewer.
+    expect(full).not.toHaveProperty('privateNetwork');
   });
 
   it('returns a limited card for a private profile to a non-owner', async () => {
@@ -226,6 +229,20 @@ describe('ProfilesService.getBySlug visibility', () => {
     // updateMe is always the owner, so private fields come back.
     expect(full.identities).toEqual(['Trans']);
     expect(full.lookingFor).toEqual(['Creative collaboration']);
+  });
+
+  it('updateMe persists privateNetwork and returns it on the owner profile', async () => {
+    const p = profile({ visibility: ProfileVisibility.Open });
+    profiles.findOne.mockResolvedValue(p);
+    (profiles as unknown as { save: jest.Mock }).save = jest
+      .fn()
+      .mockResolvedValue(p);
+
+    const res = await service.updateMe('owner-1', { privateNetwork: true });
+
+    expect(p.privateNetwork).toBe(true);
+    const full = res;
+    expect(full.privateNetwork).toBe(true);
   });
 
   it('updateMe clears now when sent an empty string', async () => {

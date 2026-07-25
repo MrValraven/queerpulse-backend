@@ -44,7 +44,13 @@ const health: OverviewHealthStat[] = [
     trendKey: 'upVsQ1',
     trendCount: 8,
   },
-  { key: 'appealUpheld', n: '1', up: false, trendKey: 'ofFiled', trendCount: 2 },
+  {
+    key: 'appealUpheld',
+    n: '1',
+    up: false,
+    trendKey: 'ofFiled',
+    trendCount: 2,
+  },
 ];
 
 // Short step key → `governance:steps.<key>.title` / `.text`. Order = array order.

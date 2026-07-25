@@ -10,13 +10,14 @@ import {
   DataSource,
   EntityManager,
   In,
+  IsNull,
   QueryFailedError,
   Repository,
 } from 'typeorm';
 import { toImageUrl } from '../common/image-url';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
-import { Vouch } from './entities/vouch.entity';
+import { Vouch, type VouchRelationship } from './entities/vouch.entity';
 import { VOUCH_CREATED, VouchCreatedEvent } from './vouch.events';
 
 // Bounds an otherwise-unbounded list read; callers may narrow with limit/offset.
@@ -64,7 +65,11 @@ export class VouchService {
   async createVouch(
     voucherId: string,
     voucheeSlug: string,
-    note?: string,
+    input?: {
+      note?: string;
+      relationship?: VouchRelationship | null;
+      anonymous?: boolean;
+    },
   ): Promise<{ vouchCount: number }> {
     const vouchee = await this.profiles.findOne({
       where: { slug: voucheeSlug },
@@ -76,16 +81,22 @@ export class VouchService {
     if (voucheeId === voucherId) {
       throw new BadRequestException('You cannot vouch for yourself');
     }
+
+    // Empty/whitespace-only notes are stored as null, not "".
+    const trimmedNote = input?.note?.trim();
+    const cleanNote = trimmedNote ? trimmedNote : null;
+    const relationship = input?.relationship ?? null;
+    const anonymous = input?.anonymous ?? false;
+
+    // One row per (voucher, vouchee) ever. If a withdrawn row exists, re-vouching
+    // un-withdraws it (keeps id/createdAt) rather than 409-ing. An ACTIVE row is
+    // a genuine duplicate.
     const existing = await this.vouches.findOne({
       where: { voucherId, voucheeId },
     });
-    if (existing) {
+    if (existing && existing.withdrawnAt === null) {
       throw new ConflictException('You have already vouched for this member');
     }
-
-    // Empty/whitespace-only notes are stored as null, not "".
-    const trimmedNote = note?.trim();
-    const cleanNote = trimmedNote ? trimmedNote : null;
 
     // Vouches are a trust/recognition signal ONLY — they no longer gate
     // membership. The threshold-crossing promotion that used to live here died
@@ -101,23 +112,36 @@ export class VouchService {
         where: { id: voucheeId },
         lock: { mode: 'pessimistic_write' },
       });
-      try {
-        await manager.insert(Vouch, {
-          voucherId,
-          voucheeId,
-          note: cleanNote,
-        });
-      } catch (err) {
-        // The pre-check above can be lost to a concurrent vouch; the UNIQUE
-        // constraint is the real backstop. Map it to a 409, not a 500.
-        if (isUniqueViolation(err)) {
-          throw new ConflictException(
-            'You have already vouched for this member',
-          );
+      if (existing) {
+        // Withdrawn → reactivate in place.
+        await manager.update(
+          Vouch,
+          { id: existing.id },
+          { withdrawnAt: null, note: cleanNote, relationship, anonymous },
+        );
+      } else {
+        try {
+          await manager.insert(Vouch, {
+            voucherId,
+            voucheeId,
+            note: cleanNote,
+            relationship,
+            anonymous,
+          });
+        } catch (err) {
+          // The pre-check can be lost to a concurrent vouch; the UNIQUE
+          // constraint is the real backstop. Map it to a 409, not a 500.
+          if (isUniqueViolation(err)) {
+            throw new ConflictException(
+              'You have already vouched for this member',
+            );
+          }
+          throw err;
         }
-        throw err;
       }
-      vouchCount = await manager.count(Vouch, { where: { voucheeId } });
+      vouchCount = await manager.count(Vouch, {
+        where: { voucheeId, withdrawnAt: IsNull() },
+      });
     });
     this.eventEmitter.emit(VOUCH_CREATED, {
       voucherId,
@@ -167,14 +191,16 @@ export class VouchService {
     if (!vouchee) {
       throw new NotFoundException('Member not found');
     }
-    // Withdrawing never demotes — promotion is one-way (spec §4).
-    const result = await this.vouches.delete({
-      voucherId,
-      voucheeId: vouchee.userId,
+    // Soft-delete: keep the row (history + admin trust graph) but stamp
+    // withdrawnAt so it drops out of every count/list. Only an ACTIVE row can
+    // be withdrawn. Withdrawing never demotes — promotion is one-way.
+    const active = await this.vouches.findOne({
+      where: { voucherId, voucheeId: vouchee.userId, withdrawnAt: IsNull() },
     });
-    if (!result.affected) {
+    if (!active) {
       throw new NotFoundException('No vouch to withdraw');
     }
+    await this.vouches.update({ id: active.id }, { withdrawnAt: new Date() });
     return { ok: true };
   }
 
@@ -188,10 +214,10 @@ export class VouchService {
     }
     // `count` is the full tally; `rows` is the requested (bounded) page.
     const count = await this.vouches.count({
-      where: { voucheeId: target.userId },
+      where: { voucheeId: target.userId, withdrawnAt: IsNull() },
     });
     const rows = await this.vouches.find({
-      where: { voucheeId: target.userId },
+      where: { voucheeId: target.userId, withdrawnAt: IsNull() },
       order: { createdAt: 'DESC' },
       take: page?.limit ?? DEFAULT_PAGE_SIZE,
       skip: page?.offset ?? 0,
@@ -210,7 +236,7 @@ export class VouchService {
     page?: PageParams,
   ): Promise<GivenVouchView[]> {
     const rows = await this.vouches.find({
-      where: { voucherId },
+      where: { voucherId, withdrawnAt: IsNull() },
       order: { createdAt: 'DESC' },
       take: page?.limit ?? DEFAULT_PAGE_SIZE,
       skip: page?.offset ?? 0,
@@ -224,7 +250,9 @@ export class VouchService {
   }
 
   getVouchCount(userId: string): Promise<number> {
-    return this.vouches.count({ where: { voucheeId: userId } });
+    return this.vouches.count({
+      where: { voucheeId: userId, withdrawnAt: IsNull() },
+    });
   }
 
   async getVouchCounts(userIds: string[]): Promise<Map<string, number>> {
@@ -237,6 +265,7 @@ export class VouchService {
       .select('v.voucheeId', 'voucheeId')
       .addSelect('COUNT(*)', 'count')
       .where('v.voucheeId IN (:...ids)', { ids: userIds })
+      .andWhere('v.withdrawnAt IS NULL')
       .groupBy('v.voucheeId')
       .getRawMany<{ voucheeId: string; count: string }>();
     for (const row of rows) {

@@ -21,9 +21,19 @@ const uniqueViolation = () =>
 
 describe('VouchService', () => {
   let service: VouchService;
-  let vouches: { findOne: jest.Mock; find: jest.Mock; count: jest.Mock };
+  let vouches: {
+    findOne: jest.Mock;
+    find: jest.Mock;
+    count: jest.Mock;
+    update: jest.Mock;
+  };
   let profiles: { findOne: jest.Mock; find: jest.Mock };
-  let manager: { findOne: jest.Mock; insert: jest.Mock; count: jest.Mock };
+  let manager: {
+    findOne: jest.Mock;
+    insert: jest.Mock;
+    update: jest.Mock;
+    count: jest.Mock;
+  };
   let dataSource: { transaction: jest.Mock };
   let emitter: { emit: jest.Mock };
 
@@ -32,6 +42,7 @@ describe('VouchService', () => {
       findOne: jest.fn().mockResolvedValue(null),
       find: jest.fn().mockResolvedValue([]),
       count: jest.fn().mockResolvedValue(0),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
     profiles = {
       findOne: jest.fn(),
@@ -40,6 +51,7 @@ describe('VouchService', () => {
     manager = {
       findOne: jest.fn().mockResolvedValue(null), // the pessimistic-lock read
       insert: jest.fn().mockResolvedValue(undefined),
+      update: jest.fn().mockResolvedValue(undefined),
       count: jest.fn().mockResolvedValue(0),
     };
     dataSource = {
@@ -75,7 +87,7 @@ describe('VouchService', () => {
 
     it('rejects a duplicate vouch found by the pre-check', async () => {
       profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
-      vouches.findOne.mockResolvedValue({ id: 'existing' });
+      vouches.findOne.mockResolvedValue({ id: 'existing', withdrawnAt: null });
       await expect(service.createVouch('u1', 'them')).rejects.toBeInstanceOf(
         ConflictException,
       );
@@ -93,14 +105,14 @@ describe('VouchService', () => {
 
     it('trims the note and stores empty/whitespace as null', async () => {
       profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
-      await service.createVouch('u1', 'them', '  great person  ');
+      await service.createVouch('u1', 'them', { note: '  great person  ' });
       expect(manager.insert).toHaveBeenCalledWith(
         Vouch,
         expect.objectContaining({ note: 'great person' }),
       );
 
       manager.insert.mockClear();
-      await service.createVouch('u1', 'them', '   ');
+      await service.createVouch('u1', 'them', { note: '   ' });
       expect(manager.insert).toHaveBeenCalledWith(
         Vouch,
         expect.objectContaining({ note: null }),
@@ -140,6 +152,66 @@ describe('VouchService', () => {
     });
   });
 
+  describe('createVouch relationship + anonymous', () => {
+    it('persists relationship and anonymous on insert', async () => {
+      profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'target' });
+      vouches.findOne.mockResolvedValue(null); // no existing row
+      manager.count.mockResolvedValue(1);
+      await service.createVouch('u1', 'target', {
+        note: 'we shipped together',
+        relationship: 'collaborated',
+        anonymous: true,
+      });
+      expect(manager.insert).toHaveBeenCalledWith(
+        Vouch,
+        expect.objectContaining({
+          voucherId: 'u1',
+          voucheeId: 'u2',
+          note: 'we shipped together',
+          relationship: 'collaborated',
+          anonymous: true,
+        }),
+      );
+    });
+
+    it('un-withdraws an existing withdrawn pair instead of 409', async () => {
+      profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'target' });
+      vouches.findOne.mockResolvedValue({
+        id: 'v9',
+        voucherId: 'u1',
+        voucheeId: 'u2',
+        withdrawnAt: new Date('2026-01-01'),
+      });
+      manager.count.mockResolvedValue(3);
+      await service.createVouch('u1', 'target', { relationship: 'friends' });
+      // The re-vouch/un-withdraw path updates the row via the transaction's
+      // EntityManager (not the `vouches` repository), so it commits or rolls
+      // back atomically with the pessimistic-lock read and the count below.
+      expect(manager.update).toHaveBeenCalledWith(
+        Vouch,
+        { id: 'v9' },
+        expect.objectContaining({
+          withdrawnAt: null,
+          relationship: 'friends',
+        }),
+      );
+      expect(manager.insert).not.toHaveBeenCalled();
+    });
+
+    it('409s when an ACTIVE vouch already exists', async () => {
+      profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'target' });
+      vouches.findOne.mockResolvedValue({
+        id: 'v1',
+        voucherId: 'u1',
+        voucheeId: 'u2',
+        withdrawnAt: null,
+      });
+      await expect(
+        service.createVouch('u1', 'target', {}),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+  });
+
   describe('withdrawVouch', () => {
     it('404s an unknown member', async () => {
       profiles.findOne.mockResolvedValue(null);
@@ -147,25 +219,51 @@ describe('VouchService', () => {
         NotFoundException,
       );
     });
+  });
 
-    it('404s when there is no vouch to withdraw', async () => {
-      profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
-      (vouches as unknown as { delete: jest.Mock }).delete = jest
-        .fn()
-        .mockResolvedValue({ affected: 0 });
-      await expect(service.withdrawVouch('u1', 'them')).rejects.toBeInstanceOf(
-        NotFoundException,
+  describe('withdrawVouch (soft-delete)', () => {
+    it('sets withdrawnAt instead of deleting', async () => {
+      profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'target' });
+      vouches.findOne.mockResolvedValue({
+        id: 'v1',
+        voucherId: 'u1',
+        voucheeId: 'u2',
+        withdrawnAt: null,
+      });
+      await expect(service.withdrawVouch('u1', 'target')).resolves.toEqual({
+        ok: true,
+      });
+      expect(vouches.update).toHaveBeenCalledWith(
+        { id: 'v1' },
+        expect.objectContaining({ withdrawnAt: expect.any(Date) }),
       );
     });
 
-    it('deletes the (voucher, vouchee) row and returns ok', async () => {
-      profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
-      const del = jest.fn().mockResolvedValue({ affected: 1 });
-      (vouches as unknown as { delete: jest.Mock }).delete = del;
-      await expect(service.withdrawVouch('u1', 'them')).resolves.toEqual({
-        ok: true,
-      });
-      expect(del).toHaveBeenCalledWith({ voucherId: 'u1', voucheeId: 'u2' });
+    it('404s when there is no active vouch to withdraw', async () => {
+      profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'target' });
+      vouches.findOne.mockResolvedValue(null);
+      await expect(
+        service.withdrawVouch('u1', 'target'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('listVouchers excludes withdrawn', () => {
+    it('filters count and rows by withdrawnAt IS NULL', async () => {
+      profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'target' });
+      vouches.count.mockResolvedValue(0);
+      vouches.find.mockResolvedValue([]);
+      await service.listVouchers('target');
+      expect(vouches.count).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ withdrawnAt: expect.anything() }),
+        }),
+      );
+      expect(vouches.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ withdrawnAt: expect.anything() }),
+        }),
+      );
     });
   });
 

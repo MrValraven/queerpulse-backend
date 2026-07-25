@@ -5,6 +5,7 @@ import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
 import { Conversation } from './entities/conversation.entity';
+import { MessageReaction } from './entities/message-reaction.entity';
 import { Message } from './entities/message.entity';
 import {
   ConversationsController,
@@ -14,7 +15,12 @@ import { MessagingService } from './messaging.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Conversation, ConversationParticipant, Message]),
+    TypeOrmModule.forFeature([
+      Conversation,
+      ConversationParticipant,
+      Message,
+      MessageReaction,
+    ]),
     UsersModule,
     ConnectionsModule,
     // Exports `BlockFilterService`, used to reject conversation/message-request

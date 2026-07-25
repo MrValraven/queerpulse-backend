@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
 import { toImageUrl } from '../common/image-url';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import {
@@ -267,7 +267,7 @@ export class AdminMembersService {
     ] = await Promise.all([
       this.vouchService.getVouchCount(profile.userId),
       this.vouches.find({
-        where: { voucheeId: profile.userId },
+        where: { voucheeId: profile.userId, withdrawnAt: IsNull() },
         order: { createdAt: 'DESC' },
         take: GRAPH_NODE_LIMIT,
       }),
@@ -286,7 +286,7 @@ export class AdminMembersService {
         .where('member.user_id = :userId', { userId: profile.userId })
         .getRawMany<{ role: RosterRole; name: string }>(),
       this.vouches.find({
-        where: { voucherId: profile.userId },
+        where: { voucherId: profile.userId, withdrawnAt: IsNull() },
         order: { createdAt: 'DESC' },
         take: CONTRIBUTION_LIMIT,
       }),
@@ -510,6 +510,7 @@ export class AdminMembersService {
       .createQueryBuilder('vouch')
       .select(['vouch.voucherId', 'vouch.voucheeId', 'vouch.createdAt'])
       .where('vouch.voucheeId IN (:...voucheeIds)', { voucheeIds })
+      .andWhere('vouch.withdrawnAt IS NULL')
       .orderBy('vouch.createdAt', 'DESC')
       .getMany();
 

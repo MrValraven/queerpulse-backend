@@ -11,6 +11,7 @@ import {
   EntityManager,
   FindOptionsWhere,
   In,
+  IsNull,
   QueryFailedError,
   Repository,
 } from 'typeorm';
@@ -425,7 +426,7 @@ export class ConnectionsService {
         order: { respondedAt: 'DESC' },
       });
       const given = await this.vouches.find({
-        where: { voucherId: userId },
+        where: { voucherId: userId, withdrawnAt: IsNull() },
       });
       const vouchedIds = new Set(given.map((v) => v.voucheeId));
       const filtered = accepted.filter((c) =>
@@ -504,7 +505,9 @@ export class ConnectionsService {
   ): Promise<number> {
     const [accepted, given] = await Promise.all([
       this.connections.find({ where: acceptedWhere }),
-      this.vouches.find({ where: { voucherId: userId } }),
+      this.vouches.find({
+        where: { voucherId: userId, withdrawnAt: IsNull() },
+      }),
     ]);
     const vouchedIds = new Set(given.map((vouch) => vouch.voucheeId));
     return accepted.filter((conn) => vouchedIds.has(this.otherId(conn, userId)))
@@ -706,8 +709,16 @@ export class ConnectionsService {
     }
     const vouches = await this.vouches.find({
       where: [
-        { voucherId: viewerUserId, voucheeId: In(otherIds) },
-        { voucheeId: viewerUserId, voucherId: In(otherIds) },
+        {
+          voucherId: viewerUserId,
+          voucheeId: In(otherIds),
+          withdrawnAt: IsNull(),
+        },
+        {
+          voucheeId: viewerUserId,
+          voucherId: In(otherIds),
+          withdrawnAt: IsNull(),
+        },
       ],
     });
     const youVouched = new Set<string>();

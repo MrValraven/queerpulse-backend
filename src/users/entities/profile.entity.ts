@@ -96,6 +96,12 @@ export class Profile {
   @Column({ type: 'boolean', default: false })
   verified: boolean;
 
+  // Member-controlled: when true, the member's trust network (vouchers/vouches)
+  // is hidden on member-facing surfaces. Admins still see it (safety tool),
+  // flagged via TrustNodeDTO.private. Default false.
+  @Column({ type: 'boolean', default: false })
+  privateNetwork: boolean;
+
   @Column({ type: 'text', nullable: true })
   now: string | null;
 

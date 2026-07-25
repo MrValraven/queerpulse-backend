@@ -11,9 +11,11 @@ import { ConnectionsService } from '../connections/connections.service';
 import { encodeCursor } from '../common/cursor-pagination';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
+import { UsersService } from '../users/users.service';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
 import { Conversation } from './entities/conversation.entity';
 import { Message } from './entities/message.entity';
+import { MessageReaction } from './entities/message-reaction.entity';
 import { MessageCreatedEvent } from './messaging.events';
 import { MessagingService } from './messaging.service';
 
@@ -33,6 +35,7 @@ interface MockQb {
   addOrderBy: jest.Mock;
   groupBy: jest.Mock;
   take: jest.Mock;
+  withDeleted: jest.Mock;
   getMany: jest.Mock;
   getRawMany: jest.Mock;
 }
@@ -50,6 +53,7 @@ function makeQb(): MockQb {
   qb.addOrderBy = jest.fn(self);
   qb.groupBy = jest.fn(self);
   qb.take = jest.fn(self);
+  qb.withDeleted = jest.fn(self);
   qb.getMany = jest.fn().mockResolvedValue([]);
   qb.getRawMany = jest.fn().mockResolvedValue([]);
   return qb;
@@ -68,6 +72,7 @@ describe('MessagingService', () => {
   let messages: {
     create: jest.Mock;
     save: jest.Mock;
+    findOne: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
   let profiles: { findOne: jest.Mock; find: jest.Mock };
@@ -75,6 +80,12 @@ describe('MessagingService', () => {
   let connections: { areConnected: jest.Mock; requestConnection: jest.Mock };
   let blockFilter: { isBlockedEitherWay: jest.Mock };
   let emitter: { emit: jest.Mock };
+  let reactions: {
+    find: jest.Mock;
+    delete: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
+  let usersService: { findById: jest.Mock };
 
   beforeEach(async () => {
     conversations = {
@@ -95,8 +106,10 @@ describe('MessagingService', () => {
         id: 'm1',
         createdAt: new Date(),
         editedAt: null,
+        deletedAt: null,
         ...v,
       })),
+      findOne: jest.fn(),
       createQueryBuilder: jest.fn(() => makeQb()),
     };
     profiles = { findOne: jest.fn(), find: jest.fn().mockResolvedValue([]) };
@@ -107,6 +120,20 @@ describe('MessagingService', () => {
     };
     blockFilter = { isBlockedEitherWay: jest.fn().mockResolvedValue(false) };
     emitter = { emit: jest.fn() };
+    reactions = {
+      find: jest.fn().mockResolvedValue([]),
+      delete: jest.fn().mockResolvedValue({ affected: 0 }),
+      createQueryBuilder: jest.fn(() => ({
+        insert: () => ({
+          into: () => ({
+            values: () => ({
+              orIgnore: () => ({ execute: jest.fn().mockResolvedValue({}) }),
+            }),
+          }),
+        }),
+      })),
+    };
+    usersService = { findById: jest.fn().mockResolvedValue(null) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -117,11 +144,13 @@ describe('MessagingService', () => {
           useValue: participants,
         },
         { provide: getRepositoryToken(Message), useValue: messages },
+        { provide: getRepositoryToken(MessageReaction), useValue: reactions },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: DataSource, useValue: dataSource },
         { provide: EventEmitter2, useValue: emitter },
         { provide: ConnectionsService, useValue: connections },
         { provide: BlockFilterService, useValue: blockFilter },
+        { provide: UsersService, useValue: usersService },
       ],
     }).compile();
     service = module.get(MessagingService);
@@ -525,6 +554,7 @@ describe('MessagingService', () => {
             avatarUrl: null,
           },
           createdAt: '2026-01-02T00:00:00.000Z',
+          deletedAt: null,
         },
         {
           id: 'm1',
@@ -536,6 +566,7 @@ describe('MessagingService', () => {
             avatarUrl: null,
           },
           createdAt: '2026-01-01T00:00:00.000Z',
+          deletedAt: null,
         },
       ]);
       // The internal `senderId` is gone: the frontend reads `sender` only.
@@ -686,6 +717,7 @@ describe('MessagingService', () => {
         body: 'hello',
         createdAt: new Date('2026-01-01T00:00:00Z'),
         editedAt: null,
+        deletedAt: null,
       });
       profiles.find.mockResolvedValueOnce([
         {
@@ -709,6 +741,7 @@ describe('MessagingService', () => {
           avatarUrl: null,
         },
         createdAt: '2026-01-01T00:00:00.000Z',
+        deletedAt: null,
       });
       expect(result).not.toHaveProperty('senderId');
     });

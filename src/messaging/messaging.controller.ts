@@ -1,8 +1,10 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
+  ParseEnumPipe,
   ParseUUIDPipe,
   Patch,
   Post,
@@ -17,9 +19,11 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateConversationDto } from './dto/create-conversation.dto';
 import { GetMessagesQuery } from './dto/get-messages.query';
+import { MessageReactionDto } from './dto/message-reaction.dto';
 import { MessageRequestDto } from './dto/message-request.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 import { UpdateConversationDto } from './dto/update-conversation.dto';
+import { MessageReactionKey } from './entities/message-reaction.entity';
 import { MessagingService } from './messaging.service';
 import { Throttle, seconds } from '@nestjs/throttler';
 
@@ -85,6 +89,49 @@ export class ConversationsController {
     @Body() dto: UpdateConversationDto,
   ) {
     return this.messagingService.setMuted(id, user.userId, dto.muted);
+  }
+
+  @Throttle({ default: { limit: 60, ttl: seconds(60) } })
+  @Post(':id/messages/:messageId/reactions')
+  addReaction(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('messageId', ParseUUIDPipe) messageId: string,
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: MessageReactionDto,
+  ) {
+    return this.messagingService.addMessageReaction(
+      id,
+      messageId,
+      user.userId,
+      dto.key,
+    );
+  }
+
+  @Throttle({ default: { limit: 30, ttl: seconds(60) } })
+  @Delete(':id/messages/:messageId')
+  deleteMessage(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('messageId', ParseUUIDPipe) messageId: string,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.messagingService.deleteMessage(id, messageId, user.userId);
+  }
+
+  @Throttle({ default: { limit: 60, ttl: seconds(60) } })
+  @Delete(':id/messages/:messageId/reactions/:key')
+  removeReaction(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('messageId', ParseUUIDPipe) messageId: string,
+    @Param('key', new ParseEnumPipe(MessageReactionKey))
+    key: MessageReactionKey,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.messagingService.removeMessageReaction(
+      id,
+      messageId,
+      user.userId,
+      key,
+    );
   }
 }
 

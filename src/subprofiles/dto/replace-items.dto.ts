@@ -2,6 +2,7 @@ import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
+  IsBoolean,
   IsOptional,
   IsString,
   MaxLength,
@@ -32,6 +33,8 @@ export class SubprofileItemInputDTO {
   @IsString({ each: true })
   @MaxLength(40, { each: true })
   tags?: string[];
+
+  @IsOptional() @IsBoolean() isFeatured?: boolean;
 }
 
 export class ReplaceItemsDTO {

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Between, In, MoreThanOrEqual, Repository } from 'typeorm';
+import { Between, In, IsNull, MoreThanOrEqual, Repository } from 'typeorm';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
@@ -187,6 +187,7 @@ export class AdminOverviewService {
         take: FEED_SOURCE_FETCH_LIMIT,
       }),
       this.vouches.find({
+        where: { withdrawnAt: IsNull() },
         order: { createdAt: 'DESC' },
         take: FEED_SOURCE_FETCH_LIMIT,
       }),

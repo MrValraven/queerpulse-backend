@@ -107,4 +107,10 @@ export class UpdateProfileDto {
   @IsOptional()
   @IsBoolean()
   lookingForPublic?: boolean;
+
+  // Whether the member's trust network (vouchers/vouches) is hidden on
+  // member-facing surfaces. See Profile.privateNetwork.
+  @IsOptional()
+  @IsBoolean()
+  privateNetwork?: boolean;
 }

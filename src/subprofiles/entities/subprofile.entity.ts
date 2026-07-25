@@ -85,6 +85,21 @@ export class Subprofile {
   @Column({ type: 'text', nullable: true })
   bio: string | null;
 
+  @Column({ type: 'varchar', nullable: true })
+  coverUrl: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  accent: string | null; // curated palette key
+
+  @Column({ type: 'varchar', nullable: true })
+  availability: string | null; // AVAILABILITY_KEYS
+
+  @Column({ type: 'varchar', nullable: true })
+  ctaLabel: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  ctaUrl: string | null;
+
   @Column({
     type: 'enum',
     enum: SubprofileLinkVisibility,

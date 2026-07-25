@@ -86,6 +86,10 @@ export interface FullProfileResponse extends ProfileCard {
   lookingFor: string[];
   // Member's own choice of whether the above is visible to other viewers.
   lookingForPublic: boolean;
+  // Private preference — populated only for the profile owner (see
+  // toFullProfile's `isOwner`); omitted entirely for every other viewer so it
+  // never leaks on another member's public/network profile.
+  privateNetwork?: boolean;
   socials: SocialLinkView[];
   work: WorkView[];
   board: BoardView[];
@@ -193,6 +197,9 @@ export function toFullProfile(
     // opted in via lookingForPublic.
     lookingFor: isOwner || p.lookingForPublic ? (p.lookingFor ?? []) : [],
     lookingForPublic: p.lookingForPublic ?? false,
+    // Owner-only: never included in the object for a non-owner viewer, so it
+    // cannot leak on another member's full profile response.
+    ...(isOwner ? { privateNetwork: p.privateNetwork ?? false } : {}),
     socials: rels.socials.map((s) => ({
       platform: s.platform,
       urlOrHandle: s.urlOrHandle,

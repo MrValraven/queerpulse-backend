@@ -9,9 +9,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * because they were added after the table; the seeded Q2 2026 row is backfilled
  * by `src/governance/governance-finance.seed.ts`.
  */
-export class AddGovernanceFinanceReserveAndPartners1785000230000
-  implements MigrationInterface
-{
+export class AddGovernanceFinanceReserveAndPartners1785000230000 implements MigrationInterface {
   name = 'AddGovernanceFinanceReserveAndPartners1785000230000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

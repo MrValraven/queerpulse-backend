@@ -129,6 +129,7 @@ const MEMBERS: Array<{
   // member-growth chart, "new this week" count, and verified mix are real.
   verified?: boolean;
   joinedAt?: string;
+  privateNetwork?: boolean;
 }> = [
   {
     googleId: 'seed-tomas',
@@ -268,6 +269,7 @@ const MEMBERS: Array<{
     openTo: [{ kind: 'preset', id: 'clientWork' }],
     verified: true,
     joinedAt: '2026-05-19T09:00:00.000Z',
+    privateNetwork: true,
   },
   {
     googleId: 'seed-kai',
@@ -465,6 +467,105 @@ const MEMBERS: Array<{
     openTo: [{ kind: 'preset', id: 'clientWork' }],
     verified: false,
     joinedAt: '2026-07-15T09:00:00.000Z',
+  },
+  // Suspicious ring (Task 4): new, unverified, thin-profile accounts that
+  // only vouch for each other in a closed loop, plus one isolated member
+  // vouched for only by the ring — exercises Safety-mode ring detection.
+  {
+    googleId: 'seed-ring-a1',
+    email: 'ring.a1@example.com',
+    status: UserStatus.Active,
+    slug: 'ring-a1',
+    firstName: 'Rúben',
+    lastName: 'Nunes',
+    pronouns: 'he/him',
+    tagline: 'New here',
+    location: 'Lisbon',
+    visibility: ProfileVisibility.Open,
+    tags: [],
+    openTo: [],
+    verified: false,
+    joinedAt: '2026-07-20T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-ring-a2',
+    email: 'ring.a2@example.com',
+    status: UserStatus.Active,
+    slug: 'ring-a2',
+    firstName: 'Tó',
+    lastName: 'Faria',
+    pronouns: 'they/them',
+    tagline: 'New here',
+    location: 'Lisbon',
+    visibility: ProfileVisibility.Open,
+    tags: [],
+    openTo: [],
+    verified: false,
+    joinedAt: '2026-07-20T10:00:00.000Z',
+  },
+  {
+    googleId: 'seed-ring-a3',
+    email: 'ring.a3@example.com',
+    status: UserStatus.Active,
+    slug: 'ring-a3',
+    firstName: 'Zé',
+    lastName: 'Matos',
+    pronouns: 'he/him',
+    tagline: 'New here',
+    location: 'Porto',
+    visibility: ProfileVisibility.Open,
+    tags: [],
+    openTo: [],
+    verified: false,
+    joinedAt: '2026-07-21T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-ring-a4',
+    email: 'ring.a4@example.com',
+    status: UserStatus.Active,
+    slug: 'ring-a4',
+    firstName: 'Lu',
+    lastName: 'Pires',
+    pronouns: 'she/her',
+    tagline: 'New here',
+    location: 'Porto',
+    visibility: ProfileVisibility.Open,
+    tags: [],
+    openTo: [],
+    verified: false,
+    joinedAt: '2026-07-21T11:00:00.000Z',
+  },
+  {
+    googleId: 'seed-ring-a5',
+    email: 'ring.a5@example.com',
+    status: UserStatus.Active,
+    slug: 'ring-a5',
+    firstName: 'Mi',
+    lastName: 'Rosa',
+    pronouns: 'they/them',
+    tagline: 'New here',
+    location: 'Braga',
+    visibility: ProfileVisibility.Open,
+    tags: [],
+    openTo: [],
+    verified: false,
+    joinedAt: '2026-07-22T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-ring-lone',
+    email: 'ring.lone@example.com',
+    status: UserStatus.Active,
+    slug: 'ring-lone',
+    firstName: 'Sam',
+    lastName: 'Vale',
+    pronouns: 'they/them',
+    tagline: 'Just joined',
+    location: 'Lisbon',
+    visibility: ProfileVisibility.Open,
+    tags: [],
+    openTo: [],
+    verified: false,
+    joinedAt: '2026-07-22T12:00:00.000Z',
   },
 ];
 
@@ -953,13 +1054,32 @@ interface VouchEdgeSeed {
   voucherSlug: string;
   voucheeSlug: string;
   daysAgo: number;
+  relationship?:
+    'collaborated' | 'friends' | 'group' | 'met_through' | 'neighbours';
+  anonymous?: boolean;
+  withdrawn?: boolean;
 }
 
 const VOUCH_EDGES: VouchEdgeSeed[] = [
   // Founding triangle
-  { voucherSlug: 'tomas-mendes', voucheeSlug: 'ana-rocha', daysAgo: 60 },
-  { voucherSlug: 'ana-rocha', voucheeSlug: 'noa-silva', daysAgo: 55 },
-  { voucherSlug: 'noa-silva', voucheeSlug: 'tomas-mendes', daysAgo: 50 },
+  {
+    voucherSlug: 'tomas-mendes',
+    voucheeSlug: 'ana-rocha',
+    daysAgo: 60,
+    relationship: 'collaborated',
+  },
+  {
+    voucherSlug: 'ana-rocha',
+    voucheeSlug: 'noa-silva',
+    daysAgo: 55,
+    relationship: 'friends',
+  },
+  {
+    voucherSlug: 'noa-silva',
+    voucheeSlug: 'tomas-mendes',
+    daysAgo: 50,
+    relationship: 'group',
+  },
   // Founders vouching for one live-mode member each
   { voucherSlug: 'tomas-mendes', voucheeSlug: 'beatriz-coelho', daysAgo: 58 },
   { voucherSlug: 'ana-rocha', voucheeSlug: 'diogo-antunes', daysAgo: 3 },
@@ -1056,6 +1176,38 @@ const VOUCH_EDGES: VouchEdgeSeed[] = [
   { voucherSlug: 'diogo-antunes', voucheeSlug: 'oscar-baptista', daysAgo: 1 },
   { voucherSlug: 'noa-silva', voucheeSlug: 'iris-cabral', daysAgo: 3 },
   { voucherSlug: 'marta-esteves', voucheeSlug: 'iris-cabral', daysAgo: 2 },
+  // Two anonymous vouches (admin sees the voucher; member surfaces shield it).
+  // Both pairs are otherwise unused in VOUCH_EDGES, so seedVouches' idempotency
+  // skip (one row per voucher→vouchee) doesn't drop them.
+  {
+    voucherSlug: 'renata-salgado',
+    voucheeSlug: 'sofia-pinheiro',
+    daysAgo: 40,
+    anonymous: true,
+  },
+  {
+    voucherSlug: 'tiago-nogueira',
+    voucheeSlug: 'diogo-antunes',
+    daysAgo: 35,
+    anonymous: true,
+  },
+  // A withdrawn vouch (dashed edge in the modal; excluded from counts).
+  {
+    voucherSlug: 'vasco-marinho',
+    voucheeSlug: 'leonor-vaz',
+    daysAgo: 30,
+    withdrawn: true,
+  },
+  // Suspicious ring: five new accounts vouching in a closed loop.
+  { voucherSlug: 'ring-a1', voucheeSlug: 'ring-a2', daysAgo: 5 },
+  { voucherSlug: 'ring-a2', voucheeSlug: 'ring-a3', daysAgo: 5 },
+  { voucherSlug: 'ring-a3', voucheeSlug: 'ring-a4', daysAgo: 4 },
+  { voucherSlug: 'ring-a4', voucheeSlug: 'ring-a5', daysAgo: 4 },
+  { voucherSlug: 'ring-a5', voucheeSlug: 'ring-a1', daysAgo: 3 },
+  { voucherSlug: 'ring-a2', voucheeSlug: 'ring-a4', daysAgo: 3 },
+  // Isolated member: vouched ONLY by ring accounts.
+  { voucherSlug: 'ring-a1', voucheeSlug: 'ring-lone', daysAgo: 2 },
+  { voucherSlug: 'ring-a2', voucheeSlug: 'ring-lone', daysAgo: 2 },
 ];
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -1089,10 +1241,21 @@ async function seedVouches(
     }
 
     const saved = await vouches.save(
-      vouches.create({ voucherId, voucheeId, note: null }),
+      vouches.create({
+        voucherId,
+        voucheeId,
+        note: null,
+        relationship: edge.relationship ?? null,
+        anonymous: edge.anonymous ?? false,
+      }),
     );
     const createdAt = new Date(now - edge.daysAgo * MS_PER_DAY);
-    await vouches.update({ id: saved.id }, { createdAt });
+    const patch: { createdAt: Date; withdrawnAt?: Date } = { createdAt };
+    if (edge.withdrawn) {
+      // Withdrawn a day after it was made.
+      patch.withdrawnAt = new Date(now - (edge.daysAgo - 1) * MS_PER_DAY);
+    }
+    await vouches.update({ id: saved.id }, patch);
     insertedCount += 1;
   }
   console.log(`Seeded ${insertedCount} vouches`);
@@ -2610,7 +2773,8 @@ const PARTNERS: PartnerSeedDefinition[] = [
         body: 'Sign up for a shift or a peer-support training cohort.',
       },
     ],
-    funding: 'Grants, membership dues, and community fundraising (illustrative).',
+    funding:
+      'Grants, membership dues, and community fundraising (illustrative).',
     atGlance: [
       { label: 'Founded', value: 'Illustrative' },
       { label: 'Focus', value: 'Legal advocacy, peer support' },
@@ -2647,7 +2811,9 @@ const PARTNERS: PartnerSeedDefinition[] = [
     about: [
       'A sample health collective used to illustrate a community-level wellbeing partnership, run largely by volunteers. Not a real partner.',
     ],
-    stats: [{ value: 'A few hundred', label: 'People supported / year (sample)' }],
+    stats: [
+      { value: 'A few hundred', label: 'People supported / year (sample)' },
+    ],
     aboutMore: [
       {
         heading: 'Why we partner',
@@ -4028,6 +4194,7 @@ async function seed(): Promise<void> {
             // prior behavior exactly.
             verified: m.verified ?? false,
             joinedAt: m.joinedAt ? new Date(m.joinedAt) : new Date(),
+            privateNetwork: m.privateNetwork ?? false,
           }),
         );
 

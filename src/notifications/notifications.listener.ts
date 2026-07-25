@@ -12,6 +12,12 @@ import {
   EventInvitedEvent,
   EventWaitlistPromotedEvent,
 } from '../events/event.events';
+import {
+  SUBPROFILE_ENDORSED,
+  SUBPROFILE_FOLLOWED,
+  SubprofileEndorsedEvent,
+  SubprofileFollowedEvent,
+} from '../subprofiles/subprofile.events';
 import { USER_PROMOTED, UserPromotedEvent } from '../users/user.events';
 import { VOUCH_CREATED, VouchCreatedEvent } from '../vouch/vouch.events';
 import { NotificationType } from './entities/notification.entity';
@@ -101,6 +107,26 @@ export class NotificationsListener {
       e.userId,
       NotificationType.WaitlistPromoted,
       { eventId: e.eventId },
+    );
+  }
+
+  @OnEvent(SUBPROFILE_ENDORSED)
+  async onSubprofileEndorsed(e: SubprofileEndorsedEvent): Promise<void> {
+    await this.notifications.create(
+      e.ownerId,
+      NotificationType.PersonaEndorsed,
+      { subprofileId: e.subprofileId },
+      e.endorserId,
+    );
+  }
+
+  @OnEvent(SUBPROFILE_FOLLOWED)
+  async onSubprofileFollowed(e: SubprofileFollowedEvent): Promise<void> {
+    await this.notifications.create(
+      e.ownerId,
+      NotificationType.PersonaFollowed,
+      { subprofileId: e.subprofileId },
+      e.followerId,
     );
   }
 }

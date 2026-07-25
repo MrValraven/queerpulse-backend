@@ -18,6 +18,7 @@ import {
   SubprofileItem,
   SubprofileSection,
 } from './entities/subprofile-item.entity';
+import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 import { isSectionAllowed } from './subprofile-kinds';
 import { toPublicDTO } from './subprofile-response';
 import {
@@ -41,6 +42,11 @@ function makeSubprofile(overrides: Partial<Subprofile> = {}): Subprofile {
     avatarUrl: null,
     tagline: null,
     bio: null,
+    coverUrl: null,
+    accent: null,
+    availability: null,
+    ctaLabel: null,
+    ctaUrl: null,
     linkVisibility: SubprofileLinkVisibility.Unlinked,
     visibility: SubprofileVisibility.Open,
     status: SubprofileStatus.Draft,
@@ -64,6 +70,7 @@ function makeItem(overrides: Partial<SubprofileItem> = {}): SubprofileItem {
     date: null,
     meta: null,
     tags: [],
+    isFeatured: false,
     position: 0,
     ...overrides,
   };
@@ -71,6 +78,19 @@ function makeItem(overrides: Partial<SubprofileItem> = {}): SubprofileItem {
 
 const contentItems = (n: number): SubprofileItem[] =>
   Array.from({ length: n }, (_, i) => makeItem({ id: `it-${i}`, position: i }));
+
+function makeSocialLink(
+  overrides: Partial<SubprofileSocialLink> = {},
+): SubprofileSocialLink {
+  return {
+    id: 'sl-1',
+    subprofileId: 'sp-1',
+    platform: 'instagram',
+    urlOrHandle: '@nightform',
+    position: 0,
+    ...overrides,
+  };
+}
 
 // A subprofile that passes every unlinked publish requirement.
 function completeUnlinked(overrides: Partial<Subprofile> = {}): Subprofile {
@@ -176,6 +196,96 @@ describe('toPublicDTO', () => {
     expect(dto.ownerName).toBeUndefined();
   });
 
+  it('exposes id + endorsement state for BOTH linked and unlinked personas', () => {
+    const unlinked = makeSubprofile({
+      linkVisibility: SubprofileLinkVisibility.Unlinked,
+    });
+    const unlinkedDto = toPublicDTO(unlinked, [], owner, [], 3, true);
+    expect(unlinkedDto.id).toBe('sp-1');
+    expect(unlinkedDto.endorsementCount).toBe(3);
+    expect(unlinkedDto.viewerEndorsed).toBe(true);
+
+    const linked = makeSubprofile({
+      linkVisibility: SubprofileLinkVisibility.Linked,
+    });
+    const linkedDto = toPublicDTO(linked, [], owner, [], 5, false);
+    expect(linkedDto.id).toBe('sp-1');
+    expect(linkedDto.endorsementCount).toBe(5);
+    expect(linkedDto.viewerEndorsed).toBe(false);
+  });
+
+  it('exposes follower state for BOTH linked and unlinked personas', () => {
+    const unlinked = makeSubprofile({
+      linkVisibility: SubprofileLinkVisibility.Unlinked,
+    });
+    const unlinkedDto = toPublicDTO(unlinked, [], owner, [], 3, true, 7, true);
+    expect(unlinkedDto.id).toBe('sp-1');
+    expect(unlinkedDto.followerCount).toBe(7);
+    expect(unlinkedDto.viewerFollowing).toBe(true);
+
+    const linked = makeSubprofile({
+      linkVisibility: SubprofileLinkVisibility.Linked,
+    });
+    const linkedDto = toPublicDTO(linked, [], owner, [], 5, false, 2, false);
+    expect(linkedDto.id).toBe('sp-1');
+    expect(linkedDto.followerCount).toBe(2);
+    expect(linkedDto.viewerFollowing).toBe(false);
+  });
+
+  it('defaults endorsementCount/viewerEndorsed/followerCount/viewerFollowing/affiliations when not supplied', () => {
+    const sp = makeSubprofile();
+    const dto = toPublicDTO(sp, [], owner);
+    expect(dto.endorsementCount).toBe(0);
+    expect(dto.viewerEndorsed).toBe(false);
+    expect(dto.followerCount).toBe(0);
+    expect(dto.viewerFollowing).toBe(false);
+    expect(dto.affiliations).toEqual([]);
+  });
+
+  it('exposes affiliations for BOTH linked and unlinked personas (persona-to-entity, not owner)', () => {
+    const resolvedAffiliations = [
+      {
+        targetType: 'event',
+        targetSlug: 'summer-block-party',
+        role: 'hosting',
+        name: 'Summer Block Party',
+        imageUrl: 'https://cdn/event.jpg',
+      },
+    ];
+
+    const unlinked = makeSubprofile({
+      linkVisibility: SubprofileLinkVisibility.Unlinked,
+    });
+    const unlinkedDto = toPublicDTO(
+      unlinked,
+      [],
+      owner,
+      [],
+      0,
+      false,
+      0,
+      false,
+      resolvedAffiliations,
+    );
+    expect(unlinkedDto.affiliations).toEqual(resolvedAffiliations);
+
+    const linked = makeSubprofile({
+      linkVisibility: SubprofileLinkVisibility.Linked,
+    });
+    const linkedDto = toPublicDTO(
+      linked,
+      [],
+      owner,
+      [],
+      0,
+      false,
+      0,
+      false,
+      resolvedAffiliations,
+    );
+    expect(linkedDto.affiliations).toEqual(resolvedAffiliations);
+  });
+
   it('includes owner fields for a linked persona', () => {
     const sp = makeSubprofile({
       linkVisibility: SubprofileLinkVisibility.Linked,
@@ -183,6 +293,52 @@ describe('toPublicDTO', () => {
     const dto = toPublicDTO(sp, [], owner);
     expect(dto.ownerSlug).toBe('diogo');
     expect(dto.ownerName).toBe('Diogo Reis');
+  });
+
+  it('exposes persona-owned presence fields for an unlinked persona (never identifying)', () => {
+    const sp = makeSubprofile({
+      linkVisibility: SubprofileLinkVisibility.Unlinked,
+      coverUrl: 'https://cdn/cover.jpg',
+      accent: 'jade',
+      availability: 'open_to_collabs',
+      ctaLabel: 'Book me',
+      ctaUrl: 'https://example.com/book',
+    });
+    const dto = toPublicDTO(sp, [], owner, [makeSocialLink()]);
+    expect(dto.accent).toBe('jade');
+    expect(dto.availability).toBe('open_to_collabs');
+    expect(dto.ctaLabel).toBe('Book me');
+    expect(dto.ctaUrl).toBe('https://example.com/book');
+    expect(dto.socialLinks).toEqual([
+      { platform: 'instagram', urlOrHandle: '@nightform' },
+    ]);
+    expect(dto.coverUrl).toBe('https://cdn/cover.jpg');
+  });
+
+  it('exposes the same persona-owned presence fields for a linked persona', () => {
+    const sp = makeSubprofile({
+      linkVisibility: SubprofileLinkVisibility.Linked,
+      accent: 'ocean',
+      availability: 'booking',
+    });
+    const dto = toPublicDTO(sp, [], owner, [makeSocialLink()]);
+    expect(dto.accent).toBe('ocean');
+    expect(dto.availability).toBe('booking');
+    expect(dto.socialLinks).toEqual([
+      { platform: 'instagram', urlOrHandle: '@nightform' },
+    ]);
+  });
+
+  it('orders social links by position', () => {
+    const sp = makeSubprofile();
+    const dto = toPublicDTO(sp, [], owner, [
+      makeSocialLink({ id: 'sl-2', platform: 'github', position: 1 }),
+      makeSocialLink({ id: 'sl-1', platform: 'instagram', position: 0 }),
+    ]);
+    expect(dto.socialLinks.map((link) => link.platform)).toEqual([
+      'instagram',
+      'github',
+    ]);
   });
 });
 

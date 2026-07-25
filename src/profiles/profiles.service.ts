@@ -551,7 +551,7 @@ export class ProfilesService {
       case MemberSort.MostVouched:
         // Correlated count of vouches received; ties fall back to name order.
         qb.orderBy(
-          '(SELECT COUNT(*) FROM vouches vc WHERE vc.vouchee_id = p.user_id)',
+          '(SELECT COUNT(*) FROM vouches vc WHERE vc.vouchee_id = p.user_id AND vc.withdrawn_at IS NULL)',
           'DESC',
         ).addOrderBy('p.firstName', 'ASC');
         break;

@@ -15,23 +15,35 @@ import { ConnectionsService } from '../connections/connections.service';
 import { decodeCursor } from '../common/cursor-pagination';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
+import { UserRole } from '../users/entities/user.entity';
+import { UsersService } from '../users/users.service';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
 import { Conversation } from './entities/conversation.entity';
+import {
+  MessageReaction,
+  MessageReactionKey,
+} from './entities/message-reaction.entity';
 import { Message } from './entities/message.entity';
 import {
   AuthorSummary,
   ConversationResponse,
   MessageResponse,
   MessageView,
+  ReactionSummary,
   requireAuthorSummary,
   toAuthorSummary,
+  toMessageReactionSummaries,
   toMessageView,
 } from './message-response';
 import {
   MESSAGE_CREATED,
+  MESSAGE_DELETED,
   MESSAGE_READ,
+  MESSAGE_REACTION,
   MessageCreatedEvent,
+  MessageDeletedEvent,
   MessageReadEvent,
+  MessageReactionEvent,
 } from './messaging.events';
 
 const DEFAULT_LIMIT = 30;
@@ -43,7 +55,7 @@ const MAX_LIMIT = 100;
  */
 type MessageLike = Pick<
   Message,
-  'id' | 'conversationId' | 'senderId' | 'body' | 'createdAt'
+  'id' | 'conversationId' | 'senderId' | 'body' | 'createdAt' | 'deletedAt'
 >;
 
 @Injectable()
@@ -55,11 +67,14 @@ export class MessagingService {
     private readonly participants: Repository<ConversationParticipant>,
     @InjectRepository(Message)
     private readonly messages: Repository<Message>,
+    @InjectRepository(MessageReaction)
+    private readonly reactions: Repository<MessageReaction>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly dataSource: DataSource,
     private readonly eventEmitter: EventEmitter2,
     private readonly connectionsService: ConnectionsService,
     private readonly blockFilter: BlockFilterService,
+    private readonly usersService: UsersService,
   ) {}
 
   async listConversations(userId: string): Promise<ConversationResponse[]> {
@@ -103,6 +118,10 @@ export class MessagingService {
       this.lastMessagesByConversation(convoIds),
       this.unreadCountsByConversation(convoIds, userId),
     ]);
+    const reactionsByMessage = await this.reactionSummariesByMessage(
+      [...lastByConvo.values()].map((m) => m.id),
+      userId,
+    );
 
     const summaries: ConversationResponse[] = [];
     for (const part of myParts) {
@@ -111,10 +130,13 @@ export class MessagingService {
         continue;
       }
       let otherParticipant: AuthorSummary | null = null;
+      // 1:1 thread: the single counterpart. Official/welcome threads have no
+      // "other participant" — the client shows the org identity instead —
+      // so `first` stays undefined and the fields below fall back to null.
+      const first = convo.isOfficial
+        ? undefined
+        : othersByConvo.get(convo.id)?.[0];
       if (!convo.isOfficial) {
-        // 1:1 thread: the single counterpart. Official/welcome threads render
-        // with no "other participant" — the client shows the org identity.
-        const first = othersByConvo.get(convo.id)?.[0];
         otherParticipant = toAuthorSummary(
           first ? profileByUser.get(first.userId) : undefined,
         );
@@ -133,6 +155,9 @@ export class MessagingService {
                 profileByUser.get(lastMessage.senderId),
               ),
               createdAt: lastMessage.createdAt.toISOString(),
+              reactions: reactionsByMessage.get(lastMessage.id) ?? [],
+              // `lastMessagesByConversation` never returns a soft-deleted row.
+              deletedAt: null,
             }
           : null,
         unreadCount: unreadByConvo.get(convo.id) ?? 0,
@@ -140,6 +165,8 @@ export class MessagingService {
         // and this workstream adds none), so last activity is derived: the
         // newest message, or the thread's own creation for an empty thread.
         updatedAt: (lastMessage?.createdAt ?? convo.createdAt).toISOString(),
+        otherLastReadAt: first?.lastReadAt?.toISOString() ?? null,
+        otherParticipantId: first?.userId ?? null,
         isOfficial: convo.isOfficial,
         muted: part.muted,
       });
@@ -195,6 +222,44 @@ export class MessagingService {
     return new Map(rows.map((r) => [r.conversationId, Number(r.count)]));
   }
 
+  /**
+   * Reaction summaries (per-key count + `mine`) for a batch of messages —
+   * shared by the "last message" preview built inline by `listConversations`/
+   * `toConversationResponse` and by `toMessageResponses`, so all three surface
+   * the same shape without a per-message query.
+   */
+  private async reactionSummariesByMessage(
+    messageIds: string[],
+    viewerId: string,
+  ): Promise<Map<string, ReactionSummary[]>> {
+    if (!messageIds.length) {
+      return new Map();
+    }
+    const reactionRows = await this.reactions.find({
+      where: { messageId: In(messageIds) },
+    });
+    const rowsByMessage = new Map<string, MessageReaction[]>();
+    for (const reaction of reactionRows) {
+      const list = rowsByMessage.get(reaction.messageId);
+      if (list) {
+        list.push(reaction);
+      } else {
+        rowsByMessage.set(reaction.messageId, [reaction]);
+      }
+    }
+    const summariesByMessage = new Map<string, ReactionSummary[]>();
+    for (const messageId of messageIds) {
+      summariesByMessage.set(
+        messageId,
+        toMessageReactionSummaries(
+          rowsByMessage.get(messageId) ?? [],
+          viewerId,
+        ),
+      );
+    }
+    return summariesByMessage;
+  }
+
   async getMessages(
     conversationId: string,
     userId: string,
@@ -236,40 +301,61 @@ export class MessagingService {
         qb.andWhere('m.created_at < :before', { before });
       }
     }
-    // @DeleteDateColumn makes the QueryBuilder exclude soft-deleted rows.
+    // @DeleteDateColumn makes the QueryBuilder exclude soft-deleted rows by
+    // default; `.withDeleted()` overrides that here so a deleted message still
+    // renders as a tombstone in the thread rather than vanishing (leaving a
+    // gap the other participant's "seen" reply would otherwise dangle from).
+    // `lastMessagesByConversation` (inbox preview) does NOT call this — the
+    // preview intentionally keeps showing the last non-deleted message.
     const rows = await qb
+      .withDeleted()
       .orderBy('m.created_at', 'DESC')
       .addOrderBy('m.id', 'DESC')
       .take(limit)
       .getMany();
-    return this.toMessageResponses(rows);
+    return this.toMessageResponses(rows, userId);
   }
 
   /**
-   * Hydrates sender profiles onto a page of messages in one query and maps to
-   * the frontend-contract `MessageResponse`. `sender` is non-nullable there —
-   * the frontend adapter reads `sender.displayName` unguarded — so this goes
-   * through `requireAuthorSummary`, which supplies a placeholder rather than
-   * emitting a message the client would throw on.
+   * Hydrates sender profiles and reactions onto a page of messages in two
+   * batched queries and maps to the frontend-contract `MessageResponse`.
+   * `sender` is non-nullable there — the frontend adapter reads
+   * `sender.displayName` unguarded — so this goes through
+   * `requireAuthorSummary`, which supplies a placeholder rather than emitting
+   * a message the client would throw on. `viewerId` is needed to compute each
+   * reaction summary's `mine` flag (mirrors `CommunityPostsService.toPostDTOs`
+   * — one `IN`-batched reactions query across the whole page rather than
+   * per-message lookups).
    */
   private async toMessageResponses(
     rows: MessageLike[],
+    viewerId: string,
   ): Promise<MessageResponse[]> {
     if (!rows.length) {
       return [];
     }
     const senderIds = [...new Set(rows.map((m) => m.senderId))];
-    const senders = await this.profiles.find({
-      where: { userId: In(senderIds) },
-    });
+    const messageIds = rows.map((m) => m.id);
+    const [senders, reactionsByMessage] = await Promise.all([
+      this.profiles.find({ where: { userId: In(senderIds) } }),
+      this.reactionSummariesByMessage(messageIds, viewerId),
+    ]);
     const profileByUser = new Map(senders.map((p) => [p.userId, p]));
-    return rows.map((m) => ({
-      id: m.id,
-      conversationId: m.conversationId,
-      body: m.body,
-      sender: requireAuthorSummary(profileByUser.get(m.senderId)),
-      createdAt: m.createdAt.toISOString(),
-    }));
+    return rows.map((m) => {
+      // A soft-deleted row renders as a tombstone: id/sender/createdAt are
+      // kept (so the thread still shows who/when), but `body` and
+      // `reactions` are blanked rather than leaking the deleted content.
+      const isDeleted = Boolean(m.deletedAt);
+      return {
+        id: m.id,
+        conversationId: m.conversationId,
+        body: isDeleted ? '' : m.body,
+        sender: requireAuthorSummary(profileByUser.get(m.senderId)),
+        createdAt: m.createdAt.toISOString(),
+        reactions: isDeleted ? [] : (reactionsByMessage.get(m.id) ?? []),
+        deletedAt: m.deletedAt ? m.deletedAt.toISOString() : null,
+      };
+    });
   }
 
   async sendMessage(
@@ -301,7 +387,7 @@ export class MessagingService {
     // MESSAGE_CREATED event payload and backs `POST /messages/request`. Only
     // the HTTP/WS send path is mapped to the frontend contract.
     const view = await this.postMessage(conversationId, userId, body);
-    const [response] = await this.toMessageResponses([view]);
+    const [response] = await this.toMessageResponses([view], userId);
     return response;
   }
 
@@ -342,6 +428,102 @@ export class MessagingService {
 
   isParticipant(conversationId: string, userId: string): Promise<boolean> {
     return this.participants.exists({ where: { conversationId, userId } });
+  }
+
+  async addMessageReaction(
+    conversationId: string,
+    messageId: string,
+    userId: string,
+    key: MessageReactionKey,
+  ): Promise<{ ok: true }> {
+    await this.requireParticipant(conversationId, userId);
+    await this.requireMessageInConversation(conversationId, messageId);
+
+    // Idempotent per (message,user,key): `ON CONFLICT DO NOTHING` absorbs a
+    // re-react (or a race between two concurrent ones) without a pre-check +
+    // 23505 — mirrors `CommunityPostsService.addReaction`'s insert idiom.
+    await this.reactions
+      .createQueryBuilder()
+      .insert()
+      .into(MessageReaction)
+      .values({ messageId, userId, key })
+      .orIgnore()
+      .execute();
+
+    this.eventEmitter.emit(MESSAGE_REACTION, {
+      conversationId,
+      messageId,
+    } satisfies MessageReactionEvent);
+    return { ok: true };
+  }
+
+  async removeMessageReaction(
+    conversationId: string,
+    messageId: string,
+    userId: string,
+    key: MessageReactionKey,
+  ): Promise<{ ok: true }> {
+    await this.requireParticipant(conversationId, userId);
+    await this.requireMessageInConversation(conversationId, messageId);
+
+    await this.reactions.delete({ messageId, userId, key });
+
+    this.eventEmitter.emit(MESSAGE_REACTION, {
+      conversationId,
+      messageId,
+    } satisfies MessageReactionEvent);
+    return { ok: true };
+  }
+
+  /**
+   * Soft-delete a message, leaving a tombstone (`toMessageResponses` blanks
+   * `body`/`reactions` for any row with `deletedAt` set). Two actor classes
+   * may delete: the message's own author, or platform staff (admin/mod) —
+   * mirrors `ChatGateway.assertNotLockedOut`'s staff predicate, but the role
+   * has to be loaded from the DB here too since there is no request/token
+   * claim carrying it in this service.
+   *
+   * Idempotent: deleting an already-deleted message is a no-op success
+   * rather than a 404/409 — a double-click or a retried request shouldn't
+   * surface an error for a delete that already "happened".
+   */
+  async deleteMessage(
+    conversationId: string,
+    messageId: string,
+    userId: string,
+  ): Promise<{ ok: true }> {
+    await this.requireParticipant(conversationId, userId);
+    // `withDeleted` so a second delete call can see its own tombstone and
+    // short-circuit instead of 404ing — the default findOne would filter it out.
+    const message = await this.messages.findOne({
+      where: { id: messageId, conversationId },
+      withDeleted: true,
+    });
+    if (!message) {
+      throw new NotFoundException('Message not found');
+    }
+    if (message.deletedAt) {
+      return { ok: true };
+    }
+
+    const isAuthor = message.senderId === userId;
+    if (!isAuthor) {
+      const actor = await this.usersService.findById(userId);
+      const isStaff =
+        actor?.role === UserRole.Admin || actor?.role === UserRole.Moderator;
+      if (!isStaff) {
+        throw new ForbiddenException('You can only delete your own messages');
+      }
+    }
+
+    message.deletedAt = new Date();
+    await this.messages.save(message);
+
+    this.eventEmitter.emit(MESSAGE_DELETED, {
+      conversationId,
+      messageId,
+    } satisfies MessageDeletedEvent);
+    return { ok: true };
   }
 
   /**
@@ -389,13 +571,21 @@ export class MessagingService {
     userId: string,
     otherUserId: string,
   ): Promise<ConversationResponse> {
-    const [profiles, lastByConvo, unreadByConvo] = await Promise.all([
-      this.profiles.find({ where: { userId: In([userId, otherUserId]) } }),
-      this.lastMessagesByConversation([convo.id]),
-      this.unreadCountsByConversation([convo.id], userId),
-    ]);
+    const [profiles, lastByConvo, unreadByConvo, otherParticipantRow] =
+      await Promise.all([
+        this.profiles.find({ where: { userId: In([userId, otherUserId]) } }),
+        this.lastMessagesByConversation([convo.id]),
+        this.unreadCountsByConversation([convo.id], userId),
+        this.participants.findOne({
+          where: { conversationId: convo.id, userId: otherUserId },
+        }),
+      ]);
     const profileByUser = new Map(profiles.map((p) => [p.userId, p]));
     const lastMessage = lastByConvo.get(convo.id) ?? null;
+    const reactionsByMessage = await this.reactionSummariesByMessage(
+      lastMessage ? [lastMessage.id] : [],
+      userId,
+    );
 
     return {
       id: convo.id,
@@ -410,10 +600,15 @@ export class MessagingService {
               profileByUser.get(lastMessage.senderId),
             ),
             createdAt: lastMessage.createdAt.toISOString(),
+            reactions: reactionsByMessage.get(lastMessage.id) ?? [],
+            // `lastMessagesByConversation` never returns a soft-deleted row.
+            deletedAt: null,
           }
         : null,
       unreadCount: unreadByConvo.get(convo.id) ?? 0,
       updatedAt: (lastMessage?.createdAt ?? convo.createdAt).toISOString(),
+      otherLastReadAt: otherParticipantRow?.lastReadAt?.toISOString() ?? null,
+      otherParticipantId: otherParticipantRow?.userId ?? null,
     };
   }
 
@@ -522,6 +717,23 @@ export class MessagingService {
       throw new ForbiddenException('You are not a participant');
     }
     return part;
+  }
+
+  // Reactions are addressed by (conversationId, messageId): confirms the
+  // message actually belongs to the conversation the caller is a participant
+  // of, so a participant of conversation A cannot react to a message that
+  // only lives in conversation B.
+  private async requireMessageInConversation(
+    conversationId: string,
+    messageId: string,
+  ): Promise<Message> {
+    const message = await this.messages.findOne({
+      where: { id: messageId, conversationId },
+    });
+    if (!message) {
+      throw new NotFoundException('Message not found');
+    }
+    return message;
   }
 
   private async postMessage(

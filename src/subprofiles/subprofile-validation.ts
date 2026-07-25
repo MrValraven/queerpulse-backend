@@ -114,3 +114,88 @@ export function slugifyDisplayName(displayName: string): string {
     .replace(/^-+|-+$/g, '');
   return slug || 'subprofile';
 }
+
+// --- Identity & presence constants (design plan Task A2; must stay identical
+// to the frontend mirror) ----------------------------------------------------
+
+// Curated accent-palette keys — each maps to an existing brand color token on
+// the frontend (plum → --plum, coral → --accent, jade → --jade, amber →
+// --amber, violet → --violet). Only brand hues with tuned light+dark variants,
+// so no hardcoded hex is ever needed (design-system: tokens only).
+export const ACCENT_KEYS = [
+  'plum',
+  'coral',
+  'jade',
+  'amber',
+  'violet',
+] as const;
+export const AVAILABILITY_KEYS = [
+  'open_to_collabs',
+  'booking',
+  'not_available',
+] as const;
+export const KNOWN_PLATFORM_KEYS = [
+  'website',
+  'instagram',
+  'x',
+  'bluesky',
+  'mastodon',
+  'linkedin',
+  'github',
+  'dribbble',
+  'behance',
+  'youtube',
+  'tiktok',
+  'letterboxd',
+  'backloggd',
+  'goodreads',
+  'email',
+  'other',
+  'bandcamp',
+  'soundcloud',
+  'spotify',
+  'twitch',
+  'imdb',
+  'artstation',
+  'kofi',
+  'patreon',
+] as const;
+export const MAX_SOCIAL_LINKS = 20;
+export const MAX_CTA_LABEL = 40;
+
+/** Returns true if a social-links payload is valid (platform known, non-empty, capped). */
+export function validateSocialLinks(
+  items: { platform: string; urlOrHandle: string }[],
+): boolean {
+  if (items.length > MAX_SOCIAL_LINKS) return false;
+  return items.every(
+    (item) =>
+      KNOWN_PLATFORM_KEYS.includes(
+        item.platform as (typeof KNOWN_PLATFORM_KEYS)[number],
+      ) && item.urlOrHandle.trim().length > 0,
+  );
+}
+
+// --- Affiliations (design plan Phase 3c Task A2; must stay identical to the
+// frontend mirror) ------------------------------------------------------------
+
+export const AFFILIATION_TARGET_TYPES = ['event', 'community'] as const;
+export const EVENT_ROLES = ['performing', 'attending', 'hosting'] as const;
+export const COMMUNITY_ROLES = ['member', 'mod', 'founder'] as const;
+export const MAX_AFFILIATIONS = 12;
+
+export function rolesForTargetType(targetType: string): readonly string[] {
+  if (targetType === 'event') return EVENT_ROLES;
+  if (targetType === 'community') return COMMUNITY_ROLES;
+  return [];
+}
+export function isValidAffiliation(item: {
+  targetType: string;
+  role: string;
+}): boolean {
+  return (
+    AFFILIATION_TARGET_TYPES.includes(
+      item.targetType as (typeof AFFILIATION_TARGET_TYPES)[number],
+    ) && rolesForTargetType(item.targetType).includes(item.role)
+  );
+}
