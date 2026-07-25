@@ -184,6 +184,11 @@ export const EVENT_ROLES = ['performing', 'attending', 'hosting'] as const;
 export const COMMUNITY_ROLES = ['member', 'mod', 'founder'] as const;
 export const MAX_AFFILIATIONS = 12;
 
+// --- Collaboration credits (design plan Phase 3d Task A2; must stay
+// identical to the frontend mirror) ------------------------------------------
+
+export const MAX_COLLABORATORS_PER_ITEM = 10;
+
 export function rolesForTargetType(targetType: string): readonly string[] {
   if (targetType === 'event') return EVENT_ROLES;
   if (targetType === 'community') return COMMUNITY_ROLES;

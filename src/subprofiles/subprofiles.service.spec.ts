@@ -71,6 +71,7 @@ function makeItem(overrides: Partial<SubprofileItem> = {}): SubprofileItem {
     meta: null,
     tags: [],
     isFeatured: false,
+    collaborators: [],
     position: 0,
     ...overrides,
   };

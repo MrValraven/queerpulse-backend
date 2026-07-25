@@ -86,6 +86,9 @@ export class SubprofileItem {
   @Column({ type: 'text', array: true, default: '{}' })
   tags: string[];
 
+  @Column({ type: 'text', array: true, default: '{}' })
+  collaborators: string[];
+
   @Column({ type: 'boolean', default: false })
   isFeatured: boolean;
 

@@ -35,6 +35,13 @@ export class SubprofileItemInputDTO {
   tags?: string[];
 
   @IsOptional() @IsBoolean() isFeatured?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @IsString({ each: true })
+  @MaxLength(60, { each: true })
+  collaborators?: string[];
 }
 
 export class ReplaceItemsDTO {

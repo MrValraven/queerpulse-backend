@@ -9,6 +9,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, In, IsNull, Not, Repository } from 'typeorm';
+import { normalizeHandle } from '../common/handles';
 import { toImageUrl } from '../common/image-url';
 import { AccessTier, Community } from '../communities/entities/community.entity';
 import {
@@ -16,6 +17,7 @@ import {
   EventStatus,
   EventVisibility,
 } from '../events/entities/event.entity';
+import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { HandlesService } from '../handles/handles.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -53,6 +55,7 @@ import {
   AVAILABILITY_KEYS,
   isValidAffiliation,
   MAX_AFFILIATIONS,
+  MAX_COLLABORATORS_PER_ITEM,
   MAX_ITEMS_PER_SECTION,
   MAX_SUBPROFILES,
   slugifyDisplayName,
@@ -61,6 +64,7 @@ import {
 } from './subprofile-validation';
 import {
   AffiliationView,
+  CollaboratorView,
   EndorserView,
   SubprofileCardView,
   SubprofilePublicView,
@@ -108,6 +112,8 @@ export class SubprofilesService {
     private readonly communities: Repository<Community>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
+    @InjectRepository(Handle)
+    private readonly handleRegistry: Repository<Handle>,
     private readonly dataSource: DataSource,
     private readonly blockFilter: BlockFilterService,
     private readonly handles: HandlesService,
@@ -126,12 +132,22 @@ export class SubprofilesService {
     const socialLinksById = await this.loadSocialLinksFor(subprofileIds);
     const endorsementCountsById =
       await this.loadEndorsementCountsFor(subprofileIds);
+    // Owner viewing their own personas: resolve ALL items' collaborator
+    // handles across every subprofile in ONE batched call, shared by every
+    // mapper invocation below (no per-persona resolution).
+    const collaboratorsByHandle = await this.resolveCollaboratorsFor(
+      userId,
+      [...itemsById.values()].flat(),
+    );
     return sps.map((sp) =>
       toSubprofileDTO(
         sp,
         itemsById.get(sp.id) ?? [],
         socialLinksById.get(sp.id) ?? [],
         endorsementCountsById.get(sp.id) ?? 0,
+        0,
+        [],
+        collaboratorsByHandle,
       ),
     );
   }
@@ -304,6 +320,38 @@ export class SubprofilesService {
       throw new BadRequestException('Only one item can be featured');
     }
 
+    // Collaboration credits: normalize + dedup each item's handle list and
+    // cap it, then resolve every handle in the WHOLE section payload in ONE
+    // batched `resolveHandles` call — using the OWNER as the viewer, so an
+    // owner can only credit a member/persona that is visible + not blocked
+    // to them. A handle that fails to resolve 400s before anything is
+    // written (no partial writes on a bad payload).
+    const normalizedCollaboratorsByItemIndex = items.map((it) => {
+      const normalized = [
+        ...new Set(
+          (it.collaborators ?? []).map((handle) => normalizeHandle(handle)),
+        ),
+      ];
+      if (normalized.length > MAX_COLLABORATORS_PER_ITEM) {
+        throw new BadRequestException(
+          `An item can credit at most ${MAX_COLLABORATORS_PER_ITEM} collaborators`,
+        );
+      }
+      return normalized;
+    });
+    const allCollaboratorHandles = normalizedCollaboratorsByItemIndex.flat();
+    const collaboratorsByHandle = await this.resolveHandles(
+      allCollaboratorHandles,
+      sp.userId,
+    );
+    for (const handle of new Set(allCollaboratorHandles)) {
+      if (!collaboratorsByHandle.has(handle)) {
+        throw new BadRequestException(
+          `Unknown or unavailable collaborator: @${handle}`,
+        );
+      }
+    }
+
     await this.dataSource.transaction(async (manager) => {
       await manager.delete(SubprofileItem, {
         subprofileId: id,
@@ -321,6 +369,7 @@ export class SubprofilesService {
           date: it.date ?? null,
           meta: it.meta ?? null,
           tags: it.tags ?? [],
+          collaborators: normalizedCollaboratorsByItemIndex[index],
           isFeatured:
             sectionEnum === SubprofileSection.Links
               ? false
@@ -629,6 +678,12 @@ export class SubprofilesService {
       viewerId,
       subprofileIds,
     );
+    // Resolve ALL personas' item collaborator handles in ONE batched call,
+    // shared by every mapper invocation below (no per-persona resolution).
+    const collaboratorsByHandle = await this.resolveCollaboratorsFor(
+      viewerId,
+      [...itemsById.values()].flat(),
+    );
     const owner = {
       slug: profile.slug,
       name: `${profile.firstName} ${profile.lastName}`.trim(),
@@ -644,6 +699,7 @@ export class SubprofilesService {
         followerCountsById.get(sp.id) ?? 0,
         viewerFollowingIds.has(sp.id),
         affiliationsById.get(sp.id) ?? [],
+        collaboratorsByHandle,
       ),
     );
   }
@@ -684,6 +740,10 @@ export class SubprofilesService {
     ).has(sp.id);
     const affiliations =
       (await this.resolveAffiliationsFor(viewerId, [sp.id])).get(sp.id) ?? [];
+    const collaboratorsByHandle = await this.resolveCollaboratorsFor(
+      viewerId,
+      items,
+    );
     // no owner → owner fields omitted
     return toPublicDTO(
       sp,
@@ -695,6 +755,7 @@ export class SubprofilesService {
       followerCount,
       viewerFollowing,
       affiliations,
+      collaboratorsByHandle,
     );
   }
 
@@ -1153,6 +1214,146 @@ export class SubprofilesService {
     return affiliationsBySubprofileId;
   }
 
+  // Batched core resolver for `@handle` collaboration credits (design plan
+  // Phase 3d): turns a set of raw handle strings into resolved display cards
+  // in a BOUNDED number of queries regardless of how many handles are asked
+  // for — ONE `handles` registry lookup, ONE `profiles` lookup, ONE
+  // `subprofiles` lookup, and ONE batched block-lookup via
+  // `BlockFilterService.blockedUserIds` (mirrors `resolveAffiliationsFor`'s
+  // two-entity-query shape). A handle is DROPPED (never surfaced, never
+  // throws) when: it isn't registered, its owner is blocked either way with
+  // `viewerId`, or — for a persona — it isn't currently published +
+  // unlinked + non-private (a linked persona is nested under its owner and
+  // is NOT creditable; a private persona isn't discoverable by handle to
+  // just anyone). Callers that must reject an unresolvable handle (the
+  // owner-facing validation in `replaceSection`) check the returned map's
+  // membership themselves — this resolver only ever narrows, never throws.
+  private async resolveHandles(
+    handleNames: string[],
+    viewerId: string,
+  ): Promise<Map<string, CollaboratorView>> {
+    const collaboratorByHandle = new Map<string, CollaboratorView>();
+    const normalizedHandles = [
+      ...new Set(handleNames.map((handleName) => normalizeHandle(handleName))),
+    ];
+    if (!normalizedHandles.length) {
+      return collaboratorByHandle;
+    }
+
+    const handleRows = await this.handleRegistry.find({
+      where: { name: In(normalizedHandles) },
+    });
+    if (!handleRows.length) {
+      return collaboratorByHandle;
+    }
+
+    const profileUserIds = [
+      ...new Set(
+        handleRows
+          .filter(
+            (row) => row.ownerKind === HandleOwnerKind.Profile && row.userId,
+          )
+          .map((row) => row.userId as string),
+      ),
+    ];
+    const subprofileIds = [
+      ...new Set(
+        handleRows
+          .filter(
+            (row) =>
+              row.ownerKind === HandleOwnerKind.Subprofile && row.subprofileId,
+          )
+          .map((row) => row.subprofileId as string),
+      ),
+    ];
+
+    const [profileRows, subprofileRows] = await Promise.all([
+      profileUserIds.length
+        ? this.profiles.find({ where: { userId: In(profileUserIds) } })
+        : Promise.resolve([]),
+      subprofileIds.length
+        ? this.subprofiles.find({ where: { id: In(subprofileIds) } })
+        : Promise.resolve([]),
+    ]);
+
+    const profileByUserId = new Map(
+      profileRows.map((profile) => [profile.userId, profile]),
+    );
+    const subprofileById = new Map(
+      subprofileRows.map((subprofile) => [subprofile.id, subprofile]),
+    );
+
+    // ONE batched block-lookup over every candidate owner (a credited
+    // member's own userId, or a credited persona's owner userId) — never a
+    // per-handle query.
+    const candidateOwnerIds = [
+      ...new Set([
+        ...profileRows.map((profile) => profile.userId),
+        ...subprofileRows.map((subprofile) => subprofile.userId),
+      ]),
+    ];
+    const blockedOwnerIds = await this.blockFilter.blockedUserIds(
+      viewerId,
+      candidateOwnerIds,
+    );
+
+    for (const handleRow of handleRows) {
+      if (handleRow.ownerKind === HandleOwnerKind.Profile && handleRow.userId) {
+        const profile = profileByUserId.get(handleRow.userId);
+        if (!profile || blockedOwnerIds.has(profile.userId)) {
+          continue;
+        }
+        collaboratorByHandle.set(handleRow.name, {
+          handle: handleRow.name,
+          type: 'member',
+          name: `${profile.firstName} ${profile.lastName}`.trim(),
+          avatarUrl: toImageUrl(profile.avatarUrl),
+          slug: profile.slug,
+        });
+      } else if (
+        handleRow.ownerKind === HandleOwnerKind.Subprofile &&
+        handleRow.subprofileId
+      ) {
+        const persona = subprofileById.get(handleRow.subprofileId);
+        // Creditable ONLY when published + unlinked + not private: a linked
+        // persona is nested under its owner (not creditable — see the phase
+        // note), a draft doesn't exist publicly yet, and a private persona
+        // isn't meant to be namelinked from someone else's page.
+        if (
+          !persona ||
+          persona.status !== SubprofileStatus.Published ||
+          persona.linkVisibility !== SubprofileLinkVisibility.Unlinked ||
+          persona.visibility === SubprofileVisibility.Private ||
+          blockedOwnerIds.has(persona.userId)
+        ) {
+          continue;
+        }
+        collaboratorByHandle.set(handleRow.name, {
+          handle: handleRow.name,
+          type: 'persona',
+          name: persona.displayName,
+          avatarUrl: toImageUrl(persona.avatarUrl),
+          slug: null,
+        });
+      }
+    }
+
+    return collaboratorByHandle;
+  }
+
+  // Gathers every item's `collaborators` handles across a set of items (one
+  // persona's items, or many personas' items pooled together by a caller
+  // like `listMine`/`listForProfile`) into a SINGLE `resolveHandles` call, so
+  // a multi-persona read resolves the whole page's collaborators in one
+  // batched pass rather than once per persona.
+  private async resolveCollaboratorsFor(
+    viewerId: string,
+    items: SubprofileItem[],
+  ): Promise<Map<string, CollaboratorView>> {
+    const handleNames = items.flatMap((item) => item.collaborators ?? []);
+    return this.resolveHandles(handleNames, viewerId);
+  }
+
   private async ownerDTO(sp: Subprofile): Promise<SubprofileView> {
     const items = await this.items.find({ where: { subprofileId: sp.id } });
     const socialLinkRows = await this.socialLinks.find({
@@ -1169,6 +1370,12 @@ export class SubprofilesService {
     // becomes blocked/invisible after linking drops out for the owner too.
     const affiliations =
       (await this.resolveAffiliationsFor(sp.userId, [sp.id])).get(sp.id) ?? [];
+    // Owner viewing their own persona: same "viewer = owner" convention as
+    // `resolveAffiliationsFor` above.
+    const collaboratorsByHandle = await this.resolveCollaboratorsFor(
+      sp.userId,
+      items,
+    );
     return toSubprofileDTO(
       sp,
       items,
@@ -1176,6 +1383,7 @@ export class SubprofilesService {
       endorsementCount,
       followerCount,
       affiliations,
+      collaboratorsByHandle,
     );
   }
 

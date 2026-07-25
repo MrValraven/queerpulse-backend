@@ -27,6 +27,17 @@ export interface SubprofileItemView {
   meta: string | null;
   tags: string[];
   isFeatured: boolean;
+  collaborators: CollaboratorView[];
+}
+
+// Resolved collaboration credit — exposed for BOTH linked and unlinked
+// personas (a collaborator names someone else, not the owner; anonymity-safe).
+export interface CollaboratorView {
+  handle: string;
+  type: 'member' | 'persona';
+  name: string;
+  avatarUrl: string | null;
+  slug: string | null; // member profile slug for /members/:slug; null for personas (use handle)
 }
 
 export interface SocialLinkView {
@@ -123,7 +134,10 @@ export interface SubprofileOwnerRef {
   name: string;
 }
 
-function toItemView(item: SubprofileItem): SubprofileItemView {
+function toItemView(
+  item: SubprofileItem,
+  collaboratorsByHandle: Map<string, CollaboratorView> = new Map(),
+): SubprofileItemView {
   return {
     section: item.section,
     title: item.title,
@@ -136,6 +150,9 @@ function toItemView(item: SubprofileItem): SubprofileItemView {
     tags: item.tags ?? [],
     isFeatured:
       item.section === SubprofileSection.Links ? false : item.isFeatured,
+    collaborators: (item.collaborators ?? [])
+      .map((handle) => collaboratorsByHandle.get(handle))
+      .filter((view): view is CollaboratorView => Boolean(view)),
   };
 }
 
@@ -167,6 +184,7 @@ export function toSubprofileDTO(
   endorsementCount = 0,
   followerCount = 0,
   affiliations: AffiliationView[] = [],
+  collaboratorsByHandle: Map<string, CollaboratorView> = new Map(),
 ): SubprofileView {
   return {
     id: subprofile.id,
@@ -186,7 +204,9 @@ export function toSubprofileDTO(
     visibility: subprofile.visibility,
     status: subprofile.status,
     position: subprofile.position,
-    items: sortItems(items).map(toItemView),
+    items: sortItems(items).map((item) =>
+      toItemView(item, collaboratorsByHandle),
+    ),
     socialLinks: sortSocialLinks(socialLinks).map(toSocialLinkView),
     endorsementCount,
     followerCount,
@@ -204,6 +224,7 @@ export function toPublicDTO(
   followerCount = 0,
   viewerFollowing = false,
   affiliations: AffiliationView[] = [],
+  collaboratorsByHandle: Map<string, CollaboratorView> = new Map(),
 ): SubprofilePublicView {
   const view: SubprofilePublicView = {
     id: subprofile.id,
@@ -223,7 +244,9 @@ export function toPublicDTO(
     ctaLabel: subprofile.ctaLabel,
     ctaUrl: subprofile.ctaUrl,
     linkVisibility: subprofile.linkVisibility,
-    items: sortItems(items).map(toItemView),
+    items: sortItems(items).map((item) =>
+      toItemView(item, collaboratorsByHandle),
+    ),
     socialLinks: sortSocialLinks(socialLinks).map(toSocialLinkView),
     // endorsementCount/viewerEndorsed/followerCount/viewerFollowing are
     // exposed for BOTH linked and unlinked personas — the id is a

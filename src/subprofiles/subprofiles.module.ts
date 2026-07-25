@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Community } from '../communities/entities/community.entity';
 import { Event } from '../events/entities/event.entity';
+import { Handle } from '../handles/entities/handle.entity';
 import { HandlesModule } from '../handles/handles.module';
 import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
@@ -28,6 +29,7 @@ import { SubprofilesService } from './subprofiles.service';
       SubprofileSocialLink,
       Event,
       Community,
+      Handle,
     ]),
     // Exports the `Profile` repository (used to resolve an owner slug → user).
     UsersModule,
