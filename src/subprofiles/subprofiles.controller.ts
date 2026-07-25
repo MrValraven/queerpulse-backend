@@ -15,6 +15,7 @@ import {
   CurrentUser,
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
+import { Public } from '../auth/decorators/public.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { CreateSubprofileDTO } from './dto/create-subprofile.dto';
 import { EndorseDTO } from './dto/endorse.dto';
@@ -53,6 +54,17 @@ export class SubprofilesController {
     @Param('handle') handle: string,
   ) {
     return this.subprofilesService.getByHandle(handle, user.userId);
+  }
+
+  // Public, unauthenticated: every crawlable persona handle, for the sitemap
+  // generator + the Playwright prerenderer (no class guard on this
+  // controller, so `@Public()` alone is enough to bypass the global JWT
+  // guard — mirrors `DirectoryController` in `listings/directory.controller.ts`).
+  @Public()
+  @Throttle({ default: { limit: 30, ttl: seconds(60) } })
+  @Get('public-handles')
+  listPublicHandles() {
+    return this.subprofilesService.listPublicHandles();
   }
 
   @Post()

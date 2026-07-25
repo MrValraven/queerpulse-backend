@@ -809,6 +809,34 @@ export class SubprofilesService {
     };
   }
 
+  // Public, unauthenticated enumeration of every crawlable persona handle —
+  // feeds the sitemap generator + the Playwright prerenderer (design plan
+  // Phase 4b). Mirrors `directory`'s WHERE (unlinked + published + open +
+  // handle set) but WITHOUT the block filter: there is no viewer here, this
+  // is public SEO data, not a personalized read. Capped + newest-first so a
+  // huge catalogue still yields a bounded, most-recently-updated sitemap.
+  async listPublicHandles(): Promise<{
+    items: { handle: string; updatedAt: string }[];
+  }> {
+    const rows = await this.subprofiles.find({
+      where: {
+        linkVisibility: SubprofileLinkVisibility.Unlinked,
+        status: SubprofileStatus.Published,
+        visibility: SubprofileVisibility.Open,
+        handle: Not(IsNull()),
+      },
+      select: { handle: true, updatedAt: true },
+      order: { updatedAt: 'DESC' },
+      take: 5000,
+    });
+    return {
+      items: rows.map((row) => ({
+        handle: row.handle as string,
+        updatedAt: row.updatedAt.toISOString(),
+      })),
+    };
+  }
+
   // ---- endorsements ----------------------------------------------------------
 
   async endorse(
