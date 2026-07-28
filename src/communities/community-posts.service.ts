@@ -6,7 +6,10 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
+import { extractMentionSlugs } from '../common/mentions';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
@@ -71,6 +74,7 @@ export class CommunityPostsService {
     private readonly postEdits: Repository<CommunityPostEdit>,
     @InjectRepository(CommunityPostReplyEdit)
     private readonly replyEdits: Repository<CommunityPostReplyEdit>,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async listPosts(
@@ -415,6 +419,14 @@ export class CommunityPostsService {
     const saved = await this.replies.save(
       this.replies.create({ postId: post.id, authorId: userId, text }),
     );
+    await this.notifyMentions(text, userId, {
+      actorId: userId,
+      source: 'community',
+      communitySlug: slug,
+      postId: post.id,
+      replyId: saved.id,
+      excerpt: text.slice(0, 140),
+    });
     const authors = await new MemberLookup(this.profiles).byUserIds([userId]);
     return toCommunityReply(
       saved,
@@ -520,10 +532,47 @@ export class CommunityPostsService {
     const saved = await this.replies.save(
       this.replies.create({ postId: post.id, authorId: userId, text }),
     );
+    await this.notifyMentions(text, userId, {
+      actorId: userId,
+      source: 'community',
+      postId: post.id,
+      replyId: saved.id,
+      excerpt: text.slice(0, 140),
+    });
     return { id: saved.id };
   }
 
   // --- internals ---
+
+  /** Best-effort `@mention` fan-out. Resolves mentioned slugs to active users,
+   *  drops the author, and creates one `mention` notification per recipient
+   *  (block/mute filtering + socket push handled by the notifications service).
+   *  Any failure is swallowed — a mention side effect must never fail a reply. */
+  private async notifyMentions(
+    body: string,
+    authorUserId: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      const slugs = extractMentionSlugs(body);
+      if (!slugs.length) return;
+      const bySlug = await new MemberLookup(this.profiles).userIdsForSlugs(
+        slugs,
+      );
+      const recipients = [...bySlug.values()].filter(
+        (userId) => userId !== authorUserId,
+      );
+      if (!recipients.length) return;
+      await this.notifications.createForRecipients(
+        recipients,
+        NotificationType.Mention,
+        payload,
+        authorUserId,
+      );
+    } catch {
+      // Intentionally ignored — see doc comment.
+    }
+  }
 
   private async loadCommunityOr404(slug: string): Promise<Community> {
     const community = await this.communities.findOne({ where: { slug } });

@@ -105,6 +105,10 @@ export class EnvironmentVariables {
   @IsOptional() @IsString() MUX_SIGNING_KEY_ID?: string;
   @IsOptional() @IsString() MUX_SIGNING_PRIVATE_KEY?: string;
 
+  @IsOptional() @IsString() VAPID_PUBLIC_KEY?: string;
+  @IsOptional() @IsString() VAPID_PRIVATE_KEY?: string;
+  @IsOptional() @IsString() VAPID_SUBJECT?: string;
+
   @IsOptional()
   @IsNumber()
   @Min(0)
@@ -168,6 +172,26 @@ export function validate(
     if (missingStorage.length > 0) {
       problems.push(
         `${missingStorage.join(', ')} ${missingStorage.length === 1 ? 'is' : 'are'} required when NODE_ENV=production (uploads fail at runtime otherwise)`,
+      );
+    }
+  }
+
+  // Web Push (VAPID) is optional overall, but all-or-nothing: a partially set
+  // trio would boot healthy and fail to send pushes at runtime instead of
+  // failing fast at boot.
+  if (validated.NODE_ENV === NodeEnv.Production) {
+    const missingPush = (
+      [
+        ['VAPID_PUBLIC_KEY', validated.VAPID_PUBLIC_KEY],
+        ['VAPID_PRIVATE_KEY', validated.VAPID_PRIVATE_KEY],
+        ['VAPID_SUBJECT', validated.VAPID_SUBJECT],
+      ] as const
+    )
+      .filter(([, value]) => !value)
+      .map(([name]) => name);
+    if (missingPush.length > 0 && missingPush.length < 3) {
+      problems.push(
+        `${missingPush.join(', ')} ${missingPush.length === 1 ? 'is' : 'are'} required when the other VAPID_* keys are set (Web Push is all-or-nothing)`,
       );
     }
   }

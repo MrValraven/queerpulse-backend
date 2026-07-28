@@ -611,6 +611,56 @@ describe('MessagingService', () => {
     });
   });
 
+  describe('clearedAt filtering', () => {
+    it('unread count query floors on cleared_at', async () => {
+      const queryBuilder = makeQb();
+      queryBuilder.getRawMany.mockResolvedValue([]);
+      messages.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await (
+        service as unknown as {
+          unreadCountsByConversation: (
+            convoIds: string[],
+            userId: string,
+          ) => Promise<Map<string, number>>;
+        }
+      ).unreadCountsByConversation(['conv-1'], 'user-1');
+
+      const predicates = queryBuilder.andWhere.mock.calls
+        .map((call) => call[0])
+        .join(' | ');
+      expect(predicates).toContain('cleared_at');
+    });
+
+    it('getMessages floors history at the caller cleared_at', async () => {
+      participants.findOne.mockResolvedValue({
+        conversationId: 'conv-1',
+        userId: 'user-1',
+        clearedAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      const queryBuilder = makeQb();
+      queryBuilder.getMany.mockResolvedValue([]);
+      messages.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await service.getMessages('conv-1', 'user-1', {});
+
+      // The query-builder predicate binds the floor via a `:clearedAt`
+      // parameter placeholder (camelCase, no underscore) rather than the raw
+      // `cleared_at` column name — unlike the unread-count query above, which
+      // embeds the column directly in a hand-written NULL-safe clause.
+      const predicates = queryBuilder.andWhere.mock.calls
+        .map((call) => call[0])
+        .join(' | ');
+      expect(predicates).toContain('m.created_at > :clearedAt');
+      const boundParams = queryBuilder.andWhere.mock.calls.map(
+        (call) => call[1],
+      );
+      expect(boundParams).toContainEqual({
+        clearedAt: '2026-01-01T00:00:00.000Z',
+      });
+    });
+  });
+
   describe('markRead', () => {
     it('stamps lastReadAt with the DB clock (now()) and emits with the DB value', async () => {
       const dbTime = new Date('2026-06-30T12:00:00Z');
@@ -651,6 +701,32 @@ describe('MessagingService', () => {
       await expect(service.markRead('c1', 'ghost')).rejects.toBeInstanceOf(
         ForbiddenException,
       );
+      expect(participants.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('clearConversation', () => {
+    it('stamps the caller participant cleared_at with the DB clock', async () => {
+      participants.findOne.mockResolvedValue({
+        conversationId: 'conv-1',
+        userId: 'user-1',
+      });
+      participants.update.mockResolvedValue({ affected: 1 });
+
+      const result = await service.clearConversation('conv-1', 'user-1');
+
+      expect(participants.update).toHaveBeenCalledWith(
+        { conversationId: 'conv-1', userId: 'user-1' },
+        { clearedAt: expect.any(Function) },
+      );
+      expect(result).toEqual({ ok: true });
+    });
+
+    it('rejects a non-participant', async () => {
+      participants.findOne.mockResolvedValue(null);
+      await expect(
+        service.clearConversation('conv-1', 'stranger'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
       expect(participants.update).not.toHaveBeenCalled();
     });
   });
@@ -879,6 +955,53 @@ describe('MessagingService', () => {
       expect(first.id).toBe('convo-1');
       expect(second.id).toBe('convo-1');
       expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('floors the preview at the caller cleared_at: a thread the caller previously cleared does not leak its pre-clear last message back through POST /conversations', async () => {
+      profiles.findOne.mockResolvedValueOnce(recipient);
+      // Reuse path: the pairKey conversation already exists, so no transaction
+      // is needed — mirrors the "is idempotent" second call above.
+      const existingConversation = {
+        id: 'convo-1',
+        isOfficial: false,
+        pairKey: 'me:them',
+        createdAt: new Date('2026-07-01T00:00:00.000Z'),
+      };
+      conversations.findOne.mockResolvedValueOnce(existingConversation);
+      profiles.find.mockResolvedValueOnce([recipient]);
+
+      const lastMessageBeforeClear = {
+        id: 'msg-1',
+        conversationId: 'convo-1',
+        senderId: 'them',
+        body: 'pre-clear history',
+        createdAt: new Date('2026-06-01T00:00:00.000Z'),
+      };
+      const lastMessageQb = makeQb();
+      lastMessageQb.getMany.mockResolvedValueOnce([lastMessageBeforeClear]);
+      messages.createQueryBuilder
+        .mockReturnValueOnce(lastMessageQb) // lastMessagesByConversation
+        .mockReturnValueOnce(makeQb()); // unreadCountsByConversation
+
+      // toConversationResponse reads the OTHER participant row first, then the
+      // CALLER's — the caller's clearedAt is newer than the last message above.
+      participants.findOne
+        .mockResolvedValueOnce({
+          conversationId: 'convo-1',
+          userId: 'them',
+          clearedAt: null,
+          lastReadAt: null,
+        })
+        .mockResolvedValueOnce({
+          conversationId: 'convo-1',
+          userId: 'me',
+          clearedAt: new Date('2026-07-15T00:00:00.000Z'),
+        });
+
+      const result = await service.createConversation('me', 'tam-rivera');
+
+      expect(result.lastMessage).toBeNull();
+      expect(result.updatedAt).toBe(existingConversation.createdAt.toISOString());
     });
 
     it('404s when recipientHandle does not resolve to a member', async () => {

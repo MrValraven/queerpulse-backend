@@ -18,6 +18,7 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateConversationDto } from './dto/create-conversation.dto';
+import { EditMessageDto } from './dto/edit-message.dto';
 import { GetMessagesQuery } from './dto/get-messages.query';
 import { MessageReactionDto } from './dto/message-reaction.dto';
 import { MessageRequestDto } from './dto/message-request.dto';
@@ -71,7 +72,12 @@ export class ConversationsController {
     @CurrentUser() user: CurrentUserData,
     @Body() dto: SendMessageDto,
   ) {
-    return this.messagingService.sendMessage(id, user.userId, dto.body);
+    return this.messagingService.sendMessage(
+      id,
+      user.userId,
+      dto.body,
+      dto.replyToId,
+    );
   }
 
   @Post(':id/read')
@@ -80,6 +86,15 @@ export class ConversationsController {
     @CurrentUser() user: CurrentUserData,
   ) {
     return this.messagingService.markRead(id, user.userId);
+  }
+
+  @Throttle({ default: { limit: 30, ttl: seconds(60) } })
+  @Delete(':id')
+  clear(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.messagingService.clearConversation(id, user.userId);
   }
 
   @Patch(':id')
@@ -115,6 +130,17 @@ export class ConversationsController {
     @CurrentUser() user: CurrentUserData,
   ) {
     return this.messagingService.deleteMessage(id, messageId, user.userId);
+  }
+
+  @Throttle({ default: { limit: 30, ttl: seconds(60) } })
+  @Patch(':id/messages/:messageId')
+  editMessage(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('messageId', ParseUUIDPipe) messageId: string,
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: EditMessageDto,
+  ) {
+    return this.messagingService.editMessage(id, messageId, user.userId, dto.body);
   }
 
   @Throttle({ default: { limit: 60, ttl: seconds(60) } })

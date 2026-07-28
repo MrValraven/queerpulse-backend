@@ -26,6 +26,7 @@ import {
 import { Message } from './entities/message.entity';
 import {
   AuthorSummary,
+  buildReplyTo,
   ConversationResponse,
   MessageResponse,
   MessageView,
@@ -40,14 +41,17 @@ import {
   MESSAGE_DELETED,
   MESSAGE_READ,
   MESSAGE_REACTION,
+  MESSAGE_UPDATED,
   MessageCreatedEvent,
   MessageDeletedEvent,
   MessageReadEvent,
   MessageReactionEvent,
+  MessageUpdatedEvent,
 } from './messaging.events';
 
 const DEFAULT_LIMIT = 30;
 const MAX_LIMIT = 100;
+const EDIT_WINDOW_MS = 15 * 60 * 1000;
 
 /**
  * The fields needed to build a `MessageResponse`. Structural, so both a
@@ -55,7 +59,14 @@ const MAX_LIMIT = 100;
  */
 type MessageLike = Pick<
   Message,
-  'id' | 'conversationId' | 'senderId' | 'body' | 'createdAt' | 'deletedAt'
+  | 'id'
+  | 'conversationId'
+  | 'senderId'
+  | 'body'
+  | 'replyToId'
+  | 'createdAt'
+  | 'editedAt'
+  | 'deletedAt'
 >;
 
 @Injectable()
@@ -81,6 +92,12 @@ export class MessagingService {
     const myParts = await this.participants.find({ where: { userId } });
     if (!myParts.length) {
       return [];
+    }
+    const clearedAtByConversation = new Map<string, Date>();
+    for (const part of myParts) {
+      if (part.clearedAt) {
+        clearedAtByConversation.set(part.conversationId, part.clearedAt);
+      }
     }
     const convoIds = myParts.map((p) => p.conversationId);
     const convos = await this.conversations.find({
@@ -142,29 +159,50 @@ export class MessagingService {
         );
       }
       const lastMessage = lastByConvo.get(convo.id) ?? null;
+      const cleared = clearedAtByConversation.get(convo.id) ?? null;
+      // A thread the caller cleared, with no newer message, is invisible to
+      // them — drop it. A `lastMessage` older than the floor is likewise gone;
+      // treat the thread as empty (a still-present preview would leak cleared
+      // history). A later message (createdAt > clearedAt) survives this and the
+      // thread reappears with fresh history only.
+      const clearedLastMessage =
+        cleared && lastMessage && lastMessage.createdAt <= cleared
+          ? null
+          : lastMessage;
+      if (cleared && !clearedLastMessage) {
+        continue;
+      }
       summaries.push({
         id: convo.id,
         type: convo.isOfficial ? 'group' : 'dm',
         otherParticipant,
-        lastMessage: lastMessage
+        lastMessage: clearedLastMessage
           ? {
-              id: lastMessage.id,
+              id: clearedLastMessage.id,
               conversationId: convo.id,
-              body: lastMessage.body,
+              body: clearedLastMessage.body,
               sender: requireAuthorSummary(
-                profileByUser.get(lastMessage.senderId),
+                profileByUser.get(clearedLastMessage.senderId),
               ),
-              createdAt: lastMessage.createdAt.toISOString(),
-              reactions: reactionsByMessage.get(lastMessage.id) ?? [],
+              createdAt: clearedLastMessage.createdAt.toISOString(),
+              editedAt: clearedLastMessage.editedAt
+                ? clearedLastMessage.editedAt.toISOString()
+                : null,
+              reactions: reactionsByMessage.get(clearedLastMessage.id) ?? [],
               // `lastMessagesByConversation` never returns a soft-deleted row.
               deletedAt: null,
+              // Conversation-list previews don't resolve reply quotes — only
+              // the message-thread view (`toMessageResponses`) does.
+              replyTo: null,
             }
           : null,
         unreadCount: unreadByConvo.get(convo.id) ?? 0,
         // `conversations` has no updated_at column (schema is migration-owned
         // and this workstream adds none), so last activity is derived: the
         // newest message, or the thread's own creation for an empty thread.
-        updatedAt: (lastMessage?.createdAt ?? convo.createdAt).toISOString(),
+        updatedAt: (
+          clearedLastMessage?.createdAt ?? convo.createdAt
+        ).toISOString(),
         otherLastReadAt: first?.lastReadAt?.toISOString() ?? null,
         otherParticipantId: first?.userId ?? null,
         isOfficial: convo.isOfficial,
@@ -217,6 +255,7 @@ export class MessagingService {
       .where('m.conversation_id IN (:...convoIds)', { convoIds })
       .andWhere('m.sender_id != :userId', { userId })
       .andWhere('(p.last_read_at IS NULL OR m.created_at > p.last_read_at)')
+      .andWhere('(p.cleared_at IS NULL OR m.created_at > p.cleared_at)')
       .groupBy('m.conversation_id')
       .getRawMany<{ conversationId: string; count: string }>();
     return new Map(rows.map((r) => [r.conversationId, Number(r.count)]));
@@ -270,7 +309,7 @@ export class MessagingService {
       cursor?: string;
     },
   ): Promise<MessageResponse[]> {
-    await this.requireParticipant(conversationId, userId);
+    const participant = await this.requireParticipant(conversationId, userId);
     const limit = Math.min(opts.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
     // An explicit `before`/`beforeId` wins; otherwise decode the frontend's
     // opaque `cursor` onto the same (createdAt, id) keyset predicate. A
@@ -288,6 +327,14 @@ export class MessagingService {
     const qb = this.messages
       .createQueryBuilder('m')
       .where('m.conversation_id = :id', { id: conversationId });
+    if (participant.clearedAt) {
+      // History is floored at the caller's clear point: messages at-or-before
+      // it don't exist for them (WhatsApp "cleared" semantics). The other
+      // participant, with their own (or no) clearedAt, still sees everything.
+      qb.andWhere('m.created_at > :clearedAt', {
+        clearedAt: participant.clearedAt.toISOString(),
+      });
+    }
     if (before) {
       if (beforeId) {
         // Composite keyset cursor: strictly "older" than (before, beforeId) in
@@ -334,8 +381,31 @@ export class MessagingService {
     if (!rows.length) {
       return [];
     }
-    const senderIds = [...new Set(rows.map((m) => m.senderId))];
     const messageIds = rows.map((m) => m.id);
+    // Reply parents are fetched `withDeleted` so a soft-deleted original still
+    // resolves to a "deleted" quote rather than silently vanishing (see
+    // `buildReplyTo`). Their FK is `ON DELETE SET NULL`, so a hard-removed
+    // parent just leaves `replyToId` absent from `parentById` — also handled
+    // as `deleted: true`.
+    const replyIds = [
+      ...new Set(rows.map((m) => m.replyToId).filter((id): id is string => Boolean(id))),
+    ];
+    const parents = replyIds.length
+      ? await this.messages.find({
+          where: { id: In(replyIds) },
+          withDeleted: true,
+        })
+      : [];
+    const parentById = new Map(parents.map((parent) => [parent.id, parent]));
+    // Sender profiles must cover both the rows' own senders AND the reply
+    // parents' senders, so `buildReplyTo` can resolve a quoted message's
+    // author name even when that author never sent anything in this page.
+    const senderIds = [
+      ...new Set([
+        ...rows.map((m) => m.senderId),
+        ...parents.map((parent) => parent.senderId),
+      ]),
+    ];
     const [senders, reactionsByMessage] = await Promise.all([
       this.profiles.find({ where: { userId: In(senderIds) } }),
       this.reactionSummariesByMessage(messageIds, viewerId),
@@ -352,8 +422,10 @@ export class MessagingService {
         body: isDeleted ? '' : m.body,
         sender: requireAuthorSummary(profileByUser.get(m.senderId)),
         createdAt: m.createdAt.toISOString(),
+        editedAt: m.editedAt ? m.editedAt.toISOString() : null,
         reactions: isDeleted ? [] : (reactionsByMessage.get(m.id) ?? []),
         deletedAt: m.deletedAt ? m.deletedAt.toISOString() : null,
+        replyTo: buildReplyTo(m.replyToId, parentById, profileByUser),
       };
     });
   }
@@ -362,6 +434,7 @@ export class MessagingService {
     conversationId: string,
     userId: string,
     body: string,
+    replyToId?: string,
   ): Promise<MessageResponse> {
     await this.requireParticipant(conversationId, userId);
     const convo = await this.conversations.findOne({
@@ -383,10 +456,26 @@ export class MessagingService {
         );
       }
     }
+    if (replyToId) {
+      // The parent must live in THIS conversation — otherwise a participant
+      // of conversation A could reply-quote a message that only exists in
+      // conversation B.
+      const parent = await this.messages.findOne({
+        where: { id: replyToId, conversationId },
+      });
+      if (!parent) {
+        throw new NotFoundException('Replied-to message not found');
+      }
+    }
     // `postMessage` stays on the internal `MessageView` — it is also the
     // MESSAGE_CREATED event payload and backs `POST /messages/request`. Only
     // the HTTP/WS send path is mapped to the frontend contract.
-    const view = await this.postMessage(conversationId, userId, body);
+    const view = await this.postMessage(
+      conversationId,
+      userId,
+      body,
+      replyToId,
+    );
     const [response] = await this.toMessageResponses([view], userId);
     return response;
   }
@@ -412,6 +501,28 @@ export class MessagingService {
       userId,
       lastReadAt,
     } satisfies MessageReadEvent);
+    return { ok: true };
+  }
+
+  /**
+   * Delete a conversation "for me only" (WhatsApp-style): stamp this
+   * participant's `clearedAt` with the DB clock. Reads then hide the thread and
+   * every message at-or-before that instant FOR THIS USER; the other
+   * participant is untouched. A later incoming message (createdAt > clearedAt)
+   * naturally resurfaces the thread with fresh history only. Idempotent — a
+   * repeat delete just re-stamps a slightly later `clearedAt`, still hiding
+   * everything older. Uses now() (not new Date()) to stay clock-comparable to
+   * message timestamps, mirroring markRead.
+   */
+  async clearConversation(
+    conversationId: string,
+    userId: string,
+  ): Promise<{ ok: true }> {
+    await this.requireParticipant(conversationId, userId);
+    await this.participants.update(
+      { conversationId, userId },
+      { clearedAt: () => 'now()' },
+    );
     return { ok: true };
   }
 
@@ -527,6 +638,46 @@ export class MessagingService {
   }
 
   /**
+   * Edit a message's `body` in place. Author-only, within a 15-minute window
+   * of `createdAt`, and only while the message is not (soft-)deleted. Stamps
+   * `editedAt` and emits `MESSAGE_UPDATED` so live sockets in the conversation
+   * see the new body — mirrors `deleteMessage`'s guard shape but is stricter:
+   * this is not idempotent (a repeat call keeps overwriting the body/edited
+   * timestamp) and the edit window is enforced on the server as the authority,
+   * even though the client also hides the Edit action past 15 minutes.
+   */
+  async editMessage(
+    conversationId: string,
+    messageId: string,
+    userId: string,
+    body: string,
+  ): Promise<MessageResponse> {
+    await this.requireParticipant(conversationId, userId);
+    const message = await this.messages.findOne({
+      where: { id: messageId, conversationId },
+    });
+    if (!message || message.deletedAt) {
+      throw new NotFoundException('Message not found');
+    }
+    if (message.senderId !== userId) {
+      throw new ForbiddenException('You can only edit your own messages');
+    }
+    if (Date.now() - message.createdAt.getTime() > EDIT_WINDOW_MS) {
+      throw new ForbiddenException('The edit window has expired');
+    }
+    message.body = body;
+    message.editedAt = new Date();
+    const saved = await this.messages.save(message);
+    const view = toMessageView(saved);
+    this.eventEmitter.emit(MESSAGE_UPDATED, {
+      conversationId,
+      message: view,
+    } satisfies MessageUpdatedEvent);
+    const [response] = await this.toMessageResponses([view], userId);
+    return response;
+  }
+
+  /**
    * `POST /conversations` — create-or-return the DM with `recipientHandle`
    * (this backend's `slug`). Thin wrapper over the same
    * `getOrCreateConversation` helper `messageRequest` uses, minus the
@@ -571,19 +722,34 @@ export class MessagingService {
     userId: string,
     otherUserId: string,
   ): Promise<ConversationResponse> {
-    const [profiles, lastByConvo, unreadByConvo, otherParticipantRow] =
-      await Promise.all([
-        this.profiles.find({ where: { userId: In([userId, otherUserId]) } }),
-        this.lastMessagesByConversation([convo.id]),
-        this.unreadCountsByConversation([convo.id], userId),
-        this.participants.findOne({
-          where: { conversationId: convo.id, userId: otherUserId },
-        }),
-      ]);
+    const [
+      profiles,
+      lastByConvo,
+      unreadByConvo,
+      otherParticipantRow,
+      callerParticipantRow,
+    ] = await Promise.all([
+      this.profiles.find({ where: { userId: In([userId, otherUserId]) } }),
+      this.lastMessagesByConversation([convo.id]),
+      this.unreadCountsByConversation([convo.id], userId),
+      this.participants.findOne({
+        where: { conversationId: convo.id, userId: otherUserId },
+      }),
+      this.participants.findOne({
+        where: { conversationId: convo.id, userId },
+      }),
+    ]);
     const profileByUser = new Map(profiles.map((p) => [p.userId, p]));
     const lastMessage = lastByConvo.get(convo.id) ?? null;
+    const clearedAt = callerParticipantRow?.clearedAt ?? null;
+    // Mirror listConversations: a last message at-or-before the caller's clear
+    // point does not exist for them, so it must not appear in the preview.
+    const clearedLastMessage =
+      clearedAt && lastMessage && lastMessage.createdAt <= clearedAt
+        ? null
+        : lastMessage;
     const reactionsByMessage = await this.reactionSummariesByMessage(
-      lastMessage ? [lastMessage.id] : [],
+      clearedLastMessage ? [clearedLastMessage.id] : [],
       userId,
     );
 
@@ -591,22 +757,30 @@ export class MessagingService {
       id: convo.id,
       type: convo.isOfficial ? 'group' : 'dm',
       otherParticipant: toAuthorSummary(profileByUser.get(otherUserId)),
-      lastMessage: lastMessage
+      lastMessage: clearedLastMessage
         ? {
-            id: lastMessage.id,
+            id: clearedLastMessage.id,
             conversationId: convo.id,
-            body: lastMessage.body,
+            body: clearedLastMessage.body,
             sender: requireAuthorSummary(
-              profileByUser.get(lastMessage.senderId),
+              profileByUser.get(clearedLastMessage.senderId),
             ),
-            createdAt: lastMessage.createdAt.toISOString(),
-            reactions: reactionsByMessage.get(lastMessage.id) ?? [],
+            createdAt: clearedLastMessage.createdAt.toISOString(),
+            editedAt: clearedLastMessage.editedAt
+              ? clearedLastMessage.editedAt.toISOString()
+              : null,
+            reactions: reactionsByMessage.get(clearedLastMessage.id) ?? [],
             // `lastMessagesByConversation` never returns a soft-deleted row.
             deletedAt: null,
+            // Conversation-list previews don't resolve reply quotes — only
+            // the message-thread view (`toMessageResponses`) does.
+            replyTo: null,
           }
         : null,
       unreadCount: unreadByConvo.get(convo.id) ?? 0,
-      updatedAt: (lastMessage?.createdAt ?? convo.createdAt).toISOString(),
+      updatedAt: (
+        clearedLastMessage?.createdAt ?? convo.createdAt
+      ).toISOString(),
       otherLastReadAt: otherParticipantRow?.lastReadAt?.toISOString() ?? null,
       otherParticipantId: otherParticipantRow?.userId ?? null,
     };
@@ -740,9 +914,15 @@ export class MessagingService {
     conversationId: string,
     senderId: string,
     body: string,
+    replyToId?: string,
   ): Promise<MessageView> {
     const saved = await this.messages.save(
-      this.messages.create({ conversationId, senderId, body }),
+      this.messages.create({
+        conversationId,
+        senderId,
+        body,
+        replyToId: replyToId ?? null,
+      }),
     );
     const view = toMessageView(saved);
     // Single internal write path; the Phase 7b gateway broadcasts on this event.

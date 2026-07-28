@@ -47,6 +47,7 @@ const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   [NotificationType.VouchReceived]: 'voucherId',
   [NotificationType.IntroductionMade]: 'requesterId',
   [NotificationType.EventInvite]: 'inviterId',
+  [NotificationType.Mention]: 'actorId',
 };
 
 /** The acting member's user id for a notification, or `null` when its type

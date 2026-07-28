@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
 import { ForumPostEdit } from './entities/forum-post-edit.entity';
@@ -27,6 +28,10 @@ import { ForumThreadsService } from './forum-threads.service';
     // muted authors. Plain import, no `forwardRef`: `SocialModule` imports only
     // `UsersModule` + `ReportsModule`, neither of which reaches `ForumModule`.
     SocialModule,
+    // `NotificationsService` — `@mention` fan-out on reply-create. Plain
+    // import, no `forwardRef`: `NotificationsModule` does not import
+    // `ForumModule`.
+    NotificationsModule,
   ],
   controllers: [ForumController],
   providers: [ForumThreadsService, ForumPostsService],

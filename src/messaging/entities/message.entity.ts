@@ -22,6 +22,10 @@ export class Message {
   @Column({ type: 'text' })
   body: string;
 
+  @Index('IDX_messages_reply_to_id')
+  @Column({ type: 'uuid', nullable: true })
+  replyToId: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 

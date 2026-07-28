@@ -22,5 +22,6 @@ import { PresenceService } from './presence.service';
     }),
   ],
   providers: [ChatGateway, PresenceService],
+  exports: [PresenceService],
 })
 export class ChatModule {}

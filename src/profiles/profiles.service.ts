@@ -550,10 +550,19 @@ export class ProfilesService {
         break;
       case MemberSort.MostVouched:
         // Correlated count of vouches received; ties fall back to name order.
-        qb.orderBy(
+        // The count is added as an aliased select and ordered by that alias
+        // rather than being passed to `orderBy` as a raw subquery: this query
+        // paginates over a join, and on that path TypeORM rewrites everything
+        // into a DISTINCT-id subquery, re-parsing each ORDER BY term as
+        // `alias.column`. A raw subquery contains dots, so it gets mistaken for
+        // an alias ("alias was not found. Maybe you forgot to join it?"). A
+        // dot-free alias sidesteps the parser.
+        qb.addSelect(
           '(SELECT COUNT(*) FROM vouches vc WHERE vc.vouchee_id = p.user_id AND vc.withdrawn_at IS NULL)',
-          'DESC',
-        ).addOrderBy('p.firstName', 'ASC');
+          'received_vouch_count',
+        )
+          .orderBy('received_vouch_count', 'DESC')
+          .addOrderBy('p.firstName', 'ASC');
         break;
       case MemberSort.ClosestMutuals: {
         // Rank by how many of the viewer's own accepted connections each
@@ -576,14 +585,23 @@ export class ProfilesService {
           viewerConnectionIds.forEach((id, index) => {
             parameters[`mutual${index}`] = id;
           });
-          qb.orderBy(
+          // Rank via an aliased scalar subquery rather than a raw ORDER BY
+          // expression: this query paginates over a join, so TypeORM rewrites it
+          // into a DISTINCT-id subquery and re-parses each ORDER BY term as
+          // `alias.column`. A raw subquery's dots (mc.status, p.user_id) get
+          // mistaken for an alias and it throws "alias was not found". Selecting
+          // the count under a dot-free alias and ordering by that alias avoids
+          // the parser entirely; the count query resets its select, so
+          // getManyAndCount stays unaffected.
+          qb.addSelect(
             `(SELECT COUNT(*) FROM connections mc
                 WHERE mc.status = :mutualAccepted
                   AND ((mc.requester_id = p.user_id AND mc.addressee_id IN (${placeholders}))
                     OR (mc.addressee_id = p.user_id AND mc.requester_id IN (${placeholders}))))`,
-            'DESC',
+            'mutual_connection_count',
           )
             .setParameters(parameters)
+            .orderBy('mutual_connection_count', 'DESC')
             .addOrderBy('p.joinedAt', 'DESC');
         } else {
           qb.orderBy('p.joinedAt', 'DESC');

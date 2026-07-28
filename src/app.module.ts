@@ -11,6 +11,7 @@ import appConfig from './config/app.config';
 import authConfig from './config/auth.config';
 import databaseConfig from './config/database.config';
 import muxConfig from './config/mux.config';
+import pushConfig from './config/push.config';
 import storageConfig from './config/storage.config';
 import { validate } from './config/env.validation';
 import { AuthModule } from './auth/auth.module';
@@ -41,6 +42,7 @@ import { AdminOverviewModule } from './admin-overview/admin-overview.module';
 import { AdminBotsModule } from './admin-bots/admin-bots.module';
 import { AdminHousingModule } from './admin-housing/admin-housing.module';
 import { PlatformStaffModule } from './platform-staff/platform-staff.module';
+import { PushModule } from './push/push.module';
 import { EventsModule } from './events/events.module';
 import { JobsModule } from './jobs/jobs.module';
 import { WorkshopsModule } from './workshops/workshops.module';
@@ -86,7 +88,14 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     ConfigModule.forRoot({
       isGlobal: true,
       cache: true,
-      load: [appConfig, databaseConfig, authConfig, storageConfig, muxConfig],
+      load: [
+        appConfig,
+        databaseConfig,
+        authConfig,
+        storageConfig,
+        muxConfig,
+        pushConfig,
+      ],
       validate,
     }),
     LoggerModule.forRoot({
@@ -191,6 +200,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     OrgTiersModule,
     VolunteeringModule,
     NotificationsModule,
+    PushModule,
     StorageModule,
     CinemaModule,
     HealthModule,

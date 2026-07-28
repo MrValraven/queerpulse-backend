@@ -11,6 +11,7 @@ export interface MessageView {
   conversationId: string;
   senderId: string;
   body: string;
+  replyToId: string | null;
   createdAt: Date;
   editedAt: Date | null;
   deletedAt: Date | null;
@@ -22,6 +23,7 @@ export function toMessageView(m: Message): MessageView {
     conversationId: m.conversationId,
     senderId: m.senderId,
     body: m.body,
+    replyToId: m.replyToId,
     createdAt: m.createdAt,
     editedAt: m.editedAt,
     deletedAt: m.deletedAt,
@@ -87,11 +89,56 @@ export interface MessageResponse {
   body: string;
   sender: AuthorSummary;
   createdAt: string;
+  /** ISO timestamp of the last edit (author, within the edit window), else null. */
+  editedAt: string | null;
   reactions: ReactionSummary[];
   /** ISO timestamp of a soft-delete (author or platform staff), else null. A
    *  tombstoned message keeps its id/sender/createdAt but `body` is blanked
    *  and `reactions` is emptied — see `toMessageResponses`. */
   deletedAt: string | null;
+  /** The quoted message this one replies to, resolved server-side. Null if not a reply. */
+  replyTo: {
+    id: string;
+    snippet: string;
+    senderName: string;
+    deleted: boolean;
+  } | null;
+}
+
+/**
+ * Builds `MessageResponse.replyTo` for a single message from the batch-fetched
+ * reply parents/sender profiles in `toMessageResponses`. `null` when the
+ * message isn't a reply. Otherwise: `deleted` is true when the parent itself
+ * has since been soft-deleted OR is missing entirely (e.g. hard-removed by a
+ * since-reverted migration) — in both cases `snippet` is blanked rather than
+ * leaking stale content, and `senderName` falls back to "Someone" when the
+ * parent's sender profile can't be resolved.
+ */
+export function buildReplyTo(
+  replyToId: string | null,
+  parentById: Map<
+    string,
+    Pick<Message, 'id' | 'body' | 'senderId' | 'deletedAt'>
+  >,
+  profileByUser: Map<string, Profile>,
+): MessageResponse['replyTo'] {
+  if (!replyToId) {
+    return null;
+  }
+  const parent = parentById.get(replyToId);
+  const deleted = Boolean(!parent || parent.deletedAt);
+  const parentSenderProfile = parent
+    ? profileByUser.get(parent.senderId)
+    : undefined;
+  return {
+    id: replyToId,
+    snippet: parent && !deleted ? parent.body.slice(0, 120) : '',
+    senderName: parentSenderProfile
+      ? `${parentSenderProfile.firstName} ${parentSenderProfile.lastName}`.trim() ||
+        'Someone'
+      : 'Someone',
+    deleted,
+  };
 }
 
 export interface ConversationResponse {

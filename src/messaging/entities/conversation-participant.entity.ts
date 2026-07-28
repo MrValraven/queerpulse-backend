@@ -17,6 +17,9 @@ export class ConversationParticipant {
   @Column({ type: 'timestamptz', nullable: true })
   lastReadAt: Date | null;
 
+  @Column({ type: 'timestamptz', nullable: true })
+  clearedAt: Date | null;
+
   @Column({ type: 'boolean', default: false })
   muted: boolean;
 }

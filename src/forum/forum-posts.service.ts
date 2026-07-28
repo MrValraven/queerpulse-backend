@@ -12,6 +12,9 @@ import {
   encodeCursor,
 } from '../common/cursor-pagination';
 import { MemberLookup } from '../common/member-ref';
+import { extractMentionSlugs } from '../common/mentions';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole } from '../users/entities/user.entity';
@@ -57,6 +60,7 @@ export class ForumPostsService {
     private readonly blockFilter: BlockFilterService,
     @InjectRepository(ForumPostEdit)
     private readonly edits: Repository<ForumPostEdit>,
+    private readonly notifications: NotificationsService,
   ) {}
 
   // GET /forum/threads/:slug/posts?cursor= — OP + replies, oldest-first.
@@ -123,6 +127,14 @@ export class ForumPostsService {
       }),
     );
     await this.threadsService.markActivity(thread.id);
+
+    await this.notifyMentions(body, user.userId, {
+      actorId: user.userId,
+      source: 'forum',
+      threadSlug,
+      postId: saved.id,
+      excerpt: body.slice(0, 140),
+    });
 
     const authors = await new MemberLookup(this.profiles).byUserIds([
       user.userId,
@@ -255,6 +267,36 @@ export class ForumPostsService {
       throw new ForbiddenException(
         'Only the author or a moderator can do that',
       );
+    }
+  }
+
+  /** Best-effort `@mention` fan-out. Resolves mentioned slugs to active users,
+   *  drops the author, and creates one `mention` notification per recipient
+   *  (block/mute filtering + socket push handled by the notifications service).
+   *  Any failure is swallowed — a mention side effect must never fail a reply. */
+  private async notifyMentions(
+    body: string,
+    authorUserId: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      const slugs = extractMentionSlugs(body);
+      if (!slugs.length) return;
+      const bySlug = await new MemberLookup(this.profiles).userIdsForSlugs(
+        slugs,
+      );
+      const recipients = [...bySlug.values()].filter(
+        (userId) => userId !== authorUserId,
+      );
+      if (!recipients.length) return;
+      await this.notifications.createForRecipients(
+        recipients,
+        NotificationType.Mention,
+        payload,
+        authorUserId,
+      );
+    } catch {
+      // Intentionally ignored — see doc comment.
     }
   }
 

@@ -19,6 +19,7 @@ export enum NotificationType {
   IntroductionMade = 'introduction_made',
   PersonaEndorsed = 'persona_endorsed',
   PersonaFollowed = 'persona_followed',
+  Mention = 'mention',
 }
 
 @Entity('notifications')

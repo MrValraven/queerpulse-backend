@@ -1,5 +1,6 @@
 import {
   IsBoolean,
+  IsOptional,
   IsString,
   IsUUID,
   MaxLength,
@@ -19,6 +20,10 @@ export class SendMessagePayload {
   @MinLength(1)
   @MaxLength(5000)
   body: string;
+
+  @IsOptional()
+  @IsUUID('4')
+  replyToId?: string;
 }
 
 export class TypingPayload {

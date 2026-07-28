@@ -22,10 +22,12 @@ import {
   MESSAGE_DELETED,
   MESSAGE_READ,
   MESSAGE_REACTION,
+  MESSAGE_UPDATED,
   MessageCreatedEvent,
   MessageDeletedEvent,
   MessageReadEvent,
   MessageReactionEvent,
+  MessageUpdatedEvent,
 } from '../messaging/messaging.events';
 import { MessagingService } from '../messaging/messaging.service';
 import {
@@ -239,7 +241,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       throw new WsException('You are sending messages too quickly');
     }
     // Single write path: persists + emits MESSAGE_CREATED → broadcast below.
-    await this.messaging.sendMessage(data.conversationId, userId, data.body);
+    await this.messaging.sendMessage(
+      data.conversationId,
+      userId,
+      data.body,
+      data.replyToId,
+    );
   }
 
   @SubscribeMessage('typing')
@@ -283,6 +290,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @OnEvent(MESSAGE_CREATED)
   handleMessageCreated(payload: MessageCreatedEvent): void {
     this.namespace?.to(payload.conversationId).emit('message:new', payload);
+  }
+
+  @OnEvent(MESSAGE_UPDATED)
+  handleMessageUpdated(payload: MessageUpdatedEvent): void {
+    this.namespace
+      ?.to(payload.conversationId)
+      .emit('message:updated', payload);
   }
 
   @OnEvent(MESSAGE_READ)
