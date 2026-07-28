@@ -5,12 +5,12 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { randomBytes } from 'node:crypto';
 import {
   DataSource,
   EntityManager,
   MoreThanOrEqual,
-  QueryFailedError,
   Repository,
 } from 'typeorm';
 import { User, UserStatus } from '../users/entities/user.entity';
@@ -56,13 +56,6 @@ function nextMonthStart(now: Date): Date {
 export interface PageParams {
   limit?: number;
   offset?: number;
-}
-
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    err instanceof QueryFailedError &&
-    (err.driverError as { code?: string })?.code === '23505'
-  );
 }
 
 // The minimal payload returned by POST /invites. The frontend derives the share

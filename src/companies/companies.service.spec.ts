@@ -6,7 +6,7 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import { JobsService } from '../jobs/jobs.service';
+import { CompanyOpenRolesService } from '../jobs/company-open-roles.service';
 import { Profile } from '../users/entities/profile.entity';
 import { CompaniesService } from './companies.service';
 import { CompanyReview } from './entities/company-review.entity';
@@ -61,7 +61,10 @@ describe('CompaniesService', () => {
     find: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
-  let jobsService: { listOpenForCompany: jest.Mock };
+  let openRoles: {
+    openRoleCountsForMany: jest.Mock;
+    listForCompany: jest.Mock;
+  };
 
   beforeEach(async () => {
     companies = {
@@ -95,11 +98,12 @@ describe('CompaniesService', () => {
       find: jest.fn().mockResolvedValue([]),
       createQueryBuilder: jest.fn(() => qbStub()),
     };
-    // `getOpenRoles` now delegates to `JobsService.listOpenForCompany` (the
-    // Jobs wiring) — every test in this file exercises companies in
-    // isolation, so this always resolves empty unless a test says otherwise.
-    jobsService = {
-      listOpenForCompany: jest.fn().mockResolvedValue([]),
+    // Open roles now come from `CompanyOpenRolesService` (Job-repo only, no
+    // `JobsService`) — every test in this file exercises companies in
+    // isolation, so counts/lists resolve empty unless a test says otherwise.
+    openRoles = {
+      openRoleCountsForMany: jest.fn().mockResolvedValue(new Map()),
+      listForCompany: jest.fn().mockResolvedValue([]),
     };
 
     // `manager.getRepository(Entity)` routes to the same mocks the outer
@@ -130,7 +134,7 @@ describe('CompaniesService', () => {
         { provide: getRepositoryToken(CompanyReview), useValue: reviews },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: DataSource, useValue: dataSource },
-        { provide: JobsService, useValue: jobsService },
+        { provide: CompanyOpenRolesService, useValue: openRoles },
       ],
     }).compile();
     service = module.get(CompaniesService);

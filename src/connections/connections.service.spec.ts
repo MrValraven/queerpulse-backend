@@ -7,13 +7,13 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { QueryFailedError } from 'typeorm';
+import { In, QueryFailedError } from 'typeorm';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { CONNECTION_ACCEPTED } from './connection.events';
 import { Connection, ConnectionStatus } from './entities/connection.entity';
-import { Vouch } from '../vouch/entities/vouch.entity';
+import { VouchService } from '../vouch/vouch.service';
 import { ConnectionsService } from './connections.service';
 
 const uniqueViolation = () =>
@@ -40,9 +40,13 @@ describe('ConnectionsService', () => {
     delete: jest.Mock;
     find: jest.Mock;
     findAndCount: jest.Mock;
+    count: jest.Mock;
   };
   let profiles: { findOne: jest.Mock; find: jest.Mock };
-  let vouches: { find: jest.Mock };
+  let vouchService: {
+    getActiveVoucheeIds: jest.Mock;
+    getVouchDirections: jest.Mock;
+  };
   let emitter: { emit: jest.Mock };
   let blockFilter: { isBlockedEitherWay: jest.Mock };
 
@@ -55,9 +59,16 @@ describe('ConnectionsService', () => {
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
       find: jest.fn().mockResolvedValue([]),
       findAndCount: jest.fn().mockResolvedValue([[], 0]),
+      count: jest.fn().mockResolvedValue(0),
     };
     profiles = { findOne: jest.fn(), find: jest.fn().mockResolvedValue([]) };
-    vouches = { find: jest.fn().mockResolvedValue([]) };
+    vouchService = {
+      getActiveVoucheeIds: jest.fn().mockResolvedValue([]),
+      getVouchDirections: jest.fn().mockResolvedValue({
+        youVouched: new Set<string>(),
+        vouchedForYou: new Set<string>(),
+      }),
+    };
     emitter = { emit: jest.fn() };
     blockFilter = { isBlockedEitherWay: jest.fn().mockResolvedValue(false) };
     const module: TestingModule = await Test.createTestingModule({
@@ -65,7 +76,7 @@ describe('ConnectionsService', () => {
         ConnectionsService,
         { provide: getRepositoryToken(Connection), useValue: connections },
         { provide: getRepositoryToken(Profile), useValue: profiles },
-        { provide: getRepositoryToken(Vouch), useValue: vouches },
+        { provide: VouchService, useValue: vouchService },
         { provide: EventEmitter2, useValue: emitter },
         { provide: BlockFilterService, useValue: blockFilter },
       ],
@@ -542,15 +553,43 @@ describe('ConnectionsService', () => {
     });
 
     it('vouched: filters accepted connections to members the user vouched for, with an honest total', async () => {
-      connections.find.mockResolvedValue([
-        { id: 'x', requesterId: 'me', addresseeId: 'a', status: 'accepted' },
-        { id: 'y', requesterId: 'me', addresseeId: 'b', status: 'accepted' },
+      // VouchService owns "who did I vouch for"; the intersection with accepted
+      // connections is pushed into `findAndCount` (bounded + server-side total).
+      vouchService.getActiveVoucheeIds.mockResolvedValue(['a']);
+      connections.findAndCount.mockResolvedValue([
+        [{ id: 'x', requesterId: 'me', addresseeId: 'a', status: 'accepted' }],
+        1,
       ]);
-      vouches.find.mockResolvedValue([{ voucheeId: 'a' }]);
       const res = await service.list('me', 'vouched');
+      expect(vouchService.getActiveVoucheeIds).toHaveBeenCalledWith('me');
+      expect(connections.findAndCount).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: [
+            {
+              requesterId: 'me',
+              addresseeId: In(['a']),
+              status: ConnectionStatus.Accepted,
+            },
+            {
+              addresseeId: 'me',
+              requesterId: In(['a']),
+              status: ConnectionStatus.Accepted,
+            },
+          ],
+          take: 20,
+          skip: 0,
+        }),
+      );
       expect(res.total).toBe(1);
       expect(res.items).toHaveLength(1);
       expect(res.items[0].id).toBe('x');
+    });
+
+    it('vouched: short-circuits to an empty page when the viewer has vouched for nobody', async () => {
+      vouchService.getActiveVoucheeIds.mockResolvedValue([]);
+      const res = await service.list('me', 'vouched');
+      expect(connections.findAndCount).not.toHaveBeenCalled();
+      expect(res).toEqual({ items: [], total: 0, page: 1, pageSize: 20 });
     });
 
     it('includes the introducer member view on incoming requests', async () => {
@@ -596,15 +635,16 @@ describe('ConnectionsService', () => {
         ],
         1,
       ]);
-      // First find: the viewer is accepted-connected to x and a.
-      // Second find: `a` is also connected to x — the one shared mutual.
+      // First find: every accepted edge touching the page's members — `a` is
+      // connected to `x`, so `x` is the candidate mutual to test.
+      // Second find: of that candidate, `x` is also one of the viewer's accepted
+      // connections — the one shared mutual.
       connections.find
         .mockResolvedValueOnce([
-          { requesterId: 'me', addresseeId: 'x' },
-          { requesterId: 'me', addresseeId: 'a' },
+          { requesterId: 'a', addresseeId: 'x', status: 'accepted' },
         ])
         .mockResolvedValueOnce([
-          { requesterId: 'a', addresseeId: 'x', status: 'accepted' },
+          { requesterId: 'me', addresseeId: 'x', status: 'accepted' },
         ]);
       profiles.find.mockResolvedValue([
         { userId: 'a', slug: 'a', firstName: 'A', lastName: 'Ok' },
@@ -631,10 +671,11 @@ describe('ConnectionsService', () => {
         ],
         1,
       ]);
-      vouches.find.mockResolvedValue([
-        { voucherId: 'me', voucheeId: 'a' },
-        { voucherId: 'a', voucheeId: 'me' },
-      ]);
+      // Vouches in both directions between the viewer and `a` → a mutual badge.
+      vouchService.getVouchDirections.mockResolvedValue({
+        youVouched: new Set<string>(['a']),
+        vouchedForYou: new Set<string>(['a']),
+      });
       profiles.find.mockResolvedValue([
         { userId: 'a', slug: 'a', firstName: 'A', lastName: 'Ok' },
       ]);

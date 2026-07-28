@@ -2,12 +2,11 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
-  forwardRef,
-  Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { In, Repository } from 'typeorm';
 import {
   CompaniesService,
@@ -39,11 +38,6 @@ import {
 // Postgres unique-violation SQLSTATE. Mirrors `CompaniesService`'s identical
 // file-local helper (not shared/exported, kept consistent with that
 // precedent).
-function isUniqueViolation(err: unknown): boolean {
-  const e = err as { code?: string; driverError?: { code?: string } };
-  return e?.code === '23505' || e?.driverError?.code === '23505';
-}
-
 export interface CreateJobInput {
   title: string;
   category: string;
@@ -121,13 +115,11 @@ export class JobsService {
     @InjectRepository(JobApplication)
     private readonly applications: Repository<JobApplication>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
-    // Circular: `CompaniesService.getOpenRoles` calls back into
-    // `JobsService.listOpenForCompany`. Both modules already wrap each
-    // other's import in `forwardRef()` (see `companies.module.ts` /
-    // `jobs.module.ts`); this constructor injection needs the same
-    // `forwardRef()` treatment because the two *providers* — not just the
-    // two modules — depend on each other directly.
-    @Inject(forwardRef(() => CompaniesService))
+    // Resolve/authorize a company for job posting, create one inline, and
+    // batch-resolve company refs for job cards. This is now a one-directional
+    // dependency: `CompaniesService` no longer injects `JobsService` (it reads
+    // open roles through `CompanyOpenRolesService` instead), so no `forwardRef`
+    // is needed on either side.
     private readonly companiesService: CompaniesService,
   ) {}
 
@@ -354,25 +346,6 @@ export class JobsService {
     job.status = JobStatus.Closed;
     const saved = await this.jobs.save(job);
     return this.buildDetail(saved, posterId);
-  }
-
-  // What `CompaniesService.getOpenRoles` delegates to for
-  // `CompanyDetailDTO.openRoles` / `CompanyCardDTO.openRolesCount`. The
-  // single-`companyId` signature is fixed by the spec, so this resolves the
-  // company's own ref via `CompaniesService.companyRefsByIds` itself rather
-  // than requiring the (already-in-hand, on the caller's side) ref to be
-  // passed in — a minor redundant lookup traded for the simpler signature.
-  async listOpenForCompany(companyId: string): Promise<JobCardDTO[]> {
-    const rows = await this.jobs.find({
-      where: { companyId, status: JobStatus.Open },
-      order: { createdAt: 'DESC' },
-    });
-    if (!rows.length) return [];
-    const companyRefs = await this.companiesService.companyRefsByIds([
-      companyId,
-    ]);
-    const ref = companyRefs.get(companyId) ?? null;
-    return rows.map((j) => toJobCard(j, ref));
   }
 
   // UNIQUE per (job, applicant) — a repeat application surfaces as 23505,

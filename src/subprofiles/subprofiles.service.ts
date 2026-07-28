@@ -7,6 +7,7 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, In, IsNull, Not, Repository } from 'typeorm';
 import { normalizeHandle } from '../common/handles';
@@ -79,17 +80,11 @@ import {
 // single avatar cluster, not a paginated page.
 const ENDORSERS_LIST_CAP = 50;
 
-// Postgres unique-violation SQLSTATE (a duplicate handle races past the
-// partial unique index `UQ_subprofiles_handle`).
-const PG_UNIQUE_VIOLATION = '23505';
-
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    (err as { code?: string }).code === PG_UNIQUE_VIOLATION
-  );
-}
+// Hard upper bound on how many personas the authenticated `directory` browse
+// materialises in one go — matches `listPublicHandles`'s `take: 5000` so an
+// unbounded catalogue can never pull every published-unlinked-open persona
+// (plus its per-row social-count / tag fan-out) into one response.
+const DIRECTORY_RESULT_CAP = 5000;
 
 @Injectable()
 export class SubprofilesService {
@@ -441,9 +436,10 @@ export class SubprofilesService {
   // either way) — mirrors `replaceSocialLinks`'s delete-then-insert shape, but
   // with per-target existence/visibility/block checks `replaceSocialLinks`
   // doesn't need (a social-link platform is just a string, never a live
-  // entity). Bounded at `MAX_AFFILIATIONS` (12), so per-item lookups here are
-  // fine — the batched, N+1-sensitive path is the READ side
-  // (`resolveAffiliationsFor`), not this bounded write.
+  // entity). Though bounded at `MAX_AFFILIATIONS` (12), the resolution is
+  // batched — the same shape as the READ side (`resolveAffiliationsFor`): ONE
+  // events query, ONE communities query, and ONE block-filter lookup total,
+  // rather than a serial `findOne` + `isBlockedEitherWay` per item.
   async replaceAffiliations(
     userId: string,
     id: string,
@@ -467,41 +463,83 @@ export class SubprofilesService {
     // Resolve + validate every target before writing anything: existence,
     // public visibility (mirrors the criteria `EventsService`/
     // `CommunitiesService` use for their own public reads), and not
-    // block-filtered against this persona's owner.
+    // block-filtered against this persona's owner. Resolution is BATCHED (one
+    // events query, one communities query, one block-filter lookup) — the read
+    // side's `resolveAffiliationsFor` shape — rather than a serial `findOne` +
+    // `isBlockedEitherWay` per item.
+    const eventSlugs = [
+      ...new Set(
+        items
+          .filter((item) => item.targetType === 'event')
+          .map((item) => item.targetSlug),
+      ),
+    ];
+    const communitySlugs = [
+      ...new Set(
+        items
+          .filter((item) => item.targetType === 'community')
+          .map((item) => item.targetSlug),
+      ),
+    ];
+
+    const [eventRows, communityRows] = await Promise.all([
+      eventSlugs.length
+        ? this.events.find({ where: { slug: In(eventSlugs) } })
+        : Promise.resolve([]),
+      communitySlugs.length
+        ? this.communities.find({ where: { slug: In(communitySlugs) } })
+        : Promise.resolve([]),
+    ]);
+    const eventBySlug = new Map(eventRows.map((event) => [event.slug, event]));
+    const communityBySlug = new Map(
+      communityRows.map((community) => [community.slug, community]),
+    );
+
+    // Owners of the targets that pass existence + visibility — the only ones a
+    // block could still reject. Batched over the DISTINCT set (one query via
+    // `blockedUserIds`, which is block-either-way, same as `isBlockedEitherWay`
+    // and as the read side), not one lookup per item.
+    const ownerIdsToBlockCheck: string[] = [];
+    for (const event of eventRows) {
+      if (
+        event.status === EventStatus.Published &&
+        event.visibility !== EventVisibility.InviteOnly
+      ) {
+        ownerIdsToBlockCheck.push(event.hostId);
+      }
+    }
+    for (const community of communityRows) {
+      if (community.accessTier !== AccessTier.Private) {
+        ownerIdsToBlockCheck.push(community.ownerId);
+      }
+    }
+    const blockedOwnerIds = await this.blockFilter.blockedUserIds(
+      sp.userId,
+      ownerIdsToBlockCheck,
+    );
+
+    // Validate in memory, in item order, so the first invalid target still
+    // throws with its own label — behaviour-identical to the old serial loop.
     for (const item of items) {
       const label = `${item.targetType}:${item.targetSlug}`;
       if (item.targetType === 'event') {
-        const event = await this.events.findOne({
-          where: { slug: item.targetSlug },
-        });
+        const event = eventBySlug.get(item.targetSlug);
         if (
           !event ||
           event.status !== EventStatus.Published ||
-          event.visibility === EventVisibility.InviteOnly
+          event.visibility === EventVisibility.InviteOnly ||
+          blockedOwnerIds.has(event.hostId)
         ) {
           throw new BadRequestException(
             `Affiliation target not found or not visible: ${label}`,
           );
         }
-        if (await this.blockFilter.isBlockedEitherWay(sp.userId, event.hostId)) {
-          throw new BadRequestException(
-            `Affiliation target not found or not visible: ${label}`,
-          );
-        }
       } else {
-        const community = await this.communities.findOne({
-          where: { slug: item.targetSlug },
-        });
-        if (!community || community.accessTier === AccessTier.Private) {
-          throw new BadRequestException(
-            `Affiliation target not found or not visible: ${label}`,
-          );
-        }
+        const community = communityBySlug.get(item.targetSlug);
         if (
-          await this.blockFilter.isBlockedEitherWay(
-            sp.userId,
-            community.ownerId,
-          )
+          !community ||
+          community.accessTier === AccessTier.Private ||
+          blockedOwnerIds.has(community.ownerId)
         ) {
           throw new BadRequestException(
             `Affiliation target not found or not visible: ${label}`,
@@ -792,7 +830,7 @@ export class SubprofilesService {
       });
     }
 
-    qb.orderBy('sp.displayName', 'ASC');
+    qb.orderBy('sp.displayName', 'ASC').take(DIRECTORY_RESULT_CAP);
     const rows = await qb.getMany();
     const socialCountsById = await this.loadSocialCountsFor(
       rows.map((row) => row.id),

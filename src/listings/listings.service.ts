@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
@@ -27,11 +28,6 @@ import { ListingDTO, toListingDTO } from './listing-response';
 // Postgres unique-violation SQLSTATE. Mirrors `CompaniesService`'s/
 // `PartnersService`'s identical file-local helper (not shared/exported, kept
 // consistent with that precedent).
-function isUniqueViolation(err: unknown): boolean {
-  const e = err as { code?: string; driverError?: { code?: string } };
-  return e?.code === '23505' || e?.driverError?.code === '23505';
-}
-
 function normalizeSocial(input?: Partial<ListingSocial>): ListingSocial {
   return {
     instagram: input?.instagram ?? '',

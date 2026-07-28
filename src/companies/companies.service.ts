@@ -1,18 +1,17 @@
 import {
   ConflictException,
   ForbiddenException,
-  forwardRef,
-  Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, In, Repository } from 'typeorm';
+import { CompanyOpenRolesService } from '../jobs/company-open-roles.service';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { JobCardDTO, JobCompanyRef } from '../jobs/job-response';
-import { JobsService } from '../jobs/jobs.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
   CompanyCardDTO,
@@ -48,11 +47,6 @@ export interface CompanyWorkItemInput {
 // the QueryFailedError or on the wrapped driverError depending on the path.
 // Mirrors `CommunitiesService`'s identical helper (file-local there too, not
 // shared/exported — kept consistent with that precedent).
-function isUniqueViolation(err: unknown): boolean {
-  const e = err as { code?: string; driverError?: { code?: string } };
-  return e?.code === '23505' || e?.driverError?.code === '23505';
-}
-
 export interface CreateCompanyInput {
   nameText: string;
   tagline: string;
@@ -108,14 +102,12 @@ export class CompaniesService {
     private readonly reviews: Repository<CompanyReview>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly dataSource: DataSource,
-    // Circular: `JobsService.create`/`list`/`listOpenForCompany` call back
-    // into `CompaniesService` (`getCompanyForJobPosting`/`companyRefsByIds`).
-    // Both modules already wrap each other's import in `forwardRef()` (see
-    // `companies.module.ts` / `jobs.module.ts`); this constructor injection
-    // needs the same `forwardRef()` treatment because the two *providers* —
-    // not just the two modules — depend on each other directly.
-    @Inject(forwardRef(() => JobsService))
-    private readonly jobsService: JobsService,
+    // Open-role counts/lists for company cards + detail. Depends only on the
+    // `Job` repository (via `CompanyOpenRolesModule`), never on `JobsService`,
+    // so this direction of the old Companies <-> Jobs cycle is gone: no
+    // `forwardRef` needed here (`JobsService` still injects `CompaniesService`,
+    // but that edge is now one-directional).
+    private readonly openRoles: CompanyOpenRolesService,
   ) {}
 
   async create(
@@ -212,15 +204,15 @@ export class CompaniesService {
     return paginate(qb, page, async (rows) => {
       if (!rows.length) return [];
       const ids = rows.map((c) => c.id);
-      const aggregates = await this.reviewAggregatesForMany(ids);
-      const openRolesCounts = await Promise.all(
-        rows.map(async (c) => (await this.getOpenRoles(c.id)).length),
-      );
-      return rows.map((c, i) =>
+      const [aggregates, openRoleCounts] = await Promise.all([
+        this.reviewAggregatesForMany(ids),
+        this.openRoles.openRoleCountsForMany(ids),
+      ]);
+      return rows.map((c) =>
         toCompanyCard(
           c,
           aggregates.get(c.id) ?? EMPTY_REVIEW_AGGREGATES,
-          openRolesCounts[i],
+          openRoleCounts.get(c.id) ?? 0,
         ),
       );
     });
@@ -364,7 +356,7 @@ export class CompaniesService {
       this.reviewAggregatesFor(company.id),
       this.team.find({ where: { companyId: company.id } }),
       this.profiles.findOne({ where: { userId: company.ownerId } }),
-      this.getOpenRoles(company.id),
+      this.getOpenRoles(company),
     ]);
 
     const teamRefs = teamRows.length
@@ -423,12 +415,15 @@ export class CompaniesService {
     return result;
   }
 
-  // Delegates to `JobsService` (see the module's `forwardRef` wiring in
-  // `companies.module.ts`/`jobs.module.ts`) — every caller here already
-  // treats the result as `JobCardDTO[]`, passed through untouched for
-  // `CompanyDetailDTO.openRoles` / `CompanyCardDTO.openRolesCount`.
-  private async getOpenRoles(companyId: string): Promise<JobCardDTO[]> {
-    return this.jobsService.listOpenForCompany(companyId);
+  // Delegates to `CompanyOpenRolesService` (Job-repo only, no `JobsService`
+  // dependency). We already hold the `Company` entity, so we pass its ref down
+  // rather than have the open-roles service look the company up again — the
+  // result is the same `JobCardDTO[]` for `CompanyDetailDTO.openRoles`.
+  private async getOpenRoles(company: Company): Promise<JobCardDTO[]> {
+    return this.openRoles.listForCompany(company.id, {
+      slug: company.slug,
+      nameText: company.nameText,
+    });
   }
 
   // --- cross-domain accessors for JobsService ---

@@ -83,6 +83,9 @@ export class UploadsController {
       );
     }
     const key = `${kindSpec.prefix}/${user.userId}/${randomUUID()}${typeSpec.extension}`;
-    return this.storage.createPresignedUpload(key, contentType);
+    // Pass the declared size through so the presigned PUT pins `ContentLength`:
+    // storage then enforces the cap itself (the client can't PUT more bytes than
+    // it declared), rather than trusting the client-declared `byteSize` alone.
+    return this.storage.createPresignedUpload(key, contentType, byteSize);
   }
 }

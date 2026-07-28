@@ -1,6 +1,7 @@
 import { ConflictException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, QueryFailedError, Repository } from 'typeorm';
+import { isUniqueViolation } from '../common/db-errors';
+import { EntityManager, Repository } from 'typeorm';
 import { handleFormatError, normalizeHandle } from '../common/handles';
 import { Handle, HandleOwnerKind } from './entities/handle.entity';
 
@@ -15,13 +16,6 @@ export type HandleOwner =
 export interface HandleCheck {
   available: boolean;
   reason: 'invalid' | 'reserved' | 'taken' | null;
-}
-
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    err instanceof QueryFailedError &&
-    (err.driverError as { code?: string })?.code === '23505'
-  );
 }
 
 /**

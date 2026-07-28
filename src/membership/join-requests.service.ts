@@ -5,7 +5,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, QueryFailedError, Repository } from 'typeorm';
+import { isUniqueViolation } from '../common/db-errors';
+import { DataSource, In, Repository } from 'typeorm';
 import { CreateJoinRequestDto } from './dto/create-join-request.dto';
 import { Invite } from './entities/invite.entity';
 import { JoinRequest, JoinRequestStatus } from './entities/join-request.entity';
@@ -19,13 +20,6 @@ import {
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 
 const MIN_AGE_YEARS = 18;
-
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    err instanceof QueryFailedError &&
-    (err.driverError as { code?: string })?.code === '23505'
-  );
-}
 
 /**
  * Whole years elapsed between `dob` and `now`, calendar-correct (this year's

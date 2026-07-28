@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
@@ -26,11 +27,6 @@ import {
 
 // Postgres unique-violation SQLSTATE. Mirrors the file-local helper each
 // service (`ListingsService`, `CompaniesService`) keeps by convention.
-function isUniqueViolation(err: unknown): boolean {
-  const e = err as { code?: string; driverError?: { code?: string } };
-  return e?.code === '23505' || e?.driverError?.code === '23505';
-}
-
 /** Applies only the fields present on a PATCH body (mirrors
  * `ListingsService.applyUpdate`'s conditional-spread idiom). */
 function applyUpdate(

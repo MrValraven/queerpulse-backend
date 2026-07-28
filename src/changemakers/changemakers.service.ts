@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { Repository } from 'typeorm';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { Changemaker, ChangemakerStatus } from './entities/changemaker.entity';
@@ -25,11 +26,6 @@ import { UpdateDirectoryStatsDto } from './dto/update-directory-stats.dto';
 // Postgres unique-violation SQLSTATE. Mirrors `CompaniesService`'s/
 // `PartnersService`'s/`ListingsService`'s identical file-local helper (not
 // shared/exported, kept consistent with that precedent).
-function isUniqueViolation(err: unknown): boolean {
-  const e = err as { code?: string; driverError?: { code?: string } };
-  return e?.code === '23505' || e?.driverError?.code === '23505';
-}
-
 @Injectable()
 export class ChangemakersService {
   constructor(

@@ -84,6 +84,17 @@ describe('UploadsController', () => {
       },
     );
 
+    it('forwards the declared byteSize so the presign can pin content-length', async () => {
+      await controller.presign(user, {
+        kind: 'avatar',
+        contentType: 'image/png',
+        byteSize: 4096,
+      });
+      const [, , contentLength] = storage.createPresignedUpload.mock
+        .calls[0] as [string, string, number];
+      expect(contentLength).toBe(4096);
+    });
+
     it('returns the storage key rather than a public URL', async () => {
       const result = await controller.presign(user, {
         kind: 'avatar',

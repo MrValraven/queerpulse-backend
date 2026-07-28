@@ -56,6 +56,34 @@ describe('StorageService', () => {
       expect(result.uploadUrl).not.toContain('amazonaws.com');
     });
 
+    it('binds the byte count by signing content-length when a size is given', async () => {
+      const service = buildService();
+      const result = await service.createPresignedUpload(
+        'avatars/user-1/abc.jpg',
+        'image/jpeg',
+        1234,
+      );
+      // A signed `content-length` header means a client that PUTs more (or
+      // fewer) bytes than declared fails the signature — storage enforces the
+      // cap, not just the up-front client-declared `byteSize` check.
+      const signedHeaders = new URL(result.uploadUrl).searchParams.get(
+        'X-Amz-SignedHeaders',
+      );
+      expect(signedHeaders).toContain('content-length');
+    });
+
+    it('omits the content-length binding for the legacy sizeless routes', async () => {
+      const service = buildService();
+      const result = await service.createPresignedUpload(
+        'avatars/user-1/abc.jpg',
+        'image/jpeg',
+      );
+      const signedHeaders = new URL(result.uploadUrl).searchParams.get(
+        'X-Amz-SignedHeaders',
+      );
+      expect(signedHeaders).not.toContain('content-length');
+    });
+
     it('raises when the bucket is not configured', async () => {
       const service = buildService({ 'storage.bucket': undefined });
       await expect(

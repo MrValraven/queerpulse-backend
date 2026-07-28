@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, Repository } from 'typeorm';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
@@ -35,11 +36,6 @@ import {
 // Postgres unique-violation SQLSTATE. Mirrors `CompaniesService`'s/
 // `JobsService`'s identical file-local helper (not shared/exported, kept
 // consistent with that precedent).
-function isUniqueViolation(err: unknown): boolean {
-  const e = err as { code?: string; driverError?: { code?: string } };
-  return e?.code === '23505' || e?.driverError?.code === '23505';
-}
-
 export interface CreateOpportunityInput {
   org: string;
   // Resolved to `partner_id` via `PartnersService.idBySlug` — see

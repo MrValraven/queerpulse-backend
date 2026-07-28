@@ -11,6 +11,7 @@ function makeEvent(overrides = {}) {
       createdAt: new Date(),
       editedAt: null,
       deletedAt: null,
+      replyToId: null,
       ...overrides,
     },
   };

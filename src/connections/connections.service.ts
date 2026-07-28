@@ -6,13 +6,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
   EntityManager,
   FindOptionsWhere,
   In,
-  IsNull,
-  QueryFailedError,
   Repository,
 } from 'typeorm';
 import {
@@ -24,7 +23,7 @@ import {
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
-import { Vouch } from '../vouch/entities/vouch.entity';
+import { VouchService } from '../vouch/vouch.service';
 import {
   ConnectionCounts,
   ConnectionListItem,
@@ -38,13 +37,6 @@ import { Paginated, PAGE_SIZE, normalizePage } from '../common/pagination';
 export type ConnectionAction = 'accept' | 'decline' | 'block' | 'unblock';
 export type ConnectionTab = 'all' | 'incoming' | 'outgoing' | 'vouched';
 
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    err instanceof QueryFailedError &&
-    (err.driverError as { code?: string })?.code === '23505'
-  );
-}
-
 /** The relationship for a member the viewer shares nothing with (yet). */
 const NO_RELATIONSHIP: ConnectionRelationship = {
   mutuals: 0,
@@ -57,7 +49,7 @@ export class ConnectionsService {
     @InjectRepository(Connection)
     private readonly connections: Repository<Connection>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
-    @InjectRepository(Vouch) private readonly vouches: Repository<Vouch>,
+    private readonly vouchService: VouchService,
     private readonly eventEmitter: EventEmitter2,
     private readonly blockFilter: BlockFilterService,
   ) {}
@@ -414,26 +406,34 @@ export class ConnectionsService {
         skip,
       });
     } else if (tab === 'vouched') {
-      // The vouched filter (members the viewer has vouched for) can't run in
-      // SQL alongside the accepted-connection query, so fetch the full accepted
-      // set, filter it, and paginate in memory — this keeps `total` honest so
-      // the client's infinite scroll stops at the real end.
-      const accepted = await this.connections.find({
-        where: [
-          { requesterId: userId, status: ConnectionStatus.Accepted },
-          { addresseeId: userId, status: ConnectionStatus.Accepted },
-        ],
-        order: { respondedAt: 'DESC' },
-      });
-      const given = await this.vouches.find({
-        where: { voucherId: userId, withdrawnAt: IsNull() },
-      });
-      const vouchedIds = new Set(given.map((v) => v.voucheeId));
-      const filtered = accepted.filter((c) =>
-        vouchedIds.has(this.otherId(c, userId)),
-      );
-      total = filtered.length;
-      rows = filtered.slice(skip, skip + take);
+      // Members the viewer has vouched for. VouchService owns the "who did I
+      // vouch for" read; we push the intersection with the accepted-connection
+      // set into SQL — the accepted edge where the far end is one of those
+      // vouchees — so `findAndCount` paginates and totals server-side instead of
+      // loading the viewer's entire connection set to filter in memory.
+      const vouchedIds = await this.vouchService.getActiveVoucheeIds(userId);
+      if (!vouchedIds.length) {
+        rows = [];
+        total = 0;
+      } else {
+        [rows, total] = await this.connections.findAndCount({
+          where: [
+            {
+              requesterId: userId,
+              addresseeId: In(vouchedIds),
+              status: ConnectionStatus.Accepted,
+            },
+            {
+              addresseeId: userId,
+              requesterId: In(vouchedIds),
+              status: ConnectionStatus.Accepted,
+            },
+          ],
+          order: { respondedAt: 'DESC' },
+          take,
+          skip,
+        });
+      }
     } else {
       // all: accepted connections the user is in.
       [rows, total] = await this.connections.findAndCount({
@@ -488,30 +488,38 @@ export class ConnectionsService {
       this.connections.count({
         where: { requesterId: userId, status: ConnectionStatus.Pending },
       }),
-      this.countVouched(userId, accepted),
+      this.countVouched(userId),
     ]);
     return { all, incoming, outgoing, vouched };
   }
 
   /**
-   * How many of the viewer's accepted connections they've also vouched for. The
-   * vouched filter can't run in SQL alongside the accepted-connection query (see
-   * the `vouched` branch of {@link list}), so it's computed the same way: load
-   * the accepted set and the viewer's vouches, then intersect.
+   * How many of the viewer's accepted connections they've also vouched for.
+   * Mirrors the `vouched` branch of {@link list}: VouchService supplies the
+   * members the viewer vouched for, and the intersection with their accepted
+   * connections is a bounded `COUNT` in SQL — the `(userLow, userHigh)` pair is
+   * unique, so each vouchee contributes at most one accepted edge and the count
+   * is exact.
    */
-  private async countVouched(
-    userId: string,
-    acceptedWhere: FindOptionsWhere<Connection>[],
-  ): Promise<number> {
-    const [accepted, given] = await Promise.all([
-      this.connections.find({ where: acceptedWhere }),
-      this.vouches.find({
-        where: { voucherId: userId, withdrawnAt: IsNull() },
-      }),
-    ]);
-    const vouchedIds = new Set(given.map((vouch) => vouch.voucheeId));
-    return accepted.filter((conn) => vouchedIds.has(this.otherId(conn, userId)))
-      .length;
+  private async countVouched(userId: string): Promise<number> {
+    const vouchedIds = await this.vouchService.getActiveVoucheeIds(userId);
+    if (!vouchedIds.length) {
+      return 0;
+    }
+    return this.connections.count({
+      where: [
+        {
+          requesterId: userId,
+          addresseeId: In(vouchedIds),
+          status: ConnectionStatus.Accepted,
+        },
+        {
+          addresseeId: userId,
+          requesterId: In(vouchedIds),
+          status: ConnectionStatus.Accepted,
+        },
+      ],
+    });
   }
 
   async areConnected(a: string, b: string): Promise<boolean> {
@@ -653,10 +661,12 @@ export class ConnectionsService {
 
   /**
    * Shared accepted-connection counts between the viewer and each of `otherIds`.
-   * Loads the viewer's accepted set once, then every accepted edge touching an
-   * other member, and counts the edges whose far end is one of the viewer's
-   * connections. The direct viewer↔other edge is excluded for free — the viewer
-   * is never a member of their own connection set.
+   * Loads every accepted edge touching an other member, collects the far ends of
+   * those edges, then asks — in one bounded query filtered to exactly those far
+   * ends — which are the viewer's own connections. Cost scales with the size of
+   * the page's neighbourhood, not the viewer's total connection degree, so the
+   * viewer's full accepted set is never loaded. The direct viewer↔other edge is
+   * excluded for free — the viewer is never a member of their own connection set.
    */
   private async mutualCountsByUserIds(
     viewerUserId: string,
@@ -666,12 +676,6 @@ export class ConnectionsService {
     if (!otherIds.length) {
       return counts;
     }
-    const viewerConnections = new Set(
-      await this.getAcceptedConnectionUserIds(viewerUserId),
-    );
-    if (!viewerConnections.size) {
-      return counts;
-    }
     const otherSet = new Set(otherIds);
     const edges = await this.connections.find({
       where: [
@@ -679,6 +683,26 @@ export class ConnectionsService {
         { addresseeId: In(otherIds), status: ConnectionStatus.Accepted },
       ],
     });
+    // The far end of each edge from an other member is a candidate mutual; only
+    // these ids need to be tested against the viewer's connections.
+    const candidateFarEnds = new Set<string>();
+    for (const edge of edges) {
+      for (const candidate of [edge.requesterId, edge.addresseeId]) {
+        if (!otherSet.has(candidate)) {
+          continue;
+        }
+        const farEnd =
+          candidate === edge.requesterId ? edge.addresseeId : edge.requesterId;
+        candidateFarEnds.add(farEnd);
+      }
+    }
+    const viewerConnections = await this.acceptedConnectionsAmong(
+      viewerUserId,
+      [...candidateFarEnds],
+    );
+    if (!viewerConnections.size) {
+      return counts;
+    }
     for (const edge of edges) {
       for (const candidate of [edge.requesterId, edge.addresseeId]) {
         if (!otherSet.has(candidate)) {
@@ -695,6 +719,44 @@ export class ConnectionsService {
   }
 
   /**
+   * Of `candidateIds`, the subset that are accepted-connected to the viewer —
+   * one bounded query (`In(candidateIds)`) instead of loading the viewer's whole
+   * accepted set. The viewer never appears in the result (no self-edge exists),
+   * so a candidate equal to the viewer is harmlessly filtered out.
+   */
+  private async acceptedConnectionsAmong(
+    viewerUserId: string,
+    candidateIds: string[],
+  ): Promise<Set<string>> {
+    const connected = new Set<string>();
+    if (!candidateIds.length) {
+      return connected;
+    }
+    const edges = await this.connections.find({
+      where: [
+        {
+          requesterId: viewerUserId,
+          addresseeId: In(candidateIds),
+          status: ConnectionStatus.Accepted,
+        },
+        {
+          addresseeId: viewerUserId,
+          requesterId: In(candidateIds),
+          status: ConnectionStatus.Accepted,
+        },
+      ],
+    });
+    for (const edge of edges) {
+      connected.add(
+        edge.requesterId === viewerUserId
+          ? edge.addresseeId
+          : edge.requesterId,
+      );
+    }
+    return connected;
+  }
+
+  /**
    * The vouch badge between the viewer and each of `otherIds`: `you-vouched`
    * when the viewer vouched for them, `vouched-for-you` the other way, `mutual`
    * for both. One query loads every vouch in either direction across the set.
@@ -707,30 +769,8 @@ export class ConnectionsService {
     if (!otherIds.length) {
       return badges;
     }
-    const vouches = await this.vouches.find({
-      where: [
-        {
-          voucherId: viewerUserId,
-          voucheeId: In(otherIds),
-          withdrawnAt: IsNull(),
-        },
-        {
-          voucheeId: viewerUserId,
-          voucherId: In(otherIds),
-          withdrawnAt: IsNull(),
-        },
-      ],
-    });
-    const youVouched = new Set<string>();
-    const vouchedForYou = new Set<string>();
-    for (const vouch of vouches) {
-      if (vouch.voucherId === viewerUserId) {
-        youVouched.add(vouch.voucheeId);
-      }
-      if (vouch.voucheeId === viewerUserId) {
-        vouchedForYou.add(vouch.voucherId);
-      }
-    }
+    const { youVouched, vouchedForYou } =
+      await this.vouchService.getVouchDirections(viewerUserId, otherIds);
     for (const otherId of new Set(otherIds)) {
       const gave = youVouched.has(otherId);
       const received = vouchedForYou.has(otherId);

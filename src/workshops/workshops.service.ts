@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { Repository } from 'typeorm';
 import { MemberLookup, toMemberRef } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
@@ -26,11 +27,6 @@ import { toWorkshopDTO, WorkshopDTO } from './workshop-response';
 // Postgres unique-violation SQLSTATE. Mirrors `JobsService`'s identical
 // file-local helper (not shared/exported, kept consistent with that
 // precedent).
-function isUniqueViolation(err: unknown): boolean {
-  const e = err as { code?: string; driverError?: { code?: string } };
-  return e?.code === '23505' || e?.driverError?.code === '23505';
-}
-
 export interface CreateWorkshopInput {
   title: string;
   titleEm?: string;

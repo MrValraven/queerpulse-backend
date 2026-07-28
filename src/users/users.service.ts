@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, QueryFailedError, Repository } from 'typeorm';
+import { isUniqueViolation } from '../common/db-errors';
+import { EntityManager, Repository } from 'typeorm';
 import { Profile } from './entities/profile.entity';
 import { User, UserStatus } from './entities/user.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
@@ -18,13 +19,6 @@ export interface CreateGoogleUserInput {
   firstName: string;
   lastName: string;
   avatarUrl?: string | null;
-}
-
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    err instanceof QueryFailedError &&
-    (err.driverError as { code?: string })?.code === '23505'
-  );
 }
 
 @Injectable()

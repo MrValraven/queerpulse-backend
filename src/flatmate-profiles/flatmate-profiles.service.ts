@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
@@ -20,20 +21,6 @@ import {
 
 const DEFAULT_GREETING =
   'Hi! I saw your flatmate profile on QueerPulse and wanted to say hello.';
-
-function isUniqueViolation(err: unknown, constraint?: string): boolean {
-  const e = err as {
-    code?: string;
-    constraint?: string;
-    driverError?: { code?: string; constraint?: string };
-  };
-  const code = e?.code ?? e?.driverError?.code;
-  if (code !== '23505') return false;
-  if (!constraint) return true;
-  return (
-    e?.constraint === constraint || e?.driverError?.constraint === constraint
-  );
-}
 
 const OWNER_ID_UNIQUE_CONSTRAINT = 'UQ_flatmate_profiles_owner_id';
 

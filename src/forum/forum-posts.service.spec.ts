@@ -24,6 +24,7 @@ function build() {
     find: jest.fn().mockResolvedValue([]),
   };
   const profiles = {} as never;
+  const notifications = { createForRecipients: jest.fn() };
   const byUserIds = jest
     .spyOn(require('../common/member-ref').MemberLookup.prototype, 'byUserIds')
     .mockResolvedValue(new Map());
@@ -34,8 +35,9 @@ function build() {
     { markActivity: jest.fn(), loadOr404: jest.fn() } as never,
     { excludeHidden: jest.fn() } as never,
     edits as never,
+    notifications as never,
   );
-  return { service, post, posts, edits, byUserIds };
+  return { service, post, posts, edits, byUserIds, notifications };
 }
 
 const author = {

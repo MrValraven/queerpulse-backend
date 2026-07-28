@@ -8,6 +8,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import {
   DataSource,
   EntityManager,
+  FindOptionsWhere,
   In,
   IsNull,
   Not,
@@ -112,7 +113,7 @@ export class ModerationService {
     );
 
     const [items, counts] = await Promise.all([
-      Promise.all(rows.map((r) => this.toRow(r))),
+      this.toRows(rows),
       this.computeCounts(),
     ]);
 
@@ -232,18 +233,28 @@ export class ModerationService {
       where: { reportId },
       order: { createdAt: 'ASC' },
     });
-    return Promise.all(
-      rows.map(async (log) =>
-        toAuditEntryDTO(log, await this.nameForUserId(log.actorId)),
-      ),
+    // One name lookup for the whole trail instead of one per log row: collect
+    // the distinct (non-erased) actor ids and resolve them together.
+    const actorIds = rows
+      .map((log) => log.actorId)
+      .filter((actorId): actorId is string => actorId !== null);
+    const actorNames = await this.namesForUserIds(actorIds);
+    return rows.map((log) =>
+      toAuditEntryDTO(log, this.resolveActorName(log.actorId, actorNames)),
     );
   }
 
   // GET /mod/appeals — newest first, mirrors every other list in this
   // codebase (`orderBy(..., 'DESC')`).
   async listAppeals(): Promise<AppealDTO[]> {
-    const rows = await this.appeals.find({ order: { createdAt: 'DESC' } });
-    return Promise.all(rows.map((a) => this.toAppealRow(a)));
+    // Bounded page, matching `DEFAULT_LIMIT` used by the reports queue: an
+    // unbounded `find` would fan a per-appeal name/audit lookup out across the
+    // entire table. Newest first is preserved.
+    const rows = await this.appeals.find({
+      order: { createdAt: 'DESC' },
+      take: DEFAULT_LIMIT,
+    });
+    return this.toAppealRows(rows);
   }
 
   // PATCH /mod/appeals/:id — uphold or overturn. Also writes an audit log
@@ -570,6 +581,155 @@ export class ModerationService {
     return toModReportDTO(report, reporter, reported, detail);
   }
 
+  /**
+   * Batched equivalent of `toRow` for a whole page — same output, in the same
+   * order, but a bounded number of queries instead of ~3-4 per report.
+   *
+   * All reporter names resolve in one `In([...])` lookup, all reported members
+   * in one more, and every subject's prior-report count in a single
+   * `GROUP BY subjectId` — so a page costs three queries regardless of size,
+   * where `rows.map(toRow)` cost three or four per row. `list()` never asks for
+   * the `detail` block (only `GET /mod/reports/:id` does, via single `toRow`),
+   * so none is built here.
+   */
+  private async toRows(reports: Report[]): Promise<ModReportDTO[]> {
+    if (!reports.length) return [];
+
+    // Only real reporters need a name — anonymous and erased reporters stay
+    // hidden and never enter the lookup (anonymization is unchanged).
+    const reporterUserIds = reports
+      .filter((report) => !report.anonymous && report.reporterId)
+      .map((report) => report.reporterId as string);
+
+    const [reporterNames, reportedProfiles, priorReportCounts] =
+      await Promise.all([
+        this.namesForUserIds(reporterUserIds),
+        this.resolveReportedProfiles(reports),
+        this.priorReportCountsBySubject(reports),
+      ]);
+
+    return reports.map((report) => {
+      const reporter = this.buildReporter(report, reporterNames);
+      const reported = this.buildReported(
+        report,
+        reportedProfiles,
+        priorReportCounts,
+      );
+      return toModReportDTO(report, reporter, reported);
+    });
+  }
+
+  // Sync twin of `describeReporter` fed from a pre-resolved name map — the
+  // anonymization arms are identical: anonymous and erased reporters stay
+  // `{ anonymous: true }` and are never named.
+  private buildReporter(
+    report: Report,
+    reporterNames: Map<string, string>,
+  ): ModReporterDTO {
+    if (report.anonymous) return { anonymous: true };
+    if (!report.reporterId) return { anonymous: true };
+    return {
+      anonymous: false,
+      id: report.reporterId,
+      name: reporterNames.get(report.reporterId) ?? 'Member',
+    };
+  }
+
+  // Sync twin of `describeReported` fed from pre-resolved profile and count
+  // maps. `priorReports` is the total reports for the subject minus this one,
+  // exactly as `count({ subjectId, id: Not(report.id) })` computed it per-row.
+  private buildReported(
+    report: Report,
+    reportedProfiles: Map<string, Profile>,
+    priorReportCounts: Map<string, number>,
+  ): ModReportedDTO {
+    const priorReports = (priorReportCounts.get(report.subjectId) ?? 1) - 1;
+    const profile = reportedProfiles.get(report.subjectId);
+    if (profile) {
+      return { id: profile.userId, handle: profile.slug, priorReports };
+    }
+    return { id: report.subjectId, handle: report.subjectId, priorReports };
+  }
+
+  /**
+   * Batched `resolveReportedProfile` over a page — keyed by `subjectId`.
+   *
+   * Member subjects are addressed by slug or (for uuid-looking ids) by userId,
+   * exactly as the single resolver's `[{ slug }, { userId }]` where-array. One
+   * `find` covers the whole page; non-member subjects have no entry and fall
+   * back to the raw `subjectId` in `buildReported`, matching the single path.
+   */
+  private async resolveReportedProfiles(
+    reports: Report[],
+  ): Promise<Map<string, Profile>> {
+    const bySubjectId = new Map<string, Profile>();
+
+    const memberReports = reports.filter(
+      (report) => report.subjectType === ReportSubjectType.Member,
+    );
+    if (!memberReports.length) return bySubjectId;
+
+    const subjectSlugs = [
+      ...new Set(memberReports.map((report) => report.subjectId)),
+    ];
+    const subjectUserIds = [
+      ...new Set(
+        memberReports
+          .map((report) => report.subjectId)
+          .filter((subjectId) => UUID_RE.test(subjectId)),
+      ),
+    ];
+
+    const where: FindOptionsWhere<Profile>[] = [{ slug: In(subjectSlugs) }];
+    if (subjectUserIds.length) where.push({ userId: In(subjectUserIds) });
+    const profiles = await this.profiles.find({ where });
+
+    const profilesBySlug = new Map<string, Profile>();
+    const profilesByUserId = new Map<string, Profile>();
+    for (const profile of profiles) {
+      profilesBySlug.set(profile.slug, profile);
+      profilesByUserId.set(profile.userId, profile);
+    }
+
+    for (const report of memberReports) {
+      const match =
+        profilesBySlug.get(report.subjectId) ??
+        (UUID_RE.test(report.subjectId)
+          ? profilesByUserId.get(report.subjectId)
+          : undefined);
+      if (match) bySubjectId.set(report.subjectId, match);
+    }
+    return bySubjectId;
+  }
+
+  /**
+   * Total reports per `subjectId` across the page, in a single `GROUP BY`.
+   *
+   * `buildReported` subtracts one (the report itself) to reproduce the per-row
+   * `count({ subjectId, id: Not(report.id) })`.
+   */
+  private async priorReportCountsBySubject(
+    reports: Report[],
+  ): Promise<Map<string, number>> {
+    const totalsBySubject = new Map<string, number>();
+
+    const subjectIds = [...new Set(reports.map((report) => report.subjectId))];
+    if (!subjectIds.length) return totalsBySubject;
+
+    const rows = await this.reports
+      .createQueryBuilder('r')
+      .select('r.subjectId', 'subjectId')
+      .addSelect('COUNT(*)', 'total')
+      .where('r.subjectId IN (:...subjectIds)', { subjectIds })
+      .groupBy('r.subjectId')
+      .getRawMany<{ subjectId: string; total: string }>();
+
+    for (const row of rows) {
+      totalsBySubject.set(row.subjectId, Number(row.total));
+    }
+    return totalsBySubject;
+  }
+
   private async describeReporter(report: Report): Promise<ModReporterDTO> {
     if (report.anonymous) return { anonymous: true };
     // An erased reporter (`reporter_id` NULLed by the erasure sweep) becomes
@@ -641,6 +801,111 @@ export class ModerationService {
     return toAppealDTO(appeal, appellant, original);
   }
 
+  /**
+   * Batched equivalent of `toAppealRow` for a whole page — same output, same
+   * order, in a bounded number of queries instead of ~3 per appeal.
+   *
+   * Appellant profiles resolve in one `In([...])` lookup, the appealed audit
+   * rows in one more, and every one of those rows' actor names in a single
+   * `namesForUserIds` — so a page is three queries regardless of size.
+   */
+  private async toAppealRows(appeals: Appeal[]): Promise<AppealDTO[]> {
+    if (!appeals.length) return [];
+
+    const appellantUserIds = appeals
+      .filter((appeal) => appeal.appellantId)
+      .map((appeal) => appeal.appellantId as string);
+    const actionIds = appeals
+      .filter((appeal) => appeal.actionId)
+      .map((appeal) => appeal.actionId as string);
+
+    const [appellantProfiles, actionLogs] = await Promise.all([
+      this.profilesByUserIds(appellantUserIds),
+      this.auditLogsByIds(actionIds),
+    ]);
+
+    const actorIds = [...actionLogs.values()]
+      .map((log) => log.actorId)
+      .filter((actorId): actorId is string => actorId !== null);
+    const actorNames = await this.namesForUserIds(actorIds);
+
+    return appeals.map((appeal) => {
+      const appellant = this.buildAppellant(appeal, appellantProfiles);
+      const original = this.buildOriginalAction(appeal, actionLogs, actorNames);
+      return toAppealDTO(appeal, appellant, original);
+    });
+  }
+
+  // Sync twin of `describeAppellant` fed from a pre-resolved profile map.
+  private buildAppellant(
+    appeal: Appeal,
+    appellantProfiles: Map<string, Profile>,
+  ): AppealAppellant {
+    if (!appeal.appellantId) return { handle: 'member' };
+    const profile = appellantProfiles.get(appeal.appellantId);
+    if (!profile) return { handle: 'member' };
+    return {
+      handle: profile.slug,
+      ...(profile.pronouns ? { pronoun: profile.pronouns } : {}),
+    };
+  }
+
+  // Sync twin of `describeOriginalAction` fed from pre-resolved audit-log and
+  // name maps — an erased actor (`actorId === null`) still names as
+  // 'Deleted member' via `resolveActorName`.
+  private buildOriginalAction(
+    appeal: Appeal,
+    actionLogs: Map<string, ModAuditLog>,
+    actorNames: Map<string, string>,
+  ): AppealOriginal {
+    const log = appeal.actionId ? actionLogs.get(appeal.actionId) : undefined;
+    if (!log) {
+      return {
+        action: 'unknown',
+        by: 'Unknown',
+        when: appeal.createdAt.toISOString(),
+        reason: '',
+      };
+    }
+    return {
+      action: log.action,
+      by: this.resolveActorName(log.actorId, actorNames),
+      when: log.createdAt.toISOString(),
+      reason: log.reasonCode ?? log.note ?? '',
+    };
+  }
+
+  // Batched sibling of the appellant lookup in `describeAppellant`: userId ->
+  // full `Profile` (kept over `MemberLookup` because the appellant DTO needs
+  // `pronouns`, which `MemberRef` does not carry).
+  private async profilesByUserIds(
+    userIds: string[],
+  ): Promise<Map<string, Profile>> {
+    const byUserId = new Map<string, Profile>();
+    const uniqueUserIds = [...new Set(userIds)];
+    if (!uniqueUserIds.length) return byUserId;
+
+    const profiles = await this.profiles.find({
+      where: { userId: In(uniqueUserIds) },
+    });
+    for (const profile of profiles) byUserId.set(profile.userId, profile);
+    return byUserId;
+  }
+
+  // Batched sibling of the audit-log lookup in `describeOriginalAction`:
+  // id -> `ModAuditLog`, in one `In([...])`.
+  private async auditLogsByIds(
+    ids: string[],
+  ): Promise<Map<string, ModAuditLog>> {
+    const byId = new Map<string, ModAuditLog>();
+    const uniqueIds = [...new Set(ids)];
+    if (!uniqueIds.length) return byId;
+
+    const logs = await this.auditLogs.find({ where: { id: In(uniqueIds) } });
+    for (const log of logs) byId.set(log.id, log);
+    return byId;
+  }
+
   private async describeAppellant(appeal: Appeal): Promise<AppealAppellant> {
     if (!appeal.appellantId) return { handle: 'member' };
     const profile = await this.profiles.findOne({
@@ -692,6 +957,70 @@ export class ModerationService {
       .where('user.id = :userId', { userId })
       .getOne();
     return user?.email ?? 'Member';
+  }
+
+  /**
+   * Batched sibling of `nameForUserId` — resolves many non-null user ids to
+   * display names in two queries total (profiles, then a users fallback for the
+   * ids with no profile), keeping the single-id contract of `nameForUserId`
+   * untouched. Every requested id resolves by the exact same rules: a profile's
+   * `firstName lastName`, else the user's email, else 'Member'.
+   *
+   * The `null` (erased) case is deliberately NOT handled here — callers pass
+   * only non-null ids and map `null` to 'Deleted member' via `resolveActorName`,
+   * mirroring `nameForUserId(null)`.
+   */
+  private async namesForUserIds(
+    userIds: string[],
+  ): Promise<Map<string, string>> {
+    const names = new Map<string, string>();
+    const uniqueUserIds = [...new Set(userIds)];
+    if (!uniqueUserIds.length) return names;
+
+    const profiles = await this.profiles.find({
+      where: { userId: In(uniqueUserIds) },
+    });
+    for (const profile of profiles) {
+      names.set(
+        profile.userId,
+        `${profile.firstName} ${profile.lastName}`.trim(),
+      );
+    }
+
+    // Only ids without a profile need the email fallback (mirrors the single
+    // resolver's profile-first, user-email-second order).
+    const userIdsWithoutProfile = uniqueUserIds.filter(
+      (userId) => !names.has(userId),
+    );
+    if (userIdsWithoutProfile.length) {
+      const users = await this.users
+        .createQueryBuilder('user')
+        .addSelect('user.email')
+        .where('user.id IN (:...userIdsWithoutProfile)', {
+          userIdsWithoutProfile,
+        })
+        .getMany();
+      for (const user of users) {
+        names.set(user.id, user.email ?? 'Member');
+      }
+    }
+
+    // Neither a profile nor a user row: `user?.email ?? 'Member'` → 'Member'.
+    for (const userId of uniqueUserIds) {
+      if (!names.has(userId)) names.set(userId, 'Member');
+    }
+    return names;
+  }
+
+  // Maps a (possibly-erased) actor id to a display name from a pre-resolved
+  // `namesForUserIds` map, reproducing `nameForUserId`: `null` → 'Deleted
+  // member', an unresolved id → 'Member'.
+  private resolveActorName(
+    actorId: string | null,
+    actorNames: Map<string, string>,
+  ): string {
+    if (!actorId) return 'Deleted member';
+    return actorNames.get(actorId) ?? 'Member';
   }
 
   private async findReportOrThrow(id: string): Promise<Report> {

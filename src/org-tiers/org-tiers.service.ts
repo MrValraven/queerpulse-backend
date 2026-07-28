@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { Repository } from 'typeorm';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import {
@@ -28,11 +29,6 @@ export interface OrgTierWriteInput {
   sortOrder?: number;
   published?: boolean;
   handle?: string;
-}
-
-function isUniqueViolation(err: unknown): boolean {
-  const error = err as { code?: string; driverError?: { code?: string } };
-  return error?.code === '23505' || error?.driverError?.code === '23505';
 }
 
 @Injectable()

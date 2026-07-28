@@ -131,6 +131,53 @@ function ownerFirstName(ownerName: string): string {
 }
 
 /**
+ * The owner's public-facing identity, redacted to honour the visibility they
+ * chose in the listing wizard (`create-listing.dto.ts`: `public | role | anon`).
+ *
+ * This MUST live here, in the response builder, because the public directory
+ * DTOs (`DirectoryCardDTO`/`DirectoryDetailDTO`) carry no `visibility` field —
+ * the client has nothing to redact on. The wizard's own preview honours the
+ * choice, but that is cosmetic; `GET /directory[/:slug]` is the real boundary,
+ * and before this it returned the owner's real name/first-name/profile-link
+ * even when they picked "anonymous", outing a person who opted out.
+ *
+ * - `anon`: reveal nothing that identifies the owner.
+ * - `role`: show the role, never the real name, first name, or a profile link
+ *   (the "view profile"/"run by <first>" affordances each name the person).
+ * - `public` (and any unset/legacy value): full identity, still gated by the
+ *   separate `linkToProfile` consent for the profile link.
+ */
+interface OwnerIdentityView {
+  name: string;
+  role: string;
+  bio: string;
+  first: string;
+  inQueerPulse: boolean;
+}
+
+function ownerIdentity(listing: Listing): OwnerIdentityView {
+  if (listing.visibility === 'anon') {
+    return { name: '', role: '', bio: '', first: '', inQueerPulse: false };
+  }
+  if (listing.visibility === 'role') {
+    return {
+      name: listing.ownerRole,
+      role: '',
+      bio: listing.ownerBio,
+      first: '',
+      inQueerPulse: false,
+    };
+  }
+  return {
+    name: listing.ownerName,
+    role: listing.ownerRole,
+    bio: listing.ownerBio,
+    first: ownerFirstName(listing.ownerName),
+    inQueerPulse: listing.linkToProfile,
+  };
+}
+
+/**
  * Compact card for the public `/local/directory` grid (`GET /directory`).
  * `tint`/`av` are presentation primitives (colour + initials); the frontend
  * resolves the category label and badge copy. `memberFirst` is non-null only
@@ -150,6 +197,7 @@ export interface DirectoryCardDTO {
 }
 
 export function toDirectoryCard(listing: Listing): DirectoryCardDTO {
+  const owner = ownerIdentity(listing);
   return {
     slug: listing.slug,
     name: listing.name,
@@ -161,9 +209,9 @@ export function toDirectoryCard(listing: Listing): DirectoryCardDTO {
     // A listing linked to its owner's member profile is a community-owned
     // ("queer-owned") business; unlinked ones are allied/"friendly" venues.
     owned: listing.linkToProfile,
-    memberFirst: listing.linkToProfile
-      ? ownerFirstName(listing.ownerName) || null
-      : null,
+    // The "run by <first>" line names the owner, so it follows their chosen
+    // visibility — null for `anon`/`role` (where `owner.first` is blank).
+    memberFirst: listing.linkToProfile ? owner.first || null : null,
   };
 }
 
@@ -311,15 +359,21 @@ export function toDirectoryDetail(
     goodFor: listing.goodFor.map((label) => ({ label, yes: true })),
     hoursType: hoursTypeForCategory(listing.cats[0] ?? ''),
     hoursNote: listing.hoursNote,
-    owner: {
-      name: listing.ownerName,
-      initials: initialsForName(listing.ownerName),
-      tint,
-      role: listing.ownerRole,
-      bio: listing.ownerBio,
-      inQueerPulse: listing.linkToProfile,
-      first: ownerFirstName(listing.ownerName),
-    },
+    // Redacted per the owner's chosen `visibility` — `anon` reveals nothing,
+    // `role` shows only the role. Initials derive from the already-redacted
+    // name so they can't leak the real name's initials for an anon owner.
+    owner: (() => {
+      const identity = ownerIdentity(listing);
+      return {
+        name: identity.name,
+        initials: initialsForName(identity.name),
+        tint,
+        role: identity.role,
+        bio: identity.bio,
+        inQueerPulse: identity.inQueerPulse,
+        first: identity.first,
+      };
+    })(),
     social: listing.social,
     address: listing.address,
     rating: ratingFromReviews(reviews),

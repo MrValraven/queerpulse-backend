@@ -16,7 +16,7 @@ import {
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 import { OptionalJwtAuthGuard } from './optional-jwt-auth.guard';
 import { PRESIGN_EXPIRY_SECONDS, StorageService } from './storage.service';
-import { parseStorageKey } from './storage-key';
+import { parseStorageKey, storageKeyOwnerId } from './storage-key';
 
 // `max-age` is deliberately SHORTER than `PRESIGN_EXPIRY_SECONDS`. At equal
 // values a cached 302 replayed just before expiry hands the browser a
@@ -72,8 +72,22 @@ export class FilesController {
     if (!kindSpec) {
       throw new NotFoundException();
     }
-    if (kindSpec.requiresSession && !user) {
-      throw new UnauthorizedException();
+    if (kindSpec.requiresSession) {
+      if (!user) {
+        throw new UnauthorizedException();
+      }
+      // A session alone is NOT enough for a session-gated kind. The key embeds
+      // the id of the member who uploaded it (`storageKeyOwnerId`), and there
+      // is no photo↔event table yet that could scope a gathering photo to an
+      // event's participants — so without an ownership check any logged-in
+      // member could walk `gathering-photos/<anyUserId>/<uuid>.<ext>` and pull
+      // identifiable photos of people at events they never attended (IDOR).
+      // Restrict a session-gated photo to its uploader; 404 (not 403) so the
+      // route still never reveals which keys exist. Widen this to event
+      // participants once gathering photos are linked to an event.
+      if (storageKeyOwnerId(storageKey) !== user.userId) {
+        throw new NotFoundException();
+      }
     }
     const downloadUrl = await this.storage.createPresignedDownload(storageKey);
     // Railway's edge cache once served authenticated responses to the wrong

@@ -53,6 +53,8 @@ const basePost = (overrides: Partial<CommunityPost> = {}): CommunityPost => ({
   kind: PostKind.Post,
   pinned: false,
   createdAt: t('2026-07-10T00:00:00.000Z'),
+  editedAt: null,
+  deletedAt: null,
   ...overrides,
 });
 

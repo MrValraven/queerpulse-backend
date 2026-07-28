@@ -44,8 +44,29 @@ export class PushService implements OnModuleInit {
     input: { endpoint: string; keys: { p256dh: string; auth: string } },
     userAgent?: string,
   ): Promise<void> {
-    // Upsert by the unique endpoint: re-subscribing the same device (or a
-    // device that moved to another account) updates the row in place.
+    // Endpoints are unique per row on purpose: a browser hands back the SAME
+    // push subscription (endpoint + keys) after its user logs out and another
+    // logs in, so one physical device must map to exactly one owner — splitting
+    // by (userId, endpoint) would leave two rows sharing keys and deliver one
+    // member's notifications to whoever now uses that browser. Re-subscribing
+    // the same device (or a device that moved to another account) therefore
+    // updates the row in place.
+    //
+    // The flip side is that overwriting `userId` transfers the endpoint away
+    // from its current owner. A legitimate account switch is indistinguishable
+    // from a forged subscription that reuses a victim's endpoint (a DoS that
+    // requires already knowing that secret endpoint), so we cannot block the
+    // transfer without breaking shared devices — but we log every cross-account
+    // reassignment so the otherwise-silent takeover is at least auditable.
+    const existing = await this.subscriptions.findOne({
+      where: { endpoint: input.endpoint },
+      select: ['userId'],
+    });
+    if (existing && existing.userId !== userId) {
+      this.logger.warn(
+        `Push endpoint reassigned from user ${existing.userId} to ${userId}`,
+      );
+    }
     await this.subscriptions.upsert(
       {
         userId,

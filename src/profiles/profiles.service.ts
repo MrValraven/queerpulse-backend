@@ -6,7 +6,8 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, QueryFailedError, Repository } from 'typeorm';
+import { isUniqueViolation } from '../common/db-errors';
+import { DataSource, In, Repository } from 'typeorm';
 import { handleFormatError, normalizeHandle } from '../common/handles';
 import { toImageUrl } from '../common/image-url';
 import { ConnectionsService } from '../connections/connections.service';
@@ -50,10 +51,6 @@ const PAGE_SIZE = 20;
 const RELATED_LIMIT = 4;
 const ACTIVITY_LIMIT = 6;
 
-// Postgres unique-violation SQLSTATE — the `profiles.slug` unique index racing a
-// concurrent username change.
-const PG_UNIQUE_VIOLATION = '23505';
-
 // Comma-separated query param -> trimmed, non-empty values.
 function csv(raw: string | undefined): string[] {
   return raw
@@ -62,13 +59,6 @@ function csv(raw: string | undefined): string[] {
         .map((v) => v.trim())
         .filter(Boolean)
     : [];
-}
-
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    err instanceof QueryFailedError &&
-    (err.driverError as { code?: string })?.code === PG_UNIQUE_VIOLATION
-  );
 }
 
 @Injectable()

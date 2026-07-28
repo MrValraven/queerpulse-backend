@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { In, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
@@ -31,11 +32,6 @@ import {
   toLandlordDetailDTO,
   toRecommendationDTO,
 } from './landlord-response';
-
-function isUniqueViolation(err: unknown): boolean {
-  const e = err as { code?: string; driverError?: { code?: string } };
-  return e?.code === '23505' || e?.driverError?.code === '23505';
-}
 
 /** Applies only present fields onto a landlord (create defaulting + PATCH). */
 function applyLandlord(

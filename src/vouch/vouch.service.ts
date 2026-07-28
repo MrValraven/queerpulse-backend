@@ -5,13 +5,13 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
   DataSource,
   EntityManager,
   In,
   IsNull,
-  QueryFailedError,
   Repository,
 } from 'typeorm';
 import { toImageUrl } from '../common/image-url';
@@ -26,13 +26,6 @@ const DEFAULT_PAGE_SIZE = 20;
 export interface PageParams {
   limit?: number;
   offset?: number;
-}
-
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    err instanceof QueryFailedError &&
-    (err.driverError as { code?: string })?.code === '23505'
-  );
 }
 
 export interface VoucherView {
@@ -51,6 +44,18 @@ export interface GivenVouchView {
   avatarUrl: string | null;
   note: string | null;
   createdAt: Date;
+}
+
+/**
+ * The active vouch relationships between a viewer and a set of other members,
+ * split by direction. Powers the connections vouch badge without exposing the
+ * `Vouch` entity outside this module.
+ */
+export interface VouchDirections {
+  /** The `otherIds` the viewer currently has an active vouch FOR. */
+  youVouched: Set<string>;
+  /** The `otherIds` who currently have an active vouch for the viewer. */
+  vouchedForYou: Set<string>;
 }
 
 @Injectable()
@@ -272,6 +277,60 @@ export class VouchService {
       map.set(row.voucheeId, parseInt(row.count, 10));
     }
     return map;
+  }
+
+  /**
+   * The user ids the voucher currently has an ACTIVE vouch for (withdrawn rows
+   * excluded). The connections "vouched" tab and its badge count intersect this
+   * set with the viewer's accepted connections, so the trust-graph read stays in
+   * this module rather than querying the `Vouch` repository from connections.
+   */
+  async getActiveVoucheeIds(voucherId: string): Promise<string[]> {
+    const rows = await this.vouches.find({
+      where: { voucherId, withdrawnAt: IsNull() },
+      select: { voucheeId: true },
+    });
+    return rows.map((vouch) => vouch.voucheeId);
+  }
+
+  /**
+   * The active vouches between `viewerUserId` and each of `otherIds`, split by
+   * direction. One query loads every vouch in either direction across the set —
+   * the same read the connections vouch badge used to run against the `Vouch`
+   * repository directly.
+   */
+  async getVouchDirections(
+    viewerUserId: string,
+    otherIds: string[],
+  ): Promise<VouchDirections> {
+    const youVouched = new Set<string>();
+    const vouchedForYou = new Set<string>();
+    if (!otherIds.length) {
+      return { youVouched, vouchedForYou };
+    }
+    const vouches = await this.vouches.find({
+      where: [
+        {
+          voucherId: viewerUserId,
+          voucheeId: In(otherIds),
+          withdrawnAt: IsNull(),
+        },
+        {
+          voucheeId: viewerUserId,
+          voucherId: In(otherIds),
+          withdrawnAt: IsNull(),
+        },
+      ],
+    });
+    for (const vouch of vouches) {
+      if (vouch.voucherId === viewerUserId) {
+        youVouched.add(vouch.voucheeId);
+      }
+      if (vouch.voucheeId === viewerUserId) {
+        vouchedForYou.add(vouch.voucherId);
+      }
+    }
+    return { youVouched, vouchedForYou };
   }
 
   private async profilesByUserIds(

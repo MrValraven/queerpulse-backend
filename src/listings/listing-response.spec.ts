@@ -2,6 +2,8 @@ import { Listing, SafeSpaceStatus } from './entities/listing.entity';
 import { ListingReview } from './entities/listing-review.entity';
 import {
   mapSafeSpaceCategory,
+  toDirectoryCard,
+  toDirectoryDetail,
   toSafeSpaceCard,
   toSafeSpaceDetail,
 } from './listing-response';
@@ -28,6 +30,84 @@ function makeListing(overrides: Partial<Listing> = {}): Listing {
     safeSpaceRemoval: null,
   } as unknown as Listing;
 }
+
+// A listing with everything the public directory builders read, plus a
+// nameable owner. Override `visibility` per test.
+function makeDirectoryListing(overrides: Partial<Listing> = {}): Listing {
+  return {
+    slug: 'atelier-pulso',
+    name: 'Atelier Pulso',
+    cats: ['design'],
+    hood: 'Marvila',
+    blurb: 'A shared ceramics studio.',
+    tagline: 'Hands in clay.',
+    tags: ['Studio'],
+    price: '€€',
+    alt: { wide: '', d1: '', d2: '', vibe: '' },
+    whatItIs: [],
+    goodFor: [],
+    hoursNote: '',
+    social: {},
+    address: 'R. do Açúcar 10',
+    ownerName: 'Inês Marques',
+    ownerRole: 'Ceramicist',
+    ownerBio: 'Runs the studio since 2019.',
+    visibility: 'public',
+    linkToProfile: true,
+    ...overrides,
+  } as unknown as Listing;
+}
+
+describe('directory owner visibility', () => {
+  it('exposes the full owner identity when visibility is public', () => {
+    const detail = toDirectoryDetail(makeDirectoryListing(), [], []);
+    expect(detail.owner.name).toBe('Inês Marques');
+    expect(detail.owner.role).toBe('Ceramicist');
+    expect(detail.owner.bio).toBe('Runs the studio since 2019.');
+    expect(detail.owner.first).toBe('Inês');
+    expect(detail.owner.inQueerPulse).toBe(true);
+    expect(detail.memberFirst).toBe('Inês');
+  });
+
+  it('withholds the real name and profile link for role-only visibility', () => {
+    const detail = toDirectoryDetail(
+      makeDirectoryListing({ visibility: 'role' }),
+      [],
+      [],
+    );
+    expect(detail.owner.name).toBe('Ceramicist');
+    expect(detail.owner.name).not.toContain('Inês');
+    expect(detail.owner.first).toBe('');
+    expect(detail.owner.inQueerPulse).toBe(false);
+    expect(detail.owner.bio).toBe('Runs the studio since 2019.');
+    expect(detail.memberFirst).toBeNull();
+  });
+
+  it('reveals nothing identifying for an anonymous owner', () => {
+    const detail = toDirectoryDetail(
+      makeDirectoryListing({ visibility: 'anon' }),
+      [],
+      [],
+    );
+    expect(detail.owner.name).toBe('');
+    expect(detail.owner.initials).toBe('');
+    expect(detail.owner.role).toBe('');
+    expect(detail.owner.bio).toBe('');
+    expect(detail.owner.first).toBe('');
+    expect(detail.owner.inQueerPulse).toBe(false);
+    expect(detail.memberFirst).toBeNull();
+  });
+
+  it('drops the grid "run by <first>" line for anon/role listings', () => {
+    expect(toDirectoryCard(makeDirectoryListing()).memberFirst).toBe('Inês');
+    expect(
+      toDirectoryCard(makeDirectoryListing({ visibility: 'anon' })).memberFirst,
+    ).toBeNull();
+    expect(
+      toDirectoryCard(makeDirectoryListing({ visibility: 'role' })).memberFirst,
+    ).toBeNull();
+  });
+});
 
 describe('safe-space adapters', () => {
   it('maps a bar listing to the Bar category via tags', () => {

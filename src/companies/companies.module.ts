@@ -1,6 +1,6 @@
-import { forwardRef, Module } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { JobsModule } from '../jobs/jobs.module';
+import { CompanyOpenRolesModule } from '../jobs/company-open-roles.module';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersModule } from '../users/users.module';
 import { CompaniesController } from './companies.controller';
@@ -18,10 +18,12 @@ import { Company } from './entities/company.entity';
       Profile,
     ]),
     UsersModule,
-    // Circular: `JobsModule` imports `CompaniesModule` (for `CompaniesService`)
-    // and `CompaniesService` injects `JobsService` (for `getOpenRoles`) — see
-    // `.superpowers/sdd/spec-phaseB-companies-jobs.md`'s Jobs section.
-    forwardRef(() => JobsModule),
+    // Open-role counts/lists for company cards + detail. `CompanyOpenRolesModule`
+    // reads the `Job` repository only and imports neither `JobsModule` nor
+    // `CompaniesModule`, so this is a one-directional dependency — the old
+    // `forwardRef(() => JobsModule)` cycle is gone. (`JobsModule` still imports
+    // `CompaniesModule`, but that edge no longer loops back here.)
+    CompanyOpenRolesModule,
   ],
   controllers: [CompaniesController],
   providers: [CompaniesService],

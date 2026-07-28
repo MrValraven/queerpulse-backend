@@ -3,6 +3,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { BlockFilterService } from '../social/block-filter.service';
+import { Mute } from '../social/entities/mute.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { Notification, NotificationType } from './entities/notification.entity';
 import { NOTIFICATION_CREATED } from './notification.events';
@@ -14,6 +15,7 @@ describe('NotificationsService', () => {
   let blockFilter: {
     isBlockedEitherWay: jest.Mock;
     isMutedBy: jest.Mock;
+    blockedUserIds: jest.Mock;
   };
   let repo: {
     create: jest.Mock;
@@ -23,6 +25,7 @@ describe('NotificationsService', () => {
     count: jest.Mock;
   };
   let profileRepo: { find: jest.Mock };
+  let muteRepo: { find: jest.Mock };
 
   beforeEach(async () => {
     repo = {
@@ -33,16 +36,20 @@ describe('NotificationsService', () => {
       count: jest.fn().mockResolvedValue(0),
     };
     profileRepo = { find: jest.fn().mockResolvedValue([]) };
+    muteRepo = { find: jest.fn().mockResolvedValue([]) };
     emit = jest.fn();
     blockFilter = {
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
       isMutedBy: jest.fn().mockResolvedValue(false),
+      // Batched, either-way block lookup used by the fan-out path.
+      blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
     };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         NotificationsService,
         { provide: getRepositoryToken(Notification), useValue: repo },
         { provide: getRepositoryToken(Profile), useValue: profileRepo },
+        { provide: getRepositoryToken(Mute), useValue: muteRepo },
         { provide: EventEmitter2, useValue: { emit } },
         { provide: BlockFilterService, useValue: blockFilter },
       ],
@@ -161,9 +168,7 @@ describe('NotificationsService', () => {
     });
 
     it('suppresses only the recipients who blocked the actor, not the whole fan-out', async () => {
-      blockFilter.isBlockedEitherWay.mockImplementation((recipientId: string) =>
-        Promise.resolve(recipientId === 'u1'),
-      );
+      blockFilter.blockedUserIds.mockResolvedValue(new Set(['u1']));
       repo.save.mockResolvedValue([{ id: 'n2', userId: 'u2' }]);
 
       await service.createForRecipients(
@@ -180,8 +185,28 @@ describe('NotificationsService', () => {
       expect(emit).toHaveBeenCalledTimes(1);
     });
 
+    it('drops a fan-out recipient who has muted the actor', async () => {
+      // One batched `mutes` lookup: `u1` muted the actor, `u2` did not.
+      muteRepo.find.mockResolvedValue([{ muterId: 'u1' }]);
+      repo.save.mockResolvedValue([{ id: 'n2', userId: 'u2' }]);
+
+      await service.createForRecipients(
+        ['u1', 'u2'],
+        NotificationType.NewMessage,
+        { conversationId: 'c1' },
+        'sender-1',
+      );
+
+      expect(muteRepo.find).toHaveBeenCalledTimes(1);
+      expect(repo.create).toHaveBeenCalledTimes(1);
+      expect(repo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 'u2' }),
+      );
+      expect(emit).toHaveBeenCalledTimes(1);
+    });
+
     it('skips the write entirely when every recipient is filtered out', async () => {
-      blockFilter.isBlockedEitherWay.mockResolvedValue(true);
+      blockFilter.blockedUserIds.mockResolvedValue(new Set(['u1', 'u2']));
 
       await service.createForRecipients(
         ['u1', 'u2'],

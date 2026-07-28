@@ -9,7 +9,7 @@ import {
 } from '../common/cursor-pagination';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { CommunityPost } from '../communities/entities/community-post.entity';
-import { Community } from '../communities/entities/community.entity';
+import { AccessTier, Community } from '../communities/entities/community.entity';
 import {
   Event,
   EventStatus,
@@ -164,7 +164,44 @@ export class FeedService {
   ): Promise<Candidate[]> {
     switch (kind) {
       case 'community_post': {
-        const qb = this.communityPosts.createQueryBuilder('cp');
+        // Soft-deleted posts are tombstoned in-place in a community's own feed
+        // (they render as "[deleted]"), but the aggregated feed has no
+        // tombstone rendering — so surfacing one would leak its original
+        // `body`. Redact it from the feed entirely.
+        //
+        // Access-tier / membership gate (mirrors the gathering branch's "don't
+        // leak non-public content into a general feed" intent): a post scoped
+        // to a community only surfaces when that community isn't `private`, OR
+        // the viewer is a member of it — otherwise a private, invite-only
+        // community's post bodies and deep links would leak to non-members via
+        // the feed. A flat/global post (`community_id IS NULL`, see
+        // `CommunityPost.communityId`) is scoped to no community's roster and
+        // stays visible to everyone.
+        //
+        // Expressed as correlated EXISTS subqueries rather than an innerJoin
+        // for the same reason the `new_member` branch below is join-free:
+        // `cursorPaginate` runs `.take() + getMany()` with a raw
+        // `date_trunc(...)` ORDER BY, and TypeORM's `.take()`+join "distinct
+        // pagination" path can't emit that raw expression correctly.
+        const qb = this.communityPosts
+          .createQueryBuilder('cp')
+          .where('cp.deletedAt IS NULL')
+          .andWhere(
+            `(
+              cp.community_id IS NULL
+              OR EXISTS (
+                SELECT 1 FROM "communities" "com"
+                WHERE "com"."id" = cp.community_id
+                  AND "com"."access_tier" != :privateTier
+              )
+              OR EXISTS (
+                SELECT 1 FROM "community_members" "mem"
+                WHERE "mem"."community_id" = cp.community_id
+                  AND "mem"."user_id" = :viewerId
+              )
+            )`,
+            { privateTier: AccessTier.Private, viewerId },
+          );
         const { rows } = await cursorPaginate(qb, cursor, limit, 'cp');
         return rows.map((row) => ({
           id: row.id,
@@ -269,20 +306,9 @@ export class FeedService {
   ): Promise<Candidate[]> {
     if (!candidates.length) return [];
     const authorIds = [...new Set(candidates.map((c) => c.authorId))];
-    const [blockedFlags, mutedFlags] = await Promise.all([
-      Promise.all(
-        authorIds.map((authorId) =>
-          this.blockFilter.isBlockedEitherWay(viewerId, authorId),
-        ),
-      ),
-      Promise.all(
-        authorIds.map((authorId) =>
-          this.blockFilter.isMutedBy(viewerId, authorId),
-        ),
-      ),
-    ]);
-    const hiddenAuthorIds = new Set(
-      authorIds.filter((_, i) => blockedFlags[i] || mutedFlags[i]),
+    const hiddenAuthorIds = await this.blockFilter.hiddenUserIds(
+      viewerId,
+      authorIds,
     );
     return candidates.filter((c) => !hiddenAuthorIds.has(c.authorId));
   }

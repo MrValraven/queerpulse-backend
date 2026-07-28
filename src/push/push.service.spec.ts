@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PushService } from './push.service';
 
@@ -14,6 +15,7 @@ jest.mock('web-push', () => ({
 function makeRepo(rows: unknown[] = []) {
   return {
     find: jest.fn().mockResolvedValue(rows),
+    findOne: jest.fn().mockResolvedValue(null),
     update: jest.fn().mockResolvedValue(undefined),
     delete: jest.fn().mockResolvedValue(undefined),
     upsert: jest.fn().mockResolvedValue(undefined),
@@ -65,6 +67,45 @@ it('prunes a subscription when the push service returns 410 Gone', async () => {
   await service.sendToUser('user-1', payload);
 
   expect(repo.delete).toHaveBeenCalledWith('s1');
+});
+
+describe('saveSubscription', () => {
+  const input = { endpoint: 'e1', keys: { p256dh: 'k1', auth: 'a1' } };
+
+  it('upserts by endpoint without warning when the owner is unchanged', async () => {
+    const repo = makeRepo();
+    repo.findOne.mockResolvedValue({ userId: 'user-1' });
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+    const service = new PushService(repo as never, config);
+
+    await service.saveSubscription('user-1', input);
+
+    expect(repo.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'user-1', endpoint: 'e1' }),
+      ['endpoint'],
+    );
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('logs a warning when an endpoint is reassigned across accounts', async () => {
+    const repo = makeRepo();
+    repo.findOne.mockResolvedValue({ userId: 'victim' });
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+    const service = new PushService(repo as never, config);
+
+    await service.saveSubscription('attacker', input);
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('reassigned from user victim to attacker'),
+    );
+    // The transfer still happens — shared-device account switches must keep working.
+    expect(repo.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'attacker', endpoint: 'e1' }),
+      ['endpoint'],
+    );
+    warn.mockRestore();
+  });
 });
 
 it('does nothing when VAPID keys are not configured', async () => {

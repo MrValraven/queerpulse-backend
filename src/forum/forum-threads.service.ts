@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, Repository } from 'typeorm';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { CursorPage, cursorPaginate } from '../common/cursor-pagination';
@@ -24,11 +25,6 @@ export interface CreateThreadInput {
   title: string;
   body: string;
   category: string;
-}
-
-function isUniqueViolation(err: unknown): boolean {
-  const e = err as { code?: string; driverError?: { code?: string } };
-  return e?.code === '23505' || e?.driverError?.code === '23505';
 }
 
 @Injectable()

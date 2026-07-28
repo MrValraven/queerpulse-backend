@@ -15,6 +15,12 @@ const STORY_COVER_KEY = `story-covers/${USER_SEGMENT}/${FILE_SEGMENT}.webp`;
 const GATHERING_KEY = `gathering-photos/${USER_SEGMENT}/${FILE_SEGMENT}.jpg`;
 
 const LOGGED_IN = { userId: USER_SEGMENT, email: 'member@example.com' };
+// A logged-in member who did NOT upload the gathering photo (their id differs
+// from the `<ownerUserId>` segment embedded in GATHERING_KEY).
+const OTHER_MEMBER = {
+  userId: '99999999-8888-7777-6666-555555555555',
+  email: 'other@example.com',
+};
 
 describe('FilesController', () => {
   let controller: FilesController;
@@ -60,7 +66,7 @@ describe('FilesController', () => {
   });
 
   describe('gathering photos', () => {
-    it('redirects for a logged-in member', async () => {
+    it('redirects for the member who uploaded the photo', async () => {
       await serve(GATHERING_KEY, LOGGED_IN);
       expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
     });
@@ -68,6 +74,13 @@ describe('FilesController', () => {
     it('rejects an anonymous request', async () => {
       await expect(serve(GATHERING_KEY, null)).rejects.toThrow(
         UnauthorizedException,
+      );
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+    });
+
+    it('404s for a logged-in member who is not the uploader (IDOR guard)', async () => {
+      await expect(serve(GATHERING_KEY, OTHER_MEMBER)).rejects.toThrow(
+        NotFoundException,
       );
       expect(storage.createPresignedDownload).not.toHaveBeenCalled();
     });

@@ -40,18 +40,28 @@ export class StorageService {
   // Presigned PUT: the caller `PUT`s the raw bytes straight to `uploadUrl`
   // with no cookies/CSRF — the signature alone authorizes writing this one
   // key, and the pinned `ContentType` means a client can't silently swap it
-  // after the signature is minted. Unlike a POST policy, a presigned PUT URL
-  // cannot itself enforce a content-length-range condition, so the caller
-  // (`UploadsController`) is responsible for rejecting an over-cap
-  // `byteSize` and a disallowed content type *before* calling this.
+  // after the signature is minted.
+  //
+  // A presigned PUT cannot carry a content-length-*range* condition the way a
+  // POST policy can, but signing an exact `ContentLength` DOES bind the upload
+  // to that byte count: it becomes a signed header, so a client that streams
+  // more (or fewer) bytes than declared fails the signature. `UploadsController`
+  // still rejects an over-cap `byteSize` up front (a large declared size never
+  // gets a signature at all); pinning `ContentLength` here closes the gap where
+  // a client declared a small `byteSize` to pass that check, then PUT a much
+  // larger body — previously the client-declared size was the *only* limit.
+  // `contentLength` is optional because the legacy avatar/work-image routes
+  // don't send a byte size; those keep the up-front check only.
   async createPresignedUpload(
     key: string,
     contentType: string,
+    contentLength?: number,
   ): Promise<PresignedUpload> {
     const command = new PutObjectCommand({
       Bucket: this.requireConfig('storage.bucket'),
       Key: key,
       ContentType: contentType,
+      ...(contentLength !== undefined ? { ContentLength: contentLength } : {}),
     });
     const uploadUrl = await getSignedUrl(this.storageClient(), command, {
       expiresIn: PRESIGN_EXPIRY_SECONDS,

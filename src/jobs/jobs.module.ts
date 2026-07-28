@@ -1,4 +1,4 @@
-import { forwardRef, Module } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CompaniesModule } from '../companies/companies.module';
 import { Profile } from '../users/entities/profile.entity';
@@ -11,11 +11,12 @@ import { JobsService } from './jobs.service';
 @Module({
   imports: [
     TypeOrmModule.forFeature([Job, JobApplication, Profile]),
-    // Circular: `CompaniesModule` imports `JobsModule` (for `JobsService`)
-    // and `JobsService` injects `CompaniesService` (to resolve/authorize
-    // companies and to create one inline) — see
-    // `.superpowers/sdd/spec-phaseB-companies-jobs.md`'s Jobs section.
-    forwardRef(() => CompaniesModule),
+    // `JobsService` injects `CompaniesService` (resolve/authorize a company for
+    // posting, inline-create one, batch-resolve company refs). This is now a
+    // one-directional import: `CompaniesModule` no longer imports `JobsModule`
+    // (it depends on the standalone `CompanyOpenRolesModule` for open roles),
+    // so the old `forwardRef` cycle is gone.
+    CompaniesModule,
     UsersModule,
   ],
   controllers: [JobsController, MeApplicationsController],

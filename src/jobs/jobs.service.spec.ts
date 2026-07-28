@@ -292,69 +292,6 @@ describe('JobsService', () => {
     });
   });
 
-  describe('listOpenForCompany', () => {
-    it('filters to open jobs and maps them to JobCardDTO', async () => {
-      jobs.find.mockResolvedValue([
-        {
-          id: 'job-1',
-          slug: 'a',
-          companyId: 'co-1',
-          title: 'A',
-          category: 'c',
-          commitment: 'ft',
-          seniority: 's',
-          format: JobFormat.Remote,
-          location: 'l',
-          city: null,
-          timezone: null,
-          salary: null,
-          rateMin: null,
-          rateMax: null,
-          currency: null,
-          ratePer: null,
-          hidePay: false,
-          barter: false,
-          deadline: null,
-          startDate: null,
-          desc: 'd',
-          tags: [],
-          queerRun: false,
-          qrLabel: null,
-          status: JobStatus.Open,
-          createdAt: new Date('2026-01-01T00:00:00.000Z'),
-        },
-      ]);
-      companiesService.companyRefsByIds.mockResolvedValue(
-        new Map([
-          ['co-1', { slug: 'atelier-pulso', nameText: 'Atelier Pulso' }],
-        ]),
-      );
-
-      const res = await service.listOpenForCompany('co-1');
-
-      expect(jobs.find).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: { companyId: 'co-1', status: JobStatus.Open },
-        }),
-      );
-      expect(res).toHaveLength(1);
-      expect(res[0].company).toEqual({
-        slug: 'atelier-pulso',
-        nameText: 'Atelier Pulso',
-      });
-      expect(res[0].status).toBe(JobStatus.Open);
-    });
-
-    it('returns [] without calling companyRefsByIds when there are no open jobs', async () => {
-      jobs.find.mockResolvedValue([]);
-
-      const res = await service.listOpenForCompany('co-empty');
-
-      expect(res).toEqual([]);
-      expect(companiesService.companyRefsByIds).not.toHaveBeenCalled();
-    });
-  });
-
   describe('listMine', () => {
     it('scopes the query to the given posterId and maps rows to JobCardDTO', async () => {
       const qb = qbStub();

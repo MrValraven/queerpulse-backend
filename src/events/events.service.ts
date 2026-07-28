@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { randomBytes } from 'node:crypto';
 import { In, Not, Repository } from 'typeorm';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -51,11 +52,6 @@ const PAGE_SIZE = 20;
 
 // Postgres unique-violation SQLSTATE. TypeORM surfaces it either directly on the
 // QueryFailedError or on the wrapped driverError depending on the path.
-function isUniqueViolation(err: unknown): boolean {
-  const e = err as { code?: string; driverError?: { code?: string } };
-  return e?.code === '23505' || e?.driverError?.code === '23505';
-}
-
 // null capacity means unlimited. "Increased" = strictly more seats than before:
 // a bigger number, or a number lifted to unlimited. Shrinking never promotes.
 function capacityIncreased(

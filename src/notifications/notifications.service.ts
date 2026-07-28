@@ -3,6 +3,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { BlockFilterService } from '../social/block-filter.service';
+import { Mute } from '../social/entities/mute.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { Notification, NotificationType } from './entities/notification.entity';
 import {
@@ -30,6 +31,8 @@ export class NotificationsService {
     private readonly notifications: Repository<Notification>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
+    @InjectRepository(Mute)
+    private readonly mutes: Repository<Mute>,
     private readonly eventEmitter: EventEmitter2,
     private readonly blockFilter: BlockFilterService,
   ) {}
@@ -182,15 +185,55 @@ export class NotificationsService {
     return blocked || muted;
   }
 
-  /** Per-recipient application of `isHiddenFrom` for the fan-out path. */
+  /**
+   * The fan-out equivalent of `isHiddenFrom`, computed in **two batched
+   * queries total** rather than `2 × userIds.length`: one either-way `blocks`
+   * lookup (reusing `BlockFilterService.blockedUserIds`) and one directional
+   * `mutes` lookup. A recipient is dropped when the actor is blocked either way
+   * relative to them, or when they have muted the actor. The actor is never
+   * hidden from themself — self-ids are excluded from both lookups, so a
+   * self-notification still passes through, exactly as the per-recipient
+   * `isHiddenFrom` behaved. Duplicates and ordering in `userIds` are
+   * preserved.
+   */
   private async visibleRecipients(
     userIds: string[],
     actorId: string,
   ): Promise<string[]> {
-    const flags = await Promise.all(
-      userIds.map((userId) => this.isHiddenFrom(userId, actorId)),
+    const recipientIdsToCheck = [...new Set(userIds)].filter(
+      (recipientId) => recipientId !== actorId,
     );
-    return userIds.filter((_, i) => !flags[i]);
+    const [blockedRecipientIds, mutingRecipientIds] = await Promise.all([
+      // Blocked either way relative to the actor — already one batched query.
+      this.blockFilter.blockedUserIds(actorId, recipientIdsToCheck),
+      this.recipientsMuting(actorId, recipientIdsToCheck),
+    ]);
+    return userIds.filter(
+      (recipientId) =>
+        !blockedRecipientIds.has(recipientId) &&
+        !mutingRecipientIds.has(recipientId),
+    );
+  }
+
+  /**
+   * The subset of `recipientIds` that have muted `actorId` — rows where the
+   * recipient is the muter and the actor the muted. This is the mirror of
+   * `BlockFilterService.mutedUserIds` (which finds who the *actor* muted), so
+   * that helper cannot serve it; one batched query in the `In(...)` style of
+   * `attachActors`.
+   */
+  private async recipientsMuting(
+    actorId: string,
+    recipientIds: string[],
+  ): Promise<Set<string>> {
+    if (!recipientIds.length) {
+      return new Set();
+    }
+    const muteRows = await this.mutes.find({
+      where: { muterId: In(recipientIds), mutedId: actorId },
+      select: { muterId: true },
+    });
+    return new Set(muteRows.map((muteRow) => muteRow.muterId));
   }
 
   /**

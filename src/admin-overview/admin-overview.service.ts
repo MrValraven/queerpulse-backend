@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Between, In, IsNull, MoreThanOrEqual, Repository } from 'typeorm';
+import { Between, In, IsNull, MoreThanOrEqual, Not, Repository } from 'typeorm';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
@@ -45,6 +45,12 @@ const FEED_SOURCE_FETCH_LIMIT = 10;
 
 /** How many merged feed rows the dashboard actually renders. */
 const FEED_RESULT_LIMIT = 6;
+
+/** Resolution window for `loadReportResolutions`: only resolutions that
+ *  happened within this many days back are considered. Bounds the id lists
+ *  handed to `In(...)` by recent-resolution volume rather than by the entire
+ *  all-time resolved-report history — see the method's doc for why. */
+const REPORT_RESOLUTION_WINDOW_DAYS = 90;
 
 // The subset of `MOD_ACTION_CODES` that `statusForAction` (the same mapper
 // `ModerationService.actOnReport` uses to write `Report.status`) resolves to
@@ -342,36 +348,67 @@ export class AdminOverviewService {
    * closed it out — the row against that `reportId` whose `action` is one of
    * `REPORT_RESOLVING_ACTIONS`, latest by `createdAt` when more than one such
    * row exists (a report could in principle be acted on more than once
-   * before landing on `Resolved`).
+   * before landing on `Resolved`) — restricted to resolutions within the last
+   * `REPORT_RESOLUTION_WINDOW_DAYS` days.
    *
-   * Two batched queries total, never one per report: all resolved reports
-   * first, then every resolving audit row for that whole set at once.
+   * The window is what keeps this bounded. The previous shape fetched EVERY
+   * resolved report, then passed all of their ids to
+   * `modAuditLogs.find({ reportId: In([...]) })`; past ~65535 ids Postgres
+   * rejects the bind-parameter list outright (`bind message has 65535
+   * parameter formats but N parameters`), and it dragged the entire
+   * resolved-report history through the Node heap on every dashboard load —
+   * the exact constraint documented on
+   * `AdminCommunitiesService.loadReportScope`. Following that precedent, the
+   * recent set is fetched FIRST — here the resolving audit rows inside the
+   * window — and only the report ids they reference are resolved, so both
+   * `In(...)` lists are bounded by recent-resolution volume, never all-time
+   * volume.
+   *
+   * Windowing on the audit row's `createdAt` (which IS the resolution instant)
+   * bounds the DATA without changing the metric's DEFINITION: "median time to
+   * resolve a report" is unchanged, now measured over resolutions that
+   * happened in the window (a recent-window reading of the same measure — and
+   * the only resolutions the activity feed would ever surface anyway). A
+   * report filed long ago but slowly resolved inside the window is still
+   * counted, so slow resolutions are not silently dropped from the median.
+   *
+   * Two batched queries total, never one per report.
    */
   private async loadReportResolutions(): Promise<ReportResolutionRow[]> {
-    const resolvedReports = await this.reports.find({
-      where: { status: ReportStatus.Resolved },
-      select: ['id', 'createdAt'],
-    });
-    if (!resolvedReports.length) return [];
-
-    const resolvingAuditRows = await this.modAuditLogs.find({
-      where: {
-        reportId: In(
-          resolvedReports.map((resolvedReport) => resolvedReport.id),
-        ),
-        action: In([...REPORT_RESOLVING_ACTIONS]),
-      },
-      order: { createdAt: 'ASC' },
-    });
+    const resolutionWindowStart = new Date(
+      Date.now() - REPORT_RESOLUTION_WINDOW_DAYS * DAY_MS,
+    );
 
     // Ascending order means the last write seen per reportId is the latest —
     // exactly the "if multiple, take the latest resolution row" rule, with no
-    // separate sort/group step needed.
+    // separate sort/group step needed. `reportId` non-null is enforced in SQL
+    // so the `In(...)` below is fed only real report ids.
+    const resolvingAuditRows = await this.modAuditLogs.find({
+      where: {
+        action: In([...REPORT_RESOLVING_ACTIONS]),
+        reportId: Not(IsNull()),
+        createdAt: MoreThanOrEqual(resolutionWindowStart),
+      },
+      order: { createdAt: 'ASC' },
+    });
+    if (!resolvingAuditRows.length) return [];
+
     const latestResolvingAuditRowByReportId = new Map<string, ModAuditLog>();
     for (const auditRow of resolvingAuditRows) {
       if (!auditRow.reportId) continue;
       latestResolvingAuditRowByReportId.set(auditRow.reportId, auditRow);
     }
+
+    // Confirm each referenced report is actually `Resolved` (an audit row with
+    // a resolving action but a report since re-opened/superseded contributes
+    // no delta). `In(...)` here is bounded by the windowed audit-row count.
+    const resolvedReports = await this.reports.find({
+      where: {
+        id: In([...latestResolvingAuditRowByReportId.keys()]),
+        status: ReportStatus.Resolved,
+      },
+      select: ['id', 'createdAt'],
+    });
 
     const resolutions: ReportResolutionRow[] = [];
     for (const resolvedReport of resolvedReports) {
