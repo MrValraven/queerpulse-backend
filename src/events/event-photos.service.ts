@@ -105,6 +105,9 @@ export class EventPhotosService {
     const rows = await this.photos.find({
       where: { eventId: event.id },
       order: { createdAt: 'DESC' },
+      // Bound the result set: an event's gallery is browsed as a strip, not
+      // paginated, so cap it rather than let one event load unboundedly.
+      take: 200,
     });
     const photos = await toEventPhotoViews(
       rows,

@@ -26,15 +26,16 @@ describe('AuthMaintenanceService.purgeExpiredRefreshTokens', () => {
     // Snake_case column names + a ~30-day cutoff.
     expect(qb.where).toHaveBeenCalledWith(
       'expires_at < :cutoff',
-      expect.objectContaining({ cutoff: expect.any(Date) }),
+      expect.objectContaining({ cutoff: expect.any(Date) as unknown }),
     );
     expect(qb.orWhere).toHaveBeenCalledWith(
       'revoked_at < :cutoff',
-      expect.objectContaining({ cutoff: expect.any(Date) }),
+      expect.objectContaining({ cutoff: expect.any(Date) as unknown }),
     );
     expect(qb.execute).toHaveBeenCalledTimes(1);
 
-    const { cutoff } = qb.where.mock.calls[0][1] as { cutoff: Date };
+    const whereArgs = qb.where.mock.calls[0] as [string, { cutoff: Date }];
+    const { cutoff } = whereArgs[1];
     const ageMs = Date.now() - cutoff.getTime();
     const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
     // Allow a little slack for test execution time.

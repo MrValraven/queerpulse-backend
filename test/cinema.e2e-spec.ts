@@ -6,6 +6,7 @@ import { ExecutionContext, INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { createHmac } from 'node:crypto';
 import request from 'supertest';
+import { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { GoogleAuthGuard } from '../src/auth/guards/google-auth.guard';
@@ -81,7 +82,7 @@ describe('Cinema (e2e)', () => {
         activatedAt: new Date(),
       }),
     );
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/auth/google/callback')
       .set(
         'x-google-profile',
@@ -98,12 +99,12 @@ describe('Cinema (e2e)', () => {
   }
 
   it('rejects unauthenticated access to the titles list', async () => {
-    const res = await request(app.getHttpServer()).get('/cinema/titles');
+    const res = await request(app.getHttpServer() as App).get('/cinema/titles');
     expect(res.status).toBe(401);
   });
 
   it('blocks playback requests without a CSRF token (guard order intact)', async () => {
-    const res = await request(app.getHttpServer()).post(
+    const res = await request(app.getHttpServer() as App).post(
       '/cinema/titles/6f2a2c4e-1f4b-4c1a-9a01-4f4dbb0b18aa/playback',
     );
     expect(res.status).toBe(403);
@@ -111,7 +112,7 @@ describe('Cinema (e2e)', () => {
   });
 
   it('lets the Mux webhook past CSRF but rejects a bad signature', async () => {
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .post('/cinema/webhooks/mux')
       .set('Content-Type', 'application/json')
       .set('mux-signature', 't=1,v1=deadbeef')
@@ -128,7 +129,7 @@ describe('Cinema (e2e)', () => {
       type: 'video.asset.created',
       data: { id: 'as-unknown' },
     });
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .post('/cinema/webhooks/mux')
       .set('Content-Type', 'application/json')
       .set('mux-signature', muxSignature(body, 'e2e-webhook-secret'))
@@ -158,13 +159,13 @@ describe('Cinema (e2e)', () => {
       }),
     );
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/cinema/titles')
       .set('Cookie', cookies);
     expect(res.status).toBe(200);
     const items = res.body as { title: string; myProgress: unknown }[];
     expect(items).toHaveLength(1);
-    expect(items[0].title).toBe('Published Film');
-    expect(items[0].myProgress).toBeNull();
+    expect(items[0]!.title).toBe('Published Film');
+    expect(items[0]!.myProgress).toBeNull();
   });
 });

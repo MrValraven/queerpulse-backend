@@ -8,6 +8,7 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
+import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 
 export class CreateChangemakerDto {
   @IsString() @MinLength(1) @MaxLength(200) name: string;
@@ -18,7 +19,9 @@ export class CreateChangemakerDto {
   @IsArray() @IsString({ each: true }) tags: string[];
   @IsString() @MaxLength(2000) summary: string;
 
-  @IsOptional() @IsString() @MaxLength(500) imageUrl?: string;
+  // A storage key or https:// URL — never a javascript:/data: URI that another
+  // member's browser would render. Matches every other image field in the repo.
+  @IsOptional() @IsImageReference() imageUrl?: string;
 
   @IsArray() @IsString({ each: true }) impact: string[];
 

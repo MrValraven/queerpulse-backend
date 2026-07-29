@@ -2,6 +2,7 @@ import { ExecutionContext, INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
+import { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { GoogleAuthGuard } from '../src/auth/guards/google-auth.guard';
@@ -139,7 +140,7 @@ describe('Bootstrap (e2e)', () => {
     // is keyed off googleId so distinct logins in the same test never collide.
     const nonce = `e2e-nonce-${googleId}`;
     const state = encodeOAuthState({ nonce })!;
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/auth/google/callback')
       .query({ state })
       .set('Cookie', [`oauth_state=${nonce}`])
@@ -172,7 +173,7 @@ describe('Bootstrap (e2e)', () => {
   async function withCsrf(
     sessionCookies: string[],
   ): Promise<{ cookies: string[]; csrfToken: string }> {
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/csrf-token')
       .set('Cookie', sessionCookies);
     expect(res.status).toBe(200);
@@ -189,7 +190,7 @@ describe('Bootstrap (e2e)', () => {
     );
     const cookies = await loginAs('g-bootstrap-1', 'bootstrap1@example.com');
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/me/bootstrap')
       .set('Cookie', cookies)
       .expect(200);
@@ -238,17 +239,17 @@ describe('Bootstrap (e2e)', () => {
     );
     const { cookies, csrfToken } = await withCsrf(sessionCookies);
 
-    await request(app.getHttpServer())
+    await request(app.getHttpServer() as App)
       .post('/blocks/bootstrap-member-2-target')
       .set('Cookie', cookies)
       .set('X-CSRF-Token', csrfToken)
       .expect(201);
 
-    const bootstrap = await request(app.getHttpServer())
+    const bootstrap = await request(app.getHttpServer() as App)
       .get('/me/bootstrap')
       .set('Cookie', cookies)
       .expect(200);
-    const blocks = await request(app.getHttpServer())
+    const blocks = await request(app.getHttpServer() as App)
       .get('/blocks')
       .set('Cookie', cookies)
       .expect(200);
@@ -264,7 +265,7 @@ describe('Bootstrap (e2e)', () => {
     await seedSuspendedMember('g-bootstrap-3', 'bootstrap3@example.com');
     const cookies = await loginAs('g-bootstrap-3', 'bootstrap3@example.com');
 
-    await request(app.getHttpServer())
+    await request(app.getHttpServer() as App)
       .get('/me/bootstrap')
       .set('Cookie', cookies)
       .expect(403);

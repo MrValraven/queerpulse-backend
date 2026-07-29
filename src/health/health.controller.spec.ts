@@ -40,17 +40,21 @@ describe('HealthController', () => {
   it('liveness runs no dependency checks', async () => {
     await expect(controller.live()).resolves.toEqual(okResult);
     // Called with an empty indicator array — no DB ping in the liveness path.
-    const indicators = check.mock.calls[0][0] as unknown[];
+    const calls = check.mock.calls as unknown[][];
+    const indicators = (calls[0]?.[0] ?? []) as unknown[];
     expect(indicators).toHaveLength(0);
     expect(pingCheck).not.toHaveBeenCalled();
   });
 
   it('readiness pings the database', async () => {
     await expect(controller.ready()).resolves.toEqual(okResult);
-    const indicators = check.mock.calls[0][0] as Array<() => unknown>;
+    const calls = check.mock.calls as unknown[][];
+    const indicators = (calls[0]?.[0] ?? []) as Array<() => unknown>;
     expect(indicators).toHaveLength(1);
     // Invoke the registered indicator to prove it drives the DB ping.
-    indicators[0]();
+    const indicator = indicators[0];
+    expect(indicator).toBeDefined();
+    indicator?.();
     expect(pingCheck).toHaveBeenCalledWith('database');
   });
 });

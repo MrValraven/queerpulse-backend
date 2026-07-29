@@ -5,6 +5,7 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { DiscoverableIdentitiesService } from './discoverable-identities.service';
 import { UpdateDiscoverableIdentitiesDto } from './dto/update-discoverable-identities.dto';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * Which of the member's identities are published for member-directory search.
@@ -38,6 +39,8 @@ import { UpdateDiscoverableIdentitiesDto } from './dto/update-discoverable-ident
  * retraction that takes effect in five minutes is a retraction that did not
  * work.
  */
+@ApiTags('Profiles')
+@ApiCookieAuth()
 @Controller('me')
 export class DiscoverableIdentitiesController {
   constructor(

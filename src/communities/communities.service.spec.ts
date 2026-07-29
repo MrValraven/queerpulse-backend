@@ -8,7 +8,10 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Profile } from '../users/entities/profile.entity';
-import { CommunitiesService } from './communities.service';
+import {
+  CommunitiesService,
+  CreateCommunityInput,
+} from './communities.service';
 import {
   CommunityJoinRequest,
   JoinRequestStatus,
@@ -201,7 +204,7 @@ describe('CommunitiesService', () => {
         whoFor: 'y',
         tagline: 'z',
       };
-      const res = await service.create('u1', dto as any);
+      const res = await service.create('u1', dto as CreateCommunityInput);
       expect(res.slug).toBe('queer-devs');
       expect(res.ref).toMatch(/^QP-C-\d{4}$/);
       expect(members.save).toHaveBeenCalledWith(
@@ -217,7 +220,7 @@ describe('CommunitiesService', () => {
       }));
       members.save.mockImplementation((m: Partial<CommunityMember>) => m);
       const qb = qbStub();
-      qb.getMany.mockResolvedValue([{ slug: 'jo', userId: 'steward-1' }]);
+      qb.getMany!.mockResolvedValue([{ slug: 'jo', userId: 'steward-1' }]);
       profiles.createQueryBuilder.mockReturnValue(qb);
 
       const dto = {
@@ -233,7 +236,7 @@ describe('CommunitiesService', () => {
         tagline: 'z',
         stewards: ['jo'],
       };
-      await service.create('u1', dto as any);
+      await service.create('u1', dto as CreateCommunityInput);
 
       expect(members.save).toHaveBeenCalledWith([
         expect.objectContaining({ userId: 'steward-1', role: RosterRole.Mod }),
@@ -250,7 +253,7 @@ describe('CommunitiesService', () => {
       // Even when the invited slug resolves to a real, active profile, no
       // CommunityMember row should ever be created for it.
       const qb = qbStub();
-      qb.getMany.mockResolvedValue([{ slug: 'invitee', userId: 'invitee-1' }]);
+      qb.getMany!.mockResolvedValue([{ slug: 'invitee', userId: 'invitee-1' }]);
       profiles.createQueryBuilder.mockReturnValue(qb);
 
       const dto = {
@@ -266,7 +269,7 @@ describe('CommunitiesService', () => {
         tagline: 'z',
         invites: ['invitee'],
       };
-      await service.create('u1', dto as any);
+      await service.create('u1', dto as CreateCommunityInput);
 
       // Only the owner roster row is ever saved — no extra `members.save`
       // call (and thus no roster row) for the invited slug.
@@ -287,7 +290,7 @@ describe('CommunitiesService', () => {
       }));
       members.save.mockImplementation((m: Partial<CommunityMember>) => m);
       const qb = qbStub();
-      qb.getMany.mockResolvedValue([
+      qb.getMany!.mockResolvedValue([
         { slug: 'jo', userId: 'steward-1' },
         { slug: 'invitee', userId: 'invitee-1' },
       ]);
@@ -307,7 +310,7 @@ describe('CommunitiesService', () => {
         stewards: ['jo'],
         invites: ['invitee'],
       };
-      await service.create('u1', dto as any);
+      await service.create('u1', dto as CreateCommunityInput);
 
       // The second `members.save` call is the roster-seed batch — exactly
       // the steward, nothing for the invitee.
@@ -341,7 +344,7 @@ describe('CommunitiesService', () => {
         whoFor: 'y',
         tagline: 'z',
       };
-      const res = await service.create('u1', dto as any);
+      const res = await service.create('u1', dto as CreateCommunityInput);
 
       expect(res.ref).toMatch(/^QP-C-\d{4}$/);
       expect(communities.save).toHaveBeenCalledTimes(2);
@@ -362,9 +365,9 @@ describe('CommunitiesService', () => {
         whoFor: 'y',
         tagline: 'z',
       };
-      await expect(service.create('u1', dto as any)).rejects.toBeInstanceOf(
-        ConflictException,
-      );
+      await expect(
+        service.create('u1', dto as CreateCommunityInput),
+      ).rejects.toBeInstanceOf(ConflictException);
       expect(communities.save).toHaveBeenCalledTimes(5);
     });
   });
@@ -424,7 +427,7 @@ describe('CommunitiesService', () => {
         accessTier: AccessTier.Public,
         ref: 'QP-C-0001',
       };
-      qb.getManyAndCount.mockResolvedValue([[row], 1]);
+      qb.getManyAndCount!.mockResolvedValue([[row], 1]);
       communities.createQueryBuilder.mockReturnValue(qb);
       members.find.mockResolvedValue([
         { communityId: 'c1', userId: 'u1', role: RosterRole.Member },
@@ -440,8 +443,8 @@ describe('CommunitiesService', () => {
       );
       expect(qb.leftJoin).not.toHaveBeenCalled();
       expect(result.items).toHaveLength(1);
-      expect(result.items[0].slug).toBe('a');
-      expect(result.items[0].myRole).toBe(RosterRole.Member);
+      expect(result.items[0]!.slug).toBe('a');
+      expect(result.items[0]!.myRole).toBe(RosterRole.Member);
     });
 
     it("default filter='discover' left-joins membership and excludes private for non-members", async () => {
@@ -725,7 +728,9 @@ describe('CommunitiesService', () => {
         ownerId: 'owner-1',
       });
       const qb = qbStub();
-      qb.getMany.mockResolvedValue([{ slug: 'owner-slug', userId: 'owner-1' }]);
+      qb.getMany!.mockResolvedValue([
+        { slug: 'owner-slug', userId: 'owner-1' },
+      ]);
       profiles.createQueryBuilder.mockReturnValue(qb);
       members.findOne.mockResolvedValue({ id: 'm1', role: RosterRole.Owner });
 
@@ -739,7 +744,7 @@ describe('CommunitiesService', () => {
   describe('myCommunities', () => {
     it('returns a bare, unpaginated array of the caller`s roster rows', async () => {
       const qb = qbStub();
-      qb.getRawMany.mockResolvedValue([
+      qb.getRawMany!.mockResolvedValue([
         {
           slug: 'trans-joy',
           name: 'Trans Joy',
@@ -801,7 +806,7 @@ describe('CommunitiesService', () => {
     // which runs on the profiles query builder.
     const resolveSlug = (slug: string, userId: string) => {
       const qb = qbStub();
-      qb.getMany.mockResolvedValue([{ slug, userId }]);
+      qb.getMany!.mockResolvedValue([{ slug, userId }]);
       profiles.createQueryBuilder.mockReturnValue(qb);
     };
 

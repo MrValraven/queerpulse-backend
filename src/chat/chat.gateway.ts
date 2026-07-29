@@ -13,7 +13,7 @@ import {
   WsException,
 } from '@nestjs/websockets';
 import { parseCookie } from 'cookie';
-import { Namespace, Socket } from 'socket.io';
+import { DefaultEventsMap, Namespace, Socket } from 'socket.io';
 import { DEFAULT_LOCKDOWN_MESSAGE } from '../common/lockdown.constants';
 import { resolveFrontendOrigins } from '../config/frontend-origins';
 import { ConnectionsService } from '../connections/connections.service';
@@ -87,10 +87,28 @@ export class PlatformLockedWsException extends WsException {
 /** Verified access-token claims we depend on for the WS handshake. */
 interface AccessTokenClaims {
   sub: string;
-  status: string;
+  status: UserStatus;
   /** Standard JWT expiry, seconds since epoch. */
   exp: number;
 }
+
+/**
+ * Per-connection state we stash on `Socket.data` during the handshake. Typing
+ * it (rather than leaving socket.io's default `any`) keeps every `client.data`
+ * read/write checked instead of unsafe.
+ */
+interface ChatSocketData {
+  userId?: string;
+  exp?: number;
+  expiryTimer?: NodeJS.Timeout;
+}
+
+type ChatSocket = Socket<
+  DefaultEventsMap,
+  DefaultEventsMap,
+  DefaultEventsMap,
+  ChatSocketData
+>;
 
 /**
  * Enforce the frontend allowlist on the handshake itself.
@@ -185,7 +203,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly platformSettings: PlatformSettingsService,
   ) {}
 
-  async handleConnection(client: Socket): Promise<void> {
+  async handleConnection(client: ChatSocket): Promise<void> {
     try {
       const { userId, exp } = await this.authenticate(client);
       client.data.userId = userId;
@@ -215,12 +233,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
-  async handleDisconnect(client: Socket): Promise<void> {
-    const timer = client.data?.expiryTimer as NodeJS.Timeout | undefined;
+  async handleDisconnect(client: ChatSocket): Promise<void> {
+    const timer = client.data.expiryTimer;
     if (timer) {
       clearTimeout(timer);
     }
-    const userId = client.data?.userId as string | undefined;
+    const userId = client.data.userId;
     if (!userId) {
       return;
     }
@@ -235,7 +253,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   @SubscribeMessage('conversation:join')
   async handleJoin(
-    @ConnectedSocket() client: Socket,
+    @ConnectedSocket() client: ChatSocket,
     @MessageBody() data: JoinPayload,
   ): Promise<{ joined: string }> {
     const userId = this.requireUserId(client);
@@ -248,7 +266,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   @SubscribeMessage('message:send')
   async handleSend(
-    @ConnectedSocket() client: Socket,
+    @ConnectedSocket() client: ChatSocket,
     @MessageBody() data: SendMessagePayload,
   ): Promise<void> {
     const userId = this.requireUserId(client);
@@ -263,18 +281,31 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       data.body,
       data.replyToId,
       data.clientMessageId,
+      undefined, // forwarded — the WS path never forwards
+      data.kind,
+      data.attachment,
     );
   }
 
   @SubscribeMessage('typing')
   handleTyping(
-    @ConnectedSocket() client: Socket,
+    @ConnectedSocket() client: ChatSocket,
     @MessageBody() data: TypingPayload,
   ): void {
     const userId = this.requireUserId(client);
     // Only members who have joined the conversation room may broadcast typing.
+    // Silently drop rather than throw when the room isn't joined yet: `typing`
+    // is advisory (see the rate-limit branch below), and `conversation:join` is
+    // an async handler racing this fire-and-forget frame — a client that opens a
+    // thread and types immediately (or reconnects) legitimately lands here for a
+    // sub-millisecond window before `client.join` completes. Erroring turned that
+    // benign race into a full stack trace + Sentry event on every occurrence
+    // (WsException is not an HttpException, so the filter logs it as a server
+    // fault). The security invariant still holds — a socket not in the room does
+    // not broadcast into it — and the composer re-emits `typing:true` every ~2s,
+    // so the indicator still appears once the join lands.
     if (!client.rooms.has(data.conversationId)) {
-      throw new WsException('Join the conversation before typing');
+      return;
     }
     if (!this.typingLimiter.tryConsume(userId)) {
       // Silently drop — typing is advisory; no need to error the client.
@@ -289,7 +320,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   @SubscribeMessage('read')
   async handleRead(
-    @ConnectedSocket() client: Socket,
+    @ConnectedSocket() client: ChatSocket,
     @MessageBody() data: ReadPayload,
   ): Promise<void> {
     const userId = this.requireUserId(client);
@@ -298,7 +329,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   @SubscribeMessage('delivered')
   async handleDelivered(
-    @ConnectedSocket() client: Socket,
+    @ConnectedSocket() client: ChatSocket,
     @MessageBody() data: DeliveredPayload,
   ): Promise<void> {
     const userId = this.requireUserId(client);
@@ -314,7 +345,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   @SubscribeMessage('presence:snapshot')
   async handlePresenceSnapshot(
-    @ConnectedSocket() client: Socket,
+    @ConnectedSocket() client: ChatSocket,
   ): Promise<void> {
     const userId = this.requireUserId(client);
     await this.emitPresenceSnapshot(client, userId);
@@ -333,9 +364,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   @OnEvent(MESSAGE_UPDATED)
   handleMessageUpdated(payload: MessageUpdatedEvent): void {
-    this.namespace
-      ?.to(payload.conversationId)
-      .emit('message:updated', payload);
+    this.namespace?.to(payload.conversationId).emit('message:updated', payload);
   }
 
   /**
@@ -366,7 +395,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // `userId` (the recipient who acked) + `deliveredAt` to advance its
     // one-check → two-check tick. `deliveredAt` is a Date here; socket.io
     // serialises it to an ISO string on the wire (as with `read`'s lastReadAt).
-    this.namespace?.to(payload.conversationId).emit('message:delivered', payload);
+    this.namespace
+      ?.to(payload.conversationId)
+      .emit('message:delivered', payload);
   }
 
   @OnEvent(MESSAGE_REACTION)
@@ -451,8 +482,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   // --- internals ---
 
-  private requireUserId(client: Socket): string {
-    const userId = client.data?.userId as string | undefined;
+  private requireUserId(client: ChatSocket): string {
+    const userId = client.data.userId;
     if (!userId) {
       throw new WsException('Unauthorized');
     }
@@ -460,7 +491,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   private async authenticate(
-    client: Socket,
+    client: ChatSocket,
   ): Promise<{ userId: string; exp: number }> {
     const fromAuth = client.handshake.auth?.token as string | undefined;
     const fromCookie = parseCookie(client.handshake.headers.cookie ?? '')[
@@ -531,7 +562,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     );
   }
 
-  private scheduleTokenExpiry(client: Socket, exp: number): void {
+  private scheduleTokenExpiry(client: ChatSocket, exp: number): void {
     const msUntilExpiry = exp * 1000 - Date.now();
     if (msUntilExpiry <= 0) {
       client.emit('exception', { status: 'error', message: 'Token expired' });
@@ -548,7 +579,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   private async emitPresenceSnapshot(
-    client: Socket,
+    client: ChatSocket,
     userId: string,
   ): Promise<void> {
     const connectionIds =

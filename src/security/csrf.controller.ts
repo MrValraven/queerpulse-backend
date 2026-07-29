@@ -1,5 +1,6 @@
-import { Controller, Get, Res } from '@nestjs/common';
+import { Controller, Get, Res, VERSION_NEUTRAL } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { ApiTags } from '@nestjs/swagger';
 import { randomBytes } from 'node:crypto';
 import { Response } from 'express';
 import { Public } from '../auth/decorators/public.decorator';
@@ -12,9 +13,16 @@ import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 // the SPA re-fetched a token.
 const CSRF_MAX_AGE = 31 * 24 * 60 * 60 * 1000; // 31d
 
+// Version-neutral: the SPA fetches `/csrf-token` directly (not through the
+// versioned request builder) to bootstrap CSRF protection, so this path must
+// stay unprefixed.
+@ApiTags('security')
 @Public()
 @LockdownExempt()
-@Controller('csrf-token')
+// `version: VERSION_NEUTRAL` in the @Controller options is how Nest sets
+// controller-level version metadata (the standalone @Version() only works at
+// the method level).
+@Controller({ path: 'csrf-token', version: VERSION_NEUTRAL })
 export class CsrfController {
   constructor(private readonly config: ConfigService) {}
 

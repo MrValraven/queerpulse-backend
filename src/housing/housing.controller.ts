@@ -3,6 +3,7 @@ import { Public } from '../auth/decorators/public.decorator';
 import { Feature } from '../common/feature.decorator';
 import { CreateJoinRequestDto } from './dto/create-join-request.dto';
 import { HousingService } from './housing.service';
+import { ApiTags } from '@nestjs/swagger';
 
 /**
  * Public co-op directory. `coops` is a static segment declared before the
@@ -23,6 +24,7 @@ import { HousingService } from './housing.service';
  * is nothing to read.
  */
 @Feature('housing')
+@ApiTags('Housing')
 @Controller('housing')
 export class HousingController {
   constructor(private readonly housing: HousingService) {}

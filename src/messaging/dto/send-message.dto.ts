@@ -1,11 +1,26 @@
 import {
   IsBoolean,
+  IsIn,
+  IsInt,
   IsOptional,
   IsString,
+  IsUrl,
   IsUUID,
   MaxLength,
+  Min,
   MinLength,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
+
+export class GifAttachmentDto {
+  @IsUrl() url: string;
+  @IsUrl() previewUrl: string;
+  @IsInt() @Min(1) width: number;
+  @IsInt() @Min(1) height: number;
+  // Free-form (bounded) so swapping the GIF provider never needs a DTO change.
+  @IsString() @MaxLength(32) provider: string;
+}
 
 export class SendMessageDto {
   @IsString()
@@ -29,4 +44,16 @@ export class SendMessageDto {
   @IsOptional()
   @IsBoolean()
   forwarded?: boolean;
+
+  /** `'gif'` marks this send as a provider GIF (requires `attachment`); default/
+   *  absent is an ordinary text bubble. */
+  @IsOptional()
+  @IsIn(['user', 'gif'])
+  kind?: 'user' | 'gif';
+
+  /** The provider-hosted GIF for a `kind:'gif'` send. Ignored for text. */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => GifAttachmentDto)
+  attachment?: GifAttachmentDto;
 }

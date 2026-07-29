@@ -16,5 +16,11 @@ export interface LinkPreviewResponse {
 
 /** An all-null card for `url` — returned when a fetch is declined or yields nothing. */
 export function emptyPreview(url: string): LinkPreviewResponse {
-  return { url, siteName: null, title: null, description: null, imageUrl: null };
+  return {
+    url,
+    siteName: null,
+    title: null,
+    description: null,
+    imageUrl: null,
+  };
 }

@@ -31,5 +31,13 @@ export default registerAs('app', () => {
      * `.toLowerCase()` that one caller will eventually forget.
      */
     genesisEmail: process.env.GENESIS_EMAIL?.trim().toLowerCase() || null,
+    /**
+     * Sentry DSN, or undefined when error reporting is disabled. Note that
+     * `src/instrument.ts` reads SENTRY_DSN directly from process.env because it
+     * runs BEFORE Nest bootstraps (so it can patch http/express/pg at
+     * require-time). This exposes the same value to code that runs after boot
+     * — e.g. the shutdown-flush guard in main.ts — via ConfigService instead.
+     */
+    sentryDsn: process.env.SENTRY_DSN,
   };
 });

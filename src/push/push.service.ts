@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import webPush from 'web-push';
+import { assertPublicUrl } from '../link-preview/ssrf';
 import { PushSubscription } from './entities/push-subscription.entity';
 
 export interface PushPayload {
@@ -15,6 +16,11 @@ export interface PushPayload {
 interface WebPushError {
   statusCode?: number;
 }
+
+// A hung push endpoint must not leave an unresolved promise accumulating off the
+// request path — abandon the send after this long (the underlying request may
+// still be in flight, which is fine for fire-and-forget delivery).
+const PUSH_SEND_TIMEOUT_MS = 10_000;
 
 @Injectable()
 export class PushService implements OnModuleInit {
@@ -89,8 +95,22 @@ export class PushService implements OnModuleInit {
     const body = JSON.stringify(payload);
     await Promise.all(
       rows.map(async (row) => {
+        // SSRF guard: the endpoint is member-supplied and we are about to POST
+        // to it. Re-validate at send time (DNS resolution can differ from the
+        // subscribe-time DTO check) that it resolves to a public host. On
+        // rejection, skip this subscription and keep delivering to the others —
+        // do NOT prune the row, since a transient DNS failure here would
+        // otherwise drop a legitimate device.
         try {
-          await webPush.sendNotification(
+          await assertPublicUrl(row.endpoint);
+        } catch (error) {
+          this.logger.warn(
+            `Skipping push to non-public endpoint for ${row.id}: ${String(error)}`,
+          );
+          return;
+        }
+        try {
+          await this.sendWithTimeout(
             {
               endpoint: row.endpoint,
               keys: { p256dh: row.p256dh, auth: row.auth },
@@ -110,5 +130,29 @@ export class PushService implements OnModuleInit {
         }
       }),
     );
+  }
+
+  // Races the web-push send against a wall-clock timeout so a stalled endpoint
+  // can't hold an unresolved promise open. The timer is always cleared so a
+  // completed send doesn't leave a pending timeout ref'ing the event loop.
+  private async sendWithTimeout(
+    subscription: { endpoint: string; keys: { p256dh: string; auth: string } },
+    body: string,
+  ): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('push-send-timeout')),
+        PUSH_SEND_TIMEOUT_MS,
+      );
+    });
+    try {
+      await Promise.race([
+        webPush.sendNotification(subscription, body),
+        timeout,
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 }

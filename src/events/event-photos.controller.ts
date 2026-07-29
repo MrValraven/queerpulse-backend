@@ -14,10 +14,13 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { AttachEventPhotoDto } from './dto/attach-event-photo.dto';
 import { EventPhotosService } from './event-photos.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 // Event photo album. `ActiveMemberGuard` (class-level, mirrors EventsController)
 // requires an active member; per-action authorization (organizer vs. attendee)
 // lives in the service.
+@ApiTags('Events')
+@ApiCookieAuth()
 @Controller('events')
 @UseGuards(ActiveMemberGuard)
 export class EventPhotosController {

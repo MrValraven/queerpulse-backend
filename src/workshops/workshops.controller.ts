@@ -22,6 +22,7 @@ import { ListWorkshopsQuery } from './dto/list-workshops.query';
 import { UpdateWorkshopDto } from './dto/update-workshop.dto';
 import { WorkshopRsvpsService } from './workshop-rsvps.service';
 import { WorkshopsService } from './workshops.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * Member-hosted, multi-week workshops — the catalogue behind the frontend's
@@ -38,6 +39,8 @@ import { WorkshopsService } from './workshops.service';
  * nothing for a DTO to carry — the route is "give me a seat".
  */
 @Feature('workshops')
+@ApiTags('Workshops')
+@ApiCookieAuth()
 @Controller('workshops')
 @UseGuards(ActiveMemberGuard)
 export class WorkshopsController {

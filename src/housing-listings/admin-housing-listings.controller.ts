@@ -5,6 +5,7 @@ import { Feature } from '../common/feature.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { UpdateHousingListingStatusDto } from './dto/update-housing-listing-status.dto';
 import { HousingListingsService } from './housing-listings.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * Moderator/admin moderation of housing listings — list all (incl. non-live)
@@ -13,6 +14,8 @@ import { HousingListingsService } from './housing-listings.service';
  * listings precedent so moderators can clear the review queue).
  */
 @Feature('housingListings')
+@ApiTags('Admin — Housing')
+@ApiCookieAuth()
 @Controller('admin/housing-listings')
 @UseGuards(RolesGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)

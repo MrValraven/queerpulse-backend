@@ -9,12 +9,12 @@ import {
   IsNumber,
   IsOptional,
   IsString,
-  IsUrl,
   MaxLength,
   Min,
   MinLength,
   ValidateNested,
 } from 'class-validator';
+import { IsSafeExternalUrl } from '../../common/validators/is-safe-external-url.decorator';
 import { CreateCompanyDto } from '../../companies/dto/create-company.dto';
 import { JobFormat } from '../entities/job.entity';
 
@@ -108,7 +108,8 @@ export class CreateJobDto {
   @IsOptional() @IsEmail() email?: string;
 
   @IsOptional()
-  @IsUrl({ protocols: ['http', 'https'], require_protocol: true })
+  @IsString()
+  @IsSafeExternalUrl()
   @MaxLength(500)
   link?: string;
 

@@ -2,8 +2,8 @@ import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PushService } from './push.service';
 
-const sendNotification = jest.fn();
-const setVapidDetails = jest.fn();
+const sendNotification = jest.fn<Promise<unknown>, unknown[]>();
+const setVapidDetails = jest.fn<void, unknown[]>();
 jest.mock('web-push', () => ({
   __esModule: true,
   default: {
@@ -59,7 +59,9 @@ it('sends a notification to each of the user’s subscriptions', async () => {
 });
 
 it('prunes a subscription when the push service returns 410 Gone', async () => {
-  const repo = makeRepo([{ id: 's1', endpoint: 'e1', p256dh: 'k1', auth: 'a1' }]);
+  const repo = makeRepo([
+    { id: 's1', endpoint: 'e1', p256dh: 'k1', auth: 'a1' },
+  ]);
   const service = new PushService(repo as never, config);
   service.onModuleInit();
   sendNotification.mockRejectedValue({ statusCode: 410 });
@@ -109,7 +111,9 @@ describe('saveSubscription', () => {
 });
 
 it('does nothing when VAPID keys are not configured', async () => {
-  const repo = makeRepo([{ id: 's1', endpoint: 'e1', p256dh: 'k1', auth: 'a1' }]);
+  const repo = makeRepo([
+    { id: 's1', endpoint: 'e1', p256dh: 'k1', auth: 'a1' },
+  ]);
   const bareConfig = { get: () => undefined } as unknown as ConfigService;
   const service = new PushService(repo as never, bareConfig);
   service.onModuleInit();

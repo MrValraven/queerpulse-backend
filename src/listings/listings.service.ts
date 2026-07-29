@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -8,6 +9,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
+import { MessagingService } from '../messaging/messaging.service';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { Profile } from '../users/entities/profile.entity';
@@ -195,6 +197,7 @@ export class ListingsService {
     @InjectRepository(Listing) private readonly listings: Repository<Listing>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly dataSource: DataSource,
+    private readonly messaging: MessagingService,
   ) {}
 
   async create(ownerId: string, dto: CreateListingDto): Promise<ListingDTO> {
@@ -242,7 +245,9 @@ export class ListingsService {
       const refs = await new MemberLookup(this.profiles).byUserIds(
         rows.map((row) => row.ownerId),
       );
-      return rows.map((row) => toListingDTO(row, refs.get(row.ownerId) ?? null));
+      return rows.map((row) =>
+        toListingDTO(row, refs.get(row.ownerId) ?? null),
+      );
     });
   }
 
@@ -279,6 +284,56 @@ export class ListingsService {
     const listing = await this.loadOr404(ref);
     listing.status = status;
     const saved = await this.listings.save(listing);
+    return this.buildDTO(saved);
+  }
+
+  // Moderator/admin-only (`ListingsController.askQuestion`'s `RolesGuard`
+  // gate). Delivers the moderator's question to the listing's submitter as a
+  // DM (reusing `deliverEnquiry`, the cold-contact path that does NOT require
+  // an accepted connection), then moves the listing to `question` status. The
+  // DM itself raises the standard new-message notification + push, so no
+  // separate notification is emitted here.
+  //
+  // The DM and the status transition can't share one DB transaction (the DM is
+  // written through `MessagingService`'s own repositories, and a posted message
+  // isn't rollback-able), so we make them atomic-in-effect instead: persist the
+  // status first, then send the DM as the last step, and revert the status if
+  // the send throws. That way a moderator retry after a failure can never send
+  // a duplicate DM, and the listing is never left in `question` with no
+  // question actually delivered.
+  async askQuestion(
+    ref: string,
+    moderatorUserId: string,
+    body: string,
+  ): Promise<ListingDTO> {
+    const listing = await this.loadOr404(ref);
+    if (!listing.ownerId) {
+      throw new BadRequestException(
+        'This listing has no submitter to contact',
+      );
+    }
+
+    const previousStatus = listing.status;
+    listing.status = ListingStatus.Question;
+    const saved = await this.listings.save(listing);
+
+    try {
+      // Throws ForbiddenException on a block either way, or BadRequest if the
+      // moderator somehow owns the listing — surfaced to the FE as a specific
+      // reason. Sent last so nothing can fail after it and strand a duplicate.
+      await this.messaging.deliverEnquiry(
+        moderatorUserId,
+        listing.ownerId,
+        body,
+      );
+    } catch (error) {
+      // DM failed — undo the status change so the state stays consistent and a
+      // retry starts clean.
+      saved.status = previousStatus;
+      await this.listings.save(saved);
+      throw error;
+    }
+
     return this.buildDTO(saved);
   }
 

@@ -7,7 +7,12 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { In, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
-import { normalizePage, paginate, Paginated } from '../common/pagination';
+import {
+  DEFAULT_LIST_LIMIT,
+  normalizePage,
+  paginate,
+  Paginated,
+} from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { Profile } from '../users/entities/profile.entity';
 import { CreateIntroRequestDto } from './dto/create-intro-request.dto';
@@ -190,7 +195,10 @@ export class LandlordsService {
   // --- admin ops ---
 
   async listAllForAdmin(): Promise<LandlordCardDTO[]> {
-    const rows = await this.landlords.find({ order: { createdAt: 'DESC' } });
+    const rows = await this.landlords.find({
+      order: { createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
+    });
     if (!rows.length) return [];
     const ratings = await this.ratingsFor(rows.map((r) => r.id));
     return rows.map((r) =>
@@ -249,6 +257,7 @@ export class LandlordsService {
     const requests = await this.introRequests.find({
       where: landlordId ? { landlordId } : {},
       order: { createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     if (!requests.length) return [];
     const landlordById = await this.landlordsByIds(

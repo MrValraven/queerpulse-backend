@@ -63,17 +63,26 @@ export function decodeCursor(
  *
  * An invalid/malformed cursor is treated the same as no cursor (first page)
  * rather than rejecting the request — see `decodeCursor`.
+ *
+ * @param createdAtColumnIsMillisecondPrecision Set `true` only once the
+ *   caller's entity has had its `created_at` column migrated to
+ *   `timestamptz(3)` (millisecond precision, matching the cursor's own
+ *   resolution — see `encodeCursor`). Defaults to `false`, which keeps the
+ *   `date_trunc('milliseconds', …)` correctness wrapper described below for
+ *   every entity that hasn't been migrated yet.
  */
 export async function cursorPaginate<E extends { id: string; createdAt: Date }>(
   qb: SelectQueryBuilder<E>,
   cursor: string | undefined,
   limit: number,
   alias: string,
+  createdAtColumnIsMillisecondPrecision = false,
 ): Promise<{ rows: E[]; nextCursor: string | null; hasMore: boolean }> {
-  // CORRECTNESS NOTE (see connect-FINAL-review.md C1): `created_at` columns
-  // are microsecond-precision `timestamptz`, but the cursor is built from a
-  // JS `Date` (millisecond resolution) via `encodeCursor`/`toISOString()`. If
-  // the WHERE predicate compared the truncated cursor against the *raw*
+  // CORRECTNESS NOTE (see connect-FINAL-review.md C1): a `created_at` column
+  // declared plain `timestamptz` (no explicit precision) defaults to
+  // microsecond precision in Postgres, but the cursor is built from a JS
+  // `Date` (millisecond resolution) via `encodeCursor`/`toISOString()`. If
+  // the WHERE predicate compared the millisecond cursor against the *raw*
   // (microsecond) column, a row sharing the cursor's millisecond but with
   // nonzero microseconds (e.g. `.123456` vs a cursor of `.123000`) would
   // compare `false` on the tuple `<` and be silently dropped from the next
@@ -81,13 +90,28 @@ export async function cursorPaginate<E extends { id: string; createdAt: Date }>(
   // milliseconds with `date_trunc('milliseconds', …)` in BOTH the ORDER BY
   // and the WHERE tuple guarantees both sides of the comparison are at the
   // exact same resolution the cursor can represent, so no same-millisecond
-  // row can fall through the gap. This is schema-free and additive (no
-  // migration, no column-precision change) but trades away index usage on
-  // `created_at` (a plain btree index on the raw column can no longer be
-  // used for this ORDER BY/WHERE). Future optimization: a functional index
-  // on `date_trunc('milliseconds', created_at)`, or migrate the column to
-  // `timestamptz(3)` so the raw value already matches cursor precision.
-  const createdAtExpr = `date_trunc('milliseconds', "${alias}"."created_at")`;
+  // row can fall through the gap.
+  //
+  // The trade-off: `date_trunc(text, timestamptz)` is STABLE, not IMMUTABLE
+  // (it depends on the session's `TimeZone` setting), so Postgres refuses to
+  // build a functional index on it — this ORDER BY/WHERE can never use an
+  // index on `created_at`, no matter how the column itself is indexed, and
+  // degrades to a full scan + in-memory sort as a table grows.
+  //
+  // `createdAtColumnIsMillisecondPrecision: true` is the real fix, not a
+  // different workaround: once a migration narrows the column itself to
+  // `timestamptz(3)`, the raw stored value IS already millisecond-precision
+  // (Postgres rounds on write), so the cursor and the column agree by
+  // construction and the `date_trunc` wrapper becomes unnecessary — ordering
+  // and filtering can use the raw column directly, which a plain
+  // `(created_at, id)` btree index can serve. `CommunityPost`, `ForumThread`,
+  // and `Event` have been migrated this way (see
+  // `1785001400000-NarrowCursorCreatedAtPrecision.ts`); any other entity
+  // routed through this function keeps the `date_trunc` wrapper by default
+  // until it's migrated too.
+  const createdAtExpr = createdAtColumnIsMillisecondPrecision
+    ? `"${alias}"."created_at"`
+    : `date_trunc('milliseconds', "${alias}"."created_at")`;
 
   qb.orderBy(createdAtExpr, 'DESC').addOrderBy(`${alias}.id`, 'DESC');
 

@@ -46,7 +46,11 @@ const qbStub = () => {
   qb.getMany = jest.fn().mockResolvedValue([]);
   qb.getRawMany = jest.fn().mockResolvedValue([]);
   qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
-  return qb;
+  return qb as Record<string, jest.Mock> & {
+    getMany: jest.Mock;
+    getRawMany: jest.Mock;
+    getManyAndCount: jest.Mock;
+  };
 };
 
 const LONG_BIO =
@@ -89,7 +93,7 @@ describe('ProfilesService.getBySlug visibility', () => {
     connections = { areConnected: jest.fn().mockResolvedValue(false) };
     blockFilter = {
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
-      excludeBlocked: jest.fn((qb) => qb),
+      excludeBlocked: jest.fn((qb: unknown) => qb),
     };
     const groupMemberships = {
       ...findEmpty(),
@@ -335,14 +339,14 @@ describe('ProfilesService.getBySlug visibility', () => {
       openTo: [
         { kind: 'preset', id: 'mentoring' },
         { kind: 'preset', id: 'mentoring' },
-        { kind: 'custom', label: '  Darkroom time  ' },
+        { kind: 'custom', label: '  Studio time  ' },
         { kind: 'custom', label: '   ' },
       ],
     });
 
     expect(p.openTo).toEqual([
       { kind: 'preset', id: 'mentoring' },
-      { kind: 'custom', label: 'Darkroom time' },
+      { kind: 'custom', label: 'Studio time' },
     ]);
   });
 
@@ -374,9 +378,10 @@ describe('ProfilesService.getBySlug visibility', () => {
       profiles.findOne.mockResolvedValue(p);
 
       const list = await service.searchMembers({}, 'viewer-1');
-      expect(list.items[0].tagline).toBe(truncateAtWord(LONG_BIO));
-      expect(list.items[0].tagline!.endsWith('…')).toBe(true);
-      expect(list.items[0]).not.toHaveProperty('bio');
+      const firstItem = list.items[0];
+      expect(firstItem?.tagline).toBe(truncateAtWord(LONG_BIO));
+      expect(firstItem?.tagline?.endsWith('…')).toBe(true);
+      expect(firstItem).not.toHaveProperty('bio');
 
       const detail = await service.getBySlug('jo', 'viewer-1');
       expect(detail.tagline).toBe('');
@@ -557,7 +562,7 @@ describe('ProfilesService replace-list endpoints', () => {
       { category: 'Dev', title: 'X', year: '2022', imageUrl: key },
     ]);
 
-    expect(res[0].imageUrl).toBe(`https://api.test/files/${key}`);
+    expect(res[0]?.imageUrl).toBe(`https://api.test/files/${key}`);
   });
 
   it('updateMe persists an uploaded avatar key to Profile.avatarUrl and returns it as a files URL', async () => {

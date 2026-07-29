@@ -1,6 +1,7 @@
 import { Controller, Get, Param } from '@nestjs/common';
 import { Public } from '../auth/decorators/public.decorator';
 import { ChangemakersService } from './changemakers.service';
+import { ApiTags } from '@nestjs/swagger';
 
 // Public, read-only directory backing `ChangemakersPage.tsx` and
 // `ChangemakerStoryPage.tsx`. Only published profiles are exposed here.
@@ -8,6 +9,7 @@ import { ChangemakersService } from './changemakers.service';
 // via `APP_GUARD`, so without it a logged-out visitor would be rejected
 // before reaching the handler (see `DirectoryController` for the same
 // pattern).
+@ApiTags('Changemakers')
 @Controller('changemakers')
 export class ChangemakersController {
   constructor(private readonly changemakers: ChangemakersService) {}

@@ -39,10 +39,10 @@ function build(overrides: { rsvp?: unknown; photoRow?: unknown } = {}) {
   const photos = {
     find: jest.fn().mockResolvedValue([]),
     findOne: jest.fn().mockResolvedValue(overrides.photoRow ?? null),
-    create: jest.fn().mockImplementation((row) => row),
+    create: jest.fn().mockImplementation((row: unknown) => row),
     save: jest
       .fn()
-      .mockImplementation(async (row) => ({ id: 'photo-1', ...row })),
+      .mockImplementation((row: object) => ({ id: 'photo-1', ...row })),
     delete: jest.fn().mockResolvedValue(undefined),
   };
   const profiles = {} as never;

@@ -7,8 +7,11 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { GetFeedQuery } from './dto/get-feed.query';
 import { FeedService } from './feed.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 @Feature('feed')
+@ApiTags('Feed')
+@ApiCookieAuth()
 @Controller('feed')
 @UseGuards(ActiveMemberGuard)
 export class FeedController {

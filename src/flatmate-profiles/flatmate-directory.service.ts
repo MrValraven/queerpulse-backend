@@ -4,6 +4,7 @@ import { Repository, SelectQueryBuilder } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { normalizePage, PAGE_SIZE, Paginated } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
+import { BlockFilterService } from '../social/block-filter.service';
 import { BrowseFlatmateProfilesQuery } from './dto/browse-flatmate-profiles.query';
 import { FlatmateProfile } from './entities/flatmate-profile.entity';
 import {
@@ -29,6 +30,7 @@ export class FlatmateDirectoryService {
     @InjectRepository(FlatmateProfile)
     private readonly flatmates: Repository<FlatmateProfile>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   async browse(
@@ -84,6 +86,12 @@ export class FlatmateDirectoryService {
     if (!profile) {
       throw new NotFoundException('Flatmate profile not found');
     }
+    // The single-item path must enforce the same block severance the browse
+    // list gets — a block either way hides the profile entirely (404, not a
+    // "blocked" signal that would confirm the profile exists).
+    if (await this.blockFilter.isBlockedEitherWay(viewerId, profile.ownerId)) {
+      throw new NotFoundException('Flatmate profile not found');
+    }
     let matchScore: number | null = null;
     if (profile.ownerId !== viewerId) {
       const viewer = await this.flatmates.findOne({
@@ -136,6 +144,11 @@ export class FlatmateDirectoryService {
       // JS string[] as a text[] literal.
       qb.andWhere('p.lifestyle_tags && :tags', { tags: query.tags });
     }
+    // Hide profiles of members blocked either way (and muted, one-way) — same
+    // severance `detail()` applies via `isBlockedEitherWay`, applied in-query so
+    // both the page and `getCount()` built off this helper are covered. The raw
+    // column reference must match the DB's snake_case name (SnakeNamingStrategy).
+    this.blockFilter.excludeHidden(qb, viewerId, '"p"."owner_id"');
     return qb;
   }
 
@@ -148,7 +161,11 @@ export class FlatmateDirectoryService {
       rows.map((r) => r.ownerId),
     );
     return rows.map((row, index) =>
-      toFlatmateProfileDTO(row, refs.get(row.ownerId) ?? null, scores[index] ?? null),
+      toFlatmateProfileDTO(
+        row,
+        refs.get(row.ownerId) ?? null,
+        scores[index] ?? null,
+      ),
     );
   }
 }

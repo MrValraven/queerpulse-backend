@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
+import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { PlatformStaffRowDTO, StaffRole } from './platform-staff-response';
 
@@ -23,6 +24,7 @@ export class PlatformStaffService {
     const staffUsers = await this.usersRepository.find({
       where: { role: In(STAFF_ROLES), status: UserStatus.Active },
       relations: { profile: true },
+      take: DEFAULT_LIST_LIMIT,
     });
     // A user without a profile row has no slug to key the badge by, so there is
     // nothing the frontend could match them against.

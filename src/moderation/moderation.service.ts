@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -25,13 +26,14 @@ import {
   ReportSubjectType,
 } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
-import { User, UserStatus } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { LiftSuspensionDto } from './dto/lift-suspension.dto';
 import { parseDuration } from './parse-duration';
 import {
   ListModReportsQuery,
   ModReportsTab,
 } from './dto/list-mod-reports.query';
+import { AuditFeedQuery } from './dto/audit-feed.query';
 import { ModActionCode, ModActionDto } from './dto/mod-action.dto';
 import { ModBulkActionDto } from './dto/mod-bulk-action.dto';
 import { ReviewAppealDto } from './dto/review-appeal.dto';
@@ -43,6 +45,9 @@ import {
   AppealDTO,
   AppealOriginal,
   AuditEntryDTO,
+  AuditFeedModerator,
+  AuditFeedResponseDTO,
+  AuditFeedRowDTO,
   ModCounts,
   ModReportDetail,
   ModReportDTO,
@@ -51,6 +56,7 @@ import {
   ModReportsResponse,
   toAppealDTO,
   toAuditEntryDTO,
+  toAuditFeedRow,
   toModReportDTO,
 } from './moderation-response';
 
@@ -244,6 +250,109 @@ export class ModerationService {
     );
   }
 
+  // GET /mod/audit — the global, cross-report moderation audit feed for the
+  // admin governance "Audit" tab. Unlike `auditTrail`, not scoped to one
+  // report: paginated, newest first, filterable by moderator/action/range/
+  // free-text note search, and includes report-less rows (e.g.
+  // `suspension_lifted`) that `auditTrail` never surfaces.
+  async auditFeed(query: AuditFeedQuery): Promise<AuditFeedResponseDTO> {
+    const page = query.page ?? 1;
+    const pageSize = query.pageSize ?? 8;
+
+    const builder = this.auditLogs
+      .createQueryBuilder('log')
+      .orderBy('log.createdAt', 'DESC');
+
+    if (query.moderator) {
+      builder.andWhere('log.actorId = :moderatorId', {
+        moderatorId: query.moderator,
+      });
+    }
+    if (query.action) {
+      builder.andWhere('log.action = :action', { action: query.action });
+    }
+    if (query.range) {
+      const now = new Date();
+      let floor: Date;
+      if (query.range === 'today') {
+        floor = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      } else if (query.range === 'week') {
+        floor = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      } else {
+        floor = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+      }
+      builder.andWhere('log.createdAt >= :floor', { floor });
+    }
+    if (query.q && query.q.trim()) {
+      builder.andWhere('log.note ILIKE :search', {
+        search: `%${query.q.trim()}%`,
+      });
+    }
+
+    const total = await builder.getCount();
+    const rows = await builder
+      .skip((page - 1) * pageSize)
+      .take(pageSize)
+      .getMany();
+
+    const actorIds = rows
+      .map((row) => row.actorId)
+      .filter((actorId): actorId is string => actorId !== null);
+    const actorNames = await this.namesForUserIds(actorIds);
+
+    const reportIds = rows
+      .map((row) => row.reportId)
+      .filter((reportId): reportId is string => reportId !== null);
+    const reportsById = new Map<string, Report>();
+    if (reportIds.length) {
+      const linkedReports = await this.reports.find({
+        where: { id: In(reportIds) },
+      });
+      for (const linkedReport of linkedReports) {
+        reportsById.set(linkedReport.id, linkedReport);
+      }
+    }
+    const subjectFor = (log: ModAuditLog): string => {
+      if (log.reportId) {
+        const linkedReport = reportsById.get(log.reportId);
+        if (linkedReport) {
+          return `Report · ${linkedReport.subjectType} ${linkedReport.subjectId.slice(0, 8)}`;
+        }
+        return `Report #${log.reportId.slice(0, 8)}`;
+      }
+      return 'Platform action';
+    };
+
+    const items: AuditFeedRowDTO[] = rows.map((log) =>
+      toAuditFeedRow(
+        log,
+        this.resolveActorName(log.actorId, actorNames),
+        subjectFor(log),
+      ),
+    );
+
+    // Distinct actors across the *whole* table (not just this page), for the
+    // moderator filter's dropdown options.
+    const distinctActorRows = await this.auditLogs
+      .createQueryBuilder('log')
+      .select('log.actorId', 'actorId')
+      .distinct(true)
+      .where('log.actorId IS NOT NULL')
+      .getRawMany<{ actorId: string }>();
+    const distinctActorIds = distinctActorRows
+      .map((actorRow) => actorRow.actorId)
+      .filter((actorId): actorId is string => actorId !== null);
+    const moderatorNames = await this.namesForUserIds(distinctActorIds);
+    const moderators: AuditFeedModerator[] = distinctActorIds.map(
+      (actorId) => ({
+        id: actorId,
+        name: moderatorNames.get(actorId) ?? 'Member',
+      }),
+    );
+
+    return { items, total, moderators };
+  }
+
   // GET /mod/appeals — newest first, mirrors every other list in this
   // codebase (`orderBy(..., 'DESC')`).
   async listAppeals(): Promise<AppealDTO[]> {
@@ -430,6 +539,15 @@ export class ModerationService {
     const user = await manager.findOne(User, { where: { id: userId } });
     if (!user) {
       throw new BadRequestException('Could not suspend the reported member.');
+    }
+
+    // A moderator may only enforce against ordinary members — never against
+    // another moderator or an admin. Staff accounts are out of scope for this
+    // surface entirely (403, not a silent success).
+    if (user.role !== UserRole.Member) {
+      throw new ForbiddenException(
+        'Moderation actions cannot target staff accounts.',
+      );
     }
 
     // A member who had already deactivated keeps `Deactivated` as their live

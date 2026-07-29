@@ -5,6 +5,7 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { BootstrapService } from './bootstrap.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * Session bootstrap — the profile / saved / blocks / mutes slices in one round
@@ -13,6 +14,8 @@ import { BootstrapService } from './bootstrap.service';
  * `ActiveMemberGuard` because all four underlying endpoints require it. No
  * `@Feature` flag: like blocks/mutes/saved, this is an always-on primitive.
  */
+@ApiTags('Bootstrap')
+@ApiCookieAuth()
 @Controller('me')
 @UseGuards(ActiveMemberGuard)
 export class BootstrapController {

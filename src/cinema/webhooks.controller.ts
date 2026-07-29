@@ -6,7 +6,9 @@ import {
   Post,
   RawBodyRequest,
   Req,
+  VERSION_NEUTRAL,
 } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 import { Request } from 'express';
 import { Public } from '../auth/decorators/public.decorator';
@@ -27,8 +29,14 @@ type MuxWebhookEvent = {
   };
 };
 
+// Version-neutral: the `/cinema/webhooks/mux` URL is configured in the Mux
+// dashboard and cannot change path in lockstep with the API version.
+@ApiTags('cinema')
 @Feature('cinema')
-@Controller('cinema/webhooks')
+// `version: VERSION_NEUTRAL` in the @Controller options is how Nest sets
+// controller-level version metadata (the standalone @Version() only works at
+// the method level).
+@Controller({ path: 'cinema/webhooks', version: VERSION_NEUTRAL })
 export class CinemaWebhooksController {
   constructor(
     private readonly mux: MuxService,

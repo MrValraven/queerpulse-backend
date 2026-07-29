@@ -14,6 +14,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
+import { IsSafeExternalUrl } from '../../common/validators/is-safe-external-url.decorator';
 
 // Fixed-shape nested pieces of `ListingDraft` — each maps 1:1 to a frontend
 // interface (`WitLine`, `ListingDraft["social"]`, the `PhotoKey`-keyed photo
@@ -26,7 +27,7 @@ export class ListingWitLineDto {
 
 export class ListingSocialDto {
   @IsOptional() @IsString() @MaxLength(200) instagram?: string;
-  @IsOptional() @IsString() @MaxLength(300) website?: string;
+  @IsOptional() @IsString() @IsSafeExternalUrl() @MaxLength(300) website?: string;
   @IsOptional() @IsString() @MaxLength(200) email?: string;
   @IsOptional() @IsString() @MaxLength(60) phone?: string;
 }

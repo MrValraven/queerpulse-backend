@@ -53,8 +53,10 @@ describe('ConnectionsService', () => {
   beforeEach(async () => {
     connections = {
       findOne: jest.fn(),
-      create: jest.fn((v) => v),
-      save: jest.fn(async (v) => ({ id: 'c1', ...v })),
+      create: jest.fn((v: Record<string, unknown>) => v),
+      save: jest.fn((v: Record<string, unknown>) =>
+        Promise.resolve({ id: 'c1', ...v }),
+      ),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
       find: jest.fn().mockResolvedValue([]),
@@ -416,7 +418,10 @@ describe('ConnectionsService', () => {
       const result = await service.respond('c1', 'me', 'accept');
       expect(connections.update).toHaveBeenCalledWith(
         { id: 'c1', status: ConnectionStatus.Pending },
-        { status: ConnectionStatus.Accepted, respondedAt: expect.any(Date) },
+        {
+          status: ConnectionStatus.Accepted,
+          respondedAt: expect.any(Date) as unknown,
+        },
       );
       expect(result.status).toBe(ConnectionStatus.Accepted);
       expect(emitter.emit).toHaveBeenCalledWith(
@@ -582,7 +587,7 @@ describe('ConnectionsService', () => {
       );
       expect(res.total).toBe(1);
       expect(res.items).toHaveLength(1);
-      expect(res.items[0].id).toBe('x');
+      expect(res.items[0]?.id).toBe('x');
     });
 
     it('vouched: short-circuits to an empty page when the viewer has vouched for nobody', async () => {
@@ -614,8 +619,8 @@ describe('ConnectionsService', () => {
       ]);
       const { items } = await service.list('me', 'incoming');
       const [item] = items;
-      expect(item.introducedBy).not.toBeNull();
-      expect(item.introducedBy?.slug).toBe('intro');
+      expect(item?.introducedBy).not.toBeNull();
+      expect(item?.introducedBy?.slug).toBe('intro');
     });
 
     it('counts accepted connections shared with the viewer as mutuals', async () => {
@@ -651,7 +656,7 @@ describe('ConnectionsService', () => {
       ]);
 
       const { items } = await service.list('me', 'all');
-      expect(items[0].mutuals).toBe(1);
+      expect(items[0]?.mutuals).toBe(1);
     });
 
     it('derives a mutual vouch badge from vouches in both directions', async () => {
@@ -681,7 +686,7 @@ describe('ConnectionsService', () => {
       ]);
 
       const { items } = await service.list('me', 'all');
-      expect(items[0].vouchBadge).toBe('mutual');
+      expect(items[0]?.vouchBadge).toBe('mutual');
     });
   });
 

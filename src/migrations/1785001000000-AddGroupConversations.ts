@@ -34,7 +34,9 @@ export class AddGroupConversations1785001000000 implements MigrationInterface {
     await queryRunner.query(
       `ALTER TABLE "conversations" ADD "avatar_url" varchar`,
     );
-    await queryRunner.query(`ALTER TABLE "conversations" ADD "created_by" uuid`);
+    await queryRunner.query(
+      `ALTER TABLE "conversations" ADD "created_by" uuid`,
+    );
     await queryRunner.query(
       `ALTER TABLE "conversations" ADD CONSTRAINT "FK_conversations_created_by" FOREIGN KEY ("created_by") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE NO ACTION`,
     );
@@ -61,7 +63,9 @@ export class AddGroupConversations1785001000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`ALTER TABLE "messages" DROP COLUMN "system_event"`);
+    await queryRunner.query(
+      `ALTER TABLE "messages" DROP COLUMN "system_event"`,
+    );
     await queryRunner.query(`ALTER TABLE "messages" DROP COLUMN "kind"`);
     await queryRunner.query(`DROP TYPE "messages_kind_enum"`);
 
@@ -71,9 +75,7 @@ export class AddGroupConversations1785001000000 implements MigrationInterface {
     await queryRunner.query(
       `ALTER TABLE "conversation_participants" DROP COLUMN "role"`,
     );
-    await queryRunner.query(
-      `DROP TYPE "conversation_participants_role_enum"`,
-    );
+    await queryRunner.query(`DROP TYPE "conversation_participants_role_enum"`);
 
     await queryRunner.query(
       `ALTER TABLE "conversations" DROP CONSTRAINT "FK_conversations_created_by"`,
@@ -81,7 +83,9 @@ export class AddGroupConversations1785001000000 implements MigrationInterface {
     await queryRunner.query(
       `ALTER TABLE "conversations" DROP COLUMN "created_by"`,
     );
-    await queryRunner.query(`ALTER TABLE "conversations" DROP COLUMN "avatar_url"`);
+    await queryRunner.query(
+      `ALTER TABLE "conversations" DROP COLUMN "avatar_url"`,
+    );
     await queryRunner.query(`ALTER TABLE "conversations" DROP COLUMN "title"`);
     await queryRunner.query(`ALTER TABLE "conversations" DROP COLUMN "kind"`);
     await queryRunner.query(`DROP TYPE "conversations_kind_enum"`);

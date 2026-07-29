@@ -88,6 +88,7 @@ export interface FlaggedMemberDTO {
   handle: string;
   initials: string;
   tone: BadgeTone;
+  avatarUrl: string | null;
   openReportCount: number;
   topReasonCode: string | null;
   moderationState: ModerationState;
@@ -168,6 +169,7 @@ export function toFlaggedMember(input: {
     slug: string;
     firstName: string;
     lastName: string;
+    avatarUrl: string | null;
     joinedAt: Date;
   };
   openReportCount: number;
@@ -182,6 +184,7 @@ export function toFlaggedMember(input: {
     handle: `@${profile.slug}`,
     initials: initialsFor(profile.firstName, profile.lastName),
     tone: toneFor(profile.slug),
+    avatarUrl: profile.avatarUrl,
     openReportCount: input.openReportCount,
     topReasonCode: input.topReasonCode,
     moderationState: moderationStateFor({

@@ -2,6 +2,7 @@ import { ExecutionContext, INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
+import { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { GoogleAuthGuard } from '../src/auth/guards/google-auth.guard';
@@ -86,7 +87,7 @@ describe('Volunteering (e2e)', () => {
     // is keyed off googleId so distinct logins in the same test never collide.
     const nonce = `e2e-nonce-${googleId}`;
     const state = encodeOAuthState({ nonce })!;
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/auth/google/callback')
       .query({ state })
       .set('Cookie', [`oauth_state=${nonce}`])
@@ -116,7 +117,7 @@ describe('Volunteering (e2e)', () => {
   async function withCsrf(
     sessionCookies: string[],
   ): Promise<{ cookies: string[]; csrfToken: string }> {
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/csrf-token')
       .set('Cookie', sessionCookies);
     expect(res.status).toBe(200);
@@ -146,7 +147,7 @@ describe('Volunteering (e2e)', () => {
     handle: string,
     spotsTotal = 2,
   ): Promise<{ slug: string; org: string }> {
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .post('/volunteering')
       .set('Cookie', cookies)
       .set('X-CSRF-Token', csrfToken)
@@ -156,7 +157,7 @@ describe('Volunteering (e2e)', () => {
   }
 
   it('rejects unauthenticated access to the volunteering list', async () => {
-    const res = await request(app.getHttpServer()).get('/volunteering');
+    const res = await request(app.getHttpServer() as App).get('/volunteering');
     expect(res.status).toBe(401);
   });
 
@@ -167,7 +168,7 @@ describe('Volunteering (e2e)', () => {
     );
     const { cookies, csrfToken } = await withCsrf(posterCookies);
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .post('/volunteering')
       .set('Cookie', cookies)
       .set('X-CSRF-Token', csrfToken)
@@ -198,7 +199,7 @@ describe('Volunteering (e2e)', () => {
     const { cookies, csrfToken } = await withCsrf(posterCookies);
     const created = await createOpportunity(cookies, csrfToken, 'mentor-qyc-2');
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get(`/volunteering/${created.slug}`)
       .set('Cookie', posterCookies);
 
@@ -228,7 +229,7 @@ describe('Volunteering (e2e)', () => {
     );
     const { cookies: firstCsrfCookies, csrfToken: firstCsrfToken } =
       await withCsrf(firstCookies);
-    const firstRes = await request(app.getHttpServer())
+    const firstRes = await request(app.getHttpServer() as App)
       .post(`/volunteering/${created.slug}/signups`)
       .set('Cookie', firstCsrfCookies)
       .set('X-CSRF-Token', firstCsrfToken)
@@ -241,7 +242,7 @@ describe('Volunteering (e2e)', () => {
     );
     const { cookies: secondCsrfCookies, csrfToken: secondCsrfToken } =
       await withCsrf(secondCookies);
-    const secondRes = await request(app.getHttpServer())
+    const secondRes = await request(app.getHttpServer() as App)
       .post(`/volunteering/${created.slug}/signups`)
       .set('Cookie', secondCsrfCookies)
       .set('X-CSRF-Token', secondCsrfToken)
@@ -267,7 +268,7 @@ describe('Volunteering (e2e)', () => {
       'outsider4@example.com',
     );
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get(`/volunteering/${created.slug}/signups`)
       .set('Cookie', outsiderCookies);
 

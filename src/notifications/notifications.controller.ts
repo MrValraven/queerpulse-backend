@@ -12,9 +12,12 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { ListNotificationsQuery } from './dto/list-notifications.query';
 import { NotificationsService } from './notifications.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 // No ActiveMemberGuard: a pending user may receive vouch_received /
 // promoted_to_member notifications and must be able to read them.
+@ApiTags('Notifications')
+@ApiCookieAuth()
 @Controller('notifications')
 export class NotificationsController {
   constructor(private readonly notificationsService: NotificationsService) {}

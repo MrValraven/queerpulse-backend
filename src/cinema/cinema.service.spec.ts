@@ -83,9 +83,9 @@ describe('CinemaService', () => {
   let manager: { createQueryBuilder: jest.Mock; increment: jest.Mock };
 
   const savedTitle = (): CinemaTitle =>
-    (titles.save.mock.calls as [CinemaTitle][])[0][0];
+    (titles.save.mock.calls as [CinemaTitle][])[0]![0];
   const findArg = (): { where?: { status?: TitleStatus } } =>
-    (titles.find.mock.calls as [{ where?: { status?: TitleStatus } }][])[0][0];
+    (titles.find.mock.calls as [{ where?: { status?: TitleStatus } }][])[0]![0];
 
   beforeEach(async () => {
     titles = {
@@ -225,15 +225,15 @@ describe('CinemaService', () => {
       expect(result).toHaveLength(1);
       expect(findArg().where).toBeUndefined();
       // Admin list must distinguish drafts/processing/failed titles.
-      expect(result[0].status).toBe(TitleStatus.Failed);
-      expect(result[0].errorMessage).toBe('bad codec');
+      expect(result[0]!.status).toBe(TitleStatus.Failed);
+      expect(result[0]!.errorMessage).toBe('bad codec');
     });
 
     it('omits admin fields from the member-facing list', async () => {
       titles.find.mockResolvedValue([makeTitle()]);
       const result = await service.listTitles(member, false);
-      expect(result[0].status).toBeUndefined();
-      expect(result[0].errorMessage).toBeUndefined();
+      expect(result[0]!.status).toBeUndefined();
+      expect(result[0]!.errorMessage).toBeUndefined();
     });
 
     it('lists only published ready titles for members, with progress merged', async () => {
@@ -243,7 +243,7 @@ describe('CinemaService', () => {
       ]);
       const result = await service.listTitles(member, false);
       expect(result).toHaveLength(1);
-      expect(result[0].myProgress).toEqual({
+      expect(result[0]!.myProgress).toEqual({
         positionSeconds: 7100,
         finished: true, // 7100 >= 97% of 7200
       });
@@ -254,7 +254,7 @@ describe('CinemaService', () => {
       titles.find.mockResolvedValue([makeTitle()]);
       progress.find.mockResolvedValue([]);
       const result = await service.listTitles(member, false);
-      expect(result[0].myProgress).toBeNull();
+      expect(result[0]!.myProgress).toBeNull();
     });
   });
 

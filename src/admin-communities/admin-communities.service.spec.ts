@@ -195,9 +195,9 @@ function queueQueryBuilders(
           );
         }
         for (const bufferedCall of callsBeforeSelect) {
-          queryBuilder[bufferedCall.method](...bufferedCall.args);
+          queryBuilder[bufferedCall.method]!(...bufferedCall.args);
         }
-        queryBuilder.select(...args);
+        queryBuilder.select!(...args);
         return queryBuilder;
       });
     }
@@ -347,10 +347,10 @@ describe('AdminCommunitiesService', () => {
         'quiet-corner',
         'loud-and-proud',
       ]);
-      expect(result[0].healthScore).toBeLessThan(result[1].healthScore);
-      expect(result[1].activePercentage).toBe(100);
-      expect(result[0].activePercentage).toBe(0);
-      expect(result[0].activityLabel).toBe('Quiet');
+      expect(result[0]!.healthScore).toBeLessThan(result[1]!.healthScore);
+      expect(result[1]!.activePercentage).toBe(100);
+      expect(result[0]!.activePercentage).toBe(0);
+      expect(result[0]!.activityLabel).toBe('Quiet');
     });
 
     it('excludes flat posts with a null community id from post counts', async () => {
@@ -409,17 +409,17 @@ describe('AdminCommunitiesService', () => {
         replyQueryBuilders['reply.id'],
         replyQueryBuilders['post.community_id'],
       ]) {
-        expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+        expect(queryBuilder!.andWhere).toHaveBeenCalledWith(
           'post.community_id IS NOT NULL',
         );
       }
       // Replies have no community_id of their own — they join through posts.
       expect(
-        replyQueryBuilders['post.community_id'].innerJoin,
+        replyQueryBuilders['post.community_id']!.innerJoin,
       ).toHaveBeenCalledWith(CommunityPost, 'post', 'post.id = reply.post_id');
       // Only the single non-null post is counted; no phantom NULL bucket.
       expect(
-        result[0].activitySparkline.reduce((sum, week) => sum + week, 0),
+        result[0]!.activitySparkline.reduce((sum, week) => sum + week, 0),
       ).toBe(1);
     });
 
@@ -428,8 +428,8 @@ describe('AdminCommunitiesService', () => {
 
       const result = await service.listCommunities();
 
-      expect(result[0].activitySparkline).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
-      expect(result[0].activityLabel).toBe('Quiet');
+      expect(result[0]!.activitySparkline).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+      expect(result[0]!.activityLabel).toBe('Quiet');
     });
 
     it('buckets fifty-six days of posts and replies into eight weeks, oldest first', async () => {
@@ -462,9 +462,9 @@ describe('AdminCommunitiesService', () => {
 
       // The 50-day-old post lands in the oldest bucket, the 1-day-old reply in
       // the newest; the six weeks between are explicit zeros, not gaps.
-      expect(result[0].activitySparkline).toEqual([1, 0, 0, 0, 0, 0, 0, 1]);
+      expect(result[0]!.activitySparkline).toEqual([1, 0, 0, 0, 0, 0, 0, 1]);
       expect(
-        postQueryBuilders['post.community_id'].andWhere,
+        postQueryBuilders['post.community_id']!.andWhere,
       ).toHaveBeenCalledWith('post.created_at >= :sparklineWindowStart', {
         sparklineWindowStart: new Date(FIXED_NOW.getTime() - 56 * DAY_MS),
       });
@@ -495,11 +495,11 @@ describe('AdminCommunitiesService', () => {
       const result = await service.listCommunities();
 
       // Present in the trend line, in the second-newest bucket.
-      expect(result[0].activitySparkline).toEqual([0, 0, 0, 0, 0, 0, 1, 0]);
+      expect(result[0]!.activitySparkline).toEqual([0, 0, 0, 0, 0, 0, 1, 0]);
       // ...but it is not this week's activity.
-      expect(result[0].activityLabel).toBe('Quiet');
-      expect(result[0].activePercentage).toBe(0);
-      expect(result[0].healthBreakdown.memberActivity).toBe(0);
+      expect(result[0]!.activityLabel).toBe('Quiet');
+      expect(result[0]!.activePercentage).toBe(0);
+      expect(result[0]!.healthBreakdown.memberActivity).toBe(0);
     });
 
     it('counts an author who both posted and replied this week only once as active', async () => {
@@ -532,11 +532,11 @@ describe('AdminCommunitiesService', () => {
 
       // One of four members was active, not two of four: the same author
       // showing up in both the post and the reply window is one person.
-      expect(result[0].activePercentage).toBe(25);
-      expect(result[0].healthBreakdown.memberActivity).toBe(25);
+      expect(result[0]!.activePercentage).toBe(25);
+      expect(result[0]!.healthBreakdown.memberActivity).toBe(25);
       // Both rows still contribute to the trend line.
       expect(
-        result[0].activitySparkline.reduce((sum, week) => sum + week, 0),
+        result[0]!.activitySparkline.reduce((sum, week) => sum + week, 0),
       ).toBe(2);
     });
 
@@ -748,16 +748,16 @@ describe('AdminCommunitiesService', () => {
         REPORTED_REPLY_ID,
         REPORTED_POST_ID_ANOTHER_COMMUNITY,
       ];
-      expect(postQueryBuilders['post.id'].where).toHaveBeenCalledWith(
+      expect(postQueryBuilders['post.id']!.where).toHaveBeenCalledWith(
         'post.id IN (:...reportedContentIds)',
         { reportedContentIds: expectedReportedContentIds },
       );
       // Reported replies resolve to their PARENT POST's community.
-      expect(replyQueryBuilders['reply.id'].where).toHaveBeenCalledWith(
+      expect(replyQueryBuilders['reply.id']!.where).toHaveBeenCalledWith(
         'reply.id IN (:...reportedContentIds)',
         { reportedContentIds: expectedReportedContentIds },
       );
-      expect(replyQueryBuilders['reply.id'].innerJoin).toHaveBeenCalledWith(
+      expect(replyQueryBuilders['reply.id']!.innerJoin).toHaveBeenCalledWith(
         CommunityPost,
         'post',
         'post.id = reply.post_id',
@@ -777,7 +777,7 @@ describe('AdminCommunitiesService', () => {
         overdue: false,
         createdAt: daysAgo(1).toISOString(),
       });
-      expect(result.scopedQueue[1].overdue).toBe(true);
+      expect(result.scopedQueue[1]!.overdue).toBe(true);
       // Three reports resolved to this community, one of them resolved-status.
       expect(result.openReportCount).toBe(2);
       expect(result.resolvedPercentage).toBe(33);
@@ -827,11 +827,11 @@ describe('AdminCommunitiesService', () => {
 
       // Only the real, UUID-shaped id is bound into either lookup — 'x' never
       // reaches a uuid column comparison.
-      expect(postQueryBuilders['post.id'].where).toHaveBeenCalledWith(
+      expect(postQueryBuilders['post.id']!.where).toHaveBeenCalledWith(
         'post.id IN (:...reportedContentIds)',
         { reportedContentIds: [REPORTED_POST_ID] },
       );
-      expect(replyQueryBuilders['reply.id'].where).toHaveBeenCalledWith(
+      expect(replyQueryBuilders['reply.id']!.where).toHaveBeenCalledWith(
         'reply.id IN (:...reportedContentIds)',
         { reportedContentIds: [REPORTED_POST_ID] },
       );

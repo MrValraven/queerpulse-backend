@@ -2,6 +2,7 @@ import { ExecutionContext, INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
+import { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { GoogleAuthGuard } from '../src/auth/guards/google-auth.guard';
@@ -91,7 +92,7 @@ describe('Jobs (e2e)', () => {
     // is keyed off googleId so distinct logins in the same test never collide.
     const nonce = `e2e-nonce-${googleId}`;
     const state = encodeOAuthState({ nonce })!;
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/auth/google/callback')
       .query({ state })
       .set('Cookie', [`oauth_state=${nonce}`])
@@ -121,7 +122,7 @@ describe('Jobs (e2e)', () => {
   async function withCsrf(
     sessionCookies: string[],
   ): Promise<{ cookies: string[]; csrfToken: string }> {
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/csrf-token')
       .set('Cookie', sessionCookies);
     expect(res.status).toBe(200);
@@ -146,7 +147,7 @@ describe('Jobs (e2e)', () => {
     csrfToken: string,
     handle: string,
   ): Promise<{ slug: string; nameText: string }> {
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .post('/companies')
       .set('Cookie', cookies)
       .set('X-CSRF-Token', csrfToken)
@@ -174,7 +175,7 @@ describe('Jobs (e2e)', () => {
     csrfToken: string,
     companySlug: string,
   ): Promise<{ slug: string; title: string }> {
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .post('/jobs')
       .set('Cookie', cookies)
       .set('X-CSRF-Token', csrfToken)
@@ -184,7 +185,7 @@ describe('Jobs (e2e)', () => {
   }
 
   it('rejects unauthenticated access to the jobs list', async () => {
-    const res = await request(app.getHttpServer()).get('/jobs');
+    const res = await request(app.getHttpServer() as App).get('/jobs');
     expect(res.status).toBe(401);
   });
 
@@ -196,7 +197,7 @@ describe('Jobs (e2e)', () => {
     const { cookies, csrfToken } = await withCsrf(ownerCookies);
     const company = await createCompany(cookies, csrfToken, 'atelier-pulso-j1');
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .post('/jobs')
       .set('Cookie', cookies)
       .set('X-CSRF-Token', csrfToken)
@@ -239,7 +240,7 @@ describe('Jobs (e2e)', () => {
     const { cookies: outsiderCsrfCookies, csrfToken: outsiderCsrfToken } =
       await withCsrf(outsiderCookies);
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .post('/jobs')
       .set('Cookie', outsiderCsrfCookies)
       .set('X-CSRF-Token', outsiderCsrfToken)
@@ -257,7 +258,7 @@ describe('Jobs (e2e)', () => {
     const company = await createCompany(cookies, csrfToken, 'atelier-pulso-j3');
     const job = await createJob(cookies, csrfToken, company.slug);
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get(`/jobs/${job.slug}`)
       .set('Cookie', ownerCookies);
 
@@ -288,7 +289,7 @@ describe('Jobs (e2e)', () => {
     const { cookies: applicantCsrfCookies, csrfToken: applicantCsrfToken } =
       await withCsrf(applicantCookies);
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .post(`/jobs/${job.slug}/applications`)
       .set('Cookie', applicantCsrfCookies)
       .set('X-CSRF-Token', applicantCsrfToken)
@@ -325,7 +326,7 @@ describe('Jobs (e2e)', () => {
       'joboutsider5@example.com',
     );
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get(`/jobs/${job.slug}/applications`)
       .set('Cookie', outsiderCookies);
 

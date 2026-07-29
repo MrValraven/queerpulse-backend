@@ -21,8 +21,11 @@ import { ListConnectionsQuery } from './dto/list-connections.query';
 import { RespondConnectionDto } from './dto/respond-connection.dto';
 import { ConnectionsService } from './connections.service';
 import { Throttle, seconds } from '@nestjs/throttler';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 @Feature('connections')
+@ApiTags('Connections')
+@ApiCookieAuth()
 @Controller('connections')
 @UseGuards(ActiveMemberGuard)
 export class ConnectionsController {

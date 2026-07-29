@@ -52,7 +52,11 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
   // re-checks the caller is an owner/admin of the target group before it
   // persists the key — so a member can never attach a photo to a group they
   // don't administer.
-  'group-avatar': { prefix: 'group-avatars', maxBytes: 5 * MB, requiresSession: false },
+  'group-avatar': {
+    prefix: 'group-avatars',
+    maxBytes: 5 * MB,
+    requiresSession: false,
+  },
 };
 
 export const UPLOAD_KINDS: readonly UploadKind[] = Object.keys(

@@ -49,7 +49,9 @@ function decodeEntities(input: string): string {
     .replace(/&quot;/g, '"')
     .replace(/&#0*39;|&#x0*27;|&apos;/gi, "'")
     .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)));
+    .replace(/&#x([0-9a-f]+);/gi, (_, code: string) =>
+      String.fromCodePoint(parseInt(code, 16)),
+    );
 }
 
 /** Clamp a field so an oversized/abusive value can't bloat the response. */
@@ -64,7 +66,10 @@ function clamp(value: string | null, max: number): string | null {
  * relative og:image. Returns an all-null-ish card when nothing usable is found;
  * the caller decides whether that's worth returning.
  */
-export function parseOpenGraph(html: string, finalUrl: string): LinkPreviewResponse {
+export function parseOpenGraph(
+  html: string,
+  finalUrl: string,
+): LinkPreviewResponse {
   const head = html.slice(0, HEAD_SCAN_LIMIT);
 
   const title = clamp(

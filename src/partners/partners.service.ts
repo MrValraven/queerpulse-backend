@@ -7,7 +7,12 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { In, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
-import { normalizePage, paginate, Paginated } from '../common/pagination';
+import {
+  DEFAULT_LIST_LIMIT,
+  normalizePage,
+  paginate,
+  Paginated,
+} from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { Profile } from '../users/entities/profile.entity';
 import {
@@ -146,6 +151,7 @@ export class PartnersService {
     const rows = await this.partners.find({
       where: { status: PartnerStatus.Pending },
       order: { createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     if (!rows.length) return [];
     return this.buildApplications(rows);
@@ -159,6 +165,7 @@ export class PartnersService {
     const rows = await this.partners.find({
       where: { status: PartnerStatus.Approved },
       order: { createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     if (!rows.length) return [];
     return this.buildApplications(rows);

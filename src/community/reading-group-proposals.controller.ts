@@ -7,12 +7,15 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateReadingGroupProposalDto } from './dto/create-reading-group-proposal.dto';
 import { ReadingGroupProposalsService } from './reading-group-proposals.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 // The Reading Groups page (`ReadingGroupsPage.tsx`) lists curated groups with
 // no server-backed directory of its own. The one genuine piece of
 // member-submitted data on the page is "Start your own group"
 // (`ListGroupStrip.tsx`) — this controller is that, and only that.
 @Feature('community')
+@ApiTags('Reading Groups')
+@ApiCookieAuth()
 @Controller('reading-groups')
 @UseGuards(ActiveMemberGuard)
 export class ReadingGroupProposalsController {

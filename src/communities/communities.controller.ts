@@ -34,8 +34,11 @@ import { UpdateCommunityDto } from './dto/update-community.dto';
 import { UpdateMemberRoleDto } from './dto/update-member-role.dto';
 import { UpdatePostDto } from './dto/update-post.dto';
 import { ReactionKey } from './entities/community-post-reaction.entity';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 @Feature('communities')
+@ApiTags('Communities')
+@ApiCookieAuth()
 @Controller('communities')
 @UseGuards(ActiveMemberGuard)
 export class CommunitiesController {

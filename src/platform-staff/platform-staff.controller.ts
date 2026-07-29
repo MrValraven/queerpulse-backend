@@ -2,10 +2,13 @@ import { Controller, Get, UseGuards } from '@nestjs/common';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { PlatformStaffRowDTO } from './platform-staff-response';
 import { PlatformStaffService } from './platform-staff.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 // Always-on member primitive (no @Feature flag) — mirrors the FE's staff.api.ts
 // exactly: `GET /platform/staff`, consumed by `useStaffRole` to badge moderators
 // and admins across the app.
+@ApiTags('Platform Staff')
+@ApiCookieAuth()
 @Controller('platform/staff')
 @UseGuards(ActiveMemberGuard)
 export class PlatformStaffController {

@@ -31,7 +31,9 @@ describe('JwtAuthGuard', () => {
   });
 
   it('delegates to passport for a protected http route', () => {
-    const superProto = Object.getPrototypeOf(JwtAuthGuard.prototype);
+    const superProto = Object.getPrototypeOf(JwtAuthGuard.prototype) as {
+      canActivate: (context: ExecutionContext) => unknown;
+    };
     const spy = jest
       .spyOn(superProto, 'canActivate')
       .mockReturnValue('DELEGATED');

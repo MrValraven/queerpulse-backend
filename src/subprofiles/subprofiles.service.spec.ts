@@ -372,8 +372,12 @@ describe('SubprofilesService', () => {
       findOne: jest.fn().mockResolvedValue(null),
       count: jest.fn().mockResolvedValue(0),
       exist: jest.fn().mockResolvedValue(false),
-      create: jest.fn().mockImplementation((v) => ({ ...v })),
-      save: jest.fn().mockImplementation((v) => Promise.resolve(v)),
+      create: jest
+        .fn()
+        .mockImplementation((value: Partial<Subprofile>) => ({ ...value })),
+      save: jest
+        .fn()
+        .mockImplementation((value: Subprofile) => Promise.resolve(value)),
       remove: jest.fn().mockResolvedValue(undefined),
       createQueryBuilder: jest.fn(),
     };
@@ -381,11 +385,25 @@ describe('SubprofilesService', () => {
     profiles = { findOne: jest.fn().mockResolvedValue(null) };
     manager = {
       delete: jest.fn().mockResolvedValue(undefined),
-      create: jest.fn().mockImplementation((_e, v) => ({ ...v })),
+      create: jest
+        .fn()
+        .mockImplementation(
+          (_entity: unknown, value: Partial<SubprofileItem>) => ({
+            ...value,
+          }),
+        ),
       save: jest.fn().mockResolvedValue(undefined),
     };
     dataSource = {
-      transaction: jest.fn().mockImplementation(async (cb) => cb(manager)),
+      transaction: jest
+        .fn()
+        .mockImplementation(
+          (
+            runInTransaction: (
+              entityManager: typeof manager,
+            ) => Promise<unknown>,
+          ) => runInTransaction(manager),
+        ),
     };
     blockFilter = {
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
@@ -412,7 +430,7 @@ describe('SubprofilesService', () => {
         kind: SubprofileKind.Musician,
         displayName: 'Night Form!!',
       });
-      const saved = subprofiles.save.mock.calls[0][0];
+      const saved = (subprofiles.save.mock.calls[0] as [Subprofile])[0];
       expect(saved.slug).toBe('night-form');
     });
 
@@ -425,7 +443,7 @@ describe('SubprofilesService', () => {
         kind: SubprofileKind.Musician,
         displayName: 'Nightform',
       });
-      const saved = subprofiles.save.mock.calls[0][0];
+      const saved = (subprofiles.save.mock.calls[0] as [Subprofile])[0];
       expect(saved.slug).toBe('nightform-3');
     });
 
@@ -484,8 +502,8 @@ describe('SubprofilesService', () => {
         subprofileId: 'sp-1',
         section: SubprofileSection.Projects,
       });
-      const savedRows = manager.save.mock.calls[0][0];
-      expect(savedRows.map((r: SubprofileItem) => r.position)).toEqual([0, 1]);
+      const savedRows = (manager.save.mock.calls[0] as [SubprofileItem[]])[0];
+      expect(savedRows.map((row) => row.position)).toEqual([0, 1]);
     });
   });
 
@@ -535,7 +553,7 @@ describe('SubprofilesService', () => {
       await service.update('user-1', 'sp-1', {
         linkVisibility: SubprofileLinkVisibility.Linked,
       });
-      const saved = subprofiles.save.mock.calls[0][0];
+      const saved = (subprofiles.save.mock.calls[0] as [Subprofile])[0];
       expect(saved.handle).toBeNull();
     });
 
@@ -548,7 +566,7 @@ describe('SubprofilesService', () => {
       await service.update('user-1', 'sp-1', {
         linkVisibility: SubprofileLinkVisibility.Unlinked,
       });
-      const saved = subprofiles.save.mock.calls[0][0];
+      const saved = (subprofiles.save.mock.calls[0] as [Subprofile])[0];
       expect(saved.status).toBe(SubprofileStatus.Draft);
     });
   });

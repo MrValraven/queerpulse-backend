@@ -441,7 +441,7 @@ export class AuthService {
     const repo = manager
       ? manager.getRepository(RefreshToken)
       : this.refreshTokens;
-    const decoded = this.jwtService.decode(refreshToken);
+    const decoded = this.jwtService.decode<{ exp: number }>(refreshToken);
     const row = repo.create({
       // A pre-generated id lets the rotation claim reference `replaced_by`
       // before the new row is inserted, keeping both writes in one transaction.

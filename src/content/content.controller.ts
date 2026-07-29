@@ -16,6 +16,7 @@ import { ContentPagesService } from './content-pages.service';
 import { ListTopicPostsQuery } from './dto/list-topic-posts.query';
 import { ContentSection } from './entities/content-page.entity';
 import { TopicsService } from './topics.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 // Route scheme (documented per the Task 5.3 brief): a single unified
 // `/pages/:section[/:slug]` path family rather than three per-section
@@ -26,6 +27,8 @@ import { TopicsService } from './topics.service';
 //   GET /pages/:section        -> PageResponse[]  (a section's published pages)
 //   GET /pages/:section/:slug  -> PageResponse    (one page, 404 if missing)
 @Feature('content')
+@ApiTags('Content')
+@ApiCookieAuth()
 @Controller('pages')
 @UseGuards(ActiveMemberGuard)
 export class ContentController {
@@ -57,6 +60,8 @@ export class ContentController {
 //   GET /topics/:slug       -> TopicDetailResponse    (one topic's meta, 404 if missing)
 //   GET /topics/:slug/posts -> Paginated<TopicPostResponse> (that topic's post feed)
 @Feature('content')
+@ApiTags('Content')
+@ApiCookieAuth()
 @Controller('topics')
 @UseGuards(ActiveMemberGuard)
 export class TopicsController {

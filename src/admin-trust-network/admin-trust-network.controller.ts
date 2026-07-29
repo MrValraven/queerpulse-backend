@@ -3,6 +3,7 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminTrustNetworkService } from './admin-trust-network.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * Read-only whole-graph trust network for admins: every member as a node,
@@ -11,6 +12,8 @@ import { AdminTrustNetworkService } from './admin-trust-network.service';
  */
 @UseGuards(RolesGuard)
 @Roles(UserRole.Admin)
+@ApiTags('Admin — Trust Network')
+@ApiCookieAuth()
 @Controller('admin/trust-network')
 export class AdminTrustNetworkController {
   constructor(private readonly service: AdminTrustNetworkService) {}

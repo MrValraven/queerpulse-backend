@@ -23,11 +23,14 @@ import { ListPartnersQuery } from './dto/list-partners.query';
 import { TriagePartnerApplicationDto } from './dto/triage-partner-application.dto';
 import { UpdatePartnerAdminDto } from './dto/update-partner-admin.dto';
 import { PartnersService } from './partners.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 // Public directory: approved partners only. Any active member can browse it,
 // but there's no ownership/authorship concept here (unlike companies/jobs),
 // so there's no CurrentUser-gated variant of these routes.
 @Feature('partners')
+@ApiTags('Partners')
+@ApiCookieAuth()
 @Controller('partners')
 @UseGuards(ActiveMemberGuard)
 export class PartnersController {
@@ -49,6 +52,8 @@ export class PartnersController {
 // only admins may list or triage the queue (mirrors `AdminTitlesController`
 // being split out from `CinemaController` for the same reason).
 @Feature('partners')
+@ApiTags('Partners')
+@ApiCookieAuth()
 @Controller('partner-applications')
 export class PartnerApplicationsController {
   constructor(private readonly partnersService: PartnersService) {}
@@ -84,6 +89,8 @@ export class PartnerApplicationsController {
 // Separate controller for the same reason the applications admin routes are
 // split out: a distinct guard shape (admin-only) and path prefix.
 @Feature('partners')
+@ApiTags('Admin — Partners')
+@ApiCookieAuth()
 @Controller('admin/partners')
 @UseGuards(ActiveMemberGuard, RolesGuard)
 @Roles(UserRole.Admin)

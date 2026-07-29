@@ -22,8 +22,11 @@ import { CreateSignupDto } from './dto/create-signup.dto';
 import { ListOpportunitiesQuery } from './dto/list-opportunities.query';
 import { UpdateOpportunityDto } from './dto/update-opportunity.dto';
 import { VolunteeringService } from './volunteering.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 @Feature('volunteering')
+@ApiTags('Volunteering')
+@ApiCookieAuth()
 @Controller('volunteering')
 @UseGuards(ActiveMemberGuard)
 export class VolunteeringController {

@@ -33,8 +33,11 @@ import { UpdateConversationDto } from './dto/update-conversation.dto';
 import { MessageReactionKey } from './entities/message-reaction.entity';
 import { MessagingService } from './messaging.service';
 import { Throttle, seconds } from '@nestjs/throttler';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 @Feature('messaging')
+@ApiTags('Messaging')
+@ApiCookieAuth()
 @Controller('conversations')
 @UseGuards(ActiveMemberGuard)
 export class ConversationsController {
@@ -168,6 +171,8 @@ export class ConversationsController {
       dto.replyToId,
       dto.clientMessageId,
       dto.forwarded,
+      dto.kind,
+      dto.attachment,
     );
   }
 
@@ -294,7 +299,12 @@ export class ConversationsController {
     @CurrentUser() user: CurrentUserData,
     @Body() dto: EditMessageDto,
   ) {
-    return this.messagingService.editMessage(id, messageId, user.userId, dto.body);
+    return this.messagingService.editMessage(
+      id,
+      messageId,
+      user.userId,
+      dto.body,
+    );
   }
 
   @Throttle({ default: { limit: 60, ttl: seconds(60) } })
@@ -316,6 +326,8 @@ export class ConversationsController {
 }
 
 @Feature('messaging')
+@ApiTags('Messaging')
+@ApiCookieAuth()
 @Controller('messages')
 @UseGuards(ActiveMemberGuard)
 export class MessageRequestController {

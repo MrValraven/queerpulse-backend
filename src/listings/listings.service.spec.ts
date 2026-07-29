@@ -169,7 +169,7 @@ describe('ListingsService', () => {
     it('scopes the query to the caller and paginates', async () => {
       await service.listMine('owner-1', { page: 2 });
 
-      const qb = listings.createQueryBuilder.mock.results[0].value as {
+      const qb = listings.createQueryBuilder.mock.results[0]!.value as {
         where: jest.Mock;
         skip: jest.Mock;
       };

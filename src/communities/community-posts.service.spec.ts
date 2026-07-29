@@ -411,7 +411,7 @@ describe('CommunityPostsService', () => {
       expect(posts.save).toHaveBeenCalledWith(
         expect.objectContaining({
           body: 'edited body',
-          editedAt: expect.any(Date),
+          editedAt: expect.any(Date) as unknown,
         }),
       );
       expect(res.editedAt).not.toBeNull();
@@ -445,7 +445,7 @@ describe('CommunityPostsService', () => {
       });
       const res = await service.deletePost('queer-devs', 'p1', 'author-1');
       expect(posts.save).toHaveBeenCalledWith(
-        expect.objectContaining({ deletedAt: expect.any(Date) }),
+        expect.objectContaining({ deletedAt: expect.any(Date) as unknown }),
       );
       expect(res.deleted).toBe(true);
     });
@@ -457,7 +457,7 @@ describe('CommunityPostsService', () => {
       });
       await service.deletePost('queer-devs', 'p1', 'mod-1');
       expect(posts.save).toHaveBeenCalledWith(
-        expect.objectContaining({ deletedAt: expect.any(Date) }),
+        expect.objectContaining({ deletedAt: expect.any(Date) as unknown }),
       );
     });
 
@@ -536,7 +536,7 @@ describe('CommunityPostsService', () => {
         }),
       );
       expect(res.revisions.map((r) => r.id)).toEqual(['edit-2', 'edit-1']);
-      expect(res.revisions[0].previousBody).toBe('second-to-last body');
+      expect(res.revisions[0]!.previousBody).toBe('second-to-last body');
     });
 
     it('listPostHistory rejects a plain member who is not the author', async () => {
@@ -627,7 +627,7 @@ describe('CommunityPostsService', () => {
       expect(replies.save).toHaveBeenCalledWith(
         expect.objectContaining({
           text: 'edited reply',
-          editedAt: expect.any(Date),
+          editedAt: expect.any(Date) as unknown,
         }),
       );
       expect(res.editedAt).not.toBeNull();
@@ -662,7 +662,7 @@ describe('CommunityPostsService', () => {
       });
       const res = await service.deleteReply('queer-devs', 'p1', 'r1', 'mod-1');
       expect(replies.save).toHaveBeenCalledWith(
-        expect.objectContaining({ deletedAt: expect.any(Date) }),
+        expect.objectContaining({ deletedAt: expect.any(Date) as unknown }),
       );
       expect(res.deleted).toBe(true);
     });
@@ -741,7 +741,7 @@ describe('CommunityPostsService', () => {
         }),
       );
       expect(res.revisions.map((r) => r.id)).toEqual(['redit-2', 'redit-1']);
-      expect(res.revisions[0].author).toBeNull();
+      expect(res.revisions[0]!.author).toBeNull();
     });
   });
 
@@ -776,7 +776,7 @@ describe('CommunityPostsService', () => {
     // safe here — there is no page length to under-fill.
     it('drops nested replies whose author is blocked or muted', async () => {
       const qb = qbStub();
-      qb.getManyAndCount.mockResolvedValue([
+      qb.getManyAndCount!.mockResolvedValue([
         [{ ...POST, id: 'post-id', authorId: 'u1' }],
         1,
       ]);
@@ -789,7 +789,7 @@ describe('CommunityPostsService', () => {
 
       const page = await service.listPosts('queer-devs', 'u1');
 
-      expect(page.items[0].replies.map((r) => r.id)).toEqual(['r2']);
+      expect(page.items[0]!.replies.map((r) => r.id)).toEqual(['r2']);
     });
 
     it("404s a private community's feed for a non-member", async () => {

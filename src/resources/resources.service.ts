@@ -1,7 +1,12 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { normalizePage, paginate, Paginated } from '../common/pagination';
+import {
+  DEFAULT_LIST_LIMIT,
+  normalizePage,
+  paginate,
+  Paginated,
+} from '../common/pagination';
 import { GlossaryTerm } from './entities/glossary-term.entity';
 import { Resource } from './entities/resource.entity';
 import {
@@ -68,6 +73,7 @@ export class ResourcesService {
     const rows = await this.glossaryTerms.find({
       where: category ? { category } : {},
       order: { term: 'ASC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     return rows.map(toGlossaryTermResponse);
   }

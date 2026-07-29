@@ -22,6 +22,7 @@ import { CreateHousingListingDto } from './dto/create-housing-listing.dto';
 import { ListMyHousingListingsQuery } from './dto/list-my-housing-listings.query';
 import { UpdateHousingListingDto } from './dto/update-housing-listing.dto';
 import { HousingListingsService } from './housing-listings.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * Member-facing housing listings. `GET/PATCH/DELETE /housing-listings/:ref`
@@ -30,6 +31,8 @@ import { HousingListingsService } from './housing-listings.service';
  * declared before `:ref` so Nest resolves the literal segment first.
  */
 @Feature('housingListings')
+@ApiTags('Housing')
+@ApiCookieAuth()
 @Controller('housing-listings')
 @UseGuards(ActiveMemberGuard)
 export class HousingListingsController {

@@ -9,7 +9,12 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
-import { normalizePage, paginate, Paginated } from '../common/pagination';
+import {
+  DEFAULT_LIST_LIMIT,
+  normalizePage,
+  paginate,
+  Paginated,
+} from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MessagingService } from '../messaging/messaging.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -146,7 +151,10 @@ export class HousingListingsService {
 
   /** Moderator/admin: every listing incl. non-live, newest first. */
   async listAllForAdmin(): Promise<HousingListingDTO[]> {
-    const rows = await this.listings.find({ order: { createdAt: 'DESC' } });
+    const rows = await this.listings.find({
+      order: { createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
+    });
     return this.mapRows(rows);
   }
 

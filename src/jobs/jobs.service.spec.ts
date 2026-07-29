@@ -288,14 +288,14 @@ describe('JobsService', () => {
       const res = await service.listApplications('x', 'poster-1');
 
       expect(res).toHaveLength(1);
-      expect(res[0].applicant?.slug).toBe('jo');
+      expect(res[0]!.applicant?.slug).toBe('jo');
     });
   });
 
   describe('listMine', () => {
     it('scopes the query to the given posterId and maps rows to JobCardDTO', async () => {
       const qb = qbStub();
-      qb.getManyAndCount.mockResolvedValue([
+      qb.getManyAndCount!.mockResolvedValue([
         [
           {
             id: 'job-1',

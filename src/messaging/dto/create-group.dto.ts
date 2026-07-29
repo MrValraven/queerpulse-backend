@@ -7,6 +7,7 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
+import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 
 /**
  * `POST /conversations/group` body. Members are addressed by their profile
@@ -21,9 +22,10 @@ export class CreateGroupDto {
   @MaxLength(80)
   title: string;
 
+  // A storage key or https:// URL — the IsImageReference guard refuses a
+  // javascript:/data: URI that group members' browsers would otherwise render.
   @IsOptional()
-  @IsString()
-  @MaxLength(2048)
+  @IsImageReference()
   avatarUrl?: string;
 
   @IsArray()

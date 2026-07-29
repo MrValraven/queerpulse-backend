@@ -1,4 +1,5 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { MemberLookup } from '../common/member-ref';
 import { ForumPostsService } from './forum-posts.service';
 
 // Minimal fake repositories; only the paths exercised below are stubbed.
@@ -15,18 +16,18 @@ function build() {
   };
   const posts = {
     findOne: jest.fn().mockResolvedValue(post),
-    save: jest.fn().mockImplementation(async (p) => p),
+    save: jest.fn().mockImplementation((savedPost: unknown) => savedPost),
   };
   const votes = { findOne: jest.fn().mockResolvedValue(null) };
   const edits = {
-    create: jest.fn().mockImplementation((row) => row),
+    create: jest.fn().mockImplementation((row: unknown) => row),
     save: jest.fn().mockResolvedValue(undefined),
     find: jest.fn().mockResolvedValue([]),
   };
   const profiles = {} as never;
   const notifications = { createForRecipients: jest.fn() };
   const byUserIds = jest
-    .spyOn(require('../common/member-ref').MemberLookup.prototype, 'byUserIds')
+    .spyOn(MemberLookup.prototype, 'byUserIds')
     .mockResolvedValue(new Map());
   const service = new ForumPostsService(
     posts as never,
@@ -67,7 +68,10 @@ describe('ForumPostsService authorization', () => {
       }),
     );
     expect(posts.save).toHaveBeenCalledWith(
-      expect.objectContaining({ body: 'new body', editedAt: expect.any(Date) }),
+      expect.objectContaining({
+        body: 'new body',
+        editedAt: expect.any(Date) as unknown,
+      }),
     );
   });
 
@@ -83,7 +87,7 @@ describe('ForumPostsService authorization', () => {
     const { service, posts } = build();
     await service.tombstonePost('p1', mod);
     expect(posts.save).toHaveBeenCalledWith(
-      expect.objectContaining({ deletedAt: expect.any(Date) }),
+      expect.objectContaining({ deletedAt: expect.any(Date) as unknown }),
     );
   });
 

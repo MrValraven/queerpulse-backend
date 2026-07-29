@@ -4,6 +4,7 @@ import { Response } from 'express';
 import { Public } from '../auth/decorators/public.decorator';
 import { PublicProfileResponse } from './public-profile-response';
 import { PublicProfilesService } from './public-profiles.service';
+import { ApiTags } from '@nestjs/swagger';
 
 /**
  * 🔴 THE FIRST UNAUTHENTICATED ENDPOINT IN THIS API THAT SERVES MEMBER DATA.
@@ -15,6 +16,7 @@ import { PublicProfilesService } from './public-profiles.service';
  * `PublicProfilesService.getBySlug` and the published field set in
  * `public-profile-response.ts`; read both before changing anything here.
  */
+@ApiTags('Public Profiles')
 @Controller('public/profiles')
 export class PublicProfilesController {
   constructor(private readonly publicProfilesService: PublicProfilesService) {}

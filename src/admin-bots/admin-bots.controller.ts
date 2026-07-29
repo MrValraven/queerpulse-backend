@@ -8,6 +8,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { ReplaceGroupsDto } from '../profiles/dto/replace-groups.dto';
 import { ReplaceShapingsDto } from '../profiles/dto/replace-shapings.dto';
@@ -18,6 +19,7 @@ import { UpdateProfileDto } from '../profiles/dto/update-profile.dto';
 import { UpdateUsernameDto } from '../profiles/dto/update-username.dto';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminBotsService } from './admin-bots.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * Admin-only surface for editing platform system ("bot") accounts. Reuses the
@@ -25,8 +27,10 @@ import { AdminBotsService } from './admin-bots.service';
  * behaviour is that the target is a `:userId` gated on `isSystem`. Under the
  * global Throttler → CSRF → JWT chain, plus RolesGuard here.
  */
-@UseGuards(RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesGuard)
 @Roles(UserRole.Admin)
+@ApiTags('Admin — Bots')
+@ApiCookieAuth()
 @Controller('admin/bots')
 export class AdminBotsController {
   constructor(private readonly adminBots: AdminBotsService) {}

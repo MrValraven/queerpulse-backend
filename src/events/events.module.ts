@@ -38,7 +38,11 @@ import { RsvpService } from './rsvp.service';
     // closes no cycle.
     StorageModule,
   ],
-  controllers: [EventsController, EventInvitesController, EventPhotosController],
+  controllers: [
+    EventsController,
+    EventInvitesController,
+    EventPhotosController,
+  ],
   providers: [
     EventsService,
     RsvpService,

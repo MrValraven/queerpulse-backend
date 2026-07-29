@@ -5,6 +5,7 @@ import { Feature } from '../common/feature.decorator';
 import { LinkPreviewQuery } from './dto/link-preview.query';
 import { LinkPreviewResponse } from './link-preview.response';
 import { LinkPreviewService } from './link-preview.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * `GET /link-preview?url=` — server-side unfurl for a URL pasted into a DM.
@@ -15,6 +16,8 @@ import { LinkPreviewService } from './link-preview.service';
  * global JWT guard still applies on top of `ActiveMemberGuard`.
  */
 @Feature('messaging')
+@ApiTags('Link Previews')
+@ApiCookieAuth()
 @Controller('link-preview')
 @UseGuards(ActiveMemberGuard)
 export class LinkPreviewController {

@@ -18,9 +18,7 @@ import { JobCardDTO, JobCompanyRef, toJobCard } from './job-response';
  */
 @Injectable()
 export class CompanyOpenRolesService {
-  constructor(
-    @InjectRepository(Job) private readonly jobs: Repository<Job>,
-  ) {}
+  constructor(@InjectRepository(Job) private readonly jobs: Repository<Job>) {}
 
   /**
    * Batched open-role counts for a set of companies: a single

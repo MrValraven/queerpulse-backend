@@ -21,8 +21,11 @@ import { Feature } from '../common/feature.decorator';
 import { CinemaService } from './cinema.service';
 import { ListTitlesQuery } from './dto/list-titles.query';
 import { ReportProgressDto } from './dto/report-progress.dto';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 @Feature('cinema')
+@ApiTags('Cinema')
+@ApiCookieAuth()
 @Controller('cinema/titles')
 @UseGuards(ActiveMemberGuard)
 export class TitlesController {

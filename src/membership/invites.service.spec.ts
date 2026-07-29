@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { SignupRejectedError } from '../auth/errors/signup-rejected.error';
@@ -269,12 +269,20 @@ describe('InvitesService.createInvite', () => {
     manager = {
       getRepository: jest.fn(() => userRepo),
       count: jest.fn().mockResolvedValue(0),
-      create: jest.fn((_entity, v) => v),
-      save: jest.fn(async (v) => v),
+      create: jest.fn((_entity: unknown, value: Partial<Invite>) => value),
+      save: jest.fn((value: Invite) => Promise.resolve(value)),
     };
     config = { get: jest.fn(() => quota) };
     const dataSource = {
-      transaction: jest.fn().mockImplementation(async (cb) => cb(manager)),
+      transaction: jest
+        .fn()
+        .mockImplementation(
+          (
+            runInTransaction: (
+              entityManager: typeof manager,
+            ) => Promise<unknown>,
+          ) => runInTransaction(manager),
+        ),
     };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -386,7 +394,11 @@ describe('InvitesService.createInvite', () => {
 
   it('counts only invites created since the start of the UTC month', async () => {
     await service.createInvite('inviter');
-    const where = manager.count.mock.calls[0][1].where;
+    const countArgs = manager.count.mock.calls[0] as [
+      unknown,
+      { where: { inviterId: string; createdAt: { value: Date } } },
+    ];
+    const where = countArgs[1].where;
     expect(where.inviterId).toBe('inviter');
     // MoreThanOrEqual(monthStart) — assert the boundary is the 1st at 00:00 UTC.
     const boundary: Date = where.createdAt.value;
@@ -402,8 +414,10 @@ describe('InvitesService.createInvite', () => {
       const callerManager = {
         getRepository: jest.fn(() => userRepo),
         count: jest.fn().mockResolvedValue(0),
-        create: jest.fn((_entity, v) => v),
-        save: jest.fn(async (v) => ({ id: 'inv-new', ...v })),
+        create: jest.fn((_entity: unknown, value: Partial<Invite>) => value),
+        save: jest.fn((value: Partial<Invite>) =>
+          Promise.resolve({ id: 'inv-new', ...value }),
+        ),
       };
 
       const result = await service.createInviteForApproval(
@@ -432,8 +446,10 @@ describe('InvitesService.createInvite', () => {
       const callerManager = {
         getRepository: jest.fn(() => userRepo),
         count: jest.fn().mockResolvedValue(5),
-        create: jest.fn((_entity, v) => v),
-        save: jest.fn(async (v) => ({ id: 'inv-new', ...v })),
+        create: jest.fn((_entity: unknown, value: Partial<Invite>) => value),
+        save: jest.fn((value: Partial<Invite>) =>
+          Promise.resolve({ id: 'inv-new', ...value }),
+        ),
       };
 
       await expect(
@@ -491,7 +507,7 @@ describe('InvitesService.listMyInvites', () => {
         skip: 0,
       }),
     );
-    expect(Object.keys(rows[0]).sort()).toEqual(
+    expect(Object.keys(rows[0]!).sort()).toEqual(
       [
         'code',
         'createdAt',
@@ -504,7 +520,7 @@ describe('InvitesService.listMyInvites', () => {
     );
     expect(rows[0]).not.toHaveProperty('id');
     expect(rows[0]).not.toHaveProperty('acceptedBy');
-    expect(rows[0].expiresAt).toBe('2026-07-12T00:00:00.000Z');
+    expect(rows[0]!.expiresAt).toBe('2026-07-12T00:00:00.000Z');
   });
 
   it('recomputes status so a not-yet-swept expiry reads as expired', async () => {
@@ -520,7 +536,7 @@ describe('InvitesService.listMyInvites', () => {
       },
     ]);
     const rows = await service.listMyInvites('inviter');
-    expect(rows[0].status).toBe('expired');
+    expect(rows[0]!.status).toBe('expired');
   });
 });
 
@@ -544,13 +560,13 @@ describe('InvitesService.validateInviteForSignup + claimInvite', () => {
   });
 
   describe('validateInviteForSignup', () => {
-    const makeManager = (invite: any) =>
+    const makeManager = (invite: Partial<Invite> | null) =>
       ({
         getRepository: () => ({
           findOne: jest.fn().mockResolvedValue(invite),
           update: jest.fn().mockResolvedValue({ affected: 1 }),
         }),
-      }) as any;
+      }) as unknown as EntityManager;
 
     it('returns inviteId, inviterId, personal, and vouch for a valid pending invite', async () => {
       usersService.findById = jest
@@ -619,7 +635,7 @@ describe('InvitesService.validateInviteForSignup + claimInvite', () => {
         getRepository: () => ({
           update: jest.fn().mockResolvedValue({ affected: 0 }),
         }),
-      } as any;
+      } as unknown as EntityManager;
       await expect(
         service.claimInvite(manager, 'inv-1', 'new-user'),
       ).rejects.toBeInstanceOf(SignupRejectedError);
@@ -627,7 +643,9 @@ describe('InvitesService.validateInviteForSignup + claimInvite', () => {
 
     it('resolves when exactly one row is claimed', async () => {
       const update = jest.fn().mockResolvedValue({ affected: 1 });
-      const manager = { getRepository: () => ({ update }) } as any;
+      const manager = {
+        getRepository: () => ({ update }),
+      } as unknown as EntityManager;
       await expect(
         service.claimInvite(manager, 'inv-1', 'new-user'),
       ).resolves.toBeUndefined();
@@ -636,7 +654,7 @@ describe('InvitesService.validateInviteForSignup + claimInvite', () => {
         {
           status: InviteStatus.Accepted,
           acceptedBy: 'new-user',
-          usedAt: expect.any(Date),
+          usedAt: expect.any(Date) as unknown,
         },
       );
     });

@@ -19,8 +19,11 @@ import { CreateJobDto } from './dto/create-job.dto';
 import { ListJobsQuery } from './dto/list-jobs.query';
 import { UpdateJobDto } from './dto/update-job.dto';
 import { JobsService } from './jobs.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 @Feature('jobs')
+@ApiTags('Jobs')
+@ApiCookieAuth()
 @Controller('jobs')
 @UseGuards(ActiveMemberGuard)
 export class JobsController {
@@ -74,6 +77,8 @@ export class JobsController {
 }
 
 @Feature('jobs')
+@ApiTags('Jobs')
+@ApiCookieAuth()
 @Controller('me')
 @UseGuards(ActiveMemberGuard)
 export class MeApplicationsController {

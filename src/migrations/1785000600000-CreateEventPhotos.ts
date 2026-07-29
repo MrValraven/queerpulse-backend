@@ -8,7 +8,12 @@ export class CreateEventPhotos1785000600000 implements MigrationInterface {
       new Table({
         name: 'event_photos',
         columns: [
-          { name: 'id', type: 'uuid', isPrimary: true, default: 'uuid_generate_v4()' },
+          {
+            name: 'id',
+            type: 'uuid',
+            isPrimary: true,
+            default: 'uuid_generate_v4()',
+          },
           { name: 'event_id', type: 'uuid' },
           { name: 'storage_key', type: 'text' },
           { name: 'uploader_id', type: 'uuid' },

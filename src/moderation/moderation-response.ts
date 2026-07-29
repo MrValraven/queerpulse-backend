@@ -138,6 +138,52 @@ export function toAuditEntryDTO(
   };
 }
 
+// `GET /mod/audit` — the global, cross-report moderation audit feed. One row
+// per `mod_audit_logs` entry, newest first, independent of `AuditEntryDTO`
+// (which is scoped to a single report's trail).
+export interface AuditFeedRowDTO {
+  id: string;
+  actorId: string | null;
+  actorName: string;
+  action: string;
+  reasonCode?: string;
+  note?: string;
+  /** Human-readable subject line — a linked report's subject, or 'Platform action'. */
+  subject: string;
+  reportId: string | null;
+  at: string;
+}
+
+export interface AuditFeedModerator {
+  id: string;
+  name: string;
+}
+
+export interface AuditFeedResponseDTO {
+  items: AuditFeedRowDTO[];
+  total: number;
+  /** Distinct actors across the whole table, for the moderator filter's options. */
+  moderators: AuditFeedModerator[];
+}
+
+export function toAuditFeedRow(
+  log: ModAuditLog,
+  actorName: string,
+  subject: string,
+): AuditFeedRowDTO {
+  return {
+    id: log.id,
+    actorId: log.actorId,
+    actorName,
+    action: log.action,
+    ...(log.reasonCode ? { reasonCode: log.reasonCode } : {}),
+    ...(log.note ? { note: log.note } : {}),
+    subject,
+    reportId: log.reportId,
+    at: log.createdAt.toISOString(),
+  };
+}
+
 export interface AppealOriginal {
   action: string;
   by: string;

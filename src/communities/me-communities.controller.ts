@@ -6,6 +6,7 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { CommunitiesService } from './communities.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * The caller's own community memberships. Split out of
@@ -15,6 +16,8 @@ import { CommunitiesService } from './communities.service';
  * (`me/drafts`).
  */
 @Feature('communities')
+@ApiTags('Communities')
+@ApiCookieAuth()
 @Controller('me/communities')
 @UseGuards(ActiveMemberGuard)
 export class MeCommunitiesController {

@@ -19,8 +19,11 @@ import { CreateCompanyDto } from './dto/create-company.dto';
 import { CreateReviewDto } from './dto/create-review.dto';
 import { ListCompaniesQuery } from './dto/list-companies.query';
 import { UpdateCompanyDto } from './dto/update-company.dto';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 @Feature('companies')
+@ApiTags('Companies')
+@ApiCookieAuth()
 @Controller('companies')
 @UseGuards(ActiveMemberGuard)
 export class CompaniesController {

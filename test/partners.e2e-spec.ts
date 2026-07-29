@@ -2,6 +2,7 @@ import { ExecutionContext, INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
+import { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { GoogleAuthGuard } from '../src/auth/guards/google-auth.guard';
@@ -87,7 +88,7 @@ describe('Partners (e2e)', () => {
     // is keyed off googleId so distinct logins in the same test never collide.
     const nonce = `e2e-nonce-${googleId}`;
     const state = encodeOAuthState({ nonce })!;
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/auth/google/callback')
       .query({ state })
       .set('Cookie', [`oauth_state=${nonce}`])
@@ -145,7 +146,7 @@ describe('Partners (e2e)', () => {
   async function withCsrf(
     sessionCookies: string[],
   ): Promise<{ cookies: string[]; csrfToken: string }> {
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/csrf-token')
       .set('Cookie', sessionCookies);
     expect(res.status).toBe(200);
@@ -208,7 +209,7 @@ describe('Partners (e2e)', () => {
   }
 
   it('rejects unauthenticated access to the partners list', async () => {
-    const res = await request(app.getHttpServer()).get('/partners');
+    const res = await request(app.getHttpServer() as App).get('/partners');
     expect(res.status).toBe(401);
   });
 
@@ -239,7 +240,7 @@ describe('Partners (e2e)', () => {
       ),
     );
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/partners')
       .set('Cookie', viewerCookies);
 
@@ -266,7 +267,7 @@ describe('Partners (e2e)', () => {
       ),
     );
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/partners/pending-partner-2')
       .set('Cookie', viewerCookies);
 
@@ -280,7 +281,7 @@ describe('Partners (e2e)', () => {
     );
     const { cookies, csrfToken } = await withCsrf(memberCookies);
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .post('/partner-applications')
       .set('Cookie', cookies)
       .set('X-CSRF-Token', csrfToken)
@@ -303,7 +304,7 @@ describe('Partners (e2e)', () => {
       'nonadmin1@example.com',
     );
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/partner-applications')
       .set('Cookie', memberCookies);
 
@@ -317,7 +318,7 @@ describe('Partners (e2e)', () => {
     );
     const { cookies: memberCsrfCookies, csrfToken: memberCsrfToken } =
       await withCsrf(memberCookies);
-    const submitRes = await request(app.getHttpServer())
+    const submitRes = await request(app.getHttpServer() as App)
       .post('/partner-applications')
       .set('Cookie', memberCsrfCookies)
       .set('X-CSRF-Token', memberCsrfToken)
@@ -332,7 +333,7 @@ describe('Partners (e2e)', () => {
     const { cookies: adminCsrfCookies, csrfToken: adminCsrfToken } =
       await withCsrf(adminCookies);
 
-    const patchRes = await request(app.getHttpServer())
+    const patchRes = await request(app.getHttpServer() as App)
       .patch(`/partner-applications/${id}`)
       .set('Cookie', adminCsrfCookies)
       .set('X-CSRF-Token', adminCsrfToken)
@@ -341,7 +342,7 @@ describe('Partners (e2e)', () => {
     expect(patchRes.status).toBe(200);
     expect((patchRes.body as { status: string }).status).toBe('approved');
 
-    const publicRes = await request(app.getHttpServer())
+    const publicRes = await request(app.getHttpServer() as App)
       .get(`/partners/${slug}`)
       .set('Cookie', memberCookies);
     expect(publicRes.status).toBe(200);
@@ -355,7 +356,7 @@ describe('Partners (e2e)', () => {
     );
     const { cookies: memberCsrfCookies, csrfToken: memberCsrfToken } =
       await withCsrf(memberCookies);
-    const submitRes = await request(app.getHttpServer())
+    const submitRes = await request(app.getHttpServer() as App)
       .post('/partner-applications')
       .set('Cookie', memberCsrfCookies)
       .set('X-CSRF-Token', memberCsrfToken)
@@ -370,7 +371,7 @@ describe('Partners (e2e)', () => {
     const { cookies: adminCsrfCookies, csrfToken: adminCsrfToken } =
       await withCsrf(adminCookies);
 
-    const patchRes = await request(app.getHttpServer())
+    const patchRes = await request(app.getHttpServer() as App)
       .patch(`/partner-applications/${id}`)
       .set('Cookie', adminCsrfCookies)
       .set('X-CSRF-Token', adminCsrfToken)

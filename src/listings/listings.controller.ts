@@ -20,6 +20,7 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Feature } from '../common/feature.decorator';
 import { UserRole } from '../users/entities/user.entity';
+import { AskListingQuestionDto } from './dto/ask-listing-question.dto';
 import { CreateListingDto } from './dto/create-listing.dto';
 import { ListListingQueueQuery } from './dto/list-listing-queue.query';
 import { ListMyListingsQuery } from './dto/list-my-listings.query';
@@ -27,6 +28,7 @@ import { UpdateListingStatusDto } from './dto/update-listing-status.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
 import { UpdateSafeSpaceDto } from './dto/update-safe-space.dto';
 import { ListingsService } from './listings.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * Member business directory listings (spec §3 Tier 4 "listings"). Every
@@ -39,6 +41,8 @@ import { ListingsService } from './listings.service';
  * (mirrors every other domain's "static path before dynamic param" ordering).
  */
 @Feature('listings')
+@ApiTags('Listings')
+@ApiCookieAuth()
 @Controller('listings')
 @UseGuards(ActiveMemberGuard)
 export class ListingsController {
@@ -109,6 +113,19 @@ export class ListingsController {
   @Roles(UserRole.Moderator, UserRole.Admin)
   setStatus(@Param('ref') ref: string, @Body() dto: UpdateListingStatusDto) {
     return this.listingsService.setStatus(ref, dto.status);
+  }
+
+  // Moderator-only: ask the submitter a question. Sends the text as a DM and
+  // moves the listing to `question` status (see `ListingsService.askQuestion`).
+  @Post(':ref/question')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.Moderator, UserRole.Admin)
+  askQuestion(
+    @CurrentUser() user: CurrentUserData,
+    @Param('ref') ref: string,
+    @Body() dto: AskListingQuestionDto,
+  ) {
+    return this.listingsService.askQuestion(ref, user.userId, dto.body);
   }
 
   // Moderator-only, same rationale as `setStatus` above — only the

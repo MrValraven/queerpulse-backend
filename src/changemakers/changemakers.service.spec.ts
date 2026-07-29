@@ -40,8 +40,8 @@ describe('ChangemakersService', () => {
   const changemakerRepo = {
     find: jest.fn(),
     findOne: jest.fn(),
-    create: jest.fn((value) => value),
-    save: jest.fn((value) => value),
+    create: jest.fn((value: Partial<Changemaker>) => value),
+    save: jest.fn((value: Changemaker) => Promise.resolve(value)),
     remove: jest.fn(),
     // Used by `allocateUniqueSlug`'s exists-checker inside
     // `createWithUniqueSlug`.
@@ -49,8 +49,8 @@ describe('ChangemakersService', () => {
   };
   const settingsRepo = {
     findOne: jest.fn(),
-    create: jest.fn((value) => value),
-    save: jest.fn((value) => value),
+    create: jest.fn((value: Partial<ChangemakerDirectorySettings>) => value),
+    save: jest.fn((value: ChangemakerDirectorySettings) => value),
   };
 
   beforeEach(async () => {
@@ -71,7 +71,9 @@ describe('ChangemakersService', () => {
     // including the unrelated `update()` tests below. Tests that need
     // call-specific behavior (`mockRejectedValueOnce`/`mockImplementationOnce`)
     // still take priority over this default for their queued calls.
-    changemakerRepo.save.mockImplementation((value) => value);
+    changemakerRepo.save.mockImplementation((value: Changemaker) =>
+      Promise.resolve(value),
+    );
     const moduleRef = await Test.createTestingModule({
       providers: [
         ChangemakersService,
@@ -143,7 +145,7 @@ describe('ChangemakersService', () => {
     changemakerRepo.exists.mockResolvedValue(false);
     changemakerRepo.save
       .mockRejectedValueOnce({ code: '23505' })
-      .mockImplementationOnce((value) => value);
+      .mockImplementationOnce((value: Changemaker) => Promise.resolve(value));
 
     const result = await service.create(baseCreateDto);
 

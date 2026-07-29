@@ -71,7 +71,8 @@ describe('CommissionInterestsService', () => {
     });
 
     it('stores a null message when it was omitted entirely', async () => {
-      const { message: _message, ...withoutMessage } = dto;
+      const withoutMessage: CreateCommissionInterestDto = { ...dto };
+      delete withoutMessage.message;
       const result = await service.create('u1', withoutMessage);
 
       expect(result.message).toBeNull();

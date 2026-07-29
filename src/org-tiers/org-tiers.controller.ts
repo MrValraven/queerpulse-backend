@@ -19,11 +19,13 @@ import { UserRole } from '../users/entities/user.entity';
 import { CreateOrgTierDto } from './dto/create-org-tier.dto';
 import { UpdateOrgTierDto } from './dto/update-org-tier.dto';
 import { OrgTiersService } from './org-tiers.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 // Public marketing content — the For Organisations page is reachable logged-out,
 // so the tier list opts out of auth (mirrors PlatformStatusController /
 // HealthController's class-level @Public()).
 @Public()
+@ApiTags('Org Tiers')
 @Controller('org-tiers')
 export class OrgTiersController {
   constructor(private readonly orgTiersService: OrgTiersService) {}
@@ -34,6 +36,8 @@ export class OrgTiersController {
   }
 }
 
+@ApiTags('Admin — Org Tiers')
+@ApiCookieAuth()
 @Controller('admin/org-tiers')
 @UseGuards(ActiveMemberGuard, RolesGuard)
 @Roles(UserRole.Admin)

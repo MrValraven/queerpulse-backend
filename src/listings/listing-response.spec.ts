@@ -8,7 +8,7 @@ import {
   toSafeSpaceDetail,
 } from './listing-response';
 
-function makeListing(overrides: Partial<Listing> = {}): Listing {
+function makeListing(): Listing {
   return {
     slug: 'purex',
     name: 'Purex',
@@ -131,7 +131,7 @@ describe('safe-space adapters', () => {
   it('derives vouch initials in the detail payload', () => {
     const detail = toSafeSpaceDetail(makeListing(), []);
     expect(detail.status).toBe('verified');
-    expect(detail.vouches[0].initials).toBe('KL');
+    expect(detail.vouches[0]!.initials).toBe('KL');
     expect(detail.promises).toHaveLength(1);
   });
 });

@@ -90,7 +90,7 @@ describe('CinemaReconciliationService', () => {
     await service.reconcile();
     const where = (
       titles.find.mock.calls as [{ where?: Record<string, unknown>[] }][]
-    )[0][0].where;
+    )[0]![0].where;
     expect(Array.isArray(where)).toBe(true);
     for (const clause of where ?? []) {
       expect(clause).toHaveProperty('lastIngestEventAt');

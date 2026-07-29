@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { DataSource, In, Repository } from 'typeorm';
 import { CreateJoinRequestDto } from './dto/create-join-request.dto';
 import { Invite } from './entities/invite.entity';
@@ -145,6 +146,7 @@ export class JoinRequestsService {
     const requests = await this.joinRequests.find({
       where: status ? { status } : {},
       order: { createdAt: 'ASC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     // One extra query for the whole page rather than N+1 (or a join that would
     // drag the full Invite entity into the view mapper).

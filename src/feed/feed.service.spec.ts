@@ -204,7 +204,7 @@ describe('FeedService', () => {
       expect(forumThreads.createQueryBuilder).not.toHaveBeenCalled();
       expect(events.createQueryBuilder).not.toHaveBeenCalled();
       expect(page.data).toHaveLength(1);
-      expect(page.data[0].type).toBe('community_post');
+      expect(page.data[0]!.type).toBe('community_post');
     });
 
     it('"gatherings" only queries events', async () => {
@@ -216,7 +216,7 @@ describe('FeedService', () => {
       expect(communityPosts.createQueryBuilder).not.toHaveBeenCalled();
       expect(forumThreads.createQueryBuilder).not.toHaveBeenCalled();
       expect(page.data).toHaveLength(1);
-      expect(page.data[0].type).toBe('gathering');
+      expect(page.data[0]!.type).toBe('gathering');
     });
 
     it('"posts" unions community posts and forum threads, not gatherings', async () => {
@@ -467,7 +467,7 @@ describe('FeedService', () => {
       expect(page.pageInfo.nextCursor).not.toBeNull();
 
       const decoded = decodeCursor(page.pageInfo.nextCursor as string);
-      expect(decoded).toEqual({ createdAt: rows[1].createdAt, id: 'p2' });
+      expect(decoded).toEqual({ createdAt: rows[1]!.createdAt, id: 'p2' });
     });
 
     it('reports hasMore=false + nextCursor=null when the page exactly exhausts the rows', async () => {

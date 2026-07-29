@@ -468,7 +468,7 @@ describe('VolunteeringService', () => {
       const res = await service.listSignups('x', 'poster-1');
 
       expect(res).toHaveLength(1);
-      expect(res[0].member?.slug).toBe('jo');
+      expect(res[0]!.member?.slug).toBe('jo');
     });
   });
 });

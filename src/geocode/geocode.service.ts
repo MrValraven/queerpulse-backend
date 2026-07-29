@@ -4,7 +4,10 @@ import {
   ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { extractCoordsFromUrl, isAllowedGoogleMapsHost } from './google-maps-link';
+import {
+  extractCoordsFromUrl,
+  isAllowedGoogleMapsHost,
+} from './google-maps-link';
 
 const FETCH_TIMEOUT_MS = 5000;
 const MAX_REDIRECTS = 5;
@@ -28,9 +31,15 @@ export class GeocodeService {
     // host. Using `redirect: 'follow'` here would be an SSRF hole, since
     // fetch would auto-follow to an unvalidated intermediate host.
     let currentUrl = url;
-    for (let redirectCount = 0; redirectCount < MAX_REDIRECTS; redirectCount += 1) {
+    for (
+      let redirectCount = 0;
+      redirectCount < MAX_REDIRECTS;
+      redirectCount += 1
+    ) {
       if (!isAllowedGoogleMapsHost(currentUrl)) {
-        throw new BadRequestException('That link did not resolve to Google Maps.');
+        throw new BadRequestException(
+          'That link did not resolve to Google Maps.',
+        );
       }
 
       let response: Response;
@@ -40,23 +49,31 @@ export class GeocodeService {
           signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         });
       } catch {
-        throw new ServiceUnavailableException("Couldn't reach Google Maps to read that link.");
+        throw new ServiceUnavailableException(
+          "Couldn't reach Google Maps to read that link.",
+        );
       }
 
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get('location');
         if (!location) {
-          throw new UnprocessableEntityException("Couldn't read coordinates from that link.");
+          throw new UnprocessableEntityException(
+            "Couldn't read coordinates from that link.",
+          );
         }
 
         let nextUrl: string;
         try {
           nextUrl = new URL(location, currentUrl).toString();
         } catch {
-          throw new UnprocessableEntityException("Couldn't read coordinates from that link.");
+          throw new UnprocessableEntityException(
+            "Couldn't read coordinates from that link.",
+          );
         }
         if (!isAllowedGoogleMapsHost(nextUrl)) {
-          throw new BadRequestException('That link did not resolve to Google Maps.');
+          throw new BadRequestException(
+            'That link did not resolve to Google Maps.',
+          );
         }
 
         currentUrl = nextUrl;
@@ -67,11 +84,15 @@ export class GeocodeService {
 
       const coords = extractCoordsFromUrl(currentUrl);
       if (!coords) {
-        throw new UnprocessableEntityException("Couldn't read coordinates from that link.");
+        throw new UnprocessableEntityException(
+          "Couldn't read coordinates from that link.",
+        );
       }
       return coords;
     }
 
-    throw new UnprocessableEntityException("Couldn't read coordinates from that link.");
+    throw new UnprocessableEntityException(
+      "Couldn't read coordinates from that link.",
+    );
   }
 }

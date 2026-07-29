@@ -8,6 +8,7 @@ import {
   Logger,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Req,
   Res,
@@ -26,10 +27,13 @@ import { RequestDeletionDto } from './dto/request-deletion.dto';
 import { RequestExportDto } from './dto/request-export.dto';
 import { SubmitDsarDto } from './dto/submit-dsar.dto';
 import { UpdateEmailPreferenceDto } from './dto/update-email-preferences.dto';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 // No ActiveMemberGuard: account lifecycle actions (reauth, deactivate,
 // deletion, export, DSAR, sessions, email preferences) must remain reachable
 // by a pending member, same as `consent`/`notifications`.
+@ApiTags('Account')
+@ApiCookieAuth()
 @Controller('account')
 export class AccountController {
   private readonly logger = new Logger(AccountController.name);
@@ -269,7 +273,10 @@ export class AccountController {
     return this.accountService.getEmailPreferences(user.userId);
   }
 
-  @Post('email-preferences')
+  // PATCH (not POST): this partially updates an existing settings resource and
+  // is idempotent. API CONTRACT CHANGE — the frontend must call PATCH
+  // /account/email-preferences (was POST).
+  @Patch('email-preferences')
   updateEmailPreference(
     @CurrentUser() user: CurrentUserData,
     @Body() body: UpdateEmailPreferenceDto,

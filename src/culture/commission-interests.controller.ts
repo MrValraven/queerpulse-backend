@@ -7,6 +7,7 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { CommissionInterestsService } from './commission-interests.service';
 import { CreateCommissionInterestDto } from './dto/create-commission-interest.dto';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 // The Culture page (`CulturePage.tsx`) is almost entirely curated editorial
 // content (book/film/music club picks, the art showcase gallery, community
@@ -15,6 +16,8 @@ import { CreateCommissionInterestDto } from './dto/create-commission-interest.dt
 // Board project (`CommissionInterestModal.tsx`) — this controller is that,
 // and only that.
 @Feature('culture')
+@ApiTags('Culture')
+@ApiCookieAuth()
 @Controller('commissions')
 @UseGuards(ActiveMemberGuard)
 export class CommissionInterestsController {

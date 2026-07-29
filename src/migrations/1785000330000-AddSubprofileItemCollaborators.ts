@@ -7,9 +7,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * members/personas by `@handle`. See
  * `src/subprofiles/entities/subprofile-item.entity.ts`.
  */
-export class AddSubprofileItemCollaborators1785000330000
-  implements MigrationInterface
-{
+export class AddSubprofileItemCollaborators1785000330000 implements MigrationInterface {
   name = 'AddSubprofileItemCollaborators1785000330000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

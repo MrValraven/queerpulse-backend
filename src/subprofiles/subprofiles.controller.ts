@@ -25,7 +25,10 @@ import { ReplaceItemsDTO } from './dto/replace-items.dto';
 import { ReplaceSocialLinksDTO } from './dto/replace-social-links.dto';
 import { UpdateSubprofileDTO } from './dto/update-subprofile.dto';
 import { SubprofilesService } from './subprofiles.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
+@ApiTags('Subprofiles')
+@ApiCookieAuth()
 @Controller('subprofiles')
 export class SubprofilesController {
   constructor(private readonly subprofilesService: SubprofilesService) {}
@@ -68,6 +71,7 @@ export class SubprofilesController {
   }
 
   @Post()
+  @UseGuards(ActiveMemberGuard)
   create(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: CreateSubprofileDTO,
@@ -81,6 +85,7 @@ export class SubprofilesController {
   }
 
   @Patch(':id')
+  @UseGuards(ActiveMemberGuard)
   update(
     @CurrentUser() user: CurrentUserData,
     @Param('id') id: string,
@@ -90,6 +95,7 @@ export class SubprofilesController {
   }
 
   @Put(':id/sections/:section')
+  @UseGuards(ActiveMemberGuard)
   replaceSection(
     @CurrentUser() user: CurrentUserData,
     @Param('id') id: string,
@@ -105,6 +111,7 @@ export class SubprofilesController {
   }
 
   @Put(':id/social-links')
+  @UseGuards(ActiveMemberGuard)
   replaceSocialLinks(
     @CurrentUser() user: CurrentUserData,
     @Param('id') id: string,
@@ -118,6 +125,7 @@ export class SubprofilesController {
   }
 
   @Put(':id/affiliations')
+  @UseGuards(ActiveMemberGuard)
   replaceAffiliations(
     @CurrentUser() user: CurrentUserData,
     @Param('id') id: string,
@@ -131,16 +139,19 @@ export class SubprofilesController {
   }
 
   @Post(':id/publish')
+  @UseGuards(ActiveMemberGuard)
   publish(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
     return this.subprofilesService.publish(user.userId, id);
   }
 
   @Post(':id/unpublish')
+  @UseGuards(ActiveMemberGuard)
   unpublish(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
     return this.subprofilesService.unpublish(user.userId, id);
   }
 
   @Delete(':id')
+  @UseGuards(ActiveMemberGuard)
   async remove(
     @CurrentUser() user: CurrentUserData,
     @Param('id') id: string,
@@ -199,6 +210,8 @@ export class SubprofilesController {
 // domain but is mounted under `profiles` (it lists a member's linked+published
 // personas). Declared as a separate controller in this file, mirroring how
 // `profiles.controller.ts` co-locates `MembersController`.
+@ApiTags('Subprofiles')
+@ApiCookieAuth()
 @Controller('profiles')
 export class ProfileSubprofilesController {
   constructor(private readonly subprofilesService: SubprofilesService) {}

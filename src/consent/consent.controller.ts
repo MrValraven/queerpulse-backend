@@ -6,9 +6,12 @@ import {
 import { CURRENT_POLICY_VERSION } from './consent.constants';
 import { ConsentService } from './consent.service';
 import { ConsentDto } from './dto/consent.dto';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 // No ActiveMemberGuard: consent is captured during signup, before a user is
 // promoted to `active` — a pending user must still be able to record it.
+@ApiTags('Consent')
+@ApiCookieAuth()
 @Controller('consent')
 export class ConsentController {
   constructor(private readonly consentService: ConsentService) {}

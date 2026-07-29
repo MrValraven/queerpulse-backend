@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Event } from '../events/entities/event.entity';
+import { MessagingModule } from '../messaging/messaging.module';
 import { UsersModule } from '../users/users.module';
 import { DirectoryController } from './directory.controller';
 import { DirectoryService } from './directory.service';
@@ -15,6 +16,9 @@ import { ListingsService } from './listings.service';
     // `DirectoryService`; the events domain itself lives in `EventsModule`.
     TypeOrmModule.forFeature([Listing, ListingReview, Event]),
     UsersModule,
+    // MessagingModule exports MessagingService — delivers a moderator's
+    // question to the submitter as a DM (mirrors HousingListingsModule).
+    MessagingModule,
   ],
   controllers: [ListingsController, DirectoryController],
   providers: [ListingsService, DirectoryService],

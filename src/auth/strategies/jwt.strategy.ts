@@ -9,7 +9,9 @@ import { User, UserStatus } from '../../users/entities/user.entity';
 import { CurrentUserData } from '../decorators/current-user.decorator';
 
 const cookieExtractor: JwtFromRequestFunction = (req: Request) =>
-  req?.cookies?.['access_token'] ?? null;
+  (req?.cookies as Record<string, string | undefined> | undefined)?.[
+    'access_token'
+  ] ?? null;
 
 export interface AccessTokenPayload {
   sub: string;

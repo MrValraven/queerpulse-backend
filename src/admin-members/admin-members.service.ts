@@ -238,6 +238,7 @@ export class AdminMembersService {
           slug: profile.slug,
           firstName: profile.firstName,
           lastName: profile.lastName,
+          avatarUrl: toImageUrl(profile.avatarUrl),
           joinedAt: profile.joinedAt,
         },
         openReportCount,

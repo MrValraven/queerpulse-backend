@@ -9,6 +9,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { ChangemakersService } from './changemakers.service';
@@ -16,9 +17,12 @@ import { CreateChangemakerDto } from './dto/create-changemaker.dto';
 import { PublishChangemakerDto } from './dto/publish-changemaker.dto';
 import { UpdateChangemakerDto } from './dto/update-changemaker.dto';
 import { UpdateDirectoryStatsDto } from './dto/update-directory-stats.dto';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
-@UseGuards(RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesGuard)
 @Roles(UserRole.Admin)
+@ApiTags('Admin — Changemakers')
+@ApiCookieAuth()
 @Controller('admin/changemakers')
 export class AdminChangemakersController {
   constructor(private readonly changemakers: ChangemakersService) {}

@@ -16,6 +16,7 @@ import {
 export enum MessageKind {
   User = 'user',
   System = 'system',
+  Gif = 'gif',
 }
 
 /** The kinds of system event a `system` message can carry. `member_added` /
@@ -39,6 +40,20 @@ export interface SystemEvent {
   actorId: string;
   targetId?: string;
   value?: string;
+}
+
+/** A provider-hosted GIF attached to a `kind:'gif'` message. `url` is the full
+ *  animated GIF rendered in the bubble; `previewUrl` is a lightweight thumbnail.
+ *  Intrinsic `width`/`height` are set as <img> attrs client-side so the bubble
+ *  reserves space (no layout shift). NULL for every non-gif message. */
+export interface GifAttachment {
+  url: string;
+  previewUrl: string;
+  width: number;
+  height: number;
+  /** Which service the GIF came from (e.g. "klipy"). Free-form so swapping the
+   *  provider never requires a schema/type change. */
+  provider: string;
 }
 
 @Entity('messages')
@@ -75,6 +90,13 @@ export class Message {
    */
   @Column({ type: 'jsonb', nullable: true })
   systemEvent: SystemEvent | null;
+
+  /**
+   * Provider-hosted GIF for a `kind:'gif'` message (else NULL). `body` still
+   * carries a "GIF" text fallback for push/notification/last-message previews.
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  attachment: GifAttachment | null;
 
   @Index('IDX_messages_reply_to_id')
   @Column({ type: 'uuid', nullable: true })

@@ -7,13 +7,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import {
-  DataSource,
-  EntityManager,
-  In,
-  IsNull,
-  Repository,
-} from 'typeorm';
+import { DataSource, EntityManager, In, IsNull, Repository } from 'typeorm';
 import { toImageUrl } from '../common/image-url';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -243,7 +237,11 @@ export class VouchService {
     const vouchers = rows.map((v) =>
       v.anonymous
         ? this.toShieldedVouchView(v.note, v.createdAt)
-        : this.toVouchView(voucherProfiles.get(v.voucherId), v.note, v.createdAt),
+        : this.toVouchView(
+            voucherProfiles.get(v.voucherId),
+            v.note,
+            v.createdAt,
+          ),
     );
     return { count, vouchers };
   }

@@ -15,12 +15,15 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { ListPageQuery } from './dto/list-page.query';
 import { SocialService } from './social.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * Mutes — one-way, soft silence (spec §3 Tier 1 "social"). Always-on safety
  * primitive: no `@Feature` flag. The muted member is never notified. Members
  * are addressed by slug in the path.
  */
+@ApiTags('Mutes')
+@ApiCookieAuth()
 @Controller('mutes')
 @UseGuards(ActiveMemberGuard)
 export class MutesController {

@@ -4,12 +4,14 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { ListChangesQuery } from './dto/list-changes.query';
 import { UpdatePlatformSettingsDto } from './dto/update-platform-settings.dto';
 import { PlatformSettingsService } from './platform-settings.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 const DEFAULT_CHANGES_LIMIT = 50;
 
@@ -22,8 +24,10 @@ const DEFAULT_CHANGES_LIMIT = 50;
  * lock the admin out of the only endpoint that can disable it.
  */
 @LockdownExempt()
-@UseGuards(RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesGuard)
 @Roles(UserRole.Admin)
+@ApiTags('Admin — Platform Settings')
+@ApiCookieAuth()
 @Controller('admin/platform-settings')
 export class PlatformSettingsController {
   constructor(private readonly settings: PlatformSettingsService) {}

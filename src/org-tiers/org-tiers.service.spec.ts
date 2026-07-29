@@ -136,9 +136,9 @@ describe('OrgTiersService', () => {
 
       const [tier] = await service.listAll();
 
-      expect(tier.id).toBe('tier-1');
-      expect(tier.sortOrder).toBe(2);
-      expect(tier.published).toBe(false);
+      expect(tier!.id).toBe('tier-1');
+      expect(tier!.sortOrder).toBe(2);
+      expect(tier!.published).toBe(false);
     });
   });
 
@@ -164,7 +164,7 @@ describe('OrgTiersService', () => {
 
       await service.create({ ...baseDto });
 
-      const savedArg = tiers.save.mock.calls[0][0] as { slug: string };
+      const savedArg = (tiers.save.mock.calls[0] as [{ slug: string }])[0];
       expect(savedArg.slug).toMatch(/^standard-[0-9a-f]{6}$/);
     });
 
@@ -206,7 +206,9 @@ describe('OrgTiersService', () => {
     it('throws ConflictException when a unique slug cannot be allocated after retries', async () => {
       tiers.exists.mockResolvedValue(false);
       tiers.save.mockImplementation(() => {
-        const error: { code: string } = { code: '23505' };
+        const error = Object.assign(new Error('unique_violation'), {
+          code: '23505',
+        });
         return Promise.reject(error);
       });
 

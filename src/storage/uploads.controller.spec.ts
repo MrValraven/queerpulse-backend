@@ -159,7 +159,7 @@ describe('UploadsController', () => {
       });
       const errors = await validate(dto);
       expect(errors).toHaveLength(1);
-      expect(errors[0].constraints).toHaveProperty('isIn');
+      expect(errors[0]!.constraints).toHaveProperty('isIn');
     });
 
     it('rejects a video content type (the gate defends the presign)', async () => {

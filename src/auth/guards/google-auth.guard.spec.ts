@@ -35,7 +35,11 @@ describe('GoogleAuthGuard.getAuthenticateOptions', () => {
     const opts = makeGuard().getAuthenticateOptions(outboundContext({}, res));
 
     expect(res.cookie).toHaveBeenCalledTimes(1);
-    const [name, cookieNonce, cookieOpts] = res.cookie.mock.calls[0];
+    const [name, cookieNonce, cookieOpts] = res.cookie.mock.calls[0] as [
+      string,
+      string,
+      Record<string, unknown>,
+    ];
     expect(name).toBe('oauth_state');
     expect(cookieOpts).toEqual(
       expect.objectContaining({ httpOnly: true, sameSite: 'lax' }),
@@ -52,7 +56,7 @@ describe('GoogleAuthGuard.getAuthenticateOptions', () => {
     const opts = makeGuard().getAuthenticateOptions(
       outboundContext({ invite: 'CODE', redirect: '/feed' }, res),
     );
-    const [, cookieNonce] = res.cookie.mock.calls[0];
+    const [, cookieNonce] = res.cookie.mock.calls[0] as [string, string];
     expect(decodeOAuthState(opts.state)).toEqual({
       invite: 'CODE',
       redirect: '/feed',

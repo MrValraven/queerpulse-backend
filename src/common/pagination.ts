@@ -3,6 +3,15 @@ import { ObjectLiteral, SelectQueryBuilder } from 'typeorm';
 /** Default page size for all list/search endpoints across domains. */
 export const PAGE_SIZE = 20;
 
+/**
+ * Hard upper bound for list endpoints that intentionally return a whole
+ * (unpaginated) array rather than a `Paginated<T>` envelope. Applied as a
+ * `take`/`limit` cap so no such query can ever return an unbounded result set,
+ * without changing the response shape callers already depend on. Sized well
+ * above every current real-world list so existing callers behave identically.
+ */
+export const DEFAULT_LIST_LIMIT = 200;
+
 export interface Paginated<T> {
   items: T[];
   total: number;

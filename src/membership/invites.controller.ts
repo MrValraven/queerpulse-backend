@@ -19,7 +19,10 @@ import { CreateInviteDto } from './dto/create-invite.dto';
 import { PaginationQuery } from './dto/pagination.query';
 import { InviteQuotaView, PublicInviteView } from './invite-response';
 import { InvitesService } from './invites.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
+@ApiTags('Membership')
+@ApiCookieAuth()
 @Controller('invites')
 export class InvitesController {
   constructor(private readonly invitesService: InvitesService) {}

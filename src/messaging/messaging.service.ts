@@ -28,7 +28,12 @@ import {
   MessageReactionKey,
 } from './entities/message-reaction.entity';
 import { MessageStar } from './entities/message-star.entity';
-import { Message, MessageKind, SystemEvent } from './entities/message.entity';
+import {
+  GifAttachment,
+  Message,
+  MessageKind,
+  SystemEvent,
+} from './entities/message.entity';
 import {
   AuthorSummary,
   buildReplyTo,
@@ -153,6 +158,7 @@ type MessageLike = Pick<
   | 'forwarded'
   | 'kind'
   | 'systemEvent'
+  | 'attachment'
 >;
 
 @Injectable()
@@ -243,8 +249,7 @@ export class MessagingService {
       // have no single "other participant" — the client shows the org identity
       // or the group title instead — so `first` stays undefined and the
       // counterpart fields below fall back to null.
-      const first =
-        convo.isOfficial || isGroup ? undefined : convoOthers[0];
+      const first = convo.isOfficial || isGroup ? undefined : convoOthers[0];
       if (!convo.isOfficial && !isGroup) {
         otherParticipant = toAuthorSummary(
           first ? profileByUser.get(first.userId) : undefined,
@@ -341,7 +346,13 @@ export class MessagingService {
       starred: false,
       canPin: false,
       replyTo: null,
-      kind: isSystem ? 'system' : 'user',
+      kind:
+        message.kind === MessageKind.System
+          ? 'system'
+          : message.kind === MessageKind.Gif
+            ? 'gif'
+            : 'user',
+      attachment: message.attachment ?? null,
       systemEvent: isSystem
         ? buildSystemEvent(message.systemEvent, profileByUser)
         : null,
@@ -764,7 +775,9 @@ export class MessagingService {
     // parent just leaves `replyToId` absent from `parentById` — also handled
     // as `deleted: true`.
     const replyIds = [
-      ...new Set(rows.map((m) => m.replyToId).filter((id): id is string => Boolean(id))),
+      ...new Set(
+        rows.map((m) => m.replyToId).filter((id): id is string => Boolean(id)),
+      ),
     ];
     const parents = replyIds.length
       ? await this.messages.find({
@@ -798,18 +811,25 @@ export class MessagingService {
     // none, or if any hasn't acked) — i.e. "delivered to all present recipients",
     // which for a 1:1 DM is simply the single counterpart's watermark.
     const conversationId = rows[0]!.conversationId;
-    const [senders, reactionsByMessage, otherParticipantRows, pinRows, starRows] =
-      await Promise.all([
-        this.profiles.find({ where: { userId: In(senderIds) } }),
-        this.reactionSummariesByMessage(messageIds, viewerId),
-        this.participants.find({
-          where: { conversationId, userId: Not(viewerId) },
-        }),
-        // Shared pins for these messages (viewer-agnostic — both participants
-        // see the same pinnedAt) and THIS viewer's private stars, batched by id.
-        this.pins.find({ where: { messageId: In(messageIds) } }),
-        this.stars.find({ where: { userId: viewerId, messageId: In(messageIds) } }),
-      ]);
+    const [
+      senders,
+      reactionsByMessage,
+      otherParticipantRows,
+      pinRows,
+      starRows,
+    ] = await Promise.all([
+      this.profiles.find({ where: { userId: In(senderIds) } }),
+      this.reactionSummariesByMessage(messageIds, viewerId),
+      this.participants.find({
+        where: { conversationId, userId: Not(viewerId) },
+      }),
+      // Shared pins for these messages (viewer-agnostic — both participants
+      // see the same pinnedAt) and THIS viewer's private stars, batched by id.
+      this.pins.find({ where: { messageId: In(messageIds) } }),
+      this.stars.find({
+        where: { userId: viewerId, messageId: In(messageIds) },
+      }),
+    ]);
     const pinnedAtByMessage = new Map(
       pinRows.map((pin) => [pin.messageId, pin.pinnedAt]),
     );
@@ -856,7 +876,7 @@ export class MessagingService {
         editedAt: m.editedAt ? m.editedAt.toISOString() : null,
         reactions: isDeleted ? [] : (reactionsByMessage.get(m.id) ?? []),
         deletedAt: m.deletedAt ? m.deletedAt.toISOString() : null,
-        deliveredAt: delivered ? otherDeliveredAt!.toISOString() : null,
+        deliveredAt: delivered ? otherDeliveredAt.toISOString() : null,
         clientMessageId: m.clientMessageId,
         forwarded: m.forwarded,
         // A tombstone carries no pin/star affordance; otherwise expose the shared
@@ -871,7 +891,13 @@ export class MessagingService {
         // event; a `system` one resolves actor/target ids to display names so the
         // client renders bilingual templates ("You created the group", "Ana
         // added Bea") without ever seeing a user id.
-        kind: m.kind === MessageKind.System ? 'system' : 'user',
+        kind:
+          m.kind === MessageKind.System
+            ? 'system'
+            : m.kind === MessageKind.Gif
+              ? 'gif'
+              : 'user',
+        attachment: isDeleted ? null : (m.attachment ?? null),
         systemEvent:
           m.kind === MessageKind.System
             ? buildSystemEvent(m.systemEvent, profileByUser)
@@ -887,6 +913,8 @@ export class MessagingService {
     replyToId?: string,
     clientMessageId?: string,
     forwarded?: boolean,
+    kind?: 'user' | 'gif',
+    attachment?: GifAttachment,
   ): Promise<MessageResponse> {
     const participant = await this.requireParticipant(conversationId, userId);
     const convo = await this.conversations.findOne({
@@ -938,6 +966,8 @@ export class MessagingService {
       replyToId,
       clientMessageId,
       forwarded,
+      kind,
+      attachment,
     );
     return response;
   }
@@ -1283,7 +1313,9 @@ export class MessagingService {
     const messages = await this.messages.find({
       where: { id: In(pinRows.map((pin) => pin.messageId)) },
     });
-    const messageById = new Map(messages.map((message) => [message.id, message]));
+    const messageById = new Map(
+      messages.map((message) => [message.id, message]),
+    );
     const ordered: Message[] = [];
     for (const pin of pinRows) {
       const message = messageById.get(pin.messageId);
@@ -1345,14 +1377,22 @@ export class MessagingService {
     userId: string,
     limit?: number,
   ): Promise<StarredMessagesResponse> {
-    const cappedLimit = Math.min(limit ?? DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT);
+    const cappedLimit = Math.min(
+      limit ?? DEFAULT_SEARCH_LIMIT,
+      MAX_SEARCH_LIMIT,
+    );
     // Order by star recency via the join; hydrate the exact `starredAt` in a
     // second batched query (avoids fragile raw-alias parsing).
     const messages = await this.messages
       .createQueryBuilder('m')
-      .innerJoin(MessageStar, 's', 's.message_id = m.id AND s.user_id = :userId', {
-        userId,
-      })
+      .innerJoin(
+        MessageStar,
+        's',
+        's.message_id = m.id AND s.user_id = :userId',
+        {
+          userId,
+        },
+      )
       // Participation + clearedAt floor: the caller's own participant row for the
       // message's conversation. A star can only exist for a message they could
       // see, but this also enforces the clear floor after a "delete for me".
@@ -1516,7 +1556,9 @@ export class MessagingService {
           'You cannot add a member you have blocked (or who has blocked you)',
         );
       }
-      if (!(await this.connectionsService.areConnected(userId, profile.userId))) {
+      if (
+        !(await this.connectionsService.areConnected(userId, profile.userId))
+      ) {
         throw new ForbiddenException(
           'You can only add accepted connections to a group',
         );
@@ -1660,13 +1702,18 @@ export class MessagingService {
       if (existing && existing.leftAt == null) {
         continue; // already an active member — silently skip
       }
-      if (await this.blockFilter.isBlockedEitherWay(actorUserId, profile.userId)) {
+      if (
+        await this.blockFilter.isBlockedEitherWay(actorUserId, profile.userId)
+      ) {
         throw new ForbiddenException(
           'You cannot add a member you have blocked (or who has blocked you)',
         );
       }
       if (
-        !(await this.connectionsService.areConnected(actorUserId, profile.userId))
+        !(await this.connectionsService.areConnected(
+          actorUserId,
+          profile.userId,
+        ))
       ) {
         throw new ForbiddenException(
           'You can only add accepted connections to a group',
@@ -2218,6 +2265,8 @@ export class MessagingService {
     replyToId?: string,
     clientMessageId?: string,
     forwarded?: boolean,
+    kind?: 'user' | 'gif',
+    attachment?: GifAttachment,
   ): Promise<{ view: MessageView; response: MessageResponse }> {
     if (clientMessageId) {
       const existing = await this.messages.findOne({
@@ -2227,6 +2276,9 @@ export class MessagingService {
       if (existing) {
         return this.buildPostResult(existing, senderId, false);
       }
+    }
+    if (kind === 'gif' && !attachment) {
+      throw new BadRequestException('attachment is required for a gif message');
     }
     let saved: Message;
     try {
@@ -2238,6 +2290,10 @@ export class MessagingService {
           replyToId: replyToId ?? null,
           clientMessageId: clientMessageId ?? null,
           forwarded: forwarded ?? false,
+          kind: kind === 'gif' ? MessageKind.Gif : MessageKind.User,
+          // Only a gif message carries an attachment — never persist one onto a
+          // plain text send even if a client mistakenly supplies both.
+          attachment: kind === 'gif' ? (attachment ?? null) : null,
         }),
       );
     } catch (error) {

@@ -61,6 +61,8 @@ describe('ChatGateway', () => {
   let platformSettings: { get: jest.Mock };
   let presence: PresenceService;
   let roomEmit: jest.Mock;
+  let namespaceTo: jest.Mock;
+  let namespaceIn: jest.Mock;
   let disconnectSockets: jest.Mock;
   let disconnectAllSockets: jest.Mock;
 
@@ -106,10 +108,12 @@ describe('ChatGateway', () => {
     roomEmit = jest.fn();
     disconnectSockets = jest.fn();
     disconnectAllSockets = jest.fn();
+    namespaceTo = jest.fn().mockReturnValue({ emit: roomEmit });
+    namespaceIn = jest.fn().mockReturnValue({ disconnectSockets });
     // @ts-expect-error assigning the injected namespace for the test
     gateway.namespace = {
-      to: jest.fn().mockReturnValue({ emit: roomEmit }),
-      in: jest.fn().mockReturnValue({ disconnectSockets }),
+      to: namespaceTo,
+      in: namespaceIn,
       // Namespace-level (not room-scoped) — the blanket lockdown disconnect.
       disconnectSockets: disconnectAllSockets,
     };
@@ -301,7 +305,7 @@ describe('ChatGateway', () => {
         'exception',
         expect.objectContaining({
           code: 'PLATFORM_LOCKED',
-          message: expect.stringContaining('temporarily unavailable'),
+          message: expect.stringContaining('temporarily unavailable') as string,
         }),
       );
     });
@@ -321,7 +325,7 @@ describe('ChatGateway', () => {
       });
     });
 
-    it('disconnects every live socket when lockdown is switched on', async () => {
+    it('disconnects every live socket when lockdown is switched on', () => {
       gateway.handleLockdownEnabled({ actorId: 'admin-1' });
 
       expect(disconnectAllSockets).toHaveBeenCalledWith(true);
@@ -350,7 +354,7 @@ describe('ChatGateway', () => {
 
       await gateway.handleConnection(client as never);
 
-      expect(gateway.namespace.to).toHaveBeenCalledWith('user:friendA');
+      expect(namespaceTo).toHaveBeenCalledWith('user:friendA');
       expect(roomEmit).toHaveBeenCalledWith('presence', {
         userId: 'u1',
         online: true,
@@ -365,7 +369,7 @@ describe('ChatGateway', () => {
 
       await gateway.handleDisconnect(client as never);
 
-      expect(gateway.namespace.to).toHaveBeenCalledWith('user:friendA');
+      expect(namespaceTo).toHaveBeenCalledWith('user:friendA');
       expect(roomEmit).toHaveBeenCalledWith('presence', {
         userId: 'u1',
         online: false,
@@ -470,7 +474,7 @@ describe('ChatGateway', () => {
   describe('force-disconnect', () => {
     it('drops all sockets in the user room on USER_SESSION_REVOKED', () => {
       gateway.handleSessionRevoked({ userId: 'u9' });
-      expect(gateway.namespace.in).toHaveBeenCalledWith('user:u9');
+      expect(namespaceIn).toHaveBeenCalledWith('user:u9');
       expect(disconnectSockets).toHaveBeenCalledWith(true);
     });
   });
@@ -483,7 +487,7 @@ describe('ChatGateway', () => {
         message: { id: 'm1' } as never,
         response: response as never,
       });
-      expect(gateway.namespace.to).toHaveBeenCalledWith('c1');
+      expect(namespaceTo).toHaveBeenCalledWith('c1');
       // The room receives the hydrated `response`, so clients patch it straight
       // into the thread cache and reconcile the optimistic bubble by client id.
       expect(roomEmit).toHaveBeenCalledWith('message:new', {
@@ -507,7 +511,7 @@ describe('ChatGateway', () => {
       } as never);
       // The user room, not a conversation room — a notification is addressed to
       // one member, and reaches every tab they have open.
-      expect(gateway.namespace.to).toHaveBeenCalledWith('user:u9');
+      expect(namespaceTo).toHaveBeenCalledWith('user:u9');
       expect(roomEmit).toHaveBeenCalledWith('notification:new', notification);
     });
 

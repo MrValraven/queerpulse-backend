@@ -1,8 +1,10 @@
 import { Controller, Get, Param, UseGuards } from '@nestjs/common';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminCommunitiesService } from './admin-communities.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * Read-only admin view over every community on the platform.
@@ -11,8 +13,10 @@ import { AdminCommunitiesService } from './admin-communities.service';
  * kill-switch, nothing here can lift a lockdown, so this surface should go
  * dark with everything else.
  */
-@UseGuards(RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesGuard)
 @Roles(UserRole.Admin)
+@ApiTags('Admin — Communities')
+@ApiCookieAuth()
 @Controller('admin/communities')
 export class AdminCommunitiesController {
   constructor(private readonly adminCommunities: AdminCommunitiesService) {}

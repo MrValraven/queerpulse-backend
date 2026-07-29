@@ -2,7 +2,12 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, In, MoreThanOrEqual, Not, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
-import { normalizePage, paginate, Paginated } from '../common/pagination';
+import {
+  DEFAULT_LIST_LIMIT,
+  normalizePage,
+  paginate,
+  Paginated,
+} from '../common/pagination';
 import { Event, EventStatus } from '../events/entities/event.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { CreateReviewDto } from './dto/create-review.dto';
@@ -62,6 +67,7 @@ export class DirectoryService {
         isPartneredWithQueerpulse: true,
       },
       order: { name: 'ASC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     return rows.map(toPartnerSpace);
   }
@@ -94,7 +100,10 @@ export class DirectoryService {
       );
     }
 
-    const rows = await qb.orderBy('listing.name', 'ASC').getMany();
+    const rows = await qb
+      .orderBy('listing.name', 'ASC')
+      .take(DEFAULT_LIST_LIMIT)
+      .getMany();
     return rows.map(toDirectoryCard);
   }
 
@@ -115,6 +124,7 @@ export class DirectoryService {
     const rows = await this.listings.find({
       where: { ownerId: ownerUserId, status: ListingStatus.Live },
       order: { createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     return rows.map(toDirectoryCard);
   }
@@ -200,6 +210,7 @@ export class DirectoryService {
         safeSpaceStatus: Not(SafeSpaceStatus.None),
       },
       order: { name: 'ASC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     // Fetch every verified listing's reviews in ONE query, then group by
     // listing id in memory — avoids an N+1 review query per verified listing.

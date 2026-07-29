@@ -84,7 +84,7 @@ describe('PartnersService', () => {
     it('filters to approved partners only', async () => {
       await service.list({});
 
-      const qb = partners.createQueryBuilder.mock.results[0].value as {
+      const qb = partners.createQueryBuilder.mock.results[0]!.value as {
         where: jest.Mock;
         andWhere: jest.Mock;
       };
@@ -97,7 +97,7 @@ describe('PartnersService', () => {
     it('adds a region filter when provided', async () => {
       await service.list({ region: PartnerRegion.Eu });
 
-      const qb = partners.createQueryBuilder.mock.results[0].value as {
+      const qb = partners.createQueryBuilder.mock.results[0]!.value as {
         andWhere: jest.Mock;
       };
       expect(qb.andWhere).toHaveBeenCalledWith('p.region = :region', {
@@ -108,7 +108,7 @@ describe('PartnersService', () => {
     it('adds a featured filter when provided', async () => {
       await service.list({ featured: true });
 
-      const qb = partners.createQueryBuilder.mock.results[0].value as {
+      const qb = partners.createQueryBuilder.mock.results[0]!.value as {
         andWhere: jest.Mock;
       };
       expect(qb.andWhere).toHaveBeenCalledWith('p.featured = :featured', {
@@ -119,7 +119,7 @@ describe('PartnersService', () => {
     it('omits the featured filter when not provided', async () => {
       await service.list({});
 
-      const qb = partners.createQueryBuilder.mock.results[0].value as {
+      const qb = partners.createQueryBuilder.mock.results[0]!.value as {
         andWhere: jest.Mock;
       };
       expect(qb.andWhere).not.toHaveBeenCalledWith(

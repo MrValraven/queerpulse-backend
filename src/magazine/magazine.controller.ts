@@ -17,8 +17,11 @@ import { CreateStorySubmissionDto } from './dto/create-story-submission.dto';
 import { ListArticlesQuery } from './dto/list-articles.query';
 import { MagazineService } from './magazine.service';
 import { StorySubmissionsService } from './story-submissions.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 @Feature('magazine')
+@ApiTags('Magazine')
+@ApiCookieAuth()
 @Controller('magazine')
 @UseGuards(ActiveMemberGuard)
 export class MagazineController {

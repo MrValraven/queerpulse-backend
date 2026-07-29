@@ -17,10 +17,13 @@ import { StorageService, PresignedUpload } from './storage.service';
 import { IMAGE_UPLOAD_TYPES } from './upload-content-types';
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 import { UserPresignThrottlerGuard } from './user-presign-throttler.guard';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 // Presigning mints a short-lived write credential to object storage; rate-limit
 // per user (see UserPresignThrottlerGuard) so a single session can't fan out an
 // unbounded number of upload slots.
+@ApiTags('Uploads')
+@ApiCookieAuth()
 @Controller('uploads')
 @UseGuards(UserPresignThrottlerGuard)
 @Throttle({ default: { limit: 20, ttl: seconds(60) } })

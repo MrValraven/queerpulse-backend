@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ScheduleModule } from '@nestjs/schedule';
@@ -10,6 +10,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import appConfig from './config/app.config';
 import authConfig from './config/auth.config';
 import databaseConfig from './config/database.config';
+import loggingConfig from './config/logging.config';
 import muxConfig from './config/mux.config';
 import pushConfig from './config/push.config';
 import storageConfig from './config/storage.config';
@@ -93,6 +94,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
       load: [
         appConfig,
         databaseConfig,
+        loggingConfig,
         authConfig,
         storageConfig,
         muxConfig,
@@ -100,73 +102,66 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
       ],
       validate,
     }),
-    LoggerModule.forRoot({
-      pinoHttp: {
-        level:
-          process.env.LOG_LEVEL ??
-          (process.env.NODE_ENV === 'production' ? 'info' : 'debug'),
-        // Correlate every request with an id (honour an inbound one behind a proxy).
-        genReqId: (req: IncomingMessage, res: ServerResponse) => {
-          const inbound = req.headers['x-request-id'];
-          const id =
-            (Array.isArray(inbound) ? inbound[0] : inbound) ?? randomUUID();
-          res.setHeader('x-request-id', id);
-          return id;
-        },
-        // Never log credentials. Largely redundant now that the serializers
-        // below drop headers entirely, but kept as defense-in-depth for the
-        // prod JSON path in case a serializer is ever widened.
-        redact: [
-          'req.headers.cookie',
-          'req.headers.authorization',
-          'res.headers["set-cookie"]',
-        ],
-        // Emit the level as its label ("info"/"warn"/"error") rather than
-        // pino's default numeric level (30/40/50). Railway's log explorer
-        // detects severity from a string `level` attribute; it can't map the
-        // numbers, so without this every JSON line falls back to Info.
-        formatters: {
-          level: (label: string) => ({ level: label }),
-        },
-        // Log only essential fields per request. reqId and responseTime are
-        // emitted at the top level by pino-http and survive automatically.
-        serializers: {
-          req: (req: IncomingMessage) => ({
-            method: req.method,
-            url: req.url,
-          }),
-          res: (res: ServerResponse) => ({ statusCode: res.statusCode }),
-          err: (err: Error & { type?: string }) => ({
-            type: err.type,
-            message: err.message,
-            stack: err.stack,
-          }),
-        },
-        // Suppress 304 cache-hits ('silent' skips emission) and map status to
-        // level so failures stand out (warn/error) while success stays info.
-        customLogLevel: (
-          _req: IncomingMessage,
-          res: ServerResponse,
-          err?: Error,
-        ) => {
-          if (res.statusCode === 304) return 'silent';
-          if (res.statusCode >= 500 || err) return 'error';
-          if (res.statusCode >= 400) return 'warn';
-          return 'info';
-        },
-        // pino-pretty is a devDependency and is absent from the production
-        // image, so selecting it there throws at boot ("unable to determine
-        // transport target") before a logger exists to report why. Keying that
-        // off `NODE_ENV !== 'production'` made a boot crash reachable by setting
-        // NODE_ENV=staging in a dashboard; require an explicit opt-in instead.
-        // LOG_PRETTY=true in a deployed environment is the caller's problem.
-        transport:
-          process.env.LOG_PRETTY === 'true' ||
-          (process.env.LOG_PRETTY === undefined &&
-            process.env.NODE_ENV === 'development')
+    LoggerModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        pinoHttp: {
+          level: configService.get<string>('logging.level'),
+          // Correlate every request with an id (honour an inbound one behind a proxy).
+          genReqId: (req: IncomingMessage, res: ServerResponse) => {
+            const inbound = req.headers['x-request-id'];
+            const id =
+              (Array.isArray(inbound) ? inbound[0] : inbound) ?? randomUUID();
+            res.setHeader('x-request-id', id);
+            return id;
+          },
+          // Never log credentials. Largely redundant now that the serializers
+          // below drop headers entirely, but kept as defense-in-depth for the
+          // prod JSON path in case a serializer is ever widened.
+          redact: [
+            'req.headers.cookie',
+            'req.headers.authorization',
+            'res.headers["set-cookie"]',
+          ],
+          // Emit the level as its label ("info"/"warn"/"error") rather than
+          // pino's default numeric level (30/40/50). Railway's log explorer
+          // detects severity from a string `level` attribute; it can't map the
+          // numbers, so without this every JSON line falls back to Info.
+          formatters: {
+            level: (label: string) => ({ level: label }),
+          },
+          // Log only essential fields per request. reqId and responseTime are
+          // emitted at the top level by pino-http and survive automatically.
+          serializers: {
+            req: (req: IncomingMessage) => ({
+              method: req.method,
+              url: req.url,
+            }),
+            res: (res: ServerResponse) => ({ statusCode: res.statusCode }),
+            err: (err: Error & { type?: string }) => ({
+              type: err.type,
+              message: err.message,
+              stack: err.stack,
+            }),
+          },
+          // Suppress 304 cache-hits ('silent' skips emission) and map status to
+          // level so failures stand out (warn/error) while success stays info.
+          customLogLevel: (
+            _req: IncomingMessage,
+            res: ServerResponse,
+            err?: Error,
+          ) => {
+            if (res.statusCode === 304) return 'silent';
+            if (res.statusCode >= 500 || err) return 'error';
+            if (res.statusCode >= 400) return 'warn';
+            return 'info';
+          },
+          // The LOG_PRETTY opt-in and its rationale live in logging.config.ts.
+          transport: configService.get<boolean>('logging.pretty')
             ? { target: 'pino-pretty', options: { singleLine: true } }
             : undefined,
-      },
+        },
+      }),
     }),
     EventEmitterModule.forRoot(),
     ScheduleModule.forRoot(),

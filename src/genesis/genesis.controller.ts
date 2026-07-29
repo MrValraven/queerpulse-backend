@@ -13,6 +13,7 @@ import { Public } from '../auth/decorators/public.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 import { GenesisService } from './genesis.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * One-time platform bootstrap. See `GenesisService` for the gate model.
@@ -25,6 +26,8 @@ import { GenesisService } from './genesis.service';
  * with registration disabled. Both default correctly on a fresh deploy.
  */
 @LockdownExempt()
+@ApiTags('Genesis')
+@ApiCookieAuth()
 @Controller('genesis')
 export class GenesisController {
   constructor(private readonly genesis: GenesisService) {}

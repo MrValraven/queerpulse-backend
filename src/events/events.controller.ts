@@ -26,8 +26,11 @@ import { UpdateEventDto } from './dto/update-event.dto';
 import { EventInvitesService } from './event-invites.service';
 import { EventsService } from './events.service';
 import { RsvpService } from './rsvp.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 @Feature('events')
+@ApiTags('Events')
+@ApiCookieAuth()
 @Controller('events')
 @UseGuards(ActiveMemberGuard)
 export class EventsController {
@@ -121,6 +124,8 @@ export class EventsController {
 }
 
 @Feature('events')
+@ApiTags('Events')
+@ApiCookieAuth()
 @Controller('event-invites')
 @UseGuards(ActiveMemberGuard)
 export class EventInvitesController {

@@ -71,7 +71,7 @@ describe('SavedService', () => {
   describe('list', () => {
     it('scopes the query to the caller and orders newest-first', async () => {
       const qb = qbStub();
-      qb.getManyAndCount.mockResolvedValue([[row()], 1]);
+      qb.getManyAndCount!.mockResolvedValue([[row()], 1]);
       repo.createQueryBuilder.mockReturnValue(qb);
 
       const query: ListSavedQuery = {};
@@ -128,7 +128,7 @@ describe('SavedService', () => {
 
     it('omits optional presentational fields when absent', async () => {
       const qb = qbStub();
-      qb.getManyAndCount.mockResolvedValue([
+      qb.getManyAndCount!.mockResolvedValue([
         [row({ href: null, meta: null, description: null, readTime: null })],
         1,
       ]);

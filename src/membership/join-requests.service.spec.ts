@@ -58,12 +58,14 @@ describe('JoinRequestsService', () => {
     repo = {
       findOne: jest.fn().mockResolvedValue(null),
       find: jest.fn().mockResolvedValue([]),
-      save: jest.fn().mockImplementation(async (r) => ({
-        id: 'r1',
-        createdAt: new Date('2026-07-18T00:00:00.000Z'),
-        ...r,
-      })),
-      create: jest.fn((v) => v),
+      save: jest.fn().mockImplementation((row: JoinRequest) =>
+        Promise.resolve({
+          ...row,
+          id: 'r1',
+          createdAt: new Date('2026-07-18T00:00:00.000Z'),
+        }),
+      ),
+      create: jest.fn((value: Partial<JoinRequest>) => value),
       createQueryBuilder: jest.fn(() => qb),
     };
     invites = {
@@ -74,7 +76,15 @@ describe('JoinRequestsService', () => {
     inviteRepo = { find: jest.fn().mockResolvedValue([]) };
     manager = { getRepository: jest.fn(() => txRepo) };
     dataSource = {
-      transaction: jest.fn().mockImplementation(async (cb) => cb(manager)),
+      transaction: jest
+        .fn()
+        .mockImplementation(
+          (
+            runInTransaction: (
+              entityManager: typeof manager,
+            ) => Promise<unknown>,
+          ) => runInTransaction(manager),
+        ),
       getRepository: jest.fn(() => inviteRepo),
     };
     // Join-request kill switch — on by default, so submission is unaffected
@@ -129,7 +139,7 @@ describe('JoinRequestsService', () => {
       await service.submit(dto({ termsVersion: '3.0' }));
       expect(repo.create).toHaveBeenCalledWith(
         expect.objectContaining({
-          ageAttestedAt: expect.any(Date),
+          ageAttestedAt: expect.any(Date) as unknown,
           termsVersion: '3.0',
         }),
       );
@@ -176,7 +186,7 @@ describe('JoinRequestsService', () => {
         await expect(
           service.submit(dto({ dateOfBirth: dobYearsAgo(10) })),
         ).rejects.toMatchObject({
-          response: expect.objectContaining({ code: 'UNDER_18' }),
+          response: expect.objectContaining({ code: 'UNDER_18' }) as unknown,
         });
       });
 
@@ -279,7 +289,7 @@ describe('JoinRequestsService', () => {
     it('returns inviteCode null for rows with no invite, without querying invites', async () => {
       repo.find.mockResolvedValue([row()]);
       const [view] = await service.list();
-      expect(view.inviteCode).toBeNull();
+      expect(view!.inviteCode).toBeNull();
       expect(inviteRepo.find).not.toHaveBeenCalled();
     });
 
@@ -355,7 +365,7 @@ describe('JoinRequestsService', () => {
         expect.objectContaining({
           status: JoinRequestStatus.Approved,
           reviewedBy: 'admin-1',
-          reviewedAt: expect.any(Date),
+          reviewedAt: expect.any(Date) as unknown,
           inviteId: 'inv-1',
         }),
       );

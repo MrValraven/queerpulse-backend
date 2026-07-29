@@ -9,6 +9,7 @@ import {
   MinLength,
   ValidateNested,
 } from 'class-validator';
+import { IsSafeExternalUrl } from '../../common/validators/is-safe-external-url.decorator';
 import { PartnerRegion } from '../entities/partner.entity';
 
 export class PartnerStatDto {
@@ -44,7 +45,7 @@ export class PartnerContactDto {
   @IsOptional() @IsString() @MaxLength(50) phone?: string;
   @IsOptional() @IsString() @MaxLength(200) phoneNote?: string;
   @IsOptional() @IsString() @MaxLength(200) email?: string;
-  @IsOptional() @IsString() @MaxLength(300) website?: string;
+  @IsOptional() @IsString() @IsSafeExternalUrl() @MaxLength(300) website?: string;
   @IsOptional() @IsString() @MaxLength(300) address?: string;
 }
 

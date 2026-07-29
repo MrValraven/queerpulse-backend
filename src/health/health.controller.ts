@@ -1,9 +1,10 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, VERSION_NEUTRAL } from '@nestjs/common';
 import {
   HealthCheck,
   HealthCheckService,
   TypeOrmHealthIndicator,
 } from '@nestjs/terminus';
+import { ApiTags } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 import { Public } from '../auth/decorators/public.decorator';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
@@ -14,10 +15,17 @@ import { LockdownExempt } from '../common/lockdown-exempt.decorator';
  * from a bucket shared with other traffic resolving to that IP. A 429 here fails
  * the healthcheck and gets a perfectly healthy instance killed.
  */
+// Version-neutral: the Railway/orchestrator healthcheck probes fixed, unversioned
+// paths (`/health`, `/health/live`, `/health/ready`) that cannot be changed in
+// lockstep with the API version.
+@ApiTags('health')
 @Public()
 @SkipThrottle()
 @LockdownExempt()
-@Controller('health')
+// `version: VERSION_NEUTRAL` in the @Controller options is how Nest sets
+// controller-level version metadata (the router reads it off the class); the
+// standalone @Version() decorator only works at the method level.
+@Controller({ path: 'health', version: VERSION_NEUTRAL })
 export class HealthController {
   constructor(
     private readonly health: HealthCheckService,

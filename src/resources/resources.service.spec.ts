@@ -77,7 +77,7 @@ describe('ResourcesService', () => {
     it('filters to published resources only', async () => {
       await service.list({});
 
-      const qb = resources.createQueryBuilder.mock.results[0].value as {
+      const qb = resources.createQueryBuilder.mock.results[0]!.value as {
         where: jest.Mock;
         andWhere: jest.Mock;
       };
@@ -90,7 +90,7 @@ describe('ResourcesService', () => {
     it('adds a category filter when provided', async () => {
       await service.list({ category: 'legal' });
 
-      const qb = resources.createQueryBuilder.mock.results[0].value as {
+      const qb = resources.createQueryBuilder.mock.results[0]!.value as {
         andWhere: jest.Mock;
       };
       expect(qb.andWhere).toHaveBeenCalledWith('r.category = :category', {
@@ -101,7 +101,7 @@ describe('ResourcesService', () => {
     it('omits the category filter when none is provided', async () => {
       await service.list({});
 
-      const qb = resources.createQueryBuilder.mock.results[0].value as {
+      const qb = resources.createQueryBuilder.mock.results[0]!.value as {
         andWhere: jest.Mock;
       };
       expect(qb.andWhere).not.toHaveBeenCalledWith(
@@ -112,7 +112,7 @@ describe('ResourcesService', () => {
 
     it('maps rows to ResourceResponse and returns the page envelope', async () => {
       const qb = qbStub();
-      qb.getManyAndCount.mockResolvedValue([[publishedResource], 1]);
+      qb.getManyAndCount!.mockResolvedValue([[publishedResource], 1]);
       resources.createQueryBuilder.mockReturnValue(qb);
 
       const page = await service.list({});

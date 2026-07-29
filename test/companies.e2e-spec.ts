@@ -2,6 +2,7 @@ import { ExecutionContext, INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
+import { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { GoogleAuthGuard } from '../src/auth/guards/google-auth.guard';
@@ -86,7 +87,7 @@ describe('Companies (e2e)', () => {
     // is keyed off googleId so distinct logins in the same test never collide.
     const nonce = `e2e-nonce-${googleId}`;
     const state = encodeOAuthState({ nonce })!;
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/auth/google/callback')
       .query({ state })
       .set('Cookie', [`oauth_state=${nonce}`])
@@ -116,7 +117,7 @@ describe('Companies (e2e)', () => {
   async function withCsrf(
     sessionCookies: string[],
   ): Promise<{ cookies: string[]; csrfToken: string }> {
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/csrf-token')
       .set('Cookie', sessionCookies);
     expect(res.status).toBe(200);
@@ -141,7 +142,7 @@ describe('Companies (e2e)', () => {
     csrfToken: string,
     handle: string,
   ): Promise<{ slug: string; nameText: string }> {
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .post('/companies')
       .set('Cookie', cookies)
       .set('X-CSRF-Token', csrfToken)
@@ -151,7 +152,7 @@ describe('Companies (e2e)', () => {
   }
 
   it('rejects unauthenticated access to the companies list', async () => {
-    const res = await request(app.getHttpServer()).get('/companies');
+    const res = await request(app.getHttpServer() as App).get('/companies');
     expect(res.status).toBe(401);
   });
 
@@ -162,7 +163,7 @@ describe('Companies (e2e)', () => {
     );
     const { cookies, csrfToken } = await withCsrf(ownerCookies);
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .post('/companies')
       .set('Cookie', cookies)
       .set('X-CSRF-Token', csrfToken)
@@ -193,7 +194,7 @@ describe('Companies (e2e)', () => {
     const { cookies, csrfToken } = await withCsrf(ownerCookies);
     const created = await createCompany(cookies, csrfToken, 'atelier-pulso-2');
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get(`/companies/${created.slug}`)
       .set('Cookie', ownerCookies);
 
@@ -223,7 +224,7 @@ describe('Companies (e2e)', () => {
     const { cookies: outsiderCsrfCookies, csrfToken: outsiderCsrfToken } =
       await withCsrf(outsiderCookies);
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .patch(`/companies/${created.slug}`)
       .set('Cookie', outsiderCsrfCookies)
       .set('X-CSRF-Token', outsiderCsrfToken)
@@ -252,7 +253,7 @@ describe('Companies (e2e)', () => {
     const { cookies: reviewerCsrfCookies, csrfToken: reviewerCsrfToken } =
       await withCsrf(reviewerCookies);
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .post(`/companies/${created.slug}/reviews`)
       .set('Cookie', reviewerCsrfCookies)
       .set('X-CSRF-Token', reviewerCsrfToken)

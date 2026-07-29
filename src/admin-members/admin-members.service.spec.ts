@@ -244,11 +244,11 @@ describe('AdminMembersService', () => {
 
       const [flaggedMember] = await service.listFlagged();
 
-      expect(flaggedMember.slug).toBe('kai-devon');
-      expect(flaggedMember.openReportCount).toBe(0);
+      expect(flaggedMember!.slug).toBe('kai-devon');
+      expect(flaggedMember!.openReportCount).toBe(0);
       // Suspended with no open reports left driving it reads as frozen, per
       // the documented heuristic in the service.
-      expect(flaggedMember.moderationState).toBe('frozen');
+      expect(flaggedMember!.moderationState).toBe('frozen');
     });
 
     it("discovers a member by their reports' subjectId (slug), and surfaces the most frequent reason and latest detail", async () => {
@@ -278,14 +278,14 @@ describe('AdminMembersService', () => {
 
       const [flaggedMember] = await service.listFlagged();
 
-      expect(flaggedMember.slug).toBe('devon-rae');
-      expect(flaggedMember.openReportCount).toBe(2);
-      expect(flaggedMember.topReasonCode).toBe('harassment');
-      expect(flaggedMember.latestReportDetail).toBe(
+      expect(flaggedMember!.slug).toBe('devon-rae');
+      expect(flaggedMember!.openReportCount).toBe(2);
+      expect(flaggedMember!.topReasonCode).toBe('harassment');
+      expect(flaggedMember!.latestReportDetail).toBe(
         'Second complaint, same reason.',
       );
       // Neither suspended nor frozen — just under active review.
-      expect(flaggedMember.moderationState).toBe('under_review');
+      expect(flaggedMember!.moderationState).toBe('under_review');
     });
   });
 

@@ -2,7 +2,7 @@ import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { DataSource } from 'typeorm';
-import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
+import { RsvpStatus } from './entities/event-rsvp.entity';
 import { EventStatus, EventVisibility } from './entities/event.entity';
 import { RsvpService } from './rsvp.service';
 
@@ -25,11 +25,11 @@ describe('RsvpService', () => {
     rsvpRepo = {
       count: jest.fn().mockResolvedValue(0),
       findOne: jest.fn().mockResolvedValue(null),
-      save: jest.fn(async (r) => r),
-      create: jest.fn((r) => r),
+      save: jest.fn((rsvp: unknown) => rsvp),
+      create: jest.fn((rsvp: unknown) => rsvp),
       createQueryBuilder: jest.fn(() => ({
         select: () => ({
-          where: () => ({ getRawOne: async () => ({ max: 0 }) }),
+          where: () => ({ getRawOne: () => ({ max: 0 }) }),
         }),
       })),
     };
@@ -40,7 +40,10 @@ describe('RsvpService', () => {
       exists: managerExists,
     };
     const dataSource = {
-      transaction: jest.fn(async (cb) => cb(manager)),
+      transaction: jest.fn(
+        (runInTransaction: (entityManager: unknown) => unknown) =>
+          runInTransaction(manager),
+      ),
     };
     const module: TestingModule = await Test.createTestingModule({
       providers: [

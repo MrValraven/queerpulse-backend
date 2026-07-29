@@ -16,6 +16,7 @@ import { CommunityPostsService } from './community-posts.service';
 import { CreateFlatPostDto } from './dto/create-flat-post.dto';
 import { FlatReplyDto } from './dto/flat-reply.dto';
 import { LikePostDto } from './dto/like-post.dto';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * Flat `community-posts` aliases the feed feature calls directly
@@ -25,6 +26,8 @@ import { LikePostDto } from './dto/like-post.dto';
  * how `communitySlug` optional and the reserved `like` reaction key work.
  */
 @Feature('communities')
+@ApiTags('Communities')
+@ApiCookieAuth()
 @Controller('community-posts')
 @UseGuards(ActiveMemberGuard)
 export class CommunityPostsController {

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { MessagingModule } from '../messaging/messaging.module';
+import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
 import { FlatmateProfile } from './entities/flatmate-profile.entity';
 import { FlatmateDirectoryController } from './flatmate-directory.controller';
@@ -13,6 +14,7 @@ import { FlatmateProfilesService } from './flatmate-profiles.service';
     TypeOrmModule.forFeature([FlatmateProfile]),
     UsersModule, // exports the Profile repository (member-ref + slug seed)
     MessagingModule, // exports MessagingService (say hello delivery)
+    SocialModule, // exports BlockFilterService (block severance on detail-by-slug)
   ],
   controllers: [FlatmateProfilesController, FlatmateDirectoryController],
   providers: [FlatmateProfilesService, FlatmateDirectoryService],

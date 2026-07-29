@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { EntityManager } from 'typeorm';
 import { Profile } from './entities/profile.entity';
 import { User, UserStatus } from './entities/user.entity';
 import { UsersService } from './users.service';
@@ -40,25 +41,29 @@ describe('UsersService', () => {
 
   describe('createGoogleUser', () => {
     it('creates an Active member with invitedBy + activatedAt on the given manager', async () => {
-      const saved: any[] = [];
+      const saved: Array<{ id: string }> = [];
       const profileRepo = { exists: jest.fn().mockResolvedValue(false) };
+      const createMock = jest.fn(
+        (_entity: unknown, value: Record<string, unknown>) => value,
+      );
+      const saveMock = jest.fn((value: Record<string, unknown>) => {
+        const row = {
+          id: saved.length === 0 ? 'new-user' : 'new-profile',
+          ...value,
+        };
+        saved.push(row);
+        return Promise.resolve(row);
+      });
       const manager = {
-        create: jest.fn((_entity, v) => v),
-        save: jest.fn(async (v) => {
-          const row = {
-            id: saved.length === 0 ? 'new-user' : 'new-profile',
-            ...v,
-          };
-          saved.push(row);
-          return row;
-        }),
+        create: createMock,
+        save: saveMock,
         getRepository: jest.fn(() => profileRepo),
         // The profile insert runs in a nested SAVEPOINT transaction; the mock
         // just re-enters the same manager.
-        transaction: jest.fn(async (cb: (m: unknown) => Promise<void>) =>
+        transaction: jest.fn((cb: (m: unknown) => Promise<void>) =>
           cb(manager),
         ),
-      } as any;
+      } as unknown as EntityManager;
 
       const user = await service.createGoogleUser(manager, {
         googleId: 'g-1',
@@ -70,10 +75,10 @@ describe('UsersService', () => {
       });
 
       expect(user).toEqual(expect.objectContaining({ id: 'new-user' }));
-      expect(manager.save).toHaveBeenCalledWith(
+      expect(saveMock).toHaveBeenCalledWith(
         expect.objectContaining({
           status: UserStatus.Active,
-          activatedAt: expect.any(Date),
+          activatedAt: expect.any(Date) as unknown,
           invitedBy: { id: 'inviter-1' },
         }),
       );
@@ -82,23 +87,27 @@ describe('UsersService', () => {
     });
 
     it('creates a system account when isSystem is passed', async () => {
-      const saved: any[] = [];
+      const saved: Array<{ id: string }> = [];
       const profileRepo = { exists: jest.fn().mockResolvedValue(false) };
+      const createMock = jest.fn(
+        (_entity: unknown, value: Record<string, unknown>) => value,
+      );
+      const saveMock = jest.fn((value: Record<string, unknown>) => {
+        const row = {
+          id: saved.length === 0 ? 'new-user' : 'new-profile',
+          ...value,
+        };
+        saved.push(row);
+        return Promise.resolve(row);
+      });
       const manager = {
-        create: jest.fn((_entity, v) => v),
-        save: jest.fn(async (v) => {
-          const row = {
-            id: saved.length === 0 ? 'new-user' : 'new-profile',
-            ...v,
-          };
-          saved.push(row);
-          return row;
-        }),
+        create: createMock,
+        save: saveMock,
         getRepository: jest.fn(() => profileRepo),
-        transaction: jest.fn(async (cb: (m: unknown) => Promise<void>) =>
+        transaction: jest.fn((cb: (m: unknown) => Promise<void>) =>
           cb(manager),
         ),
-      } as any;
+      } as unknown as EntityManager;
 
       const created = await service.createGoogleUser(manager, {
         googleId: 'system:example',
@@ -109,30 +118,34 @@ describe('UsersService', () => {
       });
 
       expect(created.isSystem).toBe(true);
-      expect(manager.create).toHaveBeenCalledWith(
+      expect(createMock).toHaveBeenCalledWith(
         User,
         expect.objectContaining({ isSystem: true }),
       );
     });
 
     it('defaults isSystem to false for an ordinary member', async () => {
-      const saved: any[] = [];
+      const saved: Array<{ id: string }> = [];
       const profileRepo = { exists: jest.fn().mockResolvedValue(false) };
+      const createMock = jest.fn(
+        (_entity: unknown, value: Record<string, unknown>) => value,
+      );
+      const saveMock = jest.fn((value: Record<string, unknown>) => {
+        const row = {
+          id: saved.length === 0 ? 'new-user' : 'new-profile',
+          ...value,
+        };
+        saved.push(row);
+        return Promise.resolve(row);
+      });
       const manager = {
-        create: jest.fn((_entity, v) => v),
-        save: jest.fn(async (v) => {
-          const row = {
-            id: saved.length === 0 ? 'new-user' : 'new-profile',
-            ...v,
-          };
-          saved.push(row);
-          return row;
-        }),
+        create: createMock,
+        save: saveMock,
         getRepository: jest.fn(() => profileRepo),
-        transaction: jest.fn(async (cb: (m: unknown) => Promise<void>) =>
+        transaction: jest.fn((cb: (m: unknown) => Promise<void>) =>
           cb(manager),
         ),
-      } as any;
+      } as unknown as EntityManager;
 
       const created = await service.createGoogleUser(manager, {
         googleId: 'google-123',
@@ -142,7 +155,7 @@ describe('UsersService', () => {
       });
 
       expect(created.isSystem).toBeFalsy();
-      expect(manager.create).toHaveBeenCalledWith(
+      expect(createMock).toHaveBeenCalledWith(
         User,
         expect.objectContaining({ isSystem: false }),
       );

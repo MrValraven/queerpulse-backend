@@ -78,7 +78,10 @@ function isPrivateIpv6(ip: string): boolean {
   // IPv4-mapped (::ffff:a.b.c.d) and NAT64 (64:ff9b::a.b.c.d) can embed a
   // dotted-quad — validate the embedded v4 with the v4 rules.
   const embedded = address.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/)?.[1];
-  if (embedded && (address.startsWith('::ffff:') || address.startsWith('64:ff9b:'))) {
+  if (
+    embedded &&
+    (address.startsWith('::ffff:') || address.startsWith('64:ff9b:'))
+  ) {
     return isPrivateIpv4(embedded);
   }
 
@@ -100,8 +103,10 @@ function isBlockedIp(ip: string): boolean {
 }
 
 /** Reject a URL whose scheme isn't http(s) or whose host resolves to any
- *  non-public address. Throws on any violation; returns nothing on success. */
-async function assertPublicUrl(rawUrl: string): Promise<URL> {
+ *  non-public address. Throws on any violation; returns the parsed URL on
+ *  success. Exported so other outbound-request paths (e.g. web-push delivery,
+ *  which POSTs to a member-supplied endpoint) can reuse the same guard. */
+export async function assertPublicUrl(rawUrl: string): Promise<URL> {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
@@ -180,7 +185,10 @@ export async function safeFetchHtml(
 
     if (!response.ok) return null;
     const contentType = response.headers.get('content-type') ?? '';
-    if (contentType && !/text\/html|application\/xhtml\+xml/i.test(contentType)) {
+    if (
+      contentType &&
+      !/text\/html|application\/xhtml\+xml/i.test(contentType)
+    ) {
       return null; // not an HTML document — nothing to unfurl
     }
 

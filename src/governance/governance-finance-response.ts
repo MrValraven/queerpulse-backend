@@ -15,6 +15,12 @@ export interface GovernanceFinanceResponseDTO {
   eventNotes: FinanceEventNote[];
   reserve: FinanceReserve | null;
   partners: FinancePartner[];
+  incomeTotal?: number | null;
+  expenseTotal?: number | null;
+  surplus?: number | null;
+  mrr?: number | null;
+  sustainerCount?: number | null;
+  solidarityRate?: number | null;
   publishedAt: string;
 }
 
@@ -31,6 +37,12 @@ export function toGovernanceFinanceResponse(
     // Normalize a null column to an empty array so the frontend can always map
     // over `partners` without a guard.
     partners: report.partners ?? [],
+    incomeTotal: report.incomeTotal ?? null,
+    expenseTotal: report.expenseTotal ?? null,
+    surplus: report.surplus ?? null,
+    mrr: report.mrr ?? null,
+    sustainerCount: report.sustainerCount ?? null,
+    solidarityRate: report.solidarityRate ?? null,
     publishedAt: report.publishedAt.toISOString(),
   };
 }

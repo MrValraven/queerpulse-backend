@@ -375,4 +375,78 @@ export const governanceFinanceReportSeed = {
   reserve: financeReserveSeed,
   partners: financePartnersSeed,
   publishedAt: new Date('2026-07-01T00:00:00.000Z'),
+  incomeTotal: 4620,
+  expenseTotal: 4150,
+  surplus: 470,
+  mrr: 1840,
+  sustainerCount: 99,
+  solidarityRate: 11,
 };
+
+// Five prior quarters used only to give the admin governance Finances tab a
+// real 6-quarter chart. These predate the rich per-quarter editorial
+// breakdown (stats/income/expense/eventNotes/reserve/partners), so those
+// jsonb columns carry minimal NOT-NULL placeholders (empty arrays) or null
+// where the column is nullable — only `2026-Q2` (`governanceFinanceReportSeed`
+// above) has the full narrative breakdown. Figures trend upward toward the
+// current quarter's totals.
+export const financeHistorySeed = [
+  {
+    quarter: '2025-Q1',
+    incomeTotal: 3560,
+    expenseTotal: 3480,
+    surplus: 80,
+    mrr: 1320,
+    sustainerCount: 71,
+    solidarityRate: 14,
+    publishedAt: new Date('2025-04-01T00:00:00.000Z'),
+  },
+  {
+    quarter: '2025-Q2',
+    incomeTotal: 3820,
+    expenseTotal: 3690,
+    surplus: 130,
+    mrr: 1440,
+    sustainerCount: 78,
+    solidarityRate: 13,
+    publishedAt: new Date('2025-07-01T00:00:00.000Z'),
+  },
+  {
+    quarter: '2025-Q3',
+    incomeTotal: 4080,
+    expenseTotal: 3900,
+    surplus: 180,
+    mrr: 1560,
+    sustainerCount: 84,
+    solidarityRate: 13,
+    publishedAt: new Date('2025-10-01T00:00:00.000Z'),
+  },
+  {
+    quarter: '2025-Q4',
+    incomeTotal: 4290,
+    expenseTotal: 4020,
+    surplus: 270,
+    mrr: 1680,
+    sustainerCount: 90,
+    solidarityRate: 12,
+    publishedAt: new Date('2026-01-01T00:00:00.000Z'),
+  },
+  {
+    quarter: '2026-Q1',
+    incomeTotal: 4240,
+    expenseTotal: 4010,
+    surplus: 230,
+    mrr: 1760,
+    sustainerCount: 95,
+    solidarityRate: 12,
+    publishedAt: new Date('2026-04-01T00:00:00.000Z'),
+  },
+].map((quarterRow) => ({
+  ...quarterRow,
+  stats: [] as FinanceStat[],
+  income: [] as FinanceLine[],
+  expense: [] as FinanceLine[],
+  eventNotes: [] as FinanceEventNote[],
+  reserve: null as FinanceReserve | null,
+  partners: null as FinancePartner[] | null,
+}));

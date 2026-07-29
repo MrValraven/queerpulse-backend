@@ -17,7 +17,7 @@ describe('UpdateProfileDto — now', () => {
   it('rejects a 281-character status', async () => {
     const errors = await check({ now: 'x'.repeat(281) });
     expect(errors).toHaveLength(1);
-    expect(errors[0].property).toBe('now');
+    expect(errors[0]?.property).toBe('now');
   });
 
   it('accepts an empty string, which is the clearing write', async () => {
@@ -51,7 +51,7 @@ describe('UpdateProfileDto — avatarUrl', () => {
   it('rejects a javascript: URI', async () => {
     const errors = await check({ avatarUrl: 'javascript:alert(1)' });
     expect(errors).toHaveLength(1);
-    expect(errors[0].property).toBe('avatarUrl');
+    expect(errors[0]?.property).toBe('avatarUrl');
   });
 
   it('rejects a data: URI', async () => {
@@ -59,7 +59,7 @@ describe('UpdateProfileDto — avatarUrl', () => {
       avatarUrl: 'data:image/svg+xml,<svg/>',
     });
     expect(errors).toHaveLength(1);
-    expect(errors[0].property).toBe('avatarUrl');
+    expect(errors[0]?.property).toBe('avatarUrl');
   });
 
   it('survives the ValidationPipe whitelist, which is what silently dropped it before', async () => {
@@ -134,7 +134,7 @@ describe('UpdateProfileDto — openTo', () => {
       openTo: [{ kind: 'preset', id: 'hiring' }],
     });
     expect(errors).toHaveLength(1);
-    expect(errors[0].property).toBe('openTo');
+    expect(errors[0]?.property).toBe('openTo');
   });
 
   it('rejects an unknown kind', async () => {
@@ -152,7 +152,7 @@ describe('UpdateProfileDto — openTo', () => {
       })),
     });
     expect(errors).toHaveLength(1);
-    expect(errors[0].property).toBe('openTo');
+    expect(errors[0]?.property).toBe('openTo');
   });
 
   it('accepts exactly 12 entries', async () => {

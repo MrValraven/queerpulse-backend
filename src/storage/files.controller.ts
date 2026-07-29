@@ -17,6 +17,7 @@ import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 import { OptionalJwtAuthGuard } from './optional-jwt-auth.guard';
 import { PRESIGN_EXPIRY_SECONDS, StorageService } from './storage.service';
 import { parseStorageKey, storageKeyOwnerId } from './storage-key';
+import { ApiTags } from '@nestjs/swagger';
 
 // `max-age` is deliberately SHORTER than `PRESIGN_EXPIRY_SECONDS`. At equal
 // values a cached 302 replayed just before expiry hands the browser a
@@ -42,6 +43,7 @@ const PUBLIC_IMAGE_MAX_AGE_SECONDS = PRESIGN_EXPIRY_SECONDS - 60;
 // the person lifting the lockdown from confirming who they are looking at —
 // so this route stays reachable while `PlatformLockdownGuard` is active.
 @LockdownExempt()
+@ApiTags('Files')
 @Controller('files')
 export class FilesController {
   constructor(private readonly storage: StorageService) {}

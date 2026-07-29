@@ -1,11 +1,15 @@
 import {
   IsBoolean,
+  IsIn,
   IsOptional,
   IsString,
   IsUUID,
   MaxLength,
   MinLength,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
+import { GifAttachmentDto } from '../../messaging/dto/send-message.dto';
 
 export class JoinPayload {
   @IsUUID('4')
@@ -30,6 +34,15 @@ export class SendMessagePayload {
   @IsOptional()
   @IsUUID('4')
   clientMessageId?: string;
+
+  @IsOptional()
+  @IsIn(['user', 'gif'])
+  kind?: 'user' | 'gif';
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => GifAttachmentDto)
+  attachment?: GifAttachmentDto;
 }
 
 export class TypingPayload {

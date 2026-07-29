@@ -14,12 +14,15 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { AffiliationService } from './affiliation.service';
 import { SetAffiliationDto } from './dto/set-affiliation.dto';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * The caller's own employer affiliation (plan Task 2.4; spec §3 Tier 2
  * "affiliation"). FE: `features/economy/api/affiliation.api.ts`. At most one
  * per member — the resource is always "mine", so no `:id`/`:slug` in the path.
  */
+@ApiTags('Affiliations')
+@ApiCookieAuth()
 @Controller('me/affiliation')
 @UseGuards(ActiveMemberGuard)
 export class AffiliationController {

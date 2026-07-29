@@ -8,9 +8,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * never-cleared. Mirrors the existing per-user `last_read_at` / `muted` columns.
  * See `src/messaging/entities/conversation-participant.entity.ts`.
  */
-export class AddConversationClearedAt1785000340000
-  implements MigrationInterface
-{
+export class AddConversationClearedAt1785000340000 implements MigrationInterface {
   name = 'AddConversationClearedAt1785000340000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

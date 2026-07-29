@@ -23,7 +23,10 @@ import { ReplaceWorkDto } from './dto/replace-work.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UpdateUsernameDto } from './dto/update-username.dto';
 import { ProfilesService } from './profiles.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
+@ApiTags('Profiles')
+@ApiCookieAuth()
 @Controller('profiles')
 export class ProfilesController {
   constructor(private readonly profilesService: ProfilesService) {}
@@ -105,6 +108,8 @@ export class ProfilesController {
   }
 }
 
+@ApiTags('Profiles')
+@ApiCookieAuth()
 @Controller('members')
 export class MembersController {
   constructor(private readonly profilesService: ProfilesService) {}

@@ -21,7 +21,10 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { DraftsService } from './drafts.service';
 import { CreateDraftDto } from './dto/create-draft.dto';
 import { UpdateDraftDto } from './dto/update-draft.dto';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
+@ApiTags('Drafts')
+@ApiCookieAuth()
 @Controller('me/drafts')
 @UseGuards(ActiveMemberGuard)
 export class DraftsController {

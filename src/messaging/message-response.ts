@@ -2,6 +2,7 @@ import { toImageUrl } from '../common/image-url';
 import { Profile } from '../users/entities/profile.entity';
 import { ConversationRole } from './entities/conversation-participant.entity';
 import {
+  GifAttachment,
   Message,
   MessageKind,
   SystemEvent,
@@ -25,6 +26,7 @@ export interface MessageView {
   forwarded: boolean;
   kind: MessageKind;
   systemEvent: SystemEvent | null;
+  attachment: GifAttachment | null;
 }
 
 export function toMessageView(m: Message): MessageView {
@@ -41,6 +43,7 @@ export function toMessageView(m: Message): MessageView {
     forwarded: m.forwarded,
     kind: m.kind,
     systemEvent: m.systemEvent,
+    attachment: m.attachment,
   };
 }
 
@@ -147,7 +150,7 @@ export interface MessageResponse {
   /** `user` (an ordinary bubble) or `system` (a rendered event pill). Present on
    *  every message; a DM's messages are all `user`, so the client's existing
    *  bubble path is unchanged. */
-  kind: 'user' | 'system';
+  kind: 'user' | 'system' | 'gif';
   /** Resolved system event for a `system` message, else null. Actor/target are
    *  resolved to DISPLAY NAMES server-side (the client only renders bilingual
    *  templates, never user ids). `value` carries a scalar the event needs (e.g. a
@@ -158,6 +161,9 @@ export interface MessageResponse {
     targetName: string | null;
     value: string | null;
   } | null;
+  /** Provider-hosted GIF for a `kind:'gif'` message, else null. The client
+   *  renders it as an inline image; `body` carries a "GIF" text fallback. */
+  attachment: GifAttachment | null;
 }
 
 /**

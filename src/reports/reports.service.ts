@@ -36,6 +36,24 @@ export class ReportsService {
     reporterId: string,
     input: CreateReportInput,
   ): Promise<ReportDTO> {
+    // De-duplicate: one open report per (reporter, subject). A member
+    // double-submitting — or re-reporting a subject already in the queue — gets
+    // the existing report back rather than piling identical rows on the mods'
+    // desk. Check-then-act, mirroring `ConnectionsService.request`'s existing-
+    // pair guard. (Resolved/escalated reports don't block a fresh filing: a
+    // recurrence after a resolution is worth surfacing again.)
+    const existing = await this.reports.findOne({
+      where: {
+        reporterId,
+        subjectType: input.subjectType,
+        subjectId: input.subjectId,
+        status: ReportStatus.Open,
+      },
+    });
+    if (existing) {
+      return toReportDTO(existing);
+    }
+
     const severity = deriveSeverity(input.reasonCode);
     const now = new Date();
 

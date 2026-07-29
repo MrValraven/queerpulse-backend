@@ -11,6 +11,13 @@ import * as Sentry from '@sentry/node';
  * request context (URL, method, user, breadcrumbs), which is most of the value.
  *
  * No-op unless SENTRY_DSN is set.
+ *
+ * This is the ONE place SENTRY_DSN is read straight from process.env rather
+ * than through ConfigService: this module runs before NestFactory.create, so
+ * the validated ConfigModule does not exist yet. The same value IS validated
+ * (env.validation.ts) and re-exposed as `app.sentryDsn` once the app has booted
+ * — code that runs after bootstrap (e.g. main.ts's shutdown flush) reads it
+ * from there.
  */
 export function initSentry(): void {
   if (!process.env.SENTRY_DSN) {

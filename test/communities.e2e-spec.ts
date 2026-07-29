@@ -2,6 +2,7 @@ import { ExecutionContext, INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
+import { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { GoogleAuthGuard } from '../src/auth/guards/google-auth.guard';
@@ -97,7 +98,7 @@ describe('Communities (e2e)', () => {
     // is keyed off googleId so distinct logins in the same test never collide.
     const nonce = `e2e-nonce-${googleId}`;
     const state = encodeOAuthState({ nonce })!;
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/auth/google/callback')
       .query({ state })
       .set('Cookie', [`oauth_state=${nonce}`])
@@ -127,7 +128,7 @@ describe('Communities (e2e)', () => {
   async function withCsrf(
     sessionCookies: string[],
   ): Promise<{ cookies: string[]; csrfToken: string }> {
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/csrf-token')
       .set('Cookie', sessionCookies);
     expect(res.status).toBe(200);
@@ -156,7 +157,7 @@ describe('Communities (e2e)', () => {
     csrfToken: string,
     handle: string,
   ): Promise<{ slug: string; name: string; accessTier: string }> {
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .post('/communities')
       .set('Cookie', cookies)
       .set('X-CSRF-Token', csrfToken)
@@ -166,7 +167,7 @@ describe('Communities (e2e)', () => {
   }
 
   it('rejects unauthenticated access to the communities list', async () => {
-    const res = await request(app.getHttpServer()).get('/communities');
+    const res = await request(app.getHttpServer() as App).get('/communities');
     expect(res.status).toBe(401);
   });
 
@@ -177,7 +178,7 @@ describe('Communities (e2e)', () => {
     );
     const { cookies, csrfToken } = await withCsrf(ownerCookies);
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .post('/communities')
       .set('Cookie', cookies)
       .set('X-CSRF-Token', csrfToken)
@@ -211,7 +212,7 @@ describe('Communities (e2e)', () => {
       'queer-book-club-2',
     );
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get(`/communities/${created.slug}`)
       .set('Cookie', ownerCookies);
 
@@ -241,7 +242,7 @@ describe('Communities (e2e)', () => {
     const { cookies: outsiderCsrfCookies, csrfToken: outsiderCsrfToken } =
       await withCsrf(outsiderCookies);
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .patch(`/communities/${created.slug}`)
       .set('Cookie', outsiderCsrfCookies)
       .set('X-CSRF-Token', outsiderCsrfToken)
@@ -270,7 +271,7 @@ describe('Communities (e2e)', () => {
     const { cookies: joinerCsrfCookies, csrfToken: joinerCsrfToken } =
       await withCsrf(joinerCookies);
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .post(`/communities/${created.slug}/join`)
       .set('Cookie', joinerCsrfCookies)
       .set('X-CSRF-Token', joinerCsrfToken)

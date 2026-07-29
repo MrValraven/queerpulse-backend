@@ -56,7 +56,7 @@ describe('SocialService', () => {
   // via the same createQueryBuilder().getMany() path `MemberLookup` uses.
   function stubSlugResolution(slugToUserId: Record<string, string>): void {
     const qb = qbStub();
-    qb.getMany.mockResolvedValue(
+    qb.getMany!.mockResolvedValue(
       Object.entries(slugToUserId).map(([slug, userId]) => ({
         slug,
         userId,
@@ -110,7 +110,7 @@ describe('SocialService', () => {
 
     it('resolves each blocked member via MemberLookup', async () => {
       const qb = qbStub();
-      qb.getManyAndCount.mockResolvedValue([
+      qb.getManyAndCount!.mockResolvedValue([
         [
           {
             id: 'b1',

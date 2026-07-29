@@ -117,7 +117,7 @@ describe('buildScenes', () => {
       ]),
     );
     expect(scenes.map((s) => s.id)).toEqual(['c1', 'c2']);
-    expect(scenes[0].color).not.toBe(scenes[1].color);
+    expect(scenes[0]!.color).not.toBe(scenes[1]!.color);
   });
 });
 
@@ -222,7 +222,7 @@ describe('AdminTrustNetworkService.getGraph', () => {
     const graph = await service.getGraph();
 
     expect(graph.nodes).toHaveLength(1);
-    expect(graph.nodes[0].standing).toBe('flagged');
+    expect(graph.nodes[0]!.standing).toBe('flagged');
   });
 
   it('marks a reciprocal active vouch pair as mutual on both edges', async () => {
@@ -258,8 +258,8 @@ describe('AdminTrustNetworkService.getGraph', () => {
     const graph = await service.getGraph();
 
     expect(graph.edges).toHaveLength(1);
-    expect(graph.edges[0].withdrawn).toBe(true);
-    expect(graph.edges[0].mutual).toBe(false);
+    expect(graph.edges[0]!.withdrawn).toBe(true);
+    expect(graph.edges[0]!.mutual).toBe(false);
   });
 
   it('drops an edge whose endpoint fell outside the node cap', async () => {

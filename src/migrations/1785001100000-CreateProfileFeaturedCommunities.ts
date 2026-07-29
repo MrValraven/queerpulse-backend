@@ -1,8 +1,6 @@
 import { MigrationInterface, QueryRunner, Table, TableIndex } from 'typeorm';
 
-export class CreateProfileFeaturedCommunities1785001100000
-  implements MigrationInterface
-{
+export class CreateProfileFeaturedCommunities1785001100000 implements MigrationInterface {
   name = 'CreateProfileFeaturedCommunities1785001100000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
@@ -10,7 +8,12 @@ export class CreateProfileFeaturedCommunities1785001100000
       new Table({
         name: 'profile_featured_communities',
         columns: [
-          { name: 'id', type: 'uuid', isPrimary: true, default: 'uuid_generate_v4()' },
+          {
+            name: 'id',
+            type: 'uuid',
+            isPrimary: true,
+            default: 'uuid_generate_v4()',
+          },
           { name: 'user_id', type: 'uuid' },
           { name: 'community_id', type: 'uuid' },
           { name: 'position', type: 'int' },

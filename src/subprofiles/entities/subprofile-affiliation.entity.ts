@@ -1,7 +1,18 @@
-import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, Unique } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+  Unique,
+} from 'typeorm';
 
 @Entity('subprofile_affiliations')
-@Unique('UQ_subprofile_affiliations', ['subprofileId', 'targetType', 'targetSlug'])
+@Unique('UQ_subprofile_affiliations', [
+  'subprofileId',
+  'targetType',
+  'targetSlug',
+])
 export class SubprofileAffiliation {
   @PrimaryGeneratedColumn('uuid')
   id: string;

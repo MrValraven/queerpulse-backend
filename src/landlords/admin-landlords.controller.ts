@@ -22,9 +22,12 @@ import { TriageIntroRequestDto } from './dto/triage-intro-request.dto';
 import { UpdateLandlordStatusDto } from './dto/update-landlord-status.dto';
 import { UpdateLandlordDto } from './dto/update-landlord.dto';
 import { LandlordsService } from './landlords.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /** Moderator/admin moderation of the landlord directory. */
 @Feature('landlords')
+@ApiTags('Admin — Landlords')
+@ApiCookieAuth()
 @Controller('admin/landlords')
 @UseGuards(RolesGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)

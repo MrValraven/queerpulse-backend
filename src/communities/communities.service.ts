@@ -9,7 +9,12 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, In, Repository } from 'typeorm';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
-import { normalizePage, paginate, Paginated } from '../common/pagination';
+import {
+  DEFAULT_LIST_LIMIT,
+  normalizePage,
+  paginate,
+  Paginated,
+} from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { Profile } from '../users/entities/profile.entity';
 import {
@@ -553,6 +558,7 @@ export class CommunitiesService {
       .addSelect('m.joined_at', 'joinedAt')
       .where('m.user_id = :userId', { userId })
       .orderBy('m.joined_at', 'DESC')
+      .limit(DEFAULT_LIST_LIMIT)
       .getRawMany<{
         slug: string;
         name: string;

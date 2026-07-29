@@ -36,7 +36,7 @@ describe('EventsService', () => {
   beforeEach(async () => {
     events = {
       findOne: jest.fn(),
-      save: jest.fn(async (e) => e),
+      save: jest.fn((event: unknown) => event),
       exists: jest.fn().mockResolvedValue(false),
     };
     cohosts = {

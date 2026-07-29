@@ -17,7 +17,10 @@ import { Throttle, seconds } from '@nestjs/throttler';
 import { CreateVouchDto } from './dto/create-vouch.dto';
 import { PaginationQuery } from './dto/pagination.query';
 import { VouchService } from './vouch.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
+@ApiTags('Vouches')
+@ApiCookieAuth()
 @Controller('members')
 @UseGuards(ActiveMemberGuard)
 export class VouchController {
@@ -48,6 +51,8 @@ export class VouchController {
   }
 }
 
+@ApiTags('Vouches')
+@ApiCookieAuth()
 @Controller('me/vouches')
 @UseGuards(ActiveMemberGuard)
 export class MyVouchesController {

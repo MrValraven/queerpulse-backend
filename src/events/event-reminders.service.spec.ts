@@ -45,11 +45,11 @@ describe('EventRemindersService', () => {
     // The conditional claim stamps reminderSentAt on a still-unsent row...
     expect(events.update).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'e1' }),
-      expect.objectContaining({ reminderSentAt: expect.any(Date) }),
+      expect.objectContaining({ reminderSentAt: expect.any(Date) as unknown }),
     );
     // ...and only then does the fan-out happen (at-most-once ordering).
     expect(events.update.mock.invocationCallOrder[0]).toBeLessThan(
-      notifications.createForRecipients.mock.invocationCallOrder[0],
+      notifications.createForRecipients.mock.invocationCallOrder[0]!,
     );
     expect(notifications.createForRecipients).toHaveBeenCalledWith(
       ['a', 'b'],

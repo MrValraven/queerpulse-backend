@@ -29,8 +29,8 @@ describe('NotificationsService', () => {
 
   beforeEach(async () => {
     repo = {
-      create: jest.fn((v) => v),
-      save: jest.fn(async (v) => v),
+      create: jest.fn((value: unknown) => value),
+      save: jest.fn((value: unknown) => value),
       find: jest.fn().mockResolvedValue([]),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
       count: jest.fn().mockResolvedValue(0),
@@ -268,7 +268,7 @@ describe('NotificationsService', () => {
     const page = await service.list('u1');
 
     expect(profileRepo.find).toHaveBeenCalledTimes(1);
-    expect(page.items[0].actor).toEqual(
+    expect(page.items[0]!.actor).toEqual(
       expect.objectContaining({ slug: 'ines', firstName: 'Inês' }),
     );
   });
@@ -287,7 +287,7 @@ describe('NotificationsService', () => {
 
     const page = await service.list('u1');
 
-    expect(page.items[0].actor).toBeNull();
+    expect(page.items[0]!.actor).toBeNull();
     expect(profileRepo.find).not.toHaveBeenCalled();
   });
 

@@ -1,6 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import request from 'supertest';
+import { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 
 describe('Health (e2e)', () => {
@@ -20,9 +21,13 @@ describe('Health (e2e)', () => {
   });
 
   it('GET /health -> 200 with database up', async () => {
-    const res = await request(app.getHttpServer()).get('/health');
+    const res = await request(app.getHttpServer() as App).get('/health');
     expect(res.status).toBe(200);
-    expect(res.body.status).toBe('ok');
-    expect(res.body.details.database.status).toBe('up');
+    const body = res.body as {
+      status: string;
+      details: { database: { status: string } };
+    };
+    expect(body.status).toBe('ok');
+    expect(body.details.database.status).toBe('up');
   });
 });

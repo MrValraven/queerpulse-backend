@@ -18,9 +18,7 @@ export class AddMessageClientId1785000700000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(
-      `DROP INDEX "UQ_messages_conversation_client_id"`,
-    );
+    await queryRunner.query(`DROP INDEX "UQ_messages_conversation_client_id"`);
     await queryRunner.query(
       `ALTER TABLE "messages" DROP COLUMN "client_message_id"`,
     );

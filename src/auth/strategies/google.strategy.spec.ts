@@ -37,7 +37,7 @@ describe('GoogleStrategy.validate', () => {
   it('rejects a profile with no email (no_email)', () => {
     const done = jest.fn();
     makeStrategy().validate('at', 'rt', profile({ emails: [] }), done);
-    const err = done.mock.calls[0][0];
+    const [err] = done.mock.calls[0] as [OAuthProfileError];
     expect(err).toBeInstanceOf(OAuthProfileError);
     expect(err.reason).toBe('no_email');
   });
@@ -50,7 +50,7 @@ describe('GoogleStrategy.validate', () => {
       profile({ emails: [{ value: 'x@y.com', verified: false }] }),
       done,
     );
-    const err = done.mock.calls[0][0];
+    const [err] = done.mock.calls[0] as [OAuthProfileError];
     expect(err).toBeInstanceOf(OAuthProfileError);
     expect(err.reason).toBe('email_unverified');
   });
@@ -64,7 +64,7 @@ describe('GoogleStrategy.validate', () => {
       profile({ emails: [{ value: 'x@y.com', verified: 'true' }] }),
       done,
     );
-    const err = done.mock.calls[0][0];
+    const [err] = done.mock.calls[0] as [OAuthProfileError];
     expect(err).toBeInstanceOf(OAuthProfileError);
     expect(err.reason).toBe('email_unverified');
   });

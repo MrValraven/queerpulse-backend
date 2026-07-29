@@ -2,7 +2,7 @@
 // auto-instrumentation can patch them. See ./instrument.ts.
 import './instrument';
 
-import { ValidationPipe } from '@nestjs/common';
+import { ValidationPipe, VersioningType } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
@@ -36,9 +36,25 @@ async function bootstrap() {
   // forwarded header.)
   app.set('trust proxy', 1);
 
-  // Security middleware before routes.
+  // Security middleware before routes. helmet's defaults are configured
+  // explicitly here rather than relied on implicitly:
+  //  - HSTS: pin browsers to HTTPS for 2 years, cover subdomains, and mark the
+  //    origin preload-eligible. Behind the TLS-terminating proxy this is only
+  //    emitted on secure requests, which is the correct behavior.
+  //  - referrerPolicy: `no-referrer` — a JSON API never needs to leak the
+  //    requesting URL to a third party, so send no Referer at all.
+  // CORS is configured separately below; helmet does not touch it.
   app.use(cookieParser());
-  app.use(helmet());
+  app.use(
+    helmet({
+      hsts: {
+        maxAge: 63072000, // 2 years, in seconds
+        includeSubDomains: true,
+        preload: true,
+      },
+      referrerPolicy: { policy: 'no-referrer' },
+    }),
+  );
 
   // FRONTEND_URL is a comma-separated allowlist parsed by app.config via
   // src/config/frontend-origins.ts — the same parser the chat gateway's CORS
@@ -65,13 +81,40 @@ async function bootstrap() {
     }),
   );
 
-  // Interactive API docs at /docs (off in production unless explicitly enabled).
-  if (!isProd || process.env.ENABLE_SWAGGER === 'true') {
+  // URI-based API versioning: every route answers at `/v1/...` by default. This
+  // is non-breaking because the frontend prepends the same `/v1` prefix in its
+  // request builder (src/shared/api/client.ts). Controllers whose paths are
+  // referenced by EXTERNAL systems that cannot be updated in lockstep (the
+  // Railway healthcheck, the Google OAuth callback, the `/auth/refresh` the SPA
+  // hits directly, the `/csrf-token` bootstrap, and the Mux webhook URL) opt out
+  // with `@Controller({ version: VERSION_NEUTRAL })` so they keep responding at
+  // their current, unversioned paths.
+  app.enableVersioning({
+    type: VersioningType.URI,
+    defaultVersion: '1',
+  });
+
+  // Interactive API docs at /docs. Enabled in every NON-production environment;
+  // NEVER in production, regardless of ENABLE_SWAGGER — a public, machine-readable
+  // map of every route and DTO is an attacker aid and must not be reachable in
+  // prod even by misconfiguration. ENABLE_SWAGGER can still turn docs OFF in a
+  // non-prod deploy (e.g. a shared staging box); leaving it unset keeps the
+  // developer default of docs-on.
+  if (!isProd && process.env.ENABLE_SWAGGER !== 'false') {
     const swaggerConfig = new DocumentBuilder()
       .setTitle('QueerPulse API')
-      .setDescription('QueerPulse backend API')
-      .setVersion('0.1.0')
+      .setDescription(
+        'QueerPulse backend API. Versioned endpoints live under the `/v1` prefix; ' +
+          'a handful of externally-referenced routes (health, csrf-token, auth, Mux ' +
+          'webhook) are version-neutral and answer at their unprefixed paths.',
+      )
+      .setVersion('1.0.0')
+      // Session auth is a JWT carried in the httpOnly `access_token` cookie, so
+      // the documented scheme is cookie auth (not a bearer header).
       .addCookieAuth('access_token')
+      // Point "Try it out" at the versioned prefix so requests hit `/v1/...`.
+      // Version-neutral routes are reachable by editing the path in the UI.
+      .addServer('/v1')
       .build();
     const document = SwaggerModule.createDocument(app, swaggerConfig);
     SwaggerModule.setup('docs', app, document);
@@ -83,7 +126,7 @@ async function bootstrap() {
   // errors captured in the seconds before a SIGTERM are dropped — exactly the
   // ones from a bad rollout, which is when a restart policy is cycling and you
   // most need to see them.
-  if (process.env.SENTRY_DSN) {
+  if (configService.get<string>('app.sentryDsn')) {
     for (const signal of ['SIGTERM', 'SIGINT'] as const) {
       process.on(signal, () => {
         void Sentry.close(SENTRY_FLUSH_TIMEOUT_MS).then(() => process.exit(0));

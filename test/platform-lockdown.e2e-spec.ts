@@ -2,6 +2,7 @@ import { ExecutionContext, INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
+import { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { GoogleAuthGuard } from '../src/auth/guards/google-auth.guard';
@@ -100,7 +101,7 @@ describe('Platform kill switches (e2e)', () => {
     // is keyed off googleId so distinct logins in the same test never collide.
     const nonce = `e2e-nonce-${googleId}`;
     const state = encodeOAuthState({ nonce })!;
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/auth/google/callback')
       .query({ state })
       .set('Cookie', [`oauth_state=${nonce}`])
@@ -130,7 +131,7 @@ describe('Platform kill switches (e2e)', () => {
   async function withCsrf(
     sessionCookies: string[],
   ): Promise<{ cookies: string[]; csrfToken: string }> {
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/csrf-token')
       .set('Cookie', sessionCookies);
     expect(res.status).toBe(200);
@@ -161,7 +162,7 @@ describe('Platform kill switches (e2e)', () => {
   async function attemptGoogleSignup(googleId: string, email: string) {
     const nonce = `e2e-nonce-${googleId}`;
     const state = encodeOAuthState({ nonce })!;
-    return request(app.getHttpServer())
+    return request(app.getHttpServer() as App)
       .get('/auth/google/callback')
       .query({ state })
       .set('Cookie', [`oauth_state=${nonce}`])
@@ -190,7 +191,7 @@ describe('Platform kill switches (e2e)', () => {
     admin: { cookies: string[]; csrfToken: string },
     flags: Record<string, boolean | string | null>,
   ): Promise<void> {
-    await request(app.getHttpServer())
+    await request(app.getHttpServer() as App)
       .patch('/admin/platform-settings')
       .set('Cookie', admin.cookies)
       .set('X-CSRF-Token', admin.csrfToken)
@@ -209,7 +210,7 @@ describe('Platform kill switches (e2e)', () => {
         'member@example.com',
         UserRole.Member,
       );
-      await request(app.getHttpServer())
+      await request(app.getHttpServer() as App)
         .get('/connections')
         .set('Cookie', member.cookies)
         .expect(200);
@@ -227,7 +228,7 @@ describe('Platform kill switches (e2e)', () => {
         lockdownMessage: 'Back soon.',
       });
 
-      const res = await request(app.getHttpServer())
+      const res = await request(app.getHttpServer() as App)
         .get('/connections')
         .set('Cookie', member.cookies)
         .expect(503);
@@ -242,7 +243,7 @@ describe('Platform kill switches (e2e)', () => {
       const admin = await signInAs('a-1', 'admin@example.com', UserRole.Admin);
       await setFlags(admin, { lockdownEnabled: true });
 
-      await request(app.getHttpServer())
+      await request(app.getHttpServer() as App)
         .get('/connections')
         .set('Cookie', admin.cookies)
         .expect(200);
@@ -261,14 +262,14 @@ describe('Platform kill switches (e2e)', () => {
 
       // Prove the platform was actually locked before lifting it — otherwise a
       // silent no-op in setFlags(true) would still let this test pass.
-      await request(app.getHttpServer())
+      await request(app.getHttpServer() as App)
         .get('/connections')
         .set('Cookie', member.cookies)
         .expect(503);
 
       await setFlags(admin, { lockdownEnabled: false });
 
-      await request(app.getHttpServer())
+      await request(app.getHttpServer() as App)
         .get('/connections')
         .set('Cookie', member.cookies)
         .expect(200);
@@ -278,8 +279,12 @@ describe('Platform kill switches (e2e)', () => {
       const admin = await signInAs('a-1', 'admin@example.com', UserRole.Admin);
       await setFlags(admin, { lockdownEnabled: true });
 
-      await request(app.getHttpServer()).get('/platform-status').expect(200);
-      await request(app.getHttpServer()).get('/health').expect(200);
+      await request(app.getHttpServer() as App)
+        .get('/platform-status')
+        .expect(200);
+      await request(app.getHttpServer() as App)
+        .get('/health')
+        .expect(200);
     });
 
     it('blocks a moderator while locked when moderators are not allowed', async () => {
@@ -290,7 +295,7 @@ describe('Platform kill switches (e2e)', () => {
         lockdownAllowsModerators: false,
       });
 
-      await request(app.getHttpServer())
+      await request(app.getHttpServer() as App)
         .get('/connections')
         .set('Cookie', mod.cookies)
         .expect(503);
@@ -304,7 +309,7 @@ describe('Platform kill switches (e2e)', () => {
         lockdownAllowsModerators: true,
       });
 
-      await request(app.getHttpServer())
+      await request(app.getHttpServer() as App)
         .get('/connections')
         .set('Cookie', mod.cookies)
         .expect(200);
@@ -323,7 +328,7 @@ describe('Platform kill switches (e2e)', () => {
       // this POST. /csrf-token is itself @Public(), so an anonymous caller can
       // fetch a token before submitting.
       const { cookies, csrfToken } = await withCsrf([]);
-      await request(app.getHttpServer())
+      await request(app.getHttpServer() as App)
         .post('/join-requests')
         .set('Cookie', cookies)
         .set('X-CSRF-Token', csrfToken)
@@ -345,7 +350,7 @@ describe('Platform kill switches (e2e)', () => {
       });
 
       const { cookies, csrfToken } = await withCsrf([]);
-      const res = await request(app.getHttpServer())
+      const res = await request(app.getHttpServer() as App)
         .post('/join-requests')
         .set('Cookie', cookies)
         .set('X-CSRF-Token', csrfToken)
@@ -358,8 +363,9 @@ describe('Platform kill switches (e2e)', () => {
         })
         .expect(403);
 
-      expect(res.body.code).toBe('JOIN_REQUESTS_CLOSED');
-      expect(res.body.message).toBe('Paused while we clear out spam.');
+      const body = res.body as { code: string; message: string };
+      expect(body.code).toBe('JOIN_REQUESTS_CLOSED');
+      expect(body.message).toBe('Paused while we clear out spam.');
     });
   });
 
@@ -397,7 +403,7 @@ describe('Platform kill switches (e2e)', () => {
         'member@example.com',
         UserRole.Member,
       );
-      await request(app.getHttpServer())
+      await request(app.getHttpServer() as App)
         .get('/admin/platform-settings')
         .set('Cookie', member.cookies)
         .expect(403);
@@ -405,7 +411,7 @@ describe('Platform kill switches (e2e)', () => {
 
     it('refuses a moderator — these controls are admin-only', async () => {
       const mod = await signInAs('o-1', 'mod@example.com', UserRole.Moderator);
-      await request(app.getHttpServer())
+      await request(app.getHttpServer() as App)
         .get('/admin/platform-settings')
         .set('Cookie', mod.cookies)
         .expect(403);
@@ -419,7 +425,7 @@ describe('Platform kill switches (e2e)', () => {
         note: 'spam wave',
       });
 
-      const res = await request(app.getHttpServer())
+      const res = await request(app.getHttpServer() as App)
         .get('/admin/platform-settings/changes')
         .set('Cookie', admin.cookies)
         .expect(200);

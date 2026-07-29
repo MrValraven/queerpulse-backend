@@ -6,6 +6,7 @@ import {
 import { UpdatePublicProfileDto } from './dto/update-public-profile.dto';
 import { UpdateWorkPreferencesDto } from './dto/update-work-preferences.dto';
 import { PreferencesService } from './preferences.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * Member safety + visibility switches. Mirrors the frontend contract exactly:
@@ -34,6 +35,8 @@ import { PreferencesService } from './preferences.service';
  * on purpose; a read-only exception would leave the member staring at a setting
  * they cannot change.
  */
+@ApiTags('Preferences')
+@ApiCookieAuth()
 @Controller('me')
 export class PreferencesController {
   constructor(private readonly preferencesService: PreferencesService) {}

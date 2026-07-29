@@ -17,6 +17,7 @@ import { Feature } from '../common/feature.decorator';
 import { DirectoryService } from './directory.service';
 import { CreateReviewDto } from './dto/create-review.dto';
 import { ListDirectoryQuery } from './dto/list-directory.query';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * Public, read-only directory over the businesses (`listings`) table, backing
@@ -30,6 +31,8 @@ import { ListDirectoryQuery } from './dto/list-directory.query';
  * in a later sub-project) so route matching resolves it literally.
  */
 @Feature('listings')
+@ApiTags('Local Directory')
+@ApiCookieAuth()
 @Controller('directory')
 export class DirectoryController {
   constructor(private readonly directoryService: DirectoryService) {}

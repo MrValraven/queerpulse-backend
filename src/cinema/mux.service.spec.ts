@@ -26,7 +26,7 @@ const baseConfig: Record<string, string | undefined> = {
 
 function decodeJwtPayload(token: string): Record<string, unknown> {
   return JSON.parse(
-    Buffer.from(token.split('.')[1], 'base64url').toString('utf8'),
+    Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8'),
   ) as Record<string, unknown>;
 }
 

@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
 import { RecognitionAward } from './entities/recognition-award.entity';
 import { RecognitionPerkClaim } from './entities/recognition-perk-claim.entity';
@@ -37,9 +38,9 @@ export class RecognitionService {
   ): Promise<RecognitionDTO> {
     const [stat, earned, claimed] = await Promise.all([
       this.stats.findOne({ where: { userId } }),
-      this.awards.find({ where: { userId } }),
+      this.awards.find({ where: { userId }, take: DEFAULT_LIST_LIMIT }),
       includePerks
-        ? this.perkClaims.find({ where: { userId } })
+        ? this.perkClaims.find({ where: { userId }, take: DEFAULT_LIST_LIMIT })
         : Promise.resolve([]),
     ]);
     const dto = buildRecognition(

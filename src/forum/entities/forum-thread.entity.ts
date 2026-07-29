@@ -50,6 +50,12 @@ export class ForumThread {
   @Column({ type: 'timestamptz' })
   lastActivityAt: Date;
 
-  @CreateDateColumn({ type: 'timestamptz' })
+  // Millisecond precision (not Postgres's microsecond default): matches the
+  // resolution of the JS `Date` cursor `cursorPaginate` builds from this
+  // column, so the raw column can be ordered/filtered on directly instead of
+  // through a non-indexable `date_trunc(...)` wrapper — see
+  // `1785001400000-NarrowCursorCreatedAtPrecision.ts` and
+  // `common/cursor-pagination.ts`.
+  @CreateDateColumn({ type: 'timestamptz', precision: 3 })
   createdAt: Date;
 }

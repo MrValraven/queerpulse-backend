@@ -14,10 +14,10 @@ describe('GeocodeService.resolveLink', () => {
 
   it('rejects a non-Google host without fetching', async () => {
     const spy = jest.fn();
-    global.fetch = spy as unknown as typeof fetch;
-    await expect(service.resolveLink('https://evil.com/x')).rejects.toBeInstanceOf(
-      BadRequestException,
-    );
+    global.fetch = spy;
+    await expect(
+      service.resolveLink('https://evil.com/x'),
+    ).rejects.toBeInstanceOf(BadRequestException);
     expect(spy).not.toHaveBeenCalled();
   });
 
@@ -26,7 +26,7 @@ describe('GeocodeService.resolveLink', () => {
     // pointing at an allowlisted google.com url that already carries coords,
     // so resolveLink extracts them from the Location target without a
     // second fetch.
-    global.fetch = (async (input: RequestInfo | URL) => ({
+    global.fetch = ((input: string) => ({
       status: 302,
       headers: {
         get: (header: string) =>
@@ -36,7 +36,9 @@ describe('GeocodeService.resolveLink', () => {
       },
       url: String(input),
     })) as unknown as typeof fetch;
-    await expect(service.resolveLink('https://maps.app.goo.gl/abc')).resolves.toEqual({
+    await expect(
+      service.resolveLink('https://maps.app.goo.gl/abc'),
+    ).resolves.toEqual({
       latitude: 38.7223,
       longitude: -9.1393,
       placeName: 'Bar Name',
@@ -48,7 +50,7 @@ describe('GeocodeService.resolveLink', () => {
     // it; the second (final, non-redirect) fetch to that same url still has
     // no coords, so resolveLink gives up with Unprocessable.
     let fetchCallCount = 0;
-    global.fetch = (async () => {
+    global.fetch = (() => {
       fetchCallCount += 1;
       if (fetchCallCount === 1) {
         return {
@@ -68,18 +70,18 @@ describe('GeocodeService.resolveLink', () => {
         url: 'https://www.google.com/maps/place/Bar+Name/',
       };
     }) as unknown as typeof fetch;
-    await expect(service.resolveLink('https://maps.app.goo.gl/abc')).rejects.toBeInstanceOf(
-      UnprocessableEntityException,
-    );
+    await expect(
+      service.resolveLink('https://maps.app.goo.gl/abc'),
+    ).rejects.toBeInstanceOf(UnprocessableEntityException);
   });
 
   it('throws ServiceUnavailable when fetch rejects', async () => {
-    global.fetch = (async () => {
+    global.fetch = () => {
       throw new Error('network');
-    }) as unknown as typeof fetch;
-    await expect(service.resolveLink('https://maps.app.goo.gl/abc')).rejects.toBeInstanceOf(
-      ServiceUnavailableException,
-    );
+    };
+    await expect(
+      service.resolveLink('https://maps.app.goo.gl/abc'),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 
   it('throws Unprocessable when the redirect Location is unparseable', async () => {
@@ -90,15 +92,16 @@ describe('GeocodeService.resolveLink', () => {
     // '::::not a url::::' is NOT a good fixture here: the URL parser is
     // lenient with relative references and percent-encodes it into a valid
     // path instead of throwing, so it wouldn't exercise this catch block.)
-    global.fetch = (async (input: RequestInfo | URL) => ({
+    global.fetch = ((input: string) => ({
       status: 302,
       headers: {
-        get: (header: string) => (header.toLowerCase() === 'location' ? 'http://[' : null),
+        get: (header: string) =>
+          header.toLowerCase() === 'location' ? 'http://[' : null,
       },
       url: String(input),
     })) as unknown as typeof fetch;
-    await expect(service.resolveLink('https://maps.app.goo.gl/abc')).rejects.toBeInstanceOf(
-      UnprocessableEntityException,
-    );
+    await expect(
+      service.resolveLink('https://maps.app.goo.gl/abc'),
+    ).rejects.toBeInstanceOf(UnprocessableEntityException);
   });
 });

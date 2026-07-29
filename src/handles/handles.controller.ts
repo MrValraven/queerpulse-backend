@@ -1,7 +1,10 @@
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { HandleCheck, HandlesService } from './handles.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
+@ApiTags('Handles')
+@ApiCookieAuth()
 @Controller('handles')
 export class HandlesController {
   constructor(private readonly handlesService: HandlesService) {}

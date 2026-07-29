@@ -7,11 +7,14 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { BrowseFlatmateProfilesQuery } from './dto/browse-flatmate-profiles.query';
 import { FlatmateDirectoryService } from './flatmate-directory.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /** Member-only flatmate board browse + detail, on its own top-level
  * `/flatmate-directory` path (avoids the `:slug` route-shadow hazard). */
 @Feature('flatmateProfiles')
 @UseGuards(ActiveMemberGuard)
+@ApiTags('Flatmates')
+@ApiCookieAuth()
 @Controller('flatmate-directory')
 export class FlatmateDirectoryController {
   constructor(private readonly service: FlatmateDirectoryService) {}

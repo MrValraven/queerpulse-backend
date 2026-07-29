@@ -1,4 +1,5 @@
 import { IsBoolean, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 
 /**
  * `PATCH /conversations/:id` body. `muted` is this caller's per-conversation
@@ -17,8 +18,9 @@ export class UpdateConversationDto {
   @MaxLength(80)
   title?: string;
 
+  // A storage key or https:// URL — the IsImageReference guard refuses a
+  // javascript:/data: URI that group members' browsers would otherwise render.
   @IsOptional()
-  @IsString()
-  @MaxLength(2048)
+  @IsImageReference()
   avatarUrl?: string;
 }

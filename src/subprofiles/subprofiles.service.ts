@@ -12,7 +12,10 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, In, IsNull, Not, Repository } from 'typeorm';
 import { normalizeHandle } from '../common/handles';
 import { toImageUrl } from '../common/image-url';
-import { AccessTier, Community } from '../communities/entities/community.entity';
+import {
+  AccessTier,
+  Community,
+} from '../communities/entities/community.entity';
 import {
   Event,
   EventStatus,
@@ -40,10 +43,6 @@ import {
   SubprofileSection,
 } from './entities/subprofile-item.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
-import type {
-  SubprofileKind as SubprofileKindKey,
-  SubprofileSection as SubprofileSectionKey,
-} from './subprofile-kinds';
 import { isSectionAllowed } from './subprofile-kinds';
 import {
   SUBPROFILE_ENDORSED,
@@ -752,6 +751,10 @@ export class SubprofilesService {
         handle,
         linkVisibility: SubprofileLinkVisibility.Unlinked,
         status: SubprofileStatus.Published,
+        // Only Open personas are publicly reachable — `network`/`private` are
+        // never served here (404, not a distinct "restricted" signal), matching
+        // `directory` / `listPublicHandles`.
+        visibility: SubprofileVisibility.Open,
       },
     });
     if (!sp) {
@@ -1038,8 +1041,7 @@ export class SubprofilesService {
       // Already following — idempotent success.
     }
 
-    const followerCount =
-      (await this.loadFollowerCountsFor([id])).get(id) ?? 0;
+    const followerCount = (await this.loadFollowerCountsFor([id])).get(id) ?? 0;
 
     if (justFollowed) {
       this.eventEmitter.emit(SUBPROFILE_FOLLOWED, {
@@ -1060,22 +1062,29 @@ export class SubprofilesService {
     // `withdrawEndorsement`: the follow control is a toggle, so unfollowing a
     // persona the viewer never followed just settles into "not following".
     await this.followers.delete({ subprofileId: id, followerId });
-    const followerCount =
-      (await this.loadFollowerCountsFor([id])).get(id) ?? 0;
+    const followerCount = (await this.loadFollowerCountsFor([id])).get(id) ?? 0;
     return { followerCount, viewerFollowing: false };
   }
 
   // ---- internals -----------------------------------------------------------
 
   // Fetches a persona by id AND enforces it is publicly endorsable: published,
-  // and not block-either-way between `userId` (the endorser/viewer) and the
-  // persona's owner. Mirrors the gate `getByHandle` applies.
+  // Open visibility, and not block-either-way between `userId` (the
+  // endorser/viewer) and the persona's owner. Mirrors the gate `getByHandle`
+  // applies.
   private async resolveEndorsablePersona(
     userId: string,
     id: string,
   ): Promise<Subprofile> {
     const persona = await this.subprofiles.findOne({
-      where: { id, status: SubprofileStatus.Published },
+      // Open + published only: `network`/`private` personas are not publicly
+      // endorsable/followable and 404 like any other unreachable persona,
+      // matching the gate `getByHandle` / `directory` apply.
+      where: {
+        id,
+        status: SubprofileStatus.Published,
+        visibility: SubprofileVisibility.Open,
+      },
     });
     if (!persona) {
       throw new NotFoundException('Subprofile not found');
@@ -1212,7 +1221,11 @@ export class SubprofilesService {
     // still publicly visible (mirrors the criteria `EventsService` /
     // `CommunitiesService` use for their own public reads) — an invisible
     // target simply has no map entry below, so it is dropped.
-    type ResolvedTarget = { name: string; imageUrl: string | null; ownerId: string };
+    type ResolvedTarget = {
+      name: string;
+      imageUrl: string | null;
+      ownerId: string;
+    };
     const eventBySlug = new Map<string, ResolvedTarget>(
       eventRows
         .filter(

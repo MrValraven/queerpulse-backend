@@ -35,7 +35,10 @@ describe('AdminChangemakersController', () => {
   });
 
   it('is guarded by @Roles(UserRole.Admin)', () => {
-    const roles = Reflect.getMetadata(ROLES_KEY, AdminChangemakersController);
+    const roles = Reflect.getMetadata(
+      ROLES_KEY,
+      AdminChangemakersController,
+    ) as UserRole[];
     expect(roles).toEqual([UserRole.Admin]);
   });
 

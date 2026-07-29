@@ -114,6 +114,12 @@ export class Listing {
   @Column({ type: 'uuid' })
   ownerId: string;
 
+  // Filtered on nearly every directory read (`DirectoryService`'s
+  // `status = live` gates) and the admin moderation queue
+  // (`ListingsService.listQueue`) — mirrors `HousingListing.status`
+  // (`housing-listings/entities/housing-listing.entity.ts`), the sibling
+  // entity that already indexes the same access pattern.
+  @Index('IDX_listings_status')
   @Column({
     type: 'enum',
     enum: ListingStatus,

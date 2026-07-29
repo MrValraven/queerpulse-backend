@@ -19,11 +19,14 @@ import { Feature } from '../common/feature.decorator';
 import { SayHelloDto } from './dto/say-hello.dto';
 import { UpsertFlatmateProfileDto } from './dto/upsert-flatmate-profile.dto';
 import { FlatmateProfilesService } from './flatmate-profiles.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /** A member's own flatmate profile (one per member) + "say hello". `/mine` is a
  * literal segment; the only `:slug` route is `POST /:slug/hello` (distinct verb
  * + depth), so no route collision. */
 @Feature('flatmateProfiles')
+@ApiTags('Flatmates')
+@ApiCookieAuth()
 @Controller('flatmate-profiles')
 @UseGuards(ActiveMemberGuard)
 export class FlatmateProfilesController {

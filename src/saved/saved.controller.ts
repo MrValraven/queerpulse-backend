@@ -18,9 +18,12 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { ListSavedQuery } from './dto/list-saved.query';
 import { SavedItemBodyDto } from './dto/saved-item-body.dto';
 import { SavedService } from './saved.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 // Always-on member primitive (no @Feature flag) — mirrors the FE's saved.api.ts
 // exactly: `GET /me/saved`, `PUT /me/saved/:id`, `DELETE /me/saved/:id`.
+@ApiTags('Saved')
+@ApiCookieAuth()
 @Controller('me/saved')
 @UseGuards(ActiveMemberGuard)
 export class SavedController {

@@ -46,12 +46,12 @@ describe('normalizeOpenTo', () => {
       normalizeOpenTo([
         { kind: 'custom', label: 'Zine trades' },
         { kind: 'preset', id: 'swaps' },
-        { kind: 'custom', label: 'Darkroom time' },
+        { kind: 'custom', label: 'Studio time' },
       ]),
     ).toEqual([
       { kind: 'custom', label: 'Zine trades' },
       { kind: 'preset', id: 'swaps' },
-      { kind: 'custom', label: 'Darkroom time' },
+      { kind: 'custom', label: 'Studio time' },
     ]);
   });
 
@@ -87,10 +87,10 @@ describe('normalizeOpenTo', () => {
   it('de-duplicates customs case-insensitively, keeping the first spelling', () => {
     expect(
       normalizeOpenTo([
-        { kind: 'custom', label: 'Darkroom Time' },
-        { kind: 'custom', label: 'darkroom time' },
+        { kind: 'custom', label: 'Studio Time' },
+        { kind: 'custom', label: 'studio time' },
       ]),
-    ).toEqual([{ kind: 'custom', label: 'Darkroom Time' }]);
+    ).toEqual([{ kind: 'custom', label: 'Studio Time' }]);
   });
 
   it('does not collide a preset id with a same-spelled custom label', () => {

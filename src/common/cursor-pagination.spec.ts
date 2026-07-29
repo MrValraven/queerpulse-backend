@@ -177,7 +177,7 @@ describe('cursorPaginate', () => {
 
     expect(result.rows).toEqual(rows.slice(0, 2));
     expect(result.hasMore).toBe(true);
-    expect(result.nextCursor).toBe(encodeCursor(rows[1]));
+    expect(result.nextCursor).toBe(encodeCursor(rows[1]!));
   });
 
   it('nextCursor decodes back to the last returned row id/createdAt', async () => {

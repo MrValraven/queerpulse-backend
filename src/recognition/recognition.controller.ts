@@ -5,12 +5,15 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RecognitionService } from './recognition.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * `GET /me/recognition` — the caller's own level, badges and perks (spec §3
  * Tier 2 "recognition"). Frontend contract:
  * `queerpulse/src/features/members/api/recognition.api.ts`.
  */
+@ApiTags('Recognition')
+@ApiCookieAuth()
 @Controller('me/recognition')
 @UseGuards(ActiveMemberGuard)
 export class MyRecognitionController {
@@ -30,6 +33,8 @@ export class MyRecognitionController {
  * prefix across modules, the same way `ProfilesController`/`MembersController`
  * already coexist.
  */
+@ApiTags('Recognition')
+@ApiCookieAuth()
 @Controller('profiles')
 @UseGuards(ActiveMemberGuard)
 export class MemberRecognitionController {

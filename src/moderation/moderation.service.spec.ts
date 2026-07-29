@@ -256,12 +256,12 @@ describe('ModerationService', () => {
           status: ReportStatus.Open,
         }),
       ]);
-      expect(page.items[0].reporter).toEqual({
+      expect(page.items[0]!.reporter).toEqual({
         anonymous: false,
         id: 'reporter-1',
         name: 'Member',
       });
-      expect(page.items[0].reported).toEqual({
+      expect(page.items[0]!.reported).toEqual({
         id: 'post-1',
         handle: 'post-1',
         priorReports: 0,
@@ -280,7 +280,7 @@ describe('ModerationService', () => {
       });
 
       const page = await service.list({});
-      expect(page.items[0].reporter).toEqual({
+      expect(page.items[0]!.reporter).toEqual({
         anonymous: false,
         id: 'reporter-1',
         name: 'Ada Lovelace',
@@ -292,7 +292,7 @@ describe('ModerationService', () => {
       reports.createQueryBuilder.mockReturnValue(qb);
 
       const page = await service.list({});
-      expect(page.items[0].reporter).toEqual({ anonymous: true });
+      expect(page.items[0]!.reporter).toEqual({ anonymous: true });
     });
 
     it('sets community for community-subject reports and null otherwise', async () => {
@@ -305,7 +305,7 @@ describe('ModerationService', () => {
       reports.createQueryBuilder.mockReturnValue(qb);
 
       const page = await service.list({});
-      expect(page.items[0].community).toBe('my-community');
+      expect(page.items[0]!.community).toBe('my-community');
     });
   });
 
@@ -641,7 +641,7 @@ describe('ModerationService', () => {
         duration: '7d',
       });
 
-      const [[, where, patch]] = userUpdates();
+      const [, where, patch] = userUpdates()[0]!;
       expect(where).toEqual({ id: 'user-1' });
       expect(patch.status).toBe(UserStatus.Suspended);
       expect(patch.suspendedUntil).toBeInstanceOf(Date);
@@ -659,7 +659,7 @@ describe('ModerationService', () => {
         note: 'Out.',
       });
 
-      const [[, , patch]] = userUpdates();
+      const [, , patch] = userUpdates()[0]!;
       expect(patch).toEqual({
         status: UserStatus.Suspended,
         suspendedUntil: null,
@@ -793,7 +793,7 @@ describe('ModerationService', () => {
 
       // `status` is untouched — they asked to be hidden — but the suspension is
       // still recorded, so reactivating brings them back suspended.
-      const [[, , patch]] = userUpdates();
+      const [, , patch] = userUpdates()[0]!;
       expect(patch).not.toHaveProperty('status');
       expect(patch.suspendedUntil).toBeNull();
       const deactivationCall = (managerUpdate.mock.calls as UpdateCall[]).find(
@@ -846,7 +846,7 @@ describe('ModerationService', () => {
       });
 
       expect(res).toEqual({ userId: 'user-1', status: UserStatus.Active });
-      const [[, , patch]] = userUpdates();
+      const [, , patch] = userUpdates()[0]!;
       expect(patch).toEqual({
         status: UserStatus.Active,
         suspendedUntil: null,

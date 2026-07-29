@@ -55,7 +55,7 @@ describe('EventInvitesService', () => {
 
     invites = {
       findOne: jest.fn(),
-      save: jest.fn(async (i) => i),
+      save: jest.fn((invite: unknown) => invite),
       find: jest.fn().mockResolvedValue([]),
       createQueryBuilder: jest.fn(() => insertBuilder),
     };
@@ -136,11 +136,10 @@ describe('EventInvitesService', () => {
 
     await service.createInvites('x', 'inviter', ['a', 'b']);
 
-    const inserted = insertBuilder.values.mock.calls[0][0] as Array<{
-      inviteeId: string;
-    }>;
+    const firstCallArguments = insertBuilder.values.mock.calls[0] as unknown[];
+    const inserted = firstCallArguments[0] as Array<{ inviteeId: string }>;
     expect(inserted).toHaveLength(1);
-    expect(inserted[0].inviteeId).toBe('a');
+    expect(inserted[0]?.inviteeId).toBe('a');
   });
 
   it('createInvites short-circuits when no active invitees remain', async () => {
@@ -225,8 +224,8 @@ describe('EventInvitesService', () => {
     const result = await service.listMyPendingInvites('u1');
 
     expect(result).toHaveLength(1);
-    expect(result[0].id).toBe('i1');
-    expect(result[0].event?.slug).toBe('party');
-    expect(result[0].inviter?.slug).toBe('host-slug');
+    expect(result[0]?.id).toBe('i1');
+    expect(result[0]?.event?.slug).toBe('party');
+    expect(result[0]?.inviter?.slug).toBe('host-slug');
   });
 });

@@ -93,6 +93,35 @@ export class EnvironmentVariables {
   @IsString()
   LOG_PRETTY?: string;
 
+  // pg connection-pool + timeout tuning. All optional with production-safe
+  // defaults applied in src/config/database.config.ts; validated here so a
+  // typo (e.g. a non-numeric value) fails fast at boot instead of silently
+  // falling back to a default that masks the misconfiguration.
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  DATABASE_POOL_MAX?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  DATABASE_POOL_MIN?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  DATABASE_CONNECTION_TIMEOUT_MS?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  DATABASE_IDLE_TIMEOUT_MS?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  DATABASE_STATEMENT_TIMEOUT_MS?: number;
+
   @IsOptional() @IsString() AWS_ENDPOINT_URL?: string;
   @IsOptional() @IsString() AWS_DEFAULT_REGION?: string;
   @IsOptional() @IsString() AWS_S3_BUCKET_NAME?: string;

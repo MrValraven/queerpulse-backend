@@ -1,8 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import {
-  LinkPreviewResponse,
-  emptyPreview,
-} from './link-preview.response';
+import { LinkPreviewResponse, emptyPreview } from './link-preview.response';
 import { parseOpenGraph } from './og-parse';
 import { safeFetchHtml } from './ssrf';
 
@@ -55,8 +52,10 @@ export class LinkPreviewService {
   private writeCache(url: string, value: LinkPreviewResponse): void {
     // Cheap bound: when full, evict the oldest insertion (Map preserves order).
     if (this.cache.size >= this.maxEntries) {
-      const oldest = this.cache.keys().next().value;
-      if (oldest !== undefined) this.cache.delete(oldest);
+      for (const oldest of this.cache.keys()) {
+        this.cache.delete(oldest);
+        break;
+      }
     }
     this.cache.set(url, { value, expiresAt: Date.now() + this.ttlMs });
   }

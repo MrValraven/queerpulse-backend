@@ -46,10 +46,12 @@ function buildMocks() {
     // Every update resolves an UpdateResult-shaped object with `affected`.
     update: jest.fn().mockResolvedValue({ affected: 1 }),
     create: jest.fn((v: Record<string, unknown>) => v),
-    save: jest.fn(async (v: Record<string, unknown>) => ({
-      id: 'new-row',
-      ...v,
-    })),
+    save: jest.fn((v: Record<string, unknown>) =>
+      Promise.resolve({
+        id: 'new-row',
+        ...v,
+      }),
+    ),
   };
   const jwt: JwtMock = {
     verifyAsync: jest.fn().mockResolvedValue({ sub: 'u1' }),
@@ -72,7 +74,7 @@ function buildMocks() {
   // and `AccountDeactivation` by entity class rather than via a repository).
   const managerUpdate = jest.fn().mockResolvedValue({ affected: 1 });
   const dataSource = {
-    transaction: jest.fn(async (cb: (m: unknown) => unknown) =>
+    transaction: jest.fn((cb: (m: unknown) => unknown) =>
       cb({ getRepository: () => repo, update: managerUpdate }),
     ),
   };
@@ -184,12 +186,16 @@ describe('AuthService.rotateRefreshToken', () => {
     expect(mocks.repo.update).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'old-row' }),
       expect.objectContaining({
-        revokedAt: expect.any(Date),
-        replacedBy: expect.any(String),
+        revokedAt: expect.any(Date) as unknown,
+        replacedBy: expect.any(String) as unknown,
       }),
     );
     // A brand-new row was persisted with the pre-generated id used in the claim.
-    const claimReplacement = mocks.repo.update.mock.calls[0][1].replacedBy;
+    const updateArguments = mocks.repo.update.mock.calls[0] as [
+      unknown,
+      { replacedBy: string },
+    ];
+    const claimReplacement = updateArguments[1].replacedBy;
     expect(mocks.repo.create).toHaveBeenCalledWith(
       expect.objectContaining({ id: claimReplacement, userId: 'u1' }),
     );
@@ -209,7 +215,7 @@ describe('AuthService.rotateRefreshToken', () => {
     // Whole family revoked; no rotation transaction started.
     expect(mocks.repo.update).toHaveBeenCalledWith(
       expect.objectContaining({ userId: 'u1' }),
-      expect.objectContaining({ revokedAt: expect.any(Date) }),
+      expect.objectContaining({ revokedAt: expect.any(Date) as unknown }),
     );
     expect(mocks.dataSource.transaction).not.toHaveBeenCalled();
     expect(mocks.repo.save).not.toHaveBeenCalled();
@@ -235,7 +241,7 @@ describe('AuthService.rotateRefreshToken', () => {
     // The family was revoked (reuse response).
     expect(mocks.repo.update).toHaveBeenCalledWith(
       expect.objectContaining({ userId: 'u1' }),
-      expect.objectContaining({ revokedAt: expect.any(Date) }),
+      expect.objectContaining({ revokedAt: expect.any(Date) as unknown }),
     );
   });
 
@@ -297,7 +303,7 @@ describe('AuthService.revokeRefreshToken / revokeAllForUser', () => {
     });
     expect(mocks.repo.update).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'r1' }),
-      expect.objectContaining({ revokedAt: expect.any(Date) }),
+      expect.objectContaining({ revokedAt: expect.any(Date) as unknown }),
     );
     expect(mocks.events.emit).toHaveBeenCalledWith('user.session.revoked', {
       userId: 'u1',
@@ -328,7 +334,7 @@ describe('AuthService.revokeRefreshToken / revokeAllForUser', () => {
     await service.revokeAllForUser('u1');
     expect(mocks.repo.update).toHaveBeenCalledWith(
       expect.objectContaining({ userId: 'u1' }),
-      expect.objectContaining({ revokedAt: expect.any(Date) }),
+      expect.objectContaining({ revokedAt: expect.any(Date) as unknown }),
     );
     expect(mocks.events.emit).toHaveBeenCalledWith('user.session.revoked', {
       userId: 'u1',
@@ -385,7 +391,7 @@ describe('AuthService.validateOrCreateGoogleUser', () => {
       expect(mocks.managerUpdate).toHaveBeenCalledWith(
         AccountDeactivation,
         expect.objectContaining({ id: 'deact-1' }),
-        expect.objectContaining({ reactivatedAt: expect.any(Date) }),
+        expect.objectContaining({ reactivatedAt: expect.any(Date) as unknown }),
       );
       expect(mocks.managerUpdate).toHaveBeenCalledWith(
         User,
@@ -516,7 +522,7 @@ describe('AuthService.validateOrCreateGoogleUser', () => {
         googleId: 'g-1',
         status: UserStatus.Active,
         invitedBy: 'inviter-1',
-        ageAttestedAt: expect.any(Date),
+        ageAttestedAt: expect.any(Date) as unknown,
         termsVersion: '2.4',
       }),
     );

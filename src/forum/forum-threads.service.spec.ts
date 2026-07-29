@@ -198,7 +198,7 @@ describe('ForumThreadsService', () => {
         undefined,
       );
 
-      expect(page.data[0].author).toEqual({
+      expect(page.data[0]!.author).toEqual({
         handle: '',
         displayName: 'Member',
         avatarUrl: null,

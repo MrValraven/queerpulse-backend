@@ -1,4 +1,7 @@
+import { InternalServerErrorException, Logger } from '@nestjs/common';
 import { isStorageKey } from '../storage/storage-key';
+
+const logger = new Logger('ImageUrl');
 
 // Every image field in the database holds one of two things:
 //
@@ -39,10 +42,13 @@ export function toImageUrl(value: string | null | undefined): string | null {
     if (!apiBaseUrl) {
       // Reaching this means a mapper ran before bootstrap wired the base URL.
       // Returning a bare key would render as a broken relative image; failing
-      // loudly surfaces the wiring bug at the first request instead.
-      throw new Error(
+      // loudly surfaces the wiring bug at the first request instead. This runs
+      // inside request-path response mappers, so throw an HttpException Nest can
+      // render (keeping the wiring detail in the log, off the wire).
+      logger.error(
         'Image URL base is not configured — setImageUrlBase() was never called',
       );
+      throw new InternalServerErrorException('Service temporarily unavailable');
     }
     return `${apiBaseUrl}/files/${value}`;
   }

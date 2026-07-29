@@ -56,7 +56,12 @@ export class MagazineService {
     query: ListArticlesInput,
   ): Promise<Paginated<ArticleListItem>> {
     const page = normalizePage(query.page);
-    const qb = this.articles.createQueryBuilder('article');
+    const qb = this.articles
+      .createQueryBuilder('article')
+      // Published only: `published_at` set and not in the future. Unpublished
+      // (NULL) rows drop out because `NULL <= :now` is unknown, not true —
+      // mirrors `ResourcesService.list` / `ContentPagesService.listBySection`.
+      .andWhere('article.published_at <= :now', { now: new Date() });
 
     if (query.issue) {
       qb.innerJoin(
@@ -88,7 +93,14 @@ export class MagazineService {
 
   async getArticleBySlug(slug: string): Promise<ArticleResponse> {
     const article = await this.articles.findOne({ where: { slug } });
-    if (!article) {
+    // 404 an unknown slug and an unpublished/future-dated one alike — hide its
+    // existence rather than surfacing a distinct "not visible yet" response
+    // (mirrors `ContentPagesService.getBySlug`).
+    if (
+      !article ||
+      !article.publishedAt ||
+      article.publishedAt > new Date()
+    ) {
       throw new NotFoundException('Article not found');
     }
     const author = await this.loadAuthorOr404(article.authorId);

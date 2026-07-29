@@ -1,8 +1,6 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
-export class CreatePushSubscriptions1785000400000
-  implements MigrationInterface
-{
+export class CreatePushSubscriptions1785000400000 implements MigrationInterface {
   name = 'CreatePushSubscriptions1785000400000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
@@ -32,9 +30,7 @@ export class CreatePushSubscriptions1785000400000
     await queryRunner.query(
       `ALTER TABLE "push_subscriptions" DROP CONSTRAINT "FK_push_subscriptions_user_id"`,
     );
-    await queryRunner.query(
-      `DROP INDEX "IDX_push_subscriptions_user_id"`,
-    );
+    await queryRunner.query(`DROP INDEX "IDX_push_subscriptions_user_id"`);
     await queryRunner.query(`DROP TABLE "push_subscriptions"`);
   }
 }

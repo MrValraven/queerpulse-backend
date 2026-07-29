@@ -9,7 +9,10 @@ import {
 } from '../common/cursor-pagination';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { CommunityPost } from '../communities/entities/community-post.entity';
-import { AccessTier, Community } from '../communities/entities/community.entity';
+import {
+  AccessTier,
+  Community,
+} from '../communities/entities/community.entity';
 import {
   Event,
   EventStatus,
@@ -202,7 +205,13 @@ export class FeedService {
             )`,
             { privateTier: AccessTier.Private, viewerId },
           );
-        const { rows } = await cursorPaginate(qb, cursor, limit, 'cp');
+        // `true`: `CommunityPost.createdAt` is migrated to `timestamptz(3)`
+        // (see `1785001400000-NarrowCursorCreatedAtPrecision.ts`), so
+        // `cursorPaginate` orders/filters on the raw column instead of
+        // wrapping it in a non-indexable `date_trunc(...)` — served by
+        // `IDX_community_posts_created_at_id`
+        // (`1785001500000-AddFeedCursorIndexes.ts`).
+        const { rows } = await cursorPaginate(qb, cursor, limit, 'cp', true);
         return rows.map((row) => ({
           id: row.id,
           createdAt: row.createdAt,
@@ -213,7 +222,14 @@ export class FeedService {
       }
       case 'forum_thread': {
         const qb = this.forumThreads.createQueryBuilder('t');
-        const { rows } = await cursorPaginate(qb, cursor, limit, 't');
+        // `true`: `ForumThread.createdAt` is migrated to `timestamptz(3)`
+        // (see `1785001400000-NarrowCursorCreatedAtPrecision.ts`), so this
+        // unfiltered "no WHERE at all" scan can finally use the existing
+        // `IDX_forum_thread_created_at_id` (`1782800210000-AddForum.ts`) —
+        // that index was already shaped correctly but unusable while this
+        // query's ORDER BY/WHERE went through the non-indexable
+        // `date_trunc(...)` wrapper.
+        const { rows } = await cursorPaginate(qb, cursor, limit, 't', true);
         return rows.map((row) => ({
           id: row.id,
           createdAt: row.createdAt,
@@ -234,7 +250,13 @@ export class FeedService {
           .andWhere('e.visibility IN (:...visibilities)', {
             visibilities: [EventVisibility.Public, EventVisibility.Members],
           });
-        const { rows } = await cursorPaginate(qb, cursor, limit, 'e');
+        // `true`: `Event.createdAt` is migrated to `timestamptz(3)` (see
+        // `1785001400000-NarrowCursorCreatedAtPrecision.ts`), so this
+        // `status`+`visibility` filter can be served by the partial index
+        // `IDX_events_feed_created_at_id`
+        // (`1785001500000-AddFeedCursorIndexes.ts`), which was built to
+        // match this exact predicate.
+        const { rows } = await cursorPaginate(qb, cursor, limit, 'e', true);
         return rows.map((row) => ({
           id: row.id,
           createdAt: row.createdAt,

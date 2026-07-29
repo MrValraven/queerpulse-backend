@@ -17,12 +17,15 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { BlockOptionsDto } from './dto/block-options.dto';
 import { ListPageQuery } from './dto/list-page.query';
 import { SocialService } from './social.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * Blocks — hard, mutual severance (spec §3 Tier 1 "social"). Always-on
  * safety primitive: no `@Feature` flag, unlike product-feature controllers.
  * Members are addressed by slug in the path.
  */
+@ApiTags('Blocks')
+@ApiCookieAuth()
 @Controller('blocks')
 @UseGuards(ActiveMemberGuard)
 export class BlocksController {

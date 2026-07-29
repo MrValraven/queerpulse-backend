@@ -62,11 +62,21 @@ export class ForumThreadsService {
       qb.andWhere('t.category = :category', { category });
     }
 
+    // `true`: `ForumThread.createdAt` is migrated to `timestamptz(3)` (see
+    // `1785001400000-NarrowCursorCreatedAtPrecision.ts`), so the default
+    // (no-`category`) listing can finally use the existing
+    // `IDX_forum_thread_created_at_id` (`1782800210000-AddForum.ts`) instead
+    // of a full scan + in-memory sort — that index was already shaped
+    // correctly but unusable while this query's ORDER BY/WHERE went through
+    // the non-indexable `date_trunc(...)` wrapper. Same index also serves
+    // `FeedService`'s `forum_thread` branch, since both order the same
+    // unfiltered `(created_at, id)` keyset.
     const { rows, nextCursor, hasMore } = await cursorPaginate(
       qb,
       cursor,
       limit ?? DEFAULT_LIMIT,
       't',
+      true,
     );
 
     return {

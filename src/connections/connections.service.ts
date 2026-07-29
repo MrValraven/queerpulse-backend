@@ -7,13 +7,9 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import {
-  EntityManager,
-  FindOptionsWhere,
-  In,
-  Repository,
-} from 'typeorm';
+import { EntityManager, FindOptionsWhere, In, Repository } from 'typeorm';
 import {
   CONNECTION_ACCEPTED,
   ConnectionAcceptedEvent,
@@ -533,6 +529,7 @@ export class ConnectionsService {
         { requesterId: userId, status: ConnectionStatus.Accepted },
         { addresseeId: userId, status: ConnectionStatus.Accepted },
       ],
+      take: DEFAULT_LIST_LIMIT,
     });
     return rows.map((c) =>
       c.requesterId === userId ? c.addresseeId : c.requesterId,
@@ -748,9 +745,7 @@ export class ConnectionsService {
     });
     for (const edge of edges) {
       connected.add(
-        edge.requesterId === viewerUserId
-          ? edge.addresseeId
-          : edge.requesterId,
+        edge.requesterId === viewerUserId ? edge.addresseeId : edge.requesterId,
       );
     }
     return connected;

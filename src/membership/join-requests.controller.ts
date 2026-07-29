@@ -28,7 +28,10 @@ import {
   SubmittedJoinRequestView,
 } from './join-request-response';
 import { JoinRequestsService } from './join-requests.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
+@ApiTags('Membership')
+@ApiCookieAuth()
 @Controller('join-requests')
 export class JoinRequestsController {
   constructor(private readonly joinRequestsService: JoinRequestsService) {}

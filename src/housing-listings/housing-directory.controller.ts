@@ -3,6 +3,7 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { BrowseHousingListingsQuery } from './dto/browse-housing-listings.query';
 import { HousingDirectoryService } from './housing-directory.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * Member-only housing board browse + detail over LIVE listings only, on its
@@ -10,6 +11,8 @@ import { HousingDirectoryService } from './housing-directory.service';
  */
 @Feature('housingListings')
 @UseGuards(ActiveMemberGuard)
+@ApiTags('Housing')
+@ApiCookieAuth()
 @Controller('housing-directory')
 export class HousingDirectoryController {
   constructor(private readonly service: HousingDirectoryService) {}

@@ -179,7 +179,8 @@ export class ForumPostsService {
           .execute();
         // On conflict the row is skipped and no `RETURNING` row comes back;
         // only bump the count when this call is the one that inserted.
-        if (inserted.raw.length > 0) {
+        const insertedRows = inserted.raw as unknown[];
+        if (insertedRows.length > 0) {
           await manager.increment(ForumPost, { id: postId }, 'voteCount', 1);
         }
       } else if (value === 0) {
@@ -194,7 +195,10 @@ export class ForumPostsService {
       const refreshed = await manager.findOne(ForumPost, {
         where: { id: postId },
       });
-      return { voteCount: refreshed?.voteCount ?? post.voteCount, myVote: value };
+      return {
+        voteCount: refreshed?.voteCount ?? post.voteCount,
+        myVote: value,
+      };
     });
   }
 

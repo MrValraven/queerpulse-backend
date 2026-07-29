@@ -102,7 +102,10 @@ import { HousingCoop } from '../housing/entities/housing-coop.entity';
 import { CoopJoinRequest } from '../housing/entities/coop-join-request.entity';
 import { OrgTier, OrgTierCtaType } from '../org-tiers/entities/org-tier.entity';
 import { GovernanceFinanceReport } from '../governance/entities/governance-finance-report.entity';
-import { governanceFinanceReportSeed } from '../governance/governance-finance.seed';
+import {
+  financeHistorySeed,
+  governanceFinanceReportSeed,
+} from '../governance/governance-finance.seed';
 import { GovernanceOverview } from '../governance/entities/governance-overview.entity';
 import { governanceOverviewSeed } from '../governance/governance-overview.seed';
 
@@ -4034,39 +4037,37 @@ async function seedOrgTiers(manager: EntityManager): Promise<void> {
   console.log(`Seeded ${insertedCount} org tiers`);
 }
 
-// Inserts the Q2 2026 quarterly financial-transparency snapshot that backs
-// `GET /governance/finances` (the one backend-wired section of the Governance
-// page — `FinancesSection`). Read-only fixture, keyed on `quarter`, mirroring
-// every other seeder's idempotent skip-if-present pattern.
+// Inserts the six quarterly financial-transparency snapshots (2025-Q1 through
+// 2026-Q2) that back `GET /governance/finances` (the one backend-wired
+// section of the Governance page — `FinancesSection`) and the admin
+// governance Finances tab's 6-quarter chart. Read-only fixtures, keyed on
+// `quarter`, upserted idempotently per quarter.
 async function seedGovernanceFinance(manager: EntityManager): Promise<void> {
   const reports = manager.getRepository(GovernanceFinanceReport);
 
-  const existing = await reports.findOne({
-    where: { quarter: governanceFinanceReportSeed.quarter },
-  });
-  if (existing) {
-    // Backfill `reserve`/`partners` on a row seeded before those columns
-    // existed, so a re-run against an older database populates them.
-    if (existing.reserve === null || existing.partners === null) {
-      await reports.update(
-        { id: existing.id },
-        {
-          reserve: governanceFinanceReportSeed.reserve,
-          partners: governanceFinanceReportSeed.partners,
-        },
-      );
-      console.log(
-        'Backfilled governance finance report reserve + partners (already present)',
-      );
+  // Q2'26 carries the full editorial breakdown (stats/income/expense/
+  // eventNotes/reserve/partners); the five prior quarters only carry metrics
+  // + minimal jsonb placeholders — together they give the admin governance
+  // Finances tab a real 6-quarter chart. Upserted per-quarter so a re-run
+  // against an older database backfills metrics/reserve/partners onto rows
+  // seeded before those columns existed.
+  const allQuarters = [...financeHistorySeed, governanceFinanceReportSeed];
+  let insertedCount = 0;
+  let updatedCount = 0;
+  for (const quarterReport of allQuarters) {
+    const existing = await reports.findOne({
+      where: { quarter: quarterReport.quarter },
+    });
+    if (existing) {
+      await reports.update({ id: existing.id }, quarterReport);
+      updatedCount += 1;
     } else {
-      console.log('Seeded 0 governance finance reports (already present)');
+      await reports.save(reports.create(quarterReport));
+      insertedCount += 1;
     }
-    return;
   }
-
-  await reports.save(reports.create(governanceFinanceReportSeed));
   console.log(
-    `Seeded governance finance report ${governanceFinanceReportSeed.quarter}`,
+    `Seeded governance finance reports (${insertedCount} inserted, ${updatedCount} updated)`,
   );
 }
 

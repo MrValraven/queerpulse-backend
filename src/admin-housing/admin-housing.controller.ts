@@ -19,9 +19,12 @@ import { HousingService } from '../housing/housing.service';
 import { CreateCoopDto } from '../housing/dto/create-coop.dto';
 import { UpdateCoopDto } from '../housing/dto/update-coop.dto';
 import { TriageJoinRequestDto } from '../housing/dto/triage-join-request.dto';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 @UseGuards(RolesGuard)
 @Roles(UserRole.Admin)
+@ApiTags('Admin — Housing')
+@ApiCookieAuth()
 @Controller('admin/housing')
 export class AdminHousingController {
   constructor(private readonly housing: HousingService) {}

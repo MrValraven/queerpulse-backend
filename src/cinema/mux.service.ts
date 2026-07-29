@@ -7,6 +7,11 @@ import {
 import { ConfigService } from '@nestjs/config';
 import Mux from '@mux/mux-node';
 
+// Cap how long any single Mux API call can hang. The SDK's default is 1 minute
+// and it retries timeouts, so without this a stalled Mux request could tie up a
+// handler far longer than a member-facing route should wait.
+const MUX_REQUEST_TIMEOUT_MS = 15_000;
+
 const TOKEN_TTL_FLOOR_SECONDS = 3600; // 1 hour
 const TOKEN_TTL_CAP_SECONDS = 43_200; // 12 hours
 const TOKEN_TTL_GRACE_SECONDS = 1800; // 30 min past the title's duration
@@ -149,6 +154,7 @@ export class MuxService {
       this.client = new Mux({
         tokenId: this.requireConfig('mux.tokenId'),
         tokenSecret: this.requireConfig('mux.tokenSecret'),
+        timeout: MUX_REQUEST_TIMEOUT_MS,
       });
     }
     return this.client;

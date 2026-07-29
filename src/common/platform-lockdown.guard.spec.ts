@@ -34,13 +34,14 @@ function makeGuard(options: {
   role?: UserRole;
   type?: 'http' | 'ws';
 }) {
+  const getSettings = jest.fn().mockResolvedValue({
+    lockdownEnabled: false,
+    lockdownAllowsModerators: false,
+    lockdownMessage: null,
+    ...options.flags,
+  });
   const settings = {
-    get: jest.fn().mockResolvedValue({
-      lockdownEnabled: false,
-      lockdownAllowsModerators: false,
-      lockdownMessage: null,
-      ...options.flags,
-    }),
+    get: getSettings,
   } as unknown as PlatformSettingsService;
 
   const reflector = new Reflector();
@@ -51,7 +52,7 @@ function makeGuard(options: {
 
   const context = {
     getType: () => options.type ?? 'http',
-    getHandler: () => targetClass.prototype.handler,
+    getHandler: () => targetClass.prototype.handler.bind(targetClass.prototype),
     getClass: () => targetClass,
     switchToHttp: () => ({
       getRequest: () => ({
@@ -64,6 +65,7 @@ function makeGuard(options: {
     guard: new PlatformLockdownGuard(reflector, settings),
     context,
     settings,
+    getSettings,
   };
 }
 
@@ -82,12 +84,12 @@ describe('PlatformLockdownGuard', () => {
     // WebSockets authenticate in ChatGateway.handleConnection, which runs its
     // own lockdown check; this guard must not try to read an HTTP request that
     // does not exist.
-    const { guard, context, settings } = makeGuard({
+    const { guard, context, getSettings } = makeGuard({
       type: 'ws',
       flags: { lockdownEnabled: true },
     });
     await expect(guard.canActivate(context)).resolves.toBe(true);
-    expect(settings.get).not.toHaveBeenCalled();
+    expect(getSettings).not.toHaveBeenCalled();
   });
 
   it('allows an exempt route while locked, even with no user', async () => {
@@ -163,7 +165,9 @@ describe('PlatformLockdownGuard', () => {
     });
 
     await expect(guard.canActivate(context)).rejects.toMatchObject({
-      response: { message: expect.stringContaining('temporarily unavailable') },
+      response: {
+        message: expect.stringContaining('temporarily unavailable') as unknown,
+      },
     });
   });
 
@@ -176,7 +180,9 @@ describe('PlatformLockdownGuard', () => {
     });
 
     await expect(guard.canActivate(context)).rejects.toMatchObject({
-      response: { message: expect.stringContaining('temporarily unavailable') },
+      response: {
+        message: expect.stringContaining('temporarily unavailable') as unknown,
+      },
     });
   });
 });

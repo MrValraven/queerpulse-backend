@@ -49,7 +49,10 @@ describe('AccountService', () => {
   // Stand-in for the `users` row the deactivation/deletion transactions read
   // and update. Tests set `users.u1.status` to drive the status a flow must
   // preserve, then assert on it after the call.
-  let users: Record<string, { id: string; status: UserStatus }>;
+  let users: { u1: { id: string; status: UserStatus } } & Record<
+    string,
+    { id: string; status: UserStatus }
+  >;
   let dataSource: { transaction: jest.Mock };
   let events: { emit: jest.Mock };
 
@@ -131,9 +134,9 @@ describe('AccountService', () => {
           entity: unknown,
           options: { where: Where | Where[] },
         ): Promise<unknown> => {
-          const where = Array.isArray(options.where)
-            ? options.where[0]
-            : options.where;
+          const where = (
+            Array.isArray(options.where) ? options.where[0] : options.where
+          ) as Where;
           if (entity === User) {
             return Promise.resolve(users[where.id as string] ?? null);
           }
@@ -223,7 +226,7 @@ describe('AccountService', () => {
         expect.objectContaining({
           userId: 'u1',
           token: result.reauthToken,
-          expiresAt: expect.any(Date),
+          expiresAt: expect.any(Date) as unknown,
         }),
       );
     });
@@ -259,7 +262,7 @@ describe('AccountService', () => {
       );
       expect(refreshTokens.update).toHaveBeenCalledWith(
         expect.objectContaining({ userId: 'u1' }),
-        expect.objectContaining({ revokedAt: expect.any(Date) }),
+        expect.objectContaining({ revokedAt: expect.any(Date) as unknown }),
       );
     });
 
@@ -680,7 +683,7 @@ describe('AccountService', () => {
       ]);
       const result = await service.listDsar('u1');
       expect(result).toHaveLength(1);
-      expect(result[0].reference).toBe('DSAR-ABC');
+      expect(result[0]?.reference).toBe('DSAR-ABC');
     });
   });
 
@@ -740,7 +743,7 @@ describe('AccountService', () => {
       ]);
       const result = await service.listSessions('u1');
       expect(refreshTokens.findOne).not.toHaveBeenCalled();
-      expect(result[0].current).toBe(false);
+      expect(result[0]?.current).toBe(false);
     });
 
     it('revokeSession 404s for an unknown/foreign/already-revoked session', async () => {
@@ -764,7 +767,10 @@ describe('AccountService', () => {
         where: { id: 'rt-1', userId: 'u1' },
       });
       expect(refreshTokens.save).toHaveBeenCalledWith(
-        expect.objectContaining({ id: 'rt-1', revokedAt: expect.any(Date) }),
+        expect.objectContaining({
+          id: 'rt-1',
+          revokedAt: expect.any(Date) as unknown,
+        }),
       );
     });
 
@@ -782,10 +788,9 @@ describe('AccountService', () => {
       // Exactly the two non-current rows are saved with a revokedAt stamp; the
       // current session is left intact so the caller stays signed in here.
       expect(refreshTokens.save).toHaveBeenCalledTimes(1);
-      const saved = refreshTokens.save.mock.calls[0][0] as Array<{
-        id: string;
-        revokedAt: Date;
-      }>;
+      const [saved] = refreshTokens.save.mock.calls[0] as [
+        Array<{ id: string; revokedAt: Date }>,
+      ];
       expect(saved.map((r) => r.id).sort()).toEqual([
         'rt-other-1',
         'rt-other-2',
@@ -809,7 +814,7 @@ describe('AccountService', () => {
       await service.revokeAllSessions('u1');
       expect(refreshTokens.update).toHaveBeenCalledWith(
         expect.objectContaining({ userId: 'u1' }),
-        expect.objectContaining({ revokedAt: expect.any(Date) }),
+        expect.objectContaining({ revokedAt: expect.any(Date) as unknown }),
       );
     });
   });

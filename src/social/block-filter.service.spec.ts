@@ -98,7 +98,7 @@ describe('BlockFilterService', () => {
         '"cp"."author_id"',
       );
       expect(qb.andWhere).toHaveBeenCalledTimes(1);
-      const [sql, params] = qb.andWhere.mock.calls[0] as [string, unknown];
+      const [sql, params] = qb.andWhere!.mock.calls[0] as [string, unknown];
       expect(sql).toContain('NOT EXISTS');
       expect(sql).toContain('"cp"."author_id"');
       expect(sql).toContain(':blockFilterActorId');

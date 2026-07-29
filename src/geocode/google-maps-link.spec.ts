@@ -1,4 +1,7 @@
-import { extractCoordsFromUrl, isAllowedGoogleMapsHost } from './google-maps-link';
+import {
+  extractCoordsFromUrl,
+  isAllowedGoogleMapsHost,
+} from './google-maps-link';
 
 describe('extractCoordsFromUrl', () => {
   it('prefers the !3d!4d place pin over the @ viewport', () => {
@@ -12,19 +15,25 @@ describe('extractCoordsFromUrl', () => {
   });
 
   it('falls back to the @lat,lng viewport when no !3d!4d', () => {
-    expect(extractCoordsFromUrl('https://www.google.com/maps/@38.7223,-9.1393,17z')).toEqual({
+    expect(
+      extractCoordsFromUrl('https://www.google.com/maps/@38.7223,-9.1393,17z'),
+    ).toEqual({
       latitude: 38.7223,
       longitude: -9.1393,
     });
   });
 
   it('reads ?q=lat,lng and query=lat,lng', () => {
-    expect(extractCoordsFromUrl('https://maps.google.com/?q=38.7223,-9.1393')).toEqual({
+    expect(
+      extractCoordsFromUrl('https://maps.google.com/?q=38.7223,-9.1393'),
+    ).toEqual({
       latitude: 38.7223,
       longitude: -9.1393,
     });
     expect(
-      extractCoordsFromUrl('https://www.google.com/maps/search/?api=1&query=38.7223,-9.1393'),
+      extractCoordsFromUrl(
+        'https://www.google.com/maps/search/?api=1&query=38.7223,-9.1393',
+      ),
     ).toEqual({ latitude: 38.7223, longitude: -9.1393 });
   });
 
@@ -33,7 +42,9 @@ describe('extractCoordsFromUrl', () => {
   });
 
   it('returns null for out-of-range coordinates', () => {
-    expect(extractCoordsFromUrl('https://www.google.com/maps/@200,-9.1,17z')).toBeNull();
+    expect(
+      extractCoordsFromUrl('https://www.google.com/maps/@200,-9.1,17z'),
+    ).toBeNull();
   });
 
   it('returns null for junk', () => {
@@ -51,8 +62,9 @@ describe('isAllowedGoogleMapsHost', () => {
     'https://www.google.pt/maps/x',
   ])('allows %s', (url) => expect(isAllowedGoogleMapsHost(url)).toBe(true));
 
-  it.each(['https://evil.com/maps', 'https://google.com.evil.com/x', 'not a url'])(
-    'rejects %s',
-    (url) => expect(isAllowedGoogleMapsHost(url)).toBe(false),
-  );
+  it.each([
+    'https://evil.com/maps',
+    'https://google.com.evil.com/x',
+    'not a url',
+  ])('rejects %s', (url) => expect(isAllowedGoogleMapsHost(url)).toBe(false));
 });

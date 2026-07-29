@@ -42,7 +42,9 @@ function extractPlaceName(rawUrl: string): string | undefined {
   const placeSegment = match?.[1];
   if (placeSegment === undefined) return undefined;
   try {
-    return decodeURIComponent(placeSegment.replace(/\+/g, ' ')).trim() || undefined;
+    return (
+      decodeURIComponent(placeSegment.replace(/\+/g, ' ')).trim() || undefined
+    );
   } catch {
     return undefined;
   }
@@ -57,7 +59,9 @@ export function extractCoordsFromUrl(
   const pin = rawUrl.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/);
   // Fallbacks: @lat,lng viewport, or q=/query= coordinate pairs
   const at = rawUrl.match(/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/);
-  const query = rawUrl.match(/[?&](?:q|query)=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/);
+  const query = rawUrl.match(
+    /[?&](?:q|query)=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/,
+  );
 
   const source = pin ?? query ?? at;
   if (!source) return null;
@@ -67,5 +71,7 @@ export function extractCoordsFromUrl(
   if (!inRange(latitude, longitude)) return null;
 
   const placeName = extractPlaceName(rawUrl);
-  return placeName ? { latitude, longitude, placeName } : { latitude, longitude };
+  return placeName
+    ? { latitude, longitude, placeName }
+    : { latitude, longitude };
 }

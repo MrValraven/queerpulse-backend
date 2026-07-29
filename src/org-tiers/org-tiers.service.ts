@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { Repository } from 'typeorm';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import {
@@ -42,6 +43,7 @@ export class OrgTiersService {
     const rows = await this.tiers.find({
       where: { published: true },
       order: { sortOrder: 'ASC', createdAt: 'ASC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     return rows.map(toOrgTier);
   }
@@ -50,6 +52,7 @@ export class OrgTiersService {
   async listAll(): Promise<OrgTierAdminDTO[]> {
     const rows = await this.tiers.find({
       order: { sortOrder: 'ASC', createdAt: 'ASC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     return rows.map(toOrgTierAdmin);
   }

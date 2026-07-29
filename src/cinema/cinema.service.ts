@@ -9,6 +9,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, IsNull, Not, Repository } from 'typeorm';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
+import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { User, UserRole } from '../users/entities/user.entity';
 import { CreateTitleDto } from './dto/create-title.dto';
 import { UpdateTitleDto } from './dto/update-title.dto';
@@ -55,10 +56,14 @@ export class CinemaService {
       throw new ForbiddenException('Moderator role required');
     }
     const rows = includeAll
-      ? await this.titles.find({ order: { createdAt: 'DESC' } })
+      ? await this.titles.find({
+          order: { createdAt: 'DESC' },
+          take: DEFAULT_LIST_LIMIT,
+        })
       : await this.titles.find({
           where: { status: TitleStatus.Ready, publishedAt: Not(IsNull()) },
           order: { publishedAt: 'DESC' },
+          take: DEFAULT_LIST_LIMIT,
         });
     const progressByTitle = await this.progressFor(
       user.userId,

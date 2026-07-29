@@ -7,8 +7,11 @@ import {
   UnauthorizedException,
   UseFilters,
   UseGuards,
+  Version,
+  VERSION_NEUTRAL,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { ApiTags } from '@nestjs/swagger';
 import { timingSafeEqual } from 'node:crypto';
 import { Request, Response } from 'express';
 import { User } from '../users/entities/user.entity';
@@ -33,8 +36,18 @@ import { resolvePostLoginRedirect, signInErrorUrl } from './safe-redirect';
 import { Throttle, seconds } from '@nestjs/throttler';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 
+// This controller inherits the app-wide `defaultVersion: '1'`, so its routes
+// answer at `/v1/auth/...` — which is where the SPA's versioned API client
+// (src/shared/api/client.ts) sends `me`, `logout`, and `logout-all`.
+//
+// The exceptions are the three EXTERNALLY-referenced routes, which must keep
+// their fixed, unversioned paths and therefore carry `@Version(VERSION_NEUTRAL)`
+// per-method: the Google OAuth callback URL is registered in Google Cloud, and
+// the SPA hits `/auth/google` and `/auth/refresh` directly (unprefixed) — none
+// can change path in lockstep with the API version.
+@ApiTags('auth')
 @LockdownExempt()
-@Controller('auth')
+@Controller({ path: 'auth' })
 export class AuthController {
   constructor(
     private readonly authService: AuthService,
@@ -60,6 +73,7 @@ export class AuthController {
     return timingSafeEqual(ab, bb);
   }
 
+  @Version(VERSION_NEUTRAL)
   @Public()
   @UseGuards(GoogleAuthGuard)
   @Get('google')
@@ -67,6 +81,7 @@ export class AuthController {
     // GoogleAuthGuard redirects to Google's consent screen; this body never runs.
   }
 
+  @Version(VERSION_NEUTRAL)
   @Public()
   @UseGuards(GoogleAuthGuard)
   @UseFilters(OAuthCallbackFilter)
@@ -78,7 +93,9 @@ export class AuthController {
     const state = decodeOAuthState(
       typeof req.query.state === 'string' ? req.query.state : undefined,
     );
-    const cookieNonce = req.cookies?.['oauth_state'];
+    const cookieNonce = (
+      req.cookies as Record<string, string | undefined> | undefined
+    )?.['oauth_state'];
     // The nonce cookie is single-use: clear it now regardless of the outcome.
     clearOAuthStateCookie(res, this.cookieOpts());
 
@@ -136,6 +153,7 @@ export class AuthController {
     res.redirect(resolvePostLoginRedirect(redirect, frontendUrl));
   }
 
+  @Version(VERSION_NEUTRAL)
   @Public()
   @Throttle({ default: { limit: 10, ttl: seconds(60) } })
   @Post('refresh')
@@ -143,7 +161,9 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<{ ok: true }> {
-    const raw = req.cookies?.['refresh_token'];
+    const raw = (
+      req.cookies as Record<string, string | undefined> | undefined
+    )?.['refresh_token'];
     if (!raw) {
       clearAuthCookies(res, this.cookieOpts());
       throw new UnauthorizedException('Missing refresh token');
@@ -174,7 +194,9 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<{ ok: true }> {
-    const raw = req.cookies?.['refresh_token'];
+    const raw = (
+      req.cookies as Record<string, string | undefined> | undefined
+    )?.['refresh_token'];
     if (raw) {
       try {
         await this.authService.revokeRefreshToken(raw);

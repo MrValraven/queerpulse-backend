@@ -87,32 +87,44 @@ describe('MessagingService', () => {
     delete: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
-  let pins: { find: jest.Mock; delete: jest.Mock; createQueryBuilder: jest.Mock };
-  let stars: { find: jest.Mock; delete: jest.Mock; createQueryBuilder: jest.Mock };
+  let pins: {
+    find: jest.Mock;
+    delete: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
+  let stars: {
+    find: jest.Mock;
+    delete: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
   let usersService: { findById: jest.Mock };
 
   beforeEach(async () => {
     conversations = {
       findOne: jest.fn(),
       find: jest.fn().mockResolvedValue([]),
-      create: jest.fn((v) => v),
+      create: jest.fn((value: Partial<Conversation>) => value),
     };
     participants = {
       find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn(),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
-      save: jest.fn(async (v) => v),
+      save: jest.fn((value: Partial<ConversationParticipant>) =>
+        Promise.resolve(value),
+      ),
       exists: jest.fn().mockResolvedValue(true),
     };
     messages = {
-      create: jest.fn((v) => v),
-      save: jest.fn(async (v) => ({
-        id: 'm1',
-        createdAt: new Date(),
-        editedAt: null,
-        deletedAt: null,
-        ...v,
-      })),
+      create: jest.fn((value: Partial<Message>) => value),
+      save: jest.fn((value: Partial<Message>) =>
+        Promise.resolve({
+          id: 'm1',
+          createdAt: new Date(),
+          editedAt: null,
+          deletedAt: null,
+          ...value,
+        }),
+      ),
       findOne: jest.fn(),
       createQueryBuilder: jest.fn(() => makeQb()),
     };
@@ -262,19 +274,19 @@ describe('MessagingService', () => {
       const result = await service.listConversations('me');
 
       expect(result.map((c) => c.id)).toEqual(['c1', 'c2']); // newest-first
-      expect(result[0].unreadCount).toBe(2);
-      expect(result[1].unreadCount).toBe(0); // absent from unread rows
+      expect(result[0]!.unreadCount).toBe(2);
+      expect(result[1]!.unreadCount).toBe(0); // absent from unread rows
       // Contract shape: `otherParticipant` with handle/displayName, not the
       // internal slug/firstName/lastName.
-      expect(result[0].otherParticipant).toEqual({
+      expect(result[0]!.otherParticipant).toEqual({
         handle: 'alice',
         displayName: 'Alice A',
         avatarUrl: null,
       });
-      expect(result[0].type).toBe('dm');
+      expect(result[0]!.type).toBe('dm');
       // `updatedAt` tracks last activity (the newest message).
-      expect(result[0].updatedAt).toBe('2026-01-02T00:00:00.000Z');
-      expect(result[1].updatedAt).toBe('2026-01-01T00:00:00.000Z');
+      expect(result[0]!.updatedAt).toBe('2026-01-02T00:00:00.000Z');
+      expect(result[1]!.updatedAt).toBe('2026-01-01T00:00:00.000Z');
       // No N+1: exactly two message queries regardless of conversation count.
       expect(messages.createQueryBuilder).toHaveBeenCalledTimes(2);
     });
@@ -327,18 +339,20 @@ describe('MessagingService', () => {
 
       const result = await service.listConversations('me');
 
-      expect(result[0].lastMessage?.sender).toEqual({
+      expect(result[0]!.lastMessage?.sender).toEqual({
         handle: 'me-handle',
         displayName: 'Me Myself',
         avatarUrl: 'https://cdn.example/me.png',
       });
-      expect(result[0].lastMessage?.conversationId).toBe('c1');
-      expect(result[0].lastMessage?.createdAt).toBe('2026-01-02T00:00:00.000Z');
+      expect(result[0]!.lastMessage?.conversationId).toBe('c1');
+      expect(result[0]!.lastMessage?.createdAt).toBe(
+        '2026-01-02T00:00:00.000Z',
+      );
       // The caller is queried alongside the counterparts, in the same query.
       const findCalls = profiles.find.mock.calls as [
         { where: { userId: FindOperator<string> } },
       ][];
-      expect(findCalls[0][0].where.userId.value).toEqual(
+      expect(findCalls[0]![0].where.userId.value).toEqual(
         expect.arrayContaining(['u2', 'me']),
       );
     });
@@ -364,7 +378,9 @@ describe('MessagingService', () => {
 
       await service.listConversations('me');
 
-      const clauses = unreadQb.andWhere.mock.calls.map((c) => c[0]);
+      const clauses = unreadQb.andWhere.mock.calls.map(
+        (call: [string]) => call[0],
+      );
       expect(clauses).toContain(
         '(p.last_read_at IS NULL OR m.created_at > p.last_read_at)',
       );
@@ -409,13 +425,13 @@ describe('MessagingService', () => {
 
       const result = await service.listConversations('me');
 
-      expect(result[0].isOfficial).toBe(true);
-      expect(result[0].type).toBe('group');
-      expect(result[0].otherParticipant).toBeNull();
-      expect(result[0].lastMessage).toBeNull();
+      expect(result[0]!.isOfficial).toBe(true);
+      expect(result[0]!.type).toBe('group');
+      expect(result[0]!.otherParticipant).toBeNull();
+      expect(result[0]!.lastMessage).toBeNull();
       // No messages yet, so last activity falls back to the thread's creation
       // (`conversations` has no updated_at column).
-      expect(result[0].updatedAt).toBe('2026-03-04T05:06:07.000Z');
+      expect(result[0]!.updatedAt).toBe('2026-03-04T05:06:07.000Z');
     });
   });
 
@@ -622,7 +638,7 @@ describe('MessagingService', () => {
 
       // Never null/undefined — the frontend adapter reads sender.displayName
       // unguarded and would throw a TypeError.
-      expect(result[0].sender).toEqual({
+      expect(result[0]!.sender).toEqual({
         handle: '',
         displayName: 'Member',
         avatarUrl: null,
@@ -655,7 +671,7 @@ describe('MessagingService', () => {
       ).unreadCountsByConversation(['conv-1'], 'user-1');
 
       const predicates = queryBuilder.andWhere.mock.calls
-        .map((call) => call[0])
+        .map((call: [string]) => call[0])
         .join(' | ');
       expect(predicates).toContain('cleared_at');
     });
@@ -677,11 +693,11 @@ describe('MessagingService', () => {
       // `cleared_at` column name — unlike the unread-count query above, which
       // embeds the column directly in a hand-written NULL-safe clause.
       const predicates = queryBuilder.andWhere.mock.calls
-        .map((call) => call[0])
+        .map((call: [string]) => call[0])
         .join(' | ');
       expect(predicates).toContain('m.created_at > :clearedAt');
       const boundParams = queryBuilder.andWhere.mock.calls.map(
-        (call) => call[1],
+        (call: [string, Record<string, string>?]) => call[1],
       );
       expect(boundParams).toContainEqual({
         clearedAt: '2026-01-01T00:00:00.000Z',
@@ -705,13 +721,10 @@ describe('MessagingService', () => {
       const result = await service.markRead('c1', 'me');
 
       expect(result).toEqual({ ok: true });
-      const where = participants.update.mock.calls[0][0] as Record<
-        string,
-        string
-      >;
-      const values = participants.update.mock.calls[0][1] as {
-        lastReadAt: () => string;
-      };
+      const [where, values] = participants.update.mock.calls[0] as [
+        Record<string, string>,
+        { lastReadAt: () => string },
+      ];
       expect(where).toEqual({ conversationId: 'c1', userId: 'me' });
       // Value is a raw-SQL function so Postgres, not the app server, sets the time.
       expect(typeof values.lastReadAt).toBe('function');
@@ -745,7 +758,7 @@ describe('MessagingService', () => {
 
       expect(participants.update).toHaveBeenCalledWith(
         { conversationId: 'conv-1', userId: 'user-1' },
-        { clearedAt: expect.any(Function) },
+        { clearedAt: expect.any(Function) as unknown },
       );
       expect(result).toEqual({ ok: true });
     });
@@ -865,7 +878,7 @@ describe('MessagingService', () => {
         string,
         MessageCreatedEvent,
       ][];
-      const [eventName, payload] = emitCalls[0];
+      const [eventName, payload] = emitCalls[0]!;
       expect(eventName).toBe('message.created');
       expect(payload.conversationId).toBe('c1');
       expect(payload.message.senderId).toBe('me');
@@ -1029,7 +1042,9 @@ describe('MessagingService', () => {
       const result = await service.createConversation('me', 'tam-rivera');
 
       expect(result.lastMessage).toBeNull();
-      expect(result.updatedAt).toBe(existingConversation.createdAt.toISOString());
+      expect(result.updatedAt).toBe(
+        existingConversation.createdAt.toISOString(),
+      );
     });
 
     it('404s when recipientHandle does not resolve to a member', async () => {

@@ -50,7 +50,7 @@ describe('ContentPagesService', () => {
           },
         ]
       >;
-      const opts = calls[0][0];
+      const opts = calls[0]![0];
       expect(opts.where.section).toBe(ContentSection.Governance);
       // A `LessThanOrEqual(now)` FindOperator excludes NULL / future rows.
       expect(opts.where.publishedAt).toBeDefined();

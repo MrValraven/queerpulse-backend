@@ -1,4 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
@@ -109,9 +113,13 @@ export class PlatformSettingsService {
       throw err;
     }
     if (!row) {
-      throw new Error(
+      // Fail-closed and fatal, but surface a stable client message through
+      // Nest's exception layer (a raw `Error` would escape as an opaque 500).
+      // The migration detail stays server-side in the log.
+      this.logger.error(
         'platform_settings row is missing — the AddPlatformSettings1782800790000 migration has not run',
       );
+      throw new ServiceUnavailableException('Service temporarily unavailable');
     }
     this.cached = row;
     this.cachedAt = Date.now();

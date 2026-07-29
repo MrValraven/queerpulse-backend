@@ -2,6 +2,11 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import {
+  AdminFinanceResponseDTO,
+  toAdminFinanceHistory,
+  toAdminFinanceLatest,
+} from './admin-finance-response';
+import {
   GovernanceFinanceResponseDTO,
   toGovernanceFinanceResponse,
 } from './governance-finance-response';
@@ -38,5 +43,23 @@ export class GovernanceFinanceService {
       throw new NotFoundException('Governance finance report not found');
     }
     return toGovernanceFinanceResponse(report);
+  }
+
+  // Admin governance Finances tab: the latest quarter's full metrics + ledgers
+  // plus a historical series (all published quarters, oldest first) for the
+  // trend chart. Unlike `getFinances`, this never 404s — an empty table simply
+  // renders an empty state on the admin tab.
+  async getAdminFinances(): Promise<AdminFinanceResponseDTO> {
+    const reports = await this.reports.find({ order: { publishedAt: 'DESC' } });
+    if (reports.length === 0) return { latest: null, history: [] };
+    // invariant: length > 0 checked above, so index 0 exists.
+    const latestReport = reports[0]!;
+    const historyAscending = [...reports].sort((firstReport, secondReport) =>
+      firstReport.quarter.localeCompare(secondReport.quarter),
+    );
+    return {
+      latest: toAdminFinanceLatest(latestReport),
+      history: toAdminFinanceHistory(historyAscending),
+    };
   }
 }

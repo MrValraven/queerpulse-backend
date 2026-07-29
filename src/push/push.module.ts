@@ -11,7 +11,11 @@ import { PushSubscription } from './entities/push-subscription.entity';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([PushSubscription, ConversationParticipant, Conversation]),
+    TypeOrmModule.forFeature([
+      PushSubscription,
+      ConversationParticipant,
+      Conversation,
+    ]),
     UsersModule, // provides UsersService + Profile repo (re-exported TypeOrmModule)
     ChatModule, // provides PresenceService
   ],

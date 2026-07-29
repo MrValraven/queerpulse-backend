@@ -2,6 +2,7 @@ import { INestApplication } from '@nestjs/common';
 import { ExecutionContext } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import request from 'supertest';
+import { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { GoogleAuthGuard } from '../src/auth/guards/google-auth.guard';
@@ -15,7 +16,11 @@ import { encodeOAuthState } from '../src/auth/oauth-state';
 // so the test exercises controller → service → DB without touching Google.
 const stubGuard = {
   canActivate: (ctx: ExecutionContext) => {
-    const req = ctx.switchToHttp().getRequest();
+    const req = ctx.switchToHttp().getRequest<{
+      headers: Record<string, string | undefined>;
+      user?: unknown;
+      query: Record<string, unknown>;
+    }>();
     const raw = req.headers['x-google-profile'];
     if (raw) req.user = JSON.parse(raw);
     const state = req.headers['x-invite-state'];
@@ -70,7 +75,7 @@ describe('Invite-gated Google sign-in (e2e)', () => {
   // Scenario 1: unknown email, no invite → 302 + error=invite_required, no row
   // -------------------------------------------------------------------------
   it('rejects an unknown email with no invite: redirect + no user row', async () => {
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/auth/google/callback')
       .set('x-google-profile', profile());
 
@@ -107,7 +112,7 @@ describe('Invite-gated Google sign-in (e2e)', () => {
       }),
     );
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/auth/google/callback')
       .set('x-google-profile', profile())
       .set('x-invite-state', 'GOODCODE');
@@ -147,7 +152,7 @@ describe('Invite-gated Google sign-in (e2e)', () => {
       }),
     );
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/auth/google/callback')
       .set(
         'x-google-profile',
@@ -172,7 +177,7 @@ describe('Invite-gated Google sign-in (e2e)', () => {
       }),
     );
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/auth/google/callback')
       .set(
         'x-google-profile',
@@ -198,7 +203,7 @@ describe('Invite-gated Google sign-in (e2e)', () => {
       }),
     );
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/auth/google/callback')
       .set(
         'x-google-profile',
@@ -237,7 +242,7 @@ describe('Invite-gated Google sign-in (e2e)', () => {
       }),
     );
 
-    const res = await request(app.getHttpServer())
+    const res = await request(app.getHttpServer() as App)
       .get('/auth/google/callback')
       .set('x-google-profile', profile())
       .set('x-invite-state', 'EXPIRED');

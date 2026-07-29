@@ -26,8 +26,8 @@ describe('PlatformSettingsService', () => {
   let changesRepo: jest.Mocked<Pick<Repository<PlatformSettingChange>, 'find'>>;
   let manager: {
     findOneOrFail: jest.Mock;
-    create: jest.Mock;
-    save: jest.Mock;
+    create: jest.Mock<unknown, [unknown, unknown]>;
+    save: jest.Mock<unknown, [unknown]>;
   };
   let dataSource: { transaction: jest.Mock };
   let events: { emit: jest.Mock };
@@ -41,8 +41,8 @@ describe('PlatformSettingsService', () => {
     changesRepo = { find: jest.fn() };
     manager = {
       findOneOrFail: jest.fn(),
-      create: jest.fn((_entity, data) => data),
-      save: jest.fn((arg) => arg),
+      create: jest.fn((_entity: unknown, data: unknown) => data),
+      save: jest.fn((arg: unknown) => arg),
     };
     dataSource = {
       transaction: jest.fn((cb: (m: unknown) => unknown) => cb(manager)),
@@ -298,7 +298,7 @@ describe('PlatformSettingsService', () => {
 
         const rows = auditRowsFrom();
         expect(rows).toHaveLength(1);
-        expect(rows![0].newValue).toBeNull();
+        expect(rows?.[0]?.newValue).toBeNull();
         const savedRow = manager.save.mock.calls
           .map(([arg]) => arg)
           .find((arg) => !Array.isArray(arg)) as PlatformSettings;

@@ -55,7 +55,15 @@ describe('VouchService', () => {
       count: jest.fn().mockResolvedValue(0),
     };
     dataSource = {
-      transaction: jest.fn().mockImplementation(async (cb) => cb(manager)),
+      transaction: jest
+        .fn()
+        .mockImplementation(
+          (
+            runInTransaction: (
+              entityManager: typeof manager,
+            ) => Promise<unknown>,
+          ) => runInTransaction(manager),
+        ),
     };
     emitter = { emit: jest.fn() };
     const module: TestingModule = await Test.createTestingModule({
@@ -235,7 +243,7 @@ describe('VouchService', () => {
       });
       expect(vouches.update).toHaveBeenCalledWith(
         { id: 'v1' },
-        expect.objectContaining({ withdrawnAt: expect.any(Date) }),
+        expect.objectContaining({ withdrawnAt: expect.any(Date) as unknown }),
       );
     });
 
@@ -256,12 +264,16 @@ describe('VouchService', () => {
       await service.listVouchers('target');
       expect(vouches.count).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: expect.objectContaining({ withdrawnAt: expect.anything() }),
+          where: expect.objectContaining({
+            withdrawnAt: expect.anything() as unknown,
+          }) as unknown,
         }),
       );
       expect(vouches.find).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: expect.objectContaining({ withdrawnAt: expect.anything() }),
+          where: expect.objectContaining({
+            withdrawnAt: expect.anything() as unknown,
+          }) as unknown,
         }),
       );
     });
@@ -360,7 +372,7 @@ describe('VouchService', () => {
           skip: 0,
         }),
       );
-      expect(res[0].slug).toBe('wren');
+      expect(res[0]!.slug).toBe('wren');
     });
   });
 
@@ -373,7 +385,11 @@ describe('VouchService', () => {
         { voucherId: 'b', voucheeId: 'me', anonymous: true },
         { voucherId: 'c', voucheeId: 'me', anonymous: false },
       ]);
-      const directions = await service.getVouchDirections('me', ['a', 'b', 'c']);
+      const directions = await service.getVouchDirections('me', [
+        'a',
+        'b',
+        'c',
+      ]);
       expect([...directions.youVouched]).toEqual(['a']);
       // `b` is shielded; only the non-anonymous `c` is revealed.
       expect(directions.vouchedForYou.has('b')).toBe(false);

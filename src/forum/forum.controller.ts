@@ -25,8 +25,11 @@ import { UpdateThreadDto } from './dto/update-thread.dto';
 import { VotePostDto } from './dto/vote-post.dto';
 import { ForumPostsService } from './forum-posts.service';
 import { ForumThreadsService } from './forum-threads.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 @Feature('forum')
+@ApiTags('Forum')
+@ApiCookieAuth()
 @Controller('forum')
 @UseGuards(ActiveMemberGuard)
 export class ForumController {

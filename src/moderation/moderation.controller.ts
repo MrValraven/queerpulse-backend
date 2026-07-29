@@ -5,7 +5,6 @@ import {
   Param,
   ParseUUIDPipe,
   Patch,
-  Post,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -17,6 +16,7 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
+import { AuditFeedQuery } from './dto/audit-feed.query';
 import { AuditLogQuery } from './dto/audit-log.query';
 import { LiftSuspensionDto } from './dto/lift-suspension.dto';
 import { ListModReportsQuery } from './dto/list-mod-reports.query';
@@ -24,9 +24,12 @@ import { ModActionDto } from './dto/mod-action.dto';
 import { ModBulkActionDto } from './dto/mod-bulk-action.dto';
 import { ReviewAppealDto } from './dto/review-appeal.dto';
 import { ModerationService } from './moderation.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 // Moderator/admin only. Frontend contract:
 // `queerpulse/src/features/admin/api/moderation.api.ts`.
+@ApiTags('Admin — Moderation')
+@ApiCookieAuth()
 @Controller('mod')
 @UseGuards(ActiveMemberGuard, RolesGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)
@@ -51,6 +54,29 @@ export class ModerationController {
     return this.moderationService.getById(id);
   }
 
+  // Global, cross-report moderation audit feed for the admin governance
+  // "Audit" tab — a distinct static path from `reports/audit` above (that one
+  // is scoped to a single report via `?reportId=`), so there is no routing
+  // conflict between the two.
+  @Get('audit')
+  auditFeed(@Query() query: AuditFeedQuery) {
+    return this.moderationService.auditFeed(query);
+  }
+
+  // PATCH (not POST): this updates existing report resources. API CONTRACT
+  // CHANGE — the frontend must call PATCH /mod/reports/bulk (was POST).
+  //
+  // This literal route MUST be declared before `reports/:id` below: both are
+  // now @Patch, so with `:id` first a PATCH to `/mod/reports/bulk` would match
+  // `reports/:id` with id="bulk" and fail the ParseUUIDPipe.
+  @Patch('reports/bulk')
+  bulkUpdateReports(
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: ModBulkActionDto,
+  ) {
+    return this.moderationService.bulkActOnReports(user.userId, dto);
+  }
+
   @Patch('reports/:id')
   updateReport(
     @CurrentUser() user: CurrentUserData,
@@ -58,14 +84,6 @@ export class ModerationController {
     @Body() dto: ModActionDto,
   ) {
     return this.moderationService.actOnReport(id, user.userId, dto);
-  }
-
-  @Post('reports/bulk')
-  bulkUpdateReports(
-    @CurrentUser() user: CurrentUserData,
-    @Body() dto: ModBulkActionDto,
-  ) {
-    return this.moderationService.bulkActOnReports(user.userId, dto);
   }
 
   // Lift a suspension or ban. Without this a `ban` would be irreversible

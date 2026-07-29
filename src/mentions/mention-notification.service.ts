@@ -53,42 +53,79 @@ export class MentionNotificationService {
           groups.push({ kind: 'member', ref: slug, recipients: [userId] });
         }
       }
-      for (const slug of mentions.communities) {
-        const community = await this.communities.findOne({ where: { slug } });
-        if (!community) continue;
-        const staff = await this.members.find({
-          where: {
-            communityId: community.id,
-            role: In([RosterRole.Owner, RosterRole.Mod]),
-          },
+      if (mentions.communities.length) {
+        const communityRows = await this.communities.find({
+          where: { slug: In(mentions.communities) },
         });
-        const recipients = Array.from(
-          new Set([community.ownerId, ...staff.map((member) => member.userId)]),
+        const communityBySlug = new Map(
+          communityRows.map((community) => [community.slug, community]),
         );
-        groups.push({ kind: 'community', ref: slug, recipients });
+        const staffRows = communityRows.length
+          ? await this.members.find({
+              where: {
+                communityId: In(communityRows.map((community) => community.id)),
+                role: In([RosterRole.Owner, RosterRole.Mod]),
+              },
+            })
+          : [];
+        const staffByCommunityId = new Map<string, string[]>();
+        for (const staff of staffRows) {
+          const userIds = staffByCommunityId.get(staff.communityId) ?? [];
+          userIds.push(staff.userId);
+          staffByCommunityId.set(staff.communityId, userIds);
+        }
+        // Iterate in mention order (not DB order) so cross-mention priority
+        // stays deterministic.
+        for (const slug of mentions.communities) {
+          const community = communityBySlug.get(slug);
+          if (!community) continue;
+          const recipients = Array.from(
+            new Set([
+              community.ownerId,
+              ...(staffByCommunityId.get(community.id) ?? []),
+            ]),
+          );
+          groups.push({ kind: 'community', ref: slug, recipients });
+        }
       }
-      for (const slug of mentions.businesses) {
-        const listing = await this.listings.findOne({ where: { slug } });
-        if (!listing) continue;
-        groups.push({
-          kind: 'business',
-          ref: slug,
-          recipients: [listing.ownerId],
+      if (mentions.businesses.length) {
+        const listingRows = await this.listings.find({
+          where: { slug: In(mentions.businesses) },
         });
+        const ownerBySlug = new Map(
+          listingRows.map((listing) => [listing.slug, listing.ownerId]),
+        );
+        for (const slug of mentions.businesses) {
+          const ownerId = ownerBySlug.get(slug);
+          if (ownerId === undefined) continue;
+          groups.push({ kind: 'business', ref: slug, recipients: [ownerId] });
+        }
       }
-      for (const slug of mentions.events) {
-        const event = await this.events.findOne({ where: { slug } });
-        if (!event) continue;
-        groups.push({ kind: 'event', ref: slug, recipients: [event.hostId] });
-      }
-      for (const slug of mentions.threads) {
-        const thread = await this.threads.findOne({ where: { slug } });
-        if (!thread) continue;
-        groups.push({
-          kind: 'thread',
-          ref: slug,
-          recipients: [thread.authorId],
+      if (mentions.events.length) {
+        const eventRows = await this.events.find({
+          where: { slug: In(mentions.events) },
         });
+        const hostBySlug = new Map(
+          eventRows.map((event) => [event.slug, event.hostId]),
+        );
+        for (const slug of mentions.events) {
+          const hostId = hostBySlug.get(slug);
+          if (hostId === undefined) continue;
+          groups.push({ kind: 'event', ref: slug, recipients: [hostId] });
+        }
+      }
+      if (mentions.threads.length) {
+        const threadRows = await this.threads.find({
+          where: { slug: In(mentions.threads) },
+        });
+        const authorBySlug = new Map(
+          threadRows.map((thread) => [thread.slug, thread.authorId]),
+        );
+        for (const slug of mentions.threads) {
+          const authorId = authorBySlug.get(slug);
+          if (authorId === undefined) continue;
+          groups.push({ kind: 'thread', ref: slug, recipients: [authorId] });
+        }
       }
 
       // One notification per recipient per post: the first (highest-priority)

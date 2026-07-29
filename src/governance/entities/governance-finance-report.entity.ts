@@ -70,6 +70,20 @@ export interface FinancePartner {
 }
 
 /**
+ * Postgres `numeric` columns round-trip as strings through `pg` by default
+ * (arbitrary precision, so the driver never silently narrows them) — this
+ * transformer keeps the metric columns below as `number | null` on the
+ * entity, matching the same pattern used by `Job`'s and `Workshop`'s
+ * `numericTransformer` (kept file-local rather than shared, per those
+ * entities' own precedent).
+ */
+const numericTransformer = {
+  to: (value: number | null | undefined): number | null => value ?? null,
+  from: (value: string | null): number | null =>
+    value === null ? null : Number(value),
+};
+
+/**
  * A published quarterly financial-transparency snapshot — backs
  * `GET /governance/finances` (see `src/governance/`), read by
  * `GovernanceFinance.tsx` / `GovernanceSections.tsx`'s `FinancesSection`.
@@ -115,6 +129,51 @@ export class GovernanceFinanceReport {
 
   @Column({ type: 'jsonb', nullable: true })
   partners: FinancePartner[] | null;
+
+  // Numeric per-quarter totals + MRR figures backing the admin governance
+  // Finances tab (`/admin/governance` → Finances). Nullable — added after the
+  // initial table, alongside `reserve`/`partners`, and not yet backfilled for
+  // every historical quarter.
+  @Column({
+    type: 'numeric',
+    name: 'income_total',
+    nullable: true,
+    transformer: numericTransformer,
+  })
+  incomeTotal: number | null;
+
+  @Column({
+    type: 'numeric',
+    name: 'expense_total',
+    nullable: true,
+    transformer: numericTransformer,
+  })
+  expenseTotal: number | null;
+
+  @Column({
+    type: 'numeric',
+    nullable: true,
+    transformer: numericTransformer,
+  })
+  surplus: number | null;
+
+  @Column({
+    type: 'numeric',
+    nullable: true,
+    transformer: numericTransformer,
+  })
+  mrr: number | null;
+
+  @Column({ type: 'int', name: 'sustainer_count', nullable: true })
+  sustainerCount: number | null;
+
+  @Column({
+    type: 'numeric',
+    name: 'solidarity_rate',
+    nullable: true,
+    transformer: numericTransformer,
+  })
+  solidarityRate: number | null;
 
   @Column({ type: 'timestamptz', name: 'published_at' })
   publishedAt: Date;

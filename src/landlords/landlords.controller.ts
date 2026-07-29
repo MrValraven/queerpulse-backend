@@ -18,6 +18,7 @@ import { CreateIntroRequestDto } from './dto/create-intro-request.dto';
 import { CreateLandlordDto } from './dto/create-landlord.dto';
 import { CreateRecommendationDto } from './dto/create-recommendation.dto';
 import { LandlordsService } from './landlords.service';
+import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
  * Member-facing community landlord directory. Browse/detail are member-only
@@ -25,6 +26,8 @@ import { LandlordsService } from './landlords.service';
  * `GET /:slug` is 1-segment; the `POST /:slug/*` routes differ by verb + depth.
  */
 @Feature('landlords')
+@ApiTags('Landlords')
+@ApiCookieAuth()
 @Controller('landlords')
 @UseGuards(ActiveMemberGuard)
 export class LandlordsController {

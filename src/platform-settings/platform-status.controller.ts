@@ -2,6 +2,7 @@ import { Controller, Get } from '@nestjs/common';
 import { Public } from '../auth/decorators/public.decorator';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 import { PlatformSettingsService } from './platform-settings.service';
+import { ApiTags } from '@nestjs/swagger';
 
 /** The public projection. Deliberately narrower than the entity. */
 export interface PlatformStatusView {
@@ -26,6 +27,7 @@ export interface PlatformStatusView {
  */
 @Public()
 @LockdownExempt()
+@ApiTags('Platform Status')
 @Controller('platform-status')
 export class PlatformStatusController {
   constructor(private readonly settings: PlatformSettingsService) {}

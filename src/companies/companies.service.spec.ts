@@ -175,7 +175,7 @@ describe('CompaniesService', () => {
         createdAt: new Date('2026-01-01T00:00:00.000Z'),
       }));
       const qb = qbStub();
-      qb.getMany.mockResolvedValue([
+      qb.getMany!.mockResolvedValue([
         { slug: 'jo', userId: 'teammate-1' },
         { slug: 'owner-slug', userId: 'owner-1' }, // resolves to the owner -> deduped
       ]);
@@ -222,7 +222,7 @@ describe('CompaniesService', () => {
         createdAt: new Date('2026-01-01T00:00:00.000Z'),
       });
       const qb = qbStub();
-      qb.getRawMany.mockResolvedValue([
+      qb.getRawMany!.mockResolvedValue([
         { companyId: 'co-1', stars: 5 },
         { companyId: 'co-1', stars: 5 },
         { companyId: 'co-1', stars: 3 },

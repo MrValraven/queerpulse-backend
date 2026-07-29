@@ -1,6 +1,7 @@
 import { MentionNotificationService } from './mention-notification.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { RosterRole } from '../communities/entities/community-member.entity';
+import { MemberLookup } from '../common/member-ref';
 
 // Minimal fake repositories; only the paths exercised below are stubbed.
 // Member-slug resolution goes through `MemberLookup` (constructed fresh
@@ -18,10 +19,7 @@ function build() {
     createForRecipients: jest.fn().mockResolvedValue(undefined),
   };
   const userIdsForSlugs = jest
-    .spyOn(
-      require('../common/member-ref').MemberLookup.prototype,
-      'userIdsForSlugs',
-    )
+    .spyOn(MemberLookup.prototype, 'userIdsForSlugs')
     .mockResolvedValue(new Map());
 
   const service = new MentionNotificationService(
@@ -83,8 +81,13 @@ describe('MentionNotificationService.notify', () => {
     await service.notify('shoutout to c/pride', 'author-1', payloadBase);
 
     expect(notifications.createForRecipients).toHaveBeenCalledTimes(1);
-    const [recipients, type, payload, actorId] =
-      notifications.createForRecipients.mock.calls[0];
+    const [recipients, type, payload, actorId] = notifications
+      .createForRecipients.mock.calls[0] as [
+      string[],
+      NotificationType,
+      Record<string, unknown>,
+      string | undefined,
+    ];
     expect(new Set(recipients)).toEqual(new Set(['owner-1', 'mod-1']));
     expect(type).toBe(NotificationType.Mention);
     expect(payload).toEqual({
@@ -126,8 +129,13 @@ describe('MentionNotificationService.notify', () => {
     );
 
     expect(notifications.createForRecipients).toHaveBeenCalledTimes(1);
-    const [recipients, , payload] =
-      notifications.createForRecipients.mock.calls[0];
+    const [recipients, , payload] = notifications.createForRecipients.mock
+      .calls[0] as [
+      string[],
+      NotificationType,
+      Record<string, unknown>,
+      string | undefined,
+    ];
     expect(recipients).toEqual(['user-x']);
     expect(payload).toMatchObject({ entityKind: 'member' });
   });
