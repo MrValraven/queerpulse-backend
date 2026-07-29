@@ -62,6 +62,20 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 export class AddFeedCursorIndexes1785001500000 implements MigrationInterface {
   name = 'AddFeedCursorIndexes1785001500000';
 
+  // `CREATE INDEX CONCURRENTLY` cannot run inside a transaction block, so this
+  // migration opts out of the per-migration transaction. Only honored under
+  // `migrationsTransactionMode: 'each'` (set in data-source.ts) — under the
+  // default `all` mode TypeORM rejects this override outright.
+  //
+  // Because there is no transaction, an interrupted build is not rolled back and
+  // leaves an INVALID index behind. Re-runnability is handled OUT of band by the
+  // deploy preflight (`scripts/migration-preflight.mjs`), which drops invalid
+  // indexes before migrations run — NOT by `IF NOT EXISTS` guards here, which
+  // this repo forbids (they hide schema drift; see CLAUDE.md). A valid index
+  // that somehow exists without a ledger row will fail loudly with "already
+  // exists" on retry, which is the intended, diagnosable outcome.
+  transaction = false as const;
+
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(
       `CREATE INDEX CONCURRENTLY "IDX_community_posts_created_at_id" ` +

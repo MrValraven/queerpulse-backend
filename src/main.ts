@@ -12,6 +12,7 @@ import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
+import { VALIDATION_PIPE_OPTIONS } from './common/validation-pipe.options';
 import { DEFAULT_FRONTEND_ORIGIN } from './config/frontend-origins';
 
 // How long to let Sentry drain its buffer on shutdown before giving up.
@@ -74,11 +75,9 @@ async function bootstrap() {
   });
 
   app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      forbidNonWhitelisted: true,
-      transform: true,
-    }),
+    // See VALIDATION_PIPE_OPTIONS — `exposeUnsetFields: false` is load-bearing
+    // (a partial-update DTO must not clobber hydrated columns with `undefined`).
+    new ValidationPipe(VALIDATION_PIPE_OPTIONS),
   );
 
   // URI-based API versioning: every route answers at `/v1/...` by default. This

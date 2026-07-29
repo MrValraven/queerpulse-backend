@@ -18,6 +18,7 @@ function makeEvent(overrides: Partial<MessageView> = {}): MessageCreatedEvent {
     forwarded: false,
     kind: MessageKind.User,
     systemEvent: null,
+    attachment: null,
     ...overrides,
   };
   return {
@@ -45,6 +46,7 @@ function makeEvent(overrides: Partial<MessageView> = {}): MessageCreatedEvent {
       replyTo: null,
       kind: 'user',
       systemEvent: null,
+      attachment: null,
     },
   };
 }

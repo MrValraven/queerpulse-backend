@@ -221,11 +221,12 @@ pnpm run test:e2e
 
 ## Deployment
 
-Order matters: **build → migrate → apply bucket CORS → start**.
+Order matters: **build → preflight → migrate → apply bucket CORS → start**.
 
 ```bash
 pnpm install --frozen-lockfile
 pnpm run build
+pnpm run migration:preflight       # drop leftover INVALID indexes (see below)
 pnpm run migration:run:prod        # apply migrations against the target DB
 pnpm run storage:cors              # apply the bucket's browser-CORS policy
 pnpm run start:prod                # node dist/main
@@ -233,6 +234,21 @@ pnpm run start:prod                # node dist/main
 
 Run `migration:run:prod` as a discrete step before rolling out new app
 instances so the schema is in place before any new code serves traffic.
+
+`migration:preflight` guards the index migrations that build with `CREATE INDEX
+CONCURRENTLY`. Those run **outside a transaction** (`data-source.ts` sets
+`migrationsTransactionMode: 'each'`, and each such migration declares
+`transaction = false`), because Postgres forbids `CONCURRENTLY` inside a
+transaction block. The cost of running without a transaction is that an
+interrupted build — killed deploy, dropped connection, statement timeout —
+leaves an *invalid* index behind that is not recorded in the migrations ledger,
+so the retry's `CREATE INDEX CONCURRENTLY` collides with the leftover name and
+fails "already exists". The preflight drops any invalid index first so the retry
+rebuilds cleanly. It's a no-op on a healthy database (valid indexes are never
+touched) and idempotent, so it's safe to leave in the deploy chain unconditionally
+— it also skips cleanly when `DATABASE_URL` is unset. Note these migrations do
+**not** use `IF NOT EXISTS` to self-heal; per the migrations note above, that
+would hide genuine schema drift, so recovery lives in the preflight instead.
 
 `storage:cors` applies the object-storage bucket's CORS policy (so the browser
 can PUT directly to presigned upload URLs). It's a provisioning step, not app
@@ -258,7 +274,8 @@ Or build just the image (multi-stage; runs `node dist/main`):
 ```bash
 docker build -t queerpulse-backend .
 docker run --rm -p 3000:3000 --env-file .env queerpulse-backend
-# migrate + apply CORS first:
+# preflight + migrate + apply CORS first:
+#   docker run --rm --env-file .env queerpulse-backend npm run migration:preflight
 #   docker run --rm --env-file .env queerpulse-backend npm run migration:run:prod
 #   docker run --rm --env-file .env queerpulse-backend npm run storage:cors
 ```

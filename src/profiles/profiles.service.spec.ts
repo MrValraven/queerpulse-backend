@@ -1,7 +1,10 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { plainToInstance } from 'class-transformer';
 import { DataSource } from 'typeorm';
+import { VALIDATION_PIPE_OPTIONS } from '../common/validation-pipe.options';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 import {
   resetImageUrlBaseForTesting,
   setImageUrlBase,
@@ -288,6 +291,44 @@ describe('ProfilesService.getBySlug visibility', () => {
     await service.updateMe('owner-1', { tagline: 'new tagline' });
 
     expect(p.now).toBe('old status');
+  });
+
+  // Regression: onboarding sends ONLY `lookingFor`. Run that body through the
+  // real production transform (the global ValidationPipe's options) so the DTO
+  // updateMe receives is byte-for-byte what the controller gets — then feed it
+  // in. Before `exposeUnsetFields: false`, class-transformer materialised every
+  // omitted field as an own `undefined` key, `Object.assign(profile, rest)`
+  // clobbered the hydrated `tags: []` with `undefined`, and buildFullProfile ->
+  // loadRelated threw "Cannot read properties of undefined (reading 'length')".
+  it('updateMe does not clobber untouched columns when a partial DTO is sent through the real transform', async () => {
+    // The transformed DTO must not carry omitted fields at all — this is the
+    // exact behaviour the fix depends on, asserted up front for a clear signal.
+    const dto = plainToInstance(
+      UpdateProfileDto,
+      { lookingFor: ['Community'] },
+      VALIDATION_PIPE_OPTIONS.transformOptions,
+    );
+    expect(Object.prototype.hasOwnProperty.call(dto, 'tags')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(dto, 'location')).toBe(false);
+
+    const p = profile({
+      tags: ['queer', 'lisbon'],
+      location: 'Lisbon',
+      lookingFor: [],
+      visibility: ProfileVisibility.Open,
+    });
+    profiles.findOne.mockResolvedValue(p);
+    (profiles as unknown as { save: jest.Mock }).save = jest
+      .fn()
+      .mockResolvedValue(p);
+
+    // Must not throw, and must apply lookingFor while leaving tags/location intact.
+    const res = await service.updateMe('owner-1', dto);
+
+    expect(p.tags).toEqual(['queer', 'lisbon']);
+    expect(p.location).toBe('Lisbon');
+    expect(p.lookingFor).toEqual(['Community']);
+    expect(res.limited).toBe(false);
   });
 
   it('updateMe replaces openTo wholesale and keeps custom labels verbatim', async () => {

@@ -29,6 +29,12 @@ export class AddListingsStatusIndex1785001700000
 {
   name = 'AddListingsStatusIndex1785001700000';
 
+  // Runs outside a transaction for `CREATE INDEX CONCURRENTLY`; requires
+  // `migrationsTransactionMode: 'each'` (data-source.ts). Re-runnability comes
+  // from the deploy preflight dropping invalid indexes, not `IF NOT EXISTS`
+  // (forbidden here — hides drift). See 1785001500000.
+  transaction = false as const;
+
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(
       `CREATE INDEX CONCURRENTLY "IDX_listings_status" ON "listings" ("status")`,

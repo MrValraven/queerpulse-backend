@@ -46,10 +46,16 @@ COPY --chown=node:node scripts ./scripts
 USER node
 EXPOSE 3000
 
-# Deploy order is migrate -> apply-bucket-CORS -> start. Run the out-of-band
-# steps before rollout (both are idempotent):
+# Deploy order is preflight -> migrate -> apply-bucket-CORS -> start. Run the
+# out-of-band steps before rollout (all idempotent):
+#   docker run ... npm run migration:preflight   # drop leftover INVALID indexes
 #   docker run ... npm run migration:run:prod
 #   docker run ... npm run storage:cors
-# then start the server (this default CMD). See README "Deployment".
+# then start the server (this default CMD). The preflight guards the CONCURRENTLY
+# index migrations (transaction=false): an interrupted CONCURRENTLY build leaves
+# an invalid, unrecorded index whose name then collides with the retry's rebuild
+# ("already exists"); the preflight drops it so the retry succeeds. These
+# migrations avoid `IF NOT EXISTS` on purpose (it hides drift — see CLAUDE.md).
+# See README "Deployment".
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "dist/main"]

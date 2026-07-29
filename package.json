@@ -33,6 +33,7 @@
     "migration:run": "pnpm run typeorm migration:run",
     "migration:revert": "pnpm run typeorm migration:revert",
     "migration:create": "typeorm-ts-node-commonjs migration:create",
+    "migration:preflight": "node scripts/migration-preflight.mjs",
     "migration:run:prod": "typeorm -d dist/data-source.js migration:run",
     "migration:revert:prod": "typeorm -d dist/data-source.js migration:revert",
     "storage:cors": "node scripts/set-bucket-cors.mjs",

@@ -18,6 +18,17 @@ export default new DataSource({
   migrations: [join(__dirname, 'migrations', `*.${ext}`)],
   namingStrategy: new SnakeNamingStrategy(),
   synchronize: false,
+  // Run each pending migration in its own transaction instead of TypeORM's
+  // default single all-or-nothing transaction. Required because some migrations
+  // create indexes with `CREATE INDEX CONCURRENTLY`, which Postgres forbids
+  // inside ANY transaction block (error 25001). Under the default `all` mode,
+  // TypeORM wraps the whole batch in one transaction AND rejects any migration
+  // that sets `transaction = false` (ForbiddenTransactionModeOverrideError), so
+  // `each` is the only mode where a CONCURRENTLY migration can opt out of the
+  // transaction per-migration (see those migrations' `transaction = false`).
+  // Trade-off: a batch is no longer atomic across migrations — each commits
+  // independently, so a mid-batch failure leaves earlier migrations applied.
+  migrationsTransactionMode: 'each',
   // Shared with DatabaseModule — the CLI and the app MUST negotiate TLS
   // identically, or `migration:run:prod` succeeds against a connection the app
   // then cannot open. See src/config/database-ssl.ts.
