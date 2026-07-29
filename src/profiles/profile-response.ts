@@ -1,6 +1,7 @@
 import { toImageUrl } from '../common/image-url';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { directoryBlurb } from './directory-blurb';
+import { FeaturedCommunityRefView } from './featured-communities';
 import { Activity } from './entities/activity.entity';
 import { BoardPost } from './entities/board-post.entity';
 import { Shaping, ShapingKind } from './entities/shaping.entity';
@@ -71,6 +72,7 @@ export interface ProfileRelations {
   shapings: Shaping[];
   activity: Activity[];
   related: ProfileCard[];
+  featuredCommunities: FeaturedCommunityRefView[];
 }
 
 export interface FullProfileResponse extends ProfileCard {
@@ -98,6 +100,10 @@ export interface FullProfileResponse extends ProfileCard {
   shapings: ShapingView[];
   activity: ActivityView[];
   related: ProfileCard[];
+  // Communities the member has pinned to their profile, resolved for display.
+  // Visible to anyone who can see the full profile (self/open/connected), like
+  // the other public sections; empty on the limited card.
+  featuredCommunities: FeaturedCommunityRefView[];
   limited: false;
 }
 
@@ -113,6 +119,7 @@ export interface LimitedProfileResponse extends ProfileCard {
   shapings: [];
   activity: [];
   related: [];
+  featuredCommunities: [];
   limited: true;
 }
 
@@ -229,6 +236,7 @@ export function toFullProfile(
       to: a.toLink,
     })),
     related: rels.related,
+    featuredCommunities: rels.featuredCommunities,
     limited: false,
   };
 }
@@ -250,6 +258,7 @@ export function toLimitedProfile(
     shapings: [],
     activity: [],
     related: [],
+    featuredCommunities: [],
     limited: true,
   };
 }

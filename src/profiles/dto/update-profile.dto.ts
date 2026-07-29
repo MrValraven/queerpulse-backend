@@ -13,6 +13,7 @@ import {
 } from 'class-validator';
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 import { ProfileVisibility } from '../../users/entities/profile.entity';
+import { MAX_FEATURED_COMMUNITIES } from '../featured-communities';
 import { INTEREST_LABELS } from '../identities';
 import {
   MAX_NOW_LENGTH,
@@ -113,4 +114,17 @@ export class UpdateProfileDto {
   @IsOptional()
   @IsBoolean()
   privateNetwork?: boolean;
+
+  // Ordered slugs of the communities the member pins to their profile's
+  // "Communities" section — a full REPLACE of the pin set, not a merge, so
+  // `[]` clears it. Each slug must be a NON-PRIVATE community the member is
+  // actually on the roster of; ProfilesService.updateMe rejects anything else
+  // (the frontend picker only offers eligible communities, this is the server
+  // enforcing the same). Capped server-side, mirroring the picker's cap.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(MAX_FEATURED_COMMUNITIES)
+  @IsString({ each: true })
+  @MaxLength(120, { each: true })
+  featuredCommunities?: string[];
 }

@@ -1,18 +1,49 @@
+import { MessageKind } from '../messaging/entities/message.entity';
+import { MessageCreatedEvent } from '../messaging/messaging.events';
+import { MessageView } from '../messaging/message-response';
 import { PushMessageListener } from './push.listener';
 
-function makeEvent(overrides = {}) {
+function makeEvent(overrides: Partial<MessageView> = {}): MessageCreatedEvent {
+  const message: MessageView = {
+    id: 'm1',
+    conversationId: 'conv-1',
+    senderId: 'sender-1',
+    body: 'hey there',
+    createdAt: new Date(),
+    editedAt: null,
+    deletedAt: null,
+    replyToId: null,
+    clientMessageId: null,
+    forwarded: false,
+    kind: MessageKind.User,
+    systemEvent: null,
+    ...overrides,
+  };
   return {
     conversationId: 'conv-1',
-    message: {
-      id: 'm1',
-      conversationId: 'conv-1',
-      senderId: 'sender-1',
-      body: 'hey there',
-      createdAt: new Date(),
+    message,
+    // The push listener only reads `message`, but MessageCreatedEvent now also
+    // carries the hydrated frontend-contract `response` the gateway relays as
+    // `message:new`. Supply a consistent one so the fixture matches the current
+    // event contract.
+    response: {
+      id: message.id,
+      conversationId: message.conversationId,
+      body: message.body,
+      sender: { handle: 'alex', displayName: 'Alex Doe', avatarUrl: null },
+      createdAt: message.createdAt.toISOString(),
       editedAt: null,
+      reactions: [],
       deletedAt: null,
-      replyToId: null,
-      ...overrides,
+      deliveredAt: null,
+      clientMessageId: null,
+      forwarded: false,
+      pinnedAt: null,
+      starred: false,
+      canPin: true,
+      replyTo: null,
+      kind: 'user',
+      systemEvent: null,
     },
   };
 }

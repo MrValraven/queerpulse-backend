@@ -55,7 +55,11 @@ export function parseStorageKey(value: string): UploadKindSpec | null {
   if (!match) {
     return null;
   }
-  return SPECS_BY_PREFIX.get(match[1]) ?? null;
+  const prefix = match[1];
+  if (prefix === undefined) {
+    return null;
+  }
+  return SPECS_BY_PREFIX.get(prefix) ?? null;
 }
 
 /** Whether a stored image value is one of our keys rather than an external URL. */
@@ -78,5 +82,5 @@ export function storageKeyOwnerId(value: string): string | null {
   if (!match) {
     return null;
   }
-  return match[2];
+  return match[2] ?? null;
 }

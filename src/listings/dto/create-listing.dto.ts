@@ -4,6 +4,8 @@ import {
   IsArray,
   IsBoolean,
   IsIn,
+  IsLatitude,
+  IsLongitude,
   IsObject,
   IsOptional,
   IsString,
@@ -114,6 +116,14 @@ export class CreateListingDto {
 
   @IsOptional() @IsString() @MaxLength(300) address?: string;
   @IsOptional() @IsBoolean() geocoded?: boolean;
+
+  @IsOptional()
+  @IsLatitude()
+  latitude?: number;
+
+  @IsOptional()
+  @IsLongitude()
+  longitude?: number;
 
   @IsOptional() @IsObject() hours?: Record<string, unknown>;
 

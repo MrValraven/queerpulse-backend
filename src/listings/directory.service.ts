@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, In, MoreThanOrEqual, Not, Repository } from 'typeorm';
+import { MemberLookup } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import { Event, EventStatus } from '../events/entities/event.entity';
 import { Profile } from '../users/entities/profile.entity';
@@ -94,6 +95,27 @@ export class DirectoryService {
     }
 
     const rows = await qb.orderBy('listing.name', 'ASC').getMany();
+    return rows.map(toDirectoryCard);
+  }
+
+  /**
+   * Every live directory listing owned by one member, addressed by the member's
+   * profile slug — backs the "businesses run by <member>" strip on public
+   * profiles. Returns the SAME redacted `DirectoryCardDTO` shape as the public
+   * grid (never the owner-scoped `ListingDTO`, which carries contact/consent
+   * PII). An unknown or inactive slug simply yields an empty array (200): a
+   * member may run no listings, so this is not a 404 case.
+   */
+  async listByMemberSlug(memberSlug: string): Promise<DirectoryCardDTO[]> {
+    const ownerUserId = await new MemberLookup(this.profiles).userIdForSlug(
+      memberSlug,
+    );
+    if (!ownerUserId) return [];
+
+    const rows = await this.listings.find({
+      where: { ownerId: ownerUserId, status: ListingStatus.Live },
+      order: { createdAt: 'DESC' },
+    });
     return rows.map(toDirectoryCard);
   }
 

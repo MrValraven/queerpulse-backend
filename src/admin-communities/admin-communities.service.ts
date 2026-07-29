@@ -328,7 +328,7 @@ export class AdminCommunitiesService {
       (now.getTime() - activityRow.createdAt.getTime()) / WEEK_MS,
     );
     if (weekIndex < 0 || weekIndex >= SPARKLINE_WEEK_COUNT) return;
-    weeklyActivity[weekIndex] += 1;
+    weeklyActivity[weekIndex] = (weeklyActivity[weekIndex] ?? 0) + 1;
   }
 
   private applyReportTotals(

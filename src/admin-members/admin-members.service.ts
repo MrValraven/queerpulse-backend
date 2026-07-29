@@ -28,6 +28,7 @@ import {
   AdminMemberListDTO,
   FlaggedMemberDTO,
   VouchAvatarDTO,
+  VouchGraphNodeDTO,
 } from './admin-members-response';
 import { ListAdminMembersQuery } from './dto/list-admin-members.query';
 
@@ -260,12 +261,16 @@ export class AdminMembersService {
 
     const [
       vouchCount,
+      outboundVouchCount,
       vouchersReceived,
       memberReports,
       communityRows,
       vouchesGiven,
     ] = await Promise.all([
       this.vouchService.getVouchCount(profile.userId),
+      this.vouches.count({
+        where: { voucherId: profile.userId, withdrawnAt: IsNull() },
+      }),
       this.vouches.find({
         where: { voucheeId: profile.userId, withdrawnAt: IsNull() },
         order: { createdAt: 'DESC' },
@@ -378,17 +383,66 @@ export class AdminMembersService {
         firstEntry.at.getTime() - secondEntry.at.getTime(),
     );
 
-    const graphNodes = vouchersReceived
-      .map((vouch) => voucherRefsByUserId.get(vouch.voucherId))
-      .filter((memberRef): memberRef is MemberRef => memberRef !== undefined)
-      .map((memberRef) =>
-        this.toVouchAvatar(
+    // The trust graph carries BOTH directions: people who vouched for this
+    // member (inbound) and people this member vouched for (outbound). Someone
+    // on both sides collapses to a single `mutual` node. Deduped by slug.
+    const graphNodeBySlug = new Map<string, VouchGraphNodeDTO>();
+    const inboundOnlySlugs: string[] = [];
+    const outboundOnlySlugs: string[] = [];
+
+    for (const vouch of vouchersReceived) {
+      const memberRef = voucherRefsByUserId.get(vouch.voucherId);
+      if (!memberRef || graphNodeBySlug.has(memberRef.slug)) continue;
+      graphNodeBySlug.set(memberRef.slug, {
+        ...this.toVouchAvatar(
           memberRef.firstName,
           memberRef.lastName,
           memberRef.slug,
           memberRef.avatarUrl,
         ),
-      );
+        direction: 'inbound',
+      });
+      inboundOnlySlugs.push(memberRef.slug);
+    }
+
+    for (const vouch of vouchesGiven) {
+      const memberRef = voucheeRefsByUserId.get(vouch.voucheeId);
+      if (!memberRef) continue;
+      const existing = graphNodeBySlug.get(memberRef.slug);
+      if (existing) {
+        // Already inbound → they vouch for each other.
+        existing.direction = 'mutual';
+        continue;
+      }
+      graphNodeBySlug.set(memberRef.slug, {
+        ...this.toVouchAvatar(
+          memberRef.firstName,
+          memberRef.lastName,
+          memberRef.slug,
+          memberRef.avatarUrl,
+        ),
+        direction: 'outbound',
+      });
+      outboundOnlySlugs.push(memberRef.slug);
+    }
+
+    // Order: mutual first (the strongest signal), then round-robin the two
+    // one-way sets so a downstream node cap can never drop a whole direction.
+    const nodeFor = (slug: string) => graphNodeBySlug.get(slug)!;
+    const inboundOnly = inboundOnlySlugs
+      .map(nodeFor)
+      .filter((node) => node.direction === 'inbound');
+    const outboundOnly = outboundOnlySlugs.map(nodeFor);
+    const graphNodes: VouchGraphNodeDTO[] = [
+      ...graphNodeBySlug.values(),
+    ].filter((node) => node.direction === 'mutual');
+    const maxOneWayLength = Math.max(inboundOnly.length, outboundOnly.length);
+    for (let nodeIndex = 0; nodeIndex < maxOneWayLength; nodeIndex += 1) {
+      const inboundNode = inboundOnly[nodeIndex];
+      if (inboundNode) graphNodes.push(inboundNode);
+      const outboundNode = outboundOnly[nodeIndex];
+      if (outboundNode) graphNodes.push(outboundNode);
+    }
 
     return toAdminMemberDetail({
       profile: {
@@ -403,6 +457,7 @@ export class AdminMembersService {
       },
       openReportCount,
       vouchCount,
+      outboundVouchCount,
       communities,
       contributions,
       moderationTimeline,
@@ -590,6 +645,7 @@ export class AdminMembersService {
     for (let rowIndex = 0; rowIndex < userIds.length; rowIndex += 1) {
       const userId = userIds[rowIndex];
       const slug = slugs[rowIndex];
+      if (userId === undefined || slug === undefined) continue;
       openReportCountByUserId.set(
         userId,
         (countBySubjectId.get(userId) ?? 0) + (countBySubjectId.get(slug) ?? 0),

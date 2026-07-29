@@ -210,7 +210,8 @@ export class HousingListingsService {
     const rows = await this.dataSource.query<{ seq: string }[]>(
       "SELECT nextval('housing_listings_ref_seq') AS seq",
     );
-    const seq = Number(rows[0].seq);
+    // invariant: `SELECT nextval(...)` always returns exactly one row.
+    const seq = Number(rows[0]!.seq);
     return `QPH-${year}-${String(seq).padStart(4, '0')}`;
   }
 

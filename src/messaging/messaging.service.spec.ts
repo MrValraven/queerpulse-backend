@@ -13,9 +13,11 @@ import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersService } from '../users/users.service';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
+import { ConversationPinnedMessage } from './entities/conversation-pinned-message.entity';
 import { Conversation } from './entities/conversation.entity';
 import { Message } from './entities/message.entity';
 import { MessageReaction } from './entities/message-reaction.entity';
+import { MessageStar } from './entities/message-star.entity';
 import { MessageCreatedEvent } from './messaging.events';
 import { MessagingService } from './messaging.service';
 
@@ -85,6 +87,8 @@ describe('MessagingService', () => {
     delete: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
+  let pins: { find: jest.Mock; delete: jest.Mock; createQueryBuilder: jest.Mock };
+  let stars: { find: jest.Mock; delete: jest.Mock; createQueryBuilder: jest.Mock };
   let usersService: { findById: jest.Mock };
 
   beforeEach(async () => {
@@ -133,6 +137,25 @@ describe('MessagingService', () => {
         }),
       })),
     };
+    const orIgnoreInsert = {
+      insert: () => ({
+        into: () => ({
+          values: () => ({
+            orIgnore: () => ({ execute: jest.fn().mockResolvedValue({}) }),
+          }),
+        }),
+      }),
+    };
+    pins = {
+      find: jest.fn().mockResolvedValue([]),
+      delete: jest.fn().mockResolvedValue({ affected: 0 }),
+      createQueryBuilder: jest.fn(() => orIgnoreInsert),
+    };
+    stars = {
+      find: jest.fn().mockResolvedValue([]),
+      delete: jest.fn().mockResolvedValue({ affected: 0 }),
+      createQueryBuilder: jest.fn(() => orIgnoreInsert),
+    };
     usersService = { findById: jest.fn().mockResolvedValue(null) };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -145,6 +168,11 @@ describe('MessagingService', () => {
         },
         { provide: getRepositoryToken(Message), useValue: messages },
         { provide: getRepositoryToken(MessageReaction), useValue: reactions },
+        {
+          provide: getRepositoryToken(ConversationPinnedMessage),
+          useValue: pins,
+        },
+        { provide: getRepositoryToken(MessageStar), useValue: stars },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: DataSource, useValue: dataSource },
         { provide: EventEmitter2, useValue: emitter },

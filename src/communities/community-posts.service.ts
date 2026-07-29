@@ -6,10 +6,8 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
-import { extractMentionSlugs } from '../common/mentions';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
-import { NotificationType } from '../notifications/entities/notification.entity';
-import { NotificationsService } from '../notifications/notifications.service';
+import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
@@ -74,7 +72,7 @@ export class CommunityPostsService {
     private readonly postEdits: Repository<CommunityPostEdit>,
     @InjectRepository(CommunityPostReplyEdit)
     private readonly replyEdits: Repository<CommunityPostReplyEdit>,
-    private readonly notifications: NotificationsService,
+    private readonly mentions: MentionNotificationService,
   ) {}
 
   async listPosts(
@@ -121,6 +119,13 @@ export class CommunityPostsService {
         pinned: false,
       }),
     );
+    await this.mentions.notify(dto.body, authorId, {
+      actorId: authorId,
+      source: 'community',
+      communitySlug: slug,
+      postId: saved.id,
+      excerpt: dto.body.slice(0, 140),
+    });
     return this.buildPostDTO(saved, authorId, membership.role);
   }
 
@@ -144,6 +149,10 @@ export class CommunityPostsService {
       post.pinned = dto.pinned;
     }
 
+    // Built if the body actually changes, then persisted alongside the post in
+    // one transaction below — never as a separate write, or a failure would
+    // record a "previous body" for an edit that never landed (phantom revision).
+    let pendingEdit: CommunityPostEdit | null = null;
     if (dto.body !== undefined || dto.kind !== undefined) {
       if (post.deletedAt) {
         throw new NotFoundException('Post not found');
@@ -152,20 +161,23 @@ export class CommunityPostsService {
         throw new ForbiddenException('Only the author can edit this post');
       }
       if (dto.body !== undefined && dto.body !== post.body) {
-        await this.postEdits.save(
-          this.postEdits.create({
-            postId: post.id,
-            previousBody: post.body,
-            editorId: actorId,
-          }),
-        );
+        pendingEdit = this.postEdits.create({
+          postId: post.id,
+          previousBody: post.body,
+          editorId: actorId,
+        });
         post.body = dto.body;
         post.editedAt = new Date();
       }
       if (dto.kind !== undefined) post.kind = dto.kind;
     }
 
-    const saved = await this.posts.save(post);
+    const saved = await this.posts.manager.transaction(async (manager) => {
+      if (pendingEdit) {
+        await manager.save(pendingEdit);
+      }
+      return manager.save(post);
+    });
     return this.buildPostDTO(saved, actorId, membership.role);
   }
 
@@ -419,7 +431,7 @@ export class CommunityPostsService {
     const saved = await this.replies.save(
       this.replies.create({ postId: post.id, authorId: userId, text }),
     );
-    await this.notifyMentions(text, userId, {
+    await this.mentions.notify(text, userId, {
       actorId: userId,
       source: 'community',
       communitySlug: slug,
@@ -472,6 +484,13 @@ export class CommunityPostsService {
         pinned: false,
       }),
     );
+    await this.mentions.notify(dto.body, authorId, {
+      actorId: authorId,
+      source: 'community',
+      postId: saved.id,
+      communitySlug: dto.communitySlug,
+      excerpt: dto.body.slice(0, 140),
+    });
     return { id: saved.id };
   }
 
@@ -532,47 +551,21 @@ export class CommunityPostsService {
     const saved = await this.replies.save(
       this.replies.create({ postId: post.id, authorId: userId, text }),
     );
-    await this.notifyMentions(text, userId, {
+    const community = post.communityId
+      ? await this.communities.findOne({ where: { id: post.communityId } })
+      : null;
+    await this.mentions.notify(text, userId, {
       actorId: userId,
       source: 'community',
       postId: post.id,
       replyId: saved.id,
+      ...(community ? { communitySlug: community.slug } : {}),
       excerpt: text.slice(0, 140),
     });
     return { id: saved.id };
   }
 
   // --- internals ---
-
-  /** Best-effort `@mention` fan-out. Resolves mentioned slugs to active users,
-   *  drops the author, and creates one `mention` notification per recipient
-   *  (block/mute filtering + socket push handled by the notifications service).
-   *  Any failure is swallowed — a mention side effect must never fail a reply. */
-  private async notifyMentions(
-    body: string,
-    authorUserId: string,
-    payload: Record<string, unknown>,
-  ): Promise<void> {
-    try {
-      const slugs = extractMentionSlugs(body);
-      if (!slugs.length) return;
-      const bySlug = await new MemberLookup(this.profiles).userIdsForSlugs(
-        slugs,
-      );
-      const recipients = [...bySlug.values()].filter(
-        (userId) => userId !== authorUserId,
-      );
-      if (!recipients.length) return;
-      await this.notifications.createForRecipients(
-        recipients,
-        NotificationType.Mention,
-        payload,
-        authorUserId,
-      );
-    } catch {
-      // Intentionally ignored — see doc comment.
-    }
-  }
 
   private async loadCommunityOr404(slug: string): Promise<Community> {
     const community = await this.communities.findOne({ where: { slug } });

@@ -1,18 +1,45 @@
-// Mirrors the frontend `parseMentions` grammar for members only: `@slug` at a
-// boundary (string start or after whitespace), slug = lowercase/digit/hyphen.
-// The boundary guard is what stops `me@host.com` counting as a mention.
-const MEMBER_MENTION = /(?:^|\s)@([a-z0-9][a-z0-9-]*)/g;
+export interface ExtractedMentions {
+  members: string[];
+  communities: string[];
+  businesses: string[];
+  events: string[];
+  threads: string[];
+}
 
-/** Member slugs mentioned in a post body, deduped and in first-seen order.
- *  Community (`c/`) tokens are intentionally excluded — a community is not a
- *  person to notify. */
-export function extractMentionSlugs(body: string): string[] {
-  const slugs: string[] = [];
-  for (const match of body.matchAll(MEMBER_MENTION)) {
-    const slug = match[1];
-    if (!slugs.includes(slug)) {
-      slugs.push(slug);
-    }
+// `@slug`, `c/slug`, `b/slug`, `e/slug`, `t/slug` at a boundary (string start or
+// after whitespace). The boundary guard keeps `me@host.com` / `.../c/x` plain.
+// Topics (`#`) are intentionally excluded — a topic has no owner to notify.
+const MENTION_TOKEN = /(?:^|\s)(@|c\/|b\/|e\/|t\/)([a-z0-9][a-z0-9-]*)/g;
+
+const BUCKET_BY_SIGIL: Record<string, keyof ExtractedMentions> = {
+  '@': 'members',
+  'c/': 'communities',
+  'b/': 'businesses',
+  'e/': 'events',
+  't/': 'threads',
+};
+
+export function extractMentions(body: string): ExtractedMentions {
+  const result: ExtractedMentions = {
+    members: [],
+    communities: [],
+    businesses: [],
+    events: [],
+    threads: [],
+  };
+  for (const match of body.matchAll(MENTION_TOKEN)) {
+    const sigil = match[1];
+    const slug = match[2];
+    if (sigil === undefined || slug === undefined) continue;
+    const bucketKey = BUCKET_BY_SIGIL[sigil];
+    if (bucketKey === undefined) continue;
+    const bucket = result[bucketKey];
+    if (!bucket.includes(slug)) bucket.push(slug);
   }
-  return slugs;
+  return result;
+}
+
+/** Member slugs only — back-compat for existing callers/tests. */
+export function extractMentionSlugs(body: string): string[] {
+  return extractMentions(body).members;
 }

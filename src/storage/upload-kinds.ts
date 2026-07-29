@@ -4,7 +4,7 @@
 // (`UPLOAD_LIMITS`) — the frontend only gives instant feedback; this table is
 // the real enforcement.
 export type UploadKind =
-  'avatar' | 'work-image' | 'story-cover' | 'gathering-photo';
+  'avatar' | 'work-image' | 'story-cover' | 'gathering-photo' | 'group-avatar';
 
 export interface UploadKindSpec {
   /** Storage-key prefix the object is namespaced under (then `/<userId>/<uuid>.<ext>`). */
@@ -40,6 +40,19 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
     maxBytes: 5 * MB,
     requiresSession: true,
   },
+  // A group chat's photo. Same size/type constraints as a member `avatar`, and
+  // deliberately `requiresSession: false` for the SAME reason avatars are:
+  // `GET /files/<key>` serves a session-gated kind ONLY to the member who
+  // uploaded it (see `files.controller.ts` — no photo↔resource table to scope
+  // it any wider), which would hide the group photo from every OTHER member.
+  // A group avatar must be visible to the whole group, so it is served like an
+  // avatar. Ownership of the SET action is not weakened by this: the storage
+  // key embeds the uploader's user id, the global StorageKeyOwnershipInterceptor
+  // rejects a PATCH that references someone else's key, and `updateGroup`
+  // re-checks the caller is an owner/admin of the target group before it
+  // persists the key — so a member can never attach a photo to a group they
+  // don't administer.
+  'group-avatar': { prefix: 'group-avatars', maxBytes: 5 * MB, requiresSession: false },
 };
 
 export const UPLOAD_KINDS: readonly UploadKind[] = Object.keys(

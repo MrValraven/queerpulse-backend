@@ -172,6 +172,12 @@ export class Listing {
   @Column({ type: 'boolean', default: false })
   geocoded: boolean;
 
+  @Column({ type: 'double precision', nullable: true })
+  latitude: number | null;
+
+  @Column({ type: 'double precision', nullable: true })
+  longitude: number | null;
+
   @Column({ type: 'jsonb', default: () => "'{}'" })
   hours: Record<string, ListingDayHours>;
 

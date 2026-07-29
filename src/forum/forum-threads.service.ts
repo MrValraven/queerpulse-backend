@@ -11,6 +11,7 @@ import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { CursorPage, cursorPaginate } from '../common/cursor-pagination';
 import { MemberLookup } from '../common/member-ref';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
+import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { ForumPostEdit } from './entities/forum-post-edit.entity';
@@ -40,6 +41,7 @@ export class ForumThreadsService {
     private readonly edits: Repository<ForumPostEdit>,
     private readonly dataSource: DataSource,
     private readonly blockFilter: BlockFilterService,
+    private readonly mentions: MentionNotificationService,
   ) {}
 
   // GET /forum/threads?category=&cursor= — newest-first cursor page.
@@ -98,6 +100,12 @@ export class ForumThreadsService {
     input: CreateThreadInput,
   ): Promise<ForumThreadResponse> {
     const thread = await this.createWithUniqueSlug(authorId, input);
+    await this.mentions.notify(input.body, authorId, {
+      actorId: authorId,
+      source: 'forum',
+      threadSlug: thread.slug,
+      excerpt: input.body.slice(0, 140),
+    });
     const authors = await new MemberLookup(this.profiles).byUserIds([authorId]);
     return toForumThreadResponse(
       thread,
@@ -140,8 +148,16 @@ export class ForumThreadsService {
    * badge depend on.
    */
   async markActivity(threadId: string): Promise<void> {
-    await this.threads.increment({ id: threadId }, 'replyCount', 1);
-    await this.threads.update({ id: threadId }, { lastActivityAt: new Date() });
+    // One transaction so a reply never bumps `replyCount` without also
+    // refreshing `lastActivityAt` (the two fields the sort/badge depend on).
+    await this.dataSource.transaction(async (manager) => {
+      await manager.increment(ForumThread, { id: threadId }, 'replyCount', 1);
+      await manager.update(
+        ForumThread,
+        { id: threadId },
+        { lastActivityAt: new Date() },
+      );
+    });
   }
 
   // PATCH /forum/threads/:slug — author-only title edit. The title lives on the
@@ -161,21 +177,27 @@ export class ForumThreadsService {
       where: { threadId: thread.id },
       order: { createdAt: 'ASC' },
     });
-    if (opPost) {
-      await this.edits.save(
-        this.edits.create({
-          postId: opPost.id,
-          previousBody: opPost.body,
-          previousTitle: thread.title,
-          editorId: user.userId,
-        }),
-      );
-      opPost.editedAt = new Date();
-      await this.posts.save(opPost);
-    }
-
+    // Snapshot the pre-edit title and persist the new one atomically: the edit
+    // record, the OP post's `editedAt`, and the thread's title must all land
+    // together, or a failure leaves a phantom revision for an edit that never
+    // committed. `previousTitle` is captured before mutating `thread.title`.
+    const previousTitle = thread.title;
     thread.title = title;
-    await this.threads.save(thread);
+    await this.dataSource.transaction(async (manager) => {
+      if (opPost) {
+        await manager.save(
+          manager.create(ForumPostEdit, {
+            postId: opPost.id,
+            previousBody: opPost.body,
+            previousTitle,
+            editorId: user.userId,
+          }),
+        );
+        opPost.editedAt = new Date();
+        await manager.save(opPost);
+      }
+      await manager.save(thread);
+    });
 
     const authors = await new MemberLookup(this.profiles).byUserIds([
       thread.authorId,

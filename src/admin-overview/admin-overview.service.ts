@@ -227,7 +227,7 @@ export class AdminOverviewService {
     const emergenciesCount = openReportRows.filter(
       (openReport) => openReport.severity === ReportSeverity.Emergency,
     ).length;
-    const oldestOpenHours = openReportRows.length
+    const oldestOpenHours = openReportRows[0]
       ? (now.getTime() - openReportRows[0].createdAt.getTime()) / HOUR_MS
       : null;
 
@@ -258,7 +258,9 @@ export class AdminOverviewService {
       );
       if (bucketIndex === null) continue;
       const categoryIndex = reasonCodeToCategoryIndex(reportRow.reasonCode);
-      reportsByTypeBuckets[bucketIndex].value[categoryIndex] += 1;
+      const bucket = reportsByTypeBuckets[bucketIndex];
+      if (bucket === undefined) continue;
+      bucket.value[categoryIndex] = (bucket.value[categoryIndex] ?? 0) + 1;
     }
     const reportsByTypeWeeks = reportsByTypeBuckets.map((bucket) => ({
       weekStart: new Date(bucket.weekStartMs).toISOString(),
@@ -278,7 +280,9 @@ export class AdminOverviewService {
         MEMBER_GROWTH_WEEK_COUNT,
       );
       if (bucketIndex === null) continue;
-      memberGrowthBuckets[bucketIndex].value += 1;
+      const bucket = memberGrowthBuckets[bucketIndex];
+      if (bucket === undefined) continue;
+      bucket.value += 1;
     }
     let spikeBucketIndex = 0;
     for (
@@ -286,9 +290,12 @@ export class AdminOverviewService {
       bucketIndex < memberGrowthBuckets.length;
       bucketIndex += 1
     ) {
+      const candidateBucket = memberGrowthBuckets[bucketIndex];
+      const currentSpikeBucket = memberGrowthBuckets[spikeBucketIndex];
       if (
-        memberGrowthBuckets[bucketIndex].value >
-        memberGrowthBuckets[spikeBucketIndex].value
+        candidateBucket !== undefined &&
+        currentSpikeBucket !== undefined &&
+        candidateBucket.value > currentSpikeBucket.value
       ) {
         spikeBucketIndex = bucketIndex;
       }

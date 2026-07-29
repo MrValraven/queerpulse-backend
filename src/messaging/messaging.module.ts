@@ -4,8 +4,10 @@ import { ConnectionsModule } from '../connections/connections.module';
 import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
+import { ConversationPinnedMessage } from './entities/conversation-pinned-message.entity';
 import { Conversation } from './entities/conversation.entity';
 import { MessageReaction } from './entities/message-reaction.entity';
+import { MessageStar } from './entities/message-star.entity';
 import { Message } from './entities/message.entity';
 import {
   ConversationsController,
@@ -18,8 +20,10 @@ import { MessagingService } from './messaging.service';
     TypeOrmModule.forFeature([
       Conversation,
       ConversationParticipant,
+      ConversationPinnedMessage,
       Message,
       MessageReaction,
+      MessageStar,
     ]),
     UsersModule,
     ConnectionsModule,

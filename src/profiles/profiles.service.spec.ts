@@ -9,6 +9,8 @@ import {
 import { ConnectionsService } from '../connections/connections.service';
 import { HandlesService } from '../handles/handles.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { Community } from '../communities/entities/community.entity';
+import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { VouchService } from '../vouch/vouch.service';
 import { truncateAtWord } from './directory-blurb';
@@ -16,6 +18,7 @@ import { Activity } from './entities/activity.entity';
 import { BoardPost } from './entities/board-post.entity';
 import { Group } from './entities/group.entity';
 import { GroupMembership } from './entities/group-membership.entity';
+import { ProfileFeaturedCommunity } from './entities/profile-featured-community.entity';
 import { Shaping, ShapingKind } from './entities/shaping.entity';
 import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
@@ -106,6 +109,18 @@ describe('ProfilesService.getBySlug visibility', () => {
         {
           provide: getRepositoryToken(GroupMembership),
           useValue: groupMemberships,
+        },
+        {
+          provide: getRepositoryToken(ProfileFeaturedCommunity),
+          useValue: { createQueryBuilder: jest.fn(() => qbStub()) },
+        },
+        {
+          provide: getRepositoryToken(Community),
+          useValue: { createQueryBuilder: jest.fn(() => qbStub()) },
+        },
+        {
+          provide: getRepositoryToken(CommunityMember),
+          useValue: { createQueryBuilder: jest.fn(() => qbStub()) },
         },
         { provide: DataSource, useValue: {} },
         {
@@ -466,6 +481,18 @@ describe('ProfilesService replace-list endpoints', () => {
             ...findEmpty(),
             createQueryBuilder: jest.fn(),
           },
+        },
+        {
+          provide: getRepositoryToken(ProfileFeaturedCommunity),
+          useValue: { createQueryBuilder: jest.fn(() => qbStub()) },
+        },
+        {
+          provide: getRepositoryToken(Community),
+          useValue: { createQueryBuilder: jest.fn(() => qbStub()) },
+        },
+        {
+          provide: getRepositoryToken(CommunityMember),
+          useValue: { createQueryBuilder: jest.fn(() => qbStub()) },
         },
         { provide: DataSource, useValue: txDataSource() },
         {

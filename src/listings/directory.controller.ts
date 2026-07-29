@@ -62,6 +62,17 @@ export class DirectoryController {
     return this.directoryService.getSafeSpaceBySlug(slug);
   }
 
+  // Public: every live listing owned by one member, addressed by the member's
+  // profile slug. Declared BEFORE the `:slug` detail route below so the static
+  // `by-member` prefix resolves literally and isn't matched as a listing slug.
+  // Returns the redacted `DirectoryCardDTO[]` (never owner/contact PII); an
+  // unknown/inactive member yields an empty array, not a 404.
+  @Public()
+  @Get('by-member/:slug')
+  listByMember(@Param('slug') slug: string) {
+    return this.directoryService.listByMemberSlug(slug);
+  }
+
   // Directory detail — declared AFTER the static `spaces`/`safe-spaces` routes
   // so route matching resolves those literally rather than as `:slug`.
   @Public()

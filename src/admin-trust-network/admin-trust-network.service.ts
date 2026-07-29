@@ -159,10 +159,12 @@ export class AdminTrustNetworkService {
       .getRawMany<{ subjectId: string; count: string }>();
     const bySubject = new Map(rows.map((r) => [r.subjectId, Number(r.count)]));
     for (let index = 0; index < userIds.length; index += 1) {
+      const userId = userIds[index];
+      const slug = slugs[index];
+      if (userId === undefined || slug === undefined) continue;
       byUserId.set(
-        userIds[index],
-        (bySubject.get(userIds[index]) ?? 0) +
-          (bySubject.get(slugs[index]) ?? 0),
+        userId,
+        (bySubject.get(userId) ?? 0) + (bySubject.get(slug) ?? 0),
       );
     }
     return byUserId;

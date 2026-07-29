@@ -5,6 +5,7 @@ import { Repository } from 'typeorm';
 import { PresenceService } from '../chat/presence.service';
 import { Conversation } from '../messaging/entities/conversation.entity';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
+import { MessageKind } from '../messaging/entities/message.entity';
 import {
   MESSAGE_CREATED,
   MessageCreatedEvent,
@@ -41,21 +42,26 @@ export class PushMessageListener {
   async handleMessageCreated(event: MessageCreatedEvent): Promise<void> {
     try {
       const { conversationId, message } = event;
-      // Push is scoped to member-to-member DMs only — official/announcement
-      // and other multi-participant threads never trigger a push. `isOfficial`
-      // is the same discriminator messaging.service.ts uses to label a
-      // conversation 'dm' vs 'group' (a DM also carries a non-null `pairKey`).
+      // System messages ("X created the group", "Cy left") are timeline chrome,
+      // not something a member should get a phone notification for — skip them.
+      if (message.kind === MessageKind.System) return;
+      // Push covers member-authored DMs AND group messages — never the
+      // official/announcement thread. Group members (all non-sender, offline,
+      // unmuted participants) are notified the same way a DM counterpart is.
       const conversation = await this.conversations.findOne({
         where: { id: conversationId },
       });
       if (!conversation || conversation.isOfficial) return;
       // muted:false at the query level drops anyone who muted this thread.
+      // A member who LEFT a group keeps their row (for history) but must not be
+      // pushed — filter them out alongside the sender + online members.
       const participants = await this.participants.find({
         where: { conversationId, muted: false },
       });
       const targets = participants.filter(
         (participant) =>
           participant.userId !== message.senderId &&
+          participant.leftAt == null &&
           !this.presence.isOnline(participant.userId),
       );
       if (targets.length === 0) return;

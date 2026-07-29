@@ -21,6 +21,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Feature } from '../common/feature.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { CreateListingDto } from './dto/create-listing.dto';
+import { ListListingQueueQuery } from './dto/list-listing-queue.query';
 import { ListMyListingsQuery } from './dto/list-my-listings.query';
 import { UpdateListingStatusDto } from './dto/update-listing-status.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
@@ -66,6 +67,17 @@ export class ListingsController {
   @Roles(UserRole.Moderator, UserRole.Admin)
   listSafeSpaceCandidates() {
     return this.listingsService.listSafeSpaceCandidates();
+  }
+
+  // Moderator-only: the listings moderation queue (FE AdminListingsPage).
+  // Declared before `:ref` so Nest resolves the literal `admin/queue`
+  // segment rather than the `:ref` param (mirrors `mine` / the safe-space
+  // candidates route ordering).
+  @Get('admin/queue')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.Moderator, UserRole.Admin)
+  listQueue(@Query() query: ListListingQueueQuery) {
+    return this.listingsService.listQueue(query);
   }
 
   @Get(':ref')

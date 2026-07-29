@@ -53,6 +53,8 @@ export interface ListingDTO {
   langs: string[];
   address: string;
   geocoded: boolean;
+  latitude: number | null;
+  longitude: number | null;
   hours: Record<string, ListingDayHours>;
   hoursNote: string;
   social: ListingSocial;
@@ -109,15 +111,20 @@ function tintForSlug(slug: string): DirectoryTint {
   for (const char of slug) {
     hash = (hash + char.charCodeAt(0)) % DIRECTORY_TINTS.length;
   }
-  return DIRECTORY_TINTS[hash];
+  // invariant: `hash` is kept in `[0, DIRECTORY_TINTS.length)` by the
+  // `% DIRECTORY_TINTS.length` in the loop, so it is always a valid index of
+  // the non-empty DIRECTORY_TINTS constant.
+  return DIRECTORY_TINTS[hash]!;
 }
 
 /** Two-letter avatar initials from the business name (e.g. "Galeria Lume" → "GL"). */
 function initialsForName(name: string): string {
   const words = name.trim().split(/\s+/).filter(Boolean);
   if (words.length === 0) return '';
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
-  return (words[0][0] + words[1][0]).toUpperCase();
+  const firstWord = words[0] ?? '';
+  if (words.length === 1) return firstWord.slice(0, 2).toUpperCase();
+  const secondWord = words[1] ?? '';
+  return ((firstWord[0] ?? '') + (secondWord[0] ?? '')).toUpperCase();
 }
 
 /** First name of the owner, for the "run by <first>" card line. */
@@ -194,6 +201,9 @@ export interface DirectoryCardDTO {
   av: string;
   owned: boolean;
   memberFirst: string | null;
+  // Map pin, when the owner placed one while listing. null ⇒ list-only (no pin).
+  latitude: number | null;
+  longitude: number | null;
 }
 
 export function toDirectoryCard(listing: Listing): DirectoryCardDTO {
@@ -212,6 +222,8 @@ export function toDirectoryCard(listing: Listing): DirectoryCardDTO {
     // The "run by <first>" line names the owner, so it follows their chosen
     // visibility — null for `anon`/`role` (where `owner.first` is blank).
     memberFirst: listing.linkToProfile ? owner.first || null : null,
+    latitude: listing.latitude ?? null,
+    longitude: listing.longitude ?? null,
   };
 }
 
@@ -409,6 +421,8 @@ export function toListingDTO(
     langs: listing.langs,
     address: listing.address,
     geocoded: listing.geocoded,
+    latitude: listing.latitude ?? null,
+    longitude: listing.longitude ?? null,
     hours: listing.hours,
     hoursNote: listing.hoursNote,
     social: listing.social,

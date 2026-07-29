@@ -17,10 +17,24 @@ import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { VouchService } from '../vouch/vouch.service';
+import {
+  AccessTier,
+  Community,
+  CommunityType,
+} from '../communities/entities/community.entity';
+import {
+  CommunityMember,
+  RosterRole,
+} from '../communities/entities/community-member.entity';
 import { ListMembersQuery, MemberSort } from './dto/list-members.query';
 import { SocialLinkDto } from './dto/replace-socials.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { WorkItemDto } from './dto/replace-work.dto';
+import {
+  FeaturedCommunityRefView,
+  communityTypeLabel,
+} from './featured-communities';
+import { ProfileFeaturedCommunity } from './entities/profile-featured-community.entity';
 import { labelsForFacets, pruneDiscoverable } from './identities';
 import { normalizeOpenTo } from './open-to';
 import { Activity } from './entities/activity.entity';
@@ -32,6 +46,7 @@ import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
 import { WorkItem } from './entities/work-item.entity';
 import {
+  BoardView,
   FullProfileResponse,
   GroupView,
   LimitedProfileResponse,
@@ -78,6 +93,12 @@ export class ProfilesService {
     @InjectRepository(Group) private readonly groups: Repository<Group>,
     @InjectRepository(GroupMembership)
     private readonly groupMemberships: Repository<GroupMembership>,
+    @InjectRepository(ProfileFeaturedCommunity)
+    private readonly featuredCommunities: Repository<ProfileFeaturedCommunity>,
+    @InjectRepository(Community)
+    private readonly communities: Repository<Community>,
+    @InjectRepository(CommunityMember)
+    private readonly communityMembers: Repository<CommunityMember>,
     private readonly dataSource: DataSource,
     private readonly vouchService: VouchService,
     private readonly connectionsService: ConnectionsService,
@@ -131,24 +152,34 @@ export class ProfilesService {
     isOwner: boolean,
   ): Promise<FullProfileResponse> {
     const userId = profile.userId;
-    const [socials, work, board, skills, shapings, activity, groups, related] =
-      await Promise.all([
-        this.socialLinks.find({
-          where: { userId },
-          order: { position: 'ASC' },
-        }),
-        this.workItems.find({ where: { userId }, order: { position: 'ASC' } }),
-        this.boardPosts.find({ where: { userId }, order: { position: 'ASC' } }),
-        this.skills.find({ where: { userId }, order: { position: 'ASC' } }),
-        this.shapings.find({ where: { userId } }),
-        this.activities.find({
-          where: { userId },
-          order: { occurredAt: 'DESC' },
-          take: ACTIVITY_LIMIT,
-        }),
-        this.loadGroups(userId),
-        this.loadRelated(profile),
-      ]);
+    const [
+      socials,
+      work,
+      board,
+      skills,
+      shapings,
+      activity,
+      groups,
+      related,
+      featuredCommunities,
+    ] = await Promise.all([
+      this.socialLinks.find({
+        where: { userId },
+        order: { position: 'ASC' },
+      }),
+      this.workItems.find({ where: { userId }, order: { position: 'ASC' } }),
+      this.boardPosts.find({ where: { userId }, order: { position: 'ASC' } }),
+      this.skills.find({ where: { userId }, order: { position: 'ASC' } }),
+      this.shapings.find({ where: { userId } }),
+      this.activities.find({
+        where: { userId },
+        order: { occurredAt: 'DESC' },
+        take: ACTIVITY_LIMIT,
+      }),
+      this.loadGroups(userId),
+      this.loadRelated(profile),
+      this.loadFeaturedCommunities(userId),
+    ]);
     const rels: ProfileRelations = {
       socials,
       work,
@@ -158,6 +189,7 @@ export class ProfilesService {
       shapings,
       activity,
       related,
+      featuredCommunities,
     };
     return toFullProfile(profile, rels, vouchCount, isOwner);
   }
@@ -172,6 +204,83 @@ export class ProfilesService {
       .orderBy('g.name', 'ASC')
       .getRawMany<{ name: string; role: string }>();
     return rows.map((r) => ({ name: r.name, role: r.role }));
+  }
+
+  /**
+   * Resolve the member's featured-community pins for display, in pin order. The
+   * pin table stores only (community, position); name/type/role/count are joined
+   * live here so a pin stays truthful as things change:
+   *
+   *  - The INNER JOIN to `community_members` (on the PROFILE OWNER's membership)
+   *    means a pin the member has since LEFT drops out entirely — role comes
+   *    from that same row, so it always reflects their current standing.
+   *  - Private-tier communities are excluded, mirroring the picker: a profile
+   *    never advertises that its owner is in a private community, even if the
+   *    tier changed to private after the pin was made.
+   *
+   * `countLabel` is the community's live roster size (`community_members` count).
+   */
+  private async loadFeaturedCommunities(
+    userId: string,
+  ): Promise<FeaturedCommunityRefView[]> {
+    const rows = await this.featuredCommunities
+      .createQueryBuilder('pin')
+      .innerJoin(Community, 'c', 'c.id = pin.community_id')
+      .innerJoin(
+        CommunityMember,
+        'cm',
+        'cm.community_id = c.id AND cm.user_id = :userId',
+        { userId },
+      )
+      .where('pin.user_id = :userId', { userId })
+      .andWhere('c.access_tier != :private', { private: AccessTier.Private })
+      .select('c.id', 'communityId')
+      .addSelect('c.slug', 'slug')
+      .addSelect('c.name', 'name')
+      .addSelect('c.tagline', 'tagline')
+      .addSelect('c.type', 'type')
+      .addSelect('cm.role', 'role')
+      .orderBy('pin.position', 'ASC')
+      .getRawMany<{
+        communityId: string;
+        slug: string;
+        name: string;
+        tagline: string;
+        type: CommunityType;
+        role: RosterRole;
+      }>();
+
+    if (rows.length === 0) {
+      return [];
+    }
+
+    // One grouped count across all pinned communities — the live roster size
+    // each `countLabel` renders (avoids a per-pin count query).
+    const countRows = await this.communityMembers
+      .createQueryBuilder('cm')
+      .select('cm.community_id', 'communityId')
+      .addSelect('COUNT(*)', 'count')
+      .where('cm.community_id IN (:...ids)', {
+        ids: rows.map((r) => r.communityId),
+      })
+      .groupBy('cm.community_id')
+      .getRawMany<{ communityId: string; count: string }>();
+    const memberCountById = new Map(
+      countRows.map((r) => [r.communityId, Number(r.count)]),
+    );
+
+    return rows.map((r) => {
+      const memberCount = memberCountById.get(r.communityId) ?? 0;
+      return {
+        slug: r.slug,
+        name: r.name,
+        tagline: r.tagline,
+        type: r.type,
+        typeLabel: communityTypeLabel(r.type),
+        countLabel: `${memberCount} members`,
+        role: r.role,
+      };
+    });
   }
 
   private async loadRelated(profile: Profile): Promise<ProfileCard[]> {
@@ -235,7 +344,15 @@ export class ProfilesService {
     // an explicit `undefined` check: `{ now: '' }` CLEARS the status and
     // `{ openTo: [] }` clears the chips, so neither empty value may be treated
     // as "field omitted". `openTo` is a full replace, not a merge.
-    const { now, openTo, ...rest } = dto;
+    const { now, openTo, featuredCommunities, ...rest } = dto;
+    // Resolve + validate the featured-community pins BEFORE any write, so an
+    // ineligible slug rejects the WHOLE patch (400) rather than half-applying
+    // it — the profile fields and the pins move together. `undefined` = the
+    // client omitted the field (leave pins alone); `[]` = clear all pins.
+    const featuredCommunityIds =
+      featuredCommunities !== undefined
+        ? await this.resolveFeaturedCommunityIds(userId, featuredCommunities)
+        : undefined;
     Object.assign(profile, rest);
     if (openTo !== undefined) {
       profile.openTo = normalizeOpenTo(openTo);
@@ -260,8 +377,78 @@ export class ProfilesService {
       profile.identities ?? [],
     );
     await this.profiles.save(profile);
+    if (featuredCommunityIds !== undefined) {
+      await this.writeFeaturedCommunities(userId, featuredCommunityIds);
+    }
     const vouchCount = await this.vouchService.getVouchCount(userId);
     return this.buildFullProfile(profile, vouchCount, true);
+  }
+
+  /**
+   * Map an ordered list of community slugs to their ids, validating that each
+   * is eligible to feature: a NON-PRIVATE community the member is actually on
+   * the roster of. Rejects duplicates and unknown/ineligible slugs with 400
+   * (mirrors `replaceGroups`), so the client can't pin a community it doesn't
+   * belong to or a private one. Order is preserved — it becomes `position`.
+   */
+  private async resolveFeaturedCommunityIds(
+    userId: string,
+    slugs: string[],
+  ): Promise<string[]> {
+    if (slugs.length === 0) {
+      return [];
+    }
+    const seen = new Set<string>();
+    for (const slug of slugs) {
+      if (seen.has(slug)) {
+        throw new BadRequestException(`Duplicate community: ${slug}`);
+      }
+      seen.add(slug);
+    }
+    const rows = await this.communities
+      .createQueryBuilder('c')
+      .innerJoin(
+        CommunityMember,
+        'cm',
+        'cm.community_id = c.id AND cm.user_id = :userId',
+        { userId },
+      )
+      .where('c.slug IN (:...slugs)', { slugs })
+      .andWhere('c.access_tier != :private', { private: AccessTier.Private })
+      .select('c.id', 'id')
+      .addSelect('c.slug', 'slug')
+      .getRawMany<{ id: string; slug: string }>();
+    const idBySlug = new Map(rows.map((r) => [r.slug, r.id]));
+    return slugs.map((slug) => {
+      const id = idBySlug.get(slug);
+      if (!id) {
+        throw new BadRequestException(
+          `Unknown or ineligible community: ${slug}`,
+        );
+      }
+      return id;
+    });
+  }
+
+  /** Full REPLACE of the member's featured-community pins, in the given order. */
+  private async writeFeaturedCommunities(
+    userId: string,
+    communityIds: string[],
+  ): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      await manager.delete(ProfileFeaturedCommunity, { userId });
+      if (communityIds.length === 0) {
+        return;
+      }
+      const rows = communityIds.map((communityId, position) =>
+        manager.create(ProfileFeaturedCommunity, {
+          userId,
+          communityId,
+          position,
+        }),
+      );
+      await manager.save(rows);
+    });
   }
 
   // Set/rename the caller's mandatory global @username. The username IS the
@@ -398,6 +585,46 @@ export class ProfilesService {
       order: { position: 'ASC' },
     });
     return saved.map((s) => ({ name: s.name, meta: s.meta }));
+  }
+
+  async replaceBoard(
+    userId: string,
+    items: { kind: BoardPost['kind']; title: string; slug: string }[],
+  ): Promise<BoardView[]> {
+    // board_posts has a unique (userId, slug); reject in-payload duplicates up
+    // front so the whole replace fails cleanly rather than tripping the DB
+    // constraint mid-transaction.
+    const seenSlugs = new Set<string>();
+    for (const item of items) {
+      if (seenSlugs.has(item.slug)) {
+        throw new BadRequestException(`Duplicate board slug: ${item.slug}`);
+      }
+      seenSlugs.add(item.slug);
+    }
+    await this.dataSource.transaction(async (manager) => {
+      await manager.delete(BoardPost, { userId });
+      const rows = items.map((item, index) =>
+        manager.create(BoardPost, {
+          userId,
+          kind: item.kind,
+          title: item.title,
+          slug: item.slug,
+          position: index,
+        }),
+      );
+      if (rows.length) {
+        await manager.save(rows);
+      }
+    });
+    const saved = await this.boardPosts.find({
+      where: { userId },
+      order: { position: 'ASC' },
+    });
+    return saved.map((boardPost) => ({
+      kind: boardPost.kind,
+      title: boardPost.title,
+      slug: boardPost.slug,
+    }));
   }
 
   async replaceShapings(

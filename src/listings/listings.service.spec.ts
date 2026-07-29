@@ -43,6 +43,8 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   langs: [],
   address: '',
   geocoded: false,
+  latitude: null,
+  longitude: null,
   hours: {},
   hoursNote: '',
   social: { instagram: '', website: '', email: '', phone: '' },

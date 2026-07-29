@@ -13,15 +13,19 @@ function tintForKey(key: string): LandlordTint {
   for (const char of key) {
     hash = (hash + char.charCodeAt(0)) % TINTS.length;
   }
-  return TINTS[hash];
+  // invariant: `hash` is kept in `[0, TINTS.length)` by the `% TINTS.length`
+  // in the loop, so it is always a valid index of the non-empty TINTS constant.
+  return TINTS[hash]!;
 }
 
 /** Two-letter initials from a display name. */
 function initialsForName(name: string): string {
   const words = name.trim().split(/\s+/).filter(Boolean);
   if (words.length === 0) return '';
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
-  return (words[0][0] + words[1][0]).toUpperCase();
+  const firstWord = words[0] ?? '';
+  if (words.length === 1) return firstWord.slice(0, 2).toUpperCase();
+  const secondWord = words[1] ?? '';
+  return ((firstWord[0] ?? '') + (secondWord[0] ?? '')).toUpperCase();
 }
 
 function memberName(member: MemberRef | null): string {

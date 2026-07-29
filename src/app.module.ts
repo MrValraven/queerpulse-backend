@@ -27,6 +27,7 @@ import { HandlesModule } from './handles/handles.module';
 import { VouchModule } from './vouch/vouch.module';
 import { ConnectionsModule } from './connections/connections.module';
 import { MessagingModule } from './messaging/messaging.module';
+import { LinkPreviewModule } from './link-preview/link-preview.module';
 import { ChatModule } from './chat/chat.module';
 import { CinemaModule } from './cinema/cinema.module';
 import { CommunitiesModule } from './communities/communities.module';
@@ -73,6 +74,7 @@ import { HousingListingsModule } from './housing-listings/housing-listings.modul
 import { FlatmateProfilesModule } from './flatmate-profiles/flatmate-profiles.module';
 import { LandlordsModule } from './landlords/landlords.module';
 import { ListingsModule } from './listings/listings.module';
+import { GeocodeModule } from './geocode/geocode.module';
 import { MagazineModule } from './magazine/magazine.module';
 import { ResourcesModule } from './resources/resources.module';
 import { ContentModule } from './content/content.module';
@@ -190,6 +192,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     VouchModule,
     ConnectionsModule,
     MessagingModule,
+    LinkPreviewModule,
     ChatModule,
     EventsModule,
     CommunitiesModule,
@@ -220,6 +223,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     ForumModule,
     FeedModule,
     ListingsModule,
+    GeocodeModule,
     HousingModule,
     HousingListingsModule,
     FlatmateProfilesModule,

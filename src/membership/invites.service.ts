@@ -348,7 +348,9 @@ export class InvitesService {
       const bytes = randomBytes(4);
       let out = '';
       for (let i = 0; i < bytes.length; i++) {
-        out += CODE_ALPHABET[bytes[i] % CODE_ALPHABET.length];
+        const byteValue = bytes[i];
+        if (byteValue === undefined) continue;
+        out += CODE_ALPHABET[byteValue % CODE_ALPHABET.length] ?? '';
       }
       return out;
     };

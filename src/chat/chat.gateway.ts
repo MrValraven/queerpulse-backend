@@ -18,13 +18,19 @@ import { DEFAULT_LOCKDOWN_MESSAGE } from '../common/lockdown.constants';
 import { resolveFrontendOrigins } from '../config/frontend-origins';
 import { ConnectionsService } from '../connections/connections.service';
 import {
+  CONVERSATION_CREATED,
+  ConversationCreatedEvent,
   MESSAGE_CREATED,
   MESSAGE_DELETED,
+  MESSAGE_DELIVERED,
+  MESSAGE_PINNED,
   MESSAGE_READ,
   MESSAGE_REACTION,
   MESSAGE_UPDATED,
   MessageCreatedEvent,
   MessageDeletedEvent,
+  MessageDeliveredEvent,
+  MessagePinnedEvent,
   MessageReadEvent,
   MessageReactionEvent,
   MessageUpdatedEvent,
@@ -42,6 +48,7 @@ import { PlatformSettingsService } from '../platform-settings/platform-settings.
 import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import {
+  DeliveredPayload,
   JoinPayload,
   ReadPayload,
   SendMessagePayload,
@@ -160,6 +167,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     capacity: 10,
     refillPerSecond: 10,
   });
+  // Delivered acks are already client-throttled (one "received up to now" stamp
+  // per burst per conversation), but bound them here too — a misbehaving client
+  // must not turn the receipt into a write amplifier.
+  private readonly deliveredLimiter = new TokenBucketLimiter({
+    capacity: 10,
+    refillPerSecond: 5,
+  });
 
   constructor(
     private readonly jwt: JwtService,
@@ -215,6 +229,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       // Last socket gone — free the per-user rate-limit buckets.
       this.messageLimiter.clear(userId);
       this.typingLimiter.clear(userId);
+      this.deliveredLimiter.clear(userId);
     }
   }
 
@@ -241,11 +256,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       throw new WsException('You are sending messages too quickly');
     }
     // Single write path: persists + emits MESSAGE_CREATED → broadcast below.
+    // `clientMessageId` makes this idempotent against the HTTP POST path.
     await this.messaging.sendMessage(
       data.conversationId,
       userId,
       data.body,
       data.replyToId,
+      data.clientMessageId,
     );
   }
 
@@ -279,6 +296,22 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     await this.messaging.markRead(data.conversationId, userId);
   }
 
+  @SubscribeMessage('delivered')
+  async handleDelivered(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: DeliveredPayload,
+  ): Promise<void> {
+    const userId = this.requireUserId(client);
+    // Advisory like typing: over the limit we silently drop rather than error —
+    // the watermark is monotonic, so a skipped ack is corrected by the next one.
+    if (!this.deliveredLimiter.tryConsume(userId)) {
+      return;
+    }
+    // Persist the delivered watermark + emit MESSAGE_DELIVERED (relayed below).
+    // `markDelivered` re-checks participation, so an un-joined caller is refused.
+    await this.messaging.markDelivered(data.conversationId, userId);
+  }
+
   @SubscribeMessage('presence:snapshot')
   async handlePresenceSnapshot(
     @ConnectedSocket() client: Socket,
@@ -289,7 +322,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   @OnEvent(MESSAGE_CREATED)
   handleMessageCreated(payload: MessageCreatedEvent): void {
-    this.namespace?.to(payload.conversationId).emit('message:new', payload);
+    // Broadcast the frontend-contract `response` (not the internal `MessageView`)
+    // so live clients patch it straight into the thread cache and reconcile the
+    // sender's optimistic bubble by `clientMessageId` — no refetch.
+    this.namespace?.to(payload.conversationId).emit('message:new', {
+      conversationId: payload.conversationId,
+      message: payload.response,
+    });
   }
 
   @OnEvent(MESSAGE_UPDATED)
@@ -299,9 +338,35 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       .emit('message:updated', payload);
   }
 
+  /**
+   * A new conversation (a group) was created: notify EACH member's
+   * `user:<id>` room so their inbox refetches live. The members weren't in the
+   * conversation room yet (they join it when they open the thread), so a
+   * room-scoped `message:new` would miss them — this is the user-room fan-out
+   * that gets the new group in front of them. Carries only the id; the client
+   * invalidates `["conversations"]` and re-fetches the DTO.
+   */
+  @OnEvent(CONVERSATION_CREATED)
+  handleConversationCreated(payload: ConversationCreatedEvent): void {
+    for (const memberUserId of payload.memberUserIds) {
+      this.namespace
+        ?.to(`user:${memberUserId}`)
+        .emit('conversation:new', { conversationId: payload.conversationId });
+    }
+  }
+
   @OnEvent(MESSAGE_READ)
   handleMessageRead(payload: MessageReadEvent): void {
     this.namespace?.to(payload.conversationId).emit('read', payload);
+  }
+
+  @OnEvent(MESSAGE_DELIVERED)
+  handleMessageDelivered(payload: MessageDeliveredEvent): void {
+    // Relayed to the whole conversation room; the SENDER's client uses the
+    // `userId` (the recipient who acked) + `deliveredAt` to advance its
+    // one-check → two-check tick. `deliveredAt` is a Date here; socket.io
+    // serialises it to an ISO string on the wire (as with `read`'s lastReadAt).
+    this.namespace?.to(payload.conversationId).emit('message:delivered', payload);
   }
 
   @OnEvent(MESSAGE_REACTION)
@@ -312,6 +377,14 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @OnEvent(MESSAGE_DELETED)
   handleMessageDeleted(payload: MessageDeletedEvent): void {
     this.namespace?.to(payload.conversationId).emit('message:deleted', payload);
+  }
+
+  @OnEvent(MESSAGE_PINNED)
+  handleMessagePinned(payload: MessagePinnedEvent): void {
+    // Pins are shared: relay to the whole conversation room so BOTH participants
+    // refresh the pinned-messages banner (and patch the message's pin state) —
+    // no blanket thread invalidation.
+    this.namespace?.to(payload.conversationId).emit('message:pinned', payload);
   }
 
   /**

@@ -22,6 +22,18 @@ export class GetMessagesQuery {
   @IsUUID('4')
   beforeId?: string;
 
+  // `after`/`afterId` are the forward counterpart of `before`/`beforeId`: the
+  // created_at and id of the NEWEST message the client currently holds. Used by
+  // reconnect history sync to fetch (oldest→newest) everything missed while the
+  // socket was down. Mutually exclusive with the backward cursor.
+  @IsOptional()
+  @IsISO8601()
+  after?: string;
+
+  @IsOptional()
+  @IsUUID('4')
+  afterId?: string;
+
   // Opaque cursor (see `src/common/cursor-pagination.ts`) the frontend sends
   // instead of `before`/`beforeId`. Decoded server-side into the same
   // (createdAt, id) keyset predicate; ignored (falls back to the first page)

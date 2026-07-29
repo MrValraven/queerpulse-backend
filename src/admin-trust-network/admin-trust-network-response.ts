@@ -92,6 +92,7 @@ export function sceneFor(
     if (sizeDiff !== 0) return sizeDiff;
     return a.communityId.localeCompare(b.communityId);
   })[0];
+  if (best === undefined) return null;
   return { id: best.communityId, label: best.communityName, role: best.role };
 }
 
@@ -119,7 +120,9 @@ export function buildScenes(sceneById: Map<string, string>): SceneDTO[] {
   return ids.map((id, index) => ({
     id,
     label: sceneById.get(id) ?? id,
-    color: SCENE_COLORS[index % SCENE_COLORS.length],
+    // invariant: `index % SCENE_COLORS.length` is always a valid index of the
+    // non-empty SCENE_COLORS constant.
+    color: SCENE_COLORS[index % SCENE_COLORS.length]!,
   }));
 }
 

@@ -12,9 +12,7 @@ import {
   encodeCursor,
 } from '../common/cursor-pagination';
 import { MemberLookup } from '../common/member-ref';
-import { extractMentionSlugs } from '../common/mentions';
-import { NotificationType } from '../notifications/entities/notification.entity';
-import { NotificationsService } from '../notifications/notifications.service';
+import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole } from '../users/entities/user.entity';
@@ -60,7 +58,7 @@ export class ForumPostsService {
     private readonly blockFilter: BlockFilterService,
     @InjectRepository(ForumPostEdit)
     private readonly edits: Repository<ForumPostEdit>,
-    private readonly notifications: NotificationsService,
+    private readonly mentions: MentionNotificationService,
   ) {}
 
   // GET /forum/threads/:slug/posts?cursor= — OP + replies, oldest-first.
@@ -128,7 +126,7 @@ export class ForumPostsService {
     );
     await this.threadsService.markActivity(thread.id);
 
-    await this.notifyMentions(body, user.userId, {
+    await this.mentions.notify(body, user.userId, {
       actorId: user.userId,
       source: 'forum',
       threadSlug,
@@ -150,29 +148,54 @@ export class ForumPostsService {
   // POST /forum/posts/:id/vote — `value` is +1 (upvote) or 0 (remove vote).
   // Idempotent both ways: voting +1 twice or removing an absent vote is a
   // no-op rather than double-counting/going negative.
+  //
+  // Concurrency-safe by construction: the whole toggle runs in one
+  // transaction, the insert is `ON CONFLICT DO NOTHING` (`.orIgnore()`) so a
+  // racing duplicate upvote can't raise a 23505 unique violation, and the
+  // denormalized `voteCount` is only moved via SQL-level atomic
+  // increment/decrement (`voteCount = voteCount + 1`) — never a
+  // read-modify-write, which would lose updates under concurrent votes. The
+  // counter is touched *only* when a row is genuinely inserted/deleted (the
+  // insert's `RETURNING` row / the delete's `affected` count), so the two
+  // idempotent no-op paths leave it untouched.
   async vote(
     postId: string,
     userId: string,
     value: number,
   ): Promise<VoteResult> {
-    const post = await this.posts.findOne({ where: { id: postId } });
-    if (!post) {
-      throw new NotFoundException('Post not found');
-    }
+    return this.posts.manager.transaction(async (manager) => {
+      const post = await manager.findOne(ForumPost, { where: { id: postId } });
+      if (!post) {
+        throw new NotFoundException('Post not found');
+      }
 
-    const existing = await this.votes.findOne({ where: { postId, userId } });
+      if (value === 1) {
+        const inserted = await manager
+          .createQueryBuilder()
+          .insert()
+          .into(ForumPostVote)
+          .values({ postId, userId, value: 1 })
+          .orIgnore()
+          .execute();
+        // On conflict the row is skipped and no `RETURNING` row comes back;
+        // only bump the count when this call is the one that inserted.
+        if (inserted.raw.length > 0) {
+          await manager.increment(ForumPost, { id: postId }, 'voteCount', 1);
+        }
+      } else if (value === 0) {
+        const deleted = await manager.delete(ForumPostVote, { postId, userId });
+        if (deleted.affected && deleted.affected > 0) {
+          await manager.decrement(ForumPost, { id: postId }, 'voteCount', 1);
+        }
+      }
 
-    if (value === 1 && !existing) {
-      await this.votes.save(this.votes.create({ postId, userId, value: 1 }));
-      post.voteCount += 1;
-      await this.posts.save(post);
-    } else if (value === 0 && existing) {
-      await this.votes.delete({ postId, userId });
-      post.voteCount -= 1;
-      await this.posts.save(post);
-    }
-
-    return { voteCount: post.voteCount, myVote: value };
+      // Re-read inside the transaction so the returned count reflects this
+      // toggle (and any other votes committed before our row lock).
+      const refreshed = await manager.findOne(ForumPost, {
+        where: { id: postId },
+      });
+      return { voteCount: refreshed?.voteCount ?? post.voteCount, myVote: value };
+    });
   }
 
   // PATCH /forum/posts/:id — author-only body edit. Snapshots the pre-edit
@@ -190,17 +213,23 @@ export class ForumPostsService {
       throw new ForbiddenException('Only the author can edit this post');
     }
 
-    await this.edits.save(
-      this.edits.create({
-        postId: post.id,
-        previousBody: post.body,
-        previousTitle: null,
-        editorId: user.userId,
-      }),
-    );
+    // Snapshot the pre-edit body and persist the new one atomically: a partial
+    // failure between the two writes would otherwise record a "previous body"
+    // for an edit that never landed (a phantom revision).
+    const previousBody = post.body;
     post.body = body;
     post.editedAt = new Date();
-    await this.posts.save(post);
+    await this.posts.manager.transaction(async (manager) => {
+      await manager.save(
+        manager.create(ForumPostEdit, {
+          postId: post.id,
+          previousBody,
+          previousTitle: null,
+          editorId: user.userId,
+        }),
+      );
+      await manager.save(post);
+    });
 
     return this.mapOne(post, user);
   }
@@ -270,36 +299,6 @@ export class ForumPostsService {
     }
   }
 
-  /** Best-effort `@mention` fan-out. Resolves mentioned slugs to active users,
-   *  drops the author, and creates one `mention` notification per recipient
-   *  (block/mute filtering + socket push handled by the notifications service).
-   *  Any failure is swallowed — a mention side effect must never fail a reply. */
-  private async notifyMentions(
-    body: string,
-    authorUserId: string,
-    payload: Record<string, unknown>,
-  ): Promise<void> {
-    try {
-      const slugs = extractMentionSlugs(body);
-      if (!slugs.length) return;
-      const bySlug = await new MemberLookup(this.profiles).userIdsForSlugs(
-        slugs,
-      );
-      const recipients = [...bySlug.values()].filter(
-        (userId) => userId !== authorUserId,
-      );
-      if (!recipients.length) return;
-      await this.notifications.createForRecipients(
-        recipients,
-        NotificationType.Mention,
-        payload,
-        authorUserId,
-      );
-    } catch {
-      // Intentionally ignored — see doc comment.
-    }
-  }
-
   private async loadPostOr404(postId: string): Promise<ForumPost> {
     const post = await this.posts.findOne({ where: { id: postId } });
     if (!post) {
@@ -338,12 +337,20 @@ export class ForumPostsService {
     nextCursor: string | null;
     hasMore: boolean;
   }> {
-    qb.orderBy(`${alias}.createdAt`, 'ASC').addOrderBy(`${alias}.id`, 'ASC');
+    // Mirror `cursorPaginate`'s microsecond-vs-millisecond fix: `created_at` is
+    // microsecond-precision `timestamptz`, but the cursor is a ms-resolution JS
+    // `Date`. Comparing the ms cursor against the raw µs column would silently
+    // drop a same-millisecond, nonzero-microsecond row at the page boundary.
+    // Truncate the column to milliseconds in BOTH the ORDER BY and the WHERE
+    // tuple so both sides match the cursor's resolution (see cursor-pagination.ts).
+    const createdAtExpr = `date_trunc('milliseconds', "${alias}"."created_at")`;
+
+    qb.orderBy(createdAtExpr, 'ASC').addOrderBy(`${alias}.id`, 'ASC');
 
     const decoded = cursor ? decodeCursor(cursor) : null;
     if (decoded) {
       qb.andWhere(
-        `(${alias}.createdAt, ${alias}.id) > (:cursorCreatedAt, :cursorId)`,
+        `(${createdAtExpr}, ${alias}.id) > (:cursorCreatedAt, :cursorId)`,
         { cursorCreatedAt: decoded.createdAt, cursorId: decoded.id },
       );
     }

@@ -108,6 +108,7 @@ export function computeLevel(totalXp: number): LevelDTO {
   let remaining = Math.max(0, Math.trunc(totalXp));
   for (let i = 0; i < LEVEL_LADDER_DEF.length; i++) {
     const def = LEVEL_LADDER_DEF[i];
+    if (def === undefined) continue;
     const isMaxLevel = def.xpSpan === null;
     if (isMaxLevel || remaining < def.xpSpan!) {
       const xpMax = isMaxLevel ? 0 : def.xpSpan!;
@@ -128,7 +129,9 @@ export function computeLevel(totalXp: number): LevelDTO {
   }
   // Unreachable: the last ladder entry always has `xpSpan: null`, which the
   // loop above catches via `isMaxLevel`.
-  const last = LEVEL_LADDER_DEF[LEVEL_LADDER_DEF.length - 1];
+  // invariant: LEVEL_LADDER_DEF is a non-empty constant, so its last index
+  // always resolves to an entry.
+  const last = LEVEL_LADDER_DEF[LEVEL_LADDER_DEF.length - 1]!;
   return {
     level: last.level,
     name: last.name,

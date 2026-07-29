@@ -20,7 +20,9 @@ export function toneFor(seed: string): BadgeTone {
   ) {
     hash = (hash * 31 + seed.charCodeAt(characterIndex)) >>> 0;
   }
-  return BADGE_TONES[hash % BADGE_TONES.length];
+  // invariant: `hash % BADGE_TONES.length` is always a valid index of the
+  // non-empty BADGE_TONES constant.
+  return BADGE_TONES[hash % BADGE_TONES.length]!;
 }
 
 /** A frozen (auto-frozen) account always reads as frozen, regardless of the
@@ -42,6 +44,18 @@ export interface VouchAvatarDTO {
   tone: BadgeTone;
   slug: string;
   avatarUrl: string | null;
+}
+
+/** Which way a vouch runs relative to the center (this member): `inbound` =
+ *  they vouched FOR the member, `outbound` = the member vouched FOR them,
+ *  `mutual` = both. */
+export type VouchDirection = 'inbound' | 'outbound' | 'mutual';
+
+/** A node in the detail-view trust graph, tagged with its direction so the
+ *  drawer preview can show who trusts the member AND who the member vouches
+ *  for, told apart visually. */
+export interface VouchGraphNodeDTO extends VouchAvatarDTO {
+  direction: VouchDirection;
 }
 
 export interface AdminMemberCardDTO {
@@ -101,12 +115,15 @@ export interface AdminMemberDetailDTO {
   verified: boolean;
   avatarUrl: string | null;
   vouchCount: number;
+  /** How many members this member has vouched FOR (not withdrawn) — the
+   *  outbound side of the trust graph, distinct from `vouchCount` (inbound). */
+  outboundVouchCount: number;
   joinedAt: string;
   openReportCount: number;
   communities: { name: string; role: 'owner' | 'mod' | 'member' }[];
   contributions: { kind: string; detail: string | null; at: string }[];
   moderationTimeline: AdminMemberModerationEntryDTO[];
-  graph: { center: VouchAvatarDTO; nodes: VouchAvatarDTO[] };
+  graph: { center: VouchAvatarDTO; nodes: VouchGraphNodeDTO[] };
 }
 
 export function toAdminMemberCard(input: {
@@ -190,6 +207,7 @@ export function toAdminMemberDetail(input: {
   };
   openReportCount: number;
   vouchCount: number;
+  outboundVouchCount: number;
   communities: { name: string; role: 'owner' | 'mod' | 'member' }[];
   contributions: { kind: string; detail: string | null; at: Date }[];
   moderationTimeline: {
@@ -201,7 +219,7 @@ export function toAdminMemberDetail(input: {
     at: Date;
     reportId: string | null;
   }[];
-  graph: { center: VouchAvatarDTO; nodes: VouchAvatarDTO[] };
+  graph: { center: VouchAvatarDTO; nodes: VouchGraphNodeDTO[] };
 }): AdminMemberDetailDTO {
   const { profile } = input;
   return {
@@ -214,6 +232,7 @@ export function toAdminMemberDetail(input: {
     verified: profile.verified,
     avatarUrl: profile.avatarUrl,
     vouchCount: input.vouchCount,
+    outboundVouchCount: input.outboundVouchCount,
     joinedAt: profile.joinedAt.toISOString(),
     openReportCount: input.openReportCount,
     communities: input.communities,

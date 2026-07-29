@@ -148,7 +148,7 @@ export class FlatmateDirectoryService {
       rows.map((r) => r.ownerId),
     );
     return rows.map((row, index) =>
-      toFlatmateProfileDTO(row, refs.get(row.ownerId) ?? null, scores[index]),
+      toFlatmateProfileDTO(row, refs.get(row.ownerId) ?? null, scores[index] ?? null),
     );
   }
 }

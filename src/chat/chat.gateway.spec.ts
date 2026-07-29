@@ -476,16 +476,20 @@ describe('ChatGateway', () => {
   });
 
   describe('event broadcasts', () => {
-    it('broadcasts message:new to the conversation room on MESSAGE_CREATED', () => {
+    it('broadcasts the frontend-contract response (not the internal view) as message:new', () => {
+      const response = { id: 'm1', conversationId: 'c1' };
       gateway.handleMessageCreated({
         conversationId: 'c1',
         message: { id: 'm1' } as never,
+        response: response as never,
       });
       expect(gateway.namespace.to).toHaveBeenCalledWith('c1');
-      expect(roomEmit).toHaveBeenCalledWith(
-        'message:new',
-        expect.objectContaining({ conversationId: 'c1' }),
-      );
+      // The room receives the hydrated `response`, so clients patch it straight
+      // into the thread cache and reconcile the optimistic bubble by client id.
+      expect(roomEmit).toHaveBeenCalledWith('message:new', {
+        conversationId: 'c1',
+        message: response,
+      });
     });
 
     it('pushes notification:new to the recipient user room on NOTIFICATION_CREATED', () => {

@@ -92,6 +92,8 @@ function normalizeCreate(dto: CreateListingDto): Omit<
     langs: dto.langs ?? [],
     address: dto.address ?? '',
     geocoded: dto.geocoded ?? false,
+    latitude: dto.latitude ?? null,
+    longitude: dto.longitude ?? null,
     hours: (dto.hours ?? {}) as Record<string, ListingDayHours>,
     hoursNote: dto.hoursNote ?? '',
     social: normalizeSocial(dto.social),
@@ -135,6 +137,10 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
     ...(dto.langs !== undefined ? { langs: dto.langs } : {}),
     ...(dto.address !== undefined ? { address: dto.address } : {}),
     ...(dto.geocoded !== undefined ? { geocoded: dto.geocoded } : {}),
+    // Persist a moved/cleared pin: applied when present (incl. explicit null to
+    // clear), left untouched when the PATCH omits them.
+    ...(dto.latitude !== undefined ? { latitude: dto.latitude } : {}),
+    ...(dto.longitude !== undefined ? { longitude: dto.longitude } : {}),
     ...(dto.hours !== undefined
       ? { hours: dto.hours as Record<string, ListingDayHours> }
       : {}),
@@ -168,6 +174,11 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
 }
 
 export interface ListMyListingsQueryInput {
+  page?: number;
+}
+
+export interface ListListingQueueQueryInput {
+  status?: ListingStatus;
   page?: number;
 }
 
@@ -208,6 +219,30 @@ export class ListingsService {
         rows.map((r) => r.ownerId),
       );
       return rows.map((r) => toListingDTO(r, refs.get(r.ownerId) ?? null));
+    });
+  }
+
+  /** Moderator/admin-only (`ListingsController.listQueue`'s `RolesGuard`
+   * gate): every member-submitted listing, optionally filtered by review
+   * status, newest first — the moderation queue. Mirrors `listMine`'s
+   * pagination + owner-ref mapping, minus the owner scope. */
+  async listQueue(
+    query: ListListingQueueQueryInput,
+  ): Promise<Paginated<ListingDTO>> {
+    const page = normalizePage(query.page);
+    const qb = this.listings
+      .createQueryBuilder('l')
+      .orderBy('l.created_at', 'DESC');
+    if (query.status) {
+      qb.andWhere('l.status = :status', { status: query.status });
+    }
+
+    return paginate(qb, page, async (rows) => {
+      if (!rows.length) return [];
+      const refs = await new MemberLookup(this.profiles).byUserIds(
+        rows.map((row) => row.ownerId),
+      );
+      return rows.map((row) => toListingDTO(row, refs.get(row.ownerId) ?? null));
     });
   }
 
@@ -352,7 +387,8 @@ export class ListingsService {
     const rows = await this.dataSource.query<{ seq: string }[]>(
       "SELECT nextval('listings_ref_seq') AS seq",
     );
-    const seq = Number(rows[0].seq);
+    // invariant: `SELECT nextval(...)` always returns exactly one row.
+    const seq = Number(rows[0]!.seq);
     return `QPL-${year}-${String(seq).padStart(4, '0')}`;
   }
 

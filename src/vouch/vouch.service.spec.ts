@@ -297,6 +297,40 @@ describe('VouchService', () => {
           avatarUrl: null,
           note: 'ally',
           createdAt: new Date('2026-01-01'),
+          anonymous: false,
+        },
+      ]);
+    });
+
+    it('shields anonymous vouchers — no identity leaks, only note/timestamp', async () => {
+      profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
+      vouches.count.mockResolvedValue(1);
+      vouches.find.mockResolvedValue([
+        {
+          voucherId: 'secret',
+          note: 'quietly in your corner',
+          createdAt: new Date('2026-03-03'),
+          anonymous: true,
+        },
+      ]);
+      // Even if a profile row exists, an anonymous voucher's identity must not
+      // be resolved or emitted.
+      profiles.find.mockResolvedValue([
+        { userId: 'secret', slug: 'nova', firstName: 'Nova', lastName: 'Mar' },
+      ]);
+      const res = await service.listVouchers('them');
+      // The anonymous voucher's id is never queried for a profile — the whole
+      // page is anonymous, so no profile lookup happens at all.
+      expect(profiles.find).not.toHaveBeenCalled();
+      expect(res.vouchers).toEqual([
+        {
+          slug: '',
+          firstName: '',
+          lastName: '',
+          avatarUrl: null,
+          note: 'quietly in your corner',
+          createdAt: new Date('2026-03-03'),
+          anonymous: true,
         },
       ]);
     });
@@ -327,6 +361,23 @@ describe('VouchService', () => {
         }),
       );
       expect(res[0].slug).toBe('wren');
+    });
+  });
+
+  describe('getVouchDirections', () => {
+    it('hides an anonymous incoming vouch so the connections badge cannot de-anonymize it', async () => {
+      // `me` vouched for `a` (visible outgoing). `b` vouched for `me` but
+      // anonymously — that incoming vouch must NOT surface as vouched-for-you.
+      vouches.find.mockResolvedValue([
+        { voucherId: 'me', voucheeId: 'a', anonymous: false },
+        { voucherId: 'b', voucheeId: 'me', anonymous: true },
+        { voucherId: 'c', voucheeId: 'me', anonymous: false },
+      ]);
+      const directions = await service.getVouchDirections('me', ['a', 'b', 'c']);
+      expect([...directions.youVouched]).toEqual(['a']);
+      // `b` is shielded; only the non-anonymous `c` is revealed.
+      expect(directions.vouchedForYou.has('b')).toBe(false);
+      expect(directions.vouchedForYou.has('c')).toBe(true);
     });
   });
 });

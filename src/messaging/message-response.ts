@@ -1,6 +1,12 @@
 import { toImageUrl } from '../common/image-url';
 import { Profile } from '../users/entities/profile.entity';
-import { Message } from './entities/message.entity';
+import { ConversationRole } from './entities/conversation-participant.entity';
+import {
+  Message,
+  MessageKind,
+  SystemEvent,
+  SystemEventType,
+} from './entities/message.entity';
 import {
   MessageReaction,
   MessageReactionKey,
@@ -15,6 +21,10 @@ export interface MessageView {
   createdAt: Date;
   editedAt: Date | null;
   deletedAt: Date | null;
+  clientMessageId: string | null;
+  forwarded: boolean;
+  kind: MessageKind;
+  systemEvent: SystemEvent | null;
 }
 
 export function toMessageView(m: Message): MessageView {
@@ -27,6 +37,10 @@ export function toMessageView(m: Message): MessageView {
     createdAt: m.createdAt,
     editedAt: m.editedAt,
     deletedAt: m.deletedAt,
+    clientMessageId: m.clientMessageId,
+    forwarded: m.forwarded,
+    kind: m.kind,
+    systemEvent: m.systemEvent,
   };
 }
 
@@ -96,6 +110,33 @@ export interface MessageResponse {
    *  tombstoned message keeps its id/sender/createdAt but `body` is blanked
    *  and `reactions` is emptied — see `toMessageResponses`. */
   deletedAt: string | null;
+  /** Set on the SENDER's own outgoing message once the recipient's delivered
+   *  watermark has reached it (their device acked receipt) — the ISO of that
+   *  watermark, a truthful upper bound on when it arrived. Null when not yet
+   *  delivered, and for messages the viewer received (delivery to the viewer is
+   *  not rendered). Drives the WhatsApp-style "double check". Distinct from
+   *  `deletedAt` and from the read/"seen" watermark (which outranks it). */
+  deliveredAt: string | null;
+  /** The sender's client-generated idempotency id (`crypto.randomUUID()`), echoed
+   *  back so the optimistic outbox bubble reconciles against its server row by
+   *  the same key (replace-in-place, no duplicate). Null for server-originated
+   *  or legacy messages that carry no client id. */
+  clientMessageId: string | null;
+  /** True when this message was created by forwarding — the recipient's bubble
+   *  renders a subtle "Forwarded" label. Only the body is carried on a forward;
+   *  reactions/receipts are never copied. */
+  forwarded: boolean;
+  /** ISO timestamp this message was pinned in the conversation (SHARED — both
+   *  participants see the same value), else null. Drives the pin indicator + the
+   *  pinned-messages banner. */
+  pinnedAt: string | null;
+  /** Whether THIS viewer has starred (privately bookmarked) the message. Scoped
+   *  to the caller — never leaks the other participant's stars. */
+  starred: boolean;
+  /** Server-authoritative: whether this viewer may pin/unpin this message. True
+   *  for any non-deleted message a DM participant can see (the endpoint re-checks
+   *  participation); false for tombstones. Groups may narrow this later. */
+  canPin: boolean;
   /** The quoted message this one replies to, resolved server-side. Null if not a reply. */
   replyTo: {
     id: string;
@@ -103,6 +144,70 @@ export interface MessageResponse {
     senderName: string;
     deleted: boolean;
   } | null;
+  /** `user` (an ordinary bubble) or `system` (a rendered event pill). Present on
+   *  every message; a DM's messages are all `user`, so the client's existing
+   *  bubble path is unchanged. */
+  kind: 'user' | 'system';
+  /** Resolved system event for a `system` message, else null. Actor/target are
+   *  resolved to DISPLAY NAMES server-side (the client only renders bilingual
+   *  templates, never user ids). `value` carries a scalar the event needs (e.g. a
+   *  new group title). */
+  systemEvent: {
+    type: SystemEventType;
+    actorName: string;
+    targetName: string | null;
+    value: string | null;
+  } | null;
+}
+
+/**
+ * One member of a GROUP conversation, for the group header/info list. `id` is the
+ * user id (correlates presence + the leave call); `role` drives the read-only
+ * role badge Phase 1 shows and the management Phase 2 gates on. DMs carry an
+ * empty `members` array — the counterpart is `otherParticipant` as before.
+ */
+export interface ConversationMemberSummary {
+  id: string;
+  /** Profile handle (slug) — the member's profile link + avatar tint seed. */
+  handle: string;
+  name: string;
+  avatarUrl: string | null;
+  role: ConversationRole;
+  /** This member's read watermark (ISO), else null. Surfaced per-member so the
+   *  client computes "Seen by N" for the caller's own group messages without an
+   *  N+1 per-message receipts fetch — a message is "seen by" a member iff this
+   *  is at-or-after the message's `createdAt`. Null for a member who has never
+   *  read (and always null on DM member lists, which are empty). */
+  lastReadAt: string | null;
+  /** This member's delivered watermark (ISO), one rung below `lastReadAt`, else
+   *  null. Lets the client show a group "delivered" state precede "seen by". */
+  deliveredAt: string | null;
+}
+
+/**
+ * Resolves a stored `SystemEvent` (actor/target as user ids) into the
+ * display-name shape the client renders. Names come from the batch-loaded
+ * profiles so a later rename is always reflected; a missing profile falls back
+ * to a generic "Member". `null` in → `null` out (a `user` message).
+ */
+export function buildSystemEvent(
+  event: SystemEvent | null,
+  profileByUser: Map<string, Profile>,
+): MessageResponse['systemEvent'] {
+  if (!event) {
+    return null;
+  }
+  const nameOf = (userId: string | undefined): string | null => {
+    if (!userId) return null;
+    const profile = profileByUser.get(userId);
+    return profile ? requireAuthorSummary(profile).displayName : 'Member';
+  };
+  return {
+    type: event.type,
+    actorName: nameOf(event.actorId) ?? 'Member',
+    targetName: nameOf(event.targetId),
+    value: event.value ?? null,
+  };
 }
 
 /**
@@ -151,15 +256,109 @@ export interface ConversationResponse {
   /** The OTHER participant's read watermark (ISO), for "Seen" receipts. Null for
    *  official/group threads or a counterpart who has never read. */
   otherLastReadAt: string | null;
+  /** The OTHER participant's delivered watermark (ISO), for the "double check".
+   *  Mirrors `otherLastReadAt` one rung down. Null for official/group threads or
+   *  a counterpart whose device hasn't acked anything yet. */
+  otherDeliveredAt: string | null;
   /** The other participant's user id — used only client-side to correlate
    *  presence (`presence` events key by userId). Null for official/group. */
   otherParticipantId: string | null;
+  /** `direct` (1:1 DM / official) or `group` (member-created, titled,
+   *  multi-participant). The client branches its header/inbox/attribution on
+   *  this; DMs stay `direct` and render exactly as before. */
+  kind: 'direct' | 'group';
+  /** Group name (null for DMs — their name is the counterpart's). */
+  title: string | null;
+  /** Group avatar URL (null for DMs — the counterpart's avatar is used). */
+  avatarUrl: string | null;
+  /** Active (not-left) member count for a group; 0 for DMs. Drives the header
+   *  subtitle ("5 members"). */
+  memberCount: number;
+  /** Group member roster (empty for DMs). Read-only in Phase 1 (role badges);
+   *  Phase 2 adds add/remove/promote. */
+  members: ConversationMemberSummary[];
   // Backend extras beyond the frontend contract, which ignores unknown fields.
   // `isOfficial` distinguishes the org/welcome thread `type: 'group'` covers
   // coarsely; `muted` is this caller's per-conversation preference and is only
   // present where a participant row was already loaded (i.e. the list path).
   isOfficial?: boolean;
   muted?: boolean;
+  /** For a group: whether THIS caller has left it (`left_at` set). A left member
+   *  keeps read access to history but the composer is severed. Absent/false for
+   *  DMs and active group members. */
+  hasLeft?: boolean;
+  /** This caller's own standing in a group (`owner`\|`admin`\|`member`), for the
+   *  info UI. Null/absent for DMs. */
+  myRole?: ConversationRole | null;
+  /** SERVER-AUTHORITATIVE capability flags for group management — the client
+   *  gates its management UI on these, and every mutation re-checks the caller's
+   *  role server-side regardless (never trusting the client). All false for DMs,
+   *  official threads, and a member who has left. `owner` gets everything incl.
+   *  role management; `admin` can add/remove/rename but not manage roles;
+   *  `member` gets none. */
+  canAddMembers?: boolean;
+  canRemoveMembers?: boolean;
+  canRename?: boolean;
+  canManageRoles?: boolean;
+}
+
+/**
+ * One cross-conversation message-search hit (see `MessagingService.searchMessages`).
+ * Carries just enough to render a result row and navigate to it: the message and
+ * conversation ids for the jump, a server-windowed `snippet` around the match
+ * (the full body is never returned — bounds payload and avoids leaking more than
+ * the matched context), the sender, and the timestamp. Tombstoned bodies are
+ * excluded upstream, so a hit's `snippet` is always real content.
+ */
+export interface MessageSearchHit {
+  id: string;
+  conversationId: string;
+  snippet: string;
+  sender: AuthorSummary;
+  createdAt: string;
+}
+
+/**
+ * Per-conversation metadata for grouping search hits in the inbox: the
+ * counterpart (null for the official/welcome thread, which the client labels
+ * with the org identity) and `isOfficial` so the client can render the right
+ * name/avatar without a second round-trip.
+ */
+export interface MessageSearchConversationGroup {
+  conversationId: string;
+  otherParticipant: AuthorSummary | null;
+  isOfficial: boolean;
+}
+
+/**
+ * Response for `GET /messages/search`: the echoed (trimmed) `query`, the flat
+ * `hits` newest-first, and the `conversations` metadata the client joins hits to
+ * for grouped rendering. Permission-scoped and `clearedAt`-floored server-side.
+ */
+export interface MessageSearchResponse {
+  query: string;
+  hits: MessageSearchHit[];
+  conversations: MessageSearchConversationGroup[];
+}
+
+/**
+ * One starred-message row for the "Starred messages" view — the same jump-to
+ * shape as a search hit (message + conversation ids, a body snippet, sender,
+ * timestamp) plus `starredAt` (when the viewer bookmarked it), so the list can
+ * order by bookmark recency. Scoped to the caller by construction.
+ */
+export interface StarredMessageHit extends MessageSearchHit {
+  starredAt: string;
+}
+
+/**
+ * Response for `GET /messages/starred`: the caller's starred messages
+ * newest-star-first, plus the per-conversation grouping metadata (reused from
+ * search) the client joins each hit to for a labelled, jump-to-able row.
+ */
+export interface StarredMessagesResponse {
+  items: StarredMessageHit[];
+  conversations: MessageSearchConversationGroup[];
 }
 
 const UNKNOWN_AUTHOR: AuthorSummary = {

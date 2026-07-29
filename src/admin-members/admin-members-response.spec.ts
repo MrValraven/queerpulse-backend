@@ -129,6 +129,7 @@ describe('toAdminMemberDetail', () => {
       },
       openReportCount: 1,
       vouchCount: 4,
+      outboundVouchCount: 2,
       communities: [{ name: 'Circle of Care', role: 'member' }],
       contributions: [
         {
@@ -148,7 +149,10 @@ describe('toAdminMemberDetail', () => {
           reportId: 'report-1',
         },
       ],
-      graph: { center: vouchAvatar, nodes: [vouchAvatar] },
+      graph: {
+        center: vouchAvatar,
+        nodes: [{ ...vouchAvatar, direction: 'inbound' }],
+      },
     });
 
     expect(detail.contributions[0].at).toBe('2025-03-05T00:00:00.000Z');

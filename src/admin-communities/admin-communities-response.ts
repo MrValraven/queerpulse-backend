@@ -185,8 +185,10 @@ export function initialsFor(name: string): string {
     .map((word) => word.replace(/[^\p{L}\p{N}]/gu, ''))
     .filter((word) => word.length > 0);
   if (words.length === 0) return '··';
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
-  return (words[0][0] + words[1][0]).toUpperCase();
+  const firstWord = words[0] ?? '';
+  if (words.length === 1) return firstWord.slice(0, 2).toUpperCase();
+  const secondWord = words[1] ?? '';
+  return ((firstWord[0] ?? '') + (secondWord[0] ?? '')).toUpperCase();
 }
 
 /** Deterministic tone from the slug, so a community keeps the same colour
@@ -200,7 +202,9 @@ export function toneFor(slug: string): BadgeTone {
   ) {
     hash = (hash * 31 + slug.charCodeAt(characterIndex)) % 1_000_003;
   }
-  return BADGE_TONES[hash % BADGE_TONES.length];
+  // invariant: `hash % BADGE_TONES.length` is always a valid index of the
+  // non-empty BADGE_TONES constant.
+  return BADGE_TONES[hash % BADGE_TONES.length]!;
 }
 
 const VISIBILITY_BY_ACCESS_TIER: Record<AccessTier, Visibility> = {

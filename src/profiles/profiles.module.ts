@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { Community } from '../communities/entities/community.entity';
+import { CommunityMember } from '../communities/entities/community-member.entity';
 import { ConnectionsModule } from '../connections/connections.module';
 import { HandlesModule } from '../handles/handles.module';
 import { SocialModule } from '../social/social.module';
@@ -9,6 +11,7 @@ import { Activity } from './entities/activity.entity';
 import { BoardPost } from './entities/board-post.entity';
 import { Group } from './entities/group.entity';
 import { GroupMembership } from './entities/group-membership.entity';
+import { ProfileFeaturedCommunity } from './entities/profile-featured-community.entity';
 import { Shaping } from './entities/shaping.entity';
 import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
@@ -29,6 +32,9 @@ import { ProfilesService } from './profiles.service';
       Activity,
       Group,
       GroupMembership,
+      ProfileFeaturedCommunity,
+      Community,
+      CommunityMember,
     ]),
     UsersModule,
     VouchModule,

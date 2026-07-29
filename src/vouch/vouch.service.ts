@@ -35,6 +35,12 @@ export interface VoucherView {
   avatarUrl: string | null;
   note: string | null;
   createdAt: Date;
+  /**
+   * True when the voucher chose to vouch anonymously. In that case the identity
+   * fields (`slug`/`firstName`/`lastName`/`avatarUrl`) are shielded to empty —
+   * anonymity is a safety property, so the voucher's identity is never emitted.
+   */
+  anonymous: boolean;
 }
 
 export interface GivenVouchView {
@@ -44,6 +50,7 @@ export interface GivenVouchView {
   avatarUrl: string | null;
   note: string | null;
   createdAt: Date;
+  anonymous: boolean;
 }
 
 /**
@@ -227,11 +234,16 @@ export class VouchService {
       take: page?.limit ?? DEFAULT_PAGE_SIZE,
       skip: page?.offset ?? 0,
     });
+    // Anonymous vouchers are shielded: never resolve their profile (so an
+    // identity can't leak) and emit a redacted view. Non-anonymous rows resolve
+    // as usual.
     const voucherProfiles = await this.profilesByUserIds(
-      rows.map((v) => v.voucherId),
+      rows.filter((v) => !v.anonymous).map((v) => v.voucherId),
     );
     const vouchers = rows.map((v) =>
-      this.toVouchView(voucherProfiles.get(v.voucherId), v.note, v.createdAt),
+      v.anonymous
+        ? this.toShieldedVouchView(v.note, v.createdAt)
+        : this.toVouchView(voucherProfiles.get(v.voucherId), v.note, v.createdAt),
     );
     return { count, vouchers };
   }
@@ -324,9 +336,16 @@ export class VouchService {
     });
     for (const vouch of vouches) {
       if (vouch.voucherId === viewerUserId) {
+        // The viewer's own outgoing vouch — they know they made it, so anonymity
+        // (which shields the voucher from the vouchee, not from themselves) does
+        // not apply to this direction.
         youVouched.add(vouch.voucheeId);
       }
-      if (vouch.voucheeId === viewerUserId) {
+      if (vouch.voucheeId === viewerUserId && !vouch.anonymous) {
+        // An INCOMING vouch surfaces as a "vouched-for-you" badge on that
+        // member's card. The viewer knows the member's identity from the
+        // connection, so surfacing an anonymous vouch here would de-anonymize
+        // the voucher — skip it.
         vouchedForYou.add(vouch.voucherId);
       }
     }
@@ -357,6 +376,28 @@ export class VouchService {
       avatarUrl: toImageUrl(profile?.avatarUrl),
       note,
       createdAt,
+      anonymous: false,
+    };
+  }
+
+  /**
+   * A voucher who vouched anonymously, with every identifying field redacted.
+   * The note and timestamp are kept (the voucher authored the note knowing they
+   * were anonymous), but the slug/name/avatar are never resolved or emitted, so
+   * the client cannot link the vouch back to a member.
+   */
+  private toShieldedVouchView(
+    note: string | null,
+    createdAt: Date,
+  ): VoucherView {
+    return {
+      slug: '',
+      firstName: '',
+      lastName: '',
+      avatarUrl: null,
+      note,
+      createdAt,
+      anonymous: true,
     };
   }
 }

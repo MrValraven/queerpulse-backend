@@ -2,6 +2,8 @@ import {
   resetImageUrlBaseForTesting,
   setImageUrlBase,
 } from '../common/image-url';
+import { CommunityType } from '../communities/entities/community.entity';
+import { RosterRole } from '../communities/entities/community-member.entity';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { DIRECTORY_BLURB_MAX_CHARS, truncateAtWord } from './directory-blurb';
 import { Activity, ActivityKind } from './entities/activity.entity';
@@ -54,6 +56,7 @@ const emptyRels: ProfileRelations = {
   shapings: [],
   activity: [],
   related: [],
+  featuredCommunities: [],
 };
 
 describe('profile-response mappers', () => {
@@ -144,6 +147,17 @@ describe('profile-response mappers', () => {
           occurredAt: new Date(),
         },
       ] as unknown as Activity[],
+      featuredCommunities: [
+        {
+          slug: 'queer-devs',
+          name: 'Queer Devs',
+          tagline: 'Ship together',
+          type: CommunityType.Professional,
+          typeLabel: 'Professional',
+          countLabel: '128 members',
+          role: RosterRole.Owner,
+        },
+      ],
     };
     const dto = toFullProfile(profile(), rels, 0);
     expect(dto.socials[0]).toEqual({
@@ -168,6 +182,16 @@ describe('profile-response mappers', () => {
       title: "RSVP'd",
       sub: 'Anjos',
       to: '/gatherings/x',
+    });
+    // Featured communities pass through already resolved for display.
+    expect(dto.featuredCommunities[0]).toEqual({
+      slug: 'queer-devs',
+      name: 'Queer Devs',
+      tagline: 'Ship together',
+      type: 'professional',
+      typeLabel: 'Professional',
+      countLabel: '128 members',
+      role: 'owner',
     });
   });
 

@@ -14,6 +14,7 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { ListMembersQuery } from './dto/list-members.query';
+import { ReplaceBoardDto } from './dto/replace-board.dto';
 import { ReplaceGroupsDto } from './dto/replace-groups.dto';
 import { ReplaceShapingsDto } from './dto/replace-shapings.dto';
 import { ReplaceSkillsDto } from './dto/replace-skills.dto';
@@ -69,6 +70,14 @@ export class ProfilesController {
     @Body() dto: ReplaceSkillsDto,
   ) {
     return this.profilesService.replaceSkills(user.userId, dto.items);
+  }
+
+  @Put('me/board')
+  replaceBoard(
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: ReplaceBoardDto,
+  ) {
+    return this.profilesService.replaceBoard(user.userId, dto.items);
   }
 
   @Put('me/shapings')

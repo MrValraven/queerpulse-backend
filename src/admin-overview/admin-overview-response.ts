@@ -85,11 +85,13 @@ export function medianHours(hoursDeltas: number[]): number | null {
   );
   const middleIndex = Math.floor(sortedHoursDeltas.length / 2);
 
+  // invariant: `middleIndex` (and `middleIndex - 1` in the even case) are valid
+  // indices — the empty set returned above, so length >= 1 here.
   if (sortedHoursDeltas.length % 2 === 1) {
-    return sortedHoursDeltas[middleIndex];
+    return sortedHoursDeltas[middleIndex]!;
   }
   return (
-    (sortedHoursDeltas[middleIndex - 1] + sortedHoursDeltas[middleIndex]) / 2
+    (sortedHoursDeltas[middleIndex - 1]! + sortedHoursDeltas[middleIndex]!) / 2
   );
 }
 

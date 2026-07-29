@@ -39,7 +39,7 @@ export class GoogleStrategy extends PassportStrategy(Strategy, 'google') {
     const result: GoogleUserInput = {
       googleId: id,
       email,
-      firstName: name?.givenName ?? email.split('@')[0],
+      firstName: name?.givenName ?? email.split('@')[0] ?? email,
       lastName: name?.familyName ?? '',
       avatarUrl: photos?.[0]?.value ?? null,
     };
