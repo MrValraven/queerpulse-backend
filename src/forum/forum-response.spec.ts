@@ -5,6 +5,7 @@ function makePost(overrides: Partial<ForumPost> = {}): ForumPost {
   return {
     id: 'post-1',
     threadId: 'thread-1',
+    parentPostId: null,
     authorId: 'author-1',
     body: 'hello',
     voteCount: 0,

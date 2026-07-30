@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -102,11 +103,15 @@ export class ForumPostsService {
   }
 
   // POST /forum/threads/:slug/posts — a reply (never the OP, which is
-  // created alongside the thread by `ForumThreadsService.create`).
+  // created alongside the thread by `ForumThreadsService.create`). An
+  // optional `parentPostId` nests this reply under another post in the same
+  // thread (a top-level comment on the thread otherwise) — see
+  // `ForumPost.parentPostId`'s docstring.
   async reply(
     threadSlug: string,
     user: CurrentUserData,
     body: string,
+    parentPostId?: string,
   ): Promise<ForumPostResponse> {
     // Passing the replier as viewer 404s the thread when its author is blocked
     // either way — a block is a hard severance, so it has to gate the write
@@ -116,23 +121,50 @@ export class ForumPostsService {
       throw new ForbiddenException('This thread is locked');
     }
 
+    const parentPost = parentPostId
+      ? await this.loadReplyParentOr400(parentPostId, thread.id)
+      : null;
+
     const saved = await this.posts.save(
       this.posts.create({
         threadId: thread.id,
         authorId: user.userId,
         body,
         voteCount: 0,
+        parentPostId: parentPost?.id ?? null,
       }),
     );
     await this.threadsService.markActivity(thread.id);
 
-    await this.mentions.notify(body, user.userId, {
-      actorId: user.userId,
-      source: 'forum',
-      threadSlug,
-      postId: saved.id,
-      excerpt: body.slice(0, 140),
-    });
+    const mentionNotifiedUserIds = await this.mentions.notify(
+      body,
+      user.userId,
+      {
+        actorId: user.userId,
+        source: 'forum',
+        threadSlug,
+        postId: saved.id,
+        excerpt: body.slice(0, 140),
+      },
+    );
+
+    // Notify the parent post's author that their comment got a reply, via its
+    // own `ForumReply` notification type — see
+    // `MentionNotificationService.notifyParentReply` for the payload shape and
+    // the self-reply skip. Skipped when the reply body already `@mentioned`
+    // the parent author by name — `notify()` above will have already created
+    // a Mention notification for them, and firing this one too would double-
+    // notify/double-push the same person for the same reply.
+    if (parentPost && !mentionNotifiedUserIds.has(parentPost.authorId)) {
+      await this.mentions.notifyParentReply(parentPost.authorId, user.userId, {
+        actorId: user.userId,
+        source: 'forum',
+        threadSlug,
+        postId: saved.id,
+        parentPostId: parentPost.id,
+        excerpt: body.slice(0, 140),
+      });
+    }
 
     const authors = await new MemberLookup(this.profiles).byUserIds([
       user.userId,
@@ -309,6 +341,28 @@ export class ForumPostsService {
       throw new NotFoundException('Post not found');
     }
     return post;
+  }
+
+  // Validates a reply's `parentPostId` before it's persisted: the parent must
+  // exist, belong to the *same* thread (a nested reply can't point across
+  // threads), and not be a tombstone (no replying to a deleted post).
+  private async loadReplyParentOr400(
+    parentPostId: string,
+    threadId: string,
+  ): Promise<ForumPost> {
+    const parent = await this.posts.findOne({ where: { id: parentPostId } });
+    if (!parent) {
+      throw new NotFoundException('Parent post not found');
+    }
+    if (parent.threadId !== threadId) {
+      throw new BadRequestException(
+        'Parent post does not belong to this thread',
+      );
+    }
+    if (parent.deletedAt) {
+      throw new BadRequestException('Cannot reply to a deleted post');
+    }
+    return parent;
   }
 
   private async mapOne(

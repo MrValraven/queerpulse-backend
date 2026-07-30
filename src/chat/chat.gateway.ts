@@ -311,7 +311,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       // Silently drop — typing is advisory; no need to error the client.
       return;
     }
-    client.to(data.conversationId).emit('typing', {
+    // `client.to(room)` excludes only the SENDING SOCKET, not the sending user.
+    // A member signed in on two devices (phone + laptop) has two sockets in this
+    // room, so without `.except` their own "typing" frame echoes to their other
+    // device and renders as "the other person is typing". Exclude the sender's
+    // whole `user:<id>` room so none of their own devices ever see it — typing is
+    // only ever meaningful about OTHER participants.
+    client.to(data.conversationId).except(`user:${userId}`).emit('typing', {
       conversationId: data.conversationId,
       userId,
       isTyping: data.isTyping,

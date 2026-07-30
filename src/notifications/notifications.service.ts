@@ -77,20 +77,28 @@ export class NotificationsService {
     return saved;
   }
 
-  /** Fan-out sibling of `create`, with the same write-time actor filter
-   *  applied per recipient (a block/mute is one recipient's relationship, so
-   *  it must never suppress the notification for everybody else). */
+  /**
+   * Fan-out sibling of `create`, with the same write-time actor filter
+   * applied per recipient (a block/mute is one recipient's relationship, so
+   * it must never suppress the notification for everybody else).
+   *
+   * Returns the `userId`s a row was actually saved for (post block/mute
+   * filter) — callers that fire a *second*, different notification off the
+   * same event (e.g. forum reply-to-parent-author, alongside this reply's
+   * `@mention` fan-out) can check this set first and skip a recipient who
+   * already got one, instead of double-notifying/double-pushing them.
+   */
   async createForRecipients(
     userIds: string[],
     type: NotificationType,
     payload: Record<string, unknown> = {},
     actorId?: string,
-  ): Promise<void> {
+  ): Promise<string[]> {
     const recipients = actorId
       ? await this.visibleRecipients(userIds, actorId)
       : userIds;
     if (!recipients.length) {
-      return;
+      return [];
     }
     const saved = await this.notifications.save(
       recipients.map((userId) =>
@@ -100,6 +108,7 @@ export class NotificationsService {
     for (const notification of saved) {
       this.announce(notification);
     }
+    return saved.map((notification) => notification.userId);
   }
 
   async list(

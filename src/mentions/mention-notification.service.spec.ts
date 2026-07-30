@@ -163,7 +163,7 @@ describe('MentionNotificationService.notify', () => {
         'author-1',
         payloadBase,
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual(new Set());
 
     expect(notifications.createForRecipients).not.toHaveBeenCalled();
   });

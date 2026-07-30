@@ -4,7 +4,12 @@
 // (`UPLOAD_LIMITS`) — the frontend only gives instant feedback; this table is
 // the real enforcement.
 export type UploadKind =
-  'avatar' | 'work-image' | 'story-cover' | 'gathering-photo' | 'group-avatar';
+  | 'avatar'
+  | 'work-image'
+  | 'story-cover'
+  | 'gathering-photo'
+  | 'group-avatar'
+  | 'listing-photo';
 
 export interface UploadKindSpec {
   /** Storage-key prefix the object is namespaced under (then `/<userId>/<uuid>.<ext>`). */
@@ -54,6 +59,18 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
   // don't administer.
   'group-avatar': {
     prefix: 'group-avatars',
+    maxBytes: 5 * MB,
+    requiresSession: false,
+  },
+  // A business listing's gallery photo. `requiresSession: false` for the SAME
+  // reason as avatars/work-images: the business directory is public — every
+  // route in `listings/directory.controller.ts` is `@Public()`, and listing
+  // responses resolve these keys through `toImageUrl` into `GET /files/*` — so
+  // gating them would blank every listing photo for logged-out directory
+  // visitors and shared-link unfurlers. 5 MB matches the frontend hint
+  // ("≥1200px wide · under 5 MB") and its `UPLOAD_LIMITS['listing-photo']`.
+  'listing-photo': {
+    prefix: 'listing-photos',
     maxBytes: 5 * MB,
     requiresSession: false,
   },

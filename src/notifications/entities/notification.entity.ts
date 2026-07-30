@@ -20,6 +20,7 @@ export enum NotificationType {
   PersonaEndorsed = 'persona_endorsed',
   PersonaFollowed = 'persona_followed',
   Mention = 'mention',
+  ForumReply = 'forum_reply',
 }
 
 @Entity('notifications')

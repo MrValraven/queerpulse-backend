@@ -44,6 +44,9 @@ function makeDirectoryListing(overrides: Partial<Listing> = {}): Listing {
     tags: ['Studio'],
     price: '€€',
     alt: { wide: '', d1: '', d2: '', vibe: '' },
+    photos: { wide: '', d1: '', d2: '', vibe: '' },
+    hours: {},
+    langs: [],
     whatItIs: [],
     goodFor: [],
     hoursNote: '',
@@ -106,6 +109,35 @@ describe('directory owner visibility', () => {
     expect(
       toDirectoryCard(makeDirectoryListing({ visibility: 'role' })).memberFirst,
     ).toBeNull();
+  });
+});
+
+describe('toDirectoryDetail', () => {
+  it('surfaces real photo urls, alt text, hours and langs on the detail DTO', () => {
+    const listing = makeDirectoryListing();
+    listing.photos = {
+      wide: 'https://cdn.example.com/wide.jpg',
+      d1: 'https://cdn.example.com/d1.jpg',
+      d2: '',
+      vibe: 'https://cdn.example.com/vibe.jpg',
+    };
+    listing.alt = { wide: 'Main room', d1: 'The bar', d2: '', vibe: 'Crowd' };
+    listing.hours = { Fri: { open: true, from: '18:00', to: '02:00' } };
+    listing.langs = ['pt', 'en'];
+
+    const detail = toDirectoryDetail(listing, [], []);
+
+    expect(detail.photos.wide).toBe('https://cdn.example.com/wide.jpg');
+    expect(detail.photos.d1).toBe('https://cdn.example.com/d1.jpg');
+    expect(detail.photos.d2).toBeNull(); // empty slot → null
+    expect(detail.photos.vibe).toBe('https://cdn.example.com/vibe.jpg');
+    expect(detail.alt.wide).toBe('Main room');
+    expect(detail.hours.Fri).toEqual({
+      open: true,
+      from: '18:00',
+      to: '02:00',
+    });
+    expect(detail.langs).toEqual(['pt', 'en']);
   });
 });
 

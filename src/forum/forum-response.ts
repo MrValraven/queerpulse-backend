@@ -92,6 +92,7 @@ export interface ForumPostViewer {
 export interface ForumPostResponse {
   id: string;
   threadId: string;
+  parentPostId: string | null;
   author: AuthorSummary;
   body: string;
   voteCount: number;
@@ -117,6 +118,7 @@ export function toForumPostResponse(
   return {
     id: post.id,
     threadId: post.threadId,
+    parentPostId: post.parentPostId ?? null,
     author: deleted ? DELETED_AUTHOR : toAuthorSummary(author),
     body: deleted ? '' : post.body,
     voteCount: post.voteCount,

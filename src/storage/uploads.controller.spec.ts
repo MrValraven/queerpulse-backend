@@ -69,6 +69,7 @@ describe('UploadsController', () => {
       ['work-image', 'work'],
       ['story-cover', 'story-covers'],
       ['gathering-photo', 'gathering-photos'],
+      ['listing-photo', 'listing-photos'],
     ];
 
     it.each(prefixCases)(

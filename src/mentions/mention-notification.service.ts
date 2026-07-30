@@ -32,14 +32,27 @@ export class MentionNotificationService {
     private readonly notifications: NotificationsService,
   ) {}
 
-  /** Best-effort mention fan-out across every entity kind. One notification per
-   *  recipient per post — member > community > business > event > thread priority,
-   *  author always dropped. Never throws: a mention side effect must not fail a write. */
+  /**
+   * Best-effort mention fan-out across every entity kind. One notification per
+   * recipient per post — member > community > business > event > thread
+   * priority, author always dropped. Never throws: a mention side effect must
+   * not fail a write.
+   *
+   * Returns the set of `userId`s an actual notification row was created for
+   * (accumulated from `NotificationsService.createForRecipients`'s own
+   * post-filter return), so a caller that's about to fire a *different*
+   * notification for the same event — e.g. `ForumPostsService.reply`'s
+   * reply-to-parent-author notification — can skip a recipient who already
+   * got one here, instead of double-notifying them. Declared outside the
+   * `try` so a mid-loop failure still returns whatever was actually notified
+   * before the error, rather than silently discarding it.
+   */
   async notify(
     body: string,
     authorUserId: string,
     payloadBase: Record<string, unknown>,
-  ): Promise<void> {
+  ): Promise<Set<string>> {
+    const notifiedUserIds = new Set<string>();
     try {
       const mentions = extractMentions(body);
       const groups: { kind: EntityKind; ref: string; recipients: string[] }[] =
@@ -137,15 +150,52 @@ export class MentionNotificationService {
         );
         if (!recipients.length) continue;
         recipients.forEach((userId) => claimed.add(userId));
-        await this.notifications.createForRecipients(
+        const notified = await this.notifications.createForRecipients(
           recipients,
           NotificationType.Mention,
           { ...payloadBase, entityKind: group.kind, entityRef: group.ref },
           authorUserId,
         );
+        notified.forEach((userId) => notifiedUserIds.add(userId));
       }
     } catch {
       // Intentionally ignored — mention notifications are best-effort.
+    }
+    return notifiedUserIds;
+  }
+
+  /**
+   * Best-effort "someone replied to your comment" notification, fired when a
+   * forum reply nests under another post (`ForumPost.parentPostId`).
+   *
+   * Uses its own `NotificationType.ForumReply` — distinct from `Mention` —
+   * so the parent author reads "replied to your comment" rather than
+   * "mentioned you in a discussion". Carries the same payload shape `notify()`
+   * writes for a forum `@mention` (`actorId`/`source`/`threadSlug`/`postId`/
+   * `excerpt`), plus `parentPostId`; `ACTOR_PAYLOAD_KEY` resolves `actorId` for
+   * this type the same way it does for `Mention`.
+   *
+   * Skips self-replies (replying to your own comment) and — mirroring
+   * `notify()` — never throws: a failure to enqueue this notification must
+   * not fail the reply it's attached to.
+   */
+  async notifyParentReply(
+    parentAuthorUserId: string,
+    replyAuthorUserId: string,
+    payloadBase: Record<string, unknown>,
+  ): Promise<void> {
+    if (parentAuthorUserId === replyAuthorUserId) {
+      return;
+    }
+    try {
+      await this.notifications.create(
+        parentAuthorUserId,
+        NotificationType.ForumReply,
+        payloadBase,
+        replyAuthorUserId,
+      );
+    } catch {
+      // Intentionally ignored — best-effort, same as `notify()` above.
     }
   }
 }

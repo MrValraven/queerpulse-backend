@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Between, In, IsNull, MoreThanOrEqual, Not, Repository } from 'typeorm';
+import { In, IsNull, MoreThanOrEqual, Not, Repository } from 'typeorm';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
@@ -128,8 +128,7 @@ export class AdminOverviewService {
 
   async getOverview(): Promise<AdminOverviewDTO> {
     const now = new Date();
-    const sevenDaysAgo = new Date(now.getTime() - 7 * DAY_MS);
-    const fourteenDaysAgo = new Date(now.getTime() - 14 * DAY_MS);
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * DAY_MS);
     const reportsByTypeWindowStart = new Date(
       now.getTime() - REPORTS_BY_TYPE_WEEK_COUNT * WEEK_MS,
     );
@@ -140,8 +139,7 @@ export class AdminOverviewService {
     const [
       activeMembersCount,
       verifiedMembersCount,
-      netNewThisWeekCount,
-      priorWeekNewMembersCount,
+      netNewThisMonthCount,
       profilesForMemberGrowth,
       openReportRows,
       reportRowsForReportsByType,
@@ -157,10 +155,7 @@ export class AdminOverviewService {
       this.usersService.countActiveMembers(),
       this.profiles.count({ where: { verified: true } }),
       this.profiles.count({
-        where: { joinedAt: MoreThanOrEqual(sevenDaysAgo) },
-      }),
-      this.profiles.count({
-        where: { joinedAt: Between(fourteenDaysAgo, sevenDaysAgo) },
+        where: { joinedAt: MoreThanOrEqual(thirtyDaysAgo) },
       }),
       this.profiles.find({
         select: ['joinedAt'],
@@ -208,13 +203,17 @@ export class AdminOverviewService {
     ]);
 
     // --- stats.activeMembers / verifiedMembers ---
+    // Growth of the active-member base over the trailing 30 days: the members
+    // who joined this month, as a percentage of the base that existed at the
+    // window's start (current total minus this month's joiners). This is
+    // positive whenever members were added, so its sign always agrees with the
+    // "+N this month" foot count the tile shows alongside it. Null when there's
+    // no prior base to grow from (base <= 0 — e.g. every active member joined
+    // within the window), which the tile renders as "not enough data yet".
+    const priorMonthBaseCount = activeMembersCount - netNewThisMonthCount;
     const growthPercent =
-      priorWeekNewMembersCount > 0
-        ? Math.round(
-            ((netNewThisWeekCount - priorWeekNewMembersCount) /
-              priorWeekNewMembersCount) *
-              100,
-          )
+      priorMonthBaseCount > 0
+        ? Math.round((netNewThisMonthCount / priorMonthBaseCount) * 100)
         : null;
 
     // --- stats.openReports / triage ---
@@ -325,7 +324,7 @@ export class AdminOverviewService {
         activeMembers: {
           value: activeMembersCount,
           growthPercent,
-          netNewThisWeek: netNewThisWeekCount,
+          netNewThisMonth: netNewThisMonthCount,
         },
         openReports: {
           value: openReportsCount,

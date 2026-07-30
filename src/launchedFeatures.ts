@@ -50,6 +50,7 @@ export const launchedFeatures = {
   culture: { launched: true },
   governance: { launched: true },
   community: { launched: true },
+  roadmap: { launched: true },
   // Cinema ships off until Mux is provisioned: launching it makes the Mux
   // credentials below mandatory at boot (see env.validation.ts). Flip to
   // `launched: true` in an environment that has those vars set.

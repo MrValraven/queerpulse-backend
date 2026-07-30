@@ -10,7 +10,7 @@ export interface AdminOverviewDTO {
     activeMembers: {
       value: number;
       growthPercent: number | null;
-      netNewThisWeek: number;
+      netNewThisMonth: number;
     };
     openReports: {
       value: number;

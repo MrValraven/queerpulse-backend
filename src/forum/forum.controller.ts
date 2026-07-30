@@ -79,7 +79,7 @@ export class ForumController {
     @Param('slug') slug: string,
     @Body() dto: ReplyThreadDto,
   ) {
-    return this.postsService.reply(slug, user, dto.body);
+    return this.postsService.reply(slug, user, dto.body, dto.parentPostId);
   }
 
   @Post('posts/:id/vote')

@@ -37,6 +37,7 @@ import { ChangemakersModule } from './changemakers/changemakers.module';
 import { CompaniesModule } from './companies/companies.module';
 import { CultureModule } from './culture/culture.module';
 import { GovernanceModule } from './governance/governance.module';
+import { RoadmapModule } from './roadmap/roadmap.module';
 import { AdminCommunitiesModule } from './admin-communities/admin-communities.module';
 import { AdminMembersModule } from './admin-members/admin-members.module';
 import { AdminTrustNetworkModule } from './admin-trust-network/admin-trust-network.module';
@@ -228,6 +229,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     ContentModule,
     CultureModule,
     GovernanceModule,
+    RoadmapModule,
     CommunityModule,
     ChangemakersModule,
     AdminCommunitiesModule,

@@ -10,9 +10,13 @@ import {
  * A single post within a thread. The oldest post (by `createdAt`) for a
  * given `threadId` is the thread's OP; every later one is a reply — there is
  * no `kind`/`isOp` column, the ordering *is* the distinction (see
- * `ForumPostsService.listPosts`'s oldest-first cursor page).
+ * `ForumPostsService.listPosts`'s oldest-first cursor page). Beyond
+ * `threadId`, a post optionally relates to another post in the same thread
+ * via `parentPostId`: `null` means a top-level comment on the thread, a
+ * value means a nested reply to that specific post.
  */
 @Entity('forum_post')
+@Index('IDX_forum_post_thread_id_parent_post_id', ['threadId', 'parentPostId'])
 export class ForumPost {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -20,6 +24,9 @@ export class ForumPost {
   @Index('IDX_forum_post_thread_id')
   @Column({ type: 'uuid' })
   threadId: string;
+
+  @Column({ type: 'uuid', nullable: true })
+  parentPostId: string | null;
 
   @Index('IDX_forum_post_author_id')
   @Column({ type: 'uuid' })

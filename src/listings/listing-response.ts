@@ -335,6 +335,15 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
   tagline: string;
   pills: string[];
   gallery: string[];
+  /** Real uploaded images (storage-resolved URLs), paired with `alt`. `null`
+   * per empty slot. The FE renders these as a gallery; `gallery` (alt-text
+   * captions) remains the fallback for listings/demo places without photos. */
+  photos: ListingPhotoSetView;
+  alt: ListingPhotoSet;
+  /** Real per-weekday opening hours, keyed by the FE `DAYS` id (`Mon`..`Sun`).
+   * The FE computes an open/closed status from this; empty → status unknown. */
+  hours: Record<string, ListingDayHours>;
+  langs: string[];
   whatItIs: string[];
   goodFor: DirectoryGoodFor[];
   hoursType: DirectoryHoursType;
@@ -366,6 +375,15 @@ export function toDirectoryDetail(
       listing.alt.d2,
       listing.alt.vibe,
     ].filter((caption) => caption.length > 0),
+    photos: {
+      wide: toImageUrl(listing.photos.wide),
+      d1: toImageUrl(listing.photos.d1),
+      d2: toImageUrl(listing.photos.d2),
+      vibe: toImageUrl(listing.photos.vibe),
+    },
+    alt: listing.alt,
+    hours: listing.hours,
+    langs: listing.langs,
     whatItIs: listing.whatItIs.map((line) => line.text),
     // The listing stores positive bullets only, so every one is a "yes".
     goodFor: listing.goodFor.map((label) => ({ label, yes: true })),
