@@ -8,7 +8,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
-import { CinemaService } from './cinema.service';
+import { CinemaService, MuxWebhookEvent } from './cinema.service';
 import {
   CinemaTitle,
   TitleKind,
@@ -334,6 +334,170 @@ describe('CinemaService', () => {
         ConflictException,
       );
       expect(mux.createDirectUpload).not.toHaveBeenCalled();
+    });
+  });
+
+  // Provider-payload → domain mapping relocated here from the webhook
+  // controller: the malformed-`data.id` reject, the event `switch`, duration
+  // `Math.round`, `playback_ids[0]?.id ?? null`, error-message joining, and
+  // event → transition routing. Spy on the (idempotent) transition methods to
+  // assert dispatch + mapping without re-running each transition.
+  describe('handleWebhookEvent (dispatch + payload mapping)', () => {
+    it('rejects a payload missing data.id before any dispatch', async () => {
+      const onAssetReady = jest.spyOn(service, 'onAssetReady');
+      await expect(
+        service.handleWebhookEvent({
+          type: 'video.asset.ready',
+          data: { playback_ids: [{ id: 'pb-1' }] },
+        } as unknown as MuxWebhookEvent),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(onAssetReady).not.toHaveBeenCalled();
+    });
+
+    it('dispatches video.upload.asset_created and polls the linked asset', async () => {
+      const onUploadAssetCreated = jest
+        .spyOn(service, 'onUploadAssetCreated')
+        .mockResolvedValue(undefined);
+      const syncAssetState = jest
+        .spyOn(service, 'syncAssetState')
+        .mockResolvedValue(undefined);
+      await service.handleWebhookEvent({
+        type: 'video.upload.asset_created',
+        data: { id: 'up-1', asset_id: 'as-1' },
+      });
+      expect(onUploadAssetCreated).toHaveBeenCalledWith('up-1', 'as-1');
+      // Out-of-order heal: after linking, poll the asset once so an early
+      // asset.ready that was dropped as "unknown" is applied immediately.
+      expect(syncAssetState).toHaveBeenCalledWith('as-1');
+    });
+
+    it('does not dispatch or poll when asset_created has no asset_id', async () => {
+      const onUploadAssetCreated = jest
+        .spyOn(service, 'onUploadAssetCreated')
+        .mockResolvedValue(undefined);
+      const syncAssetState = jest
+        .spyOn(service, 'syncAssetState')
+        .mockResolvedValue(undefined);
+      await service.handleWebhookEvent({
+        type: 'video.upload.asset_created',
+        data: { id: 'up-1' },
+      });
+      expect(onUploadAssetCreated).not.toHaveBeenCalled();
+      expect(syncAssetState).not.toHaveBeenCalled();
+    });
+
+    it('maps video.asset.ready metadata: rounds duration, takes playback_ids[0].id', async () => {
+      const onAssetReady = jest
+        .spyOn(service, 'onAssetReady')
+        .mockResolvedValue(undefined);
+      await service.handleWebhookEvent({
+        type: 'video.asset.ready',
+        data: {
+          id: 'as-1',
+          playback_ids: [{ id: 'pb-1', policy: 'signed' }],
+          duration: 7199.62,
+          aspect_ratio: '16:9',
+        },
+      });
+      expect(onAssetReady).toHaveBeenCalledWith('as-1', {
+        playbackId: 'pb-1',
+        durationSeconds: 7200,
+        aspectRatio: '16:9',
+      });
+    });
+
+    it('maps missing video.asset.ready fields to nulls', async () => {
+      const onAssetReady = jest
+        .spyOn(service, 'onAssetReady')
+        .mockResolvedValue(undefined);
+      await service.handleWebhookEvent({
+        type: 'video.asset.ready',
+        data: { id: 'as-1' },
+      });
+      expect(onAssetReady).toHaveBeenCalledWith('as-1', {
+        playbackId: null,
+        durationSeconds: null,
+        aspectRatio: null,
+      });
+    });
+
+    it('dispatches video.asset.errored with joined messages', async () => {
+      const onAssetErrored = jest
+        .spyOn(service, 'onAssetErrored')
+        .mockResolvedValue(undefined);
+      await service.handleWebhookEvent({
+        type: 'video.asset.errored',
+        data: {
+          id: 'as-1',
+          errors: {
+            type: 'invalid_input',
+            messages: ['bad codec', 'no audio'],
+          },
+        },
+      });
+      expect(onAssetErrored).toHaveBeenCalledWith(
+        'as-1',
+        'bad codec; no audio',
+      );
+    });
+
+    it('falls back to a default message when asset.errored carries none', async () => {
+      const onAssetErrored = jest
+        .spyOn(service, 'onAssetErrored')
+        .mockResolvedValue(undefined);
+      await service.handleWebhookEvent({
+        type: 'video.asset.errored',
+        data: { id: 'as-1' },
+      });
+      expect(onAssetErrored).toHaveBeenCalledWith('as-1', 'Asset errored');
+    });
+
+    it('routes upload.errored and upload.cancelled to onUploadFailed with the event type', async () => {
+      const onUploadFailed = jest
+        .spyOn(service, 'onUploadFailed')
+        .mockResolvedValue(undefined);
+      await service.handleWebhookEvent({
+        type: 'video.upload.errored',
+        data: { id: 'up-1' },
+      });
+      expect(onUploadFailed).toHaveBeenCalledWith(
+        'up-1',
+        'video.upload.errored',
+      );
+
+      await service.handleWebhookEvent({
+        type: 'video.upload.cancelled',
+        data: { id: 'up-2' },
+      });
+      expect(onUploadFailed).toHaveBeenCalledWith(
+        'up-2',
+        'video.upload.cancelled',
+      );
+    });
+
+    it('acknowledges unknown event types without dispatching', async () => {
+      const onUploadAssetCreated = jest
+        .spyOn(service, 'onUploadAssetCreated')
+        .mockResolvedValue(undefined);
+      const onAssetReady = jest
+        .spyOn(service, 'onAssetReady')
+        .mockResolvedValue(undefined);
+      const onAssetErrored = jest
+        .spyOn(service, 'onAssetErrored')
+        .mockResolvedValue(undefined);
+      const onUploadFailed = jest
+        .spyOn(service, 'onUploadFailed')
+        .mockResolvedValue(undefined);
+      await expect(
+        service.handleWebhookEvent({
+          type: 'video.asset.created',
+          data: { id: 'as-1' },
+        }),
+      ).resolves.toBeUndefined();
+      expect(onUploadAssetCreated).not.toHaveBeenCalled();
+      expect(onAssetReady).not.toHaveBeenCalled();
+      expect(onAssetErrored).not.toHaveBeenCalled();
+      expect(onUploadFailed).not.toHaveBeenCalled();
     });
   });
 

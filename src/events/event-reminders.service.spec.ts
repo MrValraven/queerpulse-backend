@@ -2,35 +2,49 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { PushService } from '../push/push.service';
 import { EventRsvp } from './entities/event-rsvp.entity';
+import { MemberEventReminderPreferences } from './entities/member-event-reminder-preferences.entity';
 import { Event } from './entities/event.entity';
 import { EventRemindersService } from './event-reminders.service';
 
 describe('EventRemindersService', () => {
   let service: EventRemindersService;
   let events: { find: jest.Mock; update: jest.Mock };
-  let rsvps: { find: jest.Mock };
+  let rsvps: { find: jest.Mock; update: jest.Mock };
+  let preferences: { find: jest.Mock };
   let notifications: { createForRecipients: jest.Mock };
+  let push: { sendToUser: jest.Mock };
 
   beforeEach(async () => {
     events = {
       find: jest.fn(),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
-    rsvps = { find: jest.fn().mockResolvedValue([]) };
+    rsvps = {
+      find: jest.fn().mockResolvedValue([]),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+    preferences = { find: jest.fn().mockResolvedValue([]) };
     notifications = { createForRecipients: jest.fn() };
+    push = { sendToUser: jest.fn().mockResolvedValue(undefined) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         EventRemindersService,
         { provide: getRepositoryToken(Event), useValue: events },
         { provide: getRepositoryToken(EventRsvp), useValue: rsvps },
+        {
+          provide: getRepositoryToken(MemberEventReminderPreferences),
+          useValue: preferences,
+        },
         { provide: NotificationsService, useValue: notifications },
+        { provide: PushService, useValue: push },
       ],
     }).compile();
     service = module.get(EventRemindersService);
   });
 
-  it('claims each due event before notifying (stamp-before-send)', async () => {
+  it('claims each due RSVP before notifying (stamp-before-send)', async () => {
     const event = {
       id: 'e1',
       slug: 'x',
@@ -38,17 +52,20 @@ describe('EventRemindersService', () => {
       reminderSentAt: null,
     };
     events.find.mockResolvedValue([event]);
-    rsvps.find.mockResolvedValue([{ userId: 'a' }, { userId: 'b' }]);
+    rsvps.find.mockResolvedValue([
+      { id: 'r1', userId: 'a' },
+      { id: 'r2', userId: 'b' },
+    ]);
 
     await service.sendDueReminders();
 
-    // The conditional claim stamps reminderSentAt on a still-unsent row...
-    expect(events.update).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'e1' }),
+    // The conditional claim stamps reminderSentAt on each still-unsent RSVP row...
+    expect(rsvps.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'r1' }),
       expect.objectContaining({ reminderSentAt: expect.any(Date) as unknown }),
     );
     // ...and only then does the fan-out happen (at-most-once ordering).
-    expect(events.update.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(rsvps.update.mock.invocationCallOrder[0]).toBeLessThan(
       notifications.createForRecipients.mock.invocationCallOrder[0]!,
     );
     expect(notifications.createForRecipients).toHaveBeenCalledWith(

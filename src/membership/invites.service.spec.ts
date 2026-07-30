@@ -166,7 +166,7 @@ describe('InvitesService.resolveInvite', () => {
       status: InviteStatus.Pending,
       note: 'hello',
       createdAt: new Date('2026-06-23T10:42:00.000Z'),
-      expiresAt: new Date('2026-07-07T10:42:00.000Z'),
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
     });
     users.findByIdWithProfile.mockResolvedValue({
       activatedAt: new Date('2024-03-01T00:00:00.000Z'),

@@ -4,16 +4,16 @@ import { CinemaService } from './cinema.service';
 import { MuxService } from './mux.service';
 import { CinemaWebhooksController } from './webhooks.controller';
 
+// The controller now owns only HMAC verification and the hand-off: it verifies
+// the signature over the raw body, hands the parsed event to
+// `CinemaService.handleWebhookEvent`, and returns `{ received: true }`. The
+// provider-payload mapping/dispatch it used to own (event switch, duration
+// rounding, playback-id extraction, error-message joining, malformed-id reject)
+// now lives in the service and is exercised in cinema.service.spec.ts.
 describe('CinemaWebhooksController', () => {
   let controller: CinemaWebhooksController;
   let mux: { verifyWebhook: jest.Mock };
-  let cinema: {
-    onUploadAssetCreated: jest.Mock;
-    onAssetReady: jest.Mock;
-    onAssetErrored: jest.Mock;
-    onUploadFailed: jest.Mock;
-    syncAssetState: jest.Mock;
-  };
+  let cinema: { handleWebhookEvent: jest.Mock };
 
   function request(body: unknown = { any: 'thing' }) {
     return {
@@ -24,13 +24,7 @@ describe('CinemaWebhooksController', () => {
 
   beforeEach(async () => {
     mux = { verifyWebhook: jest.fn() };
-    cinema = {
-      onUploadAssetCreated: jest.fn(),
-      onAssetReady: jest.fn(),
-      onAssetErrored: jest.fn(),
-      onUploadFailed: jest.fn(),
-      syncAssetState: jest.fn(),
-    };
+    cinema = { handleWebhookEvent: jest.fn().mockResolvedValue(undefined) };
     const module: TestingModule = await Test.createTestingModule({
       controllers: [CinemaWebhooksController],
       providers: [
@@ -41,122 +35,46 @@ describe('CinemaWebhooksController', () => {
     controller = module.get(CinemaWebhooksController);
   });
 
+  it('verifies the signature over the raw body then hands the event to the service', async () => {
+    const event = { type: 'video.asset.ready', data: { id: 'as-1' } };
+    mux.verifyWebhook.mockResolvedValue(event);
+    const rawBody = Buffer.from(JSON.stringify({ any: 'thing' }));
+    const headers = { 'mux-signature': 't=1,v1=abc' };
+    const result = await controller.handleMux({ rawBody, headers } as never);
+    expect(mux.verifyWebhook).toHaveBeenCalledWith(
+      rawBody.toString('utf8'),
+      headers,
+    );
+    expect(cinema.handleWebhookEvent).toHaveBeenCalledWith(event);
+    expect(result).toEqual({ received: true });
+  });
+
   it('propagates signature failures without touching state', async () => {
     mux.verifyWebhook.mockRejectedValue(new ForbiddenException());
     await expect(controller.handleMux(request())).rejects.toBeInstanceOf(
       ForbiddenException,
     );
-    expect(cinema.onUploadAssetCreated).not.toHaveBeenCalled();
-    expect(cinema.onAssetReady).not.toHaveBeenCalled();
+    expect(cinema.handleWebhookEvent).not.toHaveBeenCalled();
   });
 
-  it('400s when the raw body is missing', async () => {
+  it('400s when the raw body is missing, before verifying', async () => {
     await expect(
       controller.handleMux({ rawBody: undefined, headers: {} } as never),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(mux.verifyWebhook).not.toHaveBeenCalled();
+    expect(cinema.handleWebhookEvent).not.toHaveBeenCalled();
   });
 
-  it('dispatches video.upload.asset_created and polls the linked asset', async () => {
-    mux.verifyWebhook.mockResolvedValue({
-      type: 'video.upload.asset_created',
-      data: { id: 'up-1', asset_id: 'as-1' },
-    });
-    const result = await controller.handleMux(request());
-    expect(cinema.onUploadAssetCreated).toHaveBeenCalledWith('up-1', 'as-1');
-    // Out-of-order heal: after linking, the asset is polled once so an early
-    // asset.ready that was dropped as "unknown" is applied immediately.
-    expect(cinema.syncAssetState).toHaveBeenCalledWith('as-1');
-    expect(result).toEqual({ received: true });
-  });
-
-  it('rejects a payload missing data.id before any dispatch', async () => {
+  it('lets a service-side malformed-payload rejection surface (no ack)', async () => {
+    // The malformed-`data.id` guard now lives in the service; the controller
+    // simply propagates that rejection instead of returning { received: true }.
     mux.verifyWebhook.mockResolvedValue({
       type: 'video.asset.ready',
-      data: { playback_ids: [{ id: 'pb-1' }] }, // no id
+      data: {},
     });
+    cinema.handleWebhookEvent.mockRejectedValue(new BadRequestException());
     await expect(controller.handleMux(request())).rejects.toBeInstanceOf(
       BadRequestException,
     );
-    expect(cinema.onAssetReady).not.toHaveBeenCalled();
-  });
-
-  it('does not poll when asset_created has no asset_id', async () => {
-    mux.verifyWebhook.mockResolvedValue({
-      type: 'video.upload.asset_created',
-      data: { id: 'up-1' }, // asset_id missing
-    });
-    const result = await controller.handleMux(request());
-    expect(cinema.onUploadAssetCreated).not.toHaveBeenCalled();
-    expect(cinema.syncAssetState).not.toHaveBeenCalled();
-    expect(result).toEqual({ received: true });
-  });
-
-  it('dispatches video.asset.ready with mapped metadata', async () => {
-    mux.verifyWebhook.mockResolvedValue({
-      type: 'video.asset.ready',
-      data: {
-        id: 'as-1',
-        playback_ids: [{ id: 'pb-1', policy: 'signed' }],
-        duration: 7199.62,
-        aspect_ratio: '16:9',
-      },
-    });
-    await controller.handleMux(request());
-    expect(cinema.onAssetReady).toHaveBeenCalledWith('as-1', {
-      playbackId: 'pb-1',
-      durationSeconds: 7200,
-      aspectRatio: '16:9',
-    });
-  });
-
-  it('dispatches video.asset.errored with joined messages', async () => {
-    mux.verifyWebhook.mockResolvedValue({
-      type: 'video.asset.errored',
-      data: {
-        id: 'as-1',
-        errors: { type: 'invalid_input', messages: ['bad codec', 'no audio'] },
-      },
-    });
-    await controller.handleMux(request());
-    expect(cinema.onAssetErrored).toHaveBeenCalledWith(
-      'as-1',
-      'bad codec; no audio',
-    );
-  });
-
-  it('dispatches upload failures for errored and cancelled', async () => {
-    mux.verifyWebhook.mockResolvedValue({
-      type: 'video.upload.errored',
-      data: { id: 'up-1' },
-    });
-    await controller.handleMux(request());
-    expect(cinema.onUploadFailed).toHaveBeenCalledWith(
-      'up-1',
-      'video.upload.errored',
-    );
-
-    mux.verifyWebhook.mockResolvedValue({
-      type: 'video.upload.cancelled',
-      data: { id: 'up-2' },
-    });
-    await controller.handleMux(request());
-    expect(cinema.onUploadFailed).toHaveBeenCalledWith(
-      'up-2',
-      'video.upload.cancelled',
-    );
-  });
-
-  it('acknowledges unknown event types without dispatching', async () => {
-    mux.verifyWebhook.mockResolvedValue({
-      type: 'video.asset.created',
-      data: { id: 'as-1' },
-    });
-    const result = await controller.handleMux(request());
-    expect(result).toEqual({ received: true });
-    expect(cinema.onUploadAssetCreated).not.toHaveBeenCalled();
-    expect(cinema.onAssetReady).not.toHaveBeenCalled();
-    expect(cinema.onAssetErrored).not.toHaveBeenCalled();
-    expect(cinema.onUploadFailed).not.toHaveBeenCalled();
   });
 });

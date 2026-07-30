@@ -61,7 +61,7 @@ describe('toImageUrl', () => {
   it('throws when a key is converted before the base URL is set', () => {
     resetImageUrlBaseForTesting();
     expect(() => toImageUrl(STORAGE_KEY)).toThrow(
-      /Image URL base is not configured/,
+      /Service temporarily unavailable/,
     );
   });
 

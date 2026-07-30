@@ -16,6 +16,7 @@
     "experimentalDecorators": true,
     "allowSyntheticDefaultImports": true,
     "target": "ES2023",
+    "useDefineForClassFields": false,
     "sourceMap": true,
     "outDir": "./dist",
     "types": ["jest", "node"],

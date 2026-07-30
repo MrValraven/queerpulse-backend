@@ -413,22 +413,30 @@ describe('ChatGateway', () => {
   });
 
   describe('handleTyping authorization', () => {
-    it('throws when the client has not joined the conversation room', () => {
+    it('does not broadcast typing when the client has not joined the conversation room', () => {
       const client = makeClient({ data: { userId: 'u1' }, rooms: new Set() });
+      // A socket not yet in the room silently no-ops rather than throwing (a
+      // benign pre-join race — the composer re-emits typing every ~2s), but the
+      // security invariant still holds: it never broadcasts into a room it hasn't
+      // joined.
       expect(() =>
         gateway.handleTyping(client as never, {
           conversationId: 'c1',
           isTyping: true,
         }),
-      ).toThrow();
+      ).not.toThrow();
+      expect(client.to).not.toHaveBeenCalled();
     });
 
     it('broadcasts typing to the room (excluding sender) once joined', () => {
       const typingEmit = jest.fn();
+      // The gateway chains `.to(room).except('user:<id>').emit(...)` so a member
+      // signed in on two devices never sees their own typing frame echoed back.
+      const except = jest.fn().mockReturnValue({ emit: typingEmit });
       const client = makeClient({
         data: { userId: 'u1' },
         rooms: new Set(['c1']),
-        to: jest.fn().mockReturnValue({ emit: typingEmit }),
+        to: jest.fn().mockReturnValue({ except }),
       });
 
       gateway.handleTyping(client as never, {
@@ -437,6 +445,7 @@ describe('ChatGateway', () => {
       });
 
       expect(client.to).toHaveBeenCalledWith('c1');
+      expect(except).toHaveBeenCalledWith('user:u1');
       expect(typingEmit).toHaveBeenCalledWith('typing', {
         conversationId: 'c1',
         userId: 'u1',
@@ -553,7 +562,18 @@ describe('ChatGateway', () => {
         conversationId: 'c1',
         body: 'hi',
       });
-      expect(messaging.sendMessage).toHaveBeenCalledWith('c1', 'u1', 'hi');
+      // The WS send path forwards the full message signature (reply/clientId/
+      // forwarded/kind/attachment), all undefined for a plain text send here.
+      expect(messaging.sendMessage).toHaveBeenCalledWith(
+        'c1',
+        'u1',
+        'hi',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+      );
     });
   });
 });

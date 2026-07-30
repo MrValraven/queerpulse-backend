@@ -1,22 +1,17 @@
 import {
-  BadRequestException,
   ConflictException,
-  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
   DataSource,
-  EntityManager,
   FindOptionsWhere,
   In,
-  IsNull,
   Not,
   Repository,
   SelectQueryBuilder,
 } from 'typeorm';
-import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
 import { AuthService } from '../auth/auth.service';
 import { cursorPaginate } from '../common/cursor-pagination';
 import {
@@ -26,28 +21,27 @@ import {
   ReportSubjectType,
 } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
-import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+import { UserStatus } from '../users/entities/user.entity';
+import { AccountEnforcementService } from './account-enforcement.service';
 import { LiftSuspensionDto } from './dto/lift-suspension.dto';
-import { parseDuration } from './parse-duration';
 import {
   ListModReportsQuery,
   ModReportsTab,
 } from './dto/list-mod-reports.query';
 import { AuditFeedQuery } from './dto/audit-feed.query';
-import { ModActionCode, ModActionDto } from './dto/mod-action.dto';
+import { ModActionDto } from './dto/mod-action.dto';
 import { ModBulkActionDto } from './dto/mod-bulk-action.dto';
 import { ReviewAppealDto } from './dto/review-appeal.dto';
 import { Appeal, AppealStatus } from './entities/appeal.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
+import { ModAuditService } from './mod-audit.service';
 import { statusForAction } from './mod-action-status';
 import {
   AppealAppellant,
   AppealDTO,
   AppealOriginal,
   AuditEntryDTO,
-  AuditFeedModerator,
   AuditFeedResponseDTO,
-  AuditFeedRowDTO,
   ModCounts,
   ModReportDetail,
   ModReportDTO,
@@ -55,8 +49,6 @@ import {
   ModReporterDTO,
   ModReportsResponse,
   toAppealDTO,
-  toAuditEntryDTO,
-  toAuditFeedRow,
   toModReportDTO,
 } from './moderation-response';
 
@@ -69,6 +61,15 @@ const DEFAULT_LIMIT = 20;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * Facade over the moderation queue/detail/appeals read+action paths. The two
+ * cohesive clusters it once owned inline now live in dedicated services —
+ * audit-log write/read + actor-name resolution in {@link ModAuditService}, and
+ * account enforcement (suspend/ban/lift/restore + deactivation-sync) in
+ * {@link AccountEnforcementService}. Every public method below keeps its
+ * original signature and behavior; the extraction is a concern split, not an
+ * API change.
+ */
 @Injectable()
 export class ModerationService {
   constructor(
@@ -76,10 +77,11 @@ export class ModerationService {
     @InjectRepository(Appeal) private readonly appeals: Repository<Appeal>,
     @InjectRepository(ModAuditLog)
     private readonly auditLogs: Repository<ModAuditLog>,
-    @InjectRepository(User) private readonly users: Repository<User>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly dataSource: DataSource,
     private readonly auth: AuthService,
+    private readonly audit: ModAuditService,
+    private readonly accountEnforcement: AccountEnforcementService,
   ) {}
 
   // GET /mod/reports — filterable, cursor-paginated queue. `tab` (not
@@ -152,13 +154,14 @@ export class ModerationService {
         report.status = statusForAction(dto.action);
         const saved = await manager.save(report);
 
-        const suspendedUserId = await this.enforceAgainstUser(
-          manager,
-          report,
-          dto,
-        );
+        const suspendedUserId =
+          await this.accountEnforcement.enforceAgainstUser(
+            manager,
+            report,
+            dto,
+          );
 
-        await this.writeAuditLog(
+        await this.audit.writeAuditLog(
           saved.id,
           actorId,
           dto.action,
@@ -208,10 +211,14 @@ export class ModerationService {
           // Any unenforceable subject fails the whole batch rather than
           // partially applying. A moderator selecting twelve reports and
           // suspending needs to know all twelve landed, not eleven.
-          const userId = await this.enforceAgainstUser(manager, report, dto);
+          const userId = await this.accountEnforcement.enforceAgainstUser(
+            manager,
+            report,
+            dto,
+          );
           if (userId) suspended.push(userId);
 
-          await this.writeAuditLog(
+          await this.audit.writeAuditLog(
             report.id,
             actorId,
             dto.action,
@@ -233,124 +240,15 @@ export class ModerationService {
   }
 
   // GET /mod/reports/audit?reportId= — the immutable trail for one report,
-  // oldest first. Renames `createdAt`→`at` and resolves `actorName` (I7).
-  async auditTrail(reportId: string): Promise<AuditEntryDTO[]> {
-    const rows = await this.auditLogs.find({
-      where: { reportId },
-      order: { createdAt: 'ASC' },
-    });
-    // One name lookup for the whole trail instead of one per log row: collect
-    // the distinct (non-erased) actor ids and resolve them together.
-    const actorIds = rows
-      .map((log) => log.actorId)
-      .filter((actorId): actorId is string => actorId !== null);
-    const actorNames = await this.namesForUserIds(actorIds);
-    return rows.map((log) =>
-      toAuditEntryDTO(log, this.resolveActorName(log.actorId, actorNames)),
-    );
+  // oldest first. Delegates to `ModAuditService`.
+  auditTrail(reportId: string): Promise<AuditEntryDTO[]> {
+    return this.audit.auditTrail(reportId);
   }
 
   // GET /mod/audit — the global, cross-report moderation audit feed for the
-  // admin governance "Audit" tab. Unlike `auditTrail`, not scoped to one
-  // report: paginated, newest first, filterable by moderator/action/range/
-  // free-text note search, and includes report-less rows (e.g.
-  // `suspension_lifted`) that `auditTrail` never surfaces.
-  async auditFeed(query: AuditFeedQuery): Promise<AuditFeedResponseDTO> {
-    const page = query.page ?? 1;
-    const pageSize = query.pageSize ?? 8;
-
-    const builder = this.auditLogs
-      .createQueryBuilder('log')
-      .orderBy('log.createdAt', 'DESC');
-
-    if (query.moderator) {
-      builder.andWhere('log.actorId = :moderatorId', {
-        moderatorId: query.moderator,
-      });
-    }
-    if (query.action) {
-      builder.andWhere('log.action = :action', { action: query.action });
-    }
-    if (query.range) {
-      const now = new Date();
-      let floor: Date;
-      if (query.range === 'today') {
-        floor = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      } else if (query.range === 'week') {
-        floor = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-      } else {
-        floor = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
-      }
-      builder.andWhere('log.createdAt >= :floor', { floor });
-    }
-    if (query.q && query.q.trim()) {
-      builder.andWhere('log.note ILIKE :search', {
-        search: `%${query.q.trim()}%`,
-      });
-    }
-
-    const total = await builder.getCount();
-    const rows = await builder
-      .skip((page - 1) * pageSize)
-      .take(pageSize)
-      .getMany();
-
-    const actorIds = rows
-      .map((row) => row.actorId)
-      .filter((actorId): actorId is string => actorId !== null);
-    const actorNames = await this.namesForUserIds(actorIds);
-
-    const reportIds = rows
-      .map((row) => row.reportId)
-      .filter((reportId): reportId is string => reportId !== null);
-    const reportsById = new Map<string, Report>();
-    if (reportIds.length) {
-      const linkedReports = await this.reports.find({
-        where: { id: In(reportIds) },
-      });
-      for (const linkedReport of linkedReports) {
-        reportsById.set(linkedReport.id, linkedReport);
-      }
-    }
-    const subjectFor = (log: ModAuditLog): string => {
-      if (log.reportId) {
-        const linkedReport = reportsById.get(log.reportId);
-        if (linkedReport) {
-          return `Report · ${linkedReport.subjectType} ${linkedReport.subjectId.slice(0, 8)}`;
-        }
-        return `Report #${log.reportId.slice(0, 8)}`;
-      }
-      return 'Platform action';
-    };
-
-    const items: AuditFeedRowDTO[] = rows.map((log) =>
-      toAuditFeedRow(
-        log,
-        this.resolveActorName(log.actorId, actorNames),
-        subjectFor(log),
-      ),
-    );
-
-    // Distinct actors across the *whole* table (not just this page), for the
-    // moderator filter's dropdown options.
-    const distinctActorRows = await this.auditLogs
-      .createQueryBuilder('log')
-      .select('log.actorId', 'actorId')
-      .distinct(true)
-      .where('log.actorId IS NOT NULL')
-      .getRawMany<{ actorId: string }>();
-    const distinctActorIds = distinctActorRows
-      .map((actorRow) => actorRow.actorId)
-      .filter((actorId): actorId is string => actorId !== null);
-    const moderatorNames = await this.namesForUserIds(distinctActorIds);
-    const moderators: AuditFeedModerator[] = distinctActorIds.map(
-      (actorId) => ({
-        id: actorId,
-        name: moderatorNames.get(actorId) ?? 'Member',
-      }),
-    );
-
-    return { items, total, moderators };
+  // admin governance "Audit" tab. Delegates to `ModAuditService`.
+  auditFeed(query: AuditFeedQuery): Promise<AuditFeedResponseDTO> {
+    return this.audit.auditFeed(query);
   }
 
   // GET /mod/appeals — newest first, mirrors every other list in this
@@ -377,27 +275,46 @@ export class ModerationService {
     if (!appeal) {
       throw new NotFoundException('Appeal not found');
     }
+    // This first check is only a fast, friendly reject for an already-decided
+    // appeal — the authoritative guard is the conditional `update` inside the
+    // transaction below, which is what actually makes the decision atomic.
     if (appeal.status !== AppealStatus.Awaiting) {
       throw new ConflictException('Appeal has already been decided');
     }
 
-    appeal.status =
+    const decidedStatus =
       dto.decision === 'uphold' ? AppealStatus.Upheld : AppealStatus.Overturned;
-    appeal.decision = dto.note ?? dto.decision;
+    const decision = dto.note ?? dto.decision;
 
     const saved = await this.dataSource.transaction(async (manager) => {
-      const saved = await manager.save(appeal);
+      // Re-check the status *inside* the transaction and flip it in one
+      // conditional write: only a row still `Awaiting` is updated. Two
+      // moderators deciding the same appeal concurrently race here, and exactly
+      // one wins — the loser's `affected` is 0, so it throws before writing a
+      // second (possibly contradictory) audit entry or running a restore
+      // against an already-upheld decision.
+      const updateResult = await manager.update(
+        Appeal,
+        { id, status: AppealStatus.Awaiting },
+        { status: decidedStatus, decision },
+      );
+      if (updateResult.affected !== 1) {
+        throw new ConflictException('Appeal has already been decided');
+      }
 
       // An overturned appeal that leaves the member suspended is the same
       // class of bug as a suspension that never applied: a moderation decision
       // that does not take effect. Restore them as part of the same decision.
       if (dto.decision === 'overturn') {
-        await this.restoreSuspensionForAppeal(manager, saved.reportId);
+        await this.accountEnforcement.restoreSuspensionForAppeal(
+          manager,
+          appeal.reportId,
+        );
       }
 
-      if (saved.reportId) {
-        await this.writeAuditLog(
-          saved.reportId,
+      if (appeal.reportId) {
+        await this.audit.writeAuditLog(
+          appeal.reportId,
           actorId,
           dto.decision === 'uphold' ? 'appeal_upheld' : 'appeal_overturned',
           undefined,
@@ -407,247 +324,24 @@ export class ModerationService {
         );
       }
 
-      return saved;
+      // Reflect the committed decision on the in-memory entity for the
+      // response, matching what the conditional `update` just persisted.
+      appeal.status = decidedStatus;
+      appeal.decision = decision;
+      return appeal;
     });
 
     return this.toAppealRow(saved);
   }
 
-  /**
-   * Restores the member behind an overturned appeal's report, if there is one
-   * and they are actually suspended.
-   *
-   * Silent when the appeal has no `reportId`, the report is not about a member,
-   * or the member is not suspended — an overturn must still record its decision
-   * in all of those cases rather than 400 on a bookkeeping detail.
-   */
-  private async restoreSuspensionForAppeal(
-    manager: EntityManager,
-    reportId: string | null,
-  ): Promise<void> {
-    if (!reportId) return;
-
-    const report = await manager.findOne(Report, { where: { id: reportId } });
-    if (!report) return;
-
-    const profile = await this.resolveReportedProfile(report);
-    if (!profile) return;
-
-    const user = await manager.findOne(User, {
-      where: { id: profile.userId },
-    });
-    if (!user || user.status !== UserStatus.Suspended) return;
-
-    await this.restoreUser(manager, user.id);
-  }
-
-  // PATCH /mod/users/:userId/suspension — lift a suspension or ban.
-  //
-  // Without this, `ban` (permanent, `suspendedUntil = null`) would be
-  // irreversible through the API: expiry never fires for it, and the only other
-  // route back — an appeal overturn — is unreachable because nothing creates
-  // appeals (`POST /appeals` does not exist; see `appeal.entity.ts`).
-  async liftSuspension(
+  // PATCH /mod/users/:userId/suspension — lift a suspension or ban. Delegates
+  // to `AccountEnforcementService`.
+  liftSuspension(
     userId: string,
     actorId: string,
     dto: LiftSuspensionDto,
   ): Promise<{ userId: string; status: UserStatus }> {
-    const user = await this.users.findOne({ where: { id: userId } });
-    if (!user) {
-      throw new NotFoundException('User not found');
-    }
-
-    // Idempotent, matching this codebase's promotion/RSVP/vouch/accept
-    // convention: lifting a suspension that is not there is a no-op, not a 409.
-    if (user.status !== UserStatus.Suspended) {
-      return { userId: user.id, status: user.status };
-    }
-
-    await this.dataSource.transaction(async (manager) => {
-      await this.restoreUser(manager, user.id);
-      await this.writeAuditLog(
-        dto.reportId ?? null,
-        actorId,
-        'suspension_lifted',
-        dto.reasonCode,
-        dto.note,
-        undefined,
-        manager,
-      );
-    });
-
-    return { userId: user.id, status: UserStatus.Active };
-  }
-
-  // --- enforcement ---
-
-  /**
-   * Applies a moderator action to the reported *member*, if the action is one
-   * that has an effect on an account.
-   *
-   * Returns the suspended user's id so the caller can revoke their sessions
-   * outside the transaction, or `null` when the action was not an enforcement
-   * action.
-   *
-   * `restrict` is deliberately NOT handled here: there is no scoped-restriction
-   * model in this codebase to write to. It continues to resolve the report and
-   * write an audit row, and has NO enforcement effect. That is a known gap, not
-   * an oversight — do not read its absence as "already handled".
-   */
-  private async enforceAgainstUser(
-    manager: EntityManager,
-    report: Report,
-    dto: { action: ModActionCode; duration?: string },
-  ): Promise<string | null> {
-    if (dto.action !== 'suspend' && dto.action !== 'ban') {
-      return null;
-    }
-
-    // Suspending the author of reported *content* is not possible here: the
-    // author of a post/reply/message is not resolvable within this module (see
-    // the note in `buildDetail`). Failing loudly beats the silent no-op this
-    // whole change exists to remove.
-    if (report.subjectType !== ReportSubjectType.Member) {
-      throw new BadRequestException(
-        `Cannot ${dto.action} for a "${report.subjectType}" report — that action applies to members only.`,
-      );
-    }
-
-    const profile = await this.resolveReportedProfile(report);
-    if (!profile) {
-      throw new BadRequestException(
-        'Could not resolve the reported member to an account.',
-      );
-    }
-    const userId = profile.userId;
-
-    const now = new Date();
-    // `ban` is permanent (NULL never expires); `suspend` is time-boxed.
-    // Requiring exactly one of these shapes means a missing or malformed
-    // duration can never quietly become a permanent ban.
-    if (dto.action === 'suspend' && !dto.duration) {
-      throw new BadRequestException('A suspension requires a duration.');
-    }
-    if (dto.action === 'ban' && dto.duration) {
-      throw new BadRequestException(
-        'A ban is permanent and cannot take a duration. Use "suspend" for a time-limited action.',
-      );
-    }
-    const suspendedUntil =
-      dto.action === 'ban' ? null : parseDuration(dto.duration as string, now);
-
-    const user = await manager.findOne(User, { where: { id: userId } });
-    if (!user) {
-      throw new BadRequestException('Could not suspend the reported member.');
-    }
-
-    // A moderator may only enforce against ordinary members — never against
-    // another moderator or an admin. Staff accounts are out of scope for this
-    // surface entirely (403, not a silent success).
-    if (user.role !== UserRole.Member) {
-      throw new ForbiddenException(
-        'Moderation actions cannot target staff accounts.',
-      );
-    }
-
-    // A member who had already deactivated keeps `Deactivated` as their live
-    // status: they asked to be hidden, and overwriting that would mean this
-    // suspension expiring un-hides them later, against their own request. The
-    // suspension is still recorded — `previousStatus` below makes them come
-    // back Suspended, and `suspendedUntil` keeps the clock — so deactivating
-    // is not a way to dodge it either.
-    const preserveDeactivation = user.status === UserStatus.Deactivated;
-
-    await manager.update(
-      User,
-      { id: userId },
-      {
-        ...(preserveDeactivation ? {} : { status: UserStatus.Suspended }),
-        suspendedUntil,
-      },
-    );
-
-    await this.syncDeactivationPreviousStatus(
-      manager,
-      userId,
-      UserStatus.Suspended,
-    );
-
-    return userId;
-  }
-
-  /**
-   * Clears a suspension and puts the member back in circulation.
-   *
-   * Mirrors `enforceAgainstUser`: a member who is currently `Deactivated` stays
-   * that way. Lifting a suspension restores what they would have been without
-   * it, and that is `Deactivated` for someone who had paused their own account
-   * — un-hiding them here would be a privilege grant nobody asked for.
-   */
-  private async restoreUser(
-    manager: EntityManager,
-    userId: string,
-  ): Promise<void> {
-    const user = await manager.findOne(User, { where: { id: userId } });
-    const preserveDeactivation = user?.status === UserStatus.Deactivated;
-
-    await manager.update(
-      User,
-      { id: userId },
-      {
-        ...(preserveDeactivation ? {} : { status: UserStatus.Active }),
-        suspendedUntil: null,
-      },
-    );
-    await this.syncDeactivationPreviousStatus(
-      manager,
-      userId,
-      UserStatus.Active,
-    );
-  }
-
-  /**
-   * Keeps an open deactivation row's `previousStatus` in step with a
-   * moderation decision.
-   *
-   * SECURITY: `AccountDeactivation.previousStatus` is what reactivation
-   * restores to, and the account controller is deliberately JWT-only (no
-   * `ActiveMemberGuard`) so a suspended member CAN reach
-   * `POST /account/deactivate`. Without this, suspending an already-deactivated
-   * member would leave `previousStatus = 'active'`, and signing back in would
-   * launder the suspension away in one click — the exact attack that column was
-   * added to prevent. The restore direction matters for the same reason in
-   * reverse: a lifted suspension must not be re-applied on reactivation.
-   */
-  private async syncDeactivationPreviousStatus(
-    manager: EntityManager,
-    userId: string,
-    status: UserStatus,
-  ): Promise<void> {
-    await manager.update(
-      AccountDeactivation,
-      { userId, reactivatedAt: IsNull() },
-      { previousStatus: status },
-    );
-  }
-
-  /**
-   * `report.subjectId` → `users.id`, for member subjects.
-   *
-   * Subjects are addressed differently across domains, so a member may be
-   * recorded by slug or by uuid (see `Report`'s entity doc). Shared with
-   * `describeReported` so the read path and the enforcement path can never
-   * disagree about who a report is actually about — a drift there would mean
-   * suspending someone other than the person shown in the drawer.
-   */
-  private async resolveReportedProfile(
-    report: Report,
-  ): Promise<Profile | null> {
-    if (report.subjectType !== ReportSubjectType.Member) return null;
-    const where = UUID_RE.test(report.subjectId)
-      ? [{ slug: report.subjectId }, { userId: report.subjectId }]
-      : [{ slug: report.subjectId }];
-    return this.profiles.findOne({ where });
+    return this.accountEnforcement.liftSuspension(userId, actorId, dto);
   }
 
   // --- internals ---
@@ -721,7 +415,7 @@ export class ModerationService {
 
     const [reporterNames, reportedProfiles, priorReportCounts] =
       await Promise.all([
-        this.namesForUserIds(reporterUserIds),
+        this.audit.namesForUserIds(reporterUserIds),
         this.resolveReportedProfiles(reports),
         this.priorReportCountsBySubject(reports),
       ]);
@@ -856,7 +550,7 @@ export class ModerationService {
     // the existing `{ anonymous: true }` arm keeps `ModReporterDTO.id`
     // honestly non-nullable instead of inventing a placeholder id.
     if (!report.reporterId) return { anonymous: true };
-    const name = await this.nameForUserId(report.reporterId);
+    const name = await this.audit.nameForUserId(report.reporterId);
     return { anonymous: false, id: report.reporterId, name };
   }
 
@@ -872,7 +566,8 @@ export class ModerationService {
 
     // Shared with the enforcement path so the person shown in the drawer and
     // the person a `suspend` actually lands on can never diverge.
-    const profile = await this.resolveReportedProfile(report);
+    const profile =
+      await this.accountEnforcement.resolveReportedProfile(report);
     if (profile) {
       return { id: profile.userId, handle: profile.slug, priorReports };
     }
@@ -945,7 +640,7 @@ export class ModerationService {
     const actorIds = [...actionLogs.values()]
       .map((log) => log.actorId)
       .filter((actorId): actorId is string => actorId !== null);
-    const actorNames = await this.namesForUserIds(actorIds);
+    const actorNames = await this.audit.namesForUserIds(actorIds);
 
     return appeals.map((appeal) => {
       const appellant = this.buildAppellant(appeal, appellantProfiles);
@@ -987,7 +682,7 @@ export class ModerationService {
     }
     return {
       action: log.action,
-      by: this.resolveActorName(log.actorId, actorNames),
+      by: this.audit.resolveActorName(log.actorId, actorNames),
       when: log.createdAt.toISOString(),
       reason: log.reasonCode ?? log.note ?? '',
     };
@@ -1052,93 +747,10 @@ export class ModerationService {
     }
     return {
       action: log.action,
-      by: await this.nameForUserId(log.actorId),
+      by: await this.audit.nameForUserId(log.actorId),
       when: log.createdAt.toISOString(),
       reason: log.reasonCode ?? log.note ?? '',
     };
-  }
-
-  // `null` is the erased-account case: `reports.reporter_id` and
-  // `mod_audit_logs.actor_id` are NULLed rather than cascaded when a member
-  // exercises their right to erasure, so the moderation record outlives them.
-  // There is no one left to name — say so plainly rather than falling through
-  // to a lookup that would return the generic 'Member'.
-  private async nameForUserId(userId: string | null): Promise<string> {
-    if (!userId) return 'Deleted member';
-    const profile = await this.profiles.findOne({ where: { userId } });
-    if (profile) return `${profile.firstName} ${profile.lastName}`.trim();
-    // `addSelect('user.email')` re-includes the `select: false` email column —
-    // it is the last-resort display name for a member with no profile row.
-    const user = await this.users
-      .createQueryBuilder('user')
-      .addSelect('user.email')
-      .where('user.id = :userId', { userId })
-      .getOne();
-    return user?.email ?? 'Member';
-  }
-
-  /**
-   * Batched sibling of `nameForUserId` — resolves many non-null user ids to
-   * display names in two queries total (profiles, then a users fallback for the
-   * ids with no profile), keeping the single-id contract of `nameForUserId`
-   * untouched. Every requested id resolves by the exact same rules: a profile's
-   * `firstName lastName`, else the user's email, else 'Member'.
-   *
-   * The `null` (erased) case is deliberately NOT handled here — callers pass
-   * only non-null ids and map `null` to 'Deleted member' via `resolveActorName`,
-   * mirroring `nameForUserId(null)`.
-   */
-  private async namesForUserIds(
-    userIds: string[],
-  ): Promise<Map<string, string>> {
-    const names = new Map<string, string>();
-    const uniqueUserIds = [...new Set(userIds)];
-    if (!uniqueUserIds.length) return names;
-
-    const profiles = await this.profiles.find({
-      where: { userId: In(uniqueUserIds) },
-    });
-    for (const profile of profiles) {
-      names.set(
-        profile.userId,
-        `${profile.firstName} ${profile.lastName}`.trim(),
-      );
-    }
-
-    // Only ids without a profile need the email fallback (mirrors the single
-    // resolver's profile-first, user-email-second order).
-    const userIdsWithoutProfile = uniqueUserIds.filter(
-      (userId) => !names.has(userId),
-    );
-    if (userIdsWithoutProfile.length) {
-      const users = await this.users
-        .createQueryBuilder('user')
-        .addSelect('user.email')
-        .where('user.id IN (:...userIdsWithoutProfile)', {
-          userIdsWithoutProfile,
-        })
-        .getMany();
-      for (const user of users) {
-        names.set(user.id, user.email ?? 'Member');
-      }
-    }
-
-    // Neither a profile nor a user row: `user?.email ?? 'Member'` → 'Member'.
-    for (const userId of uniqueUserIds) {
-      if (!names.has(userId)) names.set(userId, 'Member');
-    }
-    return names;
-  }
-
-  // Maps a (possibly-erased) actor id to a display name from a pre-resolved
-  // `namesForUserIds` map, reproducing `nameForUserId`: `null` → 'Deleted
-  // member', an unresolved id → 'Member'.
-  private resolveActorName(
-    actorId: string | null,
-    actorNames: Map<string, string>,
-  ): string {
-    if (!actorId) return 'Deleted member';
-    return actorNames.get(actorId) ?? 'Member';
   }
 
   private async findReportOrThrow(id: string): Promise<Report> {
@@ -1147,34 +759,5 @@ export class ModerationService {
       throw new NotFoundException('Report not found');
     }
     return report;
-  }
-
-  private async writeAuditLog(
-    // Nullable since `AddModerationEnforcement1782800800000`: a suspension
-    // lifted outside the context of a specific report has no report to hang
-    // off, and a placeholder id would be a lie in an immutable trail. Such a
-    // row does not appear in any `GET /mod/reports/audit` response, which
-    // filters by `reportId` — there is no global audit feed yet.
-    reportId: string | null,
-    actorId: string,
-    action: string,
-    reasonCode?: string,
-    note?: string,
-    duration?: string,
-    // When inside a transaction, pass the manager so the audit row commits
-    // with the action it records instead of surviving a rollback.
-    manager?: EntityManager,
-  ): Promise<void> {
-    const repo = manager ? manager.getRepository(ModAuditLog) : this.auditLogs;
-    await repo.save(
-      repo.create({
-        reportId,
-        actorId,
-        action,
-        reasonCode: reasonCode ?? null,
-        note: note ?? null,
-        duration: duration ?? null,
-      }),
-    );
   }
 }

@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { escapeLikeTerm } from '../common/like-escape';
 import { DataSource, In, Repository } from 'typeorm';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
 import {
@@ -268,6 +269,50 @@ export class CommunitiesService {
         ),
       );
     });
+  }
+
+  // Cross-entity global search (SearchService) — mirrors `list()`'s visibility
+  // rule (private communities are only visible to their own members) and its
+  // batched stats/role hydration. ILIKE over name / tagline / purpose.
+  async searchByText(
+    viewerId: string,
+    term: string,
+    limit: number,
+  ): Promise<CommunityCardDTO[]> {
+    const pattern = `%${escapeLikeTerm(term)}%`;
+    const rows = await this.communities
+      .createQueryBuilder('c')
+      .leftJoin(
+        CommunityMember,
+        'm',
+        'm.community_id = c.id AND m.user_id = :viewerId',
+        { viewerId },
+      )
+      .andWhere('(c.access_tier != :privateTier OR m.user_id = :viewerId)', {
+        privateTier: AccessTier.Private,
+        viewerId,
+      })
+      .andWhere(
+        '(c.name ILIKE :pattern OR c.tagline ILIKE :pattern OR c.purpose ILIKE :pattern)',
+        { pattern },
+      )
+      .orderBy('c.name', 'ASC')
+      .take(limit)
+      .getMany();
+
+    if (!rows.length) return [];
+    const ids = rows.map((community) => community.id);
+    const [stats, myRoles] = await Promise.all([
+      this.statsForMany(ids),
+      this.myRoleByCommunity(ids, viewerId),
+    ]);
+    return rows.map((community) =>
+      toCommunityCard(
+        community,
+        stats.get(community.id) ?? EMPTY_STATS,
+        myRoles.get(community.id) ?? null,
+      ),
+    );
   }
 
   async getBySlug(slug: string, viewerId: string): Promise<CommunityDetailDTO> {

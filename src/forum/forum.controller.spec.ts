@@ -64,11 +64,13 @@ describe('ForumController', () => {
     );
   });
 
-  it('delegates listPosts with the caller id', async () => {
+  it('delegates listPosts with the caller user', async () => {
     await controller.listPosts(user, 'hello-world', { cursor: 'c1', limit: 5 });
+    // listPosts takes the full CurrentUserData (it derives both the viewer id
+    // and moderator role from it), so the controller forwards the whole user.
     expect(postsService.listPosts).toHaveBeenCalledWith(
       'hello-world',
-      'user-1',
+      user,
       'c1',
       5,
     );
@@ -80,12 +82,15 @@ describe('ForumController', () => {
     expect(threadsService.create).toHaveBeenCalledWith('user-1', dto);
   });
 
-  it('delegates reply with the caller id', async () => {
+  it('delegates reply with the caller user', async () => {
     await controller.reply(user, 'hello-world', { body: 'A reply' });
+    // reply also takes the full CurrentUserData, plus the optional parentPostId
+    // (undefined when replying at thread level).
     expect(postsService.reply).toHaveBeenCalledWith(
       'hello-world',
-      'user-1',
+      user,
       'A reply',
+      undefined,
     );
   });
 

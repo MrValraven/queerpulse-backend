@@ -39,6 +39,13 @@ export class EventRsvp {
   @Column({ type: 'int', nullable: true })
   waitlistPosition: number | null;
 
+  // When this attendee's reminder was sent — per-attendee at-most-once claim.
+  // Different attendees of one event can have different reminder lead times
+  // (`member_event_reminder_preferences`), so the "already reminded" flag lives
+  // here, per RSVP, rather than once on the event. Null = not yet reminded.
+  @Column({ type: 'timestamptz', nullable: true })
+  reminderSentAt: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 

@@ -1,4 +1,5 @@
 import {
+  ArrayMaxSize,
   ArrayMinSize,
   IsArray,
   IsIn,
@@ -16,6 +17,11 @@ import { MOD_ACTION_CODES, ModActionCode } from './mod-action.dto';
 export class ModBulkActionDto {
   @IsArray()
   @ArrayMinSize(1)
+  // Caps the batch so a single request cannot open one long-held transaction
+  // over an unbounded id list in `bulkActOnReports` (that method saves every
+  // row and writes an audit entry per report inside one transaction). 100 is
+  // comfortably above any real bulk-bar selection.
+  @ArrayMaxSize(100)
   @IsUUID('4', { each: true })
   ids: string[];
 

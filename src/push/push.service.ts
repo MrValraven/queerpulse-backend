@@ -10,7 +10,10 @@ export interface PushPayload {
   title: string;
   body: string;
   tag: string;
-  data: { conversationId: string; url: string };
+  // `url` is the click-through path (the service worker opens it); every push
+  // carries one. `conversationId` is DM-specific and optional — event reminders
+  // and other non-DM pushes omit it.
+  data: { url: string; conversationId?: string };
 }
 
 interface WebPushError {

@@ -1,31 +1,27 @@
-import {
-  BadRequestException,
-  Body,
-  Controller,
-  Post,
-  UseGuards,
-} from '@nestjs/common';
+import { Body, Controller, Post, UseGuards } from '@nestjs/common';
 import { Throttle, seconds } from '@nestjs/throttler';
-import { randomUUID } from 'node:crypto';
 import {
   CurrentUser,
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
+import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { PresignRequestDto } from './dto/presign-request.dto';
 import { PresignUploadDto } from './dto/presign-upload.dto';
 import { StorageService, PresignedUpload } from './storage.service';
-import { IMAGE_UPLOAD_TYPES } from './upload-content-types';
-import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 import { UserPresignThrottlerGuard } from './user-presign-throttler.guard';
 import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 // Presigning mints a short-lived write credential to object storage; rate-limit
 // per user (see UserPresignThrottlerGuard) so a single session can't fan out an
-// unbounded number of upload slots.
+// unbounded number of upload slots. `ActiveMemberGuard` gates all routes so a
+// just-suspended/deactivated member can't keep minting upload credentials until
+// their access token expires (the global JwtAuthGuard already populates
+// `request.user`; every newly onboarded member is `active`, so this only
+// excludes suspended/deactivated accounts).
 @ApiTags('Uploads')
 @ApiCookieAuth()
 @Controller('uploads')
-@UseGuards(UserPresignThrottlerGuard)
+@UseGuards(UserPresignThrottlerGuard, ActiveMemberGuard)
 @Throttle({ default: { limit: 20, ttl: seconds(60) } })
 export class UploadsController {
   constructor(private readonly storage: StorageService) {}
@@ -38,7 +34,11 @@ export class UploadsController {
     @CurrentUser() user: CurrentUserData,
     @Body() dto: PresignUploadDto,
   ): Promise<PresignedUpload> {
-    return this.presignForKind('avatar', user, dto.contentType);
+    return this.storage.presignImageUpload({
+      kind: 'avatar',
+      userId: user.userId,
+      contentType: dto.contentType,
+    });
   }
 
   // Legacy per-surface route — kept working for compatibility.
@@ -47,48 +47,26 @@ export class UploadsController {
     @CurrentUser() user: CurrentUserData,
     @Body() dto: PresignUploadDto,
   ): Promise<PresignedUpload> {
-    return this.presignForKind('work-image', user, dto.contentType);
+    return this.storage.presignImageUpload({
+      kind: 'work-image',
+      userId: user.userId,
+      contentType: dto.contentType,
+    });
   }
 
   // Unified presign, keyed by `kind` — the frontend's canonical contract
-  // (queerpulse/src/features/members/api/uploads.api.ts). `byteSize` lets us
-  // reject an over-cap upload before minting a signature.
+  // (queerpulse/src/features/members/api/uploads.api.ts). `byteSize` lets the
+  // storage service reject an over-cap upload before minting a signature.
   @Post('presign')
   presign(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: PresignRequestDto,
   ): Promise<PresignedUpload> {
-    return this.presignForKind(dto.kind, user, dto.contentType, dto.byteSize);
-  }
-
-  // Shared presign core: resolves the kind's storage-key prefix + byte cap,
-  // validates the content type, builds a user-scoped unguessable key, and
-  // mints the presigned upload. `byteSize` is optional because the legacy
-  // avatar/work-image routes above don't send one — the `/presign` route
-  // always does and is the only caller that gets the early over-cap reject.
-  private async presignForKind(
-    kind: UploadKind,
-    user: CurrentUserData,
-    contentType: string,
-    byteSize?: number,
-  ): Promise<PresignedUpload> {
-    const typeSpec = IMAGE_UPLOAD_TYPES[contentType];
-    if (!typeSpec) {
-      throw new BadRequestException(`Unsupported content type: ${contentType}`);
-    }
-    const kindSpec = UPLOAD_KIND_SPECS[kind];
-    if (!kindSpec) {
-      throw new BadRequestException(`Unsupported upload kind: ${kind}`);
-    }
-    if (byteSize !== undefined && byteSize > kindSpec.maxBytes) {
-      throw new BadRequestException(
-        `File too large for ${kind}: max ${kindSpec.maxBytes} bytes`,
-      );
-    }
-    const key = `${kindSpec.prefix}/${user.userId}/${randomUUID()}${typeSpec.extension}`;
-    // Pass the declared size through so the presigned PUT pins `ContentLength`:
-    // storage then enforces the cap itself (the client can't PUT more bytes than
-    // it declared), rather than trusting the client-declared `byteSize` alone.
-    return this.storage.createPresignedUpload(key, contentType, byteSize);
+    return this.storage.presignImageUpload({
+      kind: dto.kind,
+      userId: user.userId,
+      contentType: dto.contentType,
+      byteSize: dto.byteSize,
+    });
   }
 }

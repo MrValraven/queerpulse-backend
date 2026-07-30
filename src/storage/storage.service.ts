@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -10,6 +11,9 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { randomUUID } from 'node:crypto';
+import { IMAGE_UPLOAD_TYPES } from './upload-content-types';
+import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 
 export const PRESIGN_EXPIRY_SECONDS = 300; // 5 minutes
 
@@ -36,6 +40,43 @@ export class StorageService {
   private client: S3Client | null = null;
 
   constructor(private readonly config: ConfigService) {}
+
+  // Upload policy lives here (not in `UploadsController`): resolve the kind's
+  // storage-key prefix + byte cap, validate the requested content type against
+  // the image whitelist, reject an over-cap declared `byteSize` before any
+  // signature is minted, then build a user-scoped unguessable object key and
+  // presign the PUT. The controller passes already-authenticated params through
+  // (the caller's `userId` + the validated DTO fields) and owns none of this.
+  //
+  // `byteSize` is optional because the legacy avatar/work-image routes don't
+  // send one — only `/presign` gets the early over-cap reject; the others rely
+  // on `createPresignedUpload` pinning `ContentLength` when a size is present.
+  async presignImageUpload(params: {
+    kind: UploadKind;
+    userId: string;
+    contentType: string;
+    byteSize?: number;
+  }): Promise<PresignedUpload> {
+    const { kind, userId, contentType, byteSize } = params;
+    const typeSpec = IMAGE_UPLOAD_TYPES[contentType];
+    if (!typeSpec) {
+      throw new BadRequestException(`Unsupported content type: ${contentType}`);
+    }
+    const kindSpec = UPLOAD_KIND_SPECS[kind];
+    if (!kindSpec) {
+      throw new BadRequestException(`Unsupported upload kind: ${kind}`);
+    }
+    if (byteSize !== undefined && byteSize > kindSpec.maxBytes) {
+      throw new BadRequestException(
+        `File too large for ${kind}: max ${kindSpec.maxBytes} bytes`,
+      );
+    }
+    const key = `${kindSpec.prefix}/${userId}/${randomUUID()}${typeSpec.extension}`;
+    // Pass the declared size through so the presigned PUT pins `ContentLength`:
+    // storage then enforces the cap itself (the client can't PUT more bytes than
+    // it declared), rather than trusting the client-declared `byteSize` alone.
+    return this.createPresignedUpload(key, contentType, byteSize);
+  }
 
   // Presigned PUT: the caller `PUT`s the raw bytes straight to `uploadUrl`
   // with no cookies/CSRF — the signature alone authorizes writing this one

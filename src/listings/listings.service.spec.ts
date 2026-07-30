@@ -1,8 +1,14 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { MessagingService } from '../messaging/messaging.service';
 import { Profile } from '../users/entities/profile.entity';
+import { ListingReview } from './entities/listing-review.entity';
 import {
   Listing,
   ListingStatus,
@@ -88,6 +94,7 @@ describe('ListingsService', () => {
     createQueryBuilder: jest.Mock;
   };
   let profiles: { find: jest.Mock };
+  let reviews: { findOne: jest.Mock; save: jest.Mock };
   let dataSource: { query: jest.Mock };
 
   beforeEach(async () => {
@@ -109,6 +116,10 @@ describe('ListingsService', () => {
       createQueryBuilder: jest.fn(() => qbStub()),
     };
     profiles = { find: jest.fn().mockResolvedValue([]) };
+    reviews = {
+      findOne: jest.fn(),
+      save: jest.fn((v: object) => Promise.resolve(v)),
+    };
     dataSource = { query: jest.fn().mockResolvedValue([{ seq: '1' }]) };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -116,7 +127,9 @@ describe('ListingsService', () => {
         ListingsService,
         { provide: getRepositoryToken(Listing), useValue: listings },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        { provide: getRepositoryToken(ListingReview), useValue: reviews },
         { provide: DataSource, useValue: dataSource },
+        { provide: MessagingService, useValue: { deliverEnquiry: jest.fn() } },
       ],
     }).compile();
     service = module.get(ListingsService);
@@ -294,6 +307,111 @@ describe('ListingsService', () => {
         ListingStatus.Question,
       );
       expect(dto.status).toBe(ListingStatus.Question);
+    });
+  });
+
+  describe('replyToReview', () => {
+    const baseReview = {
+      id: 'review-1',
+      listingId: 'listing-1',
+      reviewerId: 'member-1',
+      reviewerName: 'Alex',
+      byline: 'they/them',
+      stars: 5,
+      text: 'Loved it',
+      helpful: 0,
+      ownerReplyText: null,
+      ownerRepliedAt: null,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    };
+
+    it('404s an unknown listing ref', async () => {
+      listings.findOne.mockResolvedValue(null);
+      await expect(
+        service.replyToReview('QPL-2026-9999', 'owner-1', 'review-1', {
+          text: 'Thanks!',
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(reviews.save).not.toHaveBeenCalled();
+    });
+
+    it('403s a caller who does not own the listing', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+      await expect(
+        service.replyToReview('QPL-2026-0001', 'someone-else', 'review-1', {
+          text: 'Thanks!',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(reviews.findOne).not.toHaveBeenCalled();
+      expect(reviews.save).not.toHaveBeenCalled();
+    });
+
+    it('404s a review that does not belong to this listing', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+      reviews.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.replyToReview('QPL-2026-0001', 'owner-1', 'review-1', {
+          text: 'Thanks!',
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(reviews.findOne).toHaveBeenCalledWith({
+        where: { id: 'review-1', listingId: 'listing-1' },
+      });
+      expect(reviews.save).not.toHaveBeenCalled();
+    });
+
+    it('400s a whitespace-only reply without saving', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+      reviews.findOne.mockResolvedValue({ ...baseReview });
+
+      await expect(
+        service.replyToReview('QPL-2026-0001', 'owner-1', 'review-1', {
+          text: '   ',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(reviews.save).not.toHaveBeenCalled();
+    });
+
+    it('sets a trimmed reply + timestamp for the owner', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+      reviews.findOne.mockResolvedValue({ ...baseReview });
+
+      const dto = await service.replyToReview(
+        'QPL-2026-0001',
+        'owner-1',
+        'review-1',
+        { text: '  Thanks for the kind words!  ' },
+      );
+
+      expect(reviews.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ownerReplyText: 'Thanks for the kind words!',
+          ownerRepliedAt: expect.any(Date) as unknown,
+        }),
+      );
+      expect(dto.ownerReply).toEqual({
+        text: 'Thanks for the kind words!',
+        at: expect.any(String) as unknown,
+      });
+    });
+
+    it('overwrites an existing reply', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+      reviews.findOne.mockResolvedValue({
+        ...baseReview,
+        ownerReplyText: 'Old reply',
+        ownerRepliedAt: new Date('2026-01-02T00:00:00.000Z'),
+      });
+
+      const dto = await service.replyToReview(
+        'QPL-2026-0001',
+        'owner-1',
+        'review-1',
+        { text: 'New reply' },
+      );
+
+      expect(dto.ownerReply?.text).toBe('New reply');
     });
   });
 });

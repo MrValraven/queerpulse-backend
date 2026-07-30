@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { escapeLikeTerm } from '../common/like-escape';
 import { randomBytes } from 'node:crypto';
 import { In, Not, Repository } from 'typeorm';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -277,6 +278,33 @@ export class EventsService {
         .take(PAGE_SIZE)
         .getMany();
     }
+
+    return this.summarize(events, userId);
+  }
+
+  // Cross-entity global search (SearchService) — mirrors the 'upcoming'
+  // branch's visibility (published, public/members) but drops the
+  // `start_at >= now` restriction so past matches still surface. ILIKE over
+  // title / venue / description.
+  async searchByText(
+    userId: string,
+    term: string,
+    limit: number,
+  ): Promise<EventSummary[]> {
+    const pattern = `%${escapeLikeTerm(term)}%`;
+    const events = await this.events
+      .createQueryBuilder('e')
+      .where('e.status = :status', { status: EventStatus.Published })
+      .andWhere('e.visibility IN (:...vis)', {
+        vis: [EventVisibility.Public, EventVisibility.Members],
+      })
+      .andWhere(
+        '(e.title ILIKE :pattern OR e.venue ILIKE :pattern OR e.description ILIKE :pattern)',
+        { pattern },
+      )
+      .orderBy('e.start_at', 'DESC')
+      .take(limit)
+      .getMany();
 
     return this.summarize(events, userId);
   }

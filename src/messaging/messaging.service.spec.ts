@@ -61,6 +61,19 @@ function makeQb(): MockQb {
   return qb;
 }
 
+/**
+ * The six-key, all-zero reaction summary every `MessageResponse` now carries
+ * when a message has no reactions — one entry per `MessageReactionKey`, in the
+ * canonical order, `count: 0` / `mine: false`. Matches `toMessageReactionSummaries`.
+ */
+function emptyReactions(): { key: string; count: number; mine: boolean }[] {
+  return ['love', 'laugh', 'like', 'wow', 'sad', 'thanks'].map((key) => ({
+    key,
+    count: 0,
+    mine: false,
+  }));
+}
+
 describe('MessagingService', () => {
   let service: MessagingService;
   let conversations: { findOne: jest.Mock; find: jest.Mock; create: jest.Mock };
@@ -70,6 +83,7 @@ describe('MessagingService', () => {
     update: jest.Mock;
     save: jest.Mock;
     exists: jest.Mock;
+    createQueryBuilder: jest.Mock;
   };
   let messages: {
     create: jest.Mock;
@@ -113,6 +127,12 @@ describe('MessagingService', () => {
         Promise.resolve(value),
       ),
       exists: jest.fn().mockResolvedValue(true),
+      // `listConversations` now loads the caller's own participant rows through a
+      // bounded, last-activity-ordered QueryBuilder (a deterministic
+      // DEFAULT_LIST_LIMIT cap) rather than `participants.find`. Default to an
+      // empty page; tests that exercise a populated inbox stub `getMany` via
+      // `stubMyParticipants` below.
+      createQueryBuilder: jest.fn(() => makeQb()),
     };
     messages = {
       create: jest.fn((value: Partial<Message>) => value),
@@ -196,26 +216,37 @@ describe('MessagingService', () => {
     service = module.get(MessagingService);
   });
 
+  /**
+   * Stub the bounded "my participant rows" QueryBuilder that `listConversations`
+   * now runs first (ordered by last activity, capped at DEFAULT_LIST_LIMIT),
+   * returning `rows` from its terminal `getMany`. The counterpart ("others")
+   * rows still flow through `participants.find`.
+   */
+  function stubMyParticipants(rows: unknown[]): MockQb {
+    const qb = makeQb();
+    qb.getMany.mockResolvedValue(rows);
+    participants.createQueryBuilder.mockReturnValueOnce(qb);
+    return qb;
+  }
+
   describe('listConversations', () => {
     it('returns [] when the user has no participant rows', async () => {
-      participants.find.mockResolvedValueOnce([]);
+      stubMyParticipants([]);
       await expect(service.listConversations('me')).resolves.toEqual([]);
       // Short-circuits before touching messages.
       expect(messages.createQueryBuilder).not.toHaveBeenCalled();
     });
 
     it('maps grouped unread counts, sorts newest-first, and 0s conversations with no unread row', async () => {
-      participants.find
-        // myParts
-        .mockResolvedValueOnce([
-          { conversationId: 'c1', muted: false, lastReadAt: null },
-          { conversationId: 'c2', muted: true, lastReadAt: new Date() },
-        ])
-        // others (non-self)
-        .mockResolvedValueOnce([
-          { conversationId: 'c1', userId: 'u2' },
-          { conversationId: 'c2', userId: 'u3' },
-        ]);
+      stubMyParticipants([
+        { conversationId: 'c1', muted: false, lastReadAt: null },
+        { conversationId: 'c2', muted: true, lastReadAt: new Date() },
+      ]);
+      // others (non-self)
+      participants.find.mockResolvedValueOnce([
+        { conversationId: 'c1', userId: 'u2' },
+        { conversationId: 'c2', userId: 'u3' },
+      ]);
       conversations.find.mockResolvedValueOnce([
         {
           id: 'c1',
@@ -292,11 +323,12 @@ describe('MessagingService', () => {
     });
 
     it('emits a `sender` on every lastMessage — including one the caller sent', async () => {
-      participants.find
-        .mockResolvedValueOnce([
-          { conversationId: 'c1', muted: false, lastReadAt: null },
-        ])
-        .mockResolvedValueOnce([{ conversationId: 'c1', userId: 'u2' }]);
+      stubMyParticipants([
+        { conversationId: 'c1', muted: false, lastReadAt: null },
+      ]);
+      participants.find.mockResolvedValueOnce([
+        { conversationId: 'c1', userId: 'u2' },
+      ]);
       conversations.find.mockResolvedValueOnce([
         {
           id: 'c1',
@@ -358,11 +390,10 @@ describe('MessagingService', () => {
     });
 
     it('expresses the null-lastReadAt branch in the unread query', async () => {
-      participants.find
-        .mockResolvedValueOnce([
-          { conversationId: 'c1', muted: false, lastReadAt: null },
-        ])
-        .mockResolvedValueOnce([]);
+      stubMyParticipants([
+        { conversationId: 'c1', muted: false, lastReadAt: null },
+      ]);
+      participants.find.mockResolvedValueOnce([]);
       conversations.find.mockResolvedValueOnce([
         {
           id: 'c1',
@@ -387,15 +418,14 @@ describe('MessagingService', () => {
     });
 
     it('renders official/welcome threads as type "group" with no otherParticipant (>2 participants)', async () => {
-      participants.find
-        .mockResolvedValueOnce([
-          { conversationId: 'off', muted: false, lastReadAt: null },
-        ])
-        // two other participants on the official thread
-        .mockResolvedValueOnce([
-          { conversationId: 'off', userId: 'x' },
-          { conversationId: 'off', userId: 'y' },
-        ]);
+      stubMyParticipants([
+        { conversationId: 'off', muted: false, lastReadAt: null },
+      ]);
+      // two other participants on the official thread
+      participants.find.mockResolvedValueOnce([
+        { conversationId: 'off', userId: 'x' },
+        { conversationId: 'off', userId: 'y' },
+      ]);
       conversations.find.mockResolvedValueOnce([
         {
           id: 'off',
@@ -598,7 +628,19 @@ describe('MessagingService', () => {
             avatarUrl: null,
           },
           createdAt: '2026-01-02T00:00:00.000Z',
+          editedAt: null,
+          reactions: emptyReactions(),
           deletedAt: null,
+          deliveredAt: null,
+          clientMessageId: undefined,
+          forwarded: undefined,
+          pinnedAt: null,
+          starred: false,
+          canPin: true,
+          replyTo: null,
+          kind: 'user',
+          attachment: null,
+          systemEvent: null,
         },
         {
           id: 'm1',
@@ -610,7 +652,19 @@ describe('MessagingService', () => {
             avatarUrl: null,
           },
           createdAt: '2026-01-01T00:00:00.000Z',
+          editedAt: null,
+          reactions: emptyReactions(),
           deletedAt: null,
+          deliveredAt: null,
+          clientMessageId: undefined,
+          forwarded: undefined,
+          pinnedAt: null,
+          starred: false,
+          canPin: true,
+          replyTo: null,
+          kind: 'user',
+          attachment: null,
+          systemEvent: null,
         },
       ]);
       // The internal `senderId` is gone: the frontend reads `sender` only.
@@ -858,7 +912,19 @@ describe('MessagingService', () => {
           avatarUrl: null,
         },
         createdAt: '2026-01-01T00:00:00.000Z',
+        editedAt: null,
+        reactions: emptyReactions(),
         deletedAt: null,
+        deliveredAt: null,
+        clientMessageId: undefined,
+        forwarded: undefined,
+        pinnedAt: null,
+        starred: false,
+        canPin: true,
+        replyTo: null,
+        kind: 'user',
+        attachment: null,
+        systemEvent: null,
       });
       expect(result).not.toHaveProperty('senderId');
     });

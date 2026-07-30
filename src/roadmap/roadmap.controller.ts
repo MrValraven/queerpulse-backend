@@ -56,10 +56,7 @@ export class RoadmapController {
   }
 
   @Post('ideas')
-  submitIdea(
-    @CurrentUser() user: CurrentUserData,
-    @Body() dto: SubmitIdeaDto,
-  ) {
+  submitIdea(@CurrentUser() user: CurrentUserData, @Body() dto: SubmitIdeaDto) {
     return this.roadmapService.submitIdea(user.userId, dto);
   }
 

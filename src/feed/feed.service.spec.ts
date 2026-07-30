@@ -146,7 +146,7 @@ describe('FeedService', () => {
   let forumThreads: { createQueryBuilder: jest.Mock };
   let events: { createQueryBuilder: jest.Mock };
   let profiles: { find: jest.Mock; createQueryBuilder: jest.Mock };
-  let blockFilter: { isBlockedEitherWay: jest.Mock; isMutedBy: jest.Mock };
+  let blockFilter: { hiddenUserIds: jest.Mock };
 
   beforeEach(async () => {
     communityPosts = { createQueryBuilder: jest.fn(() => qbStub()) };
@@ -157,9 +157,12 @@ describe('FeedService', () => {
       find: jest.fn().mockResolvedValue([]),
       createQueryBuilder: jest.fn(() => qbStub()),
     };
+    // `dropBlocked` now resolves the whole page's hidden authors in one batched
+    // `hiddenUserIds(viewerId, authorIds)` call (union of blocked + muted),
+    // returning a Set, rather than one `isBlockedEitherWay`/`isMutedBy` call
+    // per author.
     blockFilter = {
-      isBlockedEitherWay: jest.fn().mockResolvedValue(false),
-      isMutedBy: jest.fn().mockResolvedValue(false),
+      hiddenUserIds: jest.fn().mockResolvedValue(new Set<string>()),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -283,10 +286,11 @@ describe('FeedService', () => {
 
       await service.getFeed('viewer-1', 'people', undefined);
 
-      expect(qb.innerJoin).toHaveBeenCalledWith(
-        'p.user',
-        'u',
-        'u.status = :active',
+      // The active-user filter is a correlated EXISTS (andWhere), not an
+      // innerJoin: joining forces TypeORM's `.take()` down its distinct-
+      // pagination path, which mangles the raw `date_trunc(...)` ORDER BY.
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('"u"."status" = :active'),
         { active: UserStatus.Active },
       );
     });
@@ -318,9 +322,7 @@ describe('FeedService', () => {
       });
       profiles.createQueryBuilder.mockReturnValue(qbStub([blocked, ok]));
       profiles.find.mockResolvedValue([blocked, ok]);
-      blockFilter.isBlockedEitherWay.mockImplementation(
-        (_viewer: string, authorId: string) => authorId === 'blocked-1',
-      );
+      blockFilter.hiddenUserIds.mockResolvedValue(new Set(['blocked-1']));
 
       const page = await service.getFeed('viewer-1', 'people', undefined);
 
@@ -340,9 +342,7 @@ describe('FeedService', () => {
       });
       profiles.createQueryBuilder.mockReturnValue(qbStub([muted, ok]));
       profiles.find.mockResolvedValue([muted, ok]);
-      blockFilter.isMutedBy.mockImplementation(
-        (_viewer: string, authorId: string) => authorId === 'muted-1',
-      );
+      blockFilter.hiddenUserIds.mockResolvedValue(new Set(['muted-1']));
 
       const page = await service.getFeed('viewer-1', 'people', undefined);
 
@@ -402,19 +402,15 @@ describe('FeedService', () => {
 
     communityPosts.createQueryBuilder.mockReturnValue(qbStub([fromBlocked]));
     forumThreads.createQueryBuilder.mockReturnValue(qbStub([fromOk]));
-    blockFilter.isBlockedEitherWay.mockImplementation(
-      (_viewer: string, authorId: string) => authorId === 'blocked-author',
-    );
+    blockFilter.hiddenUserIds.mockResolvedValue(new Set(['blocked-author']));
 
     const page = await service.getFeed('viewer-1', 'posts', undefined);
 
-    expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith(
+    // Both page authors are handed to the one batched call; the hidden one is
+    // then filtered out of the result.
+    expect(blockFilter.hiddenUserIds).toHaveBeenCalledWith(
       'viewer-1',
-      'blocked-author',
-    );
-    expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith(
-      'viewer-1',
-      'ok-author',
+      expect.arrayContaining(['blocked-author', 'ok-author']),
     );
     expect(page.data.map((i) => i.id)).toEqual(['thread-ok']);
   });
@@ -432,17 +428,15 @@ describe('FeedService', () => {
 
     communityPosts.createQueryBuilder.mockReturnValue(qbStub([fromMuted]));
     forumThreads.createQueryBuilder.mockReturnValue(qbStub([fromOk]));
-    blockFilter.isMutedBy.mockImplementation(
-      (_viewer: string, authorId: string) => authorId === 'muted-author',
-    );
+    // A mute is folded into the same hidden-authors Set as a block.
+    blockFilter.hiddenUserIds.mockResolvedValue(new Set(['muted-author']));
 
     const page = await service.getFeed('viewer-1', 'posts', undefined);
 
-    expect(blockFilter.isMutedBy).toHaveBeenCalledWith(
+    expect(blockFilter.hiddenUserIds).toHaveBeenCalledWith(
       'viewer-1',
-      'muted-author',
+      expect.arrayContaining(['muted-author', 'ok-author']),
     );
-    expect(blockFilter.isMutedBy).toHaveBeenCalledWith('viewer-1', 'ok-author');
     expect(page.data.map((i) => i.id)).toEqual(['thread-ok']);
   });
 

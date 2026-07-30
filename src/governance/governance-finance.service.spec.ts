@@ -70,6 +70,12 @@ describe('GovernanceFinanceService', () => {
         eventNotes: governanceFinanceReportSeed.eventNotes,
         reserve: governanceFinanceReportSeed.reserve,
         partners: governanceFinanceReportSeed.partners,
+        incomeTotal: null,
+        expenseTotal: null,
+        surplus: null,
+        mrr: null,
+        sustainerCount: null,
+        solidarityRate: null,
         publishedAt: governanceFinanceReportSeed.publishedAt.toISOString(),
       });
     });

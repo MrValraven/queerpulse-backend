@@ -9,6 +9,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle, seconds } from '@nestjs/throttler';
 import {
   CurrentUser,
   CurrentUserData,
@@ -62,7 +63,11 @@ export class InvitesController {
   // `validateInviteForSignup` + `claimInvite`. Its remaining precondition
   // (`redeemer.status === 'pending'`) referenced a state that no longer exists.
   // Redemption happens exactly once, at signup.
+  // Throttled per IP (matches PublicProfilesController): unauthenticated and
+  // enumerable, so cap probing that would otherwise turn this into a
+  // valid-vs-invalid invite-code oracle. The global bucket alone is too loose.
   @Public()
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Get(':code')
   resolve(@Param('code') code: string): Promise<PublicInviteView> {
     return this.invitesService.resolveInvite(code);

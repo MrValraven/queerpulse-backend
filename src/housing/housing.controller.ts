@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Throttle, seconds } from '@nestjs/throttler';
 import { Public } from '../auth/decorators/public.decorator';
 import { Feature } from '../common/feature.decorator';
 import { CreateJoinRequestDto } from './dto/create-join-request.dto';
@@ -35,7 +36,11 @@ export class HousingController {
     return this.housing.listPublished();
   }
 
+  // Anonymous public write: tightly throttled per IP so the co-op review queue
+  // can't be flooded with junk join requests (the global bucket alone is too
+  // loose for an unauthenticated create). A real applicant submits once.
   @Public()
+  @Throttle({ default: { limit: 5, ttl: seconds(60) } })
   @Post('coops/:slug/join-requests')
   submitJoinRequest(
     @Param('slug') slug: string,

@@ -23,6 +23,12 @@ export enum ReportSubjectType {
   Housing = 'housing',
   Flatmate = 'flatmate',
   Landlord = 'landlord',
+  Listing = 'listing',
+  Event = 'event',
+  Business = 'business',
+  Company = 'company',
+  Job = 'job',
+  Subprofile = 'subprofile',
 }
 
 // Mirrors the frontend's `ReportDTO`/`ModReportDTO` status union

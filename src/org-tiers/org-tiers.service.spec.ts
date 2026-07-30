@@ -61,6 +61,7 @@ describe('OrgTiersService', () => {
       expect(tiers.find).toHaveBeenCalledWith({
         where: { published: true },
         order: { sortOrder: 'ASC', createdAt: 'ASC' },
+        take: 200,
       });
     });
 
@@ -111,6 +112,7 @@ describe('OrgTiersService', () => {
 
       expect(tiers.find).toHaveBeenCalledWith({
         order: { sortOrder: 'ASC', createdAt: 'ASC' },
+        take: 200,
       });
     });
 

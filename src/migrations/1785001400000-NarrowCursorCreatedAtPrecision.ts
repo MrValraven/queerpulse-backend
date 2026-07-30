@@ -50,9 +50,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `cursorPaginate`'s `(createdAt, id)` ordering was already written to
  * disambiguate.
  */
-export class NarrowCursorCreatedAtPrecision1785001400000
-  implements MigrationInterface
-{
+export class NarrowCursorCreatedAtPrecision1785001400000 implements MigrationInterface {
   name = 'NarrowCursorCreatedAtPrecision1785001400000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

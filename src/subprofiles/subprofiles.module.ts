@@ -16,6 +16,8 @@ import {
   ProfileSubprofilesController,
   SubprofilesController,
 } from './subprofiles.controller';
+import { SubprofileEndorsementsService } from './subprofile-endorsements.service';
+import { SubprofileFollowersService } from './subprofile-followers.service';
 import { SubprofilesService } from './subprofiles.service';
 
 @Module({
@@ -41,6 +43,10 @@ import { SubprofilesService } from './subprofiles.service';
     HandlesModule,
   ],
   controllers: [SubprofilesController, ProfileSubprofilesController],
-  providers: [SubprofilesService],
+  providers: [
+    SubprofilesService,
+    SubprofileEndorsementsService,
+    SubprofileFollowersService,
+  ],
 })
 export class SubprofilesModule {}

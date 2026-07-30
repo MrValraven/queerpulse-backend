@@ -143,6 +143,77 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'spam',
     'other',
   ],
+  // Business-directory listing (`src/listings`, NOT `src/housing-listings`).
+  // No dedicated codes are introduced — every concern a listing report is
+  // likely to raise already has a fitting existing code: `housing_scam`'s
+  // "Scam or fake listing" label covers a listing that doesn't exist / is
+  // fraudulent, `spam` covers self-promotion abuse, `venue_safety` covers a
+  // safety incident at the business, `discrimination` covers discriminatory
+  // or otherwise inappropriate content/practices, and `other` (with the
+  // free-text `detail`) covers inaccurate/outdated info or anything else.
+  [ReportSubjectType.Listing]: [
+    'housing_scam',
+    'spam',
+    'venue_safety',
+    'discrimination',
+    'other',
+  ],
+  // An event (`myevents` report-an-event flow on the frontend). No new codes:
+  // `hate_speech` / `harassment` cover an abusive or threatening event or its
+  // promotion, `discrimination` an exclusionary event, `spam` self-promotion
+  // abuse, `venue_safety` a harassment/safety incident at the gathering,
+  // `off_topic` "this shouldn't be here", and `other` (free-text) anything
+  // else. Mirrors the frontend `SUBJECT_REASONS.event` exactly.
+  [ReportSubjectType.Event]: [
+    'hate_speech',
+    'harassment',
+    'discrimination',
+    'venue_safety',
+    'spam',
+    'off_topic',
+    'other',
+  ],
+  // A business-directory business/company/job posting. Same shape as
+  // `Listing` — `housing_scam`'s "Scam or fake listing" label covers a fake
+  // business, `spam` self-promotion abuse, `venue_safety` a safety incident,
+  // `discrimination` discriminatory content/practices, `other` inaccurate info.
+  [ReportSubjectType.Business]: [
+    'housing_scam',
+    'spam',
+    'venue_safety',
+    'discrimination',
+    'other',
+  ],
+  // An employer/company profile. `housing_scam` ("Scam or fake listing") a
+  // fake company, `discrimination` a discriminatory employer, `harassment`
+  // targeted abuse, `spam` self-promotion abuse, `other` anything else.
+  [ReportSubjectType.Company]: [
+    'housing_scam',
+    'discrimination',
+    'harassment',
+    'spam',
+    'other',
+  ],
+  // A job posting. `housing_scam` ("Scam or fake listing") a fake/fraudulent
+  // job, `spam` self-promotion abuse, `discrimination` a discriminatory ad,
+  // `harassment` targeted abuse, `other` anything else.
+  [ReportSubjectType.Job]: [
+    'housing_scam',
+    'spam',
+    'discrimination',
+    'harassment',
+    'other',
+  ],
+  // A member subprofile / persona. Person-shaped like `Member`/`Flatmate`:
+  // `harassment`, `impersonation` (a persona impersonating someone),
+  // `discrimination`, `spam`, and `other`.
+  [ReportSubjectType.Subprofile]: [
+    'harassment',
+    'impersonation',
+    'discrimination',
+    'spam',
+    'other',
+  ],
 };
 
 /** The reason options a given subject type should offer, as `{code, label}`. */

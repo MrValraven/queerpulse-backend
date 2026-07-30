@@ -1,8 +1,6 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
-export class AddForumReplyNotificationType1785002100000
-  implements MigrationInterface
-{
+export class AddForumReplyNotificationType1785002100000 implements MigrationInterface {
   name = 'AddForumReplyNotificationType1785002100000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

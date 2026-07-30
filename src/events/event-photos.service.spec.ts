@@ -40,12 +40,16 @@ function build(overrides: { rsvp?: unknown; photoRow?: unknown } = {}) {
     find: jest.fn().mockResolvedValue([]),
     findOne: jest.fn().mockResolvedValue(overrides.photoRow ?? null),
     create: jest.fn().mockImplementation((row: unknown) => row),
-    save: jest
-      .fn()
-      .mockImplementation((row: object) => ({ id: 'photo-1', ...row })),
+    save: jest.fn().mockImplementation((row: object) => ({
+      id: 'photo-1',
+      createdAt: new Date('2026-07-30T00:00:00.000Z'),
+      ...row,
+    })),
     delete: jest.fn().mockResolvedValue(undefined),
   };
-  const profiles = {} as never;
+  const profiles = {
+    find: jest.fn().mockResolvedValue([]),
+  } as never;
   const eventsService = {
     isOrganizer: jest
       .fn()

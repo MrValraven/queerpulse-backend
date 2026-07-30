@@ -5,12 +5,47 @@ import { Profile } from './entities/profile.entity';
 import { User, UserStatus } from './entities/user.entity';
 import { UsersService } from './users.service';
 
+// The slug picker (`nextAvailableSlug`) resolves the next free slug by querying
+// the global `handles` registry through a fluent query builder. This stubs that
+// repo so nothing is ever "taken" — the base slug stays free on the first try.
+function handleRegistryRepoStub() {
+  return {
+    createQueryBuilder: jest.fn(() => ({
+      select: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      orWhere: jest.fn().mockReturnThis(),
+      getRawMany: jest.fn().mockResolvedValue([]),
+    })),
+  };
+}
+
 describe('UsersService', () => {
   let service: UsersService;
-  let usersRepo: { findOne: jest.Mock; save: jest.Mock };
+  let usersRepo: {
+    findOne: jest.Mock;
+    save: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
+  // `findByGoogleId` re-includes the `select: false` email column, so it goes
+  // through the query builder rather than `findOne`. This stub captures that
+  // fluent chain and lets each test drive its `getOne` terminal.
+  let usersQueryBuilder: {
+    addSelect: jest.Mock;
+    where: jest.Mock;
+    getOne: jest.Mock;
+  };
 
   beforeEach(async () => {
-    usersRepo = { findOne: jest.fn(), save: jest.fn() };
+    usersQueryBuilder = {
+      addSelect: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      getOne: jest.fn(),
+    };
+    usersRepo = {
+      findOne: jest.fn(),
+      save: jest.fn(),
+      createQueryBuilder: jest.fn(() => usersQueryBuilder),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         UsersService,
@@ -23,11 +58,13 @@ describe('UsersService', () => {
 
   it('findByGoogleId delegates to the repository', async () => {
     const user = { id: 'u1', status: UserStatus.Active } as User;
-    usersRepo.findOne.mockResolvedValue(user);
+    usersQueryBuilder.getOne.mockResolvedValue(user);
     await expect(service.findByGoogleId('g-123')).resolves.toBe(user);
-    expect(usersRepo.findOne).toHaveBeenCalledWith({
-      where: { googleId: 'g-123' },
-    });
+    expect(usersRepo.createQueryBuilder).toHaveBeenCalledWith('user');
+    expect(usersQueryBuilder.where).toHaveBeenCalledWith(
+      'user.googleId = :googleId',
+      { googleId: 'g-123' },
+    );
   });
 
   it('slugify produces a url-safe base slug', () => {
@@ -42,7 +79,6 @@ describe('UsersService', () => {
   describe('createGoogleUser', () => {
     it('creates an Active member with invitedBy + activatedAt on the given manager', async () => {
       const saved: Array<{ id: string }> = [];
-      const profileRepo = { exists: jest.fn().mockResolvedValue(false) };
       const createMock = jest.fn(
         (_entity: unknown, value: Record<string, unknown>) => value,
       );
@@ -57,7 +93,10 @@ describe('UsersService', () => {
       const manager = {
         create: createMock,
         save: saveMock,
-        getRepository: jest.fn(() => profileRepo),
+        getRepository: jest.fn(() => handleRegistryRepoStub()),
+        // The profile row and its global handle are INSERTed inside the nested
+        // SAVEPOINT; `save` covers the profile, `insert` covers the handle.
+        insert: jest.fn().mockResolvedValue(undefined),
         // The profile insert runs in a nested SAVEPOINT transaction; the mock
         // just re-enters the same manager.
         transaction: jest.fn((cb: (m: unknown) => Promise<void>) =>
@@ -88,7 +127,6 @@ describe('UsersService', () => {
 
     it('creates a system account when isSystem is passed', async () => {
       const saved: Array<{ id: string }> = [];
-      const profileRepo = { exists: jest.fn().mockResolvedValue(false) };
       const createMock = jest.fn(
         (_entity: unknown, value: Record<string, unknown>) => value,
       );
@@ -103,7 +141,10 @@ describe('UsersService', () => {
       const manager = {
         create: createMock,
         save: saveMock,
-        getRepository: jest.fn(() => profileRepo),
+        getRepository: jest.fn(() => handleRegistryRepoStub()),
+        // The profile row and its global handle are INSERTed inside the nested
+        // SAVEPOINT; `save` covers the profile, `insert` covers the handle.
+        insert: jest.fn().mockResolvedValue(undefined),
         transaction: jest.fn((cb: (m: unknown) => Promise<void>) =>
           cb(manager),
         ),
@@ -126,7 +167,6 @@ describe('UsersService', () => {
 
     it('defaults isSystem to false for an ordinary member', async () => {
       const saved: Array<{ id: string }> = [];
-      const profileRepo = { exists: jest.fn().mockResolvedValue(false) };
       const createMock = jest.fn(
         (_entity: unknown, value: Record<string, unknown>) => value,
       );
@@ -141,7 +181,10 @@ describe('UsersService', () => {
       const manager = {
         create: createMock,
         save: saveMock,
-        getRepository: jest.fn(() => profileRepo),
+        getRepository: jest.fn(() => handleRegistryRepoStub()),
+        // The profile row and its global handle are INSERTed inside the nested
+        // SAVEPOINT; `save` covers the profile, `insert` covers the handle.
+        insert: jest.fn().mockResolvedValue(undefined),
         transaction: jest.fn((cb: (m: unknown) => Promise<void>) =>
           cb(manager),
         ),

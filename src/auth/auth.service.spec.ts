@@ -14,6 +14,7 @@ import {
 import { EmailSuppression } from '../account/entities/email-suppression.entity';
 import { InvitesService } from '../membership/invites.service';
 import { VouchService } from '../vouch/vouch.service';
+import { ConnectionsService } from '../connections/connections.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
@@ -36,6 +37,7 @@ interface JwtMock {
 }
 interface UsersMock {
   findById: jest.Mock;
+  findByIdWithEmail: jest.Mock;
   findByGoogleId: jest.Mock;
   createGoogleUser: jest.Mock;
 }
@@ -58,13 +60,17 @@ function buildMocks() {
     signAsync: jest.fn().mockResolvedValue('signed'),
     decode: jest.fn().mockReturnValue({ exp: 9999999999 }),
   };
+  const activeUser = {
+    id: 'u1',
+    email: 'a@b.c',
+    status: 'active',
+    role: 'member',
+  };
   const users: UsersMock = {
-    findById: jest.fn().mockResolvedValue({
-      id: 'u1',
-      email: 'a@b.c',
-      status: 'active',
-      role: 'member',
-    }),
+    findById: jest.fn().mockResolvedValue(activeUser),
+    // Rotation loads the user via findByIdWithEmail (the new access token embeds
+    // an email claim, and User.email is select:false).
+    findByIdWithEmail: jest.fn().mockResolvedValue(activeUser),
     findByGoogleId: jest.fn(),
     createGoogleUser: jest.fn(),
   };
@@ -86,6 +92,11 @@ function buildMocks() {
   // default; tests for the non-personal path assert it is never called.
   const vouch = {
     createVouchInTransaction: jest.fn().mockResolvedValue(true),
+  };
+  // The inviter and the personally-invited new member become mutually connected
+  // inside the signup transaction (personal invites only).
+  const connections = {
+    createConnectionInTransaction: jest.fn().mockResolvedValue(undefined),
   };
   const events = { emit: jest.fn() };
   // Erasure suppression list — empty by default, so signup is unaffected
@@ -109,6 +120,7 @@ function buildMocks() {
     managerUpdate,
     invites,
     vouch,
+    connections,
     events,
     suppressions,
     deactivations,
@@ -133,6 +145,7 @@ async function buildService(
       { provide: DataSource, useValue: mocks.dataSource },
       { provide: InvitesService, useValue: mocks.invites },
       { provide: VouchService, useValue: mocks.vouch },
+      { provide: ConnectionsService, useValue: mocks.connections },
       { provide: EventEmitter2, useValue: mocks.events },
       {
         provide: getRepositoryToken(EmailSuppression),
@@ -266,7 +279,7 @@ describe('AuthService.rotateRefreshToken', () => {
 
   it('rejects when the user no longer exists', async () => {
     mocks.repo.findOne.mockResolvedValue(liveRow());
-    mocks.users.findById.mockResolvedValue(null);
+    mocks.users.findByIdWithEmail.mockResolvedValue(null);
     await expect(
       service.rotateRefreshToken('raw-token'),
     ).rejects.toBeInstanceOf(UnauthorizedException);

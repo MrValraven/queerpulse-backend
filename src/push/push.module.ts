@@ -21,5 +21,7 @@ import { PushSubscription } from './entities/push-subscription.entity';
   ],
   controllers: [PushController],
   providers: [PushService, PushMessageListener],
+  // Exported so other domains can deliver a push (e.g. `EventRemindersService`).
+  exports: [PushService],
 })
 export class PushModule {}

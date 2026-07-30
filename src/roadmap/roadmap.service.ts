@@ -25,10 +25,14 @@ import { SubmitIdeaDto } from './dto/submit-idea.dto';
 @Injectable()
 export class RoadmapService {
   constructor(
-    @InjectRepository(RoadmapItem) private readonly items: Repository<RoadmapItem>,
-    @InjectRepository(RoadmapIdea) private readonly ideas: Repository<RoadmapIdea>,
-    @InjectRepository(RoadmapVote) private readonly votes: Repository<RoadmapVote>,
-    @InjectRepository(RoadmapSettings) private readonly settings: Repository<RoadmapSettings>,
+    @InjectRepository(RoadmapItem)
+    private readonly items: Repository<RoadmapItem>,
+    @InjectRepository(RoadmapIdea)
+    private readonly ideas: Repository<RoadmapIdea>,
+    @InjectRepository(RoadmapVote)
+    private readonly votes: Repository<RoadmapVote>,
+    @InjectRepository(RoadmapSettings)
+    private readonly settings: Repository<RoadmapSettings>,
   ) {}
 
   // Real member-vote counts for a batch of targets, keyed by targetId. A
@@ -55,9 +59,15 @@ export class RoadmapService {
 
   async getPublic(): Promise<RoadmapResponse> {
     const allItems = await this.items.find({ order: { sortOrder: 'ASC' } });
-    const shipped = allItems.filter((item) => item.column === RoadmapColumn.Shipped);
-    const building = allItems.filter((item) => item.column === RoadmapColumn.Building);
-    const planned = allItems.filter((item) => item.column === RoadmapColumn.Planned);
+    const shipped = allItems.filter(
+      (item) => item.column === RoadmapColumn.Shipped,
+    );
+    const building = allItems.filter(
+      (item) => item.column === RoadmapColumn.Building,
+    );
+    const planned = allItems.filter(
+      (item) => item.column === RoadmapColumn.Planned,
+    );
     const publishedIdeas = await this.ideas.find({
       where: { status: RoadmapIdeaStatus.Published },
       order: { sortOrder: 'ASC' },
@@ -75,8 +85,12 @@ export class RoadmapService {
       heroStats: (settings?.heroStats ?? []).map(toHeroStatDTO),
       shipped: shipped.map(toShippedDTO),
       building: building.map(toBuildingDTO),
-      planned: planned.map((item) => toPlannedDTO(item, plannedVotes.get(item.id) ?? 0)),
-      topIdeas: publishedIdeas.map((idea) => toTopIdeaDTO(idea, ideaVotes.get(idea.id) ?? 0)),
+      planned: planned.map((item) =>
+        toPlannedDTO(item, plannedVotes.get(item.id) ?? 0),
+      ),
+      topIdeas: publishedIdeas.map((idea) =>
+        toTopIdeaDTO(idea, ideaVotes.get(idea.id) ?? 0),
+      ),
     };
   }
 
@@ -98,13 +112,19 @@ export class RoadmapService {
         : await this.ideas.exists({ where: { id: dto.targetId } });
     if (!targetExists) {
       throw new NotFoundException(
-        dto.targetType === RoadmapVoteTarget.Item ? 'Roadmap item not found' : 'Roadmap idea not found',
+        dto.targetType === RoadmapVoteTarget.Item
+          ? 'Roadmap item not found'
+          : 'Roadmap idea not found',
       );
     }
 
     try {
       await this.votes.save(
-        this.votes.create({ memberId, targetType: dto.targetType, targetId: dto.targetId }),
+        this.votes.create({
+          memberId,
+          targetType: dto.targetType,
+          targetId: dto.targetId,
+        }),
       );
     } catch (error) {
       // Idempotent: a repeat vote (or a concurrent one from the same
@@ -121,13 +141,21 @@ export class RoadmapService {
     // fresh `GET /roadmap` would show.
     const seed =
       dto.targetType === RoadmapVoteTarget.Item
-        ? ((await this.items.findOne({ where: { id: dto.targetId } }))?.votes ?? 0)
-        : ((await this.ideas.findOne({ where: { id: dto.targetId } }))?.votes ?? 0);
-    const live = (await this.liveVoteCounts(dto.targetType, [dto.targetId])).get(dto.targetId) ?? 0;
+        ? ((await this.items.findOne({ where: { id: dto.targetId } }))?.votes ??
+          0)
+        : ((await this.ideas.findOne({ where: { id: dto.targetId } }))?.votes ??
+          0);
+    const live =
+      (await this.liveVoteCounts(dto.targetType, [dto.targetId])).get(
+        dto.targetId,
+      ) ?? 0;
     return { targetId: dto.targetId, votes: seed + live, voted: true };
   }
 
-  async submitIdea(memberId: string, dto: SubmitIdeaDto): Promise<{ status: 'pending' }> {
+  async submitIdea(
+    memberId: string,
+    dto: SubmitIdeaDto,
+  ): Promise<{ status: 'pending' }> {
     const maxOrder = await this.ideas
       .createQueryBuilder('idea')
       .select('MAX(idea.sortOrder)', 'max')

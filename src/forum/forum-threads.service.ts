@@ -9,6 +9,7 @@ import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, Repository } from 'typeorm';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { CursorPage, cursorPaginate } from '../common/cursor-pagination';
+import { escapeLikeTerm } from '../common/like-escape';
 import { MemberLookup } from '../common/member-ref';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
@@ -83,6 +84,26 @@ export class ForumThreadsService {
       data: await this.toThreadResponses(rows, viewerId),
       pageInfo: { nextCursor, hasMore },
     };
+  }
+
+  // Cross-entity global search (SearchService) — ILIKE over thread `title`
+  // only (post-body search is deferred). Reuses the same block filter as
+  // `list()`. Most-recently-active first.
+  async searchByText(
+    viewerId: string,
+    term: string,
+    limit: number,
+  ): Promise<ForumThreadResponse[]> {
+    const pattern = `%${escapeLikeTerm(term)}%`;
+    const qb = this.threads
+      .createQueryBuilder('t')
+      .where('t.title ILIKE :pattern', { pattern });
+    this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
+    const rows = await qb
+      .orderBy('t.last_activity_at', 'DESC')
+      .take(limit)
+      .getMany();
+    return this.toThreadResponses(rows, viewerId);
   }
 
   // GET /forum/threads/:slug

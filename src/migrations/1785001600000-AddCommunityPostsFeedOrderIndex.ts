@@ -33,9 +33,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * on its own: `pnpm run typeorm migration:run -- --transaction none` (see
  * `1785001500000-AddFeedCursorIndexes.ts` for the full landmine writeup).
  */
-export class AddCommunityPostsFeedOrderIndex1785001600000
-  implements MigrationInterface
-{
+export class AddCommunityPostsFeedOrderIndex1785001600000 implements MigrationInterface {
   name = 'AddCommunityPostsFeedOrderIndex1785001600000';
 
   // Runs outside a transaction for `CREATE INDEX CONCURRENTLY`; requires

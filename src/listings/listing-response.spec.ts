@@ -63,7 +63,7 @@ function makeDirectoryListing(overrides: Partial<Listing> = {}): Listing {
 
 describe('directory owner visibility', () => {
   it('exposes the full owner identity when visibility is public', () => {
-    const detail = toDirectoryDetail(makeDirectoryListing(), [], []);
+    const detail = toDirectoryDetail(makeDirectoryListing(), [], [], 0);
     expect(detail.owner.name).toBe('Inês Marques');
     expect(detail.owner.role).toBe('Ceramicist');
     expect(detail.owner.bio).toBe('Runs the studio since 2019.');
@@ -77,6 +77,7 @@ describe('directory owner visibility', () => {
       makeDirectoryListing({ visibility: 'role' }),
       [],
       [],
+      0,
     );
     expect(detail.owner.name).toBe('Ceramicist');
     expect(detail.owner.name).not.toContain('Inês');
@@ -91,6 +92,7 @@ describe('directory owner visibility', () => {
       makeDirectoryListing({ visibility: 'anon' }),
       [],
       [],
+      0,
     );
     expect(detail.owner.name).toBe('');
     expect(detail.owner.initials).toBe('');
@@ -125,7 +127,7 @@ describe('toDirectoryDetail', () => {
     listing.hours = { Fri: { open: true, from: '18:00', to: '02:00' } };
     listing.langs = ['pt', 'en'];
 
-    const detail = toDirectoryDetail(listing, [], []);
+    const detail = toDirectoryDetail(listing, [], [], 0);
 
     expect(detail.photos.wide).toBe('https://cdn.example.com/wide.jpg');
     expect(detail.photos.d1).toBe('https://cdn.example.com/d1.jpg');
@@ -138,6 +140,14 @@ describe('toDirectoryDetail', () => {
       to: '02:00',
     });
     expect(detail.langs).toEqual(['pt', 'en']);
+  });
+
+  it('passes the saved-item count straight through as savedCount', () => {
+    const withNone = toDirectoryDetail(makeDirectoryListing(), [], [], 0);
+    expect(withNone.savedCount).toBe(0);
+
+    const withSome = toDirectoryDetail(makeDirectoryListing(), [], [], 7);
+    expect(withSome.savedCount).toBe(7);
   });
 });
 

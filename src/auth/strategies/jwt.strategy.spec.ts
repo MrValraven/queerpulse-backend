@@ -82,6 +82,9 @@ describe('JwtStrategy.validate', () => {
       id: 'u1',
       email: 'a@b.c',
       status: UserStatus.Suspended,
+      // A permanent ban (suspendedUntil === null) never lapses, so the live
+      // lookup serves Suspended without triggering the expiry write-back.
+      suspendedUntil: null,
       role: UserRole.Member,
     });
     await expect(strategy.validate(full)).resolves.toEqual({

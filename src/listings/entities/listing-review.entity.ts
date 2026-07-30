@@ -45,6 +45,18 @@ export class ListingReview {
   @Column({ type: 'int', default: 0 })
   helpful: number;
 
+  /**
+   * The listing owner's single public reply to this review, set via the
+   * owner-gated `PATCH /listings/:ref/reviews/:reviewId/reply`. Both columns
+   * are null until a reply is posted; posting again overwrites them
+   * (idempotent update, not a reply thread).
+   */
+  @Column({ type: 'text', nullable: true })
+  ownerReplyText: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  ownerRepliedAt: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 }

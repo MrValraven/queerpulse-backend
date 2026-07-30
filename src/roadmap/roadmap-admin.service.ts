@@ -26,10 +26,14 @@ import { UpdateSettingsDto } from './dto/update-settings.dto';
 @Injectable()
 export class RoadmapAdminService {
   constructor(
-    @InjectRepository(RoadmapItem) private readonly items: Repository<RoadmapItem>,
-    @InjectRepository(RoadmapIdea) private readonly ideas: Repository<RoadmapIdea>,
-    @InjectRepository(RoadmapVote) private readonly votes: Repository<RoadmapVote>,
-    @InjectRepository(RoadmapSettings) private readonly settings: Repository<RoadmapSettings>,
+    @InjectRepository(RoadmapItem)
+    private readonly items: Repository<RoadmapItem>,
+    @InjectRepository(RoadmapIdea)
+    private readonly ideas: Repository<RoadmapIdea>,
+    @InjectRepository(RoadmapVote)
+    private readonly votes: Repository<RoadmapVote>,
+    @InjectRepository(RoadmapSettings)
+    private readonly settings: Repository<RoadmapSettings>,
   ) {}
 
   // Duplicated (rather than shared) with `RoadmapService`'s identical
@@ -63,12 +67,22 @@ export class RoadmapAdminService {
       this.settings.findOne({ where: { id: 1 } }),
     ]);
     const [itemVotes, ideaVotes] = await Promise.all([
-      this.liveVoteCounts(RoadmapVoteTarget.Item, allItems.map((item) => item.id)),
-      this.liveVoteCounts(RoadmapVoteTarget.Idea, allIdeas.map((idea) => idea.id)),
+      this.liveVoteCounts(
+        RoadmapVoteTarget.Item,
+        allItems.map((item) => item.id),
+      ),
+      this.liveVoteCounts(
+        RoadmapVoteTarget.Idea,
+        allIdeas.map((idea) => idea.id),
+      ),
     ]);
     return {
-      items: allItems.map((item) => toAdminItemDTO(item, itemVotes.get(item.id) ?? 0)),
-      ideas: allIdeas.map((idea) => toAdminIdeaDTO(idea, ideaVotes.get(idea.id) ?? 0)),
+      items: allItems.map((item) =>
+        toAdminItemDTO(item, itemVotes.get(item.id) ?? 0),
+      ),
+      ideas: allIdeas.map((idea) =>
+        toAdminIdeaDTO(idea, ideaVotes.get(idea.id) ?? 0),
+      ),
       heroStats: settingsRow?.heroStats ?? [],
     };
   }
@@ -78,11 +92,15 @@ export class RoadmapAdminService {
     return toAdminItemDTO(item, 0);
   }
 
-  async updateItem(id: string, dto: UpdateRoadmapItemDto): Promise<AdminRoadmapItemDTO> {
+  async updateItem(
+    id: string,
+    dto: UpdateRoadmapItemDto,
+  ): Promise<AdminRoadmapItemDTO> {
     const item = await this.loadItemOr404(id);
     Object.assign(item, dto);
     const saved = await this.items.save(item);
-    const liveVotes = (await this.liveVoteCounts(RoadmapVoteTarget.Item, [id])).get(id) ?? 0;
+    const liveVotes =
+      (await this.liveVoteCounts(RoadmapVoteTarget.Item, [id])).get(id) ?? 0;
     return toAdminItemDTO(saved, liveVotes);
   }
 
@@ -115,11 +133,15 @@ export class RoadmapAdminService {
   // `status: published` (it then appears in the public "Top ideas" list);
   // dismissing sets `status: dismissed` (hidden from the public list, kept
   // for the audit trail).
-  async updateIdea(id: string, dto: UpdateIdeaDto): Promise<AdminRoadmapIdeaDTO> {
+  async updateIdea(
+    id: string,
+    dto: UpdateIdeaDto,
+  ): Promise<AdminRoadmapIdeaDTO> {
     const idea = await this.loadIdeaOr404(id);
     Object.assign(idea, dto);
     const saved = await this.ideas.save(idea);
-    const liveVotes = (await this.liveVoteCounts(RoadmapVoteTarget.Idea, [id])).get(id) ?? 0;
+    const liveVotes =
+      (await this.liveVoteCounts(RoadmapVoteTarget.Idea, [id])).get(id) ?? 0;
     return toAdminIdeaDTO(saved, liveVotes);
   }
 
@@ -131,7 +153,9 @@ export class RoadmapAdminService {
   // Upserts the `roadmap_settings` singleton (id = 1) — mirrors
   // `GovernanceOverview`/`ChangemakerDirectorySettings`'s "no authoring
   // endpoint beyond an admin edit" singleton pattern.
-  async updateSettings(dto: UpdateSettingsDto): Promise<{ heroStats: HeroStat[] }> {
+  async updateSettings(
+    dto: UpdateSettingsDto,
+  ): Promise<{ heroStats: HeroStat[] }> {
     let row = await this.settings.findOne({ where: { id: 1 } });
     if (!row) row = this.settings.create({ id: 1, heroStats: [] });
     row.heroStats = dto.heroStats;

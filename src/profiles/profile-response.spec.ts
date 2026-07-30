@@ -221,6 +221,7 @@ describe('profile-response mappers', () => {
       shapings: [],
       activity: [],
       related: [],
+      featuredCommunities: [],
       limited: true,
     });
   });

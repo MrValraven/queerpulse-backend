@@ -332,6 +332,9 @@ describe('AuthController.me', () => {
       email: 'a@b.c',
       status: 'active',
       role: 'member',
+      // NULL for accounts created before the 18+ gate shipped (this fixture has
+      // no ageAttestedAt), surfaced as a nullable ISO string.
+      ageAttestedAt: null,
       profile: { displayName: 'Ada' },
     });
   });

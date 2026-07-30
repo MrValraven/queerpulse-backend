@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Brackets, In, MoreThanOrEqual, Not, Repository } from 'typeorm';
+import { Brackets, MoreThanOrEqual, Not, Repository } from 'typeorm';
+import { escapeLikeTerm } from '../common/like-escape';
 import { MemberLookup } from '../common/member-ref';
 import {
   DEFAULT_LIST_LIMIT,
@@ -9,6 +10,7 @@ import {
   Paginated,
 } from '../common/pagination';
 import { Event, EventStatus } from '../events/entities/event.entity';
+import { SavedItem, SavedKind } from '../saved/entities/saved-item.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { CreateReviewDto } from './dto/create-review.dto';
 import { ListDirectoryQuery } from './dto/list-directory.query';
@@ -53,6 +55,8 @@ export class DirectoryService {
     private readonly reviews: Repository<ListingReview>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     @InjectRepository(Event) private readonly events: Repository<Event>,
+    @InjectRepository(SavedItem)
+    private readonly savedItems: Repository<SavedItem>,
   ) {}
 
   /**
@@ -89,7 +93,7 @@ export class DirectoryService {
     }
 
     if (query.q) {
-      const term = `%${query.q.trim().toLowerCase()}%`;
+      const term = `%${escapeLikeTerm(query.q.trim().toLowerCase())}%`;
       qb.andWhere(
         new Brackets((where) => {
           where
@@ -136,9 +140,15 @@ export class DirectoryService {
    */
   async getDirectoryBySlug(slug: string): Promise<DirectoryDetailDTO> {
     const listing = await this.loadLiveOr404(slug);
+    // Bounded: the detail card embeds the review list AND derives its rating
+    // aggregate from this same array, so `take` must sit well above any real
+    // listing's review count (DEFAULT_LIST_LIMIT is sized for exactly that) to
+    // avoid skewing the rating — full pagination is served separately by
+    // `listReviews`. Order matches `listReviews` (most-helpful, then newest).
     const reviews = await this.reviews.find({
       where: { listingId: listing.id },
       order: { helpful: 'DESC', createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     // Upcoming, published events at this venue — soonest first, capped so the
     // sidebar card stays short. `new Date()` here is server "now" at request
@@ -152,7 +162,13 @@ export class DirectoryService {
       order: { startAt: 'ASC' },
       take: 4,
     });
-    return toDirectoryDetail(listing, reviews, upcoming);
+    // How many members bookmarked this listing — `subjectId` is the listing
+    // SLUG (the frontend's Save button builds `listing:${slug}` as the
+    // composite ref; see `DirectoryActionBar.tsx`), not the `ref`/uuid.
+    const savedCount = await this.savedItems.count({
+      where: { subjectType: SavedKind.Listing, subjectId: listing.slug },
+    });
+    return toDirectoryDetail(listing, reviews, upcoming, savedCount);
   }
 
   /** Paginated reviews for one live listing. */
@@ -212,20 +228,40 @@ export class DirectoryService {
       order: { name: 'ASC' },
       take: DEFAULT_LIST_LIMIT,
     });
-    // Fetch every verified listing's reviews in ONE query, then group by
-    // listing id in memory — avoids an N+1 review query per verified listing.
+    // The card's rating only needs a per-listing COUNT + AVG of stars (never the
+    // review bodies), so aggregate in ONE grouped query — O(verified listings),
+    // not O(reviews). This stays bounded no matter how large the review corpus
+    // grows, unlike loading every verified listing's full review rows. COUNT/SUM
+    // come back as bigint strings; we recompute the score with the SAME
+    // `sum / count` arithmetic `ratingFromReviews` uses so the numbers are
+    // byte-identical to fetching the rows.
     const verifiedListings = rows.filter(
       (listing) => listing.safeSpaceStatus === SafeSpaceStatus.Verified,
     );
-    const reviewsByListingId = new Map<string, ListingReview[]>();
+    const ratingByListingId = new Map<
+      string,
+      { count: number; starSum: number }
+    >();
     if (verifiedListings.length > 0) {
-      const allReviews = await this.reviews.find({
-        where: { listingId: In(verifiedListings.map((listing) => listing.id)) },
-      });
-      for (const review of allReviews) {
-        const bucket = reviewsByListingId.get(review.listingId) ?? [];
-        bucket.push(review);
-        reviewsByListingId.set(review.listingId, bucket);
+      const ratingRows = await this.reviews
+        .createQueryBuilder('review')
+        .select('review.listing_id', 'listingId')
+        .addSelect('COUNT(*)', 'reviewCount')
+        .addSelect('SUM(review.stars)', 'starSum')
+        .where('review.listing_id IN (:...verifiedListingIds)', {
+          verifiedListingIds: verifiedListings.map((listing) => listing.id),
+        })
+        .groupBy('review.listing_id')
+        .getRawMany<{
+          listingId: string;
+          reviewCount: string;
+          starSum: string;
+        }>();
+      for (const ratingRow of ratingRows) {
+        ratingByListingId.set(ratingRow.listingId, {
+          count: Number(ratingRow.reviewCount),
+          starSum: Number(ratingRow.starSum),
+        });
       }
     }
 
@@ -234,9 +270,18 @@ export class DirectoryService {
     let reviewTotal = 0;
     for (const listing of rows) {
       if (listing.safeSpaceStatus === SafeSpaceStatus.Verified) {
-        const reviews = reviewsByListingId.get(listing.id) ?? [];
-        reviewTotal += reviews.length;
-        verified.push(toSafeSpaceCard(listing, reviews));
+        // `toSafeSpaceCard` derives `rating`/`reviews` from the passed array;
+        // we feed it `[]` (yielding the score '0' / count 0 baseline) and then
+        // overwrite exactly those two fields from the aggregate. No other card
+        // field depends on reviews, so this reproduces the row-fetch result.
+        const card = toSafeSpaceCard(listing, []);
+        const rating = ratingByListingId.get(listing.id);
+        if (rating) {
+          card.rating = (rating.starSum / rating.count).toFixed(1);
+          card.reviews = rating.count;
+          reviewTotal += rating.count;
+        }
+        verified.push(card);
       } else {
         removed.push(toRemovedSpaceCard(listing));
       }
@@ -263,9 +308,13 @@ export class DirectoryService {
     if (listing.safeSpaceStatus === SafeSpaceStatus.Removed) {
       return toRemovedSpaceDetail(listing);
     }
+    // Bounded like `getDirectoryBySlug`: the safe-space card derives its rating
+    // aggregate from this same array, so the cap sits above any real listing's
+    // review count rather than truncating to a short preview.
     const reviews = await this.reviews.find({
       where: { listingId: listing.id },
       order: { helpful: 'DESC', createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     return toSafeSpaceDetail(listing, reviews);
   }

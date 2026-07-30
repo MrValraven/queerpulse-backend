@@ -43,6 +43,8 @@ const qbStub = () => {
     'orderBy',
     'skip',
     'take',
+    'limit',
+    'offset',
   ]) {
     qb[m] = jest.fn().mockReturnValue(qb);
   }

@@ -1,4 +1,3 @@
-import { BadRequestException } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
@@ -6,7 +5,7 @@ import { PresignRequestDto } from './dto/presign-request.dto';
 import { PresignUploadDto } from './dto/presign-upload.dto';
 import { StorageService, PresignedUpload } from './storage.service';
 import { ALLOWED_IMAGE_TYPES } from './upload-content-types';
-import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
+import { UPLOAD_KIND_SPECS } from './upload-kinds';
 import { UploadsController } from './uploads.controller';
 
 const user: CurrentUserData = {
@@ -25,124 +24,59 @@ const PRESIGNED: PresignedUpload = {
 
 describe('UploadsController', () => {
   let controller: UploadsController;
-  let storage: { createPresignedUpload: jest.Mock };
-
-  const lastCall = (): [string, string] =>
-    storage.createPresignedUpload.mock.calls[0] as [string, string];
+  let storage: { presignImageUpload: jest.Mock };
 
   beforeEach(() => {
     storage = {
-      createPresignedUpload: jest.fn().mockResolvedValue(PRESIGNED),
+      presignImageUpload: jest.fn().mockResolvedValue(PRESIGNED),
     };
     controller = new UploadsController(storage as unknown as StorageService);
   });
 
-  describe('legacy per-surface routes (kept working)', () => {
-    it('builds an avatar key namespaced to the user with the mapped extension', async () => {
+  // The controller is a thin pass-through: it forwards the authenticated
+  // caller's `userId` plus the validated DTO fields to
+  // `StorageService.presignImageUpload` and returns its result verbatim. The
+  // upload policy it used to own — content-type whitelist, per-kind byte cap,
+  // and the `${prefix}/${userId}/${uuid}${ext}` key layout — now lives in the
+  // service and is exercised in storage.service.spec.ts.
+  describe('pass-through to StorageService.presignImageUpload', () => {
+    it('avatar route forwards kind "avatar" with the caller and content type', async () => {
       const result = await controller.avatar(user, {
         contentType: 'image/png',
       });
-      const [key, contentType] = lastCall();
-      // avatars/<userId>/<uuid>.png — user-scoped, unguessable, correct extension.
-      expect(key).toMatch(/^avatars\/user-1\/[0-9a-f]{8}-[0-9a-f-]{27}\.png$/);
-      expect(contentType).toBe('image/png');
+      expect(storage.presignImageUpload).toHaveBeenCalledWith({
+        kind: 'avatar',
+        userId: 'user-1',
+        contentType: 'image/png',
+      });
       expect(result).toBe(PRESIGNED);
     });
 
-    it('namespaces work-image keys under work/ with the mapped extension', async () => {
-      await controller.workImage(user, { contentType: 'image/jpeg' });
-      const [key] = lastCall();
-      expect(key).toMatch(/^work\/user-1\/[0-9a-f]{8}-[0-9a-f-]{27}\.jpg$/);
+    it('work-image route forwards kind "work-image"', async () => {
+      const result = await controller.workImage(user, {
+        contentType: 'image/jpeg',
+      });
+      expect(storage.presignImageUpload).toHaveBeenCalledWith({
+        kind: 'work-image',
+        userId: 'user-1',
+        contentType: 'image/jpeg',
+      });
+      expect(result).toBe(PRESIGNED);
     });
 
-    it('rejects a non-image content type on the avatar route', async () => {
-      await expect(
-        controller.avatar(user, { contentType: 'application/pdf' }),
-      ).rejects.toBeInstanceOf(BadRequestException);
-      expect(storage.createPresignedUpload).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('POST /uploads/presign — kind → prefix + cap', () => {
-    const prefixCases: Array<[UploadKind, string]> = [
-      ['avatar', 'avatars'],
-      ['work-image', 'work'],
-      ['story-cover', 'story-covers'],
-      ['gathering-photo', 'gathering-photos'],
-      ['listing-photo', 'listing-photos'],
-    ];
-
-    it.each(prefixCases)(
-      'maps kind "%s" to the "%s" key prefix',
-      async (kind, prefix) => {
-        await controller.presign(user, {
-          kind,
-          contentType: 'image/png',
-          byteSize: 1024,
-        });
-        const [key] = lastCall();
-        expect(key.startsWith(`${prefix}/user-1/`)).toBe(true);
-      },
-    );
-
-    it('forwards the declared byteSize so the presign can pin content-length', async () => {
-      await controller.presign(user, {
-        kind: 'avatar',
-        contentType: 'image/png',
+    it('unified presign route forwards kind, content type and byteSize', async () => {
+      const result = await controller.presign(user, {
+        kind: 'story-cover',
+        contentType: 'image/webp',
         byteSize: 4096,
       });
-      const [, , contentLength] = storage.createPresignedUpload.mock
-        .calls[0] as [string, string, number];
-      expect(contentLength).toBe(4096);
-    });
-
-    it('returns the storage key rather than a public URL', async () => {
-      const result = await controller.presign(user, {
-        kind: 'avatar',
-        contentType: 'image/jpeg',
-        byteSize: 1024,
+      expect(storage.presignImageUpload).toHaveBeenCalledWith({
+        kind: 'story-cover',
+        userId: 'user-1',
+        contentType: 'image/webp',
+        byteSize: 4096,
       });
-      expect(result.key).toBe(PRESIGNED.key);
-      expect(result).not.toHaveProperty('publicUrl');
-    });
-
-    it.each(Object.keys(UPLOAD_KIND_SPECS) as UploadKind[])(
-      'rejects an over-cap byteSize for kind "%s" with a 400',
-      async (kind) => {
-        const cap = UPLOAD_KIND_SPECS[kind].maxBytes;
-        await expect(
-          controller.presign(user, {
-            kind,
-            contentType: 'image/png',
-            byteSize: cap + 1,
-          }),
-        ).rejects.toBeInstanceOf(BadRequestException);
-        expect(storage.createPresignedUpload).not.toHaveBeenCalled();
-      },
-    );
-
-    it('accepts a byteSize exactly at the per-kind cap', async () => {
-      const cap = UPLOAD_KIND_SPECS['work-image'].maxBytes;
-      await expect(
-        controller.presign(user, {
-          kind: 'work-image',
-          contentType: 'image/png',
-          byteSize: cap,
-        }),
-      ).resolves.toBe(PRESIGNED);
-    });
-
-    it('rejects a disallowed content type with a 400', async () => {
-      await expect(
-        controller.presign(user, {
-          kind: 'avatar',
-          // Bypasses the DTO's own IsIn gate to exercise the controller's
-          // own defence-in-depth check.
-          contentType: 'application/pdf',
-          byteSize: 1024,
-        }),
-      ).rejects.toBeInstanceOf(BadRequestException);
-      expect(storage.createPresignedUpload).not.toHaveBeenCalled();
+      expect(result).toBe(PRESIGNED);
     });
   });
 

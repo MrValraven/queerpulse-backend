@@ -24,9 +24,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `Listing.status` itself (`listings/entities/listing.entity.ts`) so entity
  * metadata and schema stay in sync for any future `migration:generate` diff.
  */
-export class AddListingsStatusIndex1785001700000
-  implements MigrationInterface
-{
+export class AddListingsStatusIndex1785001700000 implements MigrationInterface {
   name = 'AddListingsStatusIndex1785001700000';
 
   // Runs outside a transaction for `CREATE INDEX CONCURRENTLY`; requires

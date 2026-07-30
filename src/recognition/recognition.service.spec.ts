@@ -1,6 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
 import { RecognitionAward } from './entities/recognition-award.entity';
 import { RecognitionPerkClaim } from './entities/recognition-perk-claim.entity';
@@ -88,6 +89,7 @@ describe('RecognitionService', () => {
 
       expect(perkClaimsRepo.find).toHaveBeenCalledWith({
         where: { userId: 'u1' },
+        take: DEFAULT_LIST_LIMIT,
       });
       expect(dto.perks.availableCount).toBeGreaterThan(0);
       expect(dto.perks.groups.some((g) => g.label === 'Already claimed')).toBe(
@@ -111,9 +113,13 @@ describe('RecognitionService', () => {
       expect(statsRepo.findOne).toHaveBeenCalledWith({
         where: { userId: 'u2' },
       });
-      expect(awardsRepo.find).toHaveBeenCalledWith({ where: { userId: 'u2' } });
+      expect(awardsRepo.find).toHaveBeenCalledWith({
+        where: { userId: 'u2' },
+        take: DEFAULT_LIST_LIMIT,
+      });
       expect(perkClaimsRepo.find).toHaveBeenCalledWith({
         where: { userId: 'u2' },
+        take: DEFAULT_LIST_LIMIT,
       });
     });
   });

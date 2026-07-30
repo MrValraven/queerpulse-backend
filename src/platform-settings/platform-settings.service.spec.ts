@@ -96,7 +96,9 @@ describe('PlatformSettingsService', () => {
     it('throws loudly when the seeded row is missing rather than defaulting to unlocked', async () => {
       settingsRepo.findOne.mockResolvedValue(null);
 
-      await expect(service.get()).rejects.toThrow(/migration/i);
+      await expect(service.get()).rejects.toThrow(
+        /Service temporarily unavailable/,
+      );
     });
 
     it('serves the last known good copy when the query fails after the TTL lapsed', async () => {

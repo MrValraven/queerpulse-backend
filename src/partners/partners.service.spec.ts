@@ -302,6 +302,7 @@ describe('PartnersService', () => {
       expect(partners.find).toHaveBeenCalledWith({
         where: { status: PartnerStatus.Approved },
         order: { createdAt: 'DESC' },
+        take: 200,
       });
     });
 

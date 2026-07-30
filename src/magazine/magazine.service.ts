@@ -96,11 +96,7 @@ export class MagazineService {
     // 404 an unknown slug and an unpublished/future-dated one alike — hide its
     // existence rather than surfacing a distinct "not visible yet" response
     // (mirrors `ContentPagesService.getBySlug`).
-    if (
-      !article ||
-      !article.publishedAt ||
-      article.publishedAt > new Date()
-    ) {
+    if (!article || !article.publishedAt || article.publishedAt > new Date()) {
       throw new NotFoundException('Article not found');
     }
     const author = await this.loadAuthorOr404(article.authorId);

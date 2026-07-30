@@ -8,7 +8,6 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, In, IsNull, Not, Repository } from 'typeorm';
 import { normalizeHandle } from '../common/handles';
 import { toImageUrl } from '../common/image-url';
@@ -30,8 +29,6 @@ import { ListDirectoryQuery } from './dto/list-directory.query';
 import { SubprofileItemInputDTO } from './dto/replace-items.dto';
 import { UpdateSubprofileDTO } from './dto/update-subprofile.dto';
 import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
-import { SubprofileEndorsement } from './entities/subprofile-endorsement.entity';
-import { SubprofileFollower } from './entities/subprofile-follower.entity';
 import {
   Subprofile,
   SubprofileLinkVisibility,
@@ -43,13 +40,9 @@ import {
   SubprofileSection,
 } from './entities/subprofile-item.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
+import { SubprofileEndorsementsService } from './subprofile-endorsements.service';
+import { SubprofileFollowersService } from './subprofile-followers.service';
 import { isSectionAllowed } from './subprofile-kinds';
-import {
-  SUBPROFILE_ENDORSED,
-  SUBPROFILE_FOLLOWED,
-  SubprofileEndorsedEvent,
-  SubprofileFollowedEvent,
-} from './subprofile.events';
 import {
   ACCENT_KEYS,
   AVAILABILITY_KEYS,
@@ -74,11 +67,6 @@ import {
   toSubprofileDTO,
 } from './subprofile-response';
 
-// Endorser lists are capped, newest-first — mirrors the vouch page-size
-// convention but fixed (not caller-tunable) since the endorse UI shows a
-// single avatar cluster, not a paginated page.
-const ENDORSERS_LIST_CAP = 50;
-
 // Hard upper bound on how many personas the authenticated `directory` browse
 // materialises in one go — matches `listPublicHandles`'s `take: 5000` so an
 // unbounded catalogue can never pull every published-unlinked-open persona
@@ -94,10 +82,6 @@ export class SubprofilesService {
     private readonly items: Repository<SubprofileItem>,
     @InjectRepository(SubprofileSocialLink)
     private readonly socialLinks: Repository<SubprofileSocialLink>,
-    @InjectRepository(SubprofileEndorsement)
-    private readonly endorsements: Repository<SubprofileEndorsement>,
-    @InjectRepository(SubprofileFollower)
-    private readonly followers: Repository<SubprofileFollower>,
     @InjectRepository(SubprofileAffiliation)
     private readonly affiliations: Repository<SubprofileAffiliation>,
     @InjectRepository(Event)
@@ -111,7 +95,8 @@ export class SubprofilesService {
     private readonly dataSource: DataSource,
     private readonly blockFilter: BlockFilterService,
     private readonly handles: HandlesService,
-    private readonly eventEmitter: EventEmitter2,
+    private readonly endorsementsService: SubprofileEndorsementsService,
+    private readonly followersService: SubprofileFollowersService,
   ) {}
 
   // ---- owner reads ---------------------------------------------------------
@@ -125,7 +110,7 @@ export class SubprofilesService {
     const itemsById = await this.loadItemsFor(subprofileIds);
     const socialLinksById = await this.loadSocialLinksFor(subprofileIds);
     const endorsementCountsById =
-      await this.loadEndorsementCountsFor(subprofileIds);
+      await this.endorsementsService.loadEndorsementCountsFor(subprofileIds);
     // Owner viewing their own personas: resolve ALL items' collaborator
     // handles across every subprofile in ONE batched call, shared by every
     // mapper invocation below (no per-persona resolution).
@@ -701,13 +686,14 @@ export class SubprofilesService {
     const itemsById = await this.loadItemsFor(subprofileIds);
     const socialLinksById = await this.loadSocialLinksFor(subprofileIds);
     const endorsementCountsById =
-      await this.loadEndorsementCountsFor(subprofileIds);
-    const viewerEndorsedIds = await this.viewerEndorsedFor(
+      await this.endorsementsService.loadEndorsementCountsFor(subprofileIds);
+    const viewerEndorsedIds = await this.endorsementsService.viewerEndorsedFor(
       viewerId,
       subprofileIds,
     );
-    const followerCountsById = await this.loadFollowerCountsFor(subprofileIds);
-    const viewerFollowingIds = await this.viewerFollowingFor(
+    const followerCountsById =
+      await this.followersService.loadFollowerCountsFor(subprofileIds);
+    const viewerFollowingIds = await this.followersService.viewerFollowingFor(
       viewerId,
       subprofileIds,
     );
@@ -770,14 +756,17 @@ export class SubprofilesService {
       order: { position: 'ASC' },
     });
     const endorsementCount =
-      (await this.loadEndorsementCountsFor([sp.id])).get(sp.id) ?? 0;
+      (await this.endorsementsService.loadEndorsementCountsFor([sp.id])).get(
+        sp.id,
+      ) ?? 0;
     const viewerEndorsed = (
-      await this.viewerEndorsedFor(viewerId, [sp.id])
+      await this.endorsementsService.viewerEndorsedFor(viewerId, [sp.id])
     ).has(sp.id);
     const followerCount =
-      (await this.loadFollowerCountsFor([sp.id])).get(sp.id) ?? 0;
+      (await this.followersService.loadFollowerCountsFor([sp.id])).get(sp.id) ??
+      0;
     const viewerFollowing = (
-      await this.viewerFollowingFor(viewerId, [sp.id])
+      await this.followersService.viewerFollowingFor(viewerId, [sp.id])
     ).has(sp.id);
     const affiliations =
       (await this.resolveAffiliationsFor(viewerId, [sp.id])).get(sp.id) ?? [];
@@ -879,292 +868,52 @@ export class SubprofilesService {
   }
 
   // ---- endorsements ----------------------------------------------------------
+  //
+  // Endorsement behaviour lives in `SubprofileEndorsementsService`; these stay
+  // on the facade so controllers/other modules keep an unchanged public API.
 
-  async endorse(
+  endorse(
     endorserId: string,
     id: string,
     note?: string,
   ): Promise<{ endorsementCount: number; viewerEndorsed: boolean }> {
-    const persona = await this.resolveEndorsablePersona(endorserId, id);
-    if (persona.userId === endorserId) {
-      throw new BadRequestException('You cannot endorse your own persona');
-    }
-
-    // Empty/whitespace-only notes are stored as null, not "" — mirrors
-    // `VouchService.createVouch`.
-    const trimmedNote = note?.trim();
-    const cleanNote = trimmedNote ? trimmedNote : null;
-
-    const existing = await this.endorsements.findOne({
-      where: { subprofileId: id, endorserId },
-    });
-
-    // Upsert mirroring `VouchService.createVouch`, EXCEPT for the
-    // already-active case: a vouch 409s on a duplicate, but endorsing is a
-    // one-tap UX action, so re-tapping an already-endorsed persona is treated
-    // as idempotent success (current count, viewerEndorsed: true) rather than
-    // an error. `justActivated` tracks whether a real active→inactive
-    // transition happened, so the notification event fires once per genuine
-    // endorse (not on every repeat tap).
-    let justActivated = false;
-    if (existing && existing.withdrawnAt === null) {
-      // Already active — idempotent no-op.
-    } else if (existing) {
-      // Withdrawn → reactivate in place (keeps id/createdAt).
-      await this.dataSource.transaction(async (manager) => {
-        await manager.update(
-          SubprofileEndorsement,
-          { id: existing.id },
-          { withdrawnAt: null, note: cleanNote },
-        );
-      });
-      justActivated = true;
-    } else {
-      try {
-        await this.dataSource.transaction(async (manager) => {
-          await manager.insert(SubprofileEndorsement, {
-            subprofileId: id,
-            endorserId,
-            note: cleanNote,
-          });
-        });
-        justActivated = true;
-      } catch (err) {
-        if (!isUniqueViolation(err)) {
-          throw err;
-        }
-        // Lost a race to a concurrent endorse for the same (persona, endorser)
-        // pair — the row now exists and is active; treat as idempotent
-        // success rather than surfacing a 409.
-      }
-    }
-
-    const endorsementCount =
-      (await this.loadEndorsementCountsFor([id])).get(id) ?? 0;
-
-    if (justActivated) {
-      this.eventEmitter.emit(SUBPROFILE_ENDORSED, {
-        subprofileId: id,
-        endorserId,
-        ownerId: persona.userId,
-      } satisfies SubprofileEndorsedEvent);
-    }
-
-    return { endorsementCount, viewerEndorsed: true };
+    return this.endorsementsService.endorse(endorserId, id, note);
   }
 
-  async withdrawEndorsement(
+  withdrawEndorsement(
     endorserId: string,
     id: string,
   ): Promise<{ endorsementCount: number; viewerEndorsed: boolean }> {
-    // No-op if there is no active endorsement to withdraw — unlike
-    // `VouchService.withdrawVouch`, this never 404s (the endorse control is a
-    // toggle; withdrawing a non-existent/already-withdrawn endorsement should
-    // just settle into the "not endorsed" state).
-    const active = await this.endorsements.findOne({
-      where: { subprofileId: id, endorserId, withdrawnAt: IsNull() },
-    });
-    if (active) {
-      await this.endorsements.update(
-        { id: active.id },
-        { withdrawnAt: new Date() },
-      );
-    }
-    const endorsementCount =
-      (await this.loadEndorsementCountsFor([id])).get(id) ?? 0;
-    return { endorsementCount, viewerEndorsed: false };
+    return this.endorsementsService.withdrawEndorsement(endorserId, id);
   }
 
-  async listEndorsers(
+  listEndorsers(
     viewerId: string,
     id: string,
   ): Promise<{ count: number; endorsers: EndorserView[] }> {
-    // In-query block filtering (mirrors `directory()`) so `LIMIT` counts only
-    // visible rows and `count` reflects the viewer's actually-visible total,
-    // not the raw active tally.
-    const qb = this.endorsements
-      .createQueryBuilder('se')
-      .where('se.subprofileId = :id', { id })
-      .andWhere('se.withdrawnAt IS NULL');
-    this.blockFilter.excludeBlocked(qb, viewerId, '"se"."endorser_id"');
-    qb.orderBy('se.createdAt', 'DESC');
-
-    const count = await qb.getCount();
-    const rows = await qb.take(ENDORSERS_LIST_CAP).getMany();
-
-    const endorserProfiles = await this.profiles.find({
-      where: { userId: In(rows.map((row) => row.endorserId)) },
-    });
-    const profileByUserId = new Map(
-      endorserProfiles.map((profile) => [profile.userId, profile]),
-    );
-    const endorsers = rows.map((row) => {
-      const profile = profileByUserId.get(row.endorserId);
-      return {
-        slug: profile?.slug ?? '',
-        name: `${profile?.firstName ?? ''} ${profile?.lastName ?? ''}`.trim(),
-        avatarUrl: toImageUrl(profile?.avatarUrl),
-        note: row.note,
-      };
-    });
-    return { count, endorsers };
+    return this.endorsementsService.listEndorsers(viewerId, id);
   }
 
   // ---- followers -------------------------------------------------------------
+  //
+  // Follower behaviour lives in `SubprofileFollowersService`; these stay on the
+  // facade so controllers/other modules keep an unchanged public API.
 
-  async follow(
+  follow(
     followerId: string,
     id: string,
   ): Promise<{ followerCount: number; viewerFollowing: boolean }> {
-    const persona = await this.resolveEndorsablePersona(followerId, id);
-    if (persona.userId === followerId) {
-      throw new BadRequestException('You cannot follow your own persona');
-    }
-
-    // Following is a one-way, instant toggle with no note/soft-withdraw (see
-    // the entity): a genuine insert emits the notification event once;
-    // re-tapping an already-followed persona (or losing a race to a
-    // concurrent follow for the same pair) is idempotent success, no event.
-    let justFollowed = false;
-    try {
-      await this.dataSource.transaction(async (manager) => {
-        await manager.insert(SubprofileFollower, {
-          subprofileId: id,
-          followerId,
-        });
-      });
-      justFollowed = true;
-    } catch (err) {
-      if (!isUniqueViolation(err)) {
-        throw err;
-      }
-      // Already following — idempotent success.
-    }
-
-    const followerCount = (await this.loadFollowerCountsFor([id])).get(id) ?? 0;
-
-    if (justFollowed) {
-      this.eventEmitter.emit(SUBPROFILE_FOLLOWED, {
-        subprofileId: id,
-        followerId,
-        ownerId: persona.userId,
-      } satisfies SubprofileFollowedEvent);
-    }
-
-    return { followerCount, viewerFollowing: true };
+    return this.followersService.follow(followerId, id);
   }
 
-  async unfollow(
+  unfollow(
     followerId: string,
     id: string,
   ): Promise<{ followerCount: number; viewerFollowing: boolean }> {
-    // No-op if there is no follow row to remove — mirrors
-    // `withdrawEndorsement`: the follow control is a toggle, so unfollowing a
-    // persona the viewer never followed just settles into "not following".
-    await this.followers.delete({ subprofileId: id, followerId });
-    const followerCount = (await this.loadFollowerCountsFor([id])).get(id) ?? 0;
-    return { followerCount, viewerFollowing: false };
+    return this.followersService.unfollow(followerId, id);
   }
 
   // ---- internals -----------------------------------------------------------
-
-  // Fetches a persona by id AND enforces it is publicly endorsable: published,
-  // Open visibility, and not block-either-way between `userId` (the
-  // endorser/viewer) and the persona's owner. Mirrors the gate `getByHandle`
-  // applies.
-  private async resolveEndorsablePersona(
-    userId: string,
-    id: string,
-  ): Promise<Subprofile> {
-    const persona = await this.subprofiles.findOne({
-      // Open + published only: `network`/`private` personas are not publicly
-      // endorsable/followable and 404 like any other unreachable persona,
-      // matching the gate `getByHandle` / `directory` apply.
-      where: {
-        id,
-        status: SubprofileStatus.Published,
-        visibility: SubprofileVisibility.Open,
-      },
-    });
-    if (!persona) {
-      throw new NotFoundException('Subprofile not found');
-    }
-    if (await this.blockFilter.isBlockedEitherWay(userId, persona.userId)) {
-      throw new NotFoundException('Subprofile not found');
-    }
-    return persona;
-  }
-
-  // Batches the active-endorsement COUNT for many personas into ONE query
-  // (mirrors `loadSocialCountsFor`) — avoids an N+1 across every read path
-  // (`listMine`, `listForProfile`, `getByHandle`, `ownerDTO`) and is reused
-  // even for a single-persona read by passing a one-element id array.
-  private async loadEndorsementCountsFor(
-    ids: string[],
-  ): Promise<Map<string, number>> {
-    const counts = new Map<string, number>();
-    if (!ids.length) return counts;
-    const rows = await this.endorsements.find({
-      where: { subprofileId: In(ids), withdrawnAt: IsNull() },
-      select: { subprofileId: true },
-    });
-    for (const row of rows)
-      counts.set(row.subprofileId, (counts.get(row.subprofileId) ?? 0) + 1);
-    return counts;
-  }
-
-  // Batches "did this viewer endorse this persona" for many personas into ONE
-  // query — the `viewerEndorsed` companion to `loadEndorsementCountsFor`.
-  private async viewerEndorsedFor(
-    viewerId: string,
-    ids: string[],
-  ): Promise<Set<string>> {
-    const set = new Set<string>();
-    if (!ids.length) return set;
-    const rows = await this.endorsements.find({
-      where: {
-        subprofileId: In(ids),
-        endorserId: viewerId,
-        withdrawnAt: IsNull(),
-      },
-      select: { subprofileId: true },
-    });
-    for (const row of rows) set.add(row.subprofileId);
-    return set;
-  }
-
-  // Batches the follower COUNT for many personas into ONE query (mirrors
-  // `loadEndorsementCountsFor`) — there is no `withdrawnAt`: every row in
-  // `subprofile_followers` is active, so this counts rows directly.
-  private async loadFollowerCountsFor(
-    ids: string[],
-  ): Promise<Map<string, number>> {
-    const counts = new Map<string, number>();
-    if (!ids.length) return counts;
-    const rows = await this.followers.find({
-      where: { subprofileId: In(ids) },
-      select: { subprofileId: true },
-    });
-    for (const row of rows)
-      counts.set(row.subprofileId, (counts.get(row.subprofileId) ?? 0) + 1);
-    return counts;
-  }
-
-  // Batches "is this viewer following this persona" for many personas into
-  // ONE query — the `viewerFollowing` companion to `loadFollowerCountsFor`.
-  private async viewerFollowingFor(
-    viewerId: string,
-    ids: string[],
-  ): Promise<Set<string>> {
-    const set = new Set<string>();
-    if (!ids.length) return set;
-    const rows = await this.followers.find({
-      where: { subprofileId: In(ids), followerId: viewerId },
-      select: { subprofileId: true },
-    });
-    for (const row of rows) set.add(row.subprofileId);
-    return set;
-  }
 
   // Batches the resolved event/community links for many personas into TWO
   // entity queries total (one `events.find`, one `communities.find`), never
@@ -1440,9 +1189,12 @@ export class SubprofilesService {
       order: { position: 'ASC' },
     });
     const endorsementCount =
-      (await this.loadEndorsementCountsFor([sp.id])).get(sp.id) ?? 0;
+      (await this.endorsementsService.loadEndorsementCountsFor([sp.id])).get(
+        sp.id,
+      ) ?? 0;
     const followerCount =
-      (await this.loadFollowerCountsFor([sp.id])).get(sp.id) ?? 0;
+      (await this.followersService.loadFollowerCountsFor([sp.id])).get(sp.id) ??
+      0;
     // Owner viewing their own persona: block-filter against the OWNER's own
     // user id (mirrors the design plan's `viewerId` param — here the "viewer"
     // is the owner). Consistent with the read paths below: a target that

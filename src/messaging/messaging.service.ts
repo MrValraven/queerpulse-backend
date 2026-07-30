@@ -6,13 +6,22 @@ import {
 } from '@nestjs/common';
 import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Not, QueryFailedError, Repository } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  In,
+  Not,
+  QueryFailedError,
+  Repository,
+} from 'typeorm';
 import {
   CONNECTION_ACCEPTED,
   ConnectionAcceptedEvent,
 } from '../connections/connection.events';
 import { ConnectionsService } from '../connections/connections.service';
 import { decodeCursor } from '../common/cursor-pagination';
+import { escapeLikeTerm } from '../common/like-escape';
+import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole } from '../users/entities/user.entity';
@@ -78,6 +87,8 @@ const MAX_LIMIT = 100;
 const EDIT_WINDOW_MS = 15 * 60 * 1000;
 const DEFAULT_SEARCH_LIMIT = 20;
 const MAX_SEARCH_LIMIT = 50;
+/** Ceiling for the (unpaginated) pinned-messages banner — newest pins first. */
+const MAX_PINNED_MESSAGES = 50;
 
 /**
  * Plain-text `body` for each kind of system message. This is only a FALLBACK for
@@ -106,17 +117,6 @@ const ROLE_RANK: Record<ConversationRole, number> = {
   [ConversationRole.Admin]: 1,
   [ConversationRole.Member]: 2,
 };
-
-/**
- * Escapes the LIKE/ILIKE metacharacters in a user-supplied search term so they
- * match literally: `\` (the default escape char) first, then the `%`/`_`
- * wildcards. The escaped term is wrapped as `%term%` and passed as a bound
- * parameter — never string-interpolated — so the query is injection-safe AND a
- * literal `%` in the term can't turn into a match-everything scan.
- */
-function escapeLikeTerm(term: string): string {
-  return term.replace(/[\\%_]/g, (character) => `\\${character}`);
-}
 
 /**
  * A short window of `body` around the first case-insensitive occurrence of
@@ -185,7 +185,33 @@ export class MessagingService {
   ) {}
 
   async listConversations(userId: string): Promise<ConversationResponse[]> {
-    const myParts = await this.participants.find({ where: { userId } });
+    // Bounded ceiling: the endpoint returns a bare array (no pagination
+    // envelope — the FE `getConversations` normalizes either shape), so cap the
+    // participant fan-out at DEFAULT_LIST_LIMIT rather than loading every row +
+    // IN() fan-out + in-memory sort unbounded. Sized well above any real inbox,
+    // so existing callers behave identically; the response contract is unchanged.
+    //
+    // Order by last activity BEFORE the take so the retained subset is
+    // DETERMINISTIC — the DEFAULT_LIST_LIMIT most-recently-active conversations,
+    // which is exactly what an over-cap inbox wants — rather than an arbitrary
+    // slice of an unordered scan. "Last activity" mirrors the derived `updatedAt`
+    // below: the newest non-deleted message's timestamp, falling back to the
+    // conversation's own creation for an empty thread. The correlated MAX rides
+    // the composite index messages (conversation_id, created_at); with no joins
+    // on this builder, `.take()` emits a plain LIMIT (no distinct-pagination).
+    const lastActivityExpression = `COALESCE(
+        (SELECT MAX(message.created_at) FROM messages message
+          WHERE message.conversation_id = participant.conversation_id
+            AND message.deleted_at IS NULL),
+        (SELECT conversation.created_at FROM conversations conversation
+          WHERE conversation.id = participant.conversation_id)
+      )`;
+    const myParts = await this.participants
+      .createQueryBuilder('participant')
+      .where('participant.user_id = :userId', { userId })
+      .orderBy(lastActivityExpression, 'DESC')
+      .take(DEFAULT_LIST_LIMIT)
+      .getMany();
     if (!myParts.length) {
       return [];
     }
@@ -1186,13 +1212,25 @@ export class MessagingService {
       }
     }
 
-    message.deletedAt = new Date();
-    await this.messages.save(message);
+    // Conditional soft-delete: only the row still un-deleted is tombstoned. Two
+    // concurrent deletes both pass the `message.deletedAt` guard above, but the
+    // `deleted_at IS NULL` predicate lets exactly ONE update affect a row — so
+    // MESSAGE_DELETED is broadcast once, never on a repeat/no-op delete.
+    const result = await this.messages
+      .createQueryBuilder()
+      .update(Message)
+      .set({ deletedAt: () => 'now()' })
+      .where('id = :messageId', { messageId })
+      .andWhere('conversation_id = :conversationId', { conversationId })
+      .andWhere('deleted_at IS NULL')
+      .execute();
 
-    this.eventEmitter.emit(MESSAGE_DELETED, {
-      conversationId,
-      messageId,
-    } satisfies MessageDeletedEvent);
+    if (result.affected === 1) {
+      this.eventEmitter.emit(MESSAGE_DELETED, {
+        conversationId,
+        messageId,
+      } satisfies MessageDeletedEvent);
+    }
     return { ok: true };
   }
 
@@ -1306,6 +1344,9 @@ export class MessagingService {
     const pinRows = await this.pins.find({
       where: { conversationId },
       order: { pinnedAt: 'DESC' },
+      // Bounded: the banner shows the newest pins; an unbounded scan of every
+      // pin a thread ever accrued is never needed.
+      take: MAX_PINNED_MESSAGES,
     });
     if (!pinRows.length) {
       return [];
@@ -1541,27 +1582,17 @@ export class MessagingService {
       where: { slug: In(uniqueHandles) },
     });
     const profileByHandle = new Map(profiles.map((p) => [p.slug, p]));
+    // Resolve EVERY handle first (a missing one is a hard 404) and collect the
+    // distinct prospective members, silently dropping the creator if they
+    // included themselves.
     const memberUserIds: string[] = [];
     for (const handle of uniqueHandles) {
       const profile = profileByHandle.get(handle);
       if (!profile) {
         throw new NotFoundException(`Member not found: ${handle}`);
       }
-      // Silently ignore the creator if they included themselves.
       if (profile.userId === userId) {
         continue;
-      }
-      if (await this.blockFilter.isBlockedEitherWay(userId, profile.userId)) {
-        throw new ForbiddenException(
-          'You cannot add a member you have blocked (or who has blocked you)',
-        );
-      }
-      if (
-        !(await this.connectionsService.areConnected(userId, profile.userId))
-      ) {
-        throw new ForbiddenException(
-          'You can only add accepted connections to a group',
-        );
       }
       if (!memberUserIds.includes(profile.userId)) {
         memberUserIds.push(profile.userId);
@@ -1570,46 +1601,61 @@ export class MessagingService {
     if (!memberUserIds.length) {
       throw new BadRequestException('A group needs at least one other member');
     }
+    // Batched block + connection gate across ALL prospective members — two
+    // queries total instead of a sequential pair per handle (N+1).
+    await this.assertAddableMembers(userId, memberUserIds);
 
-    const conversation = await this.dataSource.transaction(async (manager) => {
-      const convo = await manager.save(
-        manager.create(Conversation, {
-          kind: ConversationKind.Group,
-          isOfficial: false,
-          pairKey: null,
-          title: trimmedTitle,
-          avatarUrl: avatarUrl ?? null,
-          createdBy: userId,
-        }),
-      );
-      await manager.save([
-        manager.create(ConversationParticipant, {
-          conversationId: convo.id,
-          userId,
-          role: ConversationRole.Owner,
-        }),
-        ...memberUserIds.map((memberId) =>
+    // Single transaction: the conversation, every participant, AND the opening
+    // system message commit together — a throw anywhere rolls the whole group
+    // back rather than leaving a group with no `group_created` pill.
+    const { conversation, systemMessage } = await this.dataSource.transaction(
+      async (manager) => {
+        const convo = await manager.save(
+          manager.create(Conversation, {
+            kind: ConversationKind.Group,
+            isOfficial: false,
+            pairKey: null,
+            title: trimmedTitle,
+            avatarUrl: avatarUrl ?? null,
+            createdBy: userId,
+          }),
+        );
+        await manager.save([
           manager.create(ConversationParticipant, {
             conversationId: convo.id,
-            userId: memberId,
-            role: ConversationRole.Member,
+            userId,
+            role: ConversationRole.Owner,
           }),
-        ),
-      ]);
-      return convo;
-    });
+          ...memberUserIds.map((memberId) =>
+            manager.create(ConversationParticipant, {
+              conversationId: convo.id,
+              userId: memberId,
+              role: ConversationRole.Member,
+            }),
+          ),
+        ]);
+        // Seed the opening system message (actor = creator) INSIDE the txn.
+        // `body` is a plain-text fallback; the client renders the structured
+        // event as a centred pill.
+        const systemMessage = await this.insertSystemMessage(
+          manager,
+          convo.id,
+          {
+            type: 'group_created',
+            actorId: userId,
+          },
+        );
+        return { conversation: convo, systemMessage };
+      },
+    );
 
-    // Seed the opening system message (actor = creator). `body` is a plain-text
-    // fallback; the client renders the structured event as a centred pill.
-    await this.postSystemMessage(conversation.id, {
-      type: 'group_created',
-      actorId: userId,
-    });
-
-    // The members were not in the conversation room when it was created, so a
-    // room-scoped `message:new` won't reach them — fan the new group to each
-    // member's `user:<id>` room so their inbox refetches live.
-    this.eventEmitter.emit(CONVERSATION_CREATED, {
+    // Best-effort live fan-out AFTER commit — a socket relay failure must not
+    // 500 a group that already committed. Broadcast the opening pill, then fan
+    // the new group to each member's `user:<id>` room (they weren't in the
+    // conversation room at creation, so a room-scoped `message:new` won't reach
+    // them) so their inbox refetches live.
+    await this.broadcastSystemMessage(systemMessage);
+    this.emitBestEffort(CONVERSATION_CREATED, {
       conversationId: conversation.id,
       memberUserIds: [userId, ...memberUserIds],
     } satisfies ConversationCreatedEvent);
@@ -1638,20 +1684,40 @@ export class MessagingService {
     if (participant.leftAt) {
       return { ok: true };
     }
-    participant.leftAt = new Date();
-    await this.participants.save(participant);
-    await this.postSystemMessage(conversationId, {
-      type: 'member_left',
-      actorId: userId,
-    });
-    // Owner succession: an owner who leaves hands ownership to the
-    // longest-standing remaining member. Participant rows carry no join
-    // timestamp, so "longest-standing" is approximated deterministically — an
-    // existing admin before a plain member, ties broken by participant id (a
-    // stable rule, documented in group-chat.md). If nobody remains, the group is
-    // left ownerless (no dissolve — matches Phase 1's "no cleanup" decision).
-    if (participant.role === ConversationRole.Owner) {
-      await this.promoteSuccessor(conversationId, userId);
+    // One transaction for the leave + the `member_left` pill + owner succession:
+    // an owner's `left_at` can no longer commit on its own and leave the group
+    // ownerless (and unpromotable) if a later write throws.
+    const { systemMessage, promotedSuccessor } =
+      await this.dataSource.transaction(async (manager) => {
+        participant.leftAt = new Date();
+        await manager.save(participant);
+        const systemMessage = await this.insertSystemMessage(
+          manager,
+          conversationId,
+          { type: 'member_left', actorId: userId },
+        );
+        // Owner succession: an owner who leaves hands ownership to the
+        // longest-standing remaining member. Participant rows carry no join
+        // timestamp, so "longest-standing" is approximated deterministically —
+        // an existing admin before a plain member, ties broken by participant id
+        // (a stable rule, documented in group-chat.md). If nobody remains, the
+        // group is left ownerless (no dissolve — matches Phase 1's "no cleanup"
+        // decision).
+        const promotedSuccessor =
+          participant.role === ConversationRole.Owner
+            ? await this.promoteSuccessorInTransaction(
+                manager,
+                conversationId,
+                userId,
+              )
+            : false;
+        return { systemMessage, promotedSuccessor };
+      });
+
+    // Best-effort live fan-out AFTER commit.
+    await this.broadcastSystemMessage(systemMessage);
+    if (promotedSuccessor) {
+      await this.fanGroupRefresh(conversationId);
     }
     return { ok: true };
   }
@@ -1689,6 +1755,13 @@ export class MessagingService {
       where: { conversationId },
     });
     const rowByUser = new Map(existingRows.map((row) => [row.userId, row]));
+    // Resolve + validate EVERY handle up front (a missing one is a hard 404),
+    // skipping the actor and already-active members. Nothing is written yet, so
+    // a later invalid handle can no longer leave earlier members half-added.
+    const membersToAdd: {
+      profile: Profile;
+      existing: ConversationParticipant | undefined;
+    }[] = [];
     const addedUserIds: string[] = [];
     for (const handle of uniqueHandles) {
       const profile = profileByHandle.get(handle);
@@ -1702,52 +1775,58 @@ export class MessagingService {
       if (existing && existing.leftAt == null) {
         continue; // already an active member — silently skip
       }
-      if (
-        await this.blockFilter.isBlockedEitherWay(actorUserId, profile.userId)
-      ) {
-        throw new ForbiddenException(
-          'You cannot add a member you have blocked (or who has blocked you)',
-        );
+      if (addedUserIds.includes(profile.userId)) {
+        continue; // two handles resolving to the same member — dedupe
       }
-      if (
-        !(await this.connectionsService.areConnected(
-          actorUserId,
-          profile.userId,
-        ))
-      ) {
-        throw new ForbiddenException(
-          'You can only add accepted connections to a group',
-        );
-      }
-      if (existing) {
-        existing.leftAt = null;
-        existing.role = ConversationRole.Member;
-        existing.clearedAt = null;
-        await this.participants.save(existing);
-      } else {
-        await this.participants.save(
-          this.participants.create({
-            conversationId,
-            userId: profile.userId,
-            role: ConversationRole.Member,
-          }),
-        );
-      }
-      if (!addedUserIds.includes(profile.userId)) {
-        addedUserIds.push(profile.userId);
-      }
+      membersToAdd.push({ profile, existing });
+      addedUserIds.push(profile.userId);
     }
     if (!addedUserIds.length) {
       throw new BadRequestException('No new members to add');
     }
-    for (const targetId of addedUserIds) {
-      await this.postSystemMessage(conversationId, {
-        type: 'member_added',
-        actorId: actorUserId,
-        targetId,
-      });
+    // Batched block + connection gate across ALL candidates — two queries total
+    // instead of a sequential pair per handle (N+1).
+    await this.assertAddableMembers(actorUserId, addedUserIds);
+
+    // Single transaction: every (re)activation/insert AND its `member_added`
+    // pill commit together — a throw mid-loop no longer leaves some members
+    // added with no pill / no fan-out.
+    const systemMessages = await this.dataSource.transaction(
+      async (manager) => {
+        const pills: Message[] = [];
+        for (const { profile, existing } of membersToAdd) {
+          if (existing) {
+            existing.leftAt = null;
+            existing.role = ConversationRole.Member;
+            existing.clearedAt = null;
+            await manager.save(existing);
+          } else {
+            await manager.save(
+              manager.create(ConversationParticipant, {
+                conversationId,
+                userId: profile.userId,
+                role: ConversationRole.Member,
+              }),
+            );
+          }
+          pills.push(
+            await this.insertSystemMessage(manager, conversationId, {
+              type: 'member_added',
+              actorId: actorUserId,
+              targetId: profile.userId,
+            }),
+          );
+        }
+        return pills;
+      },
+    );
+
+    // Best-effort live fan-out AFTER commit: one pill per add, then fan the group
+    // to each new member's `user:<id>` room so their inbox refetches live.
+    for (const systemMessage of systemMessages) {
+      await this.broadcastSystemMessage(systemMessage);
     }
-    this.eventEmitter.emit(CONVERSATION_CREATED, {
+    this.emitBestEffort(CONVERSATION_CREATED, {
       conversationId,
       memberUserIds: addedUserIds,
     } satisfies ConversationCreatedEvent);
@@ -1925,16 +2004,20 @@ export class MessagingService {
   }
 
   /**
-   * Promote the successor when an owner leaves: the highest-ranked remaining
-   * active member (an existing admin before a plain member), ties broken
-   * deterministically by participant id. No-op if nobody remains (group left
-   * ownerless). Fans a quiet refetch so members see the new owner badge.
+   * Promote the successor when an owner leaves, INSIDE the caller's transaction:
+   * the highest-ranked remaining active member (an existing admin before a plain
+   * member), ties broken deterministically by participant id. Returns whether a
+   * successor was promoted so the caller can fan a quiet refetch AFTER commit;
+   * `false` (nobody remains) leaves the group ownerless (no dissolve).
    */
-  private async promoteSuccessor(
+  private async promoteSuccessorInTransaction(
+    manager: EntityManager,
     conversationId: string,
     leavingUserId: string,
-  ): Promise<void> {
-    const rows = await this.participants.find({ where: { conversationId } });
+  ): Promise<boolean> {
+    const rows = await manager.find(ConversationParticipant, {
+      where: { conversationId },
+    });
     const [successor] = rows
       .filter((row) => row.leftAt == null && row.userId !== leavingUserId)
       .sort(
@@ -1942,11 +2025,11 @@ export class MessagingService {
           ROLE_RANK[a.role] - ROLE_RANK[b.role] || a.id.localeCompare(b.id),
       );
     if (!successor) {
-      return;
+      return false;
     }
     successor.role = ConversationRole.Owner;
-    await this.participants.save(successor);
-    await this.fanGroupRefresh(conversationId);
+    await manager.save(successor);
+    return true;
   }
 
   /**
@@ -1962,7 +2045,7 @@ export class MessagingService {
     if (!memberUserIds.length) {
       return;
     }
-    this.eventEmitter.emit(CONVERSATION_CREATED, {
+    this.emitBestEffort(CONVERSATION_CREATED, {
       conversationId,
       memberUserIds,
     } satisfies ConversationCreatedEvent);
@@ -1979,8 +2062,29 @@ export class MessagingService {
     conversationId: string,
     event: SystemEvent,
   ): Promise<MessageResponse> {
-    const saved = await this.messages.save(
-      this.messages.create({
+    const saved = await this.insertSystemMessage(
+      this.messages.manager,
+      conversationId,
+      event,
+    );
+    const { response } = await this.buildPostResult(saved, event.actorId, true);
+    return response;
+  }
+
+  /**
+   * Persist a `system` message row using the supplied `manager` — the pure
+   * INSERT with no broadcast, so it can run INSIDE a transaction (createGroup /
+   * leaveGroup / addMembers) and have its MESSAGE_CREATED fan-out deferred to
+   * after commit via `broadcastSystemMessage`. `body` is a plain-text fallback
+   * for consumers that don't understand the structured event.
+   */
+  private insertSystemMessage(
+    manager: EntityManager,
+    conversationId: string,
+    event: SystemEvent,
+  ): Promise<Message> {
+    return manager.save(
+      manager.create(Message, {
         conversationId,
         senderId: event.actorId,
         body: SYSTEM_EVENT_FALLBACK[event.type],
@@ -1988,8 +2092,75 @@ export class MessagingService {
         systemEvent: event,
       }),
     );
-    const { response } = await this.buildPostResult(saved, event.actorId, true);
-    return response;
+  }
+
+  /**
+   * Post-commit MESSAGE_CREATED fan-out for a system message inserted inside a
+   * transaction. Best-effort: the pill is already committed, so a hydration or
+   * socket-relay failure must not turn a successful group mutation into a 500.
+   */
+  private async broadcastSystemMessage(message: Message): Promise<void> {
+    try {
+      await this.buildPostResult(message, message.senderId, true);
+    } catch {
+      // best-effort: the pill persisted; a live relay failure is benign.
+    }
+  }
+
+  /**
+   * Emit a domain event WITHOUT letting a synchronous listener failure surface
+   * to the caller — for post-commit socket fan-out, where the write already
+   * committed and the frame is a live-refresh nicety, not part of the write.
+   */
+  private emitBestEffort(eventName: string, payload: unknown): void {
+    try {
+      this.eventEmitter.emit(eventName, payload);
+    } catch {
+      // best-effort: post-commit live fan-out never fails a committed write.
+    }
+  }
+
+  /**
+   * Group member-gate for a batch of candidate user ids: a block either way is a
+   * hard stop, and each candidate must be an accepted connection of the actor.
+   * Two queries total (batched block set + the accepted-connection subset among
+   * exactly these candidates) regardless of candidate count, replacing the
+   * previous per-candidate `isBlockedEitherWay` + `areConnected` pair (N+1).
+   * Block is checked before connection per candidate, matching the previous
+   * sequential precedence.
+   *
+   * The connection test is `acceptedConnectionsAmong(actor, candidates)` — a
+   * query bounded by the (small) candidate set — NOT the 200-capped
+   * `getAcceptedConnectionUserIds(actor)`: an actor with more than
+   * `DEFAULT_LIST_LIMIT` accepted connections would otherwise have a valid
+   * connection beyond the cap wrongly rejected here.
+   */
+  private async assertAddableMembers(
+    actorUserId: string,
+    candidateUserIds: string[],
+  ): Promise<void> {
+    if (!candidateUserIds.length) {
+      return;
+    }
+    const [blockedUserIds, connectedUserIds] = await Promise.all([
+      this.blockFilter.blockedUserIds(actorUserId, candidateUserIds),
+      this.connectionsService.acceptedConnectionsAmong(
+        actorUserId,
+        candidateUserIds,
+      ),
+    ]);
+    for (const candidateUserId of candidateUserIds) {
+      if (blockedUserIds.has(candidateUserId)) {
+        throw new ForbiddenException(
+          'You cannot add a member you have blocked (or who has blocked you)',
+        );
+      }
+      if (!connectedUserIds.has(candidateUserId)) {
+        throw new ForbiddenException(
+          'You can only add accepted connections to a group',
+        );
+      }
+    }
   }
 
   /** Builds the frontend-contract `ConversationResponse` for a 1:1 DM. */

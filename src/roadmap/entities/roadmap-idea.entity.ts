@@ -29,7 +29,11 @@ export class RoadmapIdea {
   @Column()
   text: string;
 
-  @Column({ type: 'enum', enum: RoadmapIdeaStatus, default: RoadmapIdeaStatus.Pending })
+  @Column({
+    type: 'enum',
+    enum: RoadmapIdeaStatus,
+    default: RoadmapIdeaStatus.Pending,
+  })
   status: RoadmapIdeaStatus;
 
   // Starting seed count; member votes accrue on top via `roadmap_votes`.

@@ -27,7 +27,11 @@ export class ListingWitLineDto {
 
 export class ListingSocialDto {
   @IsOptional() @IsString() @MaxLength(200) instagram?: string;
-  @IsOptional() @IsString() @IsSafeExternalUrl() @MaxLength(300) website?: string;
+  @IsOptional()
+  @IsString()
+  @IsSafeExternalUrl()
+  @MaxLength(300)
+  website?: string;
   @IsOptional() @IsString() @MaxLength(200) email?: string;
   @IsOptional() @IsString() @MaxLength(60) phone?: string;
 }

@@ -1,6 +1,7 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { CommunityPostsService } from './community-posts.service';
@@ -102,6 +103,7 @@ describe('CommunityPostsService', () => {
     create: jest.Mock;
     save: jest.Mock;
     createQueryBuilder: jest.Mock;
+    manager: { transaction: jest.Mock };
   };
   let reactions: {
     find: jest.Mock;
@@ -122,12 +124,16 @@ describe('CommunityPostsService', () => {
   };
   let postEdits: { create: jest.Mock; save: jest.Mock; find: jest.Mock };
   let replyEdits: { create: jest.Mock; save: jest.Mock; find: jest.Mock };
+  let mentions: { notify: jest.Mock };
 
   beforeEach(async () => {
     communities = { findOne: jest.fn().mockResolvedValue(COMMUNITY) };
     members = { findOne: jest.fn().mockResolvedValue(null) };
     posts = {
-      findOne: jest.fn().mockResolvedValue(POST),
+      // Fresh clone per call: the service mutates the resolved post in place
+      // (body/pinned/editedAt/deletedAt), so returning the shared `POST`
+      // reference would leak those mutations across tests.
+      findOne: jest.fn(() => Promise.resolve({ ...POST })),
       create: jest.fn((v: object) => v),
       save: jest.fn((v: unknown) =>
         Promise.resolve({
@@ -137,6 +143,24 @@ describe('CommunityPostsService', () => {
         }),
       ),
       createQueryBuilder: jest.fn(() => qbStub()),
+      // `updatePost` now persists the edit snapshot + the mutated post together
+      // inside `posts.manager.transaction`. The stub runs the callback
+      // synchronously and routes each `manager.save(row)` to the same repo mock
+      // the assertions target: the pre-edit snapshot (it carries `previousBody`)
+      // to `postEdits.save`, everything else (the post) to `posts.save`.
+      manager: {
+        transaction: jest.fn(
+          async (
+            callback: (managerLike: {
+              save: (row: Record<string, unknown>) => unknown;
+            }) => Promise<unknown>,
+          ) =>
+            callback({
+              save: (row: Record<string, unknown>): unknown =>
+                'previousBody' in row ? postEdits.save(row) : posts.save(row),
+            }),
+        ),
+      },
     };
     reactions = {
       find: jest.fn().mockResolvedValue([]),
@@ -171,6 +195,7 @@ describe('CommunityPostsService', () => {
       save: jest.fn().mockResolvedValue(undefined),
       find: jest.fn().mockResolvedValue([]),
     };
+    mentions = { notify: jest.fn().mockResolvedValue(undefined) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -190,6 +215,7 @@ describe('CommunityPostsService', () => {
           provide: getRepositoryToken(CommunityPostReplyEdit),
           useValue: replyEdits,
         },
+        { provide: MentionNotificationService, useValue: mentions },
       ],
     }).compile();
     service = module.get(CommunityPostsService);
@@ -782,8 +808,24 @@ describe('CommunityPostsService', () => {
       ]);
       posts.createQueryBuilder.mockReturnValue(qb);
       replies.find.mockResolvedValue([
-        { id: 'r1', postId: 'post-id', authorId: 'blocked-1', text: 'hi' },
-        { id: 'r2', postId: 'post-id', authorId: 'ok-1', text: 'hello' },
+        {
+          id: 'r1',
+          postId: 'post-id',
+          authorId: 'blocked-1',
+          text: 'hi',
+          createdAt: new Date('2026-01-03T00:00:00.000Z'),
+          editedAt: null,
+          deletedAt: null,
+        },
+        {
+          id: 'r2',
+          postId: 'post-id',
+          authorId: 'ok-1',
+          text: 'hello',
+          createdAt: new Date('2026-01-03T00:00:00.000Z'),
+          editedAt: null,
+          deletedAt: null,
+        },
       ]);
       blockFilter.hiddenUserIds.mockResolvedValue(new Set(['blocked-1']));
 

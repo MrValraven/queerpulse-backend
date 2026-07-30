@@ -76,6 +76,7 @@ import { HousingListingsModule } from './housing-listings/housing-listings.modul
 import { FlatmateProfilesModule } from './flatmate-profiles/flatmate-profiles.module';
 import { LandlordsModule } from './landlords/landlords.module';
 import { ListingsModule } from './listings/listings.module';
+import { SearchModule } from './search/search.module';
 import { GeocodeModule } from './geocode/geocode.module';
 import { MagazineModule } from './magazine/magazine.module';
 import { ResourcesModule } from './resources/resources.module';
@@ -219,6 +220,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     ForumModule,
     FeedModule,
     ListingsModule,
+    SearchModule,
     GeocodeModule,
     HousingModule,
     HousingListingsModule,

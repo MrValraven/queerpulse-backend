@@ -29,6 +29,21 @@ export type PlaybackSession = PlaybackTokens & {
   durationSeconds: number | null;
 };
 
+// Shape of the (already HMAC-verified) Mux webhook payloads we act on. The
+// controller verifies the signature and hands the parsed event here; this
+// service owns the provider-payload → domain-transition mapping.
+export type MuxWebhookEvent = {
+  type: string;
+  data: {
+    id: string;
+    asset_id?: string;
+    playback_ids?: { id: string; policy?: string }[];
+    duration?: number;
+    aspect_ratio?: string;
+    errors?: { type?: string; messages?: string[] };
+  };
+};
+
 const MODERATOR_ROLES: readonly string[] = [UserRole.Moderator, UserRole.Admin];
 
 function isModerator(user: CurrentUserData): boolean {
@@ -216,6 +231,54 @@ export class CinemaService {
     title.lastIngestEventAt = new Date();
     await this.titles.save(title);
     return upload;
+  }
+
+  // Dispatch an already-signature-verified Mux webhook event to the matching
+  // idempotent transition below. The controller keeps HMAC verification (its
+  // correct home); this owns the provider-payload mapping — duration rounding,
+  // `playback_ids[0]` extraction, error-message joining, event→status routing.
+  //
+  // The object id is the sole match key for every transition; a payload missing
+  // it is rejected here, not dispatched (an undefined id in a TypeORM `where`
+  // is silently dropped and would match the first row). Handlers are idempotent;
+  // Mux retries and may deliver out of order.
+  async handleWebhookEvent(event: MuxWebhookEvent): Promise<void> {
+    if (typeof event?.data?.id !== 'string' || !event.data.id) {
+      throw new BadRequestException('Malformed webhook payload');
+    }
+    switch (event.type) {
+      case 'video.upload.asset_created':
+        if (typeof event.data.asset_id === 'string' && event.data.asset_id) {
+          await this.onUploadAssetCreated(event.data.id, event.data.asset_id);
+          // Heal out-of-order delivery: video.asset.ready may have already
+          // fired (and been dropped as "unknown") before this event linked
+          // the asset id — poll it once now instead of waiting for the cron.
+          await this.syncAssetState(event.data.asset_id);
+        }
+        break;
+      case 'video.asset.ready':
+        await this.onAssetReady(event.data.id, {
+          playbackId: event.data.playback_ids?.[0]?.id ?? null,
+          durationSeconds:
+            event.data.duration != null
+              ? Math.round(event.data.duration)
+              : null,
+          aspectRatio: event.data.aspect_ratio ?? null,
+        });
+        break;
+      case 'video.asset.errored':
+        await this.onAssetErrored(
+          event.data.id,
+          event.data.errors?.messages?.join('; ') ?? 'Asset errored',
+        );
+        break;
+      case 'video.upload.errored':
+      case 'video.upload.cancelled':
+        await this.onUploadFailed(event.data.id, event.type);
+        break;
+      default:
+        break; // acknowledge event types we don't track
+    }
   }
 
   // --- webhook/reconciliation state transitions (idempotent; unknown ids

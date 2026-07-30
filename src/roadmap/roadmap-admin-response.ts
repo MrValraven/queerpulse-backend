@@ -45,7 +45,10 @@ export interface RoadmapAdminResponse {
   heroStats: HeroStat[];
 }
 
-export const toAdminItemDTO = (item: RoadmapItem, liveVotes: number): AdminRoadmapItemDTO => ({
+export const toAdminItemDTO = (
+  item: RoadmapItem,
+  liveVotes: number,
+): AdminRoadmapItemDTO => ({
   id: item.id,
   column: item.column,
   category: item.category,
@@ -62,7 +65,10 @@ export const toAdminItemDTO = (item: RoadmapItem, liveVotes: number): AdminRoadm
   sortOrder: item.sortOrder,
 });
 
-export const toAdminIdeaDTO = (idea: RoadmapIdea, liveVotes: number): AdminRoadmapIdeaDTO => ({
+export const toAdminIdeaDTO = (
+  idea: RoadmapIdea,
+  liveVotes: number,
+): AdminRoadmapIdeaDTO => ({
   id: idea.id,
   text: idea.text,
   status: idea.status,

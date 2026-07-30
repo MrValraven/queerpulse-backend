@@ -189,6 +189,7 @@ describe('ResourcesService', () => {
       expect(glossaryTerms.find).toHaveBeenCalledWith({
         where: {},
         order: { term: 'ASC' },
+        take: 200,
       });
     });
 
@@ -197,6 +198,7 @@ describe('ResourcesService', () => {
       expect(glossaryTerms.find).toHaveBeenCalledWith({
         where: { category: 'Essential' },
         order: { term: 'ASC' },
+        take: 200,
       });
     });
 

@@ -1,5 +1,9 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
-import { ROADMAP_HERO_STATS, ROADMAP_IDEAS, ROADMAP_ITEMS } from '../roadmap/roadmap.seed';
+import {
+  ROADMAP_HERO_STATS,
+  ROADMAP_IDEAS,
+  ROADMAP_ITEMS,
+} from '../roadmap/roadmap.seed';
 import { RoadmapIdeaStatus } from '../roadmap/entities/roadmap-idea.entity';
 
 /**
@@ -8,10 +12,18 @@ import { RoadmapIdeaStatus } from '../roadmap/entities/roadmap-idea.entity';
  * - `roadmap_items` — shipped/building/planned cards (one table, keyed by
  *   `column`, since the three card shapes mostly overlap — see the entity).
  * - `roadmap_ideas` — member-submitted feature ideas ("Top ideas" + a
- *   pending-review queue).
+ *   pending-review queue). `submitted_by_id` FK is `ON DELETE SET NULL`
+ *   (nullable — a seeded/anonymised idea has no submitter, and an idea must
+ *   outlive its submitter's account erasure; mirrors `topic_post.author_id`
+ *   in `AddTopicPostAuthor` and `forum_post_edit.editor_id`).
  * - `roadmap_votes` — one row per member vote on a planned item or an idea,
  *   unique per (member, target), so double-voting is a constraint violation
- *   rather than app-level bookkeeping.
+ *   rather than app-level bookkeeping. `member_id` FK is `ON DELETE CASCADE`
+ *   (a vote is a per-member reaction meaningless without its member, and the
+ *   column is `NOT NULL`; mirrors `community_post_reactions.user_id` and
+ *   `message_reactions.user_id`). `target_id` is deliberately left WITHOUT a
+ *   FK — it is polymorphic (an item id OR an idea id, discriminated by
+ *   `target_type`), so no single referenced table exists.
  * - `roadmap_settings` — singleton (id = 1) holding the admin-curated hero
  *   stats, mirrors `governance_overview`/`changemaker_directory_settings`.
  *
@@ -76,7 +88,10 @@ export class CreateRoadmap1785002000000 implements MigrationInterface {
         "sort_order" integer NOT NULL DEFAULT 0,
         "created_at" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
         "updated_at" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
-        CONSTRAINT "PK_roadmap_ideas" PRIMARY KEY ("id")
+        CONSTRAINT "PK_roadmap_ideas" PRIMARY KEY ("id"),
+        CONSTRAINT "FK_roadmap_ideas_submitted_by_id"
+          FOREIGN KEY ("submitted_by_id") REFERENCES "users"("id")
+          ON DELETE SET NULL ON UPDATE NO ACTION
       )
     `);
     await queryRunner.query(
@@ -92,7 +107,10 @@ export class CreateRoadmap1785002000000 implements MigrationInterface {
         "target_id" uuid NOT NULL,
         "created_at" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
         CONSTRAINT "PK_roadmap_votes" PRIMARY KEY ("id"),
-        CONSTRAINT "UQ_roadmap_votes_member_target" UNIQUE ("member_id", "target_type", "target_id")
+        CONSTRAINT "UQ_roadmap_votes_member_target" UNIQUE ("member_id", "target_type", "target_id"),
+        CONSTRAINT "FK_roadmap_votes_member_id"
+          FOREIGN KEY ("member_id") REFERENCES "users"("id")
+          ON DELETE CASCADE ON UPDATE NO ACTION
       )
     `);
 

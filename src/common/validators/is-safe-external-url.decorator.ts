@@ -14,6 +14,9 @@ const DANGEROUS_URL_SCHEMES = ['javascript:', 'data:', 'vbscript:', 'file:'];
 // these when resolving a URL's scheme, so `  JavaScript:` and `java\tscript:`
 // both execute — we strip them out before testing rather than let a naive
 // `startsWith` be fooled by them.
+// Matching the ASCII control-char range is the deliberate purpose of this
+// scheme-smuggling defence, so the control-char rule is suppressed below.
+// eslint-disable-next-line no-control-regex
 const STRIPPED_CONTROL_CHARACTERS = /[\u0000-\u0020]/g;
 
 /**

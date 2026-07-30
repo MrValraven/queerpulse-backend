@@ -15,8 +15,10 @@ import { Public } from '../auth/decorators/public.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { DirectoryService } from './directory.service';
+import { CreateEditSuggestionDto } from './dto/create-edit-suggestion.dto';
 import { CreateReviewDto } from './dto/create-review.dto';
 import { ListDirectoryQuery } from './dto/list-directory.query';
+import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
 import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 
 /**
@@ -35,7 +37,10 @@ import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 @ApiCookieAuth()
 @Controller('directory')
 export class DirectoryController {
-  constructor(private readonly directoryService: DirectoryService) {}
+  constructor(
+    private readonly directoryService: DirectoryService,
+    private readonly editSuggestionsService: ListingEditSuggestionsService,
+  ) {}
 
   // Host page "Partner spaces" — live listings flagged as partner venues.
   @Public()
@@ -105,5 +110,22 @@ export class DirectoryController {
     @Body() dto: CreateReviewDto,
   ) {
     return this.directoryService.addReview(slug, user.userId, dto);
+  }
+
+  // Member-gated: propose a correction to this listing ("suggest an edit"),
+  // landing in the moderator queue (`GET /listings/admin/edit-suggestions`).
+  // Slug-keyed like `addReview` above, NOT `ref`-keyed — this is a non-owner
+  // action reached from this same public detail page, which only ever has
+  // the `slug` (`ref` lives solely on the owner-scoped `ListingDTO`, 403'd
+  // for a non-owner caller — see `ListingEditSuggestionsService.submit`'s
+  // doc comment). Guarded per-route, same as `addReview`.
+  @Post(':slug/edit-suggestions')
+  @UseGuards(ActiveMemberGuard)
+  suggestEdit(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: CreateEditSuggestionDto,
+  ) {
+    return this.editSuggestionsService.submit(slug, user.userId, dto);
   }
 }

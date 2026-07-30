@@ -1,18 +1,22 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { PushModule } from '../push/push.module';
 import { SocialModule } from '../social/social.module';
 import { StorageModule } from '../storage/storage.module';
 import { UsersModule } from '../users/users.module';
 import { EventInvitesController, EventsController } from './events.controller';
 import { EventPhotosController } from './event-photos.controller';
+import { EventReminderPreferencesController } from './event-reminder-preferences.controller';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
 import { EventPhoto } from './entities/event-photo.entity';
 import { EventRsvp } from './entities/event-rsvp.entity';
 import { Event } from './entities/event.entity';
+import { MemberEventReminderPreferences } from './entities/member-event-reminder-preferences.entity';
 import { EventInvitesService } from './event-invites.service';
 import { EventPhotosService } from './event-photos.service';
+import { EventReminderPreferencesService } from './event-reminder-preferences.service';
 import { EventRemindersService } from './event-reminders.service';
 import { EventsService } from './events.service';
 import { RsvpService } from './rsvp.service';
@@ -25,9 +29,14 @@ import { RsvpService } from './rsvp.service';
       EventRsvp,
       EventInvite,
       EventPhoto,
+      MemberEventReminderPreferences,
     ]),
     UsersModule,
     NotificationsModule,
+    // `PushService` — event reminders deliver a best-effort phone push on top of
+    // the in-app notification. `PushModule` -> {`ChatModule`, `UsersModule`},
+    // neither of which imports `EventsModule`, so this closes no cycle.
+    PushModule,
     // `BlockFilterService` — attendee lists drop blocked members. Plain
     // import: `SocialModule` -> {`UsersModule`, `ReportsModule`} only, so
     // neither this nor `NotificationsModule`'s own `SocialModule` import
@@ -42,12 +51,14 @@ import { RsvpService } from './rsvp.service';
     EventsController,
     EventInvitesController,
     EventPhotosController,
+    EventReminderPreferencesController,
   ],
   providers: [
     EventsService,
     RsvpService,
     EventInvitesService,
     EventRemindersService,
+    EventReminderPreferencesService,
     EventPhotosService,
   ],
   exports: [EventsService],

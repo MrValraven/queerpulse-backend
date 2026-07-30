@@ -86,7 +86,10 @@ export const toBuildingDTO = (item: RoadmapItem): BuildingItemDTO => ({
 
 // `liveVotes` is the count of `roadmap_votes` rows for this item — the
 // displayed total is the seed `votes` column plus that live count.
-export const toPlannedDTO = (item: RoadmapItem, liveVotes: number): PlannedItemDTO => ({
+export const toPlannedDTO = (
+  item: RoadmapItem,
+  liveVotes: number,
+): PlannedItemDTO => ({
   id: item.id,
   category: item.category,
   name: item.name,
@@ -95,7 +98,10 @@ export const toPlannedDTO = (item: RoadmapItem, liveVotes: number): PlannedItemD
   hot: item.hot,
 });
 
-export const toTopIdeaDTO = (idea: RoadmapIdea, liveVotes: number): TopIdeaDTO => ({
+export const toTopIdeaDTO = (
+  idea: RoadmapIdea,
+  liveVotes: number,
+): TopIdeaDTO => ({
   id: idea.id,
   text: idea.text,
   votes: idea.votes + liveVotes,

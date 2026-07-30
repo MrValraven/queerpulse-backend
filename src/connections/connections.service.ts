@@ -720,8 +720,14 @@ export class ConnectionsService {
    * one bounded query (`In(candidateIds)`) instead of loading the viewer's whole
    * accepted set. The viewer never appears in the result (no self-edge exists),
    * so a candidate equal to the viewer is harmlessly filtered out.
+   *
+   * PUBLIC because callers outside this service need a precise membership test
+   * bounded by a KNOWN candidate set — e.g. messaging's group member-gate, which
+   * must not use the 200-capped `getAcceptedConnectionUserIds` (a valid
+   * connection beyond that cap would be wrongly rejected). Cost scales with
+   * `candidateIds.length`, never the viewer's total connection degree.
    */
-  private async acceptedConnectionsAmong(
+  async acceptedConnectionsAmong(
     viewerUserId: string,
     candidateIds: string[],
   ): Promise<Set<string>> {

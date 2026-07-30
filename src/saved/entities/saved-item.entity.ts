@@ -21,6 +21,7 @@ export enum SavedKind {
   Housing = 'housing',
   Flatmate = 'flatmate',
   Landlord = 'landlord',
+  Listing = 'listing',
 }
 
 /**
@@ -38,6 +39,7 @@ export enum SavedKind {
  */
 @Entity('saved_item')
 @Unique('UQ_saved_item_subject', ['userId', 'subjectType', 'subjectId'])
+@Index('IDX_saved_item_subject', ['subjectType', 'subjectId'])
 export class SavedItem {
   @PrimaryGeneratedColumn('uuid')
   id: string;

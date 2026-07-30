@@ -5,6 +5,10 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { Community } from '../communities/entities/community.entity';
+import { Event } from '../events/entities/event.entity';
+import { Handle } from '../handles/entities/handle.entity';
+import { HandlesService } from '../handles/handles.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
@@ -19,6 +23,7 @@ import {
   SubprofileSection,
 } from './entities/subprofile-item.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
+import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
 import { isSectionAllowed } from './subprofile-kinds';
 import { toPublicDTO } from './subprofile-response';
 import {
@@ -26,6 +31,8 @@ import {
   MIN_CONTENT_ITEMS,
   validatePublish,
 } from './subprofile-validation';
+import { SubprofileEndorsementsService } from './subprofile-endorsements.service';
+import { SubprofileFollowersService } from './subprofile-followers.service';
 import { SubprofilesService } from './subprofiles.service';
 
 // --- fixtures ---------------------------------------------------------------
@@ -359,7 +366,12 @@ describe('SubprofilesService', () => {
   };
   let items: { find: jest.Mock };
   let profiles: { findOne: jest.Mock };
-  let manager: { delete: jest.Mock; create: jest.Mock; save: jest.Mock };
+  let manager: {
+    delete: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+    update: jest.Mock;
+  };
   let dataSource: { transaction: jest.Mock };
   let blockFilter: {
     isBlockedEitherWay: jest.Mock;
@@ -393,6 +405,7 @@ describe('SubprofilesService', () => {
           }),
         ),
       save: jest.fn().mockResolvedValue(undefined),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
     dataSource = {
       transaction: jest
@@ -416,8 +429,59 @@ describe('SubprofilesService', () => {
         { provide: getRepositoryToken(Subprofile), useValue: subprofiles },
         { provide: getRepositoryToken(SubprofileItem), useValue: items },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        {
+          provide: getRepositoryToken(SubprofileSocialLink),
+          useValue: { find: jest.fn().mockResolvedValue([]) },
+        },
+        {
+          provide: getRepositoryToken(SubprofileAffiliation),
+          useValue: { find: jest.fn().mockResolvedValue([]) },
+        },
+        {
+          provide: getRepositoryToken(Event),
+          useValue: { find: jest.fn().mockResolvedValue([]) },
+        },
+        {
+          provide: getRepositoryToken(Community),
+          useValue: { find: jest.fn().mockResolvedValue([]) },
+        },
+        {
+          provide: getRepositoryToken(Handle),
+          useValue: { find: jest.fn().mockResolvedValue([]) },
+        },
         { provide: DataSource, useValue: dataSource },
         { provide: BlockFilterService, useValue: blockFilter },
+        {
+          provide: HandlesService,
+          useValue: {
+            isTaken: jest.fn().mockResolvedValue(false),
+            release: jest.fn().mockResolvedValue(undefined),
+            rename: jest.fn().mockResolvedValue(undefined),
+          },
+        },
+        {
+          provide: SubprofileEndorsementsService,
+          useValue: {
+            endorse: jest.fn(),
+            withdrawEndorsement: jest.fn(),
+            listEndorsers: jest.fn(),
+            loadEndorsementCountsFor: jest
+              .fn()
+              .mockResolvedValue(new Map<string, number>()),
+            viewerEndorsedFor: jest.fn().mockResolvedValue(new Set<string>()),
+          },
+        },
+        {
+          provide: SubprofileFollowersService,
+          useValue: {
+            follow: jest.fn(),
+            unfollow: jest.fn(),
+            loadFollowerCountsFor: jest
+              .fn()
+              .mockResolvedValue(new Map<string, number>()),
+            viewerFollowingFor: jest.fn().mockResolvedValue(new Set<string>()),
+          },
+        },
       ],
     }).compile();
     service = module.get(SubprofilesService);

@@ -3,6 +3,7 @@ import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { ListingStatus } from './entities/listing.entity';
+import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
 import { ListingsController } from './listings.controller';
 import { ListingsService } from './listings.service';
 
@@ -15,6 +16,7 @@ describe('ListingsController', () => {
     update: jest.Mock;
     remove: jest.Mock;
     setStatus: jest.Mock;
+    replyToReview: jest.Mock;
   };
 
   const user: CurrentUserData = {
@@ -32,10 +34,14 @@ describe('ListingsController', () => {
       update: jest.fn(),
       remove: jest.fn(),
       setStatus: jest.fn(),
+      replyToReview: jest.fn(),
     };
     const module: TestingModule = await Test.createTestingModule({
       controllers: [ListingsController],
-      providers: [{ provide: ListingsService, useValue: service }],
+      providers: [
+        { provide: ListingsService, useValue: service },
+        { provide: ListingEditSuggestionsService, useValue: {} },
+      ],
     })
       .overrideGuard(ActiveMemberGuard)
       .useValue({ canActivate: () => true })
@@ -110,6 +116,26 @@ describe('ListingsController', () => {
     expect(service.setStatus).toHaveBeenCalledWith(
       'QPL-2026-0001',
       ListingStatus.Live,
+    );
+    expect(result).toBe(updated);
+  });
+
+  it('PATCH /:ref/reviews/:reviewId/reply forwards to the service for the caller', async () => {
+    const updated = { text: 'Thanks!' };
+    service.replyToReview.mockResolvedValue(updated);
+
+    const result = await controller.replyToReview(
+      user,
+      'QPL-2026-0001',
+      'review-1',
+      { text: 'Thanks!' },
+    );
+
+    expect(service.replyToReview).toHaveBeenCalledWith(
+      'QPL-2026-0001',
+      'owner-1',
+      'review-1',
+      { text: 'Thanks!' },
     );
     expect(result).toBe(updated);
   });

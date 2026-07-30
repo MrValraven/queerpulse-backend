@@ -6,7 +6,7 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { DataSource, QueryFailedError } from 'typeorm';
+import { DataSource, IsNull, QueryFailedError } from 'typeorm';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { Vouch } from './entities/vouch.entity';
@@ -367,7 +367,7 @@ describe('VouchService', () => {
       const res = await service.listGiven('u1', { limit: 5 });
       expect(vouches.find).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { voucherId: 'u1' },
+          where: { voucherId: 'u1', withdrawnAt: IsNull() },
           take: 5,
           skip: 0,
         }),

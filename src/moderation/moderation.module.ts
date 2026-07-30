@@ -6,6 +6,8 @@ import { ReportsModule } from '../reports/reports.module';
 import { UsersModule } from '../users/users.module';
 import { Appeal } from './entities/appeal.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
+import { AccountEnforcementService } from './account-enforcement.service';
+import { ModAuditService } from './mod-audit.service';
 import { ModerationController } from './moderation.controller';
 import { ModerationService } from './moderation.service';
 
@@ -35,6 +37,9 @@ import { ModerationService } from './moderation.service';
     AuthModule,
   ],
   controllers: [ModerationController],
-  providers: [ModerationService],
+  // The two extracted concerns are registered so Nest owns them as singletons
+  // and injects them into `ModerationService`. Nothing outside this module
+  // consumes them (only `ModerationService` does), so they are not exported.
+  providers: [ModerationService, ModAuditService, AccountEnforcementService],
 })
 export class ModerationModule {}

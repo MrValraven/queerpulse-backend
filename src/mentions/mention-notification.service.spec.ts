@@ -10,7 +10,7 @@ import { MemberLookup } from '../common/member-ref';
 // reimplementing its query-builder chain here.
 function build() {
   const profiles = {} as never;
-  const communities = { findOne: jest.fn() };
+  const communities = { find: jest.fn().mockResolvedValue([]) };
   const members = { find: jest.fn().mockResolvedValue([]) };
   const listings = { findOne: jest.fn() };
   const events = { findOne: jest.fn() };
@@ -68,14 +68,16 @@ describe('MentionNotificationService.notify', () => {
 
   it('community mention notifies the owner and every mod', async () => {
     const { service, communities, members, notifications } = build();
-    communities.findOne.mockResolvedValue({
-      id: 'community-1',
-      slug: 'pride',
-      ownerId: 'owner-1',
-    });
+    communities.find.mockResolvedValue([
+      {
+        id: 'community-1',
+        slug: 'pride',
+        ownerId: 'owner-1',
+      },
+    ]);
     members.find.mockResolvedValue([
-      { userId: 'owner-1', role: RosterRole.Owner },
-      { userId: 'mod-1', role: RosterRole.Mod },
+      { communityId: 'community-1', userId: 'owner-1', role: RosterRole.Owner },
+      { communityId: 'community-1', userId: 'mod-1', role: RosterRole.Mod },
     ]);
 
     await service.notify('shoutout to c/pride', 'author-1', payloadBase);
@@ -115,11 +117,13 @@ describe('MentionNotificationService.notify', () => {
     const { service, communities, members, notifications, userIdsForSlugs } =
       build();
     userIdsForSlugs.mockResolvedValue(new Map([['sameuser', 'user-x']]));
-    communities.findOne.mockResolvedValue({
-      id: 'community-2',
-      slug: 'samecommunity',
-      ownerId: 'user-x',
-    });
+    communities.find.mockResolvedValue([
+      {
+        id: 'community-2',
+        slug: 'samecommunity',
+        ownerId: 'user-x',
+      },
+    ]);
     members.find.mockResolvedValue([]);
 
     await service.notify(
@@ -142,7 +146,7 @@ describe('MentionNotificationService.notify', () => {
 
   it('skips an unresolvable slug (repo returns null) without notifying', async () => {
     const { service, communities, notifications } = build();
-    communities.findOne.mockResolvedValue(null);
+    communities.find.mockResolvedValue([]);
 
     await service.notify(
       'c/doesnotexist has vanished',
@@ -155,7 +159,7 @@ describe('MentionNotificationService.notify', () => {
 
   it('never propagates a thrown resolver error — best-effort only', async () => {
     const { service, communities, notifications } = build();
-    communities.findOne.mockRejectedValue(new Error('db exploded'));
+    communities.find.mockRejectedValue(new Error('db exploded'));
 
     await expect(
       service.notify(

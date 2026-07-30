@@ -116,7 +116,8 @@ export const ROADMAP_ITEMS: SeedItem[] = [
     column: RoadmapColumn.Building,
     category: 'Gatherings',
     name: 'Map view for gatherings',
-    description: 'Browse upcoming events on a city map. Filter by date, type, and distance.',
+    description:
+      'Browse upcoming events on a city map. Filter by date, type, and distance.',
     stage: 'Early design',
     eta: '~Q4 2026',
     progress: 20,
@@ -149,7 +150,8 @@ export const ROADMAP_ITEMS: SeedItem[] = [
     column: RoadmapColumn.Planned,
     category: 'Members',
     name: 'Anonymous Q&A threads',
-    description: 'Ask questions anonymously within communities. No names — just honest answers.',
+    description:
+      'Ask questions anonymously within communities. No names — just honest answers.',
     votes: 98,
     sortOrder: 1,
   },

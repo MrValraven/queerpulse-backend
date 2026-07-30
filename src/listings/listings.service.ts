@@ -10,12 +10,19 @@ import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { MessagingService } from '../messaging/messaging.service';
-import { normalizePage, paginate, Paginated } from '../common/pagination';
+import {
+  DEFAULT_LIST_LIMIT,
+  normalizePage,
+  paginate,
+  Paginated,
+} from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { Profile } from '../users/entities/profile.entity';
 import { CreateListingDto } from './dto/create-listing.dto';
+import { ReplyToReviewDto } from './dto/reply-to-review.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
 import { UpdateSafeSpaceDto } from './dto/update-safe-space.dto';
+import { ListingReview } from './entities/listing-review.entity';
 import {
   Listing,
   ListingDayHours,
@@ -25,7 +32,12 @@ import {
   ListingWitLine,
   SafeSpaceStatus,
 } from './entities/listing.entity';
-import { ListingDTO, toListingDTO } from './listing-response';
+import {
+  ListingDTO,
+  ReviewDTO,
+  toListingDTO,
+  toReviewDTO,
+} from './listing-response';
 
 // Postgres unique-violation SQLSTATE. Mirrors `CompaniesService`'s/
 // `PartnersService`'s identical file-local helper (not shared/exported, kept
@@ -196,6 +208,8 @@ export class ListingsService {
   constructor(
     @InjectRepository(Listing) private readonly listings: Repository<Listing>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    @InjectRepository(ListingReview)
+    private readonly reviews: Repository<ListingReview>,
     private readonly dataSource: DataSource,
     private readonly messaging: MessagingService,
   ) {}
@@ -277,6 +291,48 @@ export class ListingsService {
     await this.listings.remove(listing);
   }
 
+  /**
+   * Owner-gated: post (or overwrite) the listing owner's single public reply
+   * to one of the listing's reviews. Placed here alongside the other
+   * owner-gated `:ref` mutations rather than `DirectoryService` (where
+   * `addReview`/`listReviews` live) so the ownership check stays consistent
+   * with `update`/`remove`/`getByRef`; `DirectoryService` never enforces
+   * ownership. The review is scoped to this listing so a reply can't be
+   * attached to a review on a different owner's listing via a guessed id.
+   */
+  async replyToReview(
+    ref: string,
+    userId: string,
+    reviewId: string,
+    dto: ReplyToReviewDto,
+  ): Promise<ReviewDTO> {
+    const listing = await this.loadOr404(ref);
+    this.assertOwner(listing, userId);
+
+    const review = await this.reviews.findOne({
+      where: { id: reviewId, listingId: listing.id },
+    });
+    if (!review) {
+      throw new NotFoundException('Review not found');
+    }
+
+    // `ReplyToReviewDto`'s `@IsNotEmpty` only rejects an empty string, not a
+    // whitespace-only one — a body of `" "` passes validation, trims to `""`,
+    // and would otherwise save a blank `ownerReplyText` alongside a real
+    // `ownerRepliedAt`; `toReviewDTO`'s truthy check on `ownerReplyText` then
+    // renders that as `ownerReply: null` everywhere, so the timestamp would
+    // silently strand in the DB with no visible reply. Re-check post-trim.
+    const text = dto.text.trim();
+    if (!text) {
+      throw new BadRequestException('Reply cannot be empty');
+    }
+
+    review.ownerReplyText = text;
+    review.ownerRepliedAt = new Date();
+    const saved = await this.reviews.save(review);
+    return toReviewDTO(saved);
+  }
+
   // Moderator/admin-only (`ListingsController.setStatus`'s `RolesGuard`
   // gate) — any of the three statuses is directly settable; there's no
   // narrower transition graph in the spec's contract.
@@ -308,9 +364,7 @@ export class ListingsService {
   ): Promise<ListingDTO> {
     const listing = await this.loadOr404(ref);
     if (!listing.ownerId) {
-      throw new BadRequestException(
-        'This listing has no submitter to contact',
-      );
+      throw new BadRequestException('This listing has no submitter to contact');
     }
 
     const previousStatus = listing.status;
@@ -399,6 +453,10 @@ export class ListingsService {
     const liveListings = await this.listings.find({
       where: { status: ListingStatus.Live },
       order: { name: 'ASC' },
+      // Bounded like the public directory lists — the candidate picker is a
+      // whole-array (unpaginated) response, so cap it so it can never dump the
+      // entire live-listings table.
+      take: DEFAULT_LIST_LIMIT,
     });
     return liveListings.map((listing) => ({
       ref: listing.ref,

@@ -111,7 +111,11 @@ describe('AdminMembersService', () => {
     createQueryBuilder: jest.Mock;
   };
   let users: { find: jest.Mock };
-  let vouches: { find: jest.Mock; createQueryBuilder: jest.Mock };
+  let vouches: {
+    find: jest.Mock;
+    count: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
   let communityMembers: { createQueryBuilder: jest.Mock };
   let reports: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let modAuditLogs: { find: jest.Mock };
@@ -128,6 +132,7 @@ describe('AdminMembersService', () => {
     users = { find: jest.fn().mockResolvedValue([]) };
     vouches = {
       find: jest.fn().mockResolvedValue([]),
+      count: jest.fn().mockResolvedValue(0),
       createQueryBuilder: jest.fn(() => makeQueryBuilderStub()),
     };
     communityMembers = {

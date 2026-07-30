@@ -14,9 +14,25 @@ function build() {
     editedAt: null as Date | null,
     deletedAt: null as Date | null,
   };
+  // `updatePostBody` now snapshots + saves inside `posts.manager.transaction`,
+  // so the edit row and the mutated post go through the transaction `manager`
+  // (not the `edits`/`posts` repos directly). The manager stub runs the
+  // callback synchronously and records its writes via `managerSave`.
+  const managerSave = jest.fn().mockImplementation((row: unknown) => row);
+  const manager = {
+    create: jest
+      .fn()
+      .mockImplementation((_entity: unknown, row: unknown) => row),
+    save: managerSave,
+  };
   const posts = {
     findOne: jest.fn().mockResolvedValue(post),
     save: jest.fn().mockImplementation((savedPost: unknown) => savedPost),
+    manager: {
+      transaction: jest.fn(
+        async (cb: (m: typeof manager) => Promise<unknown>) => cb(manager),
+      ),
+    },
   };
   const votes = { findOne: jest.fn().mockResolvedValue(null) };
   const edits = {
@@ -38,7 +54,7 @@ function build() {
     edits as never,
     notifications as never,
   );
-  return { service, post, posts, edits, byUserIds, notifications };
+  return { service, post, posts, edits, byUserIds, notifications, managerSave };
 }
 
 const author = {
@@ -59,15 +75,17 @@ describe('ForumPostsService authorization', () => {
   });
 
   it('updatePostBody: author snapshots a revision then edits', async () => {
-    const { service, edits, posts } = build();
+    const { service, managerSave } = build();
     await service.updatePostBody('p1', author, 'new body');
-    expect(edits.save).toHaveBeenCalledWith(
+    // Both writes run through the transaction manager: the edit snapshot first,
+    // then the mutated post.
+    expect(managerSave).toHaveBeenCalledWith(
       expect.objectContaining({
         previousBody: 'original',
         previousTitle: null,
       }),
     );
-    expect(posts.save).toHaveBeenCalledWith(
+    expect(managerSave).toHaveBeenCalledWith(
       expect.objectContaining({
         body: 'new body',
         editedAt: expect.any(Date) as unknown,

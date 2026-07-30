@@ -11,12 +11,14 @@ import { ReportsService } from './reports.service';
 describe('ReportsService', () => {
   let service: ReportsService;
   let reports: {
+    findOne: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
   };
 
   beforeEach(async () => {
     reports = {
+      findOne: jest.fn().mockResolvedValue(null),
       create: jest.fn((v: object) => v),
       save: jest.fn((r: unknown) =>
         Promise.resolve({

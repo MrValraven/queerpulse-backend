@@ -2,8 +2,10 @@ import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
+import { ForumPostEdit } from './entities/forum-post-edit.entity';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
 import { ForumThreadsService } from './forum-threads.service';
@@ -55,11 +57,16 @@ describe('ForumThreadsService', () => {
   };
   let posts: { createQueryBuilder: jest.Mock };
   let profiles: { find: jest.Mock };
+  let edits: { find: jest.Mock; create: jest.Mock; save: jest.Mock };
   let dataSource: { transaction: jest.Mock };
+  // The transaction manager the callback runs against — `markActivity` now
+  // bumps replyCount/lastActivityAt through it rather than the thread repo.
+  let txManager: { increment: jest.Mock; update: jest.Mock };
   let blockFilter: {
     excludeHidden: jest.Mock;
     isBlockedEitherWay: jest.Mock;
   };
+  let mentions: { notify: jest.Mock };
 
   beforeEach(async () => {
     threads = {
@@ -71,10 +78,17 @@ describe('ForumThreadsService', () => {
     };
     posts = { createQueryBuilder: jest.fn(() => qbStub()) };
     profiles = { find: jest.fn().mockResolvedValue([]) };
+    edits = {
+      find: jest.fn().mockResolvedValue([]),
+      create: jest.fn((v: object) => v),
+      save: jest.fn((v: unknown) => Promise.resolve(v)),
+    };
     blockFilter = {
       excludeHidden: jest.fn((qb: unknown) => qb),
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
     };
+    // `create` fires a mention scan on the OP body; return no notified users.
+    mentions = { notify: jest.fn().mockResolvedValue(new Set<string>()) };
 
     // Runs the transaction callback against a manager whose `getRepository`
     // resolves to the *same* mocked repos the test configures — mirrors
@@ -99,7 +113,12 @@ describe('ForumThreadsService', () => {
         }),
       ),
     };
+    txManager = {
+      increment: jest.fn().mockResolvedValue(undefined),
+      update: jest.fn().mockResolvedValue(undefined),
+    };
     const manager = {
+      ...txManager,
       getRepository: jest.fn((entity: unknown) => {
         if (entity === ForumThread) return threadsRepoInTx;
         if (entity === ForumPost) return postsRepoInTx;
@@ -120,8 +139,10 @@ describe('ForumThreadsService', () => {
         { provide: getRepositoryToken(ForumThread), useValue: threads },
         { provide: getRepositoryToken(ForumPost), useValue: posts },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        { provide: getRepositoryToken(ForumPostEdit), useValue: edits },
         { provide: DataSource, useValue: dataSource },
         { provide: BlockFilterService, useValue: blockFilter },
+        { provide: MentionNotificationService, useValue: mentions },
       ],
     }).compile();
     service = module.get(ForumThreadsService);
@@ -292,15 +313,19 @@ describe('ForumThreadsService', () => {
     it('increments replyCount and refreshes lastActivityAt', async () => {
       await service.markActivity('thread-1');
 
-      expect(threads.increment).toHaveBeenCalledWith(
+      // Both writes now run inside one transaction against the manager.
+      expect(txManager.increment).toHaveBeenCalledWith(
+        ForumThread,
         { id: 'thread-1' },
         'replyCount',
         1,
       );
-      const [idArg, patch] = threads.update.mock.calls[0] as [
+      const [entity, idArg, patch] = txManager.update.mock.calls[0] as [
+        unknown,
         { id: string },
         { lastActivityAt: Date },
       ];
+      expect(entity).toBe(ForumThread);
       expect(idArg).toEqual({ id: 'thread-1' });
       expect(patch.lastActivityAt).toBeInstanceOf(Date);
     });

@@ -12,6 +12,7 @@ import { handleFormatError, normalizeHandle } from '../common/handles';
 import { toImageUrl } from '../common/image-url';
 import { ConnectionsService } from '../connections/connections.service';
 import { ConnectionStatus } from '../connections/entities/connection.entity';
+import { escapeLikeTerm } from '../common/like-escape';
 import { HandlesService } from '../handles/handles.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
@@ -721,7 +722,7 @@ export class ProfilesService {
       // Escape LIKE metacharacters (\ % _) so a user-supplied term is matched
       // literally and can't inject wildcards. Postgres treats backslash as the
       // default LIKE escape character.
-      const term = `%${q.query.replace(/[\\%_]/g, '\\$&')}%`;
+      const term = `%${escapeLikeTerm(q.query)}%`;
       qb.andWhere(
         '(p.firstName ILIKE :term OR p.lastName ILIKE :term OR p.slug ILIKE :term OR p.tagline ILIKE :term)',
         { term },

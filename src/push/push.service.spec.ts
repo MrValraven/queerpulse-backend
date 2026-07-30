@@ -45,8 +45,8 @@ beforeEach(() => {
 
 it('sends a notification to each of the user’s subscriptions', async () => {
   const repo = makeRepo([
-    { id: 's1', endpoint: 'e1', p256dh: 'k1', auth: 'a1' },
-    { id: 's2', endpoint: 'e2', p256dh: 'k2', auth: 'a2' },
+    { id: 's1', endpoint: 'https://8.8.8.8/e1', p256dh: 'k1', auth: 'a1' },
+    { id: 's2', endpoint: 'https://8.8.8.8/e2', p256dh: 'k2', auth: 'a2' },
   ]);
   const service = new PushService(repo as never, config);
   service.onModuleInit();
@@ -60,7 +60,7 @@ it('sends a notification to each of the user’s subscriptions', async () => {
 
 it('prunes a subscription when the push service returns 410 Gone', async () => {
   const repo = makeRepo([
-    { id: 's1', endpoint: 'e1', p256dh: 'k1', auth: 'a1' },
+    { id: 's1', endpoint: 'https://8.8.8.8/e1', p256dh: 'k1', auth: 'a1' },
   ]);
   const service = new PushService(repo as never, config);
   service.onModuleInit();

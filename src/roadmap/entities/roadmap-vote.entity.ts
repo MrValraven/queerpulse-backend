@@ -1,4 +1,10 @@
-import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn, Unique } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  PrimaryGeneratedColumn,
+  Unique,
+} from 'typeorm';
 
 export enum RoadmapVoteTarget {
   Item = 'item',
@@ -12,7 +18,11 @@ export enum RoadmapVoteTarget {
  * either `roadmap_items` or `roadmap_ideas` depending on `targetType`.
  */
 @Entity('roadmap_votes')
-@Unique('UQ_roadmap_votes_member_target', ['memberId', 'targetType', 'targetId'])
+@Unique('UQ_roadmap_votes_member_target', [
+  'memberId',
+  'targetType',
+  'targetId',
+])
 export class RoadmapVote {
   @PrimaryGeneratedColumn('uuid')
   id: string;

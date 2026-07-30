@@ -14,9 +14,11 @@ import {
   ReportSubjectType,
 } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
-import { User, UserStatus } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { Appeal, AppealStatus } from './entities/appeal.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
+import { AccountEnforcementService } from './account-enforcement.service';
+import { ModAuditService } from './mod-audit.service';
 import { ModerationService } from './moderation.service';
 
 // Chainable query-builder stub whose terminal method resolves to a
@@ -24,10 +26,33 @@ import { ModerationService } from './moderation.service';
 // adapted to `cursorPaginate`'s `getMany()` terminal call).
 function qbStub(rows: Report[] = []) {
   const qb: Record<string, jest.Mock> = {};
-  for (const m of ['andWhere', 'orderBy', 'addOrderBy', 'take']) {
+  for (const m of [
+    'andWhere',
+    'orderBy',
+    'addOrderBy',
+    'take',
+    'select',
+    'addSelect',
+    'where',
+    'groupBy',
+  ]) {
     qb[m] = jest.fn().mockReturnValue(qb);
   }
   qb.getMany = jest.fn().mockResolvedValue(rows);
+  qb.getRawMany = jest.fn().mockResolvedValue([]);
+  return qb;
+}
+
+// Chainable stub for `Repository<User>.createQueryBuilder(...)` — the email
+// fallback path in `ModAuditService.nameForUserId`/`namesForUserIds`
+// (`addSelect('user.email').where(...).getOne()/.getMany()`).
+function userQbStub() {
+  const qb: Record<string, jest.Mock> = {};
+  for (const m of ['addSelect', 'where']) {
+    qb[m] = jest.fn().mockReturnValue(qb);
+  }
+  qb.getOne = jest.fn().mockResolvedValue(null);
+  qb.getMany = jest.fn().mockResolvedValue([]);
   return qb;
 }
 
@@ -70,8 +95,8 @@ describe('ModerationService', () => {
     find: jest.Mock;
     findOne: jest.Mock;
   };
-  let users: { findOne: jest.Mock };
-  let profiles: { findOne: jest.Mock };
+  let users: { findOne: jest.Mock; createQueryBuilder: jest.Mock };
+  let profiles: { findOne: jest.Mock; find: jest.Mock };
   let revokeAllForUser: jest.Mock;
   let managerUpdate: jest.Mock;
 
@@ -96,8 +121,14 @@ describe('ModerationService', () => {
       find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue(null),
     };
-    users = { findOne: jest.fn().mockResolvedValue(null) };
-    profiles = { findOne: jest.fn().mockResolvedValue(null) };
+    users = {
+      findOne: jest.fn().mockResolvedValue(null),
+      createQueryBuilder: jest.fn(() => userQbStub()),
+    };
+    profiles = {
+      findOne: jest.fn().mockResolvedValue(null),
+      find: jest.fn().mockResolvedValue([]),
+    };
     revokeAllForUser = jest.fn().mockResolvedValue(undefined);
     managerUpdate = jest.fn().mockResolvedValue({ affected: 1 });
 
@@ -127,6 +158,8 @@ describe('ModerationService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ModerationService,
+        ModAuditService,
+        AccountEnforcementService,
         { provide: getRepositoryToken(Report), useValue: reports },
         { provide: getRepositoryToken(Appeal), useValue: appeals },
         { provide: getRepositoryToken(ModAuditLog), useValue: auditLogs },
@@ -274,10 +307,11 @@ describe('ModerationService', () => {
     it('resolves a non-anonymous reporter name from their profile', async () => {
       const qb = qbStub([baseReport()]);
       reports.createQueryBuilder.mockReturnValue(qb);
-      profiles.findOne.mockResolvedValueOnce({
-        firstName: 'Ada',
-        lastName: 'Lovelace',
-      });
+      // `list` batches reporter-name resolution through `namesForUserIds`
+      // (`profiles.find` by `In([...])`), not a per-row `profiles.findOne`.
+      profiles.find.mockResolvedValueOnce([
+        { userId: 'reporter-1', firstName: 'Ada', lastName: 'Lovelace' },
+      ]);
 
       const page = await service.list({});
       expect(page.items[0]!.reporter).toEqual({
@@ -397,6 +431,11 @@ describe('ModerationService', () => {
         userId: 'user-1',
         slug: 'reported-member',
       });
+      users.findOne.mockResolvedValue({
+        id: 'user-1',
+        role: UserRole.Member,
+        status: UserStatus.Active,
+      });
 
       await service.actOnReport('report-1', 'actor-1', {
         action: 'suspend',
@@ -480,16 +519,18 @@ describe('ModerationService', () => {
           createdAt: new Date('2026-01-03T00:00:00.000Z'),
         },
       ]);
-      profiles.findOne.mockResolvedValueOnce({
-        firstName: 'Mod',
-        lastName: 'Erator',
-      });
+      // `auditTrail` now resolves actor names in one batched `namesForUserIds`
+      // (`profiles.find` by `In([...])`), not a per-row `profiles.findOne`.
+      profiles.find.mockResolvedValueOnce([
+        { userId: 'actor-1', firstName: 'Mod', lastName: 'Erator' },
+      ]);
 
       const rows = await service.auditTrail('report-1');
 
       expect(auditLogs.find).toHaveBeenCalledWith({
         where: { reportId: 'report-1' },
         order: { createdAt: 'ASC' },
+        take: 20,
       });
       expect(rows).toEqual([
         {
@@ -511,6 +552,7 @@ describe('ModerationService', () => {
       await service.listAppeals();
       expect(appeals.find).toHaveBeenCalledWith({
         order: { createdAt: 'DESC' },
+        take: 20,
       });
     });
   });
@@ -630,6 +672,14 @@ describe('ModerationService', () => {
       profiles.findOne.mockResolvedValue({
         userId: 'user-1',
         slug: 'reported-member',
+      });
+      // Enforcement now loads the target account and refuses to act on a
+      // non-member (staff-guard, a prior security fix), so the resolved user
+      // must carry a role for the suspend/ban path to reach the account.
+      users.findOne.mockResolvedValue({
+        id: 'user-1',
+        role: UserRole.Member,
+        status: UserStatus.Active,
       });
     });
 
@@ -782,6 +832,7 @@ describe('ModerationService', () => {
     it('preserves a member-initiated deactivation rather than overwriting it', async () => {
       users.findOne.mockResolvedValue({
         id: 'user-1',
+        role: UserRole.Member,
         status: UserStatus.Deactivated,
       });
 

@@ -1,6 +1,10 @@
 import { toImageUrl } from '../common/image-url';
 import { MemberRef } from '../common/member-ref';
 import { Event } from '../events/entities/event.entity';
+import {
+  ListingEditSuggestion,
+  ListingEditSuggestionStatus,
+} from './entities/listing-edit-suggestion.entity';
 import { ListingReview } from './entities/listing-review.entity';
 import {
   Listing,
@@ -281,16 +285,32 @@ export interface DirectoryOwner {
  * split), so the server never bakes in an English date string.
  */
 export interface UpcomingEventDTO {
+  id: string;
+  slug: string;
   startAt: string;
   title: string;
 }
 
 export function toUpcomingEvent(event: Event): UpcomingEventDTO {
-  return { startAt: event.startAt.toISOString(), title: event.title };
+  return {
+    id: event.id,
+    slug: event.slug,
+    startAt: event.startAt.toISOString(),
+    title: event.title,
+  };
+}
+
+/** The listing owner's single public reply to a review, present only once
+ * one has been posted (`PATCH /listings/:ref/reviews/:reviewId/reply`). */
+export interface ReviewOwnerReplyDTO {
+  text: string;
+  at: string;
 }
 
 /** One review row on the detail page. `initials`/`tint` are server-derived. */
 export interface ReviewDTO {
+  /** The review's uuid PK — targets `PATCH :ref/reviews/:reviewId/reply`. */
+  id: string;
   initials: string;
   name: string;
   tint: DirectoryTint;
@@ -298,10 +318,12 @@ export interface ReviewDTO {
   stars: number;
   text: string;
   helpful: number;
+  ownerReply: ReviewOwnerReplyDTO | null;
 }
 
 export function toReviewDTO(review: ListingReview): ReviewDTO {
   return {
+    id: review.id,
     initials: initialsForName(review.reviewerName),
     name: review.reviewerName,
     tint: tintForSlug(review.reviewerName),
@@ -309,6 +331,12 @@ export function toReviewDTO(review: ListingReview): ReviewDTO {
     stars: review.stars,
     text: review.text,
     helpful: review.helpful,
+    ownerReply: review.ownerReplyText
+      ? {
+          text: review.ownerReplyText,
+          at: review.ownerRepliedAt!.toISOString(),
+        }
+      : null,
   };
 }
 
@@ -354,12 +382,16 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
   rating: { score: string; count: number };
   reviews: ReviewDTO[];
   upcoming: UpcomingEventDTO[];
+  /** Count of `saved_item` rows bookmarking this listing (`SavedKind.Listing`,
+   * keyed by slug) — the public "N members saved this" trust signal. */
+  savedCount: number;
 }
 
 export function toDirectoryDetail(
   listing: Listing,
   reviews: ListingReview[],
   upcomingEvents: Event[],
+  savedCount: number,
 ): DirectoryDetailDTO {
   const tint = tintForSlug(listing.slug);
   return {
@@ -409,6 +441,7 @@ export function toDirectoryDetail(
     rating: ratingFromReviews(reviews),
     reviews: reviews.map(toReviewDTO),
     upcoming: upcomingEvents.map(toUpcomingEvent),
+    savedCount,
   };
 }
 
@@ -640,5 +673,40 @@ export function toRemovedSpaceDetail(listing: Listing): RemovedSpaceDetailDTO {
     reasonLong: removal?.reasonLong ?? [],
     timeline: removal?.timeline ?? [],
     whatNow: removal?.whatNow ?? '',
+  };
+}
+
+/**
+ * Admin queue row for a member-submitted "suggest an edit" correction
+ * (`GET /listings/admin/edit-suggestions`). Carries the target listing's
+ * `ref`/`name` (not just its id) so the moderation UI can render/link the
+ * row without a second lookup, mirroring `ListingDTO.submittedBy`'s
+ * denormalized-for-display convention.
+ */
+export interface EditSuggestionDTO {
+  id: string;
+  listingRef: string;
+  listingName: string;
+  field: string;
+  message: string;
+  status: ListingEditSuggestionStatus;
+  submittedBy: MemberRef | null;
+  createdAt: string;
+}
+
+export function toEditSuggestionDTO(
+  suggestion: ListingEditSuggestion,
+  listing: Listing,
+  submittedBy: MemberRef | null,
+): EditSuggestionDTO {
+  return {
+    id: suggestion.id,
+    listingRef: listing.ref,
+    listingName: listing.name,
+    field: suggestion.field,
+    message: suggestion.message,
+    status: suggestion.status,
+    submittedBy,
+    createdAt: suggestion.createdAt.toISOString(),
   };
 }
