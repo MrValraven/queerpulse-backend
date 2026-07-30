@@ -26,6 +26,11 @@ RUN pnpm install --frozen-lockfile --prod
 # ---- Runtime: minimal image running the compiled output --------------------
 FROM node:20-alpine AS runtime
 ENV NODE_ENV=production
+# Silence npm's "new version available" notice. The deploy steps below invoke
+# `npm run ...` (migrate, storage:cors, preflight); npm prints the update notice
+# to stderr on each run, which Railway surfaces in the logs as if it were an
+# error. This is cosmetic only — we deliberately do NOT bump npm here.
+ENV NPM_CONFIG_UPDATE_NOTIFIER=false
 WORKDIR /app
 
 # tini as PID 1: forwards SIGTERM to node and reaps zombies. Without an init,

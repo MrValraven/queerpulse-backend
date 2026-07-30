@@ -19,7 +19,18 @@ import { UpdateProfileDto } from '../profiles/dto/update-profile.dto';
 import { UpdateUsernameDto } from '../profiles/dto/update-username.dto';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminBotsService } from './admin-bots.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiConflictResponse,
+  ApiCookieAuth,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+  ApiUnprocessableEntityResponse,
+} from '@nestjs/swagger';
 
 /**
  * Admin-only surface for editing platform system ("bot") accounts. Reuses the
@@ -30,16 +41,24 @@ import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 @UseGuards(ActiveMemberGuard, RolesGuard)
 @Roles(UserRole.Admin)
 @ApiTags('Admin — Bots')
-@ApiCookieAuth()
+@ApiCookieAuth('access_token')
+@ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+@ApiForbiddenResponse({ description: 'Requires the admin role.' })
 @Controller('admin/bots')
 export class AdminBotsController {
   constructor(private readonly adminBots: AdminBotsService) {}
 
+  @ApiOperation({ summary: 'List the platform system (bot) accounts.' })
+  @ApiOkResponse({ description: 'The system accounts.' })
   @Get()
   listBots() {
     return this.adminBots.listBots();
   }
 
+  @ApiOperation({ summary: "Update a system account's profile fields." })
+  @ApiOkResponse({ description: 'The updated profile.' })
+  @ApiBadRequestResponse({ description: 'Malformed request body.' })
+  @ApiNotFoundResponse({ description: 'System account not found.' })
   @Patch(':userId')
   updateBotProfile(
     @Param('userId') userId: string,
@@ -48,6 +67,14 @@ export class AdminBotsController {
     return this.adminBots.updateBotProfile(userId, dto);
   }
 
+  @ApiOperation({ summary: "Replace a system account's username." })
+  @ApiOkResponse({ description: 'The updated username.' })
+  @ApiBadRequestResponse({ description: 'Malformed request body.' })
+  @ApiNotFoundResponse({ description: 'System account or profile not found.' })
+  @ApiConflictResponse({ description: 'That username is already taken.' })
+  @ApiUnprocessableEntityResponse({
+    description: 'The username is reserved or otherwise not allowed.',
+  })
   @Put(':userId/username')
   updateBotUsername(
     @Param('userId') userId: string,
@@ -56,6 +83,10 @@ export class AdminBotsController {
     return this.adminBots.updateBotUsername(userId, dto);
   }
 
+  @ApiOperation({ summary: "Replace a system account's social links." })
+  @ApiOkResponse({ description: 'The updated social links.' })
+  @ApiBadRequestResponse({ description: 'Malformed request body.' })
+  @ApiNotFoundResponse({ description: 'System account not found.' })
   @Put(':userId/socials')
   replaceBotSocials(
     @Param('userId') userId: string,
@@ -64,11 +95,19 @@ export class AdminBotsController {
     return this.adminBots.replaceBotSocials(userId, dto);
   }
 
+  @ApiOperation({ summary: "Replace a system account's work history." })
+  @ApiOkResponse({ description: 'The updated work history.' })
+  @ApiBadRequestResponse({ description: 'Malformed request body.' })
+  @ApiNotFoundResponse({ description: 'System account not found.' })
   @Put(':userId/work')
   replaceBotWork(@Param('userId') userId: string, @Body() dto: ReplaceWorkDto) {
     return this.adminBots.replaceBotWork(userId, dto);
   }
 
+  @ApiOperation({ summary: "Replace a system account's skills." })
+  @ApiOkResponse({ description: 'The updated skills.' })
+  @ApiBadRequestResponse({ description: 'Malformed request body.' })
+  @ApiNotFoundResponse({ description: 'System account not found.' })
   @Put(':userId/skills')
   replaceBotSkills(
     @Param('userId') userId: string,
@@ -77,6 +116,10 @@ export class AdminBotsController {
     return this.adminBots.replaceBotSkills(userId, dto);
   }
 
+  @ApiOperation({ summary: "Replace a system account's shapings." })
+  @ApiOkResponse({ description: 'The updated shapings.' })
+  @ApiBadRequestResponse({ description: 'Malformed request body.' })
+  @ApiNotFoundResponse({ description: 'System account not found.' })
   @Put(':userId/shapings')
   replaceBotShapings(
     @Param('userId') userId: string,
@@ -85,6 +128,10 @@ export class AdminBotsController {
     return this.adminBots.replaceBotShapings(userId, dto);
   }
 
+  @ApiOperation({ summary: "Replace a system account's groups." })
+  @ApiOkResponse({ description: 'The updated groups.' })
+  @ApiBadRequestResponse({ description: 'Malformed request body.' })
+  @ApiNotFoundResponse({ description: 'System account not found.' })
   @Put(':userId/groups')
   replaceBotGroups(
     @Param('userId') userId: string,

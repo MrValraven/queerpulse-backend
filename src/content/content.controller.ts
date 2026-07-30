@@ -16,7 +16,15 @@ import { ContentPagesService } from './content-pages.service';
 import { ListTopicPostsQuery } from './dto/list-topic-posts.query';
 import { ContentSection } from './entities/content-page.entity';
 import { TopicsService } from './topics.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiCookieAuth,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 // Route scheme (documented per the Task 5.3 brief): a single unified
 // `/pages/:section[/:slug]` path family rather than three per-section
@@ -28,13 +36,19 @@ import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 //   GET /pages/:section/:slug  -> PageResponse    (one page, 404 if missing)
 @Feature('content')
 @ApiTags('Content')
-@ApiCookieAuth()
+@ApiCookieAuth('access_token')
+@ApiUnauthorizedResponse({
+  description: 'Requires an authenticated, active member session.',
+})
 @Controller('pages')
 @UseGuards(ActiveMemberGuard)
 export class ContentController {
   constructor(private readonly contentPagesService: ContentPagesService) {}
 
   @Get(':section')
+  @ApiOperation({ summary: "List a section's published pages." })
+  @ApiOkResponse({ description: 'The section published pages.' })
+  @ApiBadRequestResponse({ description: 'Unknown content section.' })
   listBySection(
     @Param('section', new ParseEnumPipe(ContentSection))
     section: ContentSection,
@@ -43,6 +57,12 @@ export class ContentController {
   }
 
   @Get(':section/:slug')
+  @ApiOperation({ summary: 'Get one published page by slug.' })
+  @ApiOkResponse({ description: 'The page.' })
+  @ApiBadRequestResponse({ description: 'Unknown content section.' })
+  @ApiNotFoundResponse({
+    description: 'No published page with that slug in the section.',
+  })
   getBySlug(
     @Param('section', new ParseEnumPipe(ContentSection))
     section: ContentSection,
@@ -61,18 +81,26 @@ export class ContentController {
 //   GET /topics/:slug/posts -> Paginated<TopicPostResponse> (that topic's post feed)
 @Feature('content')
 @ApiTags('Content')
-@ApiCookieAuth()
+@ApiCookieAuth('access_token')
+@ApiUnauthorizedResponse({
+  description: 'Requires an authenticated, active member session.',
+})
 @Controller('topics')
 @UseGuards(ActiveMemberGuard)
 export class TopicsController {
   constructor(private readonly topicsService: TopicsService) {}
 
   @Get()
+  @ApiOperation({ summary: 'List the topic directory.' })
+  @ApiOkResponse({ description: 'The full topic directory.' })
   list() {
     return this.topicsService.list();
   }
 
   @Get(':slug')
+  @ApiOperation({ summary: 'Get one topic and its meta.' })
+  @ApiOkResponse({ description: 'The topic detail.' })
+  @ApiNotFoundResponse({ description: 'No topic with that tag.' })
   getBySlug(@Param('slug') slug: string) {
     return this.topicsService.getBySlug(slug);
   }
@@ -81,6 +109,9 @@ export class TopicsController {
   // `TopicsService.listPosts`). The two routes above are viewer-independent —
   // topic meta carries no author — so they stay unparameterized.
   @Get(':slug/posts')
+  @ApiOperation({ summary: "List a topic's post feed (cursor paginated)." })
+  @ApiOkResponse({ description: 'A cursor page of topic posts.' })
+  @ApiNotFoundResponse({ description: 'No topic with that tag.' })
   listPosts(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,

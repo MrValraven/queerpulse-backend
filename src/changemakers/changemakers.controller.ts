@@ -1,7 +1,12 @@
 import { Controller, Get, Param } from '@nestjs/common';
 import { Public } from '../auth/decorators/public.decorator';
 import { ChangemakersService } from './changemakers.service';
-import { ApiTags } from '@nestjs/swagger';
+import {
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 
 // Public, read-only directory backing `ChangemakersPage.tsx` and
 // `ChangemakerStoryPage.tsx`. Only published profiles are exposed here.
@@ -16,12 +21,23 @@ export class ChangemakersController {
 
   @Public()
   @Get()
+  @ApiOperation({
+    summary: 'List published changemaker profiles with directory stats.',
+  })
+  @ApiOkResponse({
+    description: 'Published changemaker profiles plus aggregate directory stats.',
+  })
   list() {
     return this.changemakers.listPublic();
   }
 
   @Public()
   @Get(':slug')
+  @ApiOperation({ summary: 'Get a single published changemaker by slug.' })
+  @ApiOkResponse({ description: 'The published changemaker profile.' })
+  @ApiNotFoundResponse({
+    description: 'No published changemaker exists for this slug.',
+  })
   getBySlug(@Param('slug') slug: string) {
     return this.changemakers.getPublicBySlug(slug);
   }

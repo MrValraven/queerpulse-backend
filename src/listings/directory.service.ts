@@ -1,6 +1,13 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Brackets, MoreThanOrEqual, Not, Repository } from 'typeorm';
+import {
+  Brackets,
+  MoreThanOrEqual,
+  Not,
+  Repository,
+  SelectQueryBuilder,
+} from 'typeorm';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { escapeLikeTerm } from '../common/like-escape';
 import { MemberLookup } from '../common/member-ref';
 import {
@@ -12,6 +19,8 @@ import {
 import { Event, EventStatus } from '../events/entities/event.entity';
 import { SavedItem, SavedKind } from '../saved/entities/saved-item.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { CreateReviewDto } from './dto/create-review.dto';
 import { ListDirectoryQuery } from './dto/list-directory.query';
 import { ListingReview } from './entities/listing-review.entity';
@@ -57,7 +66,48 @@ export class DirectoryService {
     @InjectRepository(Event) private readonly events: Repository<Event>,
     @InjectRepository(SavedItem)
     private readonly savedItems: Repository<SavedItem>,
+    private readonly contentModeration: ContentModerationService,
+    private readonly notifications: NotificationsService,
   ) {}
+
+  // A directory business is reported (and taken down) under either the
+  // `business` code (what the directory's own report control sends) or the
+  // `listing` code, both keyed by the listing slug. Reads check both.
+  private static readonly SUBJECT_TYPES = ['business', 'listing'];
+
+  // Excludes moderator-taken-down listings from a directory query, in-query so
+  // the "showing X of Y" count stays consistent. The directory is a public
+  // marketing surface with no per-viewer staff role — a takedown hides the
+  // business from everyone here; the owner still manages it through the
+  // owner/admin routes, which do not go through this service.
+  private excludeModeratedListings(qb: SelectQueryBuilder<Listing>): void {
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "content_moderation" "cm"
+        WHERE "cm"."subject_type" IN (:...listingSubjectTypes)
+          AND "cm"."subject_id" = listing.slug
+          AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
+      )`,
+      { listingSubjectTypes: DirectoryService.SUBJECT_TYPES },
+    );
+  }
+
+  // Post-query variant for the `find`-based reads (`listByMemberSlug`,
+  // `listSafeSpaces`, `listPartnerSpaces`) that don't build a querybuilder.
+  // Drops any listing whose slug carries a takedown.
+  private async dropModeratedListings<ListingLike extends { slug: string }>(
+    rows: ListingLike[],
+  ): Promise<ListingLike[]> {
+    if (!rows.length) return rows;
+    const states = await this.contentModeration.statesForAnyType(
+      DirectoryService.SUBJECT_TYPES,
+      rows.map((row) => row.slug),
+    );
+    return rows.filter((row) => {
+      const state = states.get(row.slug);
+      return !state || (!state.hidden && !state.removed);
+    });
+  }
 
   /**
    * Every live listing flagged as a QueerPulse partner venue, for the public
@@ -73,7 +123,7 @@ export class DirectoryService {
       order: { name: 'ASC' },
       take: DEFAULT_LIST_LIMIT,
     });
-    return rows.map(toPartnerSpace);
+    return (await this.dropModeratedListings(rows)).map(toPartnerSpace);
   }
 
   /**
@@ -104,8 +154,26 @@ export class DirectoryService {
       );
     }
 
+    if (query.safe === 'verified') {
+      qb.andWhere('listing.safeSpaceStatus = :safeSpaceStatus', {
+        safeSpaceStatus: SafeSpaceStatus.Verified,
+      });
+    }
+
+    this.excludeModeratedListings(qb);
+
+    // Verified safe spaces surface first regardless of `safe` filter (a
+    // no-op when `safe=verified` already restricts the set to verified-only,
+    // but keeps the default/unfiltered grid boosting them ahead of the
+    // existing name order, which remains the tiebreaker). Boost happens in
+    // the SQL `ORDER BY` — not a JS re-sort — so it stays correct across
+    // `take`/pagination.
     const rows = await qb
-      .orderBy('listing.name', 'ASC')
+      .orderBy(
+        `CASE WHEN listing.safeSpaceStatus = '${SafeSpaceStatus.Verified}' THEN 0 ELSE 1 END`,
+        'ASC',
+      )
+      .addOrderBy('listing.name', 'ASC')
       .take(DEFAULT_LIST_LIMIT)
       .getMany();
     return rows.map(toDirectoryCard);
@@ -130,7 +198,7 @@ export class DirectoryService {
       order: { createdAt: 'DESC' },
       take: DEFAULT_LIST_LIMIT,
     });
-    return rows.map(toDirectoryCard);
+    return (await this.dropModeratedListings(rows)).map(toDirectoryCard);
   }
 
   /**
@@ -211,6 +279,22 @@ export class DirectoryService {
         helpful: 0,
       }),
     );
+    // Tell the listing's owner about the new review (skip a self-review, and
+    // listings with no real owner). Best-effort; deep-links to the business
+    // detail page via `slug`. Actor is the reviewer, so a blocked/muted
+    // reviewer is filtered by `NotificationsService.create`.
+    if (listing.ownerId && listing.ownerId !== userId) {
+      try {
+        await this.notifications.create(
+          listing.ownerId,
+          NotificationType.ListingReview,
+          { actorId: userId, source: 'listing', listingSlug: listing.slug },
+          userId,
+        );
+      } catch {
+        // Intentionally ignored — the review already committed.
+      }
+    }
     return toReviewDTO(saved);
   }
 
@@ -220,7 +304,7 @@ export class DirectoryService {
    * come from real reviews; `stats` feeds the page's hero numbers.
    */
   async listSafeSpaces(): Promise<SafeSpaceListDTO> {
-    const rows = await this.listings.find({
+    const allRows = await this.listings.find({
       where: {
         status: ListingStatus.Live,
         safeSpaceStatus: Not(SafeSpaceStatus.None),
@@ -228,6 +312,7 @@ export class DirectoryService {
       order: { name: 'ASC' },
       take: DEFAULT_LIST_LIMIT,
     });
+    const rows = await this.dropModeratedListings(allRows);
     // The card's rating only needs a per-listing COUNT + AVG of stars (never the
     // review bodies), so aggregate in ONE grouped query — O(verified listings),
     // not O(reviews). This stays bounded no matter how large the review corpus
@@ -305,6 +390,7 @@ export class DirectoryService {
     if (!listing || listing.safeSpaceStatus === SafeSpaceStatus.None) {
       throw new NotFoundException('Safe space not found');
     }
+    await this.assertNotModerated(slug);
     if (listing.safeSpaceStatus === SafeSpaceStatus.Removed) {
       return toRemovedSpaceDetail(listing);
     }
@@ -326,6 +412,21 @@ export class DirectoryService {
     if (!listing) {
       throw new NotFoundException('Listing not found');
     }
+    await this.assertNotModerated(slug);
     return listing;
+  }
+
+  // 404s a taken-down listing on the public detail/review paths — same
+  // don't-leak-existence posture as an in-review listing. Shared chokepoint for
+  // `getDirectoryBySlug`, `listReviews`, `addReview`, and `getSafeSpaceBySlug`.
+  private async assertNotModerated(slug: string): Promise<void> {
+    const states = await this.contentModeration.statesForAnyType(
+      DirectoryService.SUBJECT_TYPES,
+      [slug],
+    );
+    const state = states.get(slug);
+    if (state && (state.hidden || state.removed)) {
+      throw new NotFoundException('Listing not found');
+    }
   }
 }

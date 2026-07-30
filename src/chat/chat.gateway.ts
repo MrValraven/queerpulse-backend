@@ -257,7 +257,17 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() data: JoinPayload,
   ): Promise<{ joined: string }> {
     const userId = this.requireUserId(client);
-    if (!(await this.messaging.isParticipant(data.conversationId, userId))) {
+    // Stricter than plain participation (P0 hardening): also refuses a
+    // participant who left/was removed from a group (no live room for them —
+    // history stays reachable over HTTP) and a DM whose counterpart is
+    // blocked either way (so a block also cuts off live message/typing
+    // reception, not just new sends). See `canJoinConversationLive`'s doc.
+    if (
+      !(await this.messaging.canJoinConversationLive(
+        data.conversationId,
+        userId,
+      ))
+    ) {
       throw new WsException('Not a participant');
     }
     await client.join(data.conversationId);

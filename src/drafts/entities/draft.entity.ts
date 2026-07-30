@@ -69,6 +69,7 @@ export interface DraftPayload {
  * the same client-chosen id.
  */
 @Entity('draft')
+@Index('IDX_draft_user_id_updated_at', ['userId', 'updatedAt'])
 export class Draft {
   @PrimaryColumn({ type: 'varchar' })
   id: string;

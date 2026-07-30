@@ -97,6 +97,7 @@ export class Workshop {
   @Column({ type: 'varchar', nullable: true })
   hostRole: string | null;
 
+  @Index('IDX_workshops_cat')
   @Column({ type: 'varchar' })
   cat: string;
 

@@ -7,7 +7,14 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateReadingGroupProposalDto } from './dto/create-reading-group-proposal.dto';
 import { ReadingGroupProposalsService } from './reading-group-proposals.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiCookieAuth,
+  ApiCreatedResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 // The Reading Groups page (`ReadingGroupsPage.tsx`) lists curated groups with
 // no server-backed directory of its own. The one genuine piece of
@@ -24,6 +31,12 @@ export class ReadingGroupProposalsController {
   ) {}
 
   @Post('proposals')
+  @ApiOperation({ summary: 'Propose starting a new reading group.' })
+  @ApiCreatedResponse({
+    description: 'The proposal was recorded; echoes the submitted details.',
+  })
+  @ApiBadRequestResponse({ description: 'The proposal payload is invalid.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   create(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: CreateReadingGroupProposalDto,

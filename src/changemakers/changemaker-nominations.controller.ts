@@ -7,7 +7,14 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { ChangemakerNominationsService } from './changemaker-nominations.service';
 import { CreateChangemakerNominationDto } from './dto/create-changemaker-nomination.dto';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiCookieAuth,
+  ApiCreatedResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 // The Change Makers page (`ChangemakersPage.tsx`) profiles curated change
 // makers with no server-backed directory of its own. The one genuine piece
@@ -24,6 +31,12 @@ export class ChangemakerNominationsController {
   ) {}
 
   @Post('nominations')
+  @ApiOperation({ summary: 'Nominate someone as a changemaker.' })
+  @ApiCreatedResponse({
+    description: 'The nomination was recorded; echoes the submitted nominee.',
+  })
+  @ApiBadRequestResponse({ description: 'The nomination payload is invalid.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   create(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: CreateChangemakerNominationDto,

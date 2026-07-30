@@ -2,6 +2,7 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Index,
   PrimaryGeneratedColumn,
   Unique,
 } from 'typeorm';
@@ -23,6 +24,11 @@ export enum RoadmapVoteTarget {
   'targetType',
   'targetId',
 ])
+// Backs the per-target live-vote count (`RoadmapService.liveVoteCounts`) — the
+// unique constraint's leading column is `memberId`, so it can't serve a
+// `(targetType, targetId)` lookup. Matches `IDX_roadmap_votes_target` in
+// `1785002000000-CreateRoadmap`.
+@Index('IDX_roadmap_votes_target', ['targetType', 'targetId'])
 export class RoadmapVote {
   @PrimaryGeneratedColumn('uuid')
   id: string;

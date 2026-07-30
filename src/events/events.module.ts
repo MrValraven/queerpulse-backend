@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PushModule } from '../push/push.module';
 import { SocialModule } from '../social/social.module';
@@ -46,6 +47,9 @@ import { RsvpService } from './rsvp.service';
     // One-way edge: `StorageModule` imports nothing domain-specific, so this
     // closes no cycle.
     StorageModule,
+    // `ContentModerationService` — public event browse/search/detail honour a
+    // moderator `hide_content`/`remove_content` takedown.
+    ContentModerationModule,
   ],
   controllers: [
     EventsController,

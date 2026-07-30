@@ -17,7 +17,13 @@ import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 import { OptionalJwtAuthGuard } from './optional-jwt-auth.guard';
 import { PRESIGN_EXPIRY_SECONDS, StorageService } from './storage.service';
 import { parseStorageKey, storageKeyOwnerId } from './storage-key';
-import { ApiTags } from '@nestjs/swagger';
+import {
+  ApiNotFoundResponse,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 // `max-age` is deliberately SHORTER than `PRESIGN_EXPIRY_SECONDS`. At equal
 // values a cached 302 replayed just before expiry hands the browser a
@@ -54,6 +60,20 @@ export class FilesController {
   @Public()
   @UseGuards(OptionalJwtAuthGuard)
   @Get('*key')
+  @ApiOperation({
+    summary: 'Resolve a storage key to a short-lived presigned download (302)',
+  })
+  @ApiResponse({
+    status: 302,
+    description: 'Redirect to a short-lived presigned GET URL for the object.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'A session-gated kind was requested without a valid session.',
+  })
+  @ApiNotFoundResponse({
+    description:
+      'Malformed key, unknown prefix, or a session-gated object owned by another member (never discloses which keys exist).',
+  })
   async serve(
     // Under Express 5 / path-to-regexp 8, a named wildcard (`*key`) makes Nest
     // hand back an ARRAY of decoded path segments, not a joined string — for

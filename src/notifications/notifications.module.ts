@@ -4,6 +4,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { Mute } from '../social/entities/mute.entity';
 import { SocialModule } from '../social/social.module';
 import { Notification } from './entities/notification.entity';
+import { NotificationRetentionService } from './notification-retention.service';
 import { NotificationsController } from './notifications.controller';
 import { NotificationsListener } from './notifications.listener';
 import { NotificationsService } from './notifications.service';
@@ -24,7 +25,12 @@ import { NotificationsService } from './notifications.service';
     SocialModule,
   ],
   controllers: [NotificationsController],
-  providers: [NotificationsService, NotificationsListener],
+  providers: [
+    NotificationsService,
+    NotificationsListener,
+    // Cron-only; registering it starts the daily read-notification purge.
+    NotificationRetentionService,
+  ],
   exports: [NotificationsService],
 })
 export class NotificationsModule {}

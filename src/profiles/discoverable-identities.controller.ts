@@ -5,7 +5,15 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { DiscoverableIdentitiesService } from './discoverable-identities.service';
 import { UpdateDiscoverableIdentitiesDto } from './dto/update-discoverable-identities.dto';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiCookieAuth,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+  ApiUnprocessableEntityResponse,
+} from '@nestjs/swagger';
 
 /**
  * Which of the member's identities are published for member-directory search.
@@ -40,7 +48,7 @@ import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
  * work.
  */
 @ApiTags('Profiles')
-@ApiCookieAuth()
+@ApiCookieAuth('access_token')
 @Controller('me')
 export class DiscoverableIdentitiesController {
   constructor(
@@ -50,6 +58,15 @@ export class DiscoverableIdentitiesController {
   // Returns `{ available, published }` — what this member could publish, and
   // what they have. Empty `published` for anyone who has never opted in, which
   // is everyone by default.
+  @ApiOperation({
+    summary: "Get the caller's publishable and published discoverable identities",
+  })
+  @ApiOkResponse({
+    description:
+      'The identities the member could publish (`available`) and those currently published (`published`).',
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiNotFoundResponse({ description: 'The caller has no profile.' })
   @Get('discoverable-identities')
   get(@CurrentUser() user: CurrentUserData) {
     return this.discoverableIdentities.get(user.userId);
@@ -59,6 +76,18 @@ export class DiscoverableIdentitiesController {
   // persisted state back so the client renders what was actually stored rather
   // than what it optimistically sent. 422 when an identity is not one the member
   // has declared privately.
+  @ApiOperation({
+    summary: "Replace the caller's published discoverable-identities set",
+  })
+  @ApiOkResponse({
+    description: 'The persisted `available` and `published` sets after the replace.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiNotFoundResponse({ description: 'The caller has no profile.' })
+  @ApiUnprocessableEntityResponse({
+    description:
+      'One or more identities are not among those the member holds privately.',
+  })
   @Put('discoverable-identities')
   update(
     @CurrentUser() user: CurrentUserData,

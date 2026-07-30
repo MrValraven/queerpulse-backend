@@ -13,6 +13,10 @@ import {
   encodeCursor,
 } from '../common/cursor-pagination';
 import { MemberLookup } from '../common/member-ref';
+import {
+  ContentModerationService,
+  ContentModerationState,
+} from '../content-moderation/content-moderation.service';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -60,7 +64,13 @@ export class ForumPostsService {
     @InjectRepository(ForumPostEdit)
     private readonly edits: Repository<ForumPostEdit>,
     private readonly mentions: MentionNotificationService,
+    private readonly contentModeration: ContentModerationService,
   ) {}
+
+  // A forum post can be reported (and thus taken down) under either taxonomy
+  // code — the thread OP reports as `post`, a nested comment as `reply` — both
+  // keyed by the post's uuid. Reads check both.
+  private static readonly SUBJECT_TYPES = ['post', 'reply'];
 
   // GET /forum/threads/:slug/posts?cursor= — OP + replies, oldest-first.
   // `cursorPaginate` (src/common/cursor-pagination.ts) is hard-wired to a
@@ -102,6 +112,33 @@ export class ForumPostsService {
     };
   }
 
+  // Resolves each post's moderation state and applies the read policy: a member
+  // never sees a hidden post (dropped from the page), a moderator sees every
+  // post flagged, and a removed post is kept but rendered as a tombstone by
+  // `toForumPostResponse`. Returns the surviving rows paired with their state.
+  private async partitionByModeration(
+    rows: ForumPost[],
+    viewer: ForumPostViewer,
+  ): Promise<Array<{ post: ForumPost; moderation: ContentModerationState }>> {
+    if (!rows.length) return [];
+    const states = await this.contentModeration.statesForAnyType(
+      ForumPostsService.SUBJECT_TYPES,
+      rows.map((post) => post.id),
+    );
+    const visible: Array<{ post: ForumPost; moderation: ContentModerationState }> =
+      [];
+    for (const post of rows) {
+      const moderation = states.get(post.id) ?? { hidden: false, removed: false };
+      // A hidden-but-not-removed post is withheld from ordinary members; a
+      // removed post survives as a tombstone for everyone.
+      if (moderation.hidden && !moderation.removed && !viewer.isModerator) {
+        continue;
+      }
+      visible.push({ post, moderation });
+    }
+    return visible;
+  }
+
   // POST /forum/threads/:slug/posts — a reply (never the OP, which is
   // created alongside the thread by `ForumThreadsService.create`). An
   // optional `parentPostId` nests this reply under another post in the same
@@ -125,16 +162,23 @@ export class ForumPostsService {
       ? await this.loadReplyParentOr400(parentPostId, thread.id)
       : null;
 
-    const saved = await this.posts.save(
-      this.posts.create({
-        threadId: thread.id,
-        authorId: user.userId,
-        body,
-        voteCount: 0,
-        parentPostId: parentPost?.id ?? null,
-      }),
-    );
-    await this.threadsService.markActivity(thread.id);
+    // One transaction so the reply insert and the parent thread's
+    // `replyCount` bump (+ `lastActivityAt` refresh, via `markActivity`)
+    // commit together — a crash between the two separate writes previously
+    // drifted the denormalized count.
+    const saved = await this.posts.manager.transaction(async (manager) => {
+      const created = await manager.save(
+        manager.create(ForumPost, {
+          threadId: thread.id,
+          authorId: user.userId,
+          body,
+          voteCount: 0,
+          parentPostId: parentPost?.id ?? null,
+        }),
+      );
+      await this.threadsService.markActivity(thread.id, manager);
+      return created;
+    });
 
     const mentionNotifiedUserIds = await this.mentions.notify(
       body,
@@ -162,6 +206,20 @@ export class ForumPostsService {
         threadSlug,
         postId: saved.id,
         parentPostId: parentPost.id,
+        excerpt: body.slice(0, 140),
+      });
+    }
+
+    // A *top-level* reply (no parent post) is a reply to the thread itself —
+    // notify the thread's original author with its own `ForumThreadReply` type.
+    // Same de-dupe as the parent-reply case: skipped when the reply already
+    // `@mentioned` the thread author, so they're never double-notified.
+    if (!parentPost && !mentionNotifiedUserIds.has(thread.authorId)) {
+      await this.mentions.notifyThreadReply(thread.authorId, user.userId, {
+        actorId: user.userId,
+        source: 'forum',
+        threadSlug,
+        postId: saved.id,
         excerpt: body.slice(0, 140),
       });
     }
@@ -372,14 +430,20 @@ export class ForumPostsService {
     const authors = await new MemberLookup(this.profiles).byUserIds([
       post.authorId,
     ]);
-    const vote = await this.votes.findOne({
-      where: { postId: post.id, userId: user.userId },
-    });
+    const [vote, moderation] = await Promise.all([
+      this.votes.findOne({
+        where: { postId: post.id, userId: user.userId },
+      }),
+      this.contentModeration.statesForAnyType(ForumPostsService.SUBJECT_TYPES, [
+        post.id,
+      ]),
+    ]);
     return toForumPostResponse(
       post,
       authors.get(post.authorId) ?? null,
       vote?.value ?? 0,
       viewerOf(user),
+      moderation.get(post.id) ?? { hidden: false, removed: false },
     );
   }
 
@@ -433,8 +497,16 @@ export class ForumPostsService {
     user: CurrentUserData,
   ): Promise<ForumPostResponse[]> {
     if (!rows.length) return [];
-    const postIds = rows.map((post) => post.id);
-    const authorIds = [...new Set(rows.map((post) => post.authorId))];
+    const viewer = viewerOf(user);
+
+    // Drop hidden posts (kept for moderators) and pair the survivors with their
+    // takedown state before mapping — so the page fills with visible posts and
+    // removed ones render as tombstones.
+    const survivors = await this.partitionByModeration(rows, viewer);
+    if (!survivors.length) return [];
+
+    const postIds = survivors.map(({ post }) => post.id);
+    const authorIds = [...new Set(survivors.map(({ post }) => post.authorId))];
 
     const [authors, myVoteRows] = await Promise.all([
       new MemberLookup(this.profiles).byUserIds(authorIds),
@@ -444,14 +516,14 @@ export class ForumPostsService {
     const myVoteByPost = new Map(
       myVoteRows.map((row) => [row.postId, row.value]),
     );
-    const viewer = viewerOf(user);
 
-    return rows.map((post) =>
+    return survivors.map(({ post, moderation }) =>
       toForumPostResponse(
         post,
         authors.get(post.authorId) ?? null,
         myVoteByPost.get(post.id) ?? 0,
         viewer,
+        moderation,
       ),
     );
   }

@@ -15,6 +15,8 @@ import {
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
   JobApplication,
@@ -121,6 +123,7 @@ export class JobsService {
     // open roles through `CompanyOpenRolesService` instead), so no `forwardRef`
     // is needed on either side.
     private readonly companiesService: CompaniesService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async create(posterId: string, dto: CreateJobInput): Promise<JobDetailDTO> {
@@ -367,6 +370,26 @@ export class JobsService {
           coverNote: dto.coverNote ?? null,
         }),
       );
+      // Tell the poster they have an applicant (skip self — a poster applying
+      // to their own posting notifies no one). Best-effort: an application must
+      // never fail because its notification did.
+      if (job.posterId !== applicantId) {
+        try {
+          await this.notifications.create(
+            job.posterId,
+            NotificationType.JobApplication,
+            {
+              actorId: applicantId,
+              source: 'job',
+              jobSlug: job.slug,
+              jobTitle: job.title,
+            },
+            applicantId,
+          );
+        } catch {
+          // Intentionally ignored — the application already committed.
+        }
+      }
       const applicant = await this.memberRefFor(applicantId);
       return toJobApplication(
         saved,

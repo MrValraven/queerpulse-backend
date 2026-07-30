@@ -32,7 +32,19 @@ import { UpdateListingDto } from './dto/update-listing.dto';
 import { UpdateSafeSpaceDto } from './dto/update-safe-space.dto';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
 import { ListingsService } from './listings.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiConflictResponse,
+  ApiCookieAuth,
+  ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiNoContentResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 /**
  * Member business directory listings (spec §3 Tier 4 "listings"). Every
@@ -56,11 +68,18 @@ export class ListingsController {
   ) {}
 
   @Post()
+  @ApiOperation({ summary: 'Create a business listing for the current member' })
+  @ApiCreatedResponse({ description: 'The newly created listing.' })
+  @ApiConflictResponse({ description: 'Could not allocate a unique listing reference.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   create(@CurrentUser() user: CurrentUserData, @Body() dto: CreateListingDto) {
     return this.listingsService.create(user.userId, dto);
   }
 
   @Get('mine')
+  @ApiOperation({ summary: "List the current member's own listings" })
+  @ApiOkResponse({ description: "Paginated page of the member's listings." })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   listMine(
     @CurrentUser() user: CurrentUserData,
     @Query() query: ListMyListingsQuery,
@@ -76,6 +95,10 @@ export class ListingsController {
   @Get('admin/safe-space-candidates')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Moderator, UserRole.Admin)
+  @ApiOperation({ summary: 'List safe-space candidate listings (moderator only)' })
+  @ApiOkResponse({ description: 'The candidate listings.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
   listSafeSpaceCandidates() {
     return this.listingsService.listSafeSpaceCandidates();
   }
@@ -87,6 +110,10 @@ export class ListingsController {
   @Get('admin/queue')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Moderator, UserRole.Admin)
+  @ApiOperation({ summary: 'List the listings moderation queue (moderator only)' })
+  @ApiOkResponse({ description: 'Paginated page of queued listings.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
   listQueue(@Query() query: ListListingQueueQuery) {
     return this.listingsService.listQueue(query);
   }
@@ -100,6 +127,10 @@ export class ListingsController {
   @Get('admin/edit-suggestions')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Moderator, UserRole.Admin)
+  @ApiOperation({ summary: 'List the edit-suggestion review queue (moderator only)' })
+  @ApiOkResponse({ description: 'The edit suggestions, newest first.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
   listEditSuggestions(@Query() query: ListEditSuggestionsQuery) {
     return this.editSuggestionsService.listForAdmin(query);
   }
@@ -108,6 +139,11 @@ export class ListingsController {
   @Patch('admin/edit-suggestions/:id')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Moderator, UserRole.Admin)
+  @ApiOperation({ summary: 'Accept or dismiss an edit suggestion (moderator only)' })
+  @ApiOkResponse({ description: 'The resolved edit suggestion.' })
+  @ApiNotFoundResponse({ description: 'No edit suggestion or listing found.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
   resolveEditSuggestion(
     @CurrentUser() user: CurrentUserData,
     @Param('id') id: string,
@@ -117,11 +153,21 @@ export class ListingsController {
   }
 
   @Get(':ref')
+  @ApiOperation({ summary: "Get one of the member's own listings by reference" })
+  @ApiOkResponse({ description: 'The listing owned by the caller.' })
+  @ApiNotFoundResponse({ description: 'No listing with that reference.' })
+  @ApiForbiddenResponse({ description: 'The listing is not owned by the caller.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   get(@CurrentUser() user: CurrentUserData, @Param('ref') ref: string) {
     return this.listingsService.getByRef(ref, user.userId);
   }
 
   @Patch(':ref')
+  @ApiOperation({ summary: "Update one of the member's own listings" })
+  @ApiOkResponse({ description: 'The updated listing.' })
+  @ApiNotFoundResponse({ description: 'No listing with that reference.' })
+  @ApiForbiddenResponse({ description: 'The listing is not owned by the caller.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   update(
     @CurrentUser() user: CurrentUserData,
     @Param('ref') ref: string,
@@ -132,6 +178,11 @@ export class ListingsController {
 
   @Delete(':ref')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: "Delete one of the member's own listings" })
+  @ApiNoContentResponse({ description: 'The listing was deleted.' })
+  @ApiNotFoundResponse({ description: 'No listing with that reference.' })
+  @ApiForbiddenResponse({ description: 'The listing is not owned by the caller.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   remove(@CurrentUser() user: CurrentUserData, @Param('ref') ref: string) {
     return this.listingsService.remove(ref, user.userId);
   }
@@ -140,6 +191,12 @@ export class ListingsController {
   // above, not a `RolesGuard` route): the listing owner posts (or overwrites)
   // their single public reply to a review on their own listing.
   @Patch(':ref/reviews/:reviewId/reply')
+  @ApiOperation({ summary: "Post or overwrite the owner's public reply to a review" })
+  @ApiOkResponse({ description: 'The review with the updated owner reply.' })
+  @ApiNotFoundResponse({ description: 'No listing or review found.' })
+  @ApiForbiddenResponse({ description: 'The listing is not owned by the caller.' })
+  @ApiBadRequestResponse({ description: 'Reply cannot be empty.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   replyToReview(
     @CurrentUser() user: CurrentUserData,
     @Param('ref') ref: string,
@@ -156,6 +213,11 @@ export class ListingsController {
   @Patch(':ref/status')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Moderator, UserRole.Admin)
+  @ApiOperation({ summary: "Set a listing's moderation status (moderator only)" })
+  @ApiOkResponse({ description: 'The updated listing.' })
+  @ApiNotFoundResponse({ description: 'No listing with that reference.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
   setStatus(@Param('ref') ref: string, @Body() dto: UpdateListingStatusDto) {
     return this.listingsService.setStatus(ref, dto.status);
   }
@@ -165,6 +227,12 @@ export class ListingsController {
   @Post(':ref/question')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Moderator, UserRole.Admin)
+  @ApiOperation({ summary: 'Ask the submitter a question via DM (moderator only)' })
+  @ApiCreatedResponse({ description: 'The listing moved to question status.' })
+  @ApiNotFoundResponse({ description: 'No listing with that reference.' })
+  @ApiBadRequestResponse({ description: 'This listing has no submitter to contact.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Requires moderator or admin role, or the message was blocked.' })
   askQuestion(
     @CurrentUser() user: CurrentUserData,
     @Param('ref') ref: string,
@@ -178,6 +246,11 @@ export class ListingsController {
   @Patch(':ref/safe-space')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Moderator, UserRole.Admin)
+  @ApiOperation({ summary: "Toggle a listing's safe-space badge (moderator only)" })
+  @ApiOkResponse({ description: 'The updated listing.' })
+  @ApiNotFoundResponse({ description: 'No listing with that reference.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
   setSafeSpace(@Param('ref') ref: string, @Body() dto: UpdateSafeSpaceDto) {
     return this.listingsService.setSafeSpace(ref, dto);
   }

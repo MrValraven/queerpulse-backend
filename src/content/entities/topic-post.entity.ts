@@ -41,6 +41,7 @@ import {
  * single opaque "stats" string, since the frontend needs real counts.
  */
 @Entity('topic_post')
+@Index('IDX_topic_post_topic_id_created_at_id', ['topicId', 'createdAt', 'id'])
 export class TopicPost {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -64,7 +65,7 @@ export class TopicPost {
    *  derived from this column, and a post with `authorId === null` still shows
    *  its `authorName`. This column exists so `BlockFilterService` has a user id
    *  to filter against; see `../topics.service.ts#listPosts`. */
-  @Index('IDX_topic_post_author_id')
+  @Index('IDX_topic_post_author_id', { where: '"author_id" IS NOT NULL' })
   @Column({ type: 'uuid', nullable: true })
   authorId: string | null;
 

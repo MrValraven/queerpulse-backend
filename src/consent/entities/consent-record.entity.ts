@@ -24,11 +24,11 @@ export enum ConsentAction {
 // `necessary` is always true (session/CSRF cookies, theme/i18n prefs) and is not
 // persisted; it is re-synthesised as `true` on every read.
 @Entity('consent_record')
+@Index('IDX_consent_record_user_id', ['userId', 'createdAt'])
 export class ConsentRecord {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Index('IDX_consent_record_user_id')
   @Column({ type: 'uuid' })
   userId: string;
 

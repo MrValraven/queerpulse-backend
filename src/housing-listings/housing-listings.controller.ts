@@ -22,7 +22,19 @@ import { CreateHousingListingDto } from './dto/create-housing-listing.dto';
 import { ListMyHousingListingsQuery } from './dto/list-my-housing-listings.query';
 import { UpdateHousingListingDto } from './dto/update-housing-listing.dto';
 import { HousingListingsService } from './housing-listings.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiConflictResponse,
+  ApiCookieAuth,
+  ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiNoContentResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 /**
  * Member-facing housing listings. `GET/PATCH/DELETE /housing-listings/:ref`
@@ -39,6 +51,10 @@ export class HousingListingsController {
   constructor(private readonly service: HousingListingsService) {}
 
   @Post()
+  @ApiOperation({ summary: 'Create a housing listing for the current member' })
+  @ApiCreatedResponse({ description: 'The newly created housing listing.' })
+  @ApiConflictResponse({ description: 'Could not allocate a unique listing reference.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   create(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: CreateHousingListingDto,
@@ -47,6 +63,9 @@ export class HousingListingsController {
   }
 
   @Get('mine')
+  @ApiOperation({ summary: "List the current member's own housing listings" })
+  @ApiOkResponse({ description: "Paginated page of the member's housing listings." })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   listMine(
     @CurrentUser() user: CurrentUserData,
     @Query() query: ListMyHousingListingsQuery,
@@ -55,11 +74,21 @@ export class HousingListingsController {
   }
 
   @Get(':ref')
+  @ApiOperation({ summary: "Get one of the member's own housing listings by reference" })
+  @ApiOkResponse({ description: 'The housing listing owned by the caller.' })
+  @ApiNotFoundResponse({ description: 'No housing listing with that reference.' })
+  @ApiForbiddenResponse({ description: 'The listing is not owned by the caller.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   get(@CurrentUser() user: CurrentUserData, @Param('ref') ref: string) {
     return this.service.getByRef(ref, user.userId);
   }
 
   @Patch(':ref')
+  @ApiOperation({ summary: "Update one of the member's own housing listings" })
+  @ApiOkResponse({ description: 'The updated housing listing.' })
+  @ApiNotFoundResponse({ description: 'No housing listing with that reference.' })
+  @ApiForbiddenResponse({ description: 'The listing is not owned by the caller.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   update(
     @CurrentUser() user: CurrentUserData,
     @Param('ref') ref: string,
@@ -70,11 +99,21 @@ export class HousingListingsController {
 
   @Delete(':ref')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: "Delete one of the member's own housing listings" })
+  @ApiNoContentResponse({ description: 'The housing listing was deleted.' })
+  @ApiNotFoundResponse({ description: 'No housing listing with that reference.' })
+  @ApiForbiddenResponse({ description: 'The listing is not owned by the caller.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   remove(@CurrentUser() user: CurrentUserData, @Param('ref') ref: string) {
     return this.service.remove(ref, user.userId);
   }
 
   @Post(':ref/enquiries')
+  @ApiOperation({ summary: "Send an enquiry to a live listing's lister" })
+  @ApiCreatedResponse({ description: 'The conversation id for the delivered enquiry.' })
+  @ApiNotFoundResponse({ description: 'No live housing listing with that reference.' })
+  @ApiBadRequestResponse({ description: 'Cannot send an enquiry on your own listing.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   enquire(
     @CurrentUser() user: CurrentUserData,
     @Param('ref') ref: string,

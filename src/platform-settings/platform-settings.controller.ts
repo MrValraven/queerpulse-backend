@@ -11,7 +11,14 @@ import { UserRole } from '../users/entities/user.entity';
 import { ListChangesQuery } from './dto/list-changes.query';
 import { UpdatePlatformSettingsDto } from './dto/update-platform-settings.dto';
 import { PlatformSettingsService } from './platform-settings.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiCookieAuth,
+  ApiForbiddenResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 const DEFAULT_CHANGES_LIMIT = 50;
 
@@ -33,11 +40,19 @@ export class PlatformSettingsController {
   constructor(private readonly settings: PlatformSettingsService) {}
 
   @Get()
+  @ApiOperation({ summary: 'Get the platform settings' })
+  @ApiOkResponse({ description: 'The current platform settings.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
   get() {
     return this.settings.get();
   }
 
   @Patch()
+  @ApiOperation({ summary: 'Update the platform settings' })
+  @ApiOkResponse({ description: 'The updated platform settings.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
   update(
     @Body() dto: UpdatePlatformSettingsDto,
     @CurrentUser() user: CurrentUserData,
@@ -46,6 +61,10 @@ export class PlatformSettingsController {
   }
 
   @Get('changes')
+  @ApiOperation({ summary: 'List the platform settings change history' })
+  @ApiOkResponse({ description: 'The audit history, newest first.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
   listChanges(@Query() query: ListChangesQuery) {
     return this.settings.listChanges(
       query.limit ?? DEFAULT_CHANGES_LIMIT,

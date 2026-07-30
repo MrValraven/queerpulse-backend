@@ -1,5 +1,5 @@
 import { Controller, Get } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Public } from '../auth/decorators/public.decorator';
 import { Feature } from '../common/feature.decorator';
 import { RoadmapService } from './roadmap.service';
@@ -17,6 +17,11 @@ import { RoadmapService } from './roadmap.service';
 export class RoadmapPublicController {
   constructor(private readonly roadmapService: RoadmapService) {}
 
+  @ApiOperation({ summary: 'Get the public roadmap (unauthenticated)' })
+  @ApiOkResponse({
+    description:
+      'Hero stats plus shipped, building, planned, and top-idea entries.',
+  })
   @Public()
   @Get()
   getPublic() {

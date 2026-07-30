@@ -21,13 +21,29 @@ export enum AppealStatus {
  * appeal may reference a report that's since been deleted.
  *
  * `actionId`/`appellantId`/`severity`/`community` support the enriched
- * `AppealDTO` (`moderation.api.ts`) the appeals queue renders. There is no
- * `POST /appeals` endpoint in this module yet (out of scope here — appeals
- * are read/reviewed, not created, by the current contract), so these columns
- * are nullable/best-effort until a creation flow lands; `moderation-response.ts`
- * documents the read-time fallbacks.
+ * `AppealDTO` (`moderation.api.ts`) the appeals queue renders. They stay
+ * nullable/best-effort: `POST /appeals` (`AppealsController`) resolves the
+ * appealed action where it can, but a cold appeal with no resolvable action is
+ * still valid — `moderation-response.ts` documents the read-time fallbacks.
+ *
+ * The two partial unique indexes enforce "one OPEN appeal per member per
+ * action" behind `ModerationService.submitAppeal`'s check-then-insert (they
+ * are what actually closes the race). `UQ_appeals_open_appellant_action` covers
+ * appeals linked to a resolved action; `UQ_appeals_open_appellant_no_action`
+ * covers cold appeals (NULL `action_id`, which a plain composite unique index
+ * would treat as always-distinct). Both are created by
+ * `1785003500000-AddAppealsOpenDedupeIndex`; the decorators keep entity
+ * metadata in step for any future `migration:generate` diff.
  */
 @Entity('appeals')
+@Index('UQ_appeals_open_appellant_action', ['appellantId', 'actionId'], {
+  unique: true,
+  where: `"status" = 'awaiting'`,
+})
+@Index('UQ_appeals_open_appellant_no_action', ['appellantId'], {
+  unique: true,
+  where: `"status" = 'awaiting' AND "action_id" IS NULL`,
+})
 export class Appeal {
   @PrimaryGeneratedColumn('uuid')
   id: string;

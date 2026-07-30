@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { MentionsModule } from '../mentions/mentions.module';
 import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
@@ -32,6 +33,11 @@ import { ForumThreadsService } from './forum-threads.service';
     // reply-create. Plain import, no `forwardRef`: `MentionsModule` does not
     // import `ForumModule`.
     MentionsModule,
+    // `ContentModerationService` — post/reply reads respect a moderator
+    // `hide_content`/`remove_content` takedown: hidden posts are withheld from
+    // members (shown to moderators, flagged), removed posts render as a
+    // tombstone reusing the existing `deleted` rendering.
+    ContentModerationModule,
   ],
   controllers: [ForumController],
   providers: [ForumThreadsService, ForumPostsService],

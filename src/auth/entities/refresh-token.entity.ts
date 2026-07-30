@@ -11,10 +11,11 @@ export class RefreshToken {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
+  @Index('IDX_refresh_tokens_user_id')
   @Column({ type: 'uuid' })
   userId: string;
 
-  @Index({ unique: true })
+  @Index('IDX_refresh_tokens_token_hash', { unique: true })
   @Column({ type: 'varchar' })
   tokenHash: string;
 

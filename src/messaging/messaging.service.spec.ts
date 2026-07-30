@@ -20,6 +20,12 @@ import { MessageReaction } from './entities/message-reaction.entity';
 import { MessageStar } from './entities/message-star.entity';
 import { MessageCreatedEvent } from './messaging.events';
 import { MessagingService } from './messaging.service';
+import { MessagingCoreService } from './messaging-core.service';
+import { ConversationsService } from './conversations.service';
+import { MessagesService } from './messages.service';
+import { MessageAnnotationsService } from './message-annotations.service';
+import { GroupsService } from './groups.service';
+import { MessageRequestsService } from './message-requests.service';
 
 /**
  * Minimal chainable stand-in for a TypeORM SelectQueryBuilder. Every builder
@@ -76,6 +82,8 @@ function emptyReactions(): { key: string; count: number; mine: boolean }[] {
 
 describe('MessagingService', () => {
   let service: MessagingService;
+  let core: MessagingCoreService;
+  let messageRequestsService: MessageRequestsService;
   let conversations: { findOne: jest.Mock; find: jest.Mock; create: jest.Mock };
   let participants: {
     find: jest.Mock;
@@ -193,6 +201,12 @@ describe('MessagingService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         MessagingService,
+        MessagingCoreService,
+        ConversationsService,
+        MessagesService,
+        MessageAnnotationsService,
+        GroupsService,
+        MessageRequestsService,
         { provide: getRepositoryToken(Conversation), useValue: conversations },
         {
           provide: getRepositoryToken(ConversationParticipant),
@@ -214,6 +228,8 @@ describe('MessagingService', () => {
       ],
     }).compile();
     service = module.get(MessagingService);
+    core = module.get(MessagingCoreService);
+    messageRequestsService = module.get(MessageRequestsService);
   });
 
   /**
@@ -715,14 +731,10 @@ describe('MessagingService', () => {
       queryBuilder.getRawMany.mockResolvedValue([]);
       messages.createQueryBuilder.mockReturnValue(queryBuilder);
 
-      await (
-        service as unknown as {
-          unreadCountsByConversation: (
-            convoIds: string[],
-            userId: string,
-          ) => Promise<Map<string, number>>;
-        }
-      ).unreadCountsByConversation(['conv-1'], 'user-1');
+      // `unreadCountsByConversation` now lives on the shared
+      // `MessagingCoreService` (extracted from the god `MessagingService`),
+      // not the facade — every split concern calls through it.
+      await core.unreadCountsByConversation(['conv-1'], 'user-1');
 
       const predicates = queryBuilder.andWhere.mock.calls
         .map((call: [string]) => call[0])
@@ -756,6 +768,87 @@ describe('MessagingService', () => {
       expect(boundParams).toContainEqual({
         clearedAt: '2026-01-01T00:00:00.000Z',
       });
+    });
+
+    // P0 hardening: a removed/left group member kept unbounded read access
+    // (and forward reconnect-sync access) to everything posted after they
+    // left — `leftAt` now ceilings both the same way `clearedAt` floors them.
+    it('getMessages ceilings history at the caller leftAt (P0)', async () => {
+      participants.findOne.mockResolvedValue({
+        conversationId: 'conv-1',
+        userId: 'user-1',
+        leftAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      const queryBuilder = makeQb();
+      queryBuilder.getMany.mockResolvedValue([]);
+      messages.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await service.getMessages('conv-1', 'user-1', {});
+
+      const predicates = queryBuilder.andWhere.mock.calls
+        .map((call: [string]) => call[0])
+        .join(' | ');
+      expect(predicates).toContain('m.created_at <= :leftAt');
+      const boundParams = queryBuilder.andWhere.mock.calls.map(
+        (call: [string, Record<string, string>?]) => call[1],
+      );
+      expect(boundParams).toContainEqual({
+        leftAt: '2026-01-01T00:00:00.000Z',
+      });
+    });
+
+    it('getMessages forward reconnect-sync (`after`) also ceilings at leftAt', async () => {
+      participants.findOne.mockResolvedValue({
+        conversationId: 'conv-1',
+        userId: 'user-1',
+        leftAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      const queryBuilder = makeQb();
+      queryBuilder.getMany.mockResolvedValue([]);
+      messages.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await service.getMessages('conv-1', 'user-1', {
+        after: '2026-01-02T00:00:00.000Z',
+      });
+
+      const predicates = queryBuilder.andWhere.mock.calls
+        .map((call: [string]) => call[0])
+        .join(' | ');
+      expect(predicates).toContain('m.created_at <= :leftAt');
+    });
+  });
+
+  describe('canJoinConversationLive', () => {
+    it('refuses a participant who left/was removed from a group (P0)', async () => {
+      participants.findOne.mockResolvedValueOnce({
+        conversationId: 'c1',
+        userId: 'me',
+        leftAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      await expect(service.canJoinConversationLive('c1', 'me')).resolves.toBe(
+        false,
+      );
+    });
+
+    it('refuses a DM whose counterpart is blocked either way (P0)', async () => {
+      participants.findOne
+        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
+        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+      conversations.findOne.mockResolvedValue({ id: 'c1', isOfficial: false });
+      blockFilter.isBlockedEitherWay.mockResolvedValueOnce(true);
+      await expect(service.canJoinConversationLive('c1', 'me')).resolves.toBe(
+        false,
+      );
+    });
+
+    it('allows a normal, unblocked, still-present participant', async () => {
+      participants.findOne
+        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
+        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+      conversations.findOne.mockResolvedValue({ id: 'c1', isOfficial: false });
+      await expect(service.canJoinConversationLive('c1', 'me')).resolves.toBe(
+        true,
+      );
     });
   });
 
@@ -858,6 +951,22 @@ describe('MessagingService', () => {
       await expect(
         service.sendMessage('c1', 'me', 'hi'),
       ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    // P0 hardening: a `blocks` row is a hard stop even if the `connections`
+    // edge somehow still reads Accepted — defense-in-depth alongside the
+    // transactional sever in `SocialService.blockMember`.
+    it('rejects a send when either party has blocked the other, even if still marked accepted-connected', async () => {
+      participants.findOne
+        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
+        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'them' });
+      conversations.findOne.mockResolvedValue({ id: 'c1', isOfficial: false });
+      connections.areConnected.mockResolvedValue(true);
+      blockFilter.isBlockedEitherWay.mockResolvedValueOnce(true);
+      await expect(
+        service.sendMessage('c1', 'me', 'hi'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith('me', 'them');
     });
 
     it('persists and emits message.created on a valid send', async () => {
@@ -1151,7 +1260,7 @@ describe('MessagingService', () => {
       dataSource.transaction.mockRejectedValueOnce(unique);
 
       await expect(
-        service.handleConnectionAccepted({
+        messageRequestsService.handleConnectionAccepted({
           connectionId: 'x',
           requesterId: 'a',
           addresseeId: 'b',
@@ -1167,7 +1276,7 @@ describe('MessagingService', () => {
       conversations.findOne.mockResolvedValueOnce(null);
       dataSource.transaction.mockRejectedValueOnce(new Error('boom'));
       await expect(
-        service.handleConnectionAccepted({
+        messageRequestsService.handleConnectionAccepted({
           connectionId: 'x',
           requesterId: 'a',
           addresseeId: 'b',

@@ -53,6 +53,9 @@ function build() {
     { excludeHidden: jest.fn() } as never,
     edits as never,
     notifications as never,
+    {
+      statesForAnyType: jest.fn().mockResolvedValue(new Map()),
+    } as never,
   );
   return { service, post, posts, edits, byUserIds, notifications, managerSave };
 }

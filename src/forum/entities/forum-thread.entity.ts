@@ -14,11 +14,13 @@ import {
  * like `communities`/`community_posts`.
  */
 @Entity('forum_thread')
+@Index('IDX_forum_thread_created_at_id', ['createdAt', 'id'])
 export class ForumThread {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'varchar', unique: true })
+  @Index('UQ_forum_thread_slug', { unique: true })
+  @Column({ type: 'varchar' })
   slug: string;
 
   @Column({ type: 'varchar' })

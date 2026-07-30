@@ -1,4 +1,10 @@
-import { Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+} from 'typeorm';
 
 export enum ShapingKind {
   Film = 'film',
@@ -29,4 +35,7 @@ export class Shaping {
 
   @Column({ type: 'text' })
   note: string;
+
+  @CreateDateColumn({ type: 'timestamptz' })
+  createdAt: Date;
 }

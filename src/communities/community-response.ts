@@ -76,6 +76,11 @@ export interface CommunityDetailDTO extends CommunityCardDTO {
   owner: MemberRef | null;
   createdAt: string;
   myJoinRequestStatus: JoinRequestStatus | null;
+  // A moderator takedown. Only ever surfaced to an owner/mod — outsiders get a
+  // 404 for a moderated community, never this detail — so they know why the
+  // community is no longer publicly reachable.
+  moderationRemoved: boolean;
+  moderationHidden: boolean;
 }
 
 export function toCommunityCard(
@@ -103,6 +108,7 @@ export function toCommunityDetail(
   myRole: RosterRole | null,
   owner: MemberRef | null,
   myJoinRequestStatus: JoinRequestStatus | null,
+  moderation?: CommunityContentModeration,
 ): CommunityDetailDTO {
   return {
     ...toCommunityCard(c, stats, myRole),
@@ -114,6 +120,8 @@ export function toCommunityDetail(
     owner,
     createdAt: c.createdAt.toISOString(),
     myJoinRequestStatus,
+    moderationRemoved: moderation?.removed ?? false,
+    moderationHidden: moderation?.hidden ?? false,
   };
 }
 
@@ -194,6 +202,14 @@ export interface CommunityReactionSummary {
   mine: boolean;
 }
 
+// A moderator takedown on a post/reply, resolved from the shared
+// `content_moderation` table. Optional on the mappers: create/react echoes
+// that don't consult it leave it undefined = untouched.
+export interface CommunityContentModeration {
+  hidden: boolean;
+  removed: boolean;
+}
+
 export interface CommunityReplyDTO {
   id: string;
   author: MemberRef | null;
@@ -205,6 +221,8 @@ export interface CommunityReplyDTO {
   canDelete: boolean;
   canRestore: boolean;
   canViewHistory: boolean;
+  moderationRemoved: boolean;
+  moderationHidden: boolean;
 }
 
 export interface CommunityPostDTO {
@@ -224,6 +242,8 @@ export interface CommunityPostDTO {
   reactions: CommunityReactionSummary[]; // always all 4 keys, count + mine
   replies: CommunityReplyDTO[];
   replyCount: number;
+  moderationRemoved: boolean;
+  moderationHidden: boolean;
 }
 
 /** Fixed key order every reaction summary is rendered in (matches the spec's
@@ -262,22 +282,30 @@ export function toCommunityReply(
   author: MemberRef | null,
   viewerId: string,
   viewerRole: RosterRole | null,
+  moderation?: CommunityContentModeration,
 ): CommunityReplyDTO {
-  const deleted = reply.deletedAt != null;
+  const authorTombstoned = reply.deletedAt != null;
+  const moderationRemoved = moderation?.removed ?? false;
+  const moderationHidden = moderation?.hidden ?? false;
+  const blanked = authorTombstoned || moderationRemoved || moderationHidden;
   const isAuthor = reply.authorId === viewerId;
   const isMember = viewerRole != null;
   const canManage = (isAuthor || isOwnerOrMod(viewerRole)) && isMember;
   return {
     id: reply.id,
-    author: deleted ? DELETED_MEMBER : author,
-    text: deleted ? '' : reply.text,
+    author: blanked ? DELETED_MEMBER : author,
+    text: blanked ? '' : reply.text,
     createdAt: reply.createdAt.toISOString(),
     editedAt: reply.editedAt ? reply.editedAt.toISOString() : null,
-    deleted,
-    canEdit: isAuthor && isMember && !deleted, // edit is author-only (owner/mod excluded)
-    canDelete: canManage && !deleted,
-    canRestore: canManage && deleted,
+    deleted: authorTombstoned || moderationRemoved,
+    canEdit: isAuthor && isMember && !blanked, // edit is author-only (owner/mod excluded)
+    canDelete: canManage && !blanked,
+    // Only an author's own tombstone is restorable here; a moderator takedown
+    // is lifted through the moderation/appeal path.
+    canRestore: canManage && authorTombstoned && !moderationRemoved,
     canViewHistory: canManage && reply.editedAt != null,
+    moderationRemoved,
+    moderationHidden,
   };
 }
 
@@ -294,28 +322,34 @@ export function toCommunityPost(
   replies: CommunityReplyDTO[],
   viewerId: string,
   viewerRole: RosterRole | null,
+  moderation?: CommunityContentModeration,
 ): CommunityPostDTO {
-  const deleted = post.deletedAt != null;
+  const authorTombstoned = post.deletedAt != null;
+  const moderationRemoved = moderation?.removed ?? false;
+  const moderationHidden = moderation?.hidden ?? false;
+  const blanked = authorTombstoned || moderationRemoved || moderationHidden;
   const isAuthor = post.authorId === viewerId;
   const isMember = viewerRole != null;
   const canManage = (isAuthor || isOwnerOrMod(viewerRole)) && isMember;
   return {
     id: post.id,
-    author: deleted ? DELETED_MEMBER : author,
-    body: deleted ? '' : post.body,
-    image: deleted ? null : toImageUrl(post.image),
+    author: blanked ? DELETED_MEMBER : author,
+    body: blanked ? '' : post.body,
+    image: blanked ? null : toImageUrl(post.image),
     kind: post.kind,
     pinned: post.pinned,
     createdAt: post.createdAt.toISOString(),
     editedAt: post.editedAt ? post.editedAt.toISOString() : null,
-    deleted,
-    canEdit: isAuthor && isMember && !deleted, // edit is author-only (owner/mod excluded)
-    canDelete: canManage && !deleted,
-    canRestore: canManage && deleted,
+    deleted: authorTombstoned || moderationRemoved,
+    canEdit: isAuthor && isMember && !blanked, // edit is author-only (owner/mod excluded)
+    canDelete: canManage && !blanked,
+    canRestore: canManage && authorTombstoned && !moderationRemoved,
     canViewHistory: canManage && post.editedAt != null,
     reactions: toReactionSummaries(reactionRows, viewerId),
     replies,
     replyCount: replies.length,
+    moderationRemoved,
+    moderationHidden,
   };
 }
 

@@ -48,6 +48,22 @@ export class ConversationsController {
     return this.messagingService.listConversations(user.userId);
   }
 
+  /**
+   * GET /conversations/unread-count — the single number for the nav DM badge,
+   * so the badge never pulls the whole inbox app-wide on every route. Mirrors
+   * GET /notifications/unread-count. A static segment declared before the
+   * `:id/*` routes below, so it can never be captured as an `:id`.
+   */
+  @Get('unread-count')
+  async unreadCount(
+    @CurrentUser() user: CurrentUserData,
+  ): Promise<{ count: number }> {
+    const count = await this.messagingService.unreadConversationCount(
+      user.userId,
+    );
+    return { count };
+  }
+
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Post()
   create(

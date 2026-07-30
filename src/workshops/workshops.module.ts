@@ -30,6 +30,5 @@ import { WorkshopsService } from './workshops.service';
   ],
   controllers: [WorkshopsController],
   providers: [WorkshopsService, WorkshopRsvpsService],
-  exports: [WorkshopsService, WorkshopRsvpsService],
 })
 export class WorkshopsModule {}

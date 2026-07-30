@@ -21,7 +21,7 @@ export class DsarRequest {
   @Column({ type: 'uuid' })
   userId: string;
 
-  @Index({ unique: true })
+  @Index('UQ_dsar_request_reference', { unique: true })
   @Column({ type: 'varchar' })
   reference: string;
 

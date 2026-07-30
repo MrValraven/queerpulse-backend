@@ -4,7 +4,13 @@ import { Public } from '../auth/decorators/public.decorator';
 import { Feature } from '../common/feature.decorator';
 import { CreateJoinRequestDto } from './dto/create-join-request.dto';
 import { HousingService } from './housing.service';
-import { ApiTags } from '@nestjs/swagger';
+import {
+  ApiCreatedResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 
 /**
  * Public co-op directory. `coops` is a static segment declared before the
@@ -32,6 +38,8 @@ export class HousingController {
 
   @Public()
   @Get('coops')
+  @ApiOperation({ summary: 'List published co-ops in the public directory' })
+  @ApiOkResponse({ description: 'All published co-ops.' })
   listCoops() {
     return this.housing.listPublished();
   }
@@ -42,6 +50,9 @@ export class HousingController {
   @Public()
   @Throttle({ default: { limit: 5, ttl: seconds(60) } })
   @Post('coops/:slug/join-requests')
+  @ApiOperation({ summary: 'Submit a join request to a co-op (anonymous allowed)' })
+  @ApiCreatedResponse({ description: 'The created join request.' })
+  @ApiNotFoundResponse({ description: 'No co-op with that slug.' })
   submitJoinRequest(
     @Param('slug') slug: string,
     @Body() dto: CreateJoinRequestDto,

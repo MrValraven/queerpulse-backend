@@ -49,6 +49,18 @@ const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   [NotificationType.EventInvite]: 'inviterId',
   [NotificationType.Mention]: 'actorId',
   [NotificationType.ForumReply]: 'actorId',
+  // Member-driven coverage-sweep types. The system-driven ones
+  // (JoinRequestApproved/Declined, ListingApproved, ReportResolved,
+  // AppealResolved, RoadmapStatus) carry no actor — the platform is telling
+  // you about your own status — so they are intentionally absent here and
+  // resolve to `actor: null`, exactly like PromotedToMember/WaitlistPromoted.
+  [NotificationType.EventRsvp]: 'actorId',
+  [NotificationType.CommunityReply]: 'actorId',
+  [NotificationType.ForumThreadReply]: 'actorId',
+  [NotificationType.JoinRequestReceived]: 'actorId',
+  [NotificationType.JobApplication]: 'actorId',
+  [NotificationType.InviteAccepted]: 'actorId',
+  [NotificationType.ListingReview]: 'actorId',
 };
 
 /** The acting member's user id for a notification, or `null` when its type

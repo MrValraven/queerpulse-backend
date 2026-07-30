@@ -8,10 +8,17 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { PushSubscribeDto } from './dto/push-subscribe.dto';
 import { PushUnsubscribeDto } from './dto/push-unsubscribe.dto';
 import { PushService } from './push.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiCookieAuth,
+  ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 @ApiTags('Push Notifications')
-@ApiCookieAuth()
+@ApiCookieAuth('access_token')
 @Controller('push')
 @UseGuards(ActiveMemberGuard)
 export class PushController {
@@ -19,6 +26,10 @@ export class PushController {
 
   // A device (re)subscribes rarely; a modest cap keeps the endpoint from being
   // used to churn subscription rows without disrupting legitimate use.
+  @ApiOperation({ summary: 'Register a Web Push subscription for the caller' })
+  @ApiCreatedResponse({ description: 'The subscription was saved (`{ ok: true }`).' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Post('subscribe')
   async subscribe(
@@ -30,6 +41,10 @@ export class PushController {
     return { ok: true };
   }
 
+  @ApiOperation({ summary: 'Remove a Web Push subscription for the caller' })
+  @ApiCreatedResponse({ description: 'The subscription was removed (`{ ok: true }`).' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Post('unsubscribe')
   async unsubscribe(

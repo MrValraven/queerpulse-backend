@@ -4,7 +4,14 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminOverviewService } from './admin-overview.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiCookieAuth,
+  ApiForbiddenResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 /**
  * Read-only admin dashboard overview: platform-wide stats, triage counts,
@@ -15,11 +22,15 @@ import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 @UseGuards(ActiveMemberGuard, RolesGuard)
 @Roles(UserRole.Admin)
 @ApiTags('Admin — Overview')
-@ApiCookieAuth()
+@ApiCookieAuth('access_token')
+@ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+@ApiForbiddenResponse({ description: 'Requires the admin role.' })
 @Controller('admin/overview')
 export class AdminOverviewController {
   constructor(private readonly adminOverview: AdminOverviewService) {}
 
+  @ApiOperation({ summary: 'Get the admin dashboard overview.' })
+  @ApiOkResponse({ description: 'The dashboard overview.' })
   @Get()
   getOverview() {
     return this.adminOverview.getOverview();

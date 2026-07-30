@@ -10,6 +10,8 @@ import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { MessagingService } from '../messaging/messaging.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import {
   DEFAULT_LIST_LIMIT,
   normalizePage,
@@ -212,6 +214,7 @@ export class ListingsService {
     private readonly reviews: Repository<ListingReview>,
     private readonly dataSource: DataSource,
     private readonly messaging: MessagingService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async create(ownerId: string, dto: CreateListingDto): Promise<ListingDTO> {
@@ -338,8 +341,29 @@ export class ListingsService {
   // narrower transition graph in the spec's contract.
   async setStatus(ref: string, status: ListingStatus): Promise<ListingDTO> {
     const listing = await this.loadOr404(ref);
+    const wasLive = listing.status === ListingStatus.Live;
     listing.status = status;
     const saved = await this.listings.save(listing);
+    // Approval = a submitted listing going Live. Notify the submitter once, on
+    // the transition into Live (never on a re-save of an already-live listing).
+    // No actor: the platform is telling the owner about their own listing.
+    // Best-effort; guarded on a real submitter (`ownerId` can be null on
+    // admin-seeded listings). Deep-links to the public detail page via `slug`.
+    if (
+      status === ListingStatus.Live &&
+      !wasLive &&
+      saved.ownerId
+    ) {
+      try {
+        await this.notifications.create(
+          saved.ownerId,
+          NotificationType.ListingApproved,
+          { source: 'listing', listingSlug: saved.slug },
+        );
+      } catch {
+        // Intentionally ignored — the status change already committed.
+      }
+    }
     return this.buildDTO(saved);
   }
 

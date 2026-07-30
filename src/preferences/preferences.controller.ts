@@ -6,7 +6,14 @@ import {
 import { UpdatePublicProfileDto } from './dto/update-public-profile.dto';
 import { UpdateWorkPreferencesDto } from './dto/update-work-preferences.dto';
 import { PreferencesService } from './preferences.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiCookieAuth,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 /**
  * Member safety + visibility switches. Mirrors the frontend contract exactly:
@@ -43,6 +50,11 @@ export class PreferencesController {
 
   // Returns defaults (`verified` / `[]` / `true`) when no row exists yet rather
   // than 404 — see `PreferencesService.loadOrDefault`.
+  @ApiOperation({ summary: "Get the member's work/collaboration preferences." })
+  @ApiOkResponse({
+    description: 'The work preferences (normalised defaults when none set).',
+  })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Get('work-preferences')
   getWorkPreferences(@CurrentUser() user: CurrentUserData) {
     return this.preferencesService.getWorkPreferences(user.userId);
@@ -50,6 +62,10 @@ export class PreferencesController {
 
   // Full replace, echoing the persisted state back so the client renders what
   // was actually stored (normalised) rather than what it optimistically sent.
+  @ApiOperation({ summary: "Replace the member's work/collaboration preferences." })
+  @ApiOkResponse({ description: 'The persisted, normalised work preferences.' })
+  @ApiBadRequestResponse({ description: 'Validation failed.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Put('work-preferences')
   updateWorkPreferences(
     @CurrentUser() user: CurrentUserData,
@@ -60,11 +76,18 @@ export class PreferencesController {
 
   // Defaults to `{ enabled: false }` when no row exists — off unless the member
   // has said otherwise.
+  @ApiOperation({ summary: "Get the member's public-profile visibility setting." })
+  @ApiOkResponse({ description: 'The public-profile setting (defaults to off).' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Get('public-profile')
   getPublicProfile(@CurrentUser() user: CurrentUserData) {
     return this.preferencesService.getPublicProfile(user.userId);
   }
 
+  @ApiOperation({ summary: "Replace the member's public-profile visibility setting." })
+  @ApiOkResponse({ description: 'The persisted public-profile setting.' })
+  @ApiBadRequestResponse({ description: 'Validation failed.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Put('public-profile')
   updatePublicProfile(
     @CurrentUser() user: CurrentUserData,

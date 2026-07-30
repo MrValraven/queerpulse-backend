@@ -122,9 +122,9 @@ export class InvitesService {
    * Two deliberate differences from `createInvite`:
    *
    * 1. The monthly quota is skipped. This is not the admin spending a personal
-   *    invite, and with `INVITE_MONTHLY_QUOTA` defaulting to 1 an admin would
-   *    otherwise be unable to clear the queue past their first approval of the
-   *    month.
+   *    invite, and with `INVITE_MONTHLY_QUOTA` defaulting to 5 an admin would
+   *    otherwise be unable to clear the queue past their first few approvals of
+   *    the month.
    * 2. There is no code-collision retry loop. A 23505 inside someone else's
    *    transaction has already aborted it, so retrying would just issue
    *    statements against a poisoned transaction. `generateUniqueCode` has

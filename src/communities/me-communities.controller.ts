@@ -6,7 +6,13 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { CommunitiesService } from './communities.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiCookieAuth,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 /**
  * The caller's own community memberships. Split out of
@@ -18,6 +24,7 @@ import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 @Feature('communities')
 @ApiTags('Communities')
 @ApiCookieAuth()
+@ApiUnauthorizedResponse({ description: 'Not authenticated.' })
 @Controller('me/communities')
 @UseGuards(ActiveMemberGuard)
 export class MeCommunitiesController {
@@ -30,6 +37,13 @@ export class MeCommunitiesController {
    * this endpoint replaces.
    */
   @Get()
+  @ApiOperation({
+    summary: "List the caller's own community memberships (full, unpaginated).",
+  })
+  @ApiOkResponse({
+    description:
+      "A bare array of the caller's memberships ({ slug, name, role, joinedAt }).",
+  })
   list(@CurrentUser() user: CurrentUserData) {
     return this.communitiesService.myCommunities(user.userId);
   }

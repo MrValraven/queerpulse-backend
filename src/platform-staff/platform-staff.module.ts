@@ -7,6 +7,5 @@ import { PlatformStaffService } from './platform-staff.service';
   imports: [UsersModule],
   controllers: [PlatformStaffController],
   providers: [PlatformStaffService],
-  exports: [PlatformStaffService],
 })
 export class PlatformStaffModule {}

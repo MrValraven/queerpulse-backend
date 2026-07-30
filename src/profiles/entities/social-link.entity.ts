@@ -1,4 +1,10 @@
-import { Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+} from 'typeorm';
 
 @Entity('social_links')
 export class SocialLink {
@@ -17,4 +23,7 @@ export class SocialLink {
 
   @Column({ type: 'int', default: 0 })
   position: number;
+
+  @CreateDateColumn({ type: 'timestamptz' })
+  createdAt: Date;
 }

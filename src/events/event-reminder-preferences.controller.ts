@@ -1,5 +1,11 @@
 import { Body, Controller, Get, Put, UseGuards } from '@nestjs/common';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiCookieAuth,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 import {
   CurrentUser,
   CurrentUserData,
@@ -18,7 +24,10 @@ import { UpdateReminderPreferencesDto } from './dto/update-reminder-preferences.
  * safety control), matching the other `/me/*` feature routes.
  */
 @ApiTags('Preferences')
-@ApiCookieAuth()
+@ApiCookieAuth('access_token')
+@ApiUnauthorizedResponse({
+  description: 'Requires an authenticated, active member session.',
+})
 @Controller('me')
 @UseGuards(ActiveMemberGuard)
 export class EventReminderPreferencesController {
@@ -28,11 +37,17 @@ export class EventReminderPreferencesController {
 
   // Returns the default lead (1 day) when no row exists yet rather than 404.
   @Get('event-reminder-preferences')
+  @ApiOperation({ summary: 'Get your event reminder lead time.' })
+  @ApiOkResponse({
+    description: 'The reminder lead time (default when unset).',
+  })
   get(@CurrentUser() user: CurrentUserData) {
     return this.reminderPreferences.get(user.userId);
   }
 
   @Put('event-reminder-preferences')
+  @ApiOperation({ summary: 'Update your event reminder lead time.' })
+  @ApiOkResponse({ description: 'The updated reminder lead time.' })
   update(
     @CurrentUser() user: CurrentUserData,
     @Body() body: UpdateReminderPreferencesDto,

@@ -2,6 +2,7 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Index,
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
@@ -43,6 +44,7 @@ export class CinemaTitle {
   @Column({ type: 'varchar', nullable: true })
   coverImageUrl: string | null;
 
+  @Index('IDX_cinema_titles_status')
   @Column({
     type: 'enum',
     enum: TitleStatus,
@@ -54,9 +56,17 @@ export class CinemaTitle {
   @Column({ type: 'text', nullable: true })
   errorMessage: string | null;
 
+  @Index('UQ_cinema_titles_mux_upload_id', {
+    unique: true,
+    where: '"mux_upload_id" IS NOT NULL',
+  })
   @Column({ type: 'varchar', nullable: true })
   muxUploadId: string | null;
 
+  @Index('UQ_cinema_titles_mux_asset_id', {
+    unique: true,
+    where: '"mux_asset_id" IS NOT NULL',
+  })
   @Column({ type: 'varchar', nullable: true })
   muxAssetId: string | null;
 
@@ -65,9 +75,17 @@ export class CinemaTitle {
 
   // In-flight replacement of a ready title: the new upload/asset live here
   // until video.asset.ready, then swap into the mux_* columns atomically.
+  @Index('UQ_cinema_titles_pending_mux_upload_id', {
+    unique: true,
+    where: '"pending_mux_upload_id" IS NOT NULL',
+  })
   @Column({ type: 'varchar', nullable: true })
   pendingMuxUploadId: string | null;
 
+  @Index('UQ_cinema_titles_pending_mux_asset_id', {
+    unique: true,
+    where: '"pending_mux_asset_id" IS NOT NULL',
+  })
   @Column({ type: 'varchar', nullable: true })
   pendingMuxAssetId: string | null;
 
@@ -75,6 +93,7 @@ export class CinemaTitle {
   // asset ready/errored). Reconciliation cuts stale in-flight titles on THIS,
   // not updated_at — view-count increments bump updated_at and would otherwise
   // hide a title that is genuinely stuck mid-ingest.
+  @Index('IDX_cinema_titles_last_ingest_event_at')
   @Column({ type: 'timestamptz', nullable: true })
   lastIngestEventAt: Date | null;
 
@@ -84,12 +103,14 @@ export class CinemaTitle {
   @Column({ type: 'varchar', nullable: true })
   aspectRatio: string | null;
 
+  @Index('IDX_cinema_titles_published_at')
   @Column({ type: 'timestamptz', nullable: true })
   publishedAt: Date | null;
 
   @Column({ type: 'integer', default: 0 })
   viewCount: number;
 
+  @Index('IDX_cinema_titles_created_by')
   @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
   @JoinColumn({ name: 'created_by' })
   createdBy: User | null;

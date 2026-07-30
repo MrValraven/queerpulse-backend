@@ -23,8 +23,15 @@ export class EventPhoto {
   @Column({ type: 'text' })
   storageKey: string;
 
-  @Column({ type: 'uuid' })
-  uploaderId: string;
+  // Nullable + indexed since
+  // `AddEventPhotoAndFeaturedCommunityForeignKeys1785001300000`: the
+  // `uploader_id` FK is `ON DELETE SET NULL` (which cannot fire on a NOT NULL
+  // column), so an uploader erasing their account NULLs this while the photo
+  // survives. Always non-null at write time (`EventPhotosService`). The
+  // `IDX_event_photos_uploader_id` index backs that SET-NULL column.
+  @Index('IDX_event_photos_uploader_id')
+  @Column({ type: 'uuid', nullable: true })
+  uploaderId: string | null;
 
   @Column({ type: 'varchar', nullable: true })
   caption: string | null;

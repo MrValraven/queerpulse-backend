@@ -198,4 +198,60 @@ export class MentionNotificationService {
       // Intentionally ignored — best-effort, same as `notify()` above.
     }
   }
+
+  /**
+   * Best-effort "someone replied to your thread" notification, for a *top-level*
+   * forum reply (no `parentPostId`) — the thread's original author. Distinct
+   * from `notifyParentReply` (a reply nested under a specific comment) and from
+   * `Mention` (an `@`-tag). Skips self-replies and never throws.
+   *
+   * The caller passes the set of user ids `notify()` already created a mention
+   * for so a thread author who was also `@`-mentioned in the same reply isn't
+   * notified twice — mirrors `ForumPostsService.reply`'s parent-reply guard.
+   */
+  async notifyThreadReply(
+    threadAuthorUserId: string,
+    replyAuthorUserId: string,
+    payloadBase: Record<string, unknown>,
+  ): Promise<void> {
+    if (threadAuthorUserId === replyAuthorUserId) {
+      return;
+    }
+    try {
+      await this.notifications.create(
+        threadAuthorUserId,
+        NotificationType.ForumThreadReply,
+        payloadBase,
+        replyAuthorUserId,
+      );
+    } catch {
+      // Intentionally ignored — best-effort, same as `notify()` above.
+    }
+  }
+
+  /**
+   * Best-effort "someone replied to your post" notification for a community
+   * post's author, fired on every community reply (nested or flat). Distinct
+   * from `Mention`; skips self-replies and never throws. Same de-dupe contract
+   * as `notifyThreadReply` — the caller drops an author already `@`-mentioned.
+   */
+  async notifyPostReply(
+    postAuthorUserId: string,
+    replyAuthorUserId: string,
+    payloadBase: Record<string, unknown>,
+  ): Promise<void> {
+    if (postAuthorUserId === replyAuthorUserId) {
+      return;
+    }
+    try {
+      await this.notifications.create(
+        postAuthorUserId,
+        NotificationType.CommunityReply,
+        payloadBase,
+        replyAuthorUserId,
+      );
+    } catch {
+      // Intentionally ignored — best-effort, same as `notify()` above.
+    }
+  }
 }

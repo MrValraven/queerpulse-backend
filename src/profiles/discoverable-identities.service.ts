@@ -86,6 +86,7 @@ export class DiscoverableIdentitiesService {
     ];
     if (rejected.length) {
       throw new UnprocessableEntityException({
+        code: 'IDENTITY_NOT_DECLARED',
         reason: 'not-declared',
         identities: rejected,
         message:

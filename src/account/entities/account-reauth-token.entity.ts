@@ -20,7 +20,7 @@ export class AccountReauthToken {
   @Column({ type: 'uuid' })
   userId: string;
 
-  @Index({ unique: true })
+  @Index('UQ_account_reauth_token_token', { unique: true })
   @Column({ type: 'varchar' })
   token: string;
 

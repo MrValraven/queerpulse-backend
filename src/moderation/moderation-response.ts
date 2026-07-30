@@ -212,6 +212,26 @@ export interface AppealDTO {
   status: AppealStatus;
 }
 
+// `POST /appeals` response — the member-facing acknowledgement. Deliberately
+// NARROWER than `AppealDTO` (the moderator queue view): the member who just
+// filed gets back only their own appeal's id, its status, and when it was
+// filed. It leaks none of the enriched moderation context — the resolved
+// `actionId`/`reportId`, the appellant handle, the original moderator's name —
+// which belongs to the review side, not the person under review.
+export interface SubmittedAppealDTO {
+  id: string;
+  status: AppealStatus;
+  createdAt: string;
+}
+
+export function toSubmittedAppealDTO(appeal: Appeal): SubmittedAppealDTO {
+  return {
+    id: appeal.id,
+    status: appeal.status,
+    createdAt: appeal.createdAt.toISOString(),
+  };
+}
+
 export function toAppealDTO(
   appeal: Appeal,
   appellant: AppealAppellant,

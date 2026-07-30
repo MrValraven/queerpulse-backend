@@ -89,6 +89,14 @@ export interface ForumPostViewer {
   isModerator: boolean;
 }
 
+// A moderator takedown on this post, as the read path resolved it from the
+// shared `content_moderation` table. Optional: callers that don't consult
+// moderation state (create/vote/edit echoes) leave it undefined = untouched.
+export interface ForumPostModeration {
+  hidden: boolean;
+  removed: boolean;
+}
+
 export interface ForumPostResponse {
   id: string;
   threadId: string;
@@ -104,6 +112,13 @@ export interface ForumPostResponse {
   canDelete: boolean;
   canRestore: boolean;
   canViewHistory: boolean;
+  // A moderator `remove_content` takedown. Distinct from `deleted` (which also
+  // covers an author's own tombstone) so staff/appeals can tell the two apart;
+  // the frontend renders both as "[removed]".
+  moderationRemoved: boolean;
+  // A moderator `hide_content` takedown. Only ever `true` in a moderator's own
+  // view — members never receive a hidden post (it is filtered out upstream).
+  moderationHidden: boolean;
 }
 
 export function toForumPostResponse(
@@ -111,25 +126,37 @@ export function toForumPostResponse(
   author: MemberRef | null,
   myVote: number,
   viewer: ForumPostViewer,
+  moderation?: ForumPostModeration,
 ): ForumPostResponse {
-  const deleted = post.deletedAt != null;
+  const authorTombstoned = post.deletedAt != null;
+  const moderationRemoved = moderation?.removed ?? false;
+  const moderationHidden = moderation?.hidden ?? false;
+  // A removed post renders exactly like an author tombstone (empty body,
+  // hidden author). Hiding the body of a merely-hidden post too keeps a
+  // moderator's view from leaking content a member can't see if the flag is
+  // ever surfaced verbatim.
+  const blanked = authorTombstoned || moderationRemoved || moderationHidden;
   const isAuthor = post.authorId === viewer.userId;
   const canModerate = isAuthor || viewer.isModerator;
   return {
     id: post.id,
     threadId: post.threadId,
     parentPostId: post.parentPostId ?? null,
-    author: deleted ? DELETED_AUTHOR : toAuthorSummary(author),
-    body: deleted ? '' : post.body,
+    author: blanked ? DELETED_AUTHOR : toAuthorSummary(author),
+    body: blanked ? '' : post.body,
     voteCount: post.voteCount,
     myVote,
     createdAt: post.createdAt.toISOString(),
     editedAt: post.editedAt ? post.editedAt.toISOString() : null,
-    deleted,
-    canEdit: isAuthor && !deleted, // edit is author-only
-    canDelete: canModerate && !deleted,
-    canRestore: canModerate && deleted,
+    deleted: authorTombstoned || moderationRemoved,
+    canEdit: isAuthor && !blanked, // edit is author-only
+    canDelete: canModerate && !blanked,
+    // Only an author's own tombstone is restorable through the forum route; a
+    // moderator takedown is lifted through the moderation/appeal path, not here.
+    canRestore: canModerate && authorTombstoned && !moderationRemoved,
     canViewHistory: canModerate && post.editedAt != null,
+    moderationRemoved,
+    moderationHidden,
   };
 }
 

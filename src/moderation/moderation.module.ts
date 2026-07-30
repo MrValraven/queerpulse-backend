@@ -2,11 +2,14 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
 import { AuthModule } from '../auth/auth.module';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { ReportsModule } from '../reports/reports.module';
 import { UsersModule } from '../users/users.module';
 import { Appeal } from './entities/appeal.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
 import { AccountEnforcementService } from './account-enforcement.service';
+import { AppealsController } from './appeals.controller';
 import { ModAuditService } from './mod-audit.service';
 import { ModerationController } from './moderation.controller';
 import { ModerationService } from './moderation.service';
@@ -35,8 +38,20 @@ import { ModerationService } from './moderation.service';
     // nothing imports `ModerationModule` except `app.module.ts`, and
     // `AuthModule`'s own imports never reach moderation. No `forwardRef`.
     AuthModule,
+    // `ContentModerationService.applyAction` — a `hide_content`/`remove_content`
+    // action now writes the target content's takedown state in the SAME
+    // transaction as the report status + audit row, closing the P3 gap where
+    // those actions recorded an audit entry but left the content live.
+    ContentModerationModule,
+    // `NotificationsService` — tell a reporter their report was resolved, and
+    // an appellant their appeal was decided. `NotificationsModule` imports only
+    // `SocialModule`; nothing there reaches `ModerationModule`, so no cycle.
+    NotificationsModule,
   ],
-  controllers: [ModerationController],
+  // `AppealsController` (member-facing `POST /appeals`) shares `ModerationService`
+  // with `ModerationController` (the mod/admin queue + review), so submitted
+  // appeals land in the very same table the review path reads.
+  controllers: [ModerationController, AppealsController],
   // The two extracted concerns are registered so Nest owns them as singletons
   // and injects them into `ModerationService`. Nothing outside this module
   // consumes them (only `ModerationService` does), so they are not exported.

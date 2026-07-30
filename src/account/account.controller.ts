@@ -27,19 +27,38 @@ import { RequestDeletionDto } from './dto/request-deletion.dto';
 import { RequestExportDto } from './dto/request-export.dto';
 import { SubmitDsarDto } from './dto/submit-dsar.dto';
 import { UpdateEmailPreferenceDto } from './dto/update-email-preferences.dto';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiConflictResponse,
+  ApiCookieAuth,
+  ApiCreatedResponse,
+  ApiNoContentResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 // No ActiveMemberGuard: account lifecycle actions (reauth, deactivate,
 // deletion, export, DSAR, sessions, email preferences) must remain reachable
 // by a pending member, same as `consent`/`notifications`.
 @ApiTags('Account')
-@ApiCookieAuth()
+@ApiCookieAuth('access_token')
 @Controller('account')
 export class AccountController {
   private readonly logger = new Logger(AccountController.name);
 
   constructor(private readonly accountService: AccountService) {}
 
+  @ApiOperation({
+    summary: 'Confirm a recent re-authentication and mint a step-up token.',
+  })
+  @ApiCreatedResponse({
+    description: 'Step-up re-authentication token issued.',
+  })
+  @ApiBadRequestResponse({ description: 'Malformed request body.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Post('reauth')
   reauth(
     @CurrentUser() user: CurrentUserData,
@@ -49,11 +68,27 @@ export class AccountController {
     return this.accountService.reauth(user.userId);
   }
 
+  @ApiOperation({ summary: 'Deactivate (reversibly hide) the account.' })
+  @ApiCreatedResponse({ description: 'Account deactivated.' })
+  @ApiBadRequestResponse({ description: 'Malformed request body.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not authenticated, or step-up re-authentication required.',
+  })
+  @ApiNotFoundResponse({ description: 'User not found.' })
   @Post('deactivate')
   deactivate(@CurrentUser() user: CurrentUserData, @Body() dto: DeactivateDto) {
     return this.accountService.deactivate(user.userId, dto);
   }
 
+  @ApiOperation({ summary: 'Schedule account deletion (opens the grace period).' })
+  @ApiCreatedResponse({ description: 'Deletion request scheduled.' })
+  @ApiBadRequestResponse({ description: 'Malformed request body.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not authenticated, or step-up re-authentication required.',
+  })
+  @ApiConflictResponse({
+    description: 'A deletion request is already scheduled.',
+  })
   @Post('deletion-request')
   requestDeletion(
     @CurrentUser() user: CurrentUserData,
@@ -62,11 +97,20 @@ export class AccountController {
     return this.accountService.requestDeletion(user.userId, dto);
   }
 
+  @ApiOperation({
+    summary: 'Get the pending deletion request, or null if none.',
+  })
+  @ApiOkResponse({ description: 'The pending deletion request, or null.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Get('deletion-request')
   getDeletionRequest(@CurrentUser() user: CurrentUserData) {
     return this.accountService.getDeletionRequest(user.userId);
   }
 
+  @ApiOperation({ summary: 'Cancel the pending deletion request.' })
+  @ApiNoContentResponse({ description: 'Deletion request cancelled.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiNotFoundResponse({ description: 'No pending deletion request.' })
   @Delete('deletion-request')
   @HttpCode(HttpStatus.NO_CONTENT)
   async cancelDeletionRequest(
@@ -75,6 +119,12 @@ export class AccountController {
     await this.accountService.cancelDeletionRequest(user.userId);
   }
 
+  @ApiOperation({ summary: 'Request a personal-data export job.' })
+  @ApiCreatedResponse({ description: 'Export job created and ready.' })
+  @ApiBadRequestResponse({ description: 'Malformed request body.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not authenticated, or step-up re-authentication required.',
+  })
   @Post('export')
   requestExport(
     @CurrentUser() user: CurrentUserData,
@@ -83,6 +133,11 @@ export class AccountController {
     return this.accountService.requestExport(user.userId, dto);
   }
 
+  @ApiOperation({ summary: 'Get the status of a personal-data export job.' })
+  @ApiOkResponse({ description: 'The export job.' })
+  @ApiBadRequestResponse({ description: 'Malformed job id.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiNotFoundResponse({ description: 'Export job not found.' })
   @Get('export/:jobId')
   getExportJob(
     @CurrentUser() user: CurrentUserData,
@@ -101,6 +156,17 @@ export class AccountController {
   // `csv`/`both` serve a `.zip` streamed through `archiver`. `@Res()` is used
   // WITHOUT `passthrough` because the zip path owns the response lifecycle
   // itself — see `streamZip` for why Nest must not try to finish it for us.
+  @ApiOperation({
+    summary: 'Download a ready export as a .json file or a .zip archive.',
+  })
+  @ApiOkResponse({
+    description: 'The export file stream (application/json or application/zip).',
+  })
+  @ApiBadRequestResponse({ description: 'Malformed job id.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiNotFoundResponse({
+    description: 'Export job not found, or its archive is not ready.',
+  })
   @Get('export/:jobId/download')
   async downloadExport(
     @CurrentUser() user: CurrentUserData,
@@ -219,11 +285,20 @@ export class AccountController {
     });
   }
 
+  @ApiOperation({ summary: 'Submit a data-subject access request (DSAR).' })
+  @ApiCreatedResponse({ description: 'DSAR recorded.' })
+  @ApiBadRequestResponse({ description: 'Malformed request body.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not authenticated, or step-up re-authentication required.',
+  })
   @Post('dsar')
   submitDsar(@CurrentUser() user: CurrentUserData, @Body() dto: SubmitDsarDto) {
     return this.accountService.submitDsar(user.userId, dto);
   }
 
+  @ApiOperation({ summary: "List the caller's DSAR requests, newest first." })
+  @ApiOkResponse({ description: 'The DSAR requests.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Get('dsar')
   listDsar(@CurrentUser() user: CurrentUserData) {
     return this.accountService.listDsar(user.userId);
@@ -236,6 +311,9 @@ export class AccountController {
     return cookies?.['refresh_token'];
   }
 
+  @ApiOperation({ summary: "List the caller's active sessions." })
+  @ApiOkResponse({ description: 'The active sessions.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Get('sessions')
   listSessions(@CurrentUser() user: CurrentUserData, @Req() req: Request) {
     return this.accountService.listSessions(
@@ -244,6 +322,11 @@ export class AccountController {
     );
   }
 
+  @ApiOperation({ summary: 'Revoke one session.' })
+  @ApiNoContentResponse({ description: 'Session revoked.' })
+  @ApiBadRequestResponse({ description: 'Malformed session id.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiNotFoundResponse({ description: 'Session not found.' })
   @Delete('sessions/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
   async revokeSession(
@@ -256,6 +339,9 @@ export class AccountController {
   // "Sign out all other sessions": revoke every session EXCEPT the presenting
   // one (identified by the `refresh_token` cookie), so the caller stays signed
   // in on this device. Matches FE `revokeOtherSessions`.
+  @ApiOperation({ summary: 'Sign out all other sessions but this one.' })
+  @ApiNoContentResponse({ description: 'Other sessions revoked.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Delete('sessions')
   @HttpCode(HttpStatus.NO_CONTENT)
   async revokeOtherSessions(
@@ -268,6 +354,9 @@ export class AccountController {
     );
   }
 
+  @ApiOperation({ summary: "Get the caller's email-notification preferences." })
+  @ApiOkResponse({ description: 'The email preferences.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Get('email-preferences')
   getEmailPreferences(@CurrentUser() user: CurrentUserData) {
     return this.accountService.getEmailPreferences(user.userId);
@@ -276,6 +365,10 @@ export class AccountController {
   // PATCH (not POST): this partially updates an existing settings resource and
   // is idempotent. API CONTRACT CHANGE — the frontend must call PATCH
   // /account/email-preferences (was POST).
+  @ApiOperation({ summary: 'Update one email-notification preference.' })
+  @ApiOkResponse({ description: 'The updated email preferences.' })
+  @ApiBadRequestResponse({ description: 'Malformed request body.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Patch('email-preferences')
   updateEmailPreference(
     @CurrentUser() user: CurrentUserData,

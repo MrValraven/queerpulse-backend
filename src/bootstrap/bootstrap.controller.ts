@@ -5,7 +5,13 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { BootstrapService } from './bootstrap.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiCookieAuth,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 /**
  * Session bootstrap — the profile / saved / blocks / mutes slices in one round
@@ -15,12 +21,17 @@ import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
  * `@Feature` flag: like blocks/mutes/saved, this is an always-on primitive.
  */
 @ApiTags('Bootstrap')
-@ApiCookieAuth()
+@ApiCookieAuth('access_token')
 @Controller('me')
 @UseGuards(ActiveMemberGuard)
 export class BootstrapController {
   constructor(private readonly bootstrap: BootstrapService) {}
 
+  @ApiOperation({
+    summary: 'Get the session bootstrap (profile, saved, blocks, mutes).',
+  })
+  @ApiOkResponse({ description: 'The combined session bootstrap payload.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Get('bootstrap')
   get(@CurrentUser() user: CurrentUserData) {
     return this.bootstrap.getForUser(user.userId);

@@ -1,4 +1,4 @@
-import { IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 
 /**
  * Optional server-side filters for the public directory grid. The frontend
@@ -17,4 +17,13 @@ export class ListDirectoryQuery {
   @IsString()
   @MaxLength(120)
   q?: string;
+
+  /**
+   * When `'verified'`, restricts the grid to listings whose
+   * `safeSpaceStatus` is `verified`. Omitting it returns every live listing,
+   * with verified rows boosted first in the default order.
+   */
+  @IsOptional()
+  @IsIn(['verified'])
+  safe?: 'verified';
 }

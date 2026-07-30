@@ -9,7 +9,14 @@ import { PresignRequestDto } from './dto/presign-request.dto';
 import { PresignUploadDto } from './dto/presign-upload.dto';
 import { StorageService, PresignedUpload } from './storage.service';
 import { UserPresignThrottlerGuard } from './user-presign-throttler.guard';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiCookieAuth,
+  ApiCreatedResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 // Presigning mints a short-lived write credential to object storage; rate-limit
 // per user (see UserPresignThrottlerGuard) so a single session can't fan out an
@@ -30,6 +37,10 @@ export class UploadsController {
   // Legacy per-surface route — kept working for compatibility, delegates to
   // the same kind-keyed core as POST /uploads/presign.
   @Post('avatar')
+  @ApiOperation({ summary: 'Presign an avatar image upload (legacy per-surface route)' })
+  @ApiCreatedResponse({ description: 'A short-lived presigned upload credential.' })
+  @ApiBadRequestResponse({ description: 'Unsupported content type or oversize upload.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   avatar(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: PresignUploadDto,
@@ -43,6 +54,10 @@ export class UploadsController {
 
   // Legacy per-surface route — kept working for compatibility.
   @Post('work-image')
+  @ApiOperation({ summary: 'Presign a work-image upload (legacy per-surface route)' })
+  @ApiCreatedResponse({ description: 'A short-lived presigned upload credential.' })
+  @ApiBadRequestResponse({ description: 'Unsupported content type or oversize upload.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   workImage(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: PresignUploadDto,
@@ -58,6 +73,12 @@ export class UploadsController {
   // (queerpulse/src/features/members/api/uploads.api.ts). `byteSize` lets the
   // storage service reject an over-cap upload before minting a signature.
   @Post('presign')
+  @ApiOperation({ summary: 'Presign an image upload, keyed by upload kind' })
+  @ApiCreatedResponse({ description: 'A short-lived presigned upload credential.' })
+  @ApiBadRequestResponse({
+    description: 'Unsupported upload kind or content type, or oversize upload.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   presign(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: PresignRequestDto,

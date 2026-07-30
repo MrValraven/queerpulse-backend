@@ -24,7 +24,16 @@ import { ModActionDto } from './dto/mod-action.dto';
 import { ModBulkActionDto } from './dto/mod-bulk-action.dto';
 import { ReviewAppealDto } from './dto/review-appeal.dto';
 import { ModerationService } from './moderation.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiConflictResponse,
+  ApiCookieAuth,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 // Moderator/admin only. Frontend contract:
 // `queerpulse/src/features/admin/api/moderation.api.ts`.
@@ -37,6 +46,10 @@ export class ModerationController {
   constructor(private readonly moderationService: ModerationService) {}
 
   @Get('reports')
+  @ApiOperation({ summary: 'List the moderation report queue' })
+  @ApiOkResponse({ description: 'The filtered, paginated report queue.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
   listReports(@Query() query: ListModReportsQuery) {
     return this.moderationService.list(query);
   }
@@ -45,11 +58,20 @@ export class ModerationController {
   // swallowed by the `:id` param route (mirrors the usual Nest routing
   // pitfall guard other controllers avoid the same way).
   @Get('reports/audit')
+  @ApiOperation({ summary: 'Get the audit trail for a single report' })
+  @ApiOkResponse({ description: "One report's immutable audit trail." })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
   audit(@Query() query: AuditLogQuery) {
     return this.moderationService.auditTrail(query.reportId);
   }
 
   @Get('reports/:id')
+  @ApiOperation({ summary: 'Get a single report with its detail block' })
+  @ApiOkResponse({ description: 'The report, including the drawer detail.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
+  @ApiNotFoundResponse({ description: 'The report does not exist.' })
   getReport(@Param('id', ParseUUIDPipe) id: string) {
     return this.moderationService.getById(id);
   }
@@ -59,6 +81,10 @@ export class ModerationController {
   // is scoped to a single report via `?reportId=`), so there is no routing
   // conflict between the two.
   @Get('audit')
+  @ApiOperation({ summary: 'Get the global cross-report moderation audit feed' })
+  @ApiOkResponse({ description: 'The platform-wide moderation audit feed.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
   auditFeed(@Query() query: AuditFeedQuery) {
     return this.moderationService.auditFeed(query);
   }
@@ -70,6 +96,10 @@ export class ModerationController {
   // now @Patch, so with `:id` first a PATCH to `/mod/reports/bulk` would match
   // `reports/:id` with id="bulk" and fail the ParseUUIDPipe.
   @Patch('reports/bulk')
+  @ApiOperation({ summary: 'Apply one moderation action to many reports' })
+  @ApiOkResponse({ description: 'The ids of the reports that were updated.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
   bulkUpdateReports(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: ModBulkActionDto,
@@ -78,6 +108,11 @@ export class ModerationController {
   }
 
   @Patch('reports/:id')
+  @ApiOperation({ summary: 'Apply a moderation action to one report' })
+  @ApiOkResponse({ description: 'The updated report.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
+  @ApiNotFoundResponse({ description: 'The report does not exist.' })
   updateReport(
     @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
@@ -95,6 +130,11 @@ export class ModerationController {
   // alternative (admin-only) leaves a mistaken ban standing for however long
   // an admin takes to appear.
   @Patch('users/:userId/suspension')
+  @ApiOperation({ summary: "Lift a member's suspension or ban" })
+  @ApiOkResponse({ description: "The member's id and resulting status." })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
+  @ApiNotFoundResponse({ description: 'The user does not exist.' })
   liftSuspension(
     @CurrentUser() user: CurrentUserData,
     @Param('userId', ParseUUIDPipe) userId: string,
@@ -104,11 +144,21 @@ export class ModerationController {
   }
 
   @Get('appeals')
+  @ApiOperation({ summary: 'List appeals awaiting review' })
+  @ApiOkResponse({ description: 'The appeals queue, newest first.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
   listAppeals() {
     return this.moderationService.listAppeals();
   }
 
   @Patch('appeals/:id')
+  @ApiOperation({ summary: 'Uphold or overturn an appeal' })
+  @ApiOkResponse({ description: 'The decided appeal.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
+  @ApiNotFoundResponse({ description: 'The appeal does not exist.' })
+  @ApiConflictResponse({ description: 'The appeal has already been decided.' })
   reviewAppeal(
     @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,

@@ -26,11 +26,25 @@ import { UpdateEventDto } from './dto/update-event.dto';
 import { EventInvitesService } from './event-invites.service';
 import { EventsService } from './events.service';
 import { RsvpService } from './rsvp.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiConflictResponse,
+  ApiCookieAuth,
+  ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 @Feature('events')
 @ApiTags('Events')
-@ApiCookieAuth()
+@ApiCookieAuth('access_token')
+@ApiUnauthorizedResponse({
+  description: 'Requires an authenticated, active member session.',
+})
 @Controller('events')
 @UseGuards(ActiveMemberGuard)
 export class EventsController {
@@ -41,6 +55,8 @@ export class EventsController {
   ) {}
 
   @Get()
+  @ApiOperation({ summary: 'List events (filtered, paginated).' })
+  @ApiOkResponse({ description: 'Event summaries for the requested filter.' })
   list(@CurrentUser() user: CurrentUserData, @Query() query: ListEventsQuery) {
     return this.eventsService.list(
       user.userId,
@@ -50,16 +66,28 @@ export class EventsController {
   }
 
   @Post()
+  @ApiOperation({ summary: 'Create an event.' })
+  @ApiCreatedResponse({ description: 'The created event detail.' })
+  @ApiBadRequestResponse({ description: 'Invalid schedule (past start, or end before start).' })
   create(@CurrentUser() user: CurrentUserData, @Body() dto: CreateEventDto) {
     return this.eventsService.create(user.userId, dto);
   }
 
   @Get(':slug')
+  @ApiOperation({ summary: 'Get an event by slug.' })
+  @ApiOkResponse({ description: 'The event detail.' })
+  @ApiNotFoundResponse({ description: 'No event with that slug, or not visible to you.' })
   get(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.eventsService.getBySlug(slug, user.userId);
   }
 
   @Patch(':slug')
+  @ApiOperation({ summary: 'Update an event you organize.' })
+  @ApiOkResponse({ description: 'The updated event detail.' })
+  @ApiBadRequestResponse({ description: 'Invalid resulting schedule.' })
+  @ApiForbiddenResponse({ description: 'Only the host or a co-host can update it.' })
+  @ApiNotFoundResponse({ description: 'No event with that slug.' })
+  @ApiConflictResponse({ description: 'A cancelled event cannot be reopened.' })
   update(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
@@ -69,11 +97,20 @@ export class EventsController {
   }
 
   @Post(':slug/cancel')
+  @ApiOperation({ summary: 'Cancel an event you organize.' })
+  @ApiCreatedResponse({ description: 'The cancelled event detail.' })
+  @ApiForbiddenResponse({ description: 'Only the host or a co-host can cancel it.' })
+  @ApiNotFoundResponse({ description: 'No event with that slug.' })
   cancel(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.eventsService.cancel(slug, user.userId);
   }
 
   @Post(':slug/rsvp')
+  @ApiOperation({ summary: 'RSVP to an event (going or maybe).' })
+  @ApiCreatedResponse({ description: 'The resolved RSVP status and waitlist position.' })
+  @ApiBadRequestResponse({ description: 'The event is not open for RSVPs.' })
+  @ApiForbiddenResponse({ description: 'This event is invite-only.' })
+  @ApiNotFoundResponse({ description: 'No event with that slug.' })
   rsvp(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
@@ -83,6 +120,9 @@ export class EventsController {
   }
 
   @Delete(':slug/rsvp')
+  @ApiOperation({ summary: 'Cancel your RSVP to an event.' })
+  @ApiOkResponse({ description: 'Cancellation acknowledged.' })
+  @ApiNotFoundResponse({ description: 'No event with that slug.' })
   cancelRsvp(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
@@ -91,11 +131,19 @@ export class EventsController {
   }
 
   @Get(':slug/attendees')
+  @ApiOperation({ summary: "List an event's attendees." })
+  @ApiOkResponse({ description: 'The visible attendee views.' })
+  @ApiNotFoundResponse({ description: 'No event with that slug, or not visible to you.' })
   attendees(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.eventsService.attendees(slug, user.userId);
   }
 
   @Post(':slug/cohosts')
+  @ApiOperation({ summary: 'Add a co-host to an event you organize.' })
+  @ApiCreatedResponse({ description: 'The co-host was added (idempotent).' })
+  @ApiBadRequestResponse({ description: 'Co-hosts must be active members.' })
+  @ApiForbiddenResponse({ description: 'Only the host or a co-host can do that.' })
+  @ApiNotFoundResponse({ description: 'No such event or member.' })
   addCohost(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
@@ -105,6 +153,10 @@ export class EventsController {
   }
 
   @Delete(':slug/cohosts/:cohostSlug')
+  @ApiOperation({ summary: 'Remove a co-host from an event you organize.' })
+  @ApiOkResponse({ description: 'The co-host was removed (idempotent).' })
+  @ApiForbiddenResponse({ description: 'Only the host or a co-host can do that.' })
+  @ApiNotFoundResponse({ description: 'No event with that slug.' })
   removeCohost(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
@@ -114,6 +166,11 @@ export class EventsController {
   }
 
   @Post(':slug/invites')
+  @ApiOperation({ summary: 'Invite members to an event you organize.' })
+  @ApiCreatedResponse({ description: 'How many invites were created.' })
+  @ApiBadRequestResponse({ description: 'Only a published event can send invites.' })
+  @ApiForbiddenResponse({ description: 'Only the host or a co-host can invite.' })
+  @ApiNotFoundResponse({ description: 'No event with that slug.' })
   invite(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
@@ -125,18 +182,28 @@ export class EventsController {
 
 @Feature('events')
 @ApiTags('Events')
-@ApiCookieAuth()
+@ApiCookieAuth('access_token')
+@ApiUnauthorizedResponse({
+  description: 'Requires an authenticated, active member session.',
+})
 @Controller('event-invites')
 @UseGuards(ActiveMemberGuard)
 export class EventInvitesController {
   constructor(private readonly eventInvitesService: EventInvitesService) {}
 
   @Get()
+  @ApiOperation({ summary: 'List your pending event invites.' })
+  @ApiOkResponse({ description: 'Your pending event invites.' })
   listMine(@CurrentUser() user: CurrentUserData) {
     return this.eventInvitesService.listMyPendingInvites(user.userId);
   }
 
   @Patch(':id')
+  @ApiOperation({ summary: 'Respond to an event invite (accept or decline).' })
+  @ApiOkResponse({ description: 'The invite id and its new status.' })
+  @ApiForbiddenResponse({ description: 'This invite is not addressed to you.' })
+  @ApiNotFoundResponse({ description: 'Invite not found.' })
+  @ApiConflictResponse({ description: 'This invite has already been answered.' })
   respond(
     @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,

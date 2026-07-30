@@ -6,7 +6,6 @@ import {
   IsIn,
   IsLatitude,
   IsLongitude,
-  IsObject,
   IsOptional,
   IsString,
   MaxLength,
@@ -15,6 +14,7 @@ import {
 } from 'class-validator';
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 import { IsSafeExternalUrl } from '../../common/validators/is-safe-external-url.decorator';
+import { LISTING_CATEGORY_SLUGS } from '../listing-categories';
 
 // Fixed-shape nested pieces of `ListingDraft` — each maps 1:1 to a frontend
 // interface (`WitLine`, `ListingDraft["social"]`, the `PhotoKey`-keyed photo
@@ -66,12 +66,40 @@ export class ListingPhotoAltSetDto {
 }
 
 /**
+ * One weekday's opening hours — mirrors the entity's `ListingDayHours`
+ * (`open`/`from`/`to`). `from`/`to` are `HH:MM` strings (or empty when the day
+ * is closed), so they are validated as short strings rather than a strict time
+ * format, matching how the frontend wizard emits partial/blank times.
+ */
+export class ListingDayHoursDto {
+  @IsBoolean() open: boolean;
+  @IsOptional() @IsString() @MaxLength(20) from?: string;
+  @IsOptional() @IsString() @MaxLength(20) to?: string;
+}
+
+/**
+ * The `hours` map — one `ListingDayHoursDto` per weekday, keyed by the
+ * frontend's `DAYS` ids (`Mon`..`Sun`, capitalised — see
+ * `database/seed-safe-spaces.ts`). Fixed-key shape on purpose (same precedent
+ * as `ListingPhotoSetDto`): the global `forbidNonWhitelisted` ValidationPipe
+ * then rejects any stray/unknown day key instead of persisting it to jsonb.
+ */
+export class ListingHoursDto {
+  @IsOptional() @ValidateNested() @Type(() => ListingDayHoursDto) Mon?: ListingDayHoursDto;
+  @IsOptional() @ValidateNested() @Type(() => ListingDayHoursDto) Tue?: ListingDayHoursDto;
+  @IsOptional() @ValidateNested() @Type(() => ListingDayHoursDto) Wed?: ListingDayHoursDto;
+  @IsOptional() @ValidateNested() @Type(() => ListingDayHoursDto) Thu?: ListingDayHoursDto;
+  @IsOptional() @ValidateNested() @Type(() => ListingDayHoursDto) Fri?: ListingDayHoursDto;
+  @IsOptional() @ValidateNested() @Type(() => ListingDayHoursDto) Sat?: ListingDayHoursDto;
+  @IsOptional() @ValidateNested() @Type(() => ListingDayHoursDto) Sun?: ListingDayHoursDto;
+}
+
+/**
  * POST /listings body — the wizard's full draft, verbatim
  * (`CreateListingDto = ListingDraft` on the frontend; see `listings.api.ts`).
- * `hours` is a `Record<string, DayHours>` keyed by the frontend's `DAYS` ids,
- * which aren't fixed here — validated loosely (`IsObject`) and passed through
- * as-is, matching the "no presentation fields" precedent for opaque
- * passthrough blobs.
+ * `hours` is the per-weekday opening-hours map (`ListingHoursDto`), the one
+ * request-body shape that used to be persisted to jsonb with only a loose
+ * `@IsObject()` check.
  */
 export class CreateListingDto {
   @IsOptional() @IsIn(['claim', 'suggest', '']) path?: string;
@@ -82,8 +110,7 @@ export class CreateListingDto {
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(2)
-  @IsString({ each: true })
-  @MaxLength(80, { each: true })
+  @IsIn(LISTING_CATEGORY_SLUGS, { each: true })
   cats?: string[];
 
   @IsOptional() @IsString() @MaxLength(120) hood?: string;
@@ -130,7 +157,10 @@ export class CreateListingDto {
   @IsLongitude()
   longitude?: number;
 
-  @IsOptional() @IsObject() hours?: Record<string, unknown>;
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ListingHoursDto)
+  hours?: ListingHoursDto;
 
   @IsOptional() @IsString() @MaxLength(300) hoursNote?: string;
 

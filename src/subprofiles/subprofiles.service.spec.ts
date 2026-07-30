@@ -80,6 +80,7 @@ function makeItem(overrides: Partial<SubprofileItem> = {}): SubprofileItem {
     isFeatured: false,
     collaborators: [],
     position: 0,
+    createdAt: new Date(),
     ...overrides,
   };
 }
@@ -96,6 +97,7 @@ function makeSocialLink(
     platform: 'instagram',
     urlOrHandle: '@nightform',
     position: 0,
+    createdAt: new Date(),
     ...overrides,
   };
 }

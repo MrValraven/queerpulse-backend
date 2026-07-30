@@ -2,19 +2,31 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { Connection } from '../connections/entities/connection.entity';
+import { ConsentRecord } from '../consent/entities/consent-record.entity';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
 import { Event } from '../events/entities/event.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
+import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
+import { Listing } from '../listings/entities/listing.entity';
 import { Message } from '../messaging/entities/message.entity';
+import { Notification } from '../notifications/entities/notification.entity';
 import { Activity } from '../profiles/entities/activity.entity';
+import { SavedItem } from '../saved/entities/saved-item.entity';
+import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import { AccountDeletionProcessorService } from './account-deletion-processor.service';
 import { AccountExportService } from './account-export.service';
+import { AccountRetentionService } from './account-retention.service';
 import { AccountController } from './account.controller';
 import { AccountService } from './account.service';
+import {
+  DATA_EXPORT_CONTRIBUTORS,
+  DataExportContribution,
+} from './data-export-contributor';
+import { NEW_DOMAIN_EXPORT_CONTRIBUTORS } from './data-export-contributors';
 import { AccountDeactivation } from './entities/account-deactivation.entity';
 import { EmailSuppression } from './entities/email-suppression.entity';
 import { AccountReauthToken } from './entities/account-reauth-token.entity';
@@ -56,6 +68,16 @@ import { EmailPreference } from './entities/email-preference.entity';
       Connection,
       Vouch,
       Activity,
+      // Read-only sources for the newer-domain export contributors
+      // (see data-export-contributors.ts). Same cross-module registration
+      // pattern as the entities above — the owning module keeps its own
+      // forFeature, and TypeORM allows the same entity in more than one.
+      Subprofile,
+      Listing,
+      HousingListing,
+      SavedItem,
+      Notification,
+      ConsentRecord,
     ]),
   ],
   controllers: [AccountController],
@@ -65,6 +87,20 @@ import { EmailPreference } from './entities/email-preference.entity';
     // Cron-only; nothing injects it. Registering it here is what starts the
     // daily erasure sweep.
     AccountDeletionProcessorService,
+    // Cron-only; registering it starts the data-export-archive and reauth-token
+    // retention sweeps.
+    AccountRetentionService,
+    // The newer-domain export contributors + the registry token that collects
+    // them. Adding a domain to the Art. 20 archive is exactly: implement a
+    // DataExportContribution and add it here.
+    ...NEW_DOMAIN_EXPORT_CONTRIBUTORS,
+    {
+      provide: DATA_EXPORT_CONTRIBUTORS,
+      useFactory: (
+        ...contributors: DataExportContribution[]
+      ): DataExportContribution[] => contributors,
+      inject: [...NEW_DOMAIN_EXPORT_CONTRIBUTORS],
+    },
   ],
   exports: [AccountService],
 })

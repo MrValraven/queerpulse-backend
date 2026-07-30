@@ -143,6 +143,35 @@ export class EnvironmentVariables {
   @Min(0)
   INVITE_MONTHLY_QUOTA?: number;
 
+  // Retention-cron thresholds (days) and batch sizing. All optional with
+  // production-safe defaults applied in src/config/retention.config.ts;
+  // validated here so a typo (e.g. a non-numeric or zero value) fails fast at
+  // boot instead of silently falling back to a default that masks it.
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  DATA_EXPORT_RETENTION_DAYS?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  NOTIFICATION_RETENTION_DAYS?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  PUSH_SUBSCRIPTION_STALE_DAYS?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  RETENTION_BATCH_SIZE?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  RETENTION_MAX_BATCHES_PER_RUN?: number;
+
   // Optional because it is absent in every environment except during one-time
   // founder bootstrap — absence is the normal, safe state, and it is what makes
   // the genesis endpoints 404.

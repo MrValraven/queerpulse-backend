@@ -1,4 +1,10 @@
-import { Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+} from 'typeorm';
 
 // Mirrors `SocialLink` (main profile) but scoped to a persona: a subprofile
 // owns its own set of social links, independent of the main profile's.
@@ -19,4 +25,7 @@ export class SubprofileSocialLink {
 
   @Column({ type: 'int', default: 0 })
   position: number;
+
+  @CreateDateColumn({ type: 'timestamptz' })
+  createdAt: Date;
 }

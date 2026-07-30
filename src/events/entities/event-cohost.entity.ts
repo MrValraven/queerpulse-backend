@@ -1,4 +1,11 @@
-import { Column, Entity, Index, PrimaryGeneratedColumn, Unique } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+  Unique,
+} from 'typeorm';
 
 @Entity('event_cohosts')
 @Unique('UQ_event_cohosts', ['eventId', 'userId'])
@@ -13,4 +20,7 @@ export class EventCohost {
   @Index('IDX_event_cohosts_user_id')
   @Column({ type: 'uuid' })
   userId: string;
+
+  @CreateDateColumn({ type: 'timestamptz' })
+  createdAt: Date;
 }

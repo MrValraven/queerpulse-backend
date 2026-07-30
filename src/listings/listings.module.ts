@@ -1,7 +1,9 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { Event } from '../events/entities/event.entity';
 import { MessagingModule } from '../messaging/messaging.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { SavedItem } from '../saved/entities/saved-item.entity';
 import { UsersModule } from '../users/users.module';
 import { DirectoryController } from './directory.controller';
@@ -31,6 +33,12 @@ import { ListingsService } from './listings.service';
     // MessagingModule exports MessagingService — delivers a moderator's
     // question to the submitter as a DM (mirrors HousingListingsModule).
     MessagingModule,
+    // `ContentModerationService` — public directory/safe-space reads honour a
+    // moderator `hide_content`/`remove_content` takedown on a business listing.
+    ContentModerationModule,
+    // `NotificationsService` — listing approved (submitter, in `ListingsService`)
+    // and a new review (owner, in `DirectoryService`).
+    NotificationsModule,
   ],
   controllers: [ListingsController, DirectoryController],
   providers: [ListingsService, ListingEditSuggestionsService, DirectoryService],

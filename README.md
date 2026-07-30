@@ -83,7 +83,12 @@ or malformed.
 | `API_URL` | prod | this API's own public origin — see [Object storage](#object-storage--railway-buckets) |
 | `AWS_ENDPOINT_URL` / `AWS_DEFAULT_REGION` / `AWS_S3_BUCKET_NAME` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | prod | Railway Buckets — see [Object storage](#object-storage--railway-buckets) |
 | `MUX_*` | no | video features |
-| `INVITE_MONTHLY_QUOTA` | no | membership tuning |
+| `INVITE_MONTHLY_QUOTA` | no | invites a member may create per calendar month (default `5`) |
+| `GENESIS_EMAIL` | no | one-time first-admin bootstrap; leave **unset** normally — unset it again after the first admin exists |
+| `DATA_EXPORT_RETENTION_DAYS` | no | expire+null data-export archives after N days (default `30`) |
+| `NOTIFICATION_RETENTION_DAYS` | no | delete read notifications after N days (default `90`) |
+| `PUSH_SUBSCRIPTION_STALE_DAYS` | no | prune push subs unused for N days (default `90`) |
+| `RETENTION_BATCH_SIZE` / `RETENTION_MAX_BATCHES_PER_RUN` | no | retention-cron batch sizing (defaults `1000` / `50`) |
 
 ### Database TLS & connection pool
 

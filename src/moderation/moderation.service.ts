@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -8,12 +9,17 @@ import {
   DataSource,
   FindOptionsWhere,
   In,
+  IsNull,
   Not,
   Repository,
   SelectQueryBuilder,
 } from 'typeorm';
 import { AuthService } from '../auth/auth.service';
+import { isUniqueViolation } from '../common/db-errors';
 import { cursorPaginate } from '../common/cursor-pagination';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import {
   Report,
   ReportSeverity,
@@ -29,6 +35,7 @@ import {
   ModReportsTab,
 } from './dto/list-mod-reports.query';
 import { AuditFeedQuery } from './dto/audit-feed.query';
+import { CreateAppealDto } from './dto/create-appeal.dto';
 import { ModActionDto } from './dto/mod-action.dto';
 import { ModBulkActionDto } from './dto/mod-bulk-action.dto';
 import { ReviewAppealDto } from './dto/review-appeal.dto';
@@ -48,11 +55,26 @@ import {
   ModReportedDTO,
   ModReporterDTO,
   ModReportsResponse,
+  SubmittedAppealDTO,
   toAppealDTO,
   toModReportDTO,
+  toSubmittedAppealDTO,
 } from './moderation-response';
 
 const DEFAULT_LIMIT = 20;
+
+// The moderator actions a member can actually appeal — the ones that land on
+// an account or its content. `dismiss`/`escalate`/`shield` and the appeal
+// bookkeeping actions (`appeal_upheld`, `suspension_lifted`, …) are not
+// contestable outcomes, so they never become the target of a fresh appeal.
+const APPEALABLE_ACTIONS = [
+  'warn',
+  'hide_content',
+  'remove_content',
+  'restrict',
+  'suspend',
+  'ban',
+];
 
 // Loose enough to guard `Repository.findOne({ where: { userId: subjectId } })`
 // from a Postgres "invalid input syntax for type uuid" error when a
@@ -82,7 +104,18 @@ export class ModerationService {
     private readonly auth: AuthService,
     private readonly audit: ModAuditService,
     private readonly accountEnforcement: AccountEnforcementService,
+    private readonly contentModeration: ContentModerationService,
+    private readonly notifications: NotificationsService,
   ) {}
+
+  // The two actions whose whole point is to change the target content's
+  // visibility. `hide_content` withholds it from public/member reads;
+  // `remove_content` tombstones it. Recorded in the `content_moderation` state
+  // table, in the same transaction as the report status + audit row.
+  private static readonly CONTENT_ACTIONS = new Set<string>([
+    'hide_content',
+    'remove_content',
+  ]);
 
   // GET /mod/reports — filterable, cursor-paginated queue. `tab` (not
   // `status`, which the frontend never sends — C4) is mapped to a status
@@ -171,6 +204,21 @@ export class ModerationService {
           manager,
         );
 
+        // The takedown itself — enrolled in this same transaction so a
+        // `hide_content`/`remove_content` can never resolve the report and log
+        // an audit entry while leaving the reported content live (the P3 gap).
+        if (ModerationService.CONTENT_ACTIONS.has(dto.action)) {
+          await this.contentModeration.applyAction(manager, {
+            subjectType: report.subjectType,
+            subjectId: report.subjectId,
+            action: dto.action as 'hide_content' | 'remove_content',
+            actorId,
+            reportId: saved.id,
+            reasonCode: dto.reasonCode,
+            note: dto.note,
+          });
+        }
+
         return { saved, suspendedUserId };
       },
     );
@@ -181,6 +229,22 @@ export class ModerationService {
     // member is already locked out with or without this.
     if (suspendedUserId) {
       await this.auth.revokeAllForUser(suspendedUserId);
+    }
+
+    // Tell the reporter their report has been dealt with. Skipped for an
+    // anonymous report (no `reporterId` to reach) and when the acting moderator
+    // is the reporter. No actor — moderation outcomes are the platform's word,
+    // not a member action. Best-effort, post-commit.
+    if (saved.reporterId && saved.reporterId !== actorId) {
+      try {
+        await this.notifications.create(
+          saved.reporterId,
+          NotificationType.ReportResolved,
+          { source: 'report', reportId: saved.id, outcome: saved.status },
+        );
+      } catch {
+        // Intentionally ignored — the report action already committed.
+      }
     }
 
     return this.toRow(saved);
@@ -227,6 +291,18 @@ export class ModerationService {
             dto.duration,
             manager,
           );
+
+          if (ModerationService.CONTENT_ACTIONS.has(dto.action)) {
+            await this.contentModeration.applyAction(manager, {
+              subjectType: report.subjectType,
+              subjectId: report.subjectId,
+              action: dto.action as 'hide_content' | 'remove_content',
+              actorId,
+              reportId: report.id,
+              reasonCode: dto.reasonCode,
+              note: dto.note,
+            });
+          }
         }
         return suspended;
       },
@@ -262,6 +338,142 @@ export class ModerationService {
       take: DEFAULT_LIMIT,
     });
     return this.toAppealRows(rows);
+  }
+
+  // POST /appeals — a member (crucially, possibly a SUSPENDED one, via
+  // `AppealSubmitGuard`) contests a moderation decision taken on them. Resolves
+  // the specific enforcement action being appealed (best-effort), enforces one
+  // open appeal per action, and returns a narrow member-facing acknowledgement.
+  async submitAppeal(
+    appellantUserId: string,
+    dto: CreateAppealDto,
+  ): Promise<SubmittedAppealDTO> {
+    const target = await this.resolveAppealTarget(appellantUserId, dto.actionId);
+
+    // One OPEN (awaiting) appeal at a time. Keyed on the resolved action when
+    // there is one, else on the appellant alone (a cold appeal with no
+    // resolvable action). The `findOne` fast-paths the ordinary case; the
+    // partial unique indexes from `1785003500000` are what actually close the
+    // check-then-insert race, and the `isUniqueViolation` catch below converts
+    // the loser of that race into the same 409.
+    const existing = await this.appeals.findOne({
+      where: {
+        appellantId: appellantUserId,
+        status: AppealStatus.Awaiting,
+        actionId: target?.actionId ?? IsNull(),
+      },
+    });
+    if (existing) {
+      throw new ConflictException(
+        'You already have an appeal awaiting review. A moderator will get to it.',
+      );
+    }
+
+    try {
+      const saved = await this.appeals.save(
+        this.appeals.create({
+          appellantId: appellantUserId,
+          actionId: target?.actionId ?? null,
+          reportId: target?.reportId ?? null,
+          severity: target?.severity ?? ReportSeverity.Medium,
+          community: null,
+          argument: dto.reason,
+          status: AppealStatus.Awaiting,
+        }),
+      );
+      return toSubmittedAppealDTO(saved);
+    } catch (error) {
+      if (
+        isUniqueViolation(error, 'UQ_appeals_open_appellant_action') ||
+        isUniqueViolation(error, 'UQ_appeals_open_appellant_no_action')
+      ) {
+        throw new ConflictException(
+          'You already have an appeal awaiting review. A moderator will get to it.',
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Resolves which enforcement action a member's appeal is really about, so the
+   * appeal lands in the moderator queue with the same context a moderator-side
+   * `AppealDTO` carries (`actionId`/`reportId`/`severity`).
+   *
+   * Two paths:
+   *  - `actionId` supplied — the member deep-linked a specific action. It is
+   *    trusted only after confirming the action is tied to a report ABOUT THIS
+   *    MEMBER (ownership scoping): a member may appeal a decision made against
+   *    themselves, never someone else's. A mismatch is a 403, not a silent
+   *    re-resolve, because the member asked to appeal a specific thing.
+   *  - no `actionId` — the common suspended-member case. Falls back to the most
+   *    recent appealable action against them.
+   *
+   * Returns `null` when nothing resolvable is found (a cold appeal): the appeal
+   * still stands, unlinked, rather than being rejected on a lookup miss.
+   */
+  private async resolveAppealTarget(
+    appellantUserId: string,
+    actionId?: string,
+  ): Promise<{
+    actionId: string;
+    reportId: string;
+    severity: ReportSeverity;
+  } | null> {
+    // Reports about this member are addressed by their slug or their userId
+    // (see `Report.subjectId`'s doc) — match both.
+    const profile = await this.profiles.findOne({
+      where: { userId: appellantUserId },
+    });
+    const memberSubjectIds = profile
+      ? [appellantUserId, profile.slug]
+      : [appellantUserId];
+
+    const reportsAboutMember = await this.reports.find({
+      where: {
+        subjectType: ReportSubjectType.Member,
+        subjectId: In(memberSubjectIds),
+      },
+    });
+    const reportsById = new Map(
+      reportsAboutMember.map((report) => [report.id, report]),
+    );
+
+    if (actionId) {
+      const log = await this.auditLogs.findOne({ where: { id: actionId } });
+      const report =
+        log && log.reportId ? reportsById.get(log.reportId) : undefined;
+      if (!log || !report) {
+        throw new ForbiddenException(
+          'That moderation action is not one you can appeal.',
+        );
+      }
+      return {
+        actionId: log.id,
+        reportId: report.id,
+        severity: report.severity,
+      };
+    }
+
+    if (!reportsById.size) return null;
+
+    const latestAction = await this.auditLogs.findOne({
+      where: {
+        reportId: In([...reportsById.keys()]),
+        action: In(APPEALABLE_ACTIONS),
+      },
+      order: { createdAt: 'DESC' },
+    });
+    if (!latestAction || !latestAction.reportId) return null;
+
+    const report = reportsById.get(latestAction.reportId);
+    if (!report) return null;
+
+    return {
+      actionId: latestAction.id,
+      reportId: report.id,
+      severity: report.severity,
+    };
   }
 
   // PATCH /mod/appeals/:id — uphold or overturn. Also writes an audit log
@@ -330,6 +542,22 @@ export class ModerationService {
       appeal.decision = decision;
       return appeal;
     });
+
+    // Tell the appellant the outcome. Skipped when the appeal has no
+    // account-backed appellant, or when the reviewer is the appellant. No
+    // actor — this is the platform's decision. Best-effort, post-commit. The FE
+    // deep-links to the appeal-outcome page from the `appeal` source.
+    if (saved.appellantId && saved.appellantId !== actorId) {
+      try {
+        await this.notifications.create(
+          saved.appellantId,
+          NotificationType.AppealResolved,
+          { source: 'appeal', appealId: saved.id, outcome: saved.status },
+        );
+      } catch {
+        // Intentionally ignored — the appeal decision already committed.
+      }
+    }
 
     return this.toAppealRow(saved);
   }

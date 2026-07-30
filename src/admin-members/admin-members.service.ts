@@ -1,6 +1,12 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, IsNull, Repository } from 'typeorm';
+import { DataSource, In, IsNull, Repository } from 'typeorm';
 import { toImageUrl } from '../common/image-url';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import {
@@ -15,7 +21,7 @@ import {
   ReportSubjectType,
 } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
-import { User, UserStatus } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { VouchService } from '../vouch/vouch.service';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import {
@@ -23,9 +29,11 @@ import {
   toneFor,
   toAdminMemberCard,
   toAdminMemberDetail,
+  toAdminMemberRole,
   toFlaggedMember,
   AdminMemberDetailDTO,
   AdminMemberListDTO,
+  AdminMemberRoleDTO,
   FlaggedMemberDTO,
   VouchAvatarDTO,
   VouchGraphNodeDTO,
@@ -111,6 +119,7 @@ export class AdminMembersService {
     @InjectRepository(ModAuditLog)
     private readonly modAuditLogs: Repository<ModAuditLog>,
     private readonly vouchService: VouchService,
+    private readonly dataSource: DataSource,
   ) {}
 
   async list(query: ListAdminMembersQuery): Promise<AdminMemberListDTO> {
@@ -148,11 +157,13 @@ export class AdminMembersService {
       topVouchersByVouchee,
       openReportCountByUserId,
       communityNamesByUserId,
+      roleByUserId,
     ] = await Promise.all([
       this.vouchService.getVouchCounts(userIds),
       this.loadTopVouchers(userIds),
       this.loadOpenReportCounts(userIds, slugs),
       this.loadCommunityNames(userIds),
+      this.loadRolesByUserId(userIds),
     ]);
 
     const items = profileRows.map((profileRow) =>
@@ -168,6 +179,7 @@ export class AdminMembersService {
           verified: profileRow.verified,
           joinedAt: profileRow.joinedAt,
         },
+        role: roleByUserId.get(profileRow.userId) ?? UserRole.Member,
         openReportCount: openReportCountByUserId.get(profileRow.userId) ?? 0,
         communities: communityNamesByUserId.get(profileRow.userId) ?? [],
         vouchCount: vouchCountsByUserId.get(profileRow.userId) ?? 0,
@@ -261,6 +273,7 @@ export class AdminMembersService {
     const memberLookup = new MemberLookup(this.profiles);
 
     const [
+      userRow,
       vouchCount,
       outboundVouchCount,
       vouchersReceived,
@@ -268,6 +281,10 @@ export class AdminMembersService {
       communityRows,
       vouchesGiven,
     ] = await Promise.all([
+      this.users.findOne({
+        where: { id: profile.userId },
+        select: ['id', 'role', 'isSystem'],
+      }),
       this.vouchService.getVouchCount(profile.userId),
       this.vouches.count({
         where: { voucherId: profile.userId, withdrawnAt: IsNull() },
@@ -456,6 +473,8 @@ export class AdminMembersService {
         verified: profile.verified,
         joinedAt: profile.joinedAt,
       },
+      role: userRow?.role ?? UserRole.Member,
+      isSystem: userRow?.isSystem ?? false,
       openReportCount,
       vouchCount,
       outboundVouchCount,
@@ -471,6 +490,108 @@ export class AdminMembersService {
         ),
         nodes: graphNodes,
       },
+    });
+  }
+
+  /**
+   * Grant or revoke `moderator` / `admin` on one member — the platform's only
+   * way to make (or unmake) staff without editing the database by hand. The
+   * body carries the target role in full, so this one method covers every
+   * transition.
+   *
+   * Guardrails, all enforced here in the service (not the controller), and the
+   * last-admin check + write done in one transaction so two admins demoting the
+   * last two admins concurrently can't both pass their count read:
+   *  - an admin can never change their OWN role (no accidental self-lockout,
+   *    and no self-promotion games) — `actorUserId` vs. the target;
+   *  - a `isSystem` house account's role is immutable (it is deliberately a
+   *    plain `member` that never rides `RolesGuard`);
+   *  - the LAST admin can never be demoted, or the platform loses every admin
+   *    surface with no way back in.
+   *
+   * The change is recorded in the shared `mod_audit_logs` trail with a NULL
+   * `reportId` (it is not report-driven), mirroring how a lifted suspension is
+   * logged. Such rows intentionally don't surface in the report-filtered audit
+   * feed or a member's report timeline.
+   */
+  async updateRole(
+    actorUserId: string,
+    idOrSlug: string,
+    targetRole: UserRole,
+  ): Promise<AdminMemberRoleDTO> {
+    const where = UUID_RE.test(idOrSlug)
+      ? [{ slug: idOrSlug }, { userId: idOrSlug }]
+      : [{ slug: idOrSlug }];
+    const profile = await this.profiles.findOne({ where });
+    if (!profile) {
+      throw new NotFoundException('Member not found');
+    }
+    const targetUserId = profile.userId;
+
+    if (targetUserId === actorUserId) {
+      throw new ForbiddenException(
+        'You can’t change your own role — ask another admin to do it.',
+      );
+    }
+
+    const appliedRole = await this.dataSource.transaction(async (manager) => {
+      const users = manager.getRepository(User);
+      const targetUser = await users.findOne({
+        where: { id: targetUserId },
+        select: ['id', 'role', 'isSystem'],
+      });
+      if (!targetUser) {
+        throw new NotFoundException('Member not found');
+      }
+
+      if (targetUser.isSystem) {
+        throw new ForbiddenException(
+          'The house account’s role can’t be changed.',
+        );
+      }
+
+      const previousRole = targetUser.role;
+      if (previousRole === targetRole) {
+        // Nothing changed — return without writing an audit row for a no-op.
+        return previousRole;
+      }
+
+      // Demoting an admin: never let the final admin lose the role, or the
+      // platform is locked out of every admin surface. Counted inside the
+      // transaction so a concurrent demotion can't slip past a stale count.
+      if (previousRole === UserRole.Admin && targetRole !== UserRole.Admin) {
+        const adminCount = await users.count({
+          where: { role: UserRole.Admin },
+        });
+        if (adminCount <= 1) {
+          throw new ConflictException(
+            'This is the last admin — promote another member to admin before removing this one.',
+          );
+        }
+      }
+
+      await users.update({ id: targetUserId }, { role: targetRole });
+
+      const auditLogs = manager.getRepository(ModAuditLog);
+      await auditLogs.save(
+        auditLogs.create({
+          reportId: null,
+          actorId: actorUserId,
+          action: 'role_changed',
+          reasonCode: null,
+          note: `${previousRole} → ${targetRole}`,
+          duration: null,
+        }),
+      );
+
+      return targetRole;
+    });
+
+    return toAdminMemberRole({
+      userId: targetUserId,
+      slug: profile.slug,
+      role: appliedRole,
+      isSystem: false,
     });
   }
 
@@ -679,6 +800,23 @@ export class AdminMembersService {
       }
     }
     return communityNamesByUserId;
+  }
+
+  /** Platform role for a page of members, in one query, so the roster can show
+   *  each member's role without an N+1 or joining `user` onto every card. */
+  private async loadRolesByUserId(
+    userIds: string[],
+  ): Promise<Map<string, UserRole>> {
+    const roleByUserId = new Map<string, UserRole>();
+    if (!userIds.length) return roleByUserId;
+    const userRows = await this.users.find({
+      where: { id: In(userIds) },
+      select: ['id', 'role'],
+    });
+    for (const userRow of userRows) {
+      roleByUserId.set(userRow.id, userRow.role);
+    }
+    return roleByUserId;
   }
 
   private toRosterRoleLabel(role: RosterRole): 'owner' | 'mod' | 'member' {

@@ -5,6 +5,10 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
+import {
+  ContentModerationService,
+  ContentModerationState,
+} from '../content-moderation/content-moderation.service';
 import { MemberLookup } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
@@ -73,7 +77,23 @@ export class CommunityPostsService {
     @InjectRepository(CommunityPostReplyEdit)
     private readonly replyEdits: Repository<CommunityPostReplyEdit>,
     private readonly mentions: MentionNotificationService,
+    private readonly contentModeration: ContentModerationService,
   ) {}
+
+  // A community post/reply can be taken down under either taxonomy code
+  // (`post` / `reply`), keyed by the row's uuid — reads check both.
+  private static readonly SUBJECT_TYPES = ['post', 'reply'];
+
+  // Owner/mod see moderated content (flagged); ordinary members/non-members do
+  // not receive hidden content.
+  private static isStaffRole(viewerRole: RosterRole | null): boolean {
+    return viewerRole === RosterRole.Owner || viewerRole === RosterRole.Mod;
+  }
+
+  private static readonly VISIBLE: ContentModerationState = {
+    hidden: false,
+    removed: false,
+  };
 
   async listPosts(
     slug: string,
@@ -368,14 +388,19 @@ export class CommunityPostsService {
     viewerId: string,
     viewerRole: RosterRole | null,
   ): Promise<CommunityReplyDTO> {
-    const authors = await new MemberLookup(this.profiles).byUserIds([
-      reply.authorId,
+    const [authors, states] = await Promise.all([
+      new MemberLookup(this.profiles).byUserIds([reply.authorId]),
+      this.contentModeration.statesForAnyType(
+        CommunityPostsService.SUBJECT_TYPES,
+        [reply.id],
+      ),
     ]);
     return toCommunityReply(
       reply,
       authors.get(reply.authorId) ?? null,
       viewerId,
       viewerRole,
+      states.get(reply.id) ?? CommunityPostsService.VISIBLE,
     );
   }
 
@@ -431,14 +456,20 @@ export class CommunityPostsService {
     const saved = await this.replies.save(
       this.replies.create({ postId: post.id, authorId: userId, text }),
     );
-    await this.mentions.notify(text, userId, {
+    const replyPayload = {
       actorId: userId,
       source: 'community',
       communitySlug: slug,
       postId: post.id,
       replyId: saved.id,
       excerpt: text.slice(0, 140),
-    });
+    };
+    const mentioned = await this.mentions.notify(text, userId, replyPayload);
+    // Tell the post's author their post got a reply — unless the reply already
+    // `@mentioned` them (they'd then get one notification, not two).
+    if (!mentioned.has(post.authorId)) {
+      await this.mentions.notifyPostReply(post.authorId, userId, replyPayload);
+    }
     const authors = await new MemberLookup(this.profiles).byUserIds([userId]);
     return toCommunityReply(
       saved,
@@ -554,14 +585,18 @@ export class CommunityPostsService {
     const community = post.communityId
       ? await this.communities.findOne({ where: { id: post.communityId } })
       : null;
-    await this.mentions.notify(text, userId, {
+    const replyPayload = {
       actorId: userId,
       source: 'community',
       postId: post.id,
       replyId: saved.id,
       ...(community ? { communitySlug: community.slug } : {}),
       excerpt: text.slice(0, 140),
-    });
+    };
+    const mentioned = await this.mentions.notify(text, userId, replyPayload);
+    if (!mentioned.has(post.authorId)) {
+      await this.mentions.notifyPostReply(post.authorId, userId, replyPayload);
+    }
     return { id: saved.id };
   }
 
@@ -693,6 +728,18 @@ export class CommunityPostsService {
     return hidden.size ? rows.filter((r) => !hidden.has(r.authorId)) : rows;
   }
 
+  // States for a page of posts + their replies, keyed by row id. One query for
+  // the whole set (post ids and reply ids never collide — both are uuids).
+  private async moderationStatesFor(
+    postIds: string[],
+    replyIds: string[],
+  ): Promise<Map<string, ContentModerationState>> {
+    return this.contentModeration.statesForAnyType(
+      CommunityPostsService.SUBJECT_TYPES,
+      [...postIds, ...replyIds],
+    );
+  }
+
   private async buildPostDTO(
     post: CommunityPost,
     viewerId: string,
@@ -708,14 +755,24 @@ export class CommunityPostsService {
     const replyRows = await this.visibleReplies(allReplyRows, viewerId);
 
     const authorIds = [post.authorId, ...replyRows.map((r) => r.authorId)];
-    const authors = await new MemberLookup(this.profiles).byUserIds(authorIds);
+    const [authors, states] = await Promise.all([
+      new MemberLookup(this.profiles).byUserIds(authorIds),
+      this.moderationStatesFor(
+        [post.id],
+        replyRows.map((r) => r.id),
+      ),
+    ]);
 
+    // This is a mutation echo (create/react/delete/restore returns the acted-on
+    // post to the actor), so it reflects moderation state via the mappers but
+    // does not drop hidden rows — the actor is operating on the post directly.
     const replies = replyRows.map((r) =>
       toCommunityReply(
         r,
         authors.get(r.authorId) ?? null,
         viewerId,
         viewerRole,
+        states.get(r.id) ?? CommunityPostsService.VISIBLE,
       ),
     );
     return toCommunityPost(
@@ -725,6 +782,7 @@ export class CommunityPostsService {
       replies,
       viewerId,
       viewerRole,
+      states.get(post.id) ?? CommunityPostsService.VISIBLE,
     );
   }
 
@@ -746,25 +804,47 @@ export class CommunityPostsService {
         order: { createdAt: 'ASC' },
       }),
     ]);
-    const replyRows = await this.visibleReplies(allReplyRows, viewerId);
+    const blockFilteredReplies = await this.visibleReplies(
+      allReplyRows,
+      viewerId,
+    );
+
+    const states = await this.moderationStatesFor(
+      postIds,
+      blockFilteredReplies.map((r) => r.id),
+    );
+    const viewerIsStaff = CommunityPostsService.isStaffRole(viewerRole);
+    const isWithheld = (id: string): boolean => {
+      const state = states.get(id);
+      // Hidden-but-not-removed content is withheld from non-staff; removed
+      // content stays (as a tombstone) for everyone.
+      return !!state && state.hidden && !state.removed && !viewerIsStaff;
+    };
+
+    // Drop hidden posts and hidden replies from a member's feed entirely.
+    const visiblePosts = rows.filter((post) => !isWithheld(post.id));
+    const replyRows = blockFilteredReplies.filter(
+      (reply) => !isWithheld(reply.id),
+    );
 
     const reactionsByPost = groupBy(reactionRows, (r) => r.postId);
     const repliesByPost = groupBy(replyRows, (r) => r.postId);
 
     const authorIds = new Set<string>();
-    for (const p of rows) authorIds.add(p.authorId);
+    for (const p of visiblePosts) authorIds.add(p.authorId);
     for (const r of replyRows) authorIds.add(r.authorId);
     const authors = await new MemberLookup(this.profiles).byUserIds([
       ...authorIds,
     ]);
 
-    return rows.map((post) => {
+    return visiblePosts.map((post) => {
       const replies = (repliesByPost.get(post.id) ?? []).map((r) =>
         toCommunityReply(
           r,
           authors.get(r.authorId) ?? null,
           viewerId,
           viewerRole,
+          states.get(r.id) ?? CommunityPostsService.VISIBLE,
         ),
       );
       return toCommunityPost(
@@ -774,6 +854,7 @@ export class CommunityPostsService {
         replies,
         viewerId,
         viewerRole,
+        states.get(post.id) ?? CommunityPostsService.VISIBLE,
       );
     });
   }

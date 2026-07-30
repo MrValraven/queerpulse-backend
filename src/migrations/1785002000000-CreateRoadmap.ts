@@ -113,6 +113,14 @@ export class CreateRoadmap1785002000000 implements MigrationInterface {
           ON DELETE CASCADE ON UPDATE NO ACTION
       )
     `);
+    // Backs the per-target live-vote count (`RoadmapService.liveVoteCounts`:
+    // `WHERE target_type = ? AND target_id IN (...)`). The unique constraint's
+    // leading column is `member_id`, so it can't serve this lookup; without a
+    // dedicated `(target_type, target_id)` index every roadmap read
+    // sequentially scans `roadmap_votes`.
+    await queryRunner.query(
+      `CREATE INDEX "IDX_roadmap_votes_target" ON "roadmap_votes" ("target_type", "target_id")`,
+    );
 
     // --- roadmap_settings ------------------------------------------------
     await queryRunner.query(`
@@ -168,6 +176,7 @@ export class CreateRoadmap1785002000000 implements MigrationInterface {
     await queryRunner.query(`DROP TABLE "roadmap_ideas"`);
     await queryRunner.query(`DROP INDEX "IDX_roadmap_items_column_sort"`);
     await queryRunner.query(`DROP TABLE "roadmap_items"`);
+    await queryRunner.query(`DROP INDEX "IDX_roadmap_votes_target"`);
     await queryRunner.query(`DROP TABLE "roadmap_votes"`);
     await queryRunner.query(`DROP TYPE "roadmap_votes_target_type_enum"`);
     await queryRunner.query(`DROP TYPE "roadmap_ideas_status_enum"`);

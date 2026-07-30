@@ -8,10 +8,16 @@ import {
 } from '../connections/connection.events';
 import {
   EVENT_INVITED,
+  EVENT_RSVPED,
   EVENT_WAITLIST_PROMOTED,
   EventInvitedEvent,
+  EventRsvpedEvent,
   EventWaitlistPromotedEvent,
 } from '../events/event.events';
+import {
+  INVITE_ACCEPTED,
+  InviteAcceptedEvent,
+} from '../membership/membership.events';
 import {
   SUBPROFILE_ENDORSED,
   SUBPROFILE_FOLLOWED,
@@ -107,6 +113,31 @@ export class NotificationsListener {
       e.userId,
       NotificationType.WaitlistPromoted,
       { eventId: e.eventId },
+    );
+  }
+
+  @OnEvent(EVENT_RSVPED)
+  async onEventRsvped(e: EventRsvpedEvent): Promise<void> {
+    await this.notifications.create(
+      e.hostId,
+      NotificationType.EventRsvp,
+      {
+        actorId: e.rsvperId,
+        source: 'event',
+        eventId: e.eventId,
+        eventSlug: e.eventSlug,
+      },
+      e.rsvperId,
+    );
+  }
+
+  @OnEvent(INVITE_ACCEPTED)
+  async onInviteAccepted(e: InviteAcceptedEvent): Promise<void> {
+    await this.notifications.create(
+      e.inviterId,
+      NotificationType.InviteAccepted,
+      { actorId: e.newMemberId },
+      e.newMemberId,
     );
   }
 

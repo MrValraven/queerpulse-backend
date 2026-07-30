@@ -578,7 +578,11 @@ export class SubprofilesService {
 
     const unmet = validatePublish(sp, items, handleTaken);
     if (unmet.length) {
-      throw new UnprocessableEntityException({ unmet });
+      throw new UnprocessableEntityException({
+        code: 'SUBPROFILE_NOT_READY',
+        message: 'This persona is not ready to publish yet.',
+        unmet,
+      });
     }
 
     if (!unlinked) {
@@ -615,7 +619,11 @@ export class SubprofilesService {
       // 422 `handle_taken` to stay consistent with the publish completeness
       // contract (rather than leaking a bare 409).
       if (err instanceof ConflictException) {
-        throw new UnprocessableEntityException({ unmet: ['handle_taken'] });
+        throw new UnprocessableEntityException({
+          code: 'SUBPROFILE_NOT_READY',
+          message: 'That handle was just taken. Choose another.',
+          unmet: ['handle_taken'],
+        });
       }
       throw err;
     }

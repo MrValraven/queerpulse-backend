@@ -19,14 +19,21 @@ export async function toEventPhotoViews(
   storage: StorageService,
   memberLookup: MemberLookup,
 ): Promise<EventPhotoView[]> {
-  const uploaderRefs = await memberLookup.byUserIds(
-    photos.map((photo) => photo.uploaderId),
-  );
+  // `uploaderId` is nullable (an uploader who erased their account leaves the
+  // photo standing with a NULL uploader — FK is `ON DELETE SET NULL`), so drop
+  // the NULLs before the lookup and render those photos with no uploader ref.
+  const uploaderIds = photos
+    .map((photo) => photo.uploaderId)
+    .filter((uploaderId): uploaderId is string => uploaderId !== null);
+  const uploaderRefs = await memberLookup.byUserIds(uploaderIds);
   return Promise.all(
     photos.map(async (photo) => ({
       id: photo.id,
       url: await storage.createPresignedDownload(photo.storageKey),
-      uploader: uploaderRefs.get(photo.uploaderId) ?? null,
+      uploader:
+        photo.uploaderId !== null
+          ? (uploaderRefs.get(photo.uploaderId) ?? null)
+          : null,
       caption: photo.caption,
       createdAt: photo.createdAt.toISOString(),
     })),

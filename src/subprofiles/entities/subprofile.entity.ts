@@ -46,6 +46,8 @@ export enum SubprofileStatus {
 }
 
 @Entity('subprofiles')
+@Index('IDX_subprofiles_directory', ['kind', 'status', 'visibility'])
+@Index('UQ_subprofiles_user_slug', ['userId', 'slug'], { unique: true })
 export class Subprofile {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -70,6 +72,10 @@ export class Subprofile {
   slug: string;
 
   // Globally unique when set; the `/p/<handle>` handle for unlinked+published.
+  @Index('UQ_subprofiles_handle', {
+    unique: true,
+    where: '"handle" IS NOT NULL',
+  })
   @Column({ type: 'varchar', nullable: true })
   handle: string | null;
 

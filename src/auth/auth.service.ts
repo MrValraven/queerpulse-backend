@@ -9,6 +9,10 @@ import { User, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { USER_PROMOTED, UserPromotedEvent } from '../users/user.events';
 import {
+  INVITE_ACCEPTED,
+  InviteAcceptedEvent,
+} from '../membership/membership.events';
+import {
   USER_SESSION_REVOKED,
   UserSessionRevokedEvent,
 } from '../chat/session.events';
@@ -190,6 +194,14 @@ export class AuthService {
     this.eventEmitter.emit(USER_PROMOTED, {
       userId: user.id,
     } satisfies UserPromotedEvent);
+
+    // Tell the inviter their invite was redeemed. `inviterId` is always a real
+    // member (invites.inviter_id is NOT NULL), and never the new member, so no
+    // self-notification is possible. Best-effort, post-commit, on the same bus.
+    this.eventEmitter.emit(INVITE_ACCEPTED, {
+      inviterId,
+      newMemberId: user.id,
+    } satisfies InviteAcceptedEvent);
 
     // Emitted only after the transaction commits (a mid-transaction emit would
     // survive a rollback): fans out the "VouchReceived" notification and keeps

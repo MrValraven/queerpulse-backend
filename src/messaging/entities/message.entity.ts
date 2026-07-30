@@ -57,6 +57,19 @@ export interface GifAttachment {
 }
 
 @Entity('messages')
+// Composite (conversation_id, created_at DESC) — backs the newest-N-per-
+// conversation reads (`lastMessagesByConversation`'s DISTINCT ON, and the
+// keyset-paginated thread history) without falling back to the single-column
+// `IDX_messages_conversation_id` index + an in-memory sort. Mirrors
+// `1782692700000-AddPerformanceIndexes.ts`'s
+// `IDX_messages_conversation_id_created_at`; TypeORM can't express the
+// `DESC` direction on `createdAt` alone here (column order matches, direction
+// is a migration-only detail), so this decorator exists purely to keep
+// `migration:generate` from proposing a `DROP INDEX` for it.
+@Index('IDX_messages_conversation_id_created_at', [
+  'conversationId',
+  'createdAt',
+])
 export class Message {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -65,6 +78,7 @@ export class Message {
   @Column({ type: 'uuid' })
   conversationId: string;
 
+  @Index('IDX_messages_sender_id')
   @Column({ type: 'uuid' })
   senderId: string;
 
@@ -109,6 +123,19 @@ export class Message {
    * row. Null for server-originated messages (message requests, enquiries) and
    * legacy rows created before this column existed.
    */
+  // Partial UNIQUE(conversation_id, client_message_id) WHERE client_message_id
+  // IS NOT NULL — see `1785000700000-AddMessageClientId.ts`. Mirrored here
+  // (rather than left implicit) so `migration:generate` doesn't propose
+  // dropping it; NULL client ids (legacy rows, server-originated messages)
+  // are exempt from the uniqueness constraint by the `where` predicate.
+  @Index(
+    'UQ_messages_conversation_client_id',
+    ['conversationId', 'clientMessageId'],
+    {
+      unique: true,
+      where: '"client_message_id" IS NOT NULL',
+    },
+  )
   @Column({ type: 'uuid', nullable: true })
   clientMessageId: string | null;
 

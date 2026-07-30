@@ -1,4 +1,4 @@
-import { Column, Entity, PrimaryGeneratedColumn } from 'typeorm';
+import { Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
 import { UserStatus } from '../../users/entities/user.entity';
 
 // Reversible, non-erasure account pause (`POST /account/deactivate`).
@@ -17,7 +17,8 @@ export class AccountDeactivation {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid', unique: true })
+  @Index('UQ_account_deactivation_user_id', { unique: true })
+  @Column({ type: 'uuid' })
   userId: string;
 
   @Column({ type: 'timestamptz' })

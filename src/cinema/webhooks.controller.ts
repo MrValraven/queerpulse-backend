@@ -8,7 +8,13 @@ import {
   Req,
   VERSION_NEUTRAL,
 } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiForbiddenResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 import { Request } from 'express';
 import { Public } from '../auth/decorators/public.decorator';
@@ -43,6 +49,17 @@ export class CinemaWebhooksController {
   @SkipThrottle()
   @Post('mux')
   @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Receive a Mux webhook (HMAC-authenticated; no cookie auth). Version-neutral.',
+  })
+  @ApiOkResponse({
+    description: 'The event was accepted (`{ received: true }`).',
+  })
+  @ApiBadRequestResponse({
+    description: 'Missing request body or malformed webhook payload.',
+  })
+  @ApiForbiddenResponse({ description: 'Invalid Mux webhook signature.' })
   async handleMux(@Req() req: RawBodyRequest<Request>) {
     if (!req.rawBody) {
       throw new BadRequestException('Missing request body');

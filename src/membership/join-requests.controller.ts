@@ -28,7 +28,17 @@ import {
   SubmittedJoinRequestView,
 } from './join-request-response';
 import { JoinRequestsService } from './join-requests.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiConflictResponse,
+  ApiCookieAuth,
+  ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 @ApiTags('Membership')
 @ApiCookieAuth()
@@ -58,6 +68,14 @@ export class JoinRequestsController {
   @Throttle({ default: { limit: 3, ttl: seconds(3600) } })
   @Post()
   @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Submit a public invite request' })
+  @ApiCreatedResponse({ description: 'The invite request was recorded.' })
+  @ApiForbiddenResponse({
+    description: 'Invite requests are closed, or the applicant is under 18.',
+  })
+  @ApiConflictResponse({
+    description: 'An invite request for this email is already awaiting review.',
+  })
   submit(@Body() dto: CreateJoinRequestDto): Promise<SubmittedJoinRequestView> {
     return this.joinRequestsService.submit(dto);
   }
@@ -65,6 +83,12 @@ export class JoinRequestsController {
   @Get()
   @UseGuards(RolesGuard)
   @Roles(UserRole.Moderator, UserRole.Admin)
+  @ApiOperation({ summary: 'List invite requests for the review queue' })
+  @ApiOkResponse({ description: 'The invite request queue.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({
+    description: 'Requires a moderator or admin role.',
+  })
   list(@Query() query: ListJoinRequestsQuery): Promise<JoinRequestView[]> {
     return this.joinRequestsService.list(query.status);
   }
@@ -72,6 +96,16 @@ export class JoinRequestsController {
   @Patch(':id')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Moderator, UserRole.Admin)
+  @ApiOperation({ summary: 'Approve or decline an invite request' })
+  @ApiOkResponse({ description: 'The updated invite request.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({
+    description: 'Requires a moderator or admin role.',
+  })
+  @ApiNotFoundResponse({ description: 'The invite request does not exist.' })
+  @ApiConflictResponse({
+    description: 'The invite request has already been reviewed.',
+  })
   review(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,

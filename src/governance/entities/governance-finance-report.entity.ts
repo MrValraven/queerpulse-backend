@@ -175,6 +175,7 @@ export class GovernanceFinanceReport {
   })
   solidarityRate: number | null;
 
+  @Index('IDX_governance_finance_report_published_at')
   @Column({ type: 'timestamptz', name: 'published_at' })
   publishedAt: Date;
 

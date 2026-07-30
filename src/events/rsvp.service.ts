@@ -7,7 +7,9 @@ import {
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import {
+  EVENT_RSVPED,
   EVENT_WAITLIST_PROMOTED,
+  EventRsvpedEvent,
   EventWaitlistPromotedEvent,
 } from './event.events';
 import { EventCohost } from './entities/event-cohost.entity';
@@ -45,6 +47,19 @@ export class RsvpService {
         where: { eventId: event.id, userId },
       });
 
+      // Notify the host only on a member's *first* RSVP to this event (no row
+      // yet, or a previously cancelled one being revived) — never on a
+      // going↔maybe toggle of a live row, which would spam the host. A host
+      // RSVPing to their own event notifies no one.
+      const notifyHost =
+        event.hostId !== userId &&
+        (!existing || existing.status === RsvpStatus.Cancelled);
+      const hostRsvp = {
+        notifyHost,
+        hostId: event.hostId,
+        eventSlug: event.slug,
+      };
+
       if (status === 'maybe') {
         // Stepping down from 'going' to 'maybe' frees a seat — pull the waitlist
         // up just as a cancellation would.
@@ -60,6 +75,7 @@ export class RsvpService {
           result: { status: RsvpStatus.Maybe, waitlistPosition: null },
           eventId: event.id,
           promoted,
+          ...hostRsvp,
         };
       }
 
@@ -85,6 +101,9 @@ export class RsvpService {
             },
             eventId: event.id,
             promoted: [] as string[],
+            // Already waitlisted — `notifyHost` is already false here (existing
+            // row), so re-pressing the button never re-notifies the host.
+            ...hostRsvp,
           };
         }
         resolved = RsvpStatus.Waitlisted;
@@ -109,10 +128,22 @@ export class RsvpService {
         result: { status: resolved, waitlistPosition },
         eventId: event.id,
         promoted: [] as string[],
+        ...hostRsvp,
       };
     });
 
     this.emitPromotions(outcome.eventId, outcome.promoted);
+    // After commit (a mid-transaction emit would survive a rollback): tell the
+    // host someone RSVPed. Fire-and-forget on the same bus as the waitlist
+    // promotions above; the listener writes + pushes the notification.
+    if (outcome.notifyHost) {
+      this.eventEmitter.emit(EVENT_RSVPED, {
+        eventId: outcome.eventId,
+        eventSlug: outcome.eventSlug,
+        hostId: outcome.hostId,
+        rsvperId: userId,
+      } satisfies EventRsvpedEvent);
+    }
     return outcome.result;
   }
 

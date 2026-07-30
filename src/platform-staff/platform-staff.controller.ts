@@ -2,7 +2,14 @@ import { Controller, Get, UseGuards } from '@nestjs/common';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { PlatformStaffRowDTO } from './platform-staff-response';
 import { PlatformStaffService } from './platform-staff.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiCookieAuth,
+  ApiForbiddenResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 // Always-on member primitive (no @Feature flag) — mirrors the FE's staff.api.ts
 // exactly: `GET /platform/staff`, consumed by `useStaffRole` to badge moderators
@@ -19,6 +26,10 @@ export class PlatformStaffController {
   // people holding moderation power — the frontend enforces the same rule in
   // `useStaffMap`, and this guard is what makes that more than a client-side
   // courtesy.
+  @ApiOperation({ summary: 'List the platform moderators and admins.' })
+  @ApiOkResponse({ description: 'The staff roster (moderators and admins).' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Not an active member.' })
   @Get()
   list(): Promise<PlatformStaffRowDTO[]> {
     return this.platformStaffService.list();

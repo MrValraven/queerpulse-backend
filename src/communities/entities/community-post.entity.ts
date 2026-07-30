@@ -12,6 +12,10 @@ export enum PostKind {
 }
 
 @Entity('community_posts')
+@Index('IDX_community_posts_created_at_id', ['createdAt', 'id'], {
+  where: `"deleted_at" IS NULL`,
+})
+@Index('IDX_community_posts_feed_order', ['communityId', 'pinned', 'createdAt'])
 export class CommunityPost {
   @PrimaryGeneratedColumn('uuid')
   id: string;

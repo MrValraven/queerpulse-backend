@@ -13,7 +13,16 @@ import { Public } from '../auth/decorators/public.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 import { GenesisService } from './genesis.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiCookieAuth,
+  ApiForbiddenResponse,
+  ApiNoContentResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 /**
  * One-time platform bootstrap. See `GenesisService` for the gate model.
@@ -27,7 +36,6 @@ import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
  */
 @LockdownExempt()
 @ApiTags('Genesis')
-@ApiCookieAuth()
 @Controller('genesis')
 export class GenesisController {
   constructor(private readonly genesis: GenesisService) {}
@@ -40,6 +48,11 @@ export class GenesisController {
   @Public()
   @Post('invite')
   @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Mint the one-time genesis (founder) invite' })
+  @ApiOkResponse({ description: 'The redeemable genesis invite code.' })
+  @ApiNotFoundResponse({
+    description: 'Genesis is disabled or the platform is already bootstrapped.',
+  })
   invite(): Promise<{ code: string }> {
     return this.genesis.mintGenesisInvite();
   }
@@ -47,6 +60,14 @@ export class GenesisController {
   @Post('claim')
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(ActiveMemberGuard)
+  @ApiCookieAuth('access_token')
+  @ApiOperation({ summary: 'Promote the genesis account to admin (self-closing)' })
+  @ApiNoContentResponse({ description: 'Caller promoted to admin.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated as an active member.' })
+  @ApiForbiddenResponse({
+    description: 'Not the genesis account, or genesis is already closed.',
+  })
+  @ApiNotFoundResponse({ description: 'Genesis is disabled.' })
   claim(@CurrentUser() user: CurrentUserData): Promise<void> {
     return this.genesis.claimAdmin(user.userId, user.email);
   }

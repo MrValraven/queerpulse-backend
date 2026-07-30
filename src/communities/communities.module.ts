@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { MentionsModule } from '../mentions/mentions.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { SocialModule } from '../social/social.module';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersModule } from '../users/users.module';
@@ -40,6 +42,16 @@ import { MeCommunitiesController } from './me-communities.controller';
     // post/reply create. Plain import, no `forwardRef`: `MentionsModule`
     // imports only entity repos + `NotificationsModule`, not `CommunitiesModule`.
     MentionsModule,
+    // `ContentModerationService` — community post/reply reads honour a
+    // moderator `hide_content`/`remove_content` takedown (hidden withheld from
+    // members, removed rendered as a tombstone).
+    ContentModerationModule,
+    // `NotificationsService` — `CommunitiesService` emits join-request
+    // received (owner/mods) + decided (applicant). (The community-post-reply
+    // notification goes through `MentionNotificationService` above.)
+    // `NotificationsModule` imports only `SocialModule`, not `CommunitiesModule`,
+    // so there is no cycle.
+    NotificationsModule,
   ],
   controllers: [
     CommunitiesController,

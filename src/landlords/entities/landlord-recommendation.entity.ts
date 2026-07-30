@@ -4,7 +4,6 @@ import {
   Entity,
   Index,
   PrimaryGeneratedColumn,
-  Unique,
 } from 'typeorm';
 
 /**
@@ -13,7 +12,9 @@ import {
  * identity is hydrated live via `MemberLookup`, not snapshotted.
  */
 @Entity('landlord_recommendations')
-@Unique('UQ_landlord_recommendations_author', ['landlordId', 'authorUserId'])
+@Index('UQ_landlord_recommendations_author', ['landlordId', 'authorUserId'], {
+  unique: true,
+})
 export class LandlordRecommendation {
   @PrimaryGeneratedColumn('uuid')
   id: string;

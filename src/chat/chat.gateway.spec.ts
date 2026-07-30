@@ -54,7 +54,7 @@ describe('ChatGateway', () => {
   let messaging: {
     sendMessage: jest.Mock;
     markRead: jest.Mock;
-    isParticipant: jest.Mock;
+    canJoinConversationLive: jest.Mock;
   };
   let connections: { getAcceptedConnectionUserIds: jest.Mock };
   let users: { findById: jest.Mock };
@@ -71,7 +71,7 @@ describe('ChatGateway', () => {
     messaging = {
       sendMessage: jest.fn().mockResolvedValue({ id: 'm1' }),
       markRead: jest.fn().mockResolvedValue({ ok: true }),
-      isParticipant: jest.fn().mockResolvedValue(true),
+      canJoinConversationLive: jest.fn().mockResolvedValue(true),
     };
     connections = {
       getAcceptedConnectionUserIds: jest.fn().mockResolvedValue([]),
@@ -549,11 +549,24 @@ describe('ChatGateway', () => {
     });
 
     it('conversation:join rejects a non-participant', async () => {
-      messaging.isParticipant.mockResolvedValue(false);
+      messaging.canJoinConversationLive.mockResolvedValue(false);
       const client = makeClient({ data: { userId: 'u1' } });
       await expect(
         gateway.handleJoin(client as never, { conversationId: 'c1' }),
       ).rejects.toBeDefined();
+    });
+
+    // Also covers a left/removed group participant and a blocked DM
+    // counterpart — both refused by `canJoinConversationLive` itself
+    // (unit-tested in messaging.service.spec.ts); this only proves the
+    // gateway wires the boolean through to a WsException.
+    it('conversation:join succeeds when canJoinConversationLive allows it', async () => {
+      messaging.canJoinConversationLive.mockResolvedValue(true);
+      const client = makeClient({ data: { userId: 'u1' } });
+      await expect(
+        gateway.handleJoin(client as never, { conversationId: 'c1' }),
+      ).resolves.toEqual({ joined: 'c1' });
+      expect(client.join).toHaveBeenCalledWith('c1');
     });
 
     it('message:send delegates to the single write path (no direct broadcast)', async () => {

@@ -1,3 +1,4 @@
+import { UserRole } from '../users/entities/user.entity';
 import {
   initialsFor,
   toneFor,
@@ -72,6 +73,7 @@ describe('toAdminMemberCard', () => {
         verified: true,
         joinedAt: new Date('2025-01-01T00:00:00.000Z'),
       },
+      role: UserRole.Member,
       openReportCount: 0,
       communities: ['circle-of-care'],
       vouchCount: 2,
@@ -82,6 +84,7 @@ describe('toAdminMemberCard', () => {
     expect(card.initials).toBe(initialsFor('Inês', 'Martins'));
     expect(card.tone).toBe(toneFor('ines-martins'));
     expect(card.joinedAt).toBe('2025-01-01T00:00:00.000Z');
+    expect(card.role).toBe(UserRole.Member);
   });
 });
 
@@ -128,6 +131,8 @@ describe('toAdminMemberDetail', () => {
         verified: false,
         joinedAt: new Date('2025-03-01T00:00:00.000Z'),
       },
+      role: UserRole.Moderator,
+      isSystem: false,
       openReportCount: 1,
       vouchCount: 4,
       outboundVouchCount: 2,

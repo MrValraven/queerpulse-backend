@@ -1,6 +1,7 @@
 import {
   Column,
   Entity,
+  Index,
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
@@ -19,6 +20,7 @@ export class WatchProgress {
   @Column({ type: 'uuid' })
   userId: string;
 
+  @Index('IDX_cinema_watch_progress_title_id')
   @Column({ type: 'uuid' })
   titleId: string;
 

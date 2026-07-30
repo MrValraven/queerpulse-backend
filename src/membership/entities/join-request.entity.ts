@@ -56,6 +56,7 @@ export class JoinRequest {
   @Column({ type: 'varchar', length: 32 })
   termsVersion: string;
 
+  @Index('IDX_join_requests_reviewed_by')
   @Column({ type: 'uuid', nullable: true })
   reviewedBy: string | null;
 
@@ -67,7 +68,7 @@ export class JoinRequest {
    * for declined requests. The FK is ON DELETE SET NULL so purging an invite
    * never erases the record that the approval happened.
    */
-  @Index()
+  @Index('IDX_join_requests_invite_id')
   @Column({ type: 'uuid', nullable: true })
   inviteId: string | null;
 

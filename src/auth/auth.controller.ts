@@ -11,7 +11,16 @@ import {
   VERSION_NEUTRAL,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { ApiTags } from '@nestjs/swagger';
+import {
+  ApiCookieAuth,
+  ApiCreatedResponse,
+  ApiFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiTooManyRequestsResponse,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 import { timingSafeEqual } from 'node:crypto';
 import { Request, Response } from 'express';
 import { User } from '../users/entities/user.entity';
@@ -73,6 +82,8 @@ export class AuthController {
     return timingSafeEqual(ab, bb);
   }
 
+  @ApiOperation({ summary: 'Begin Google OAuth sign-in.' })
+  @ApiFoundResponse({ description: "Redirect to Google's consent screen." })
   @Version(VERSION_NEUTRAL)
   @Public()
   @UseGuards(GoogleAuthGuard)
@@ -81,6 +92,11 @@ export class AuthController {
     // GoogleAuthGuard redirects to Google's consent screen; this body never runs.
   }
 
+  @ApiOperation({ summary: 'Handle the Google OAuth callback.' })
+  @ApiFoundResponse({
+    description:
+      'Redirect back to the frontend — signed in (auth cookies set) on success, or to the sign-in error page otherwise.',
+  })
   @Version(VERSION_NEUTRAL)
   @Public()
   @UseGuards(GoogleAuthGuard)
@@ -153,6 +169,14 @@ export class AuthController {
     res.redirect(resolvePostLoginRedirect(redirect, frontendUrl));
   }
 
+  @ApiOperation({ summary: 'Rotate the refresh token and reset auth cookies.' })
+  @ApiCreatedResponse({
+    description: 'Tokens rotated; fresh auth cookies set.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Missing, invalid, expired, revoked, or reused refresh token.',
+  })
+  @ApiTooManyRequestsResponse({ description: 'Rate limit exceeded.' })
   @Version(VERSION_NEUTRAL)
   @Public()
   @Throttle({ default: { limit: 10, ttl: seconds(60) } })
@@ -188,6 +212,8 @@ export class AuthController {
   // skipped) — but it stays a POST behind the global CsrfGuard, so it remains
   // CSRF-protected. Best-effort: revoke the refresh row if we can, ALWAYS clear
   // cookies, ALWAYS return ok.
+  @ApiOperation({ summary: 'Log out this device and clear auth cookies.' })
+  @ApiCreatedResponse({ description: 'Logged out; auth cookies cleared.' })
   @Public()
   @Post('logout')
   async logout(
@@ -212,6 +238,12 @@ export class AuthController {
   // Global sign-out: revoke every live refresh token for the current user, then
   // clear this device's cookies. Authenticated (NOT @Public) so we know who to
   // revoke; POST keeps it CSRF-protected.
+  @ApiOperation({ summary: 'Log out every device for the current user.' })
+  @ApiCookieAuth('access_token')
+  @ApiCreatedResponse({
+    description: 'All sessions revoked; this device signed out.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Post('logout-all')
   async logoutAll(
     @CurrentUser() current: CurrentUserData,
@@ -223,6 +255,10 @@ export class AuthController {
     return { ok: true };
   }
 
+  @ApiOperation({ summary: 'Get the currently authenticated user.' })
+  @ApiCookieAuth('access_token')
+  @ApiOkResponse({ description: 'The current user with their profile.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Get('me')
   async me(@CurrentUser() current: CurrentUserData) {
     const user = await this.usersService.findByIdWithProfile(current.userId);

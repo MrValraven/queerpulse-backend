@@ -1,6 +1,7 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
 import { ReportsService } from '../reports/reports.service';
 import { Profile } from '../users/entities/profile.entity';
 import { Block } from './entities/block.entity';
@@ -51,6 +52,8 @@ describe('SocialService', () => {
   };
   let profiles: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let reportsService: { create: jest.Mock };
+  let manager: { createQueryBuilder: jest.Mock; update: jest.Mock };
+  let dataSource: { transaction: jest.Mock };
 
   // Resolves any slug to a userId equal to the slug prefixed with `user-`,
   // via the same createQueryBuilder().getMany() path `MemberLookup` uses.
@@ -83,6 +86,21 @@ describe('SocialService', () => {
       createQueryBuilder: jest.fn(() => qbStub()),
     };
     reportsService = { create: jest.fn().mockResolvedValue({ id: 'r1' }) };
+    manager = {
+      createQueryBuilder: jest.fn(() => qbStub()),
+      update: jest.fn().mockResolvedValue({ affected: 0 }),
+    };
+    dataSource = {
+      transaction: jest
+        .fn()
+        .mockImplementation(
+          (
+            runInTransaction: (
+              entityManager: typeof manager,
+            ) => Promise<unknown>,
+          ) => runInTransaction(manager),
+        ),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -91,6 +109,7 @@ describe('SocialService', () => {
         { provide: getRepositoryToken(Mute), useValue: mutes },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: ReportsService, useValue: reportsService },
+        { provide: DataSource, useValue: dataSource },
       ],
     }).compile();
     service = module.get(SocialService);
@@ -162,7 +181,7 @@ describe('SocialService', () => {
     it('inserts idempotently (orIgnore) and returns the row', async () => {
       stubSlugResolution({ them: 'them' });
       const insertQb = qbStub();
-      blocks.createQueryBuilder.mockReturnValue(insertQb);
+      manager.createQueryBuilder.mockReturnValue(insertQb);
       blocks.findOneOrFail.mockResolvedValue({
         id: 'b1',
         blockerId: 'me',
@@ -177,6 +196,7 @@ describe('SocialService', () => {
       const result = await service.blockMember('me', 'them', {
         reason: 'spam',
       });
+      expect(dataSource.transaction).toHaveBeenCalled();
       expect(insertQb.values).toHaveBeenCalledWith({
         blockerId: 'me',
         blockedId: 'them',
@@ -188,6 +208,29 @@ describe('SocialService', () => {
       });
       expect(result.id).toBe('b1');
       expect(result.reason).toBe('spam');
+    });
+
+    it('severs an existing connection edge in the same transaction (P0)', async () => {
+      stubSlugResolution({ them: 'them' });
+      blocks.findOneOrFail.mockResolvedValue({
+        id: 'b1',
+        blockerId: 'me',
+        blockedId: 'them',
+        reason: null,
+        createdAt: new Date(),
+      });
+
+      await service.blockMember('me', 'them');
+
+      const [entity, where, set] = manager.update.mock.calls[0] as [
+        unknown,
+        { userLow: string; userHigh: string; status: unknown },
+        { status: string; blockedBy: string },
+      ];
+      expect(entity).toBeDefined();
+      // 'me' < 'them' lexicographically, so low/high resolve deterministically.
+      expect(where).toMatchObject({ userLow: 'me', userHigh: 'them' });
+      expect(set).toMatchObject({ status: 'blocked', blockedBy: 'me' });
     });
 
     it('files a companion report when alsoReport is true', async () => {

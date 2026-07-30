@@ -9,7 +9,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
 import { randomBytes } from 'node:crypto';
-import { In, Not, Repository } from 'typeorm';
+import { In, Not, Repository, SelectQueryBuilder } from 'typeorm';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -78,7 +79,29 @@ export class EventsService {
     private readonly rsvpService: RsvpService,
     private readonly notifications: NotificationsService,
     private readonly blockFilter: BlockFilterService,
+    private readonly contentModeration: ContentModerationService,
   ) {}
+
+  // Events are reported (and taken down) under the `event` taxonomy code, keyed
+  // by the event's uuid.
+  private static readonly SUBJECT_TYPE = 'event';
+
+  // Excludes moderator-taken-down events from a browse/search query, in-query so
+  // pagination and any `take` limit stay consistent. Applied to the PUBLIC
+  // discovery surfaces only (`upcoming` browse + global search); an organizer
+  // still reaches a taken-down event through their hosting context and the
+  // detail gate (`assertCanView`) admits them.
+  private excludeModeratedEvents(qb: SelectQueryBuilder<Event>): void {
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "content_moderation" "cm"
+        WHERE "cm"."subject_type" = :eventSubjectType
+          AND "cm"."subject_id" = e.id::text
+          AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
+      )`,
+      { eventSubjectType: EventsService.SUBJECT_TYPE },
+    );
+  }
 
   async create(hostId: string, dto: CreateEventInput): Promise<EventDetail> {
     const startAt = new Date(dto.startAt);
@@ -266,13 +289,15 @@ export class EventsService {
     } else {
       // 'upcoming' — published, future, public/members (invite_only surfaces
       // via going/hosting/invited contexts, not the general browse).
-      events = await this.events
+      const upcomingQb = this.events
         .createQueryBuilder('e')
         .where('e.status = :status', { status: EventStatus.Published })
         .andWhere('e.start_at >= :now', { now })
         .andWhere('e.visibility IN (:...vis)', {
           vis: [EventVisibility.Public, EventVisibility.Members],
-        })
+        });
+      this.excludeModeratedEvents(upcomingQb);
+      events = await upcomingQb
         .orderBy('e.start_at', 'ASC')
         .skip(skip)
         .take(PAGE_SIZE)
@@ -292,7 +317,7 @@ export class EventsService {
     limit: number,
   ): Promise<EventSummary[]> {
     const pattern = `%${escapeLikeTerm(term)}%`;
-    const events = await this.events
+    const searchQb = this.events
       .createQueryBuilder('e')
       .where('e.status = :status', { status: EventStatus.Published })
       .andWhere('e.visibility IN (:...vis)', {
@@ -301,7 +326,9 @@ export class EventsService {
       .andWhere(
         '(e.title ILIKE :pattern OR e.venue ILIKE :pattern OR e.description ILIKE :pattern)',
         { pattern },
-      )
+      );
+    this.excludeModeratedEvents(searchQb);
+    const events = await searchQb
       .orderBy('e.start_at', 'DESC')
       .take(limit)
       .getMany();
@@ -420,6 +447,17 @@ export class EventsService {
     viewerId: string,
   ): Promise<boolean> {
     const isOrganizer = await this.isOrganizer(event.id, viewerId);
+    // A moderator takedown 404s the detail for everyone but an organizer — same
+    // "don't leak existence" posture as the draft/invite-only gates below.
+    if (!isOrganizer) {
+      const moderation = await this.contentModeration.stateFor(
+        EventsService.SUBJECT_TYPE,
+        event.id,
+      );
+      if (moderation.hidden || moderation.removed) {
+        throw new NotFoundException('Event not found');
+      }
+    }
     // Drafts are the organizers' private workspace — invisible to everyone else.
     if (event.status === EventStatus.Draft) {
       if (!isOrganizer) {

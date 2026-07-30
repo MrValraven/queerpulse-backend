@@ -65,6 +65,16 @@ export enum ReportSeverity {
  * table.
  */
 @Entity('reports')
+// De-dupe guard for `ReportsService.create`: at most one OPEN report per
+// (reporter, subject). Partial (`WHERE status = 'open'`) so a member can file
+// afresh once a prior report is resolved/escalated. Backs the check-then-insert
+// against a concurrent-duplicate race — matches
+// `UQ_reports_open_reporter_subject` in
+// `1785003000000-AddReportsOpenDedupeIndex`.
+@Index('UQ_reports_open_reporter_subject', ['reporterId', 'subjectType', 'subjectId'], {
+  unique: true,
+  where: `"status" = 'open'`,
+})
 export class Report {
   @PrimaryGeneratedColumn('uuid')
   id: string;

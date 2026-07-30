@@ -6,9 +6,13 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import {
+  ContentModerationService,
+  ContentModerationState,
+} from '../content-moderation/content-moderation.service';
 import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
 import {
   DEFAULT_LIST_LIMIT,
@@ -18,6 +22,8 @@ import {
 } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { Profile } from '../users/entities/profile.entity';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import {
   CommunityCardDTO,
   CommunityDetailDTO,
@@ -117,7 +123,40 @@ export class CommunitiesService {
     private readonly joinRequests: Repository<CommunityJoinRequest>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly dataSource: DataSource,
+    private readonly contentModeration: ContentModerationService,
+    private readonly notifications: NotificationsService,
   ) {}
+
+  // A community is taken down under the `community` taxonomy code, keyed by its
+  // slug (matching the report `subjectId`).
+  private static readonly SUBJECT_TYPE = 'community';
+
+  private static isStaffRole(role: RosterRole | null): boolean {
+    return role === RosterRole.Owner || role === RosterRole.Mod;
+  }
+
+  // Excludes moderator-taken-down communities from a browse/search query, in
+  // the query itself so the paginated `total` stays consistent with the rows
+  // returned. A community's own owner/mod (`m.role`) still sees it — the
+  // moderated-away card is withheld from members and non-members only. Assumes
+  // the querybuilder has joined `CommunityMember` as `m` on the viewer (both
+  // `list` and `searchByText` do).
+  private excludeModeratedCommunities(
+    qb: SelectQueryBuilder<Community>,
+  ): void {
+    qb.andWhere(
+      `(NOT EXISTS (
+          SELECT 1 FROM "content_moderation" "cm"
+          WHERE "cm"."subject_type" = :communitySubjectType
+            AND "cm"."subject_id" = c.slug
+            AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
+        ) OR m.role IN (:...communityStaffRoles))`,
+      {
+        communitySubjectType: CommunitiesService.SUBJECT_TYPE,
+        communityStaffRoles: [RosterRole.Owner, RosterRole.Mod],
+      },
+    );
+  }
 
   async create(
     ownerId: string,
@@ -251,6 +290,7 @@ export class CommunitiesService {
     if (query.access) {
       qb.andWhere('c.access_tier = :access', { access: query.access });
     }
+    this.excludeModeratedCommunities(qb);
 
     qb.orderBy('c.createdAt', 'DESC');
 
@@ -280,7 +320,7 @@ export class CommunitiesService {
     limit: number,
   ): Promise<CommunityCardDTO[]> {
     const pattern = `%${escapeLikeTerm(term)}%`;
-    const rows = await this.communities
+    const rowsQb = this.communities
       .createQueryBuilder('c')
       .leftJoin(
         CommunityMember,
@@ -295,7 +335,9 @@ export class CommunitiesService {
       .andWhere(
         '(c.name ILIKE :pattern OR c.tagline ILIKE :pattern OR c.purpose ILIKE :pattern)',
         { pattern },
-      )
+      );
+    this.excludeModeratedCommunities(rowsQb);
+    const rows = await rowsQb
       .orderBy('c.name', 'ASC')
       .take(limit)
       .getMany();
@@ -322,7 +364,19 @@ export class CommunitiesService {
     if (community.accessTier === AccessTier.Private && !role) {
       throw new NotFoundException('Community not found');
     }
-    return this.buildDetail(community, viewerId, role);
+    // A moderator takedown 404s the detail for everyone but the community's own
+    // owner/mod — same "don't leak existence" posture as the private-tier gate.
+    const moderation = await this.contentModeration.stateFor(
+      CommunitiesService.SUBJECT_TYPE,
+      community.slug,
+    );
+    if (
+      (moderation.hidden || moderation.removed) &&
+      !CommunitiesService.isStaffRole(role)
+    ) {
+      throw new NotFoundException('Community not found');
+    }
+    return this.buildDetail(community, viewerId, role, moderation);
   }
 
   async update(
@@ -397,6 +451,11 @@ export class CommunitiesService {
         }),
       );
       const memberRef = await this.memberRefFor(userId);
+      // Tell the owner + mods a request is waiting. Best-effort: a notification
+      // failure must not fail the request itself. `createForRecipients` applies
+      // the actor block/mute filter per recipient and drops the requester
+      // themselves, so no self-notification is possible.
+      await this.notifyStaffOfJoinRequest(community, slug, userId);
       return {
         outcome: 'requested',
         role: null,
@@ -496,20 +555,40 @@ export class CommunitiesService {
       throw new ConflictException('Join request already resolved');
     }
 
+    const newStatus =
+      action === 'approve'
+        ? JoinRequestStatus.Approved
+        : JoinRequestStatus.Declined;
+
     const saved = await this.dataSource.transaction(async (manager) => {
       const joinRequestsRepo = manager.getRepository(CommunityJoinRequest);
       const membersRepo = manager.getRepository(CommunityMember);
 
-      request.status =
-        action === 'approve'
-          ? JoinRequestStatus.Approved
-          : JoinRequestStatus.Declined;
-      const updated = await joinRequestsRepo.save(request);
+      // Atomic conditional claim: flip `pending -> newStatus` only if the row
+      // is STILL pending. The pre-transaction status check above is just a
+      // fast-path; without this guarded UPDATE an approve and a decline racing
+      // (or a double-approve) could both pass that check as read-modify-write,
+      // and the approve branch could leave a just-declined applicant on the
+      // roster. `affected === 0` means another call already resolved it — the
+      // roster insert below is then skipped and we abort with a 409.
+      const claim = await joinRequestsRepo
+        .createQueryBuilder()
+        .update(CommunityJoinRequest)
+        .set({ status: newStatus })
+        .where('id = :id AND status = :pending', {
+          id: request.id,
+          pending: JoinRequestStatus.Pending,
+        })
+        .execute();
+      if (claim.affected === 0) {
+        // Rolls the transaction back (nothing was inserted, since the roster
+        // insert is gated on this claim succeeding).
+        throw new ConflictException('Join request already resolved');
+      }
 
       if (action === 'approve') {
-        // Idempotent upsert: approving an already-approved request (or one
-        // whose applicant is somehow already a member) must not 500 on the
-        // roster's unique constraint.
+        // Idempotent upsert: approving a request whose applicant is somehow
+        // already a member must not 500 on the roster's unique constraint.
         await membersRepo
           .createQueryBuilder()
           .insert()
@@ -523,11 +602,62 @@ export class CommunitiesService {
           .execute();
       }
 
-      return updated;
+      // Reflect the claimed status on the in-memory entity for the DTO — the
+      // guarded UPDATE doesn't hydrate it.
+      request.status = newStatus;
+      return request;
     });
+
+    // Tell the applicant the outcome — they always have an account (a
+    // `CommunityJoinRequest.userId` is a real member), so this in-app
+    // notification always reaches them. No actor: it's the community telling
+    // you about your own status, not a member action to filter on. Best-effort.
+    try {
+      await this.notifications.create(
+        saved.userId,
+        action === 'approve'
+          ? NotificationType.JoinRequestApproved
+          : NotificationType.JoinRequestDeclined,
+        { source: 'community', communitySlug: slug },
+      );
+    } catch {
+      // Intentionally ignored — the triage decision already committed.
+    }
 
     const memberRef = await this.memberRefFor(saved.userId);
     return toJoinRequestDTO(saved, memberRef);
+  }
+
+  /**
+   * Fan the "someone wants to join" notification out to the owner and every
+   * mod. Own try/catch so a notification failure never surfaces as a failed
+   * join request. Deep-links to the community (where the triage queue lives).
+   */
+  private async notifyStaffOfJoinRequest(
+    community: Community,
+    slug: string,
+    requesterId: string,
+  ): Promise<void> {
+    try {
+      const staff = await this.members.find({
+        where: {
+          communityId: community.id,
+          role: In([RosterRole.Owner, RosterRole.Mod]),
+        },
+        select: { userId: true },
+      });
+      const recipientIds = [
+        ...new Set([community.ownerId, ...staff.map((row) => row.userId)]),
+      ];
+      await this.notifications.createForRecipients(
+        recipientIds,
+        NotificationType.JoinRequestReceived,
+        { actorId: requesterId, source: 'community', communitySlug: slug },
+        requesterId,
+      );
+    } catch {
+      // Intentionally ignored — best-effort, same contract as the reply fan-out.
+    }
   }
 
   // Self-leave or mod-remove; the owner is never removable (they'd orphan
@@ -832,6 +962,7 @@ export class CommunitiesService {
     community: Community,
     viewerId: string,
     myRole?: RosterRole | null,
+    moderation?: ContentModerationState,
   ): Promise<CommunityDetailDTO> {
     const [role, stats, ownerProfile, myJoinRequest] = await Promise.all([
       myRole !== undefined
@@ -850,6 +981,7 @@ export class CommunitiesService {
       role,
       toMemberRef(ownerProfile),
       myJoinRequest?.status ?? null,
+      moderation,
     );
   }
 

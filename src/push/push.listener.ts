@@ -11,6 +11,7 @@ import {
   MessageCreatedEvent,
 } from '../messaging/messaging.events';
 import { requireAuthorSummary } from '../messaging/message-response';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { PushService } from './push.service';
 
@@ -36,6 +37,7 @@ export class PushMessageListener {
     private readonly profiles: Repository<Profile>,
     private readonly presence: PresenceService,
     private readonly pushService: PushService,
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   @OnEvent(MESSAGE_CREATED)
@@ -66,6 +68,20 @@ export class PushMessageListener {
       );
       if (targets.length === 0) return;
 
+      // P0 hardening: a block either way must stop a push from ever reaching
+      // the blocked party's phone. `sendMessage` already refuses to CREATE a
+      // direct message between blocked members, but a group has no single
+      // "other" party to gate the send on, so a blocked group member is
+      // filtered out here instead — belt-and-braces for the direct case too.
+      const blockedUserIds = await this.blockFilter.blockedUserIds(
+        message.senderId,
+        targets.map((participant) => participant.userId),
+      );
+      const deliverable = targets.filter(
+        (participant) => !blockedUserIds.has(participant.userId),
+      );
+      if (deliverable.length === 0) return;
+
       const senderProfile = await this.profiles.findOne({
         where: { userId: message.senderId },
       });
@@ -73,7 +89,7 @@ export class PushMessageListener {
       const body = preview(message.body);
 
       await Promise.all(
-        targets.map((participant) =>
+        deliverable.map((participant) =>
           this.pushService.sendToUser(participant.userId, {
             title: senderName,
             body,

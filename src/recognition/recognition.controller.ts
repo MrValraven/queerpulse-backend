@@ -5,7 +5,15 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RecognitionService } from './recognition.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiCookieAuth,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 /**
  * `GET /me/recognition` — the caller's own level, badges and perks (spec §3
@@ -13,12 +21,18 @@ import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
  * `queerpulse/src/features/members/api/recognition.api.ts`.
  */
 @ApiTags('Recognition')
-@ApiCookieAuth()
+@ApiCookieAuth('access_token')
 @Controller('me/recognition')
 @UseGuards(ActiveMemberGuard)
 export class MyRecognitionController {
   constructor(private readonly recognitionService: RecognitionService) {}
 
+  @ApiOperation({ summary: "Get the caller's level, badges, and perks" })
+  @ApiOkResponse({
+    description: "The caller's recognition, including private perk state.",
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
   @Get()
   getMine(@CurrentUser() user: CurrentUserData) {
     return this.recognitionService.getForUser(user.userId, true);
@@ -34,12 +48,19 @@ export class MyRecognitionController {
  * already coexist.
  */
 @ApiTags('Recognition')
-@ApiCookieAuth()
+@ApiCookieAuth('access_token')
 @Controller('profiles')
 @UseGuards(ActiveMemberGuard)
 export class MemberRecognitionController {
   constructor(private readonly recognitionService: RecognitionService) {}
 
+  @ApiOperation({ summary: "Get another member's recognition by slug" })
+  @ApiOkResponse({
+    description: "The member's recognition (perk state omitted for non-owners).",
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
+  @ApiNotFoundResponse({ description: 'No profile with that slug.' })
   @Get(':slug/recognition')
   getForMember(@Param('slug') slug: string) {
     return this.recognitionService.getBySlug(slug);

@@ -33,6 +33,7 @@ export class Connection {
   @Column({ type: 'uuid' })
   userLow: string;
 
+  @Index('IDX_connections_user_high')
   @Column({ type: 'uuid' })
   userHigh: string;
 
@@ -44,6 +45,7 @@ export class Connection {
   })
   status: ConnectionStatus;
 
+  @Index('IDX_connections_blocked_by')
   @Column({ type: 'uuid', nullable: true })
   blockedBy: string | null;
 

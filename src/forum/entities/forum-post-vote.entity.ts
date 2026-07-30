@@ -1,4 +1,10 @@
-import { Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+} from 'typeorm';
 
 /**
  * One member's vote on one post. `POST /forum/posts/:id/vote` only ever
@@ -17,9 +23,13 @@ export class ForumPostVote {
   @Column({ type: 'uuid' })
   postId: string;
 
+  @Index('IDX_forum_post_vote_user_id')
   @Column({ type: 'uuid' })
   userId: string;
 
   @Column({ type: 'smallint' })
   value: number;
+
+  @CreateDateColumn({ type: 'timestamptz' })
+  createdAt: Date;
 }

@@ -13,6 +13,7 @@ import databaseConfig from './config/database.config';
 import loggingConfig from './config/logging.config';
 import muxConfig from './config/mux.config';
 import pushConfig from './config/push.config';
+import retentionConfig from './config/retention.config';
 import storageConfig from './config/storage.config';
 import { validate } from './config/env.validation';
 import { AuthModule } from './auth/auth.module';
@@ -32,7 +33,7 @@ import { LinkPreviewModule } from './link-preview/link-preview.module';
 import { ChatModule } from './chat/chat.module';
 import { CinemaModule } from './cinema/cinema.module';
 import { CommunitiesModule } from './communities/communities.module';
-import { CommunityModule } from './community/community.module';
+import { ReadingGroupProposalsModule } from './reading-group-proposals/reading-group-proposals.module';
 import { ChangemakersModule } from './changemakers/changemakers.module';
 import { CompaniesModule } from './companies/companies.module';
 import { CultureModule } from './culture/culture.module';
@@ -61,6 +62,7 @@ import { HttpThrottlerGuard } from './security/http-throttler.guard';
 import { SecurityModule } from './security/security.module';
 import { SocialModule } from './social/social.module';
 import { ReportsModule } from './reports/reports.module';
+import { ContentModerationModule } from './content-moderation/content-moderation.module';
 import { ModerationModule } from './moderation/moderation.module';
 import { AccountModule } from './account/account.module';
 import { ConsentModule } from './consent/consent.module';
@@ -101,6 +103,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
         storageConfig,
         muxConfig,
         pushConfig,
+        retentionConfig,
       ],
       validate,
     }),
@@ -207,6 +210,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     SecurityModule,
     SocialModule,
     ReportsModule,
+    ContentModerationModule,
     ModerationModule,
     AccountModule,
     ConsentModule,
@@ -232,7 +236,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     CultureModule,
     GovernanceModule,
     RoadmapModule,
-    CommunityModule,
+    ReadingGroupProposalsModule,
     ChangemakersModule,
     AdminCommunitiesModule,
     AdminMembersModule,

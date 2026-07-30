@@ -25,7 +25,19 @@ import { ReplaceItemsDTO } from './dto/replace-items.dto';
 import { ReplaceSocialLinksDTO } from './dto/replace-social-links.dto';
 import { UpdateSubprofileDTO } from './dto/update-subprofile.dto';
 import { SubprofilesService } from './subprofiles.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiConflictResponse,
+  ApiCookieAuth,
+  ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+  ApiUnprocessableEntityResponse,
+} from '@nestjs/swagger';
 
 @ApiTags('Subprofiles')
 @ApiCookieAuth()
@@ -37,12 +49,18 @@ export class SubprofilesController {
   //     captured by the ':id' param route below. ----------------------------
 
   @Get('mine')
+  @ApiOperation({ summary: 'List the current member’s own subprofiles' })
+  @ApiOkResponse({ description: 'The member’s subprofiles (owner-facing view).' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   listMine(@CurrentUser() user: CurrentUserData) {
     return this.subprofilesService.listMine(user.userId);
   }
 
   @Get('directory')
   @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'Browse the public subprofile directory' })
+  @ApiOkResponse({ description: 'Directory cards matching the query.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   directory(
     @CurrentUser() user: CurrentUserData,
     @Query() query: ListDirectoryQuery,
@@ -52,6 +70,10 @@ export class SubprofilesController {
 
   @Get('by-handle/:handle')
   @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'Get a published subprofile by its handle (public view)' })
+  @ApiOkResponse({ description: 'The subprofile’s public view.' })
+  @ApiNotFoundResponse({ description: 'No published subprofile with that handle.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   getByHandle(
     @CurrentUser() user: CurrentUserData,
     @Param('handle') handle: string,
@@ -66,12 +88,19 @@ export class SubprofilesController {
   @Public()
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Get('public-handles')
+  @ApiOperation({ summary: 'List every crawlable persona handle (public, for sitemap/prerender)' })
+  @ApiOkResponse({ description: 'All published persona handles.' })
   listPublicHandles() {
     return this.subprofilesService.listPublicHandles();
   }
 
   @Post()
   @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'Create a subprofile' })
+  @ApiCreatedResponse({ description: 'The newly created subprofile (owner-facing view).' })
+  @ApiBadRequestResponse({ description: 'Invalid field (e.g. unknown accent, CTA pairing).' })
+  @ApiConflictResponse({ description: 'Slug or handle already in use.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   create(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: CreateSubprofileDTO,
@@ -80,12 +109,24 @@ export class SubprofilesController {
   }
 
   @Get(':id')
+  @ApiOperation({ summary: 'Get one of your own subprofiles by id' })
+  @ApiOkResponse({ description: 'The subprofile (owner-facing view).' })
+  @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   getOne(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
     return this.subprofilesService.getOwnedDTO(user.userId, id);
   }
 
   @Patch(':id')
   @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'Update a subprofile’s core fields' })
+  @ApiOkResponse({ description: 'The updated subprofile (owner-facing view).' })
+  @ApiBadRequestResponse({ description: 'Invalid field (e.g. unknown accent, CTA pairing).' })
+  @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiConflictResponse({ description: 'Slug or handle already in use.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   update(
     @CurrentUser() user: CurrentUserData,
     @Param('id') id: string,
@@ -96,6 +137,12 @@ export class SubprofilesController {
 
   @Put(':id/sections/:section')
   @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'Replace all items in one section of a subprofile' })
+  @ApiOkResponse({ description: 'The updated subprofile (owner-facing view).' })
+  @ApiBadRequestResponse({ description: 'Unknown section, or invalid items (e.g. multiple featured).' })
+  @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   replaceSection(
     @CurrentUser() user: CurrentUserData,
     @Param('id') id: string,
@@ -112,6 +159,12 @@ export class SubprofilesController {
 
   @Put(':id/social-links')
   @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'Replace a subprofile’s social links' })
+  @ApiOkResponse({ description: 'The updated subprofile (owner-facing view).' })
+  @ApiBadRequestResponse({ description: 'Invalid social links.' })
+  @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   replaceSocialLinks(
     @CurrentUser() user: CurrentUserData,
     @Param('id') id: string,
@@ -126,6 +179,12 @@ export class SubprofilesController {
 
   @Put(':id/affiliations')
   @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'Replace a subprofile’s event/community affiliations' })
+  @ApiOkResponse({ description: 'The updated subprofile (owner-facing view).' })
+  @ApiBadRequestResponse({ description: 'Invalid affiliations.' })
+  @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   replaceAffiliations(
     @CurrentUser() user: CurrentUserData,
     @Param('id') id: string,
@@ -140,18 +199,36 @@ export class SubprofilesController {
 
   @Post(':id/publish')
   @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'Publish a subprofile' })
+  @ApiCreatedResponse({ description: 'The published subprofile (owner-facing view).' })
+  @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnprocessableEntityResponse({
+    description: 'The persona is not ready to publish (unmet requirements or the handle was just taken).',
+  })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   publish(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
     return this.subprofilesService.publish(user.userId, id);
   }
 
   @Post(':id/unpublish')
   @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'Unpublish a subprofile back to draft' })
+  @ApiCreatedResponse({ description: 'The unpublished subprofile (owner-facing view).' })
+  @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   unpublish(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
     return this.subprofilesService.unpublish(user.userId, id);
   }
 
   @Delete(':id')
   @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'Delete a subprofile' })
+  @ApiOkResponse({ description: '`{ ok: true }` once deleted.' })
+  @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   async remove(
     @CurrentUser() user: CurrentUserData,
     @Param('id') id: string,
@@ -166,6 +243,11 @@ export class SubprofilesController {
   @UseGuards(ActiveMemberGuard)
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Post(':id/endorse')
+  @ApiOperation({ summary: 'Endorse a subprofile (optionally with a note)' })
+  @ApiCreatedResponse({ description: 'The updated endorsement standing.' })
+  @ApiBadRequestResponse({ description: 'You cannot endorse your own persona.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   endorse(
     @CurrentUser() user: CurrentUserData,
     @Param('id') id: string,
@@ -176,6 +258,10 @@ export class SubprofilesController {
 
   @UseGuards(ActiveMemberGuard)
   @Delete(':id/endorse')
+  @ApiOperation({ summary: 'Withdraw your endorsement of a subprofile' })
+  @ApiOkResponse({ description: 'The updated endorsement standing.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   withdrawEndorsement(
     @CurrentUser() user: CurrentUserData,
     @Param('id') id: string,
@@ -185,6 +271,10 @@ export class SubprofilesController {
 
   @UseGuards(ActiveMemberGuard)
   @Get(':id/endorsements')
+  @ApiOperation({ summary: 'List a subprofile’s endorsers' })
+  @ApiOkResponse({ description: 'The endorsers of the subprofile.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   listEndorsers(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
     return this.subprofilesService.listEndorsers(user.userId, id);
   }
@@ -195,12 +285,21 @@ export class SubprofilesController {
   @UseGuards(ActiveMemberGuard)
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Post(':id/follow')
+  @ApiOperation({ summary: 'Follow a subprofile' })
+  @ApiCreatedResponse({ description: 'The updated follow standing.' })
+  @ApiBadRequestResponse({ description: 'You cannot follow your own persona.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   follow(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
     return this.subprofilesService.follow(user.userId, id);
   }
 
   @UseGuards(ActiveMemberGuard)
   @Delete(':id/follow')
+  @ApiOperation({ summary: 'Unfollow a subprofile' })
+  @ApiOkResponse({ description: 'The updated follow standing.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   unfollow(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
     return this.subprofilesService.unfollow(user.userId, id);
   }
@@ -218,6 +317,10 @@ export class ProfileSubprofilesController {
 
   @Get(':slug/subprofiles')
   @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'List a member’s linked, published subprofiles' })
+  @ApiOkResponse({ description: 'The member’s public subprofiles.' })
+  @ApiNotFoundResponse({ description: 'No member with that slug.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   listForProfile(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,

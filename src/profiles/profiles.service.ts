@@ -474,10 +474,18 @@ export class ProfilesService {
 
     const fmt = handleFormatError(username);
     if (fmt === 'invalid') {
-      throw new UnprocessableEntityException({ reason: 'invalid' });
+      throw new UnprocessableEntityException({
+        code: 'HANDLE_INVALID',
+        message: 'That username contains characters that are not allowed.',
+        reason: 'invalid',
+      });
     }
     if (fmt === 'reserved') {
-      throw new UnprocessableEntityException({ reason: 'reserved' });
+      throw new UnprocessableEntityException({
+        code: 'HANDLE_RESERVED',
+        message: 'That username is reserved.',
+        reason: 'reserved',
+      });
     }
 
     const currentSlug = profile.slug;

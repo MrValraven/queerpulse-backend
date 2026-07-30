@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { RoadmapItem } from './entities/roadmap-item.entity';
 import { RoadmapIdea } from './entities/roadmap-idea.entity';
 import { RoadmapVote } from './entities/roadmap-vote.entity';
@@ -17,6 +18,9 @@ import { RoadmapPublicController } from './roadmap-public.controller';
       RoadmapVote,
       RoadmapSettings,
     ]),
+    // `NotificationsService` — tell a member their submitted idea's status
+    // changed (published or dismissed).
+    NotificationsModule,
   ],
   controllers: [RoadmapPublicController, RoadmapController],
   providers: [RoadmapService, RoadmapAdminService],

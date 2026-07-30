@@ -13,6 +13,9 @@ import {
   ListingSocial,
   ListingStatus,
   ListingWitLine,
+  SafeSpacePromise,
+  SafeSpaceRemoval,
+  SafeSpaceVouch,
 } from './entities/listing.entity';
 
 /**
@@ -208,6 +211,11 @@ export interface DirectoryCardDTO {
   // Map pin, when the owner placed one while listing. null ⇒ list-only (no pin).
   latitude: number | null;
   longitude: number | null;
+  // Safe-space badge primitives for the card. Deliberately lean — detail-only
+  // fields (promises/vouches/removal/verifier/re-verified-at) are NOT surfaced
+  // here; see `SafeSpaceDetailDTO`/`RemovedSpaceDetailDTO` for those.
+  safeSpaceStatus: 'none' | 'verified' | 'removed';
+  safeSpaceTier: number | null;
 }
 
 export function toDirectoryCard(listing: Listing): DirectoryCardDTO {
@@ -228,6 +236,8 @@ export function toDirectoryCard(listing: Listing): DirectoryCardDTO {
     memberFirst: listing.linkToProfile ? owner.first || null : null,
     latitude: listing.latitude ?? null,
     longitude: listing.longitude ?? null,
+    safeSpaceStatus: listing.safeSpaceStatus,
+    safeSpaceTier: listing.safeSpaceTier ?? null,
   };
 }
 
@@ -256,6 +266,7 @@ const CATEGORY_HOURS_TYPE: Record<string, DirectoryHoursType> = {
   fitness: 'gym',
   health: 'clinic',
   space: 'studio',
+  nightlife: 'restaurant',
 };
 
 function hoursTypeForCategory(cat: string): DirectoryHoursType {
@@ -385,6 +396,19 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
   /** Count of `saved_item` rows bookmarking this listing (`SavedKind.Listing`,
    * keyed by slug) — the public "N members saved this" trust signal. */
   savedCount: number;
+  // Trust block, present alongside the inherited `safeSpaceStatus`/
+  // `safeSpaceTier` so the merged directory detail page can render the full
+  // safe-space narrative from the same record. Shapes mirror the raw
+  // `Listing` columns exactly — the same source `toSafeSpaceDetail` (below)
+  // reads for the safe-spaces hub — rather than the hub's own derived
+  // `SafeSpaceDetailDTO` (which adds per-vouch `initials`/`tint`). `null`
+  // whenever the listing has never been a verified/removed safe space.
+  safeSpaceVerifier: string | null;
+  safeSpaceReVerifiedAt: string | null;
+  safeSpaceSub: string | null;
+  safeSpacePromises: SafeSpacePromise[];
+  safeSpaceVouches: SafeSpaceVouch[];
+  safeSpaceRemoval: SafeSpaceRemoval | null;
 }
 
 export function toDirectoryDetail(
@@ -442,6 +466,14 @@ export function toDirectoryDetail(
     reviews: reviews.map(toReviewDTO),
     upcoming: upcomingEvents.map(toUpcomingEvent),
     savedCount,
+    // Empty-string defaults (never-a-safe-space listings) read as "no value"
+    // here, same as `safeSpaceTier` already does on the inherited card DTO.
+    safeSpaceVerifier: listing.safeSpaceVerifier || null,
+    safeSpaceReVerifiedAt: listing.safeSpaceReVerifiedAt ?? null,
+    safeSpaceSub: listing.safeSpaceSub || null,
+    safeSpacePromises: listing.safeSpacePromises,
+    safeSpaceVouches: listing.safeSpaceVouches,
+    safeSpaceRemoval: listing.safeSpaceRemoval,
   };
 }
 

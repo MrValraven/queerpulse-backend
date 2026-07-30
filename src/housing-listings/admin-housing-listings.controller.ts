@@ -5,7 +5,15 @@ import { Feature } from '../common/feature.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { UpdateHousingListingStatusDto } from './dto/update-housing-listing-status.dto';
 import { HousingListingsService } from './housing-listings.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiCookieAuth,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 /**
  * Moderator/admin moderation of housing listings — list all (incl. non-live)
@@ -15,7 +23,11 @@ import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
  */
 @Feature('housingListings')
 @ApiTags('Admin — Housing')
-@ApiCookieAuth()
+@ApiCookieAuth('access_token')
+@ApiUnauthorizedResponse({
+  description: 'Not authenticated.',
+})
+@ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
 @Controller('admin/housing-listings')
 @UseGuards(RolesGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)
@@ -23,11 +35,16 @@ export class AdminHousingListingsController {
   constructor(private readonly service: HousingListingsService) {}
 
   @Get()
+  @ApiOperation({ summary: 'List all housing listings (including non-live)' })
+  @ApiOkResponse({ description: 'Every housing listing, for moderation.' })
   listAll() {
     return this.service.listAllForAdmin();
   }
 
   @Patch(':ref/status')
+  @ApiOperation({ summary: "Set a housing listing's moderation status" })
+  @ApiOkResponse({ description: 'The updated housing listing.' })
+  @ApiNotFoundResponse({ description: 'Housing listing not found.' })
   setStatus(
     @Param('ref') ref: string,
     @Body() dto: UpdateHousingListingStatusDto,

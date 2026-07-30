@@ -2,6 +2,7 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Index,
   JoinColumn,
   ManyToOne,
   PrimaryColumn,
@@ -42,6 +43,7 @@ export class Handle {
 
   // Set when ownerKind === 'profile'; null otherwise (enforced by the migration
   // CHECK constraint). Cascades so a deleted user frees the handle.
+  @Index('IDX_handles_user_id')
   @Column({ type: 'uuid', nullable: true })
   userId: string | null;
 
@@ -51,6 +53,7 @@ export class Handle {
 
   // Set when ownerKind === 'subprofile'; null otherwise. Cascades so a deleted
   // subprofile frees the handle.
+  @Index('IDX_handles_subprofile_id')
   @Column({ type: 'uuid', nullable: true })
   subprofileId: string | null;
 

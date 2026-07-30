@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CompaniesModule } from '../companies/companies.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersModule } from '../users/users.module';
 import { JobApplication } from './entities/job-application.entity';
@@ -18,6 +19,8 @@ import { JobsService } from './jobs.service';
     // so the old `forwardRef` cycle is gone.
     CompaniesModule,
     UsersModule,
+    // `NotificationsService` — tell the job's poster when someone applies.
+    NotificationsModule,
   ],
   controllers: [JobsController, MeApplicationsController],
   providers: [JobsService],

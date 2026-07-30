@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { Connection } from '../connections/entities/connection.entity';
 import { ReportsModule } from '../reports/reports.module';
 import { UsersModule } from '../users/users.module';
 import { BlockFilterService } from './block-filter.service';
@@ -21,10 +22,17 @@ import { SocialService } from './social.service';
  * path can create a `Report` via `ReportsService`. `ReportsModule` does not
  * import anything from `social`, so this is a plain one-way import — no
  * `forwardRef` needed.
+ *
+ * Registers the `Connection` entity directly (rather than importing
+ * `ConnectionsModule`) so `blockMember` can sever an existing connection edge
+ * in the same transaction as the block insert — `ConnectionsModule` already
+ * imports `SocialModule` for `BlockFilterService`, so importing it back here
+ * would be a cycle. `SocialService` talks to the `connections` table directly
+ * for this one write; it does not depend on `ConnectionsService`.
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Block, Mute]),
+    TypeOrmModule.forFeature([Block, Mute, Connection]),
     UsersModule,
     ReportsModule,
   ],

@@ -55,6 +55,7 @@ function build(opts: {
   participants: { userId: string; muted: boolean }[];
   online: string[];
   isOfficial?: boolean;
+  blocked?: string[];
 }) {
   const conversationsRepo = {
     findOne: jest.fn().mockResolvedValue({
@@ -78,14 +79,20 @@ function build(opts: {
     isOnline: (userId: string) => opts.online.includes(userId),
   };
   const push = { sendToUser: jest.fn().mockResolvedValue(undefined) };
+  const blockFilter = {
+    blockedUserIds: jest
+      .fn()
+      .mockResolvedValue(new Set<string>(opts.blocked ?? [])),
+  };
   const listener = new PushMessageListener(
     conversationsRepo as never,
     participantsRepo as never,
     profilesRepo as never,
     presence as never,
     push as never,
+    blockFilter as never,
   );
-  return { listener, push, participantsRepo, conversationsRepo };
+  return { listener, push, participantsRepo, conversationsRepo, blockFilter };
 }
 
 it('pushes to an offline recipient with the sender name + preview', async () => {
@@ -138,6 +145,22 @@ it('excludes muted participants at the query level', async () => {
   expect(participantsRepo.find).toHaveBeenCalledWith({
     where: { conversationId: 'conv-1', muted: false },
   });
+});
+
+it('never pushes to a recipient blocked either way relative to the sender (P0)', async () => {
+  const { listener, push, blockFilter } = build({
+    participants: [
+      { userId: 'sender-1', muted: false },
+      { userId: 'recipient-1', muted: false },
+    ],
+    online: [],
+    blocked: ['recipient-1'],
+  });
+  await listener.handleMessageCreated(makeEvent());
+  expect(blockFilter.blockedUserIds).toHaveBeenCalledWith('sender-1', [
+    'recipient-1',
+  ]);
+  expect(push.sendToUser).not.toHaveBeenCalled();
 });
 
 it('never pushes for an official (non-DM) conversation', async () => {

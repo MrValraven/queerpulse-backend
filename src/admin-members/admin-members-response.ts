@@ -1,3 +1,5 @@
+import { UserRole } from '../users/entities/user.entity';
+
 export type BadgeTone = 'plum' | 'coral' | 'jade' | 'violet' | 'amber';
 export type ModerationState = 'under_review' | 'frozen' | 'limited';
 
@@ -66,6 +68,9 @@ export interface AdminMemberCardDTO {
   tone: BadgeTone;
   pronouns: string | null;
   verified: boolean;
+  /** The member's platform role (`member` / `moderator` / `admin`), so the
+   *  admin roster can show and manage it without a second fetch. */
+  role: UserRole;
   openReportCount: number;
   joinedAt: string;
   tagline: string | null;
@@ -114,6 +119,11 @@ export interface AdminMemberDetailDTO {
   tone: BadgeTone;
   pronouns: string | null;
   verified: boolean;
+  /** The member's platform role, driving the drawer's role control. */
+  role: UserRole;
+  /** A non-human house account (genesis) — its role is not editable, so the
+   *  drawer disables the control and says why. */
+  isSystem: boolean;
   avatarUrl: string | null;
   vouchCount: number;
   /** How many members this member has vouched FOR (not withdrawn) — the
@@ -139,6 +149,7 @@ export function toAdminMemberCard(input: {
     verified: boolean;
     joinedAt: Date;
   };
+  role: UserRole;
   openReportCount: number;
   communities: string[];
   vouchCount: number;
@@ -153,6 +164,7 @@ export function toAdminMemberCard(input: {
     tone: toneFor(profile.slug),
     pronouns: profile.pronouns,
     verified: profile.verified,
+    role: input.role,
     openReportCount: input.openReportCount,
     joinedAt: profile.joinedAt.toISOString(),
     tagline: profile.tagline,
@@ -208,6 +220,8 @@ export function toAdminMemberDetail(input: {
     verified: boolean;
     joinedAt: Date;
   };
+  role: UserRole;
+  isSystem: boolean;
   openReportCount: number;
   vouchCount: number;
   outboundVouchCount: number;
@@ -233,6 +247,8 @@ export function toAdminMemberDetail(input: {
     tone: toneFor(profile.slug),
     pronouns: profile.pronouns,
     verified: profile.verified,
+    role: input.role,
+    isSystem: input.isSystem,
     avatarUrl: profile.avatarUrl,
     vouchCount: input.vouchCount,
     outboundVouchCount: input.outboundVouchCount,
@@ -254,5 +270,30 @@ export function toAdminMemberDetail(input: {
       reportId: entry.reportId,
     })),
     graph: input.graph,
+  };
+}
+
+/* ── Role change (PATCH /admin/members/:id/role) ─────────────────────────── */
+
+/** The minimal shape returned after a role change, so the admin UI can patch
+ *  the roster/drawer in place without re-fetching the whole member. */
+export interface AdminMemberRoleDTO {
+  id: string;
+  slug: string;
+  role: UserRole;
+  isSystem: boolean;
+}
+
+export function toAdminMemberRole(input: {
+  userId: string;
+  slug: string;
+  role: UserRole;
+  isSystem: boolean;
+}): AdminMemberRoleDTO {
+  return {
+    id: input.userId,
+    slug: input.slug,
+    role: input.role,
+    isSystem: input.isSystem,
   };
 }

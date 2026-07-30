@@ -20,6 +20,10 @@ export enum EventStatus {
 }
 
 @Entity('events')
+@Index('IDX_events_status_start_at', ['status', 'startAt'])
+@Index('IDX_events_feed_created_at_id', ['createdAt', 'id'], {
+  where: `"status" = 'published' AND "visibility" IN ('public', 'members')`,
+})
 export class Event {
   @PrimaryGeneratedColumn('uuid')
   id: string;

@@ -1,4 +1,10 @@
-import { Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+} from 'typeorm';
 
 @Entity('group_memberships')
 @Index('UQ_group_memberships_user_group', ['userId', 'groupId'], {
@@ -12,9 +18,13 @@ export class GroupMembership {
   @Column({ type: 'uuid' })
   userId: string;
 
+  @Index('IDX_group_memberships_group_id')
   @Column({ type: 'uuid' })
   groupId: string;
 
   @Column({ type: 'varchar' })
   role: string;
+
+  @CreateDateColumn({ type: 'timestamptz' })
+  createdAt: Date;
 }

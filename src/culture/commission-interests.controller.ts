@@ -7,7 +7,13 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { CommissionInterestsService } from './commission-interests.service';
 import { CreateCommissionInterestDto } from './dto/create-commission-interest.dto';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiCookieAuth,
+  ApiCreatedResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 // The Culture page (`CulturePage.tsx`) is almost entirely curated editorial
 // content (book/film/music club picks, the art showcase gallery, community
@@ -17,7 +23,10 @@ import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 // and only that.
 @Feature('culture')
 @ApiTags('Culture')
-@ApiCookieAuth()
+@ApiCookieAuth('access_token')
+@ApiUnauthorizedResponse({
+  description: 'Requires an authenticated, active member session.',
+})
 @Controller('commissions')
 @UseGuards(ActiveMemberGuard)
 export class CommissionInterestsController {
@@ -26,6 +35,8 @@ export class CommissionInterestsController {
   ) {}
 
   @Post('interest')
+  @ApiOperation({ summary: 'Express interest in a commission board project.' })
+  @ApiCreatedResponse({ description: 'The recorded commission interest.' })
   create(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: CreateCommissionInterestDto,

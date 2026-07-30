@@ -1,6 +1,10 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
+import {
+  DATA_EXPORT_CONTRIBUTORS,
+  DataExportContribution,
+} from './data-export-contributor';
 import { Connection } from '../connections/entities/connection.entity';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
 import { Event } from '../events/entities/event.entity';
@@ -50,7 +54,54 @@ export class AccountExportService {
     @InjectRepository(Vouch) private readonly vouches: Repository<Vouch>,
     @InjectRepository(Activity)
     private readonly activities: Repository<Activity>,
+    // Contributions for domains beyond the six core categories built directly
+    // below (subprofiles, listings, housing, saved, notifications, consent).
+    // Registered under DATA_EXPORT_CONTRIBUTORS in AccountModule so a new
+    // domain can't be silently forgotten from the Art. 20 archive.
+    @Inject(DATA_EXPORT_CONTRIBUTORS)
+    private readonly extraContributors: DataExportContribution[],
   ) {}
+
+  /**
+   * The six original categories, expressed as contributions so `build` can
+   * iterate ALL contributions (core + registered) through one code path. The
+   * builder methods and their output are unchanged — this is the same set of
+   * keys the frontend has always shipped against.
+   */
+  private coreContributions(): DataExportContribution[] {
+    return [
+      {
+        category: 'profile',
+        archiveKey: 'profile',
+        buildContribution: (userId) => this.buildProfile(userId),
+      },
+      {
+        category: 'messages',
+        archiveKey: 'messages',
+        buildContribution: (userId) => this.buildMessages(userId),
+      },
+      {
+        category: 'forumPosts',
+        archiveKey: 'posts',
+        buildContribution: (userId) => this.buildPosts(userId),
+      },
+      {
+        category: 'events',
+        archiveKey: 'events',
+        buildContribution: (userId) => this.buildEvents(userId),
+      },
+      {
+        category: 'connections',
+        archiveKey: 'connections',
+        buildContribution: (userId) => this.buildConnections(userId),
+      },
+      {
+        category: 'activityLog',
+        archiveKey: 'activity',
+        buildContribution: (userId) => this.buildActivity(userId),
+      },
+    ];
+  }
 
   /**
    * Build the whole archive in memory and return it for inline `jsonb` storage.
@@ -78,23 +129,17 @@ export class AccountExportService {
       },
     };
 
-    if (want.has('profile')) {
-      archive.profile = await this.buildProfile(userId);
-    }
-    if (want.has('messages')) {
-      archive.messages = await this.buildMessages(userId);
-    }
-    if (want.has('forumPosts')) {
-      archive.posts = await this.buildPosts(userId);
-    }
-    if (want.has('events')) {
-      archive.events = await this.buildEvents(userId);
-    }
-    if (want.has('connections')) {
-      archive.connections = await this.buildConnections(userId);
-    }
-    if (want.has('activityLog')) {
-      archive.activity = await this.buildActivity(userId);
+    // One code path over every contribution — the six core categories plus any
+    // registered domain contributor. A category the caller did not request is
+    // skipped (and its key omitted), exactly as before.
+    for (const contribution of [
+      ...this.coreContributions(),
+      ...this.extraContributors,
+    ]) {
+      if (want.has(contribution.category)) {
+        archive[contribution.archiveKey] =
+          await contribution.buildContribution(userId);
+      }
     }
     return archive;
   }

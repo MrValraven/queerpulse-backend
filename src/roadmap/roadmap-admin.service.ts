@@ -1,6 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { RoadmapItem } from './entities/roadmap-item.entity';
 import { RoadmapIdea, RoadmapIdeaStatus } from './entities/roadmap-idea.entity';
 import { RoadmapVote, RoadmapVoteTarget } from './entities/roadmap-vote.entity';
@@ -34,6 +36,7 @@ export class RoadmapAdminService {
     private readonly votes: Repository<RoadmapVote>,
     @InjectRepository(RoadmapSettings)
     private readonly settings: Repository<RoadmapSettings>,
+    private readonly notifications: NotificationsService,
   ) {}
 
   // Duplicated (rather than shared) with `RoadmapService`'s identical
@@ -105,8 +108,19 @@ export class RoadmapAdminService {
   }
 
   async deleteItem(id: string): Promise<void> {
-    const item = await this.loadItemOr404(id);
-    await this.items.remove(item);
+    await this.loadItemOr404(id);
+    // Votes are polymorphic (`target_id` has no FK to discriminate item vs
+    // idea — see the migration), so nothing cascades them. Delete this item's
+    // votes and the item itself in one transaction to avoid orphaned
+    // `roadmap_votes` rows (which would otherwise inflate a re-created item's
+    // count if an id were ever reused, and leak into `getMyVotes`).
+    await this.items.manager.transaction(async (manager) => {
+      await manager.delete(RoadmapVote, {
+        targetType: RoadmapVoteTarget.Item,
+        targetId: id,
+      });
+      await manager.delete(RoadmapItem, { id });
+    });
   }
 
   // Admin-authored ideas skip the `pending` review step other members'
@@ -138,16 +152,42 @@ export class RoadmapAdminService {
     dto: UpdateIdeaDto,
   ): Promise<AdminRoadmapIdeaDTO> {
     const idea = await this.loadIdeaOr404(id);
+    const previousStatus = idea.status;
     Object.assign(idea, dto);
     const saved = await this.ideas.save(idea);
+    // Tell the member who submitted this idea that its status changed (e.g.
+    // pending → published, or → dismissed). Only when there's a real submitter
+    // and the status genuinely moved. No actor: an admin decision reads as the
+    // platform's word, not a member action. Best-effort; deep-links to the
+    // public roadmap. Admin-authored ideas have `submittedById: null` and so
+    // never notify.
+    if (saved.submittedById && saved.status !== previousStatus) {
+      try {
+        await this.notifications.create(
+          saved.submittedById,
+          NotificationType.RoadmapStatus,
+          { source: 'roadmap', ideaId: saved.id, status: saved.status },
+        );
+      } catch {
+        // Intentionally ignored — the idea update already committed.
+      }
+    }
     const liveVotes =
       (await this.liveVoteCounts(RoadmapVoteTarget.Idea, [id])).get(id) ?? 0;
     return toAdminIdeaDTO(saved, liveVotes);
   }
 
   async deleteIdea(id: string): Promise<void> {
-    const idea = await this.loadIdeaOr404(id);
-    await this.ideas.remove(idea);
+    await this.loadIdeaOr404(id);
+    // Same polymorphic-vote cleanup as `deleteItem` — delete the idea's votes
+    // and the idea in one transaction so no orphaned `roadmap_votes` remain.
+    await this.ideas.manager.transaction(async (manager) => {
+      await manager.delete(RoadmapVote, {
+        targetType: RoadmapVoteTarget.Idea,
+        targetId: id,
+      });
+      await manager.delete(RoadmapIdea, { id });
+    });
   }
 
   // Upserts the `roadmap_settings` singleton (id = 1) — mirrors

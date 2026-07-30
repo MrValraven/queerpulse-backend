@@ -9,4 +9,4 @@ import { ReadingGroupProposalsService } from './reading-group-proposals.service'
   controllers: [ReadingGroupProposalsController],
   providers: [ReadingGroupProposalsService],
 })
-export class CommunityModule {}
+export class ReadingGroupProposalsModule {}

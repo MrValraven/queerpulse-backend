@@ -16,6 +16,7 @@ import {
  * value means a nested reply to that specific post.
  */
 @Entity('forum_post')
+@Index('IDX_forum_post_thread_id_created_at_id', ['threadId', 'createdAt', 'id'])
 @Index('IDX_forum_post_thread_id_parent_post_id', ['threadId', 'parentPostId'])
 export class ForumPost {
   @PrimaryGeneratedColumn('uuid')

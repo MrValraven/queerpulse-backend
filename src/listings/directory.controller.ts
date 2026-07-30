@@ -19,7 +19,16 @@ import { CreateEditSuggestionDto } from './dto/create-edit-suggestion.dto';
 import { CreateReviewDto } from './dto/create-review.dto';
 import { ListDirectoryQuery } from './dto/list-directory.query';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiCookieAuth,
+  ApiCreatedResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 /**
  * Public, read-only directory over the businesses (`listings`) table, backing
@@ -45,6 +54,8 @@ export class DirectoryController {
   // Host page "Partner spaces" — live listings flagged as partner venues.
   @Public()
   @Get('spaces')
+  @ApiOperation({ summary: 'List live listings flagged as partner venues' })
+  @ApiOkResponse({ description: 'The partner spaces.' })
   listPartnerSpaces() {
     return this.directoryService.listPartnerSpaces();
   }
@@ -52,6 +63,8 @@ export class DirectoryController {
   // Public directory grid — every live listing, optionally filtered.
   @Public()
   @Get()
+  @ApiOperation({ summary: 'List the public directory of live listings' })
+  @ApiOkResponse({ description: 'Matching directory cards.' })
   listDirectory(@Query() query: ListDirectoryQuery) {
     return this.directoryService.listDirectory(query);
   }
@@ -59,6 +72,8 @@ export class DirectoryController {
   // Public Safe Spaces page — verified + removed safe spaces with hero stats.
   @Public()
   @Get('safe-spaces')
+  @ApiOperation({ summary: 'List verified and removed safe spaces with hero stats' })
+  @ApiOkResponse({ description: 'The safe-spaces list and stats.' })
   listSafeSpaces() {
     return this.directoryService.listSafeSpaces();
   }
@@ -66,6 +81,9 @@ export class DirectoryController {
   // Public Safe Space detail (verified or removed).
   @Public()
   @Get('safe-spaces/:slug')
+  @ApiOperation({ summary: 'Get a safe space (verified or removed) by slug' })
+  @ApiOkResponse({ description: 'The safe-space detail.' })
+  @ApiNotFoundResponse({ description: 'No safe space with that slug.' })
   getSafeSpace(@Param('slug') slug: string) {
     return this.directoryService.getSafeSpaceBySlug(slug);
   }
@@ -77,6 +95,8 @@ export class DirectoryController {
   // unknown/inactive member yields an empty array, not a 404.
   @Public()
   @Get('by-member/:slug')
+  @ApiOperation({ summary: "List live listings owned by a member's profile slug" })
+  @ApiOkResponse({ description: 'Redacted directory cards (empty for an unknown/inactive member).' })
   listByMember(@Param('slug') slug: string) {
     return this.directoryService.listByMemberSlug(slug);
   }
@@ -85,6 +105,9 @@ export class DirectoryController {
   // so route matching resolves those literally rather than as `:slug`.
   @Public()
   @Get(':slug')
+  @ApiOperation({ summary: 'Get a live directory listing by slug' })
+  @ApiOkResponse({ description: 'The directory detail.' })
+  @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
   getDirectoryListing(@Param('slug') slug: string) {
     return this.directoryService.getDirectoryBySlug(slug);
   }
@@ -92,6 +115,9 @@ export class DirectoryController {
   // Public: paginated reviews for a listing.
   @Public()
   @Get(':slug/reviews')
+  @ApiOperation({ summary: 'List paginated reviews for a live listing' })
+  @ApiOkResponse({ description: 'A page of reviews.' })
+  @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
   listReviews(@Param('slug') slug: string, @Query('page') page?: string) {
     return this.directoryService.listReviews(
       slug,
@@ -104,6 +130,10 @@ export class DirectoryController {
   // requires the global CSRF token like every other mutation.
   @Post(':slug/reviews')
   @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'Leave a review on a live listing' })
+  @ApiCreatedResponse({ description: 'The created review.' })
+  @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   addReview(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
@@ -121,6 +151,11 @@ export class DirectoryController {
   // doc comment). Guarded per-route, same as `addReview`.
   @Post(':slug/edit-suggestions')
   @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'Suggest an edit to a live listing (moderator queue)' })
+  @ApiCreatedResponse({ description: 'The created edit suggestion id and status.' })
+  @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
+  @ApiBadRequestResponse({ description: 'You own the listing, or the message is empty.' })
+  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
   suggestEdit(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,

@@ -8,6 +8,5 @@ import { ConsentRecord } from './entities/consent-record.entity';
   imports: [TypeOrmModule.forFeature([ConsentRecord])],
   controllers: [ConsentController],
   providers: [ConsentService],
-  exports: [ConsentService],
 })
 export class ConsentModule {}

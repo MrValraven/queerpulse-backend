@@ -1,4 +1,10 @@
-import { Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+} from 'typeorm';
 
 export enum BoardKind {
   Looking = 'looking',
@@ -30,4 +36,7 @@ export class BoardPost {
 
   @Column({ type: 'int', default: 0 })
   position: number;
+
+  @CreateDateColumn({ type: 'timestamptz' })
+  createdAt: Date;
 }

@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, EntityManager, Repository } from 'typeorm';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { CursorPage, cursorPaginate } from '../common/cursor-pagination';
 import { escapeLikeTerm } from '../common/like-escape';
@@ -178,17 +178,30 @@ export class ForumThreadsService {
    * the two fields the frontend's "recently active" thread sort and reply
    * badge depend on.
    */
-  async markActivity(threadId: string): Promise<void> {
-    // One transaction so a reply never bumps `replyCount` without also
-    // refreshing `lastActivityAt` (the two fields the sort/badge depend on).
-    await this.dataSource.transaction(async (manager) => {
+  async markActivity(
+    threadId: string,
+    existingManager?: EntityManager,
+  ): Promise<void> {
+    // Atomic SQL increment (never a read-modify-write, which would lose bumps
+    // under concurrent replies) plus a `lastActivityAt` refresh — the two
+    // fields the "recently active" sort/badge depend on.
+    const run = async (manager: EntityManager): Promise<void> => {
       await manager.increment(ForumThread, { id: threadId }, 'replyCount', 1);
       await manager.update(
         ForumThread,
         { id: threadId },
         { lastActivityAt: new Date() },
       );
-    });
+    };
+    // Run inside the caller's transaction when given one — `reply()` passes
+    // its manager so the reply insert and this count bump commit together (a
+    // crash between them would otherwise drift `replyCount`). Standalone
+    // callers get their own one-shot transaction.
+    if (existingManager) {
+      await run(existingManager);
+      return;
+    }
+    await this.dataSource.transaction(run);
   }
 
   // PATCH /forum/threads/:slug — author-only title edit. The title lives on the

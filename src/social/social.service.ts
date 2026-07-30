@@ -4,9 +4,13 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Not, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
+import {
+  Connection,
+  ConnectionStatus,
+} from '../connections/entities/connection.entity';
 import { ReportsService } from '../reports/reports.service';
 import { ReportSubjectType } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
@@ -36,6 +40,7 @@ export class SocialService {
     @InjectRepository(Mute) private readonly mutes: Repository<Mute>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly reportsService: ReportsService,
+    private readonly dataSource: DataSource,
   ) {
     this.memberLookup = new MemberLookup(this.profiles);
   }
@@ -60,21 +65,53 @@ export class SocialService {
     });
   }
 
-  /** Idempotent: re-blocking an already-blocked member returns the existing row. */
+  /**
+   * Idempotent: re-blocking an already-blocked member returns the existing row.
+   *
+   * Transactional: the block row AND the severing of any existing
+   * `connections` edge commit together (P0 fix — `blocks` used to be a
+   * standalone primitive with "no bearing on connection state" per the
+   * entity's docstring, which meant blocking someone left a prior `Accepted`
+   * connection in place; `MessagingService.sendMessage`'s `areConnected` gate,
+   * and presence/typing which are also connection-derived, kept treating the
+   * pair as connected — a blocked member could still DM the blocker and show
+   * up online to them). Reuses the SAME `Blocked` status + `blockedBy` the
+   * connections `respond('block')` action already writes, so every
+   * connections-side read (`areConnected`, `getAcceptedConnectionUserIds`, …)
+   * sees the pair as severed regardless of which of the two block mechanisms
+   * placed it. A connection already `Blocked` (by either party) is left
+   * untouched — it's already severed, and overwriting `blockedBy` here would
+   * let this actor seize a block the OTHER party placed, which is exactly
+   * what `ConnectionsService.respond('unblock')`'s "only the blocker can
+   * unblock" check guards against.
+   */
   async blockMember(
     actorId: string,
     slug: string,
     dto?: BlockOptionsDto,
   ): Promise<BlockDTO> {
     const blockedId = await this.resolveMutationTarget(actorId, slug);
+    const { low, high } = this.orderedPair(actorId, blockedId);
 
-    await this.blocks
-      .createQueryBuilder()
-      .insert()
-      .into(Block)
-      .values({ blockerId: actorId, blockedId, reason: dto?.reason ?? null })
-      .orIgnore()
-      .execute();
+    await this.dataSource.transaction(async (manager) => {
+      await manager
+        .createQueryBuilder()
+        .insert()
+        .into(Block)
+        .values({ blockerId: actorId, blockedId, reason: dto?.reason ?? null })
+        .orIgnore()
+        .execute();
+
+      await manager.update(
+        Connection,
+        { userLow: low, userHigh: high, status: Not(ConnectionStatus.Blocked) },
+        {
+          status: ConnectionStatus.Blocked,
+          blockedBy: actorId,
+          respondedAt: new Date(),
+        },
+      );
+    });
 
     const row = await this.blocks.findOneOrFail({
       where: { blockerId: actorId, blockedId },
@@ -177,6 +214,16 @@ export class SocialService {
   }
 
   // --- internals ---
+
+  /**
+   * Canonical unordered pair (least/greatest userId) matching `connections`'
+   * own `(userLow, userHigh)` ordering (mirrors `ConnectionsService#pair`,
+   * duplicated here rather than imported to avoid a module import cycle —
+   * see the module docstring).
+   */
+  private orderedPair(a: string, b: string): { low: string; high: string } {
+    return a < b ? { low: a, high: b } : { low: b, high: a };
+  }
 
   private async resolveSlugStrict(slug: string): Promise<string> {
     const targetId = await this.memberLookup.userIdForSlug(slug);

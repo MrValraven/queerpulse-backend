@@ -1,4 +1,11 @@
-import { Column, Entity, Index, PrimaryGeneratedColumn, Unique } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+  Unique,
+} from 'typeorm';
 
 export enum ReactionKey {
   Heart = 'heart',
@@ -34,4 +41,7 @@ export class CommunityPostReaction {
     enumName: 'community_post_reactions_key_enum',
   })
   key: ReactionKey;
+
+  @CreateDateColumn({ type: 'timestamptz' })
+  createdAt: Date;
 }

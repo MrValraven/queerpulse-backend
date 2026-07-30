@@ -4,7 +4,12 @@ import { Response } from 'express';
 import { Public } from '../auth/decorators/public.decorator';
 import { PublicProfileResponse } from './public-profile-response';
 import { PublicProfilesService } from './public-profiles.service';
-import { ApiTags } from '@nestjs/swagger';
+import {
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 
 /**
  * 🔴 THE FIRST UNAUTHENTICATED ENDPOINT IN THIS API THAT SERVES MEMBER DATA.
@@ -59,6 +64,16 @@ export class PublicProfilesController {
    * "no such slug" is byte-identical to the response for "exists but not
    * published" — see below.
    */
+  @ApiOperation({
+    summary: 'Get a published member profile by slug (unauthenticated)',
+  })
+  @ApiOkResponse({
+    description: 'The published, allowlisted public profile fields.',
+  })
+  @ApiNotFoundResponse({
+    description:
+      'No published profile for that slug (identical response whether unknown, unpublished, deactivated, suspended, or not open).',
+  })
   @Public()
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Get(':slug')

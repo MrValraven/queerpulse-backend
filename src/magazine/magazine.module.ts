@@ -21,6 +21,6 @@ import { StorySubmissionsService } from './story-submissions.service';
   ],
   controllers: [MagazineController],
   providers: [MagazineService, StorySubmissionsService],
-  exports: [MagazineService, StorySubmissionsService],
+  exports: [StorySubmissionsService],
 })
 export class MagazineModule {}

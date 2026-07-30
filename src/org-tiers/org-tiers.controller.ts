@@ -19,7 +19,18 @@ import { UserRole } from '../users/entities/user.entity';
 import { CreateOrgTierDto } from './dto/create-org-tier.dto';
 import { UpdateOrgTierDto } from './dto/update-org-tier.dto';
 import { OrgTiersService } from './org-tiers.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiConflictResponse,
+  ApiCookieAuth,
+  ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiNoContentResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 // Public marketing content — the For Organisations page is reachable logged-out,
 // so the tier list opts out of auth (mirrors PlatformStatusController /
@@ -31,6 +42,8 @@ export class OrgTiersController {
   constructor(private readonly orgTiersService: OrgTiersService) {}
 
   @Get()
+  @ApiOperation({ summary: 'List published organisation tiers' })
+  @ApiOkResponse({ description: 'Published tiers in display order.' })
   list() {
     return this.orgTiersService.listPublished();
   }
@@ -45,16 +58,30 @@ export class AdminOrgTiersController {
   constructor(private readonly orgTiersService: OrgTiersService) {}
 
   @Get()
+  @ApiOperation({ summary: 'List all organisation tiers (published or not)' })
+  @ApiOkResponse({ description: 'Every tier in display order.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
   list() {
     return this.orgTiersService.listAll();
   }
 
   @Post()
+  @ApiOperation({ summary: 'Create an organisation tier' })
+  @ApiCreatedResponse({ description: 'The created tier.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiConflictResponse({ description: 'Could not allocate a unique tier slug.' })
   create(@Body() dto: CreateOrgTierDto) {
     return this.orgTiersService.create(dto);
   }
 
   @Patch(':id')
+  @ApiOperation({ summary: 'Update an organisation tier' })
+  @ApiOkResponse({ description: 'The updated tier.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiNotFoundResponse({ description: 'The tier does not exist.' })
   update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateOrgTierDto,
@@ -64,6 +91,11 @@ export class AdminOrgTiersController {
 
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Delete an organisation tier' })
+  @ApiNoContentResponse({ description: 'The tier was deleted.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiNotFoundResponse({ description: 'The tier does not exist.' })
   remove(@Param('id', ParseUUIDPipe) id: string) {
     return this.orgTiersService.remove(id);
   }

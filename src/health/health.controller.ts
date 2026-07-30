@@ -4,7 +4,12 @@ import {
   HealthCheckService,
   TypeOrmHealthIndicator,
 } from '@nestjs/terminus';
-import { ApiTags } from '@nestjs/swagger';
+import {
+  ApiOkResponse,
+  ApiOperation,
+  ApiServiceUnavailableResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 import { Public } from '../auth/decorators/public.decorator';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
@@ -38,6 +43,11 @@ export class HealthController {
    */
   @Get()
   @HealthCheck()
+  @ApiOperation({ summary: 'Full health check (includes a database ping)' })
+  @ApiOkResponse({ description: 'The service and database are healthy.' })
+  @ApiServiceUnavailableResponse({
+    description: 'A health indicator failed (e.g. the database is unreachable).',
+  })
   check() {
     return this.health.check([() => this.db.pingCheck('database')]);
   }
@@ -49,6 +59,8 @@ export class HealthController {
    */
   @Get('live')
   @HealthCheck()
+  @ApiOperation({ summary: 'Liveness probe (process up, no external checks)' })
+  @ApiOkResponse({ description: 'The process is alive.' })
   live() {
     return this.health.check([]);
   }
@@ -59,6 +71,11 @@ export class HealthController {
    */
   @Get('ready')
   @HealthCheck()
+  @ApiOperation({ summary: 'Readiness probe (database reachable)' })
+  @ApiOkResponse({ description: 'The instance can serve traffic.' })
+  @ApiServiceUnavailableResponse({
+    description: 'The database is unreachable; stop routing traffic here.',
+  })
   ready() {
     return this.health.check([() => this.db.pingCheck('database')]);
   }

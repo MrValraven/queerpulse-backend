@@ -1,4 +1,11 @@
-import { Column, Entity, Index, PrimaryGeneratedColumn, Unique } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  PrimaryGeneratedColumn,
+  Unique,
+} from 'typeorm';
 
 /**
  * One community the member has pinned to the "Communities" section of their
@@ -19,10 +26,14 @@ export class ProfileFeaturedCommunity {
   @Column({ type: 'uuid' })
   userId: string;
 
+  @Index('IDX_profile_featured_communities_community_id')
   @Column({ type: 'uuid' })
   communityId: string;
 
   /** 0-based display order; the write path assigns it from the array index. */
   @Column({ type: 'int' })
   position: number;
+
+  @CreateDateColumn({ type: 'timestamptz' })
+  createdAt: Date;
 }

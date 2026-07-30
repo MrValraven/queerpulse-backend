@@ -1,6 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
 import {
   CommunityMember,
   RosterRole,
@@ -110,7 +111,7 @@ describe('AdminMembersService', () => {
     findOne: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
-  let users: { find: jest.Mock };
+  let users: { find: jest.Mock; findOne: jest.Mock };
   let vouches: {
     find: jest.Mock;
     count: jest.Mock;
@@ -120,6 +121,7 @@ describe('AdminMembersService', () => {
   let reports: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let modAuditLogs: { find: jest.Mock };
   let vouchService: { getVouchCounts: jest.Mock; getVouchCount: jest.Mock };
+  let dataSource: { transaction: jest.Mock };
 
   beforeEach(async () => {
     jest.useFakeTimers().setSystemTime(FIXED_NOW);
@@ -129,7 +131,10 @@ describe('AdminMembersService', () => {
       findOne: jest.fn(),
       createQueryBuilder: jest.fn(() => makeQueryBuilderStub()),
     };
-    users = { find: jest.fn().mockResolvedValue([]) };
+    users = {
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(null),
+    };
     vouches = {
       find: jest.fn().mockResolvedValue([]),
       count: jest.fn().mockResolvedValue(0),
@@ -147,6 +152,13 @@ describe('AdminMembersService', () => {
       getVouchCounts: jest.fn().mockResolvedValue(new Map()),
       getVouchCount: jest.fn().mockResolvedValue(0),
     };
+    // `updateRole` is the only method that opens a transaction; the existing
+    // `list`/`getMember`/`listFlagged` tests never reach it, so a stub that
+    // simply runs the callback with a manager exposing the repos it touches is
+    // enough to keep the module resolvable.
+    dataSource = {
+      transaction: jest.fn(),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -161,6 +173,7 @@ describe('AdminMembersService', () => {
         { provide: getRepositoryToken(Report), useValue: reports },
         { provide: getRepositoryToken(ModAuditLog), useValue: modAuditLogs },
         { provide: VouchService, useValue: vouchService },
+        { provide: DataSource, useValue: dataSource },
       ],
     }).compile();
 

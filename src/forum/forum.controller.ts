@@ -25,11 +25,25 @@ import { UpdateThreadDto } from './dto/update-thread.dto';
 import { VotePostDto } from './dto/vote-post.dto';
 import { ForumPostsService } from './forum-posts.service';
 import { ForumThreadsService } from './forum-threads.service';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiConflictResponse,
+  ApiCookieAuth,
+  ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 @Feature('forum')
 @ApiTags('Forum')
-@ApiCookieAuth()
+@ApiCookieAuth('access_token')
+@ApiUnauthorizedResponse({
+  description: 'Not authenticated as an active member.',
+})
 @Controller('forum')
 @UseGuards(ActiveMemberGuard)
 export class ForumController {
@@ -39,6 +53,8 @@ export class ForumController {
   ) {}
 
   @Get('threads')
+  @ApiOperation({ summary: 'List forum threads (cursor-paginated)' })
+  @ApiOkResponse({ description: 'A page of forum threads.' })
   listThreads(
     @CurrentUser() user: CurrentUserData,
     @Query() query: ListThreadsQuery,
@@ -52,11 +68,17 @@ export class ForumController {
   }
 
   @Get('threads/:slug')
+  @ApiOperation({ summary: 'Get a single forum thread by slug' })
+  @ApiOkResponse({ description: 'The forum thread.' })
+  @ApiNotFoundResponse({ description: 'Thread not found.' })
   getThread(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.threadsService.getBySlug(slug, user.userId);
   }
 
   @Get('threads/:slug/posts')
+  @ApiOperation({ summary: 'List posts in a thread (cursor-paginated)' })
+  @ApiOkResponse({ description: 'A page of posts for the thread.' })
+  @ApiNotFoundResponse({ description: 'Thread not found.' })
   listPosts(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
@@ -66,6 +88,11 @@ export class ForumController {
   }
 
   @Post('threads')
+  @ApiOperation({ summary: 'Create a new thread with its opening post' })
+  @ApiCreatedResponse({ description: 'The created thread.' })
+  @ApiConflictResponse({
+    description: 'Could not allocate a unique thread slug.',
+  })
   createThread(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: CreateThreadDto,
@@ -74,6 +101,14 @@ export class ForumController {
   }
 
   @Post('threads/:slug/posts')
+  @ApiOperation({ summary: 'Reply to a thread (optionally nested under a post)' })
+  @ApiCreatedResponse({ description: 'The created reply post.' })
+  @ApiForbiddenResponse({ description: 'The thread is locked.' })
+  @ApiBadRequestResponse({
+    description:
+      'Parent post is in another thread, or is a deleted post you cannot reply to.',
+  })
+  @ApiNotFoundResponse({ description: 'Thread or parent post not found.' })
   reply(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
@@ -83,6 +118,10 @@ export class ForumController {
   }
 
   @Post('posts/:id/vote')
+  @ApiOperation({ summary: 'Cast or clear an upvote on a post (idempotent)' })
+  @ApiCreatedResponse({ description: 'Updated vote count and the caller vote.' })
+  @ApiBadRequestResponse({ description: 'Malformed post id.' })
+  @ApiNotFoundResponse({ description: 'Post not found.' })
   vote(
     @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
@@ -92,6 +131,11 @@ export class ForumController {
   }
 
   @Patch('posts/:id')
+  @ApiOperation({ summary: 'Edit a post body (author only)' })
+  @ApiOkResponse({ description: 'The updated post.' })
+  @ApiForbiddenResponse({ description: 'Only the author can edit this post.' })
+  @ApiBadRequestResponse({ description: 'Malformed post id.' })
+  @ApiNotFoundResponse({ description: 'Post not found or already deleted.' })
   updatePost(
     @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
@@ -101,6 +145,13 @@ export class ForumController {
   }
 
   @Delete('posts/:id')
+  @ApiOperation({ summary: 'Soft-delete (tombstone) a post; author or staff' })
+  @ApiOkResponse({ description: 'The tombstoned post.' })
+  @ApiForbiddenResponse({
+    description: 'Only the author or a moderator can delete this post.',
+  })
+  @ApiBadRequestResponse({ description: 'Malformed post id.' })
+  @ApiNotFoundResponse({ description: 'Post not found.' })
   deletePost(
     @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
@@ -109,6 +160,13 @@ export class ForumController {
   }
 
   @Post('posts/:id/restore')
+  @ApiOperation({ summary: 'Restore a tombstoned post; author or staff' })
+  @ApiCreatedResponse({ description: 'The restored post.' })
+  @ApiForbiddenResponse({
+    description: 'Only the author or a moderator can restore this post.',
+  })
+  @ApiBadRequestResponse({ description: 'Malformed post id.' })
+  @ApiNotFoundResponse({ description: 'Post not found.' })
   restorePost(
     @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
@@ -117,6 +175,13 @@ export class ForumController {
   }
 
   @Get('posts/:id/history')
+  @ApiOperation({ summary: 'List a post edit history; author or staff' })
+  @ApiOkResponse({ description: 'The revisions, newest first.' })
+  @ApiForbiddenResponse({
+    description: 'Only the author or a moderator can view this history.',
+  })
+  @ApiBadRequestResponse({ description: 'Malformed post id.' })
+  @ApiNotFoundResponse({ description: 'Post not found.' })
   postHistory(
     @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
@@ -125,6 +190,10 @@ export class ForumController {
   }
 
   @Patch('threads/:slug')
+  @ApiOperation({ summary: 'Edit a thread title (author only)' })
+  @ApiOkResponse({ description: 'The updated thread.' })
+  @ApiForbiddenResponse({ description: 'Only the author can edit this thread.' })
+  @ApiNotFoundResponse({ description: 'Thread not found.' })
   updateThread(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,

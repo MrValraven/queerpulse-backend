@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { Paginated, normalizePage, paginate } from '../common/pagination';
 import { ListSavedQuery } from './dto/list-saved.query';
 import { SavedItemBodyDto } from './dto/saved-item-body.dto';
@@ -67,14 +68,25 @@ export class SavedService {
       return;
     }
 
-    await this.savedItems.save(
-      this.savedItems.create({
-        userId,
-        subjectType,
-        subjectId,
-        ...snapshot,
-      }),
-    );
+    try {
+      await this.savedItems.save(
+        this.savedItems.create({
+          userId,
+          subjectType,
+          subjectId,
+          ...snapshot,
+        }),
+      );
+    } catch (error) {
+      // Idempotent under a race: two concurrent PUTs of the same (user,
+      // subject) both miss the `findOne` above and both insert — one loses on
+      // `UQ_saved_item_subject`. That IS the "already saved" state this call
+      // converges on, so swallow the 23505 instead of surfacing it as a 500.
+      // (Mirrors `RoadmapService.castVote`'s unique-violation handling.)
+      if (!isUniqueViolation(error, 'UQ_saved_item_subject')) {
+        throw error;
+      }
+    }
   }
 
   async remove(userId: string, rawId: string): Promise<void> {

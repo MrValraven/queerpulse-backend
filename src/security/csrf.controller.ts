@@ -1,6 +1,6 @@
 import { Controller, Get, Res, VERSION_NEUTRAL } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { randomBytes } from 'node:crypto';
 import { Response } from 'express';
 import { Public } from '../auth/decorators/public.decorator';
@@ -28,6 +28,13 @@ export class CsrfController {
 
   // GET is a safe method, so CsrfGuard lets it through; @Public skips JwtAuthGuard.
   @Get()
+  @ApiOperation({
+    summary: 'Issue a CSRF token (also set as the csrf_token cookie)',
+  })
+  @ApiOkResponse({
+    description:
+      'The CSRF token to echo in the X-CSRF-Token header on state-changing requests.',
+  })
   issue(@Res({ passthrough: true }) res: Response): { csrfToken: string } {
     const token = randomBytes(32).toString('hex');
     res.cookie('csrf_token', token, {

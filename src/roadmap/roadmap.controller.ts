@@ -8,7 +8,16 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiCookieAuth,
+  ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 import {
   CurrentUser,
   CurrentUserData,
@@ -36,7 +45,7 @@ import { UpdateSettingsDto } from './dto/update-settings.dto';
  */
 @Feature('roadmap')
 @ApiTags('Roadmap')
-@ApiCookieAuth()
+@ApiCookieAuth('access_token')
 @Controller('roadmap')
 @UseGuards(ActiveMemberGuard)
 export class RoadmapController {
@@ -45,16 +54,31 @@ export class RoadmapController {
     private readonly adminService: RoadmapAdminService,
   ) {}
 
+  @ApiOperation({ summary: 'List the roadmap targets the caller has voted for' })
+  @ApiOkResponse({ description: 'The target ids the caller has voted for.' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
   @Get('my-votes')
   myVotes(@CurrentUser() user: CurrentUserData) {
     return this.roadmapService.getMyVotes(user.userId);
   }
 
+  @ApiOperation({ summary: 'Cast a vote for a roadmap item or idea' })
+  @ApiCreatedResponse({
+    description: 'The target id, its recomputed vote total, and `voted: true`.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
+  @ApiNotFoundResponse({ description: 'No roadmap item or idea with that id.' })
   @Post('vote')
   vote(@CurrentUser() user: CurrentUserData, @Body() dto: CastVoteDto) {
     return this.roadmapService.castVote(user.userId, dto);
   }
 
+  @ApiOperation({ summary: 'Submit a roadmap idea for moderation' })
+  @ApiCreatedResponse({ description: 'The idea was queued (`{ status: "pending" }`).' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
   @Post('ideas')
   submitIdea(@CurrentUser() user: CurrentUserData, @Body() dto: SubmitIdeaDto) {
     return this.roadmapService.submitIdea(user.userId, dto);
@@ -62,6 +86,14 @@ export class RoadmapController {
 
   // ── Admin (Admin/Moderator) ──────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get the full admin roadmap board' })
+  @ApiOkResponse({
+    description: 'All items and ideas (any status) with vote counts and hero stats.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({
+    description: 'Caller is not an active member or lacks the admin/moderator role.',
+  })
   @Get('admin')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)
@@ -69,6 +101,12 @@ export class RoadmapController {
     return this.adminService.getAdmin();
   }
 
+  @ApiOperation({ summary: 'Create a roadmap item' })
+  @ApiCreatedResponse({ description: 'The created roadmap item.' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({
+    description: 'Caller is not an active member or lacks the admin/moderator role.',
+  })
   @Post('admin/items')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)
@@ -76,6 +114,13 @@ export class RoadmapController {
     return this.adminService.createItem(dto);
   }
 
+  @ApiOperation({ summary: 'Update a roadmap item' })
+  @ApiOkResponse({ description: 'The updated roadmap item.' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({
+    description: 'Caller is not an active member or lacks the admin/moderator role.',
+  })
+  @ApiNotFoundResponse({ description: 'No roadmap item with that id.' })
   @Patch('admin/items/:id')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)
@@ -83,6 +128,13 @@ export class RoadmapController {
     return this.adminService.updateItem(id, dto);
   }
 
+  @ApiOperation({ summary: 'Delete a roadmap item and its votes' })
+  @ApiOkResponse({ description: 'The item was deleted.' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({
+    description: 'Caller is not an active member or lacks the admin/moderator role.',
+  })
+  @ApiNotFoundResponse({ description: 'No roadmap item with that id.' })
   @Delete('admin/items/:id')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)
@@ -92,6 +144,12 @@ export class RoadmapController {
 
   // Reuses `SubmitIdeaDto` — there is no separate `CreateIdeaDto`; the admin
   // service publishes the idea directly instead of leaving it `pending`.
+  @ApiOperation({ summary: 'Create a published roadmap idea (admin-authored)' })
+  @ApiCreatedResponse({ description: 'The created idea.' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({
+    description: 'Caller is not an active member or lacks the admin/moderator role.',
+  })
   @Post('admin/ideas')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)
@@ -99,6 +157,13 @@ export class RoadmapController {
     return this.adminService.createIdea(dto);
   }
 
+  @ApiOperation({ summary: 'Update a roadmap idea (moderate, edit, reorder)' })
+  @ApiOkResponse({ description: 'The updated idea.' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({
+    description: 'Caller is not an active member or lacks the admin/moderator role.',
+  })
+  @ApiNotFoundResponse({ description: 'No roadmap idea with that id.' })
   @Patch('admin/ideas/:id')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)
@@ -106,6 +171,13 @@ export class RoadmapController {
     return this.adminService.updateIdea(id, dto);
   }
 
+  @ApiOperation({ summary: 'Delete a roadmap idea and its votes' })
+  @ApiOkResponse({ description: 'The idea was deleted.' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({
+    description: 'Caller is not an active member or lacks the admin/moderator role.',
+  })
+  @ApiNotFoundResponse({ description: 'No roadmap idea with that id.' })
   @Delete('admin/ideas/:id')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)
@@ -113,6 +185,12 @@ export class RoadmapController {
     return this.adminService.deleteIdea(id);
   }
 
+  @ApiOperation({ summary: 'Update the roadmap hero-stats settings' })
+  @ApiOkResponse({ description: 'The persisted hero stats.' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({
+    description: 'Caller is not an active member or lacks the admin/moderator role.',
+  })
   @Patch('admin/settings')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)

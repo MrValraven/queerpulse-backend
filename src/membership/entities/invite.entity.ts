@@ -18,11 +18,11 @@ export class Invite {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Index()
+  @Index('IDX_invites_inviter_id')
   @Column({ type: 'uuid' })
   inviterId: string;
 
-  @Index({ unique: true })
+  @Index('IDX_invites_code', { unique: true })
   @Column({ type: 'varchar' })
   code: string;
 
@@ -55,6 +55,7 @@ export class Invite {
   status: InviteStatus;
 
   // Who redeemed the invite (the recipient). Doubles as "used_by".
+  @Index('IDX_invites_accepted_by')
   @Column({ type: 'uuid', nullable: true })
   acceptedBy: string | null;
 

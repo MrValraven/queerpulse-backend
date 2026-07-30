@@ -3,7 +3,6 @@ import {
   Entity,
   Index,
   PrimaryGeneratedColumn,
-  Unique,
   UpdateDateColumn,
 } from 'typeorm';
 
@@ -11,7 +10,9 @@ import {
 // stored row falls back to `AccountService`'s default matrix — this table
 // only holds overrides, not the full always-present set of categories.
 @Entity('email_preference')
-@Unique('UQ_email_preference_user_id_category', ['userId', 'category'])
+@Index('UQ_email_preference_user_id_category', ['userId', 'category'], {
+  unique: true,
+})
 export class EmailPreference {
   @PrimaryGeneratedColumn('uuid')
   id: string;

@@ -18,6 +18,10 @@ export enum JoinRequestStatus {
 // a TypeORM decorator — mirrors `join-request.entity.ts` +
 // `AddJoinRequestPendingUnique`.
 @Entity('community_join_requests')
+@Index('UQ_community_join_requests_pending', ['communityId', 'userId'], {
+  unique: true,
+  where: `"status" = 'pending'`,
+})
 export class CommunityJoinRequest {
   @PrimaryGeneratedColumn('uuid')
   id: string;
