@@ -318,6 +318,15 @@ export interface ReviewOwnerReplyDTO {
   at: string;
 }
 
+/** The reviewer's live profile identity, resolved from `review.reviewerId`.
+ * Present only for member-authored reviews whose author still has a profile;
+ * seeded/imported reviews (null `reviewerId`) and members without a profile
+ * resolve to `null`, and the row then renders with initials only, unlinked. */
+export interface ReviewAuthor {
+  slug: string;
+  avatarUrl: string | null;
+}
+
 /** One review row on the detail page. `initials`/`tint` are server-derived. */
 export interface ReviewDTO {
   /** The review's uuid PK — targets `PATCH :ref/reviews/:reviewId/reply`. */
@@ -330,9 +339,19 @@ export interface ReviewDTO {
   text: string;
   helpful: number;
   ownerReply: ReviewOwnerReplyDTO | null;
+  /** Reviewer's profile photo, when they are a member with one. `null` → the
+   * frontend falls back to the tinted `initials` avatar. */
+  avatarUrl: string | null;
+  /** Reviewer's profile slug, when they are a member. `null` → the frontend
+   * renders the name as plain text (seeded/non-member review); when set it
+   * links to `/members/:authorSlug`. */
+  authorSlug: string | null;
 }
 
-export function toReviewDTO(review: ListingReview): ReviewDTO {
+export function toReviewDTO(
+  review: ListingReview,
+  author: ReviewAuthor | null = null,
+): ReviewDTO {
   return {
     id: review.id,
     initials: initialsForName(review.reviewerName),
@@ -348,6 +367,8 @@ export function toReviewDTO(review: ListingReview): ReviewDTO {
           at: review.ownerRepliedAt!.toISOString(),
         }
       : null,
+    avatarUrl: author?.avatarUrl ?? null,
+    authorSlug: author?.slug ?? null,
   };
 }
 
@@ -416,6 +437,10 @@ export function toDirectoryDetail(
   reviews: ListingReview[],
   upcomingEvents: Event[],
   savedCount: number,
+  /** Reviewer identities keyed by `reviewerId`, so member-authored reviews can
+   * carry a profile avatar + link. Missing keys (seeded/non-member reviews)
+   * render with initials only — see `toReviewDTO`. */
+  reviewAuthors: Map<string, ReviewAuthor> = new Map(),
 ): DirectoryDetailDTO {
   const tint = tintForSlug(listing.slug);
   return {
@@ -463,7 +488,12 @@ export function toDirectoryDetail(
     social: listing.social,
     address: listing.address,
     rating: ratingFromReviews(reviews),
-    reviews: reviews.map(toReviewDTO),
+    reviews: reviews.map((review) =>
+      toReviewDTO(
+        review,
+        review.reviewerId ? (reviewAuthors.get(review.reviewerId) ?? null) : null,
+      ),
+    ),
     upcoming: upcomingEvents.map(toUpcomingEvent),
     savedCount,
     // Empty-string defaults (never-a-safe-space listings) read as "no value"

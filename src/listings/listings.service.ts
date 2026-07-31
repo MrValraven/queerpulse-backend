@@ -333,7 +333,18 @@ export class ListingsService {
     review.ownerReplyText = text;
     review.ownerRepliedAt = new Date();
     const saved = await this.reviews.save(review);
-    return toReviewDTO(saved);
+    // The reply's author is the owner, but the returned row still represents
+    // the reviewer — resolve their profile so the DTO keeps the avatar + link.
+    const author = saved.reviewerId
+      ? await this.profiles.findOne({
+          where: { userId: saved.reviewerId },
+          select: { slug: true, avatarUrl: true },
+        })
+      : null;
+    return toReviewDTO(
+      saved,
+      author ? { slug: author.slug, avatarUrl: author.avatarUrl } : null,
+    );
   }
 
   // Moderator/admin-only (`ListingsController.setStatus`'s `RolesGuard`

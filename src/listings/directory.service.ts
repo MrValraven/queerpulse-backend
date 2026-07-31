@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
   Brackets,
+  In,
   MoreThanOrEqual,
   Not,
   Repository,
@@ -35,6 +36,7 @@ import {
   DirectoryDetailDTO,
   PartnerSpaceDTO,
   RemovedSpaceCardDTO,
+  ReviewAuthor,
   ReviewDTO,
   SafeSpaceCardDTO,
   SafeSpaceListDTO,
@@ -236,7 +238,44 @@ export class DirectoryService {
     const savedCount = await this.savedItems.count({
       where: { subjectType: SavedKind.Listing, subjectId: listing.slug },
     });
-    return toDirectoryDetail(listing, reviews, upcoming, savedCount);
+    const reviewAuthors = await this.resolveReviewAuthors(reviews);
+    return toDirectoryDetail(
+      listing,
+      reviews,
+      upcoming,
+      savedCount,
+      reviewAuthors,
+    );
+  }
+
+  /**
+   * Batch-resolve each review's author identity (profile slug + avatar), keyed
+   * by `reviewerId`, so member-authored reviews carry a clickable name and a
+   * real photo. Seeded/imported reviews (null `reviewerId`) and members whose
+   * profile no longer exists are simply absent from the map — those rows render
+   * with initials only, unlinked. One `IN (...)` query, never N+1.
+   */
+  private async resolveReviewAuthors(
+    reviews: ListingReview[],
+  ): Promise<Map<string, ReviewAuthor>> {
+    const reviewerIds = [
+      ...new Set(
+        reviews
+          .map((review) => review.reviewerId)
+          .filter((id): id is string => id !== null),
+      ),
+    ];
+    if (reviewerIds.length === 0) return new Map();
+    const profiles = await this.profiles.find({
+      where: { userId: In(reviewerIds) },
+      select: { userId: true, slug: true, avatarUrl: true },
+    });
+    return new Map(
+      profiles.map((profile) => [
+        profile.userId,
+        { slug: profile.slug, avatarUrl: profile.avatarUrl },
+      ]),
+    );
   }
 
   /** Paginated reviews for one live listing. */
@@ -250,7 +289,15 @@ export class DirectoryService {
       .where('review.listing_id = :listingId', { listingId: listing.id })
       .orderBy('review.helpful', 'DESC')
       .addOrderBy('review.created_at', 'DESC');
-    return paginate(qb, normalizePage(page), (rows) => rows.map(toReviewDTO));
+    return paginate(qb, normalizePage(page), async (rows) => {
+      const authors = await this.resolveReviewAuthors(rows);
+      return rows.map((review) =>
+        toReviewDTO(
+          review,
+          review.reviewerId ? (authors.get(review.reviewerId) ?? null) : null,
+        ),
+      );
+    });
   }
 
   /**
@@ -295,7 +342,12 @@ export class DirectoryService {
         // Intentionally ignored — the review already committed.
       }
     }
-    return toReviewDTO(saved);
+    // The author is the current member: reuse the profile already loaded above
+    // so the freshly-returned row is immediately clickable + shows their photo.
+    return toReviewDTO(
+      saved,
+      profile ? { slug: profile.slug, avatarUrl: profile.avatarUrl } : null,
+    );
   }
 
   /**
