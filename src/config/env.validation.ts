@@ -187,9 +187,9 @@ export class EnvironmentVariables {
   @IsEmail()
   GENESIS_EMAIL?: string;
 
-  // Bearer token guarding GET /metrics (see MetricsTokenGuard). Optional so
-  // local dev scrapes unauthenticated; REQUIRED in production by the cross-field
-  // rule below so a prod /metrics is never accidentally world-readable.
+  // Bearer token guarding GET /metrics (see MetricsTokenGuard). Optional in
+  // every environment: leave it unset to let Railway scrape /metrics over its
+  // private network, or set it (min 16 chars) to require a bearer token.
   @IsOptional()
   @IsString()
   @MinLength(16)
@@ -347,14 +347,10 @@ export function validate(
     }
   }
 
-  // /metrics must not be world-readable in production. Unset METRICS_TOKEN
-  // leaves MetricsTokenGuard open (correct for dev / private-network scraping);
-  // require it in prod so route inventory and pool/traffic shape never leak.
-  if (validated.NODE_ENV === NodeEnv.Production && !validated.METRICS_TOKEN) {
-    problems.push(
-      'METRICS_TOKEN is required when NODE_ENV=production (an unauthenticated /metrics endpoint leaks internal topology)',
-    );
-  }
+  // /metrics is guarded by METRICS_TOKEN when set (see MetricsTokenGuard).
+  // It is optional in every environment: we rely on Railway's private network
+  // for observability, so an unset token leaves the endpoint open to the
+  // internal network rather than being a hard boot failure in production.
 
   // Single-replica gate. The throttler store, socket.io fan-out and presence
   // map all live in process memory (see the ThrottlerModule + ChatGateway
