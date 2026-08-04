@@ -30,52 +30,52 @@ export interface CompanyHiringContact {
 @Entity('companies')
 export class Company {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_companies_slug', { unique: true })
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   @Column({ type: 'varchar' })
-  nameText: string;
+  nameText!: string;
 
   @Column({ type: 'varchar' })
-  tagline: string;
+  tagline!: string;
 
   @Column({ type: 'text' })
-  about: string;
+  about!: string;
 
   @Column({ type: 'boolean', default: false })
-  queerRun: boolean;
+  queerRun!: boolean;
 
   @Column({ type: 'boolean', default: false })
-  queerLed: boolean;
+  queerLed!: boolean;
 
   @Column({ type: 'boolean', default: false })
-  verified: boolean;
+  verified!: boolean;
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  values: CompanyValue[];
+  values!: CompanyValue[];
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  info: CompanyInfoItem[];
+  info!: CompanyInfoItem[];
 
   @Column({ type: 'int', default: 0 })
-  teamCount: number;
+  teamCount!: number;
 
   @Column({ type: 'jsonb', nullable: true })
-  hiringContact: CompanyHiringContact | null;
+  hiringContact!: CompanyHiringContact | null;
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  work: CompanyWorkItem[];
+  work!: CompanyWorkItem[];
 
   @Index('IDX_companies_owner_id')
   @Column({ type: 'uuid' })
-  ownerId: string;
+  ownerId!: string;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

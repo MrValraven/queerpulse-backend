@@ -9,27 +9,27 @@ import {
 @Entity('work_items')
 export class WorkItem {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_work_items_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({ type: 'varchar' })
-  category: string;
+  category!: string;
 
   @Column({ type: 'varchar' })
-  title: string;
+  title!: string;
 
   @Column({ type: 'varchar' })
-  year: string;
+  year!: string;
 
   @Column({ type: 'varchar', nullable: true })
-  imageUrl: string | null;
+  imageUrl!: string | null;
 
   @Column({ type: 'int', default: 0 })
-  position: number;
+  position!: number;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

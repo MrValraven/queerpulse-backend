@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { CreateListingDto } from './dto/create-listing.dto';
 import { ListingStatus } from './entities/listing.entity';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
 import { ListingsController } from './listings.controller';
@@ -17,6 +18,10 @@ describe('ListingsController', () => {
     remove: jest.Mock;
     setStatus: jest.Mock;
     replyToReview: jest.Mock;
+    bulkSetStatus: jest.Mock;
+    bulkRemove: jest.Mock;
+    getListingHistory: jest.Mock;
+    answerQuestion: jest.Mock;
   };
 
   const user: CurrentUserData = {
@@ -35,6 +40,10 @@ describe('ListingsController', () => {
       remove: jest.fn(),
       setStatus: jest.fn(),
       replyToReview: jest.fn(),
+      bulkSetStatus: jest.fn(),
+      bulkRemove: jest.fn(),
+      getListingHistory: jest.fn(),
+      answerQuestion: jest.fn(),
     };
     const module: TestingModule = await Test.createTestingModule({
       controllers: [ListingsController],
@@ -52,7 +61,7 @@ describe('ListingsController', () => {
   });
 
   it('POST / creates a listing owned by the caller', async () => {
-    const dto = { name: 'Lux Café' };
+    const dto = { name: 'Lux Café' } as CreateListingDto;
     const created = { ref: 'QPL-2026-0001', ...dto };
     service.create.mockResolvedValue(created);
 
@@ -105,19 +114,86 @@ describe('ListingsController', () => {
     expect(service.remove).toHaveBeenCalledWith('QPL-2026-0001', 'owner-1');
   });
 
-  it('PATCH /:ref/status forwards the status transition', async () => {
+  it('PATCH /:ref/status forwards the status transition and the acting moderator', async () => {
     const updated = { ref: 'QPL-2026-0001', status: ListingStatus.Live };
     service.setStatus.mockResolvedValue(updated);
 
-    const result = await controller.setStatus('QPL-2026-0001', {
+    const result = await controller.setStatus(user, 'QPL-2026-0001', {
       status: ListingStatus.Live,
     });
 
     expect(service.setStatus).toHaveBeenCalledWith(
       'QPL-2026-0001',
       ListingStatus.Live,
+      'owner-1',
+      undefined,
     );
     expect(result).toBe(updated);
+  });
+
+  it('PATCH admin/bulk-status forwards refs/status/actor/reason', async () => {
+    const summary = { updated: ['QPL-2026-0001'], failed: [] };
+    service.bulkSetStatus.mockResolvedValue(summary);
+
+    const result = await controller.bulkSetStatus(user, {
+      refs: ['QPL-2026-0001'],
+      status: ListingStatus.Live,
+      reason: 'looks good',
+    });
+
+    expect(service.bulkSetStatus).toHaveBeenCalledWith(
+      ['QPL-2026-0001'],
+      ListingStatus.Live,
+      'owner-1',
+      'looks good',
+    );
+    expect(result).toBe(summary);
+  });
+
+  it('POST admin/bulk-remove forwards refs/actor/reason', async () => {
+    const summary = { updated: ['QPL-2026-0001'], failed: ['QPL-2026-9999'] };
+    service.bulkRemove.mockResolvedValue(summary);
+
+    const result = await controller.bulkRemove(user, {
+      refs: ['QPL-2026-0001', 'QPL-2026-9999'],
+    });
+
+    expect(service.bulkRemove).toHaveBeenCalledWith(
+      ['QPL-2026-0001', 'QPL-2026-9999'],
+      'owner-1',
+      undefined,
+    );
+    expect(result).toBe(summary);
+  });
+
+  it('GET admin/:ref/history forwards the ref', async () => {
+    const history = { events: [], questions: [] };
+    service.getListingHistory.mockResolvedValue(history);
+
+    const result = await controller.getHistory('QPL-2026-0001');
+
+    expect(service.getListingHistory).toHaveBeenCalledWith('QPL-2026-0001');
+    expect(result).toBe(history);
+  });
+
+  it('POST :ref/questions/:id/answer forwards to the service for the caller', async () => {
+    const answered = { id: 'question-1', answer: 'Sure, opens at 9am.' };
+    service.answerQuestion.mockResolvedValue(answered);
+
+    const result = await controller.answerQuestion(
+      user,
+      'QPL-2026-0001',
+      'question-1',
+      { answer: 'Sure, opens at 9am.' },
+    );
+
+    expect(service.answerQuestion).toHaveBeenCalledWith(
+      'QPL-2026-0001',
+      'question-1',
+      'owner-1',
+      'Sure, opens at 9am.',
+    );
+    expect(result).toBe(answered);
   });
 
   it('PATCH /:ref/reviews/:reviewId/reply forwards to the service for the caller', async () => {

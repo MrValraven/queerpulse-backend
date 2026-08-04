@@ -13,5 +13,5 @@ import { RosterRole } from '../entities/community-member.entity';
  */
 export class UpdateMemberRoleDto {
   @IsIn([RosterRole.Member, RosterRole.Mod])
-  role: RosterRole.Member | RosterRole.Mod;
+  role!: RosterRole.Member | RosterRole.Mod;
 }

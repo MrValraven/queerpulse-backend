@@ -1,6 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, In, Repository } from 'typeorm';
+import {
+  EntityManager,
+  In,
+  ObjectLiteral,
+  Repository,
+  SelectQueryBuilder,
+} from 'typeorm';
 import { ContentModeration } from './entities/content-moderation.entity';
 
 /** The resolved moderation state of one subject, as read paths consume it. */
@@ -80,8 +86,23 @@ export class ContentModerationService {
         // On conflict, always (re)assert hidden + the actor/report/reason
         // metadata; only escalate to removed when this action is a removal.
         isRemove
-          ? ['hidden_at', 'removed_at', 'moderated_by', 'report_id', 'reason_code', 'note', 'updated_at']
-          : ['hidden_at', 'moderated_by', 'report_id', 'reason_code', 'note', 'updated_at'],
+          ? [
+              'hidden_at',
+              'removed_at',
+              'moderated_by',
+              'report_id',
+              'reason_code',
+              'note',
+              'updated_at',
+            ]
+          : [
+              'hidden_at',
+              'moderated_by',
+              'report_id',
+              'reason_code',
+              'note',
+              'updated_at',
+            ],
         ['subject_type', 'subject_id'],
       )
       .execute();
@@ -150,6 +171,43 @@ export class ContentModerationService {
       result.set(row.subjectId, existing ? strongest(existing, state) : state);
     }
     return result;
+  }
+
+  /**
+   * Appends a `NOT EXISTS` predicate to `qb` that drops rows whose subject is
+   * hidden-but-not-removed under any of `subjectTypes` — the in-query mirror
+   * of `BlockFilterService.excludeHidden`, for exactly the same reason:
+   * filtering AFTER a fixed-size fetch under-fills a page, and under an
+   * OFFSET-paginated query it permanently skips the row just past the hidden
+   * one (the next page's offset is computed from the raw, unfiltered row
+   * order). A removed (tombstoned) subject is deliberately NOT excluded here
+   * — read paths still render it (blanked, as `[removed]`) rather than drop
+   * it, matching `ContentModerationState`'s `hidden`/`removed` split.
+   *
+   * Callers must skip calling this for a staff viewer (owner/mod), who sees
+   * hidden-but-not-removed content — this method has no viewer-role
+   * awareness of its own, same contract as `BlockFilterService`'s methods.
+   * `subjectIdColumn` is spliced verbatim into raw SQL, so pass an actual,
+   * already-quoted `"alias"."id"` reference (never user input); it's cast to
+   * `text` because `content_moderation.subject_id` is `varchar` while a
+   * post/reply id is `uuid`. Call at most once per query builder (fixed
+   * bound parameter name).
+   */
+  excludeHidden<E extends ObjectLiteral>(
+    qb: SelectQueryBuilder<E>,
+    subjectTypes: readonly string[],
+    subjectIdColumn: string,
+  ): SelectQueryBuilder<E> {
+    return qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "content_moderation" "__moderation_filter"
+        WHERE "__moderation_filter"."subject_type" IN (:...moderationFilterSubjectTypes)
+          AND "__moderation_filter"."subject_id" = ${subjectIdColumn}::text
+          AND "__moderation_filter"."hidden_at" IS NOT NULL
+          AND "__moderation_filter"."removed_at" IS NULL
+      )`,
+      { moderationFilterSubjectTypes: [...subjectTypes] },
+    );
   }
 }
 

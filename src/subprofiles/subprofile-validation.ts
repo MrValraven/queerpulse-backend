@@ -25,6 +25,9 @@ export const MIN_CONTENT_ITEMS = 3; // items in sections other than `links`
 export const MAX_SUBPROFILES = 12; // per user
 export const MAX_ITEMS_PER_SECTION = 100;
 
+// A persona can have at most this many co-owners (creator + invited members).
+export const MAX_SUBPROFILE_CO_OWNERS = 5;
+
 // Placeholder blocklist for v1. FOLLOW-UP: replace this static list with a hook
 // into the dedicated `moderation` module so terms are centrally managed and the
 // list is not duplicated per feature (documented non-goal in design spec §4/§8).

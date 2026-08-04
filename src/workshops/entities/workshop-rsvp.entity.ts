@@ -36,22 +36,22 @@ export enum WorkshopRsvpStatus {
 @Unique('UQ_workshop_rsvps', ['workshopId', 'userId'])
 export class WorkshopRsvp {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_workshop_rsvps_workshop_id')
   @Column({ type: 'uuid' })
-  workshopId: string;
+  workshopId!: string;
 
   @Index('IDX_workshop_rsvps_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({
     type: 'enum',
     enum: WorkshopRsvpStatus,
     enumName: 'workshop_rsvp_status_enum',
   })
-  status: WorkshopRsvpStatus;
+  status!: WorkshopRsvpStatus;
 
   /**
    * When this member joined the queue — the waitlist's FIFO ordering.
@@ -72,11 +72,11 @@ export class WorkshopRsvp {
    * NULL whenever `status` is not `waitlist`.
    */
   @Column({ type: 'timestamptz', nullable: true })
-  waitlistedAt: Date | null;
+  waitlistedAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

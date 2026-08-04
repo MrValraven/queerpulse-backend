@@ -11,13 +11,13 @@ import {
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 
 export class LandlordStatDto {
-  @IsString() @MaxLength(40) value: string;
-  @IsString() @MaxLength(80) label: string;
+  @IsString() @MaxLength(40) value!: string;
+  @IsString() @MaxLength(80) label!: string;
 }
 
 /** POST /landlords (member suggest) and POST /admin/landlords (admin create). */
 export class CreateLandlordDto {
-  @IsString() @MinLength(1) @MaxLength(160) name: string;
+  @IsString() @MinLength(1) @MaxLength(160) name!: string;
 
   @IsOptional() @IsString() @MaxLength(160) hood?: string;
 

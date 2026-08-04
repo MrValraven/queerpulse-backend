@@ -23,41 +23,41 @@ export class JobDetailBodyDto {
   @ArrayMaxSize(30)
   @IsString({ each: true })
   @MaxLength(2000, { each: true })
-  about: string[];
+  about!: string[];
 
   @IsArray()
   @ArrayMaxSize(30)
   @IsString({ each: true })
   @MaxLength(2000, { each: true })
-  dayToDay: string[];
+  dayToDay!: string[];
 
   @IsArray()
   @ArrayMaxSize(30)
   @IsString({ each: true })
   @MaxLength(2000, { each: true })
-  lookingFor: string[];
+  lookingFor!: string[];
 
   @IsArray()
   @ArrayMaxSize(30)
   @IsString({ each: true })
   @MaxLength(2000, { each: true })
-  offer: string[];
+  offer!: string[];
 
   @IsOptional() @IsString() @MaxLength(2000) reviewerNote?: string | null;
 }
 
 export class CreateJobDto {
-  @IsString() @MinLength(1) @MaxLength(200) title: string;
-  @IsString() @MinLength(1) @MaxLength(100) category: string;
-  @IsString() @MinLength(1) @MaxLength(100) commitment: string;
-  @IsString() @MinLength(1) @MaxLength(100) seniority: string;
-  @IsEnum(JobFormat) format: JobFormat;
-  @IsString() @MinLength(1) @MaxLength(200) location: string;
+  @IsString() @MinLength(1) @MaxLength(200) title!: string;
+  @IsString() @MinLength(1) @MaxLength(100) category!: string;
+  @IsString() @MinLength(1) @MaxLength(100) commitment!: string;
+  @IsString() @MinLength(1) @MaxLength(100) seniority!: string;
+  @IsEnum(JobFormat) format!: JobFormat;
+  @IsString() @MinLength(1) @MaxLength(200) location!: string;
   @IsOptional() @IsString() @MaxLength(200) city?: string;
   @IsOptional() @IsString() @MaxLength(100) timezone?: string;
 
   // -> `Job.desc` (card blurb).
-  @IsString() @MinLength(1) @MaxLength(10000) description: string;
+  @IsString() @MinLength(1) @MaxLength(10000) description!: string;
 
   @IsOptional() @IsString() @MaxLength(100) deadline?: string;
   @IsOptional() @IsString() @MaxLength(100) startDate?: string;
@@ -134,5 +134,5 @@ export class CreateJobDto {
   // `CreateJobInput` in `jobs.service.ts`).
   @IsBoolean()
   @Equals(true, { message: 'You must agree to the posting terms' })
-  agreement: boolean;
+  agreement!: boolean;
 }

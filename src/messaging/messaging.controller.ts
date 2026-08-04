@@ -33,17 +33,37 @@ import { UpdateConversationDto } from './dto/update-conversation.dto';
 import { MessageReactionKey } from './entities/message-reaction.entity';
 import { MessagingService } from './messaging.service';
 import { Throttle, seconds } from '@nestjs/throttler';
-import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiCookieAuth,
+  ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 
 @Feature('messaging')
 @ApiTags('Messaging')
 @ApiCookieAuth()
+@ApiUnauthorizedResponse({
+  description: 'Not authenticated as an active member.',
+})
 @Controller('conversations')
 @UseGuards(ActiveMemberGuard)
 export class ConversationsController {
   constructor(private readonly messagingService: MessagingService) {}
 
   @Get()
+  @ApiOperation({
+    summary: "List the caller's conversations (inbox), newest activity first",
+  })
+  @ApiOkResponse({
+    description:
+      "The caller's conversations with last-message previews and unread counts.",
+  })
   list(@CurrentUser() user: CurrentUserData) {
     return this.messagingService.listConversations(user.userId);
   }
@@ -55,6 +75,12 @@ export class ConversationsController {
    * `:id/*` routes below, so it can never be captured as an `:id`.
    */
   @Get('unread-count')
+  @ApiOperation({
+    summary: 'Count the conversations that have at least one unread message',
+  })
+  @ApiOkResponse({
+    description: 'The number of unread conversations, for the nav DM badge.',
+  })
   async unreadCount(
     @CurrentUser() user: CurrentUserData,
   ): Promise<{ count: number }> {
@@ -66,6 +92,20 @@ export class ConversationsController {
 
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Post()
+  @ApiOperation({
+    summary: 'Open (or reuse) a 1:1 conversation with a member by handle',
+  })
+  @ApiCreatedResponse({
+    description: 'The conversation (existing or newly created).',
+  })
+  @ApiBadRequestResponse({
+    description: 'Invalid body, or the recipient is the caller.',
+  })
+  @ApiForbiddenResponse({
+    description:
+      'The two members are not connected, or one has blocked the other.',
+  })
+  @ApiNotFoundResponse({ description: 'The recipient handle does not exist.' })
   create(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: CreateConversationDto,
@@ -84,6 +124,16 @@ export class ConversationsController {
    */
   @Throttle({ default: { limit: 15, ttl: seconds(60) } })
   @Post('group')
+  @ApiOperation({
+    summary: 'Create a group conversation (caller becomes owner)',
+  })
+  @ApiCreatedResponse({ description: 'The newly created group conversation.' })
+  @ApiBadRequestResponse({
+    description: 'Missing title, or no valid other members supplied.',
+  })
+  @ApiNotFoundResponse({
+    description: 'One of the member handles does not exist.',
+  })
   createGroup(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: CreateGroupDto,
@@ -100,6 +150,10 @@ export class ConversationsController {
    *  system message; an owner who leaves hands ownership to a successor). */
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Post(':id/leave')
+  @ApiOperation({ summary: 'Leave a group conversation' })
+  @ApiOkResponse({ description: 'The caller has left the group.' })
+  @ApiBadRequestResponse({ description: 'Not a group conversation.' })
+  @ApiForbiddenResponse({ description: 'The caller is not a participant.' })
   leave(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,
@@ -115,6 +169,19 @@ export class ConversationsController {
    */
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Post(':id/members')
+  @ApiOperation({
+    summary: 'Add members to a group by handle (owner/admin only)',
+  })
+  @ApiOkResponse({ description: 'The updated group conversation.' })
+  @ApiBadRequestResponse({
+    description: 'Not a group, or no valid new members supplied.',
+  })
+  @ApiForbiddenResponse({
+    description: 'The caller is not a group owner/admin.',
+  })
+  @ApiNotFoundResponse({
+    description: 'One of the member handles does not exist.',
+  })
   addMembers(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,
@@ -129,6 +196,16 @@ export class ConversationsController {
    */
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Delete(':id/members/:userId')
+  @ApiOperation({ summary: 'Remove a member from a group (owner/admin only)' })
+  @ApiOkResponse({ description: 'The updated group conversation.' })
+  @ApiBadRequestResponse({
+    description: 'Use the leave endpoint to remove yourself.',
+  })
+  @ApiForbiddenResponse({
+    description:
+      'The caller lacks the role, or is trying to remove the owner/an admin without permission.',
+  })
+  @ApiNotFoundResponse({ description: 'That member is not in this group.' })
   removeMember(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('userId', ParseUUIDPipe) userId: string,
@@ -143,6 +220,19 @@ export class ConversationsController {
    */
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Patch(':id/members/:userId/role')
+  @ApiOperation({
+    summary:
+      'Promote/demote a group member between admin and member (owner only)',
+  })
+  @ApiOkResponse({ description: 'The updated group conversation.' })
+  @ApiBadRequestResponse({
+    description: 'Invalid role, or attempting to change your own role.',
+  })
+  @ApiForbiddenResponse({
+    description:
+      'Only the owner may change roles; the owner role is not assignable.',
+  })
+  @ApiNotFoundResponse({ description: 'That member is not in this group.' })
   changeMemberRole(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('userId', ParseUUIDPipe) userId: string,
@@ -158,6 +248,17 @@ export class ConversationsController {
   }
 
   @Get(':id/messages')
+  @ApiOperation({
+    summary:
+      'Fetch a page of thread history (keyset-paginated; reconnect sync)',
+  })
+  @ApiOkResponse({
+    description:
+      "A page of messages, floored by the caller's clear point. Moderator-taken-down messages render as tombstones.",
+  })
+  @ApiForbiddenResponse({
+    description: 'The caller is not a participant of this conversation.',
+  })
   messages(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,
@@ -175,6 +276,21 @@ export class ConversationsController {
 
   @Throttle({ default: { limit: 60, ttl: seconds(60) } })
   @Post(':id/messages')
+  @ApiOperation({ summary: 'Send a message to a conversation' })
+  @ApiCreatedResponse({
+    description:
+      'The stored message (idempotent on clientMessageId — a retry returns the same message).',
+  })
+  @ApiBadRequestResponse({
+    description: 'Invalid body (e.g. a gif message missing its attachment).',
+  })
+  @ApiForbiddenResponse({
+    description:
+      'Not a participant, has left the group, is blocked, or is not a connected member.',
+  })
+  @ApiNotFoundResponse({
+    description: 'The conversation or the replied-to message was not found.',
+  })
   send(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,
@@ -193,6 +309,9 @@ export class ConversationsController {
   }
 
   @Get(':id/pins')
+  @ApiOperation({ summary: 'List the pinned messages of a conversation' })
+  @ApiOkResponse({ description: "The conversation's pinned messages." })
+  @ApiForbiddenResponse({ description: 'The caller is not a participant.' })
   pins(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,
@@ -202,6 +321,12 @@ export class ConversationsController {
 
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Post(':id/messages/:messageId/pin')
+  @ApiOperation({ summary: 'Pin a message in a conversation' })
+  @ApiCreatedResponse({ description: 'The message is pinned.' })
+  @ApiForbiddenResponse({ description: 'The caller is not a participant.' })
+  @ApiNotFoundResponse({
+    description: 'The conversation or message was not found.',
+  })
   pin(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('messageId', ParseUUIDPipe) messageId: string,
@@ -212,6 +337,12 @@ export class ConversationsController {
 
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Delete(':id/messages/:messageId/pin')
+  @ApiOperation({ summary: 'Unpin a message in a conversation' })
+  @ApiOkResponse({ description: 'The message is no longer pinned.' })
+  @ApiForbiddenResponse({ description: 'The caller is not a participant.' })
+  @ApiNotFoundResponse({
+    description: 'The conversation or message was not found.',
+  })
   unpin(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('messageId', ParseUUIDPipe) messageId: string,
@@ -222,6 +353,12 @@ export class ConversationsController {
 
   @Throttle({ default: { limit: 60, ttl: seconds(60) } })
   @Post(':id/messages/:messageId/star')
+  @ApiOperation({ summary: 'Privately star (bookmark) a message' })
+  @ApiCreatedResponse({ description: 'The message is starred for the caller.' })
+  @ApiForbiddenResponse({ description: 'The caller is not a participant.' })
+  @ApiNotFoundResponse({
+    description: 'The conversation or message was not found.',
+  })
   star(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('messageId', ParseUUIDPipe) messageId: string,
@@ -232,6 +369,14 @@ export class ConversationsController {
 
   @Throttle({ default: { limit: 60, ttl: seconds(60) } })
   @Delete(':id/messages/:messageId/star')
+  @ApiOperation({ summary: 'Remove a private star from a message' })
+  @ApiOkResponse({
+    description: 'The message is no longer starred for the caller.',
+  })
+  @ApiForbiddenResponse({ description: 'The caller is not a participant.' })
+  @ApiNotFoundResponse({
+    description: 'The conversation or message was not found.',
+  })
   unstar(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('messageId', ParseUUIDPipe) messageId: string,
@@ -241,6 +386,12 @@ export class ConversationsController {
   }
 
   @Post(':id/read')
+  @ApiOperation({
+    summary:
+      "Mark a conversation read up to the caller's latest received message",
+  })
+  @ApiOkResponse({ description: "The caller's read watermark was advanced." })
+  @ApiForbiddenResponse({ description: 'The caller is not a participant.' })
   read(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,
@@ -250,6 +401,14 @@ export class ConversationsController {
 
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Delete(':id')
+  @ApiOperation({
+    summary: 'Clear ("delete for me") a conversation from the caller\'s inbox',
+  })
+  @ApiOkResponse({
+    description:
+      'The conversation is cleared for the caller (their history floor advances); the other participant is unaffected.',
+  })
+  @ApiForbiddenResponse({ description: 'The caller is not a participant.' })
   clear(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,
@@ -264,6 +423,18 @@ export class ConversationsController {
    */
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Patch(':id')
+  @ApiOperation({
+    summary:
+      "Update a conversation: this caller's mute, or a group's title/avatar",
+  })
+  @ApiOkResponse({ description: 'The updated conversation.' })
+  @ApiBadRequestResponse({
+    description: 'Nothing to update, or not a group for a title/avatar change.',
+  })
+  @ApiForbiddenResponse({
+    description:
+      'Not a participant, or not owner/admin for a group info change.',
+  })
   update(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,
@@ -283,6 +454,13 @@ export class ConversationsController {
 
   @Throttle({ default: { limit: 60, ttl: seconds(60) } })
   @Post(':id/messages/:messageId/reactions')
+  @ApiOperation({ summary: 'Add an emoji reaction to a message' })
+  @ApiCreatedResponse({ description: 'The reaction was recorded.' })
+  @ApiBadRequestResponse({ description: 'Invalid reaction key.' })
+  @ApiForbiddenResponse({ description: 'The caller is not a participant.' })
+  @ApiNotFoundResponse({
+    description: 'The conversation or message was not found.',
+  })
   addReaction(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('messageId', ParseUUIDPipe) messageId: string,
@@ -299,6 +477,20 @@ export class ConversationsController {
 
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Delete(':id/messages/:messageId')
+  @ApiOperation({
+    summary:
+      'Soft-delete a message (author or platform staff), leaving a tombstone',
+  })
+  @ApiOkResponse({
+    description:
+      'The message is tombstoned (idempotent on an already-deleted message).',
+  })
+  @ApiForbiddenResponse({
+    description: 'The caller is neither the author nor platform staff.',
+  })
+  @ApiNotFoundResponse({
+    description: 'The conversation or message was not found.',
+  })
   deleteMessage(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('messageId', ParseUUIDPipe) messageId: string,
@@ -309,6 +501,18 @@ export class ConversationsController {
 
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Patch(':id/messages/:messageId')
+  @ApiOperation({
+    summary: 'Edit a message body (author only, within the 15-minute window)',
+  })
+  @ApiOkResponse({ description: 'The edited message.' })
+  @ApiBadRequestResponse({ description: 'Invalid body.' })
+  @ApiForbiddenResponse({
+    description:
+      'The caller is not the author, or the edit window has expired.',
+  })
+  @ApiNotFoundResponse({
+    description: 'The message was not found (or has been deleted).',
+  })
   editMessage(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('messageId', ParseUUIDPipe) messageId: string,
@@ -325,6 +529,15 @@ export class ConversationsController {
 
   @Throttle({ default: { limit: 60, ttl: seconds(60) } })
   @Delete(':id/messages/:messageId/reactions/:key')
+  @ApiOperation({
+    summary: "Remove the caller's emoji reaction from a message",
+  })
+  @ApiOkResponse({ description: 'The reaction was removed.' })
+  @ApiBadRequestResponse({ description: 'Invalid reaction key.' })
+  @ApiForbiddenResponse({ description: 'The caller is not a participant.' })
+  @ApiNotFoundResponse({
+    description: 'The conversation or message was not found.',
+  })
   removeReaction(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('messageId', ParseUUIDPipe) messageId: string,
@@ -344,6 +557,9 @@ export class ConversationsController {
 @Feature('messaging')
 @ApiTags('Messaging')
 @ApiCookieAuth()
+@ApiUnauthorizedResponse({
+  description: 'Not authenticated as an active member.',
+})
 @Controller('messages')
 @UseGuards(ActiveMemberGuard)
 export class MessageRequestController {
@@ -357,6 +573,13 @@ export class MessageRequestController {
    */
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Get('search')
+  @ApiOperation({
+    summary: "Search the caller's own messages across all their conversations",
+  })
+  @ApiOkResponse({
+    description:
+      "Search hits (snippets + sender + conversation grouping), floored by the caller's clear point; moderator-taken-down messages are excluded.",
+  })
   search(
     @CurrentUser() user: CurrentUserData,
     @Query() query: SearchMessagesQuery,
@@ -375,6 +598,11 @@ export class MessageRequestController {
    */
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Get('starred')
+  @ApiOperation({
+    summary:
+      "The caller's starred (privately-bookmarked) messages, newest first",
+  })
+  @ApiOkResponse({ description: "The caller's starred messages." })
   starred(
     @CurrentUser() user: CurrentUserData,
     @Query() query: StarredMessagesQuery,
@@ -384,6 +612,19 @@ export class MessageRequestController {
 
   @Throttle({ default: { limit: 15, ttl: seconds(60) } })
   @Post('request')
+  @ApiOperation({
+    summary: 'Send a first-contact message request to a member by handle',
+  })
+  @ApiCreatedResponse({
+    description: 'The request was delivered (the conversation id is returned).',
+  })
+  @ApiBadRequestResponse({
+    description: 'Invalid body, or the recipient is the caller.',
+  })
+  @ApiForbiddenResponse({
+    description: 'The recipient has blocked the caller (or vice versa).',
+  })
+  @ApiNotFoundResponse({ description: 'The recipient handle does not exist.' })
   request(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: MessageRequestDto,

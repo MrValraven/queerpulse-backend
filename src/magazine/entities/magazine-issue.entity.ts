@@ -15,29 +15,29 @@ import {
 @Entity('magazine_issue')
 export class MagazineIssue {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_magazine_issue_number', { unique: true })
   @Column({ type: 'varchar' })
-  number: string;
+  number!: string;
 
   @Column({ type: 'varchar' })
-  title: string;
+  title!: string;
 
   @Column({ type: 'text' })
-  dek: string;
+  dek!: string;
 
   // Postgres `date` — TypeORM returns this as a plain `YYYY-MM-DD` string,
   // matching `IssueResponse.publishedOn: string` with no extra conversion.
   @Column({ type: 'date' })
-  publishedOn: string;
+  publishedOn!: string;
 
   @Column({ type: 'varchar', nullable: true })
-  coverUrl: string | null;
+  coverUrl!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

@@ -16,41 +16,41 @@ import {
 @Entity('magazine_article')
 export class MagazineArticle {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_magazine_article_slug', { unique: true })
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   @Column({ type: 'varchar' })
-  title: string;
+  title!: string;
 
   @Column({ type: 'text' })
-  dek: string;
+  dek!: string;
 
   @Column({ type: 'text' })
-  body: string;
+  body!: string;
 
   @Index('IDX_magazine_article_author_id')
   @Column({ type: 'uuid' })
-  authorId: string;
+  authorId!: string;
 
   @Index('IDX_magazine_article_issue_id')
   @Column({ type: 'uuid', nullable: true })
-  issueId: string | null;
+  issueId!: string | null;
 
   @Column({ type: 'text', array: true, default: '{}' })
-  tags: string[];
+  tags!: string[];
 
   @Column({ type: 'int' })
-  readMinutes: number;
+  readMinutes!: number;
 
   @Column({ type: 'timestamptz', nullable: true })
-  publishedAt: Date | null;
+  publishedAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

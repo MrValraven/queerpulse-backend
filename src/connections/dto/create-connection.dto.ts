@@ -3,7 +3,7 @@ import { IsOptional, IsString, MaxLength } from 'class-validator';
 export class CreateConnectionDto {
   @IsString()
   @MaxLength(200)
-  toSlug: string;
+  toSlug!: string;
 
   @IsOptional()
   @IsString()

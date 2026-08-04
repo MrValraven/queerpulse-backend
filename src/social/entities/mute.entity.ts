@@ -16,16 +16,16 @@ import {
 @Unique('UQ_mutes_pair', ['muterId', 'mutedId'])
 export class Mute {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_mutes_muter_id')
   @Column({ type: 'uuid' })
-  muterId: string;
+  muterId!: string;
 
   @Index('IDX_mutes_muted_id')
   @Column({ type: 'uuid' })
-  mutedId: string;
+  mutedId!: string;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

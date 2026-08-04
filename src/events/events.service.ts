@@ -8,6 +8,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
+import { normalizePage, paginate } from '../common/pagination';
 import { randomBytes } from 'node:crypto';
 import { In, Not, Repository, SelectQueryBuilder } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
@@ -17,8 +18,9 @@ import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
+import { AttendeeStatusFilter } from './dto/list-attendees.query';
 import {
-  AttendeeView,
+  AttendeesPageDTO,
   EventDetail,
   EventSummary,
   toAttendeeView,
@@ -387,38 +389,71 @@ export class EventsService {
     return { ok: true };
   }
 
-  async attendees(slug: string, viewerId: string): Promise<AttendeeView[]> {
+  /**
+   * One RSVP status's own paginated page (`going` or `waitlisted`) — never
+   * the whole guest list in one response. This used to be
+   * `this.rsvps.find({ where: { eventId } })` with no `LIMIT` at all: an
+   * uncapped (`capacity: null`) public gathering could accumulate an
+   * unbounded number of `going` rows, all fetched (and post-query filtered)
+   * on every dashboard load. `status` splits the single combined list into
+   * the two the manage dashboard actually renders, and `paginate` bounds each
+   * to `PAGE_SIZE` per page.
+   */
+  async attendees(
+    slug: string,
+    viewerId: string,
+    status: AttendeeStatusFilter,
+    page?: number,
+  ): Promise<AttendeesPageDTO> {
     const event = await this.loadEventOr404(slug);
     const isOrganizer = await this.assertCanView(event, viewerId);
-    const rsvps = await this.rsvps.find({
-      where: { eventId: event.id },
-      order: { status: 'ASC', waitlistPosition: 'ASC' },
-    });
-    const notCancelled = rsvps.filter((r) => r.status !== RsvpStatus.Cancelled);
+    const normalizedPage = normalizePage(page);
+    const rsvpStatus =
+      status === 'waitlisted' ? RsvpStatus.Waitlisted : RsvpStatus.Going;
+
+    const qb = this.rsvps
+      .createQueryBuilder('r')
+      .where('r.event_id = :eventId', { eventId: event.id })
+      .andWhere('r.status = :status', { status: rsvpStatus })
+      .orderBy('r.waitlist_position', 'ASC')
+      .addOrderBy('r.created_at', 'ASC');
     // Blocks only — deliberately NOT mutes. A block is a mutual severance, so
     // a blocked member must not surface in a list the viewer reads (same rule
     // `ProfilesService.searchMembers` applies to the directory). A mute is a
     // content-feed silence, not an "erase them from the guest list" tool:
     // dropping muted members here would misstate who is actually attending,
     // which the viewer may need to know for their own safety planning.
-    // Post-query is sound here — `attendees` returns the whole list with no
-    // LIMIT, so there is no page to under-fill.
-    const blocked = await this.blockFilter.blockedUserIds(
-      viewerId,
-      notCancelled.map((r) => r.userId),
-    );
-    const visible = notCancelled.filter((r) => !blocked.has(r.userId));
-    const profiles = await this.profilesByUserIds(visible.map((r) => r.userId));
-    return visible
-      .filter((r) => profiles.has(r.userId)) // drop profile-less ghost rows
-      .map((r) => {
-        const view = toAttendeeView(r, profiles.get(r.userId));
-        // Waitlist ordering is organizer-only; hide positions from regular viewers.
-        if (!isOrganizer) {
-          view.waitlistPosition = null;
-        }
-        return view;
-      });
+    // In-query (not the old post-query filter) so a page of `PAGE_SIZE`
+    // attendees comes back full instead of silently short.
+    this.blockFilter.excludeBlocked(qb, viewerId, '"r"."user_id"');
+
+    const {
+      items,
+      total,
+      page: resolvedPage,
+      pageSize,
+    } = await paginate(qb, normalizedPage, async (rows) => {
+      if (!rows.length) return [];
+      const profiles = await this.profilesByUserIds(rows.map((r) => r.userId));
+      return rows
+        .filter((r) => profiles.has(r.userId)) // drop profile-less ghost rows
+        .map((r) => {
+          const view = toAttendeeView(r, profiles.get(r.userId));
+          // Waitlist ordering is organizer-only; hide positions from regular viewers.
+          if (!isOrganizer) {
+            view.waitlistPosition = null;
+          }
+          return view;
+        });
+    });
+
+    return {
+      items,
+      total,
+      page: resolvedPage,
+      pageSize,
+      capacity: event.capacity,
+    };
   }
 
   async isOrganizer(eventId: string, userId: string): Promise<boolean> {

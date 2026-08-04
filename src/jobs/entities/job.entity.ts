@@ -43,118 +43,118 @@ const numericTransformer = {
 @Entity('jobs')
 export class Job {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_jobs_slug', { unique: true })
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   @Index('IDX_jobs_company_id')
   @Column({ type: 'uuid' })
-  companyId: string;
+  companyId!: string;
 
   @Column({ type: 'varchar' })
-  title: string;
+  title!: string;
 
   // Validated to a known set in `CreateJobDto`, but stored as `varchar` (not
   // a DB enum) — the spec's category set is open-ended, unlike `format`.
   @Column({ type: 'varchar' })
-  category: string;
+  category!: string;
 
   @Column({ type: 'varchar' })
-  commitment: string;
+  commitment!: string;
 
   @Column({ type: 'varchar' })
-  seniority: string;
+  seniority!: string;
 
   @Column({ type: 'enum', enum: JobFormat, enumName: 'job_format_enum' })
-  format: JobFormat;
+  format!: JobFormat;
 
   @Column({ type: 'varchar' })
-  location: string;
+  location!: string;
 
   @Column({ type: 'varchar', nullable: true })
-  city: string | null;
+  city!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  timezone: string | null;
+  timezone!: string | null;
 
   // Display-only pay string (e.g. "€40k-50k"); `rateMin`/`rateMax`/`currency`/
   // `ratePer` below are the structured counterparts.
   @Column({ type: 'varchar', nullable: true })
-  salary: string | null;
+  salary!: string | null;
 
   @Column({
     type: 'numeric',
     nullable: true,
     transformer: numericTransformer,
   })
-  rateMin: number | null;
+  rateMin!: number | null;
 
   @Column({
     type: 'numeric',
     nullable: true,
     transformer: numericTransformer,
   })
-  rateMax: number | null;
+  rateMax!: number | null;
 
   @Column({ type: 'varchar', nullable: true })
-  currency: string | null;
+  currency!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  ratePer: string | null;
+  ratePer!: string | null;
 
   @Column({ type: 'boolean', default: false })
-  hidePay: boolean;
+  hidePay!: boolean;
 
   @Column({ type: 'boolean', default: false })
-  barter: boolean;
+  barter!: boolean;
 
   @Column({ type: 'varchar', nullable: true })
-  deadline: string | null;
+  deadline!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  startDate: string | null;
+  startDate!: string | null;
 
   // Card blurb; maps to `CreateJobDto.description` at the request boundary.
   @Column({ type: 'text' })
-  desc: string;
+  desc!: string;
 
   @Column({ type: 'text', array: true, default: '{}' })
-  tags: string[];
+  tags!: string[];
 
   @Column({ type: 'boolean', default: false })
-  queerRun: boolean;
+  queerRun!: boolean;
 
   @Column({ type: 'varchar', nullable: true })
-  qrLabel: string | null;
+  qrLabel!: string | null;
 
   // Always populated by the service (never relies on a DB default) — see
   // `JobsService`'s `normalizeDetail`.
   @Column({ type: 'jsonb' })
-  detail: JobDetailBody;
+  detail!: JobDetailBody;
 
   @Column({ type: 'text', array: true, default: '{}' })
-  benefits: string[];
+  benefits!: string[];
 
   @Column({ type: 'text', array: true, default: '{}' })
-  inclusivity: string[];
+  inclusivity!: string[];
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  screening: string[];
+  screening!: string[];
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  contacts: string[];
+  contacts!: string[];
 
   @Column({ type: 'varchar', nullable: true })
-  email: string | null;
+  email!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  link: string | null;
+  link!: string | null;
 
   @Index('IDX_jobs_poster_id')
   @Column({ type: 'uuid' })
-  posterId: string;
+  posterId!: string;
 
   @Column({
     type: 'enum',
@@ -162,11 +162,11 @@ export class Job {
     enumName: 'job_status_enum',
     default: JobStatus.Open,
   })
-  status: JobStatus;
+  status!: JobStatus;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

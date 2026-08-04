@@ -1,10 +1,13 @@
 import {
   BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import { Community } from '../communities/entities/community.entity';
 import { Event } from '../events/entities/event.entity';
 import { Handle } from '../handles/entities/handle.entity';
@@ -24,6 +27,7 @@ import {
 } from './entities/subprofile-item.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
+import { SubprofileMember } from './entities/subprofile-member.entity';
 import { isSectionAllowed } from './subprofile-kinds';
 import { toPublicDTO } from './subprofile-response';
 import {
@@ -367,8 +371,18 @@ describe('SubprofilesService', () => {
     createQueryBuilder: jest.Mock;
   };
   let items: { find: jest.Mock };
+  let members: {
+    findOne: jest.Mock;
+    find: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+    count: jest.Mock;
+    delete: jest.Mock;
+  };
   let profiles: { findOne: jest.Mock };
   let manager: {
+    findOne: jest.Mock;
+    count: jest.Mock;
     delete: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
@@ -386,9 +400,14 @@ describe('SubprofilesService', () => {
       findOne: jest.fn().mockResolvedValue(null),
       count: jest.fn().mockResolvedValue(0),
       exist: jest.fn().mockResolvedValue(false),
-      create: jest
-        .fn()
-        .mockImplementation((value: Partial<Subprofile>) => ({ ...value })),
+      // `create` in `create()`'s new transactional path (`manager.save(sp)`)
+      // needs a concrete `id` on the entity it builds so the "creator is the
+      // first member" test can pin an actual value rather than `undefined ===
+      // undefined`.
+      create: jest.fn().mockImplementation((value: Partial<Subprofile>) => ({
+        id: 'sp-created-1',
+        ...value,
+      })),
       save: jest
         .fn()
         .mockImplementation((value: Subprofile) => Promise.resolve(value)),
@@ -396,8 +415,40 @@ describe('SubprofilesService', () => {
       createQueryBuilder: jest.fn(),
     };
     items = { find: jest.fn().mockResolvedValue([]) };
+    // Defaults to "is a member" so every pre-existing `getOwned`-backed test
+    // (which never touched membership) keeps passing unchanged; tests that
+    // care about the membership gate itself override this per-case.
+    members = {
+      findOne: jest.fn().mockResolvedValue({ id: 'member-1' }),
+      find: jest.fn().mockResolvedValue([]),
+      create: jest
+        .fn()
+        .mockImplementation((value: Partial<SubprofileMember>) => ({
+          ...value,
+        })),
+      save: jest
+        .fn()
+        .mockImplementation((value: SubprofileMember) =>
+          Promise.resolve(value),
+        ),
+      // `leave` counts remaining members; defaults to 2 so the "non-last
+      // member leaves" path is the default and last-member tests override it.
+      count: jest.fn().mockResolvedValue(2),
+      delete: jest.fn().mockResolvedValue(undefined),
+    };
     profiles = { findOne: jest.fn().mockResolvedValue(null) };
     manager = {
+      // Backs `leave()`'s locked transaction: the persona-row lock (dispatched
+      // on the `Subprofile` entity class, mirrors
+      // `subprofile-invites.service.spec.ts`'s shared manager mock) and the
+      // re-count of remaining members. Defaults to "non-last member" (2) so
+      // every test that doesn't touch `leave` is unaffected; the `leave`
+      // describe block below overrides per-case.
+      findOne: jest.fn().mockImplementation((entity: unknown) => {
+        if (entity === Subprofile) return Promise.resolve(makeSubprofile());
+        return Promise.resolve(null);
+      }),
+      count: jest.fn().mockResolvedValue(2),
       delete: jest.fn().mockResolvedValue(undefined),
       create: jest
         .fn()
@@ -439,6 +490,7 @@ describe('SubprofilesService', () => {
           provide: getRepositoryToken(SubprofileAffiliation),
           useValue: { find: jest.fn().mockResolvedValue([]) },
         },
+        { provide: getRepositoryToken(SubprofileMember), useValue: members },
         {
           provide: getRepositoryToken(Event),
           useValue: { find: jest.fn().mockResolvedValue([]) },
@@ -490,13 +542,19 @@ describe('SubprofilesService', () => {
   });
 
   describe('create', () => {
+    // `create` now writes the subprofile AND its first `subprofile_members`
+    // row in ONE `dataSource.transaction` (see `getOwned` finding: an
+    // untransacted create could orphan a subprofile with no membership row).
+    // Both writes go through the mocked `manager.save`, in order — the
+    // subprofile first, the membership row second — never through the plain
+    // `subprofiles.save`/`members.save` repo mocks.
     it('slugifies the display name', async () => {
       subprofiles.find.mockResolvedValue([]); // no existing slugs
       await service.create('user-1', {
         kind: SubprofileKind.Musician,
         displayName: 'Night Form!!',
       });
-      const saved = (subprofiles.save.mock.calls[0] as [Subprofile])[0];
+      const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
       expect(saved.slug).toBe('night-form');
     });
 
@@ -509,7 +567,7 @@ describe('SubprofilesService', () => {
         kind: SubprofileKind.Musician,
         displayName: 'Nightform',
       });
-      const saved = (subprofiles.save.mock.calls[0] as [Subprofile])[0];
+      const saved = (manager.save.mock.calls[0] as [Subprofile])[0];
       expect(saved.slug).toBe('nightform-3');
     });
 
@@ -521,7 +579,201 @@ describe('SubprofilesService', () => {
           displayName: 'Overflow',
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
-      expect(subprofiles.save).not.toHaveBeenCalled();
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('inserts the creator as the first subprofile_members row, in the same transaction as the subprofile save', async () => {
+      subprofiles.find.mockResolvedValue([]);
+      await service.create('user-1', {
+        kind: SubprofileKind.Musician,
+        displayName: 'Nightform',
+      });
+      const savedSubprofile = (manager.save.mock.calls[0] as [Subprofile])[0];
+      const savedMember = (manager.save.mock.calls[1] as [SubprofileMember])[0];
+      // Pins a concrete id (from the `subprofiles.create` mock) rather than
+      // asserting `undefined === undefined`.
+      expect(savedSubprofile.id).toBe('sp-created-1');
+      expect(savedMember).toMatchObject({
+        subprofileId: 'sp-created-1',
+        userId: 'user-1',
+      });
+    });
+
+    it('translates a unique-violation into a 409 on duplicate slug/handle', async () => {
+      subprofiles.find.mockResolvedValue([]);
+      manager.save.mockRejectedValueOnce(
+        Object.assign(new Error('duplicate key'), { code: '23505' }),
+      );
+      await expect(
+        service.create('user-1', {
+          kind: SubprofileKind.Musician,
+          displayName: 'Nightform',
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+  });
+
+  describe('getOwned', () => {
+    it('allows any member (not just the creator)', async () => {
+      // creatorId owns sp1; memberId is a co-owner via subprofile_members.
+      subprofiles.findOne.mockResolvedValue({ id: 'sp1', userId: 'creatorId' });
+      members.findOne.mockResolvedValue({
+        subprofileId: 'sp1',
+        userId: 'memberId',
+      });
+      await expect(service.getOwned('memberId', 'sp1')).resolves.toMatchObject({
+        id: 'sp1',
+      });
+    });
+
+    it('rejects a non-member with 403', async () => {
+      subprofiles.findOne.mockResolvedValue({ id: 'sp1', userId: 'creatorId' });
+      members.findOne.mockResolvedValue(null);
+      await expect(service.getOwned('strangerId', 'sp1')).rejects.toThrow(
+        ForbiddenException,
+      );
+    });
+
+    it('404s when the subprofile does not exist', async () => {
+      subprofiles.findOne.mockResolvedValue(null);
+      await expect(service.getOwned('anyone', 'missing-id')).rejects.toThrow(
+        NotFoundException,
+      );
+      // Membership is never even checked for a subprofile that doesn't exist.
+      expect(members.findOne).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('leave', () => {
+    beforeEach(() => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ id: 'sp-1', userId: 'creator-1' }),
+      );
+      // Membership gate passes by default (see the `members` mock default).
+      members.findOne.mockResolvedValue({
+        subprofileId: 'sp-1',
+        userId: 'member-1',
+      });
+      // `leave` now re-counts INSIDE the locked transaction via the shared
+      // `manager` mock (mirrors `invite`/`accept` in
+      // `subprofile-invites.service.spec.ts`), not the plain `members.count`
+      // repo — the top-level `manager` mock already defaults to this same
+      // shape; each test below just overrides `manager.count` per-case.
+    });
+
+    it('throws ConflictException when the caller is the last remaining member (inside the locked transaction)', async () => {
+      manager.count.mockResolvedValue(1);
+      await expect(service.leave('member-1', 'sp-1')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(manager.findOne).toHaveBeenCalledWith(
+        Subprofile,
+        expect.objectContaining({
+          where: { id: 'sp-1' },
+          lock: { mode: 'pessimistic_write' },
+        }),
+      );
+      expect(manager.delete).not.toHaveBeenCalled();
+    });
+
+    it('deletes the membership row when a non-last member leaves (inside the locked transaction)', async () => {
+      manager.count.mockResolvedValue(2);
+      await service.leave('member-1', 'sp-1');
+      expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+      expect(manager.delete).toHaveBeenCalledWith(SubprofileMember, {
+        subprofileId: 'sp-1',
+        userId: 'member-1',
+      });
+    });
+
+    it('propagates the 403 from getOwned when the caller is not a member', async () => {
+      members.findOne.mockResolvedValue(null);
+      await expect(service.leave('stranger-1', 'sp-1')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      // The membership gate 403s BEFORE the transaction is ever opened.
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(manager.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('listMine', () => {
+    it('includes a persona the caller co-owns but did not create', async () => {
+      // 'co-owner-1' is a member of a persona created by someone else.
+      members.find.mockResolvedValue([
+        { subprofileId: 'sp-created-by-other', userId: 'co-owner-1' },
+      ]);
+      subprofiles.find.mockResolvedValue([
+        makeSubprofile({ id: 'sp-created-by-other', userId: 'creator-1' }),
+      ]);
+      const result = await service.listMine('co-owner-1');
+      expect(members.find).toHaveBeenCalledWith({
+        where: { userId: 'co-owner-1' },
+        select: { subprofileId: true },
+      });
+      expect(subprofiles.find).toHaveBeenCalledWith({
+        where: { id: In(['sp-created-by-other']) },
+        order: { position: 'ASC', createdAt: 'ASC' },
+      });
+      expect(result.map((view) => view.id)).toContain('sp-created-by-other');
+    });
+
+    it('skips the subprofiles query entirely when the caller has no memberships', async () => {
+      members.find.mockResolvedValue([]);
+      const result = await service.listMine('lonely-user');
+      expect(subprofiles.find).not.toHaveBeenCalled();
+      expect(result).toEqual([]);
+    });
+  });
+
+  describe('listForProfile', () => {
+    it('lists a persona co-owned (not created) by the profile’s user', async () => {
+      profiles.findOne.mockResolvedValue({
+        slug: 'viewed-member',
+        userId: 'viewed-user-id',
+        firstName: 'Viewed',
+        lastName: 'Member',
+      });
+      // 'viewed-user-id' co-owns a persona created by someone else.
+      members.find.mockResolvedValue([
+        { subprofileId: 'sp-co-owned', userId: 'viewed-user-id' },
+      ]);
+      subprofiles.find.mockResolvedValue([
+        makeSubprofile({
+          id: 'sp-co-owned',
+          userId: 'creator-1',
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          status: SubprofileStatus.Published,
+        }),
+      ]);
+      const result = await service.listForProfile('viewed-member', 'viewer-id');
+      expect(members.find).toHaveBeenCalledWith({
+        where: { userId: 'viewed-user-id' },
+        select: { subprofileId: true },
+      });
+      expect(subprofiles.find).toHaveBeenCalledWith({
+        where: {
+          id: In(['sp-co-owned']),
+          linkVisibility: SubprofileLinkVisibility.Linked,
+          status: SubprofileStatus.Published,
+        },
+        order: { position: 'ASC', createdAt: 'ASC' },
+      });
+      expect(result.map((view) => view.slug)).toContain('nightform');
+    });
+
+    it('skips the subprofiles query entirely when the profile’s user has no memberships', async () => {
+      profiles.findOne.mockResolvedValue({
+        slug: 'viewed-member',
+        userId: 'viewed-user-id',
+        firstName: 'Viewed',
+        lastName: 'Member',
+      });
+      members.find.mockResolvedValue([]);
+      const result = await service.listForProfile('viewed-member', 'viewer-id');
+      expect(subprofiles.find).not.toHaveBeenCalled();
+      expect(result).toEqual([]);
     });
   });
 

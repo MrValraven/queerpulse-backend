@@ -9,11 +9,11 @@ import {
 
 class SocialLinkInputDTO {
   @IsString()
-  platform: string;
+  platform!: string;
 
   @IsString()
   @MaxLength(300)
-  urlOrHandle: string;
+  urlOrHandle!: string;
 }
 
 export class ReplaceSocialLinksDTO {
@@ -21,5 +21,5 @@ export class ReplaceSocialLinksDTO {
   @ArrayMaxSize(20)
   @ValidateNested({ each: true })
   @Type(() => SocialLinkInputDTO)
-  items: SocialLinkInputDTO[];
+  items!: SocialLinkInputDTO[];
 }

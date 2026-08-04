@@ -35,26 +35,26 @@ export enum ContentSection {
 @Index('UQ_content_pages_section_slug', ['section', 'slug'], { unique: true })
 export class ContentPage {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Column({
     type: 'enum',
     enum: ContentSection,
     enumName: 'content_pages_section_enum',
   })
-  section: ContentSection;
+  section!: ContentSection;
 
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   @Column({ type: 'varchar' })
-  title: string;
+  title!: string;
 
   @Column({ type: 'text' })
-  body: string;
+  body!: string;
 
   @Column({ type: 'varchar', default: 'en' })
-  locale: string;
+  locale!: string;
 
   // Nullable: a null (or future-dated) `publishedAt` hides the page from both
   // list and by-slug reads (see `ContentPagesService`) — the same
@@ -62,11 +62,11 @@ export class ContentPage {
   // minimal here as a single timestamp rather than a full status enum since
   // there's no authoring flow yet to move a page between states.
   @Column({ type: 'timestamptz', nullable: true })
-  publishedAt: Date | null;
+  publishedAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

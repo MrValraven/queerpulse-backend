@@ -24,18 +24,18 @@ export enum JoinRequestStatus {
 })
 export class CommunityJoinRequest {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_community_join_requests_community_id')
   @Column({ type: 'uuid' })
-  communityId: string;
+  communityId!: string;
 
   @Index('IDX_community_join_requests_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({ type: 'text', nullable: true })
-  note: string | null;
+  note!: string | null;
 
   @Column({
     type: 'enum',
@@ -43,8 +43,8 @@ export class CommunityJoinRequest {
     enumName: 'community_join_requests_status_enum',
     default: JoinRequestStatus.Pending,
   })
-  status: JoinRequestStatus;
+  status!: JoinRequestStatus;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

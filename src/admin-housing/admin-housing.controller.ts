@@ -13,6 +13,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { HousingService } from '../housing/housing.service';
@@ -33,7 +34,7 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
-@UseGuards(RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesGuard)
 @Roles(UserRole.Admin)
 @ApiTags('Admin — Housing')
 @ApiCookieAuth('access_token')

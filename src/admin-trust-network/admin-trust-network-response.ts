@@ -34,6 +34,7 @@ export interface TrustEdgeDTO {
   relationship: string | null;
   note: string | null;
   anonymous: boolean;
+  kind: 'invite' | 'vouch';
 }
 
 export interface SceneDTO {

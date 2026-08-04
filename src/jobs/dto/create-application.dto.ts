@@ -10,8 +10,8 @@ import {
 } from 'class-validator';
 
 export class JobApplicationAnswerDto {
-  @IsString() @MinLength(1) @MaxLength(300) question: string;
-  @IsString() @MinLength(1) @MaxLength(3000) answer: string;
+  @IsString() @MinLength(1) @MaxLength(300) question!: string;
+  @IsString() @MinLength(1) @MaxLength(3000) answer!: string;
 }
 
 export class CreateJobApplicationDto {
@@ -19,7 +19,7 @@ export class CreateJobApplicationDto {
   @ArrayMaxSize(20)
   @ValidateNested({ each: true })
   @Type(() => JobApplicationAnswerDto)
-  answers: JobApplicationAnswerDto[];
+  answers!: JobApplicationAnswerDto[];
 
   @IsOptional() @IsString() @MaxLength(5000) coverNote?: string;
 }

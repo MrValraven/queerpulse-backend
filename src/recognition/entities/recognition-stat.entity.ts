@@ -12,11 +12,11 @@ import { Column, Entity, PrimaryColumn, UpdateDateColumn } from 'typeorm';
 @Entity('recognition_stats')
 export class RecognitionStat {
   @PrimaryColumn({ name: 'user_id', type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({ type: 'int', default: 0 })
-  xp: number;
+  xp!: number;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

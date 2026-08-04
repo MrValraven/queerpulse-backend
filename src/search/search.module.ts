@@ -4,6 +4,12 @@ import { ListingsModule } from '../listings/listings.module';
 import { CommunitiesModule } from '../communities/communities.module';
 import { EventsModule } from '../events/events.module';
 import { ForumModule } from '../forum/forum.module';
+import { MagazineModule } from '../magazine/magazine.module';
+import { JobsModule } from '../jobs/jobs.module';
+import { HousingListingsModule } from '../housing-listings/housing-listings.module';
+import { ResourcesModule } from '../resources/resources.module';
+import { WorkshopsModule } from '../workshops/workshops.module';
+import { SubprofilesModule } from '../subprofiles/subprofiles.module';
 import { SearchController } from './search.controller';
 import { SearchService } from './search.service';
 
@@ -14,6 +20,12 @@ import { SearchService } from './search.service';
     CommunitiesModule,
     EventsModule,
     ForumModule,
+    MagazineModule,
+    JobsModule,
+    HousingListingsModule,
+    ResourcesModule,
+    WorkshopsModule,
+    SubprofilesModule,
   ],
   controllers: [SearchController],
   providers: [SearchService],

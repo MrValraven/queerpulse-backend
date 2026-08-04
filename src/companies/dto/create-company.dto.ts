@@ -12,29 +12,29 @@ import {
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 
 export class CompanyValueDto {
-  @IsString() @MinLength(1) @MaxLength(80) title: string;
-  @IsString() @MinLength(1) @MaxLength(500) desc: string;
+  @IsString() @MinLength(1) @MaxLength(80) title!: string;
+  @IsString() @MinLength(1) @MaxLength(500) desc!: string;
 }
 
 export class CompanyInfoItemDto {
-  @IsString() @MinLength(1) @MaxLength(80) label: string;
-  @IsString() @MinLength(1) @MaxLength(300) value: string;
+  @IsString() @MinLength(1) @MaxLength(80) label!: string;
+  @IsString() @MinLength(1) @MaxLength(300) value!: string;
 }
 
 export class CompanyWorkItemDto {
-  @IsString() @MinLength(1) @MaxLength(200) label: string;
+  @IsString() @MinLength(1) @MaxLength(200) label!: string;
   @IsOptional() @IsImageReference() imageUrl?: string;
 }
 
 export class HiringContactDto {
-  @IsString() @MinLength(1) @MaxLength(200) name: string;
-  @IsString() @MinLength(1) @MaxLength(200) role: string;
+  @IsString() @MinLength(1) @MaxLength(200) name!: string;
+  @IsString() @MinLength(1) @MaxLength(200) role!: string;
 }
 
 export class CreateCompanyDto {
-  @IsString() @MinLength(1) @MaxLength(200) nameText: string;
-  @IsString() @MinLength(1) @MaxLength(200) tagline: string;
-  @IsString() @MinLength(1) @MaxLength(10000) about: string;
+  @IsString() @MinLength(1) @MaxLength(200) nameText!: string;
+  @IsString() @MinLength(1) @MaxLength(200) tagline!: string;
+  @IsString() @MinLength(1) @MaxLength(10000) about!: string;
 
   // `verified` is intentionally not a field here at all — it's admin-only
   // and `CompaniesService.create` always forces it `false` regardless of

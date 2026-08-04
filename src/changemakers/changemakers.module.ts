@@ -1,5 +1,8 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { Profile } from '../users/entities/profile.entity';
+import { AdminChangemakerNominationsController } from './admin-changemaker-nominations.controller';
+import { AdminChangemakerNominationsService } from './admin-changemaker-nominations.service';
 import { AdminChangemakersController } from './admin-changemakers.controller';
 import { ChangemakerNominationsController } from './changemaker-nominations.controller';
 import { ChangemakerNominationsService } from './changemaker-nominations.service';
@@ -11,17 +14,25 @@ import { ChangemakerNomination } from './entities/changemaker-nomination.entity'
 
 @Module({
   imports: [
+    // `Profile` is registered here (overlapping `forFeature` is permitted) so
+    // the nomination admin read model can resolve nominator refs.
     TypeOrmModule.forFeature([
       Changemaker,
       ChangemakerDirectorySettings,
       ChangemakerNomination,
+      Profile,
     ]),
   ],
   controllers: [
     ChangemakersController,
     AdminChangemakersController,
     ChangemakerNominationsController,
+    AdminChangemakerNominationsController,
   ],
-  providers: [ChangemakersService, ChangemakerNominationsService],
+  providers: [
+    ChangemakersService,
+    ChangemakerNominationsService,
+    AdminChangemakerNominationsService,
+  ],
 })
 export class ChangemakersModule {}

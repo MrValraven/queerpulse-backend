@@ -13,18 +13,18 @@ import {
 @Entity('community_post_reply_edit')
 export class CommunityPostReplyEdit {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_community_post_reply_edit_reply_id')
   @Column({ type: 'uuid' })
-  replyId: string;
+  replyId!: string;
 
   @Column({ type: 'text' })
-  previousText: string;
+  previousText!: string;
 
   @Column({ type: 'uuid', nullable: true })
-  editorId: string | null;
+  editorId!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

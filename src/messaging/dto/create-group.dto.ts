@@ -20,7 +20,7 @@ export class CreateGroupDto {
   @IsString()
   @MinLength(1)
   @MaxLength(80)
-  title: string;
+  title!: string;
 
   // A storage key or https:// URL — the IsImageReference guard refuses a
   // javascript:/data: URI that group members' browsers would otherwise render.
@@ -33,5 +33,5 @@ export class CreateGroupDto {
   @ArrayMaxSize(50)
   @IsString({ each: true })
   @MaxLength(255, { each: true })
-  memberHandles: string[];
+  memberHandles!: string[];
 }

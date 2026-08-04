@@ -116,7 +116,9 @@ export class ProfilesController {
   @ApiOperation({ summary: "Replace the caller's board posts" })
   @ApiOkResponse({ description: 'The persisted board posts, in order.' })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
-  @ApiBadRequestResponse({ description: 'A board slug is duplicated in the payload.' })
+  @ApiBadRequestResponse({
+    description: 'A board slug is duplicated in the payload.',
+  })
   @Put('me/board')
   replaceBoard(
     @CurrentUser() user: CurrentUserData,
@@ -126,9 +128,13 @@ export class ProfilesController {
   }
 
   @ApiOperation({ summary: "Replace the caller's shaping entries" })
-  @ApiOkResponse({ description: 'The persisted shaping entries, in canonical order.' })
+  @ApiOkResponse({
+    description: 'The persisted shaping entries, in canonical order.',
+  })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
-  @ApiBadRequestResponse({ description: 'A shaping kind is duplicated in the payload.' })
+  @ApiBadRequestResponse({
+    description: 'A shaping kind is duplicated in the payload.',
+  })
   @Put('me/shapings')
   replaceShapings(
     @CurrentUser() user: CurrentUserData,
@@ -140,7 +146,9 @@ export class ProfilesController {
   @ApiOperation({ summary: "Replace the caller's group memberships" })
   @ApiOkResponse({ description: 'The persisted group memberships.' })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
-  @ApiBadRequestResponse({ description: 'A group slug is unknown or duplicated.' })
+  @ApiBadRequestResponse({
+    description: 'A group slug is unknown or duplicated.',
+  })
   @Put('me/groups')
   replaceGroups(
     @CurrentUser() user: CurrentUserData,
@@ -162,7 +170,9 @@ export class ProfilesController {
   @Get(':slug')
   @UseGuards(ActiveMemberGuard)
   getBySlug(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
-    return this.profilesService.getBySlug(slug, user.userId);
+    // `user.role` lets a moderator/admin still view a taken-down member's
+    // profile (the takedown 404s it for ordinary members only).
+    return this.profilesService.getBySlug(slug, user.userId, user.role);
   }
 }
 

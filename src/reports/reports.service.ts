@@ -1,7 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { Message } from '../messaging/entities/message.entity';
 import {
   Report,
   ReportStatus,
@@ -31,12 +32,36 @@ export interface CreateReportInput {
 export class ReportsService {
   constructor(
     @InjectRepository(Report) private readonly reports: Repository<Report>,
+    // Read-only lookup for the message self-report guard below. Registered
+    // directly in `ReportsModule` (not via `MessagingModule`, which would
+    // create a cycle through `SocialModule` -> `ReportsModule`) — TypeORM
+    // permits the same entity's repository being registered in more than one
+    // module (see `AccountModule`'s identical cross-module `Message` reuse).
+    @InjectRepository(Message) private readonly messages: Repository<Message>,
   ) {}
 
   async create(
     reporterId: string,
     input: CreateReportInput,
   ): Promise<ReportDTO> {
+    // A member can't report their own message — mirrors the DTO's `canReport`
+    // flag (`!isDeleted && !isAuthor` in `MessagingCoreService.toMessageResponses`),
+    // which is only a UI convenience unless the server enforces the same rule.
+    // Scoped to the `message` subject type only: other subject types (member,
+    // post, reply, …) have no equivalent server-computed "is this mine" flag
+    // today, so there's no matching gap to close for them here.
+    if (input.subjectType === ReportSubjectType.Message) {
+      const message = await this.messages.findOne({
+        where: { id: input.subjectId },
+        // A soft-deleted message still has a real author; withDeleted so a
+        // deleted-but-still-yours message can't be self-reported either.
+        withDeleted: true,
+      });
+      if (message && message.senderId === reporterId) {
+        throw new ForbiddenException('You cannot report your own message');
+      }
+    }
+
     // De-duplicate: one open report per (reporter, subject). A member
     // double-submitting — or re-reporting a subject already in the queue — gets
     // the existing report back rather than piling identical rows on the mods'
@@ -96,6 +121,13 @@ export class ReportsService {
         reporterId,
         subjectType: input.subjectType,
         subjectId: input.subjectId,
+        // Dedupe collapses only SAME-reason open reports by the same reporter
+        // on the same subject. Two DISTINCT reasonCodes on one subject (e.g. a
+        // `listing_dispute` then a high-severity abuse report on the same
+        // listing) are genuinely different reports and must both reach the
+        // queue — keyed here (and in the partial unique index) on reasonCode so
+        // a distinct/higher-severity filing isn't silently dropped.
+        reasonCode: input.reasonCode,
         status: ReportStatus.Open,
       },
     });

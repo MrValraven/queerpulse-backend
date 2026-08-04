@@ -31,26 +31,26 @@ export interface CoopFace {
 @Entity('housing_coops')
 export class HousingCoop {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_housing_coops_slug', { unique: true })
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   @Column({ type: 'varchar' })
-  name: string;
+  name!: string;
 
   @Column({ type: 'varchar', nullable: true })
-  nameEm: string | null;
+  nameEm!: string | null;
 
   @Column({ type: 'varchar' })
-  city: string;
+  city!: string;
 
   @Column({ type: 'varchar' })
-  area: string;
+  area!: string;
 
   @Column({ type: 'int', default: 0 })
-  householdCount: number;
+  householdCount!: number;
 
   @Column({
     type: 'enum',
@@ -58,31 +58,31 @@ export class HousingCoop {
     enumName: 'housing_coops_phase_enum',
     default: HousingPhase.Forming,
   })
-  phase: HousingPhase;
+  phase!: HousingPhase;
 
   @Column({ type: 'int', default: 0 })
-  progress: number;
+  progress!: number;
 
   @Column({ type: 'boolean', default: false })
-  operational: boolean;
+  operational!: boolean;
 
   @Column({ type: 'date', nullable: true })
-  operationalSince: string | null;
+  operationalSince!: string | null;
 
   @Column({ type: 'date', nullable: true })
-  formingSince: string | null;
+  formingSince!: string | null;
 
   @Column({ type: 'text' })
-  description: string;
+  description!: string;
 
   @Column({ type: 'int', nullable: true })
-  shareAmountEuros: number | null;
+  shareAmountEuros!: number | null;
 
   @Column({ type: 'int', nullable: true })
-  monthlyEuros: number | null;
+  monthlyEuros!: number | null;
 
   @Column({ type: 'boolean', default: false })
-  sharesAreTarget: boolean;
+  sharesAreTarget!: boolean;
 
   @Column({
     type: 'enum',
@@ -90,20 +90,20 @@ export class HousingCoop {
     enumName: 'housing_coops_cta_kind_enum',
     default: CoopCtaKind.Join,
   })
-  ctaKind: CoopCtaKind;
+  ctaKind!: CoopCtaKind;
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  faces: CoopFace[];
+  faces!: CoopFace[];
 
   @Column({ type: 'boolean', default: false })
-  published: boolean;
+  published!: boolean;
 
   @OneToMany(() => CoopJoinRequest, (request) => request.coop)
-  joinRequests: CoopJoinRequest[];
+  joinRequests!: CoopJoinRequest[];
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

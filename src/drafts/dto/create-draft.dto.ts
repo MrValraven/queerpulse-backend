@@ -18,17 +18,17 @@ import {
 
 export class CreateDraftDto {
   // Caller-supplied opaque id (see `Draft` entity doc) — not a uuid.
-  @IsString() @MinLength(1) @MaxLength(200) id: string;
+  @IsString() @MinLength(1) @MaxLength(200) id!: string;
 
-  @IsString() @MinLength(1) @MaxLength(50) kind: string;
+  @IsString() @MinLength(1) @MaxLength(50) kind!: string;
 
-  @IsEnum(DraftKindVariant) kindVariant: DraftKindVariant;
+  @IsEnum(DraftKindVariant) kindVariant!: DraftKindVariant;
 
-  @IsString() @MinLength(1) @MaxLength(500) title: string;
+  @IsString() @MinLength(1) @MaxLength(500) title!: string;
 
-  @IsString() @MaxLength(4000) desc: string;
+  @IsString() @MaxLength(4000) desc!: string;
 
-  @IsNumber() @Min(0) @Max(100) progress: number;
+  @IsNumber() @Min(0) @Max(100) progress!: number;
 
   @IsOptional() @IsBoolean() ready?: boolean;
 

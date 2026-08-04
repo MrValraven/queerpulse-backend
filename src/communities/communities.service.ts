@@ -22,6 +22,7 @@ import {
 } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { Profile } from '../users/entities/profile.entity';
+import { User } from '../users/entities/user.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import {
@@ -122,6 +123,10 @@ export class CommunitiesService {
     @InjectRepository(CommunityJoinRequest)
     private readonly joinRequests: Repository<CommunityJoinRequest>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    // For the house-account guardrail on `transferOwnership` (a `User.isSystem`
+    // account can never be handed a community). The repo is available via
+    // `UsersModule`'s exported `TypeOrmModule` (no extra `forFeature` needed).
+    @InjectRepository(User) private readonly users: Repository<User>,
     private readonly dataSource: DataSource,
     private readonly contentModeration: ContentModerationService,
     private readonly notifications: NotificationsService,
@@ -141,9 +146,7 @@ export class CommunitiesService {
   // moderated-away card is withheld from members and non-members only. Assumes
   // the querybuilder has joined `CommunityMember` as `m` on the viewer (both
   // `list` and `searchByText` do).
-  private excludeModeratedCommunities(
-    qb: SelectQueryBuilder<Community>,
-  ): void {
+  private excludeModeratedCommunities(qb: SelectQueryBuilder<Community>): void {
     qb.andWhere(
       `(NOT EXISTS (
           SELECT 1 FROM "content_moderation" "cm"
@@ -290,6 +293,10 @@ export class CommunitiesService {
     if (query.access) {
       qb.andWhere('c.access_tier = :access', { access: query.access });
     }
+    // An archived community leaves every listing (discover AND mine) — it has
+    // been taken down by its owner, so it should stop surfacing anywhere a card
+    // is rendered, exactly like the moderated-away exclusion just below.
+    qb.andWhere('c.archived_at IS NULL');
     this.excludeModeratedCommunities(qb);
 
     qb.orderBy('c.createdAt', 'DESC');
@@ -335,12 +342,10 @@ export class CommunitiesService {
       .andWhere(
         '(c.name ILIKE :pattern OR c.tagline ILIKE :pattern OR c.purpose ILIKE :pattern)',
         { pattern },
-      );
+      )
+      .andWhere('c.archived_at IS NULL');
     this.excludeModeratedCommunities(rowsQb);
-    const rows = await rowsQb
-      .orderBy('c.name', 'ASC')
-      .take(limit)
-      .getMany();
+    const rows = await rowsQb.orderBy('c.name', 'ASC').take(limit).getMany();
 
     if (!rows.length) return [];
     const ids = rows.map((community) => community.id);
@@ -376,6 +381,13 @@ export class CommunitiesService {
     ) {
       throw new NotFoundException('Community not found');
     }
+    // An archived community 404s for everyone but its own owner/mods — same
+    // "don't leak existence" posture as the private-tier and takedown gates.
+    // Staff still get the detail (with `archived: true`) so the mod panel can
+    // render the archived state rather than "not found".
+    if (community.archivedAt != null && !CommunitiesService.isStaffRole(role)) {
+      throw new NotFoundException('Community not found');
+    }
     return this.buildDetail(community, viewerId, role, moderation);
   }
 
@@ -403,6 +415,132 @@ export class CommunitiesService {
 
     const saved = await this.communities.save(community);
     return this.buildDetail(saved, userId);
+  }
+
+  /**
+   * `POST /communities/:slug/archive` — take the community down from the mod
+   * panel's danger zone.
+   *
+   * OWNER-ONLY, deliberately stricter than the `owner/mod` gate `update` and
+   * the roster routes use. Archiving takes the *whole community* down for every
+   * member at once; letting a single moderator do that would be a takeover-by-
+   * destruction — the same class of escalation the owner-immutability rules in
+   * `removeMember`/`setMemberRole` exist to prevent. Ownership
+   * (`Community.ownerId`) is the root of authority, so only the owner may pull
+   * this lever.
+   *
+   * Idempotent: archiving an already-archived community is a no-op 200 (the
+   * first `archivedAt` timestamp stands), matching this module's posture on
+   * `join`, reaction-add and approve-triage. The owner is still staff, so the
+   * returned detail carries `archived: true` rather than 404ing.
+   */
+  async archive(slug: string, userId: string): Promise<CommunityDetailDTO> {
+    const community = await this.loadOr404(slug);
+    this.assertOwner(community, userId);
+
+    if (community.archivedAt == null) {
+      community.archivedAt = new Date();
+      await this.communities.save(community);
+    }
+    return this.buildDetail(community, userId, RosterRole.Owner);
+  }
+
+  /**
+   * `POST /communities/:slug/transfer` — hand ownership to another member.
+   *
+   * Guardrails, in the order enforced below (mirrors `AdminMembersService
+   * .updateRole`'s house-account + self-action posture, and this module's own
+   * owner invariants):
+   *
+   *  1. **Actor must be the CURRENT owner.** Not owner-or-mod: transferring the
+   *     community away is the single most consequential act on it, and only its
+   *     root of authority (`Community.ownerId`) may perform it. A mod attempting
+   *     it gets Forbidden.
+   *  2. **Target must be a member of this community.** Unknown slug, or a member
+   *     of some other community, both 404 `Member not found` — same as
+   *     `setMemberRole`/`removeMember`.
+   *  3. **No self-transfer.** Handing the community to yourself is a no-op the
+   *     caller almost certainly didn't mean; 400 rather than silently succeed.
+   *  4. **No transfer to the house account.** A `User.isSystem` account is a
+   *     non-human platform account that never rides a permission path; making
+   *     it a community owner would strand the community under an account no one
+   *     signs in as. Mirrors the immovable-house-account rule in admin role
+   *     management.
+   *
+   * The swap runs in one transaction: `Community.ownerId` moves to the target,
+   * the target's roster row becomes `owner`, and the outgoing owner is demoted
+   * to `mod` (they keep moderator reach and stay on the roster rather than being
+   * orphaned). All three writes commit together or none do.
+   */
+  async transferOwnership(
+    slug: string,
+    actorId: string,
+    memberSlug: string,
+  ): Promise<CommunityDetailDTO> {
+    const community = await this.loadOr404(slug);
+
+    // 1. actor is the current owner
+    this.assertOwner(community, actorId);
+
+    // 2. target is on this roster
+    const targetUserId = await new MemberLookup(this.profiles).userIdForSlug(
+      memberSlug,
+    );
+    if (!targetUserId) {
+      throw new NotFoundException('Member not found');
+    }
+
+    // 3. not a self-transfer (checked before the roster lookup below since the
+    //    owner is trivially their own member)
+    if (targetUserId === actorId) {
+      throw new BadRequestException('You already own this community');
+    }
+
+    const targetMembership = await this.members.findOne({
+      where: { communityId: community.id, userId: targetUserId },
+    });
+    if (!targetMembership) {
+      throw new NotFoundException('Member not found');
+    }
+
+    // 4. not the house account
+    const targetUser = await this.users.findOne({
+      where: { id: targetUserId },
+      select: { id: true, isSystem: true },
+    });
+    if (targetUser?.isSystem) {
+      throw new BadRequestException(
+        'Ownership cannot be transferred to the house account',
+      );
+    }
+
+    const saved = await this.dataSource.transaction(async (manager) => {
+      const communitiesRepo = manager.getRepository(Community);
+      const membersRepo = manager.getRepository(CommunityMember);
+
+      community.ownerId = targetUserId;
+      const savedCommunity = await communitiesRepo.save(community);
+
+      // New owner's roster row -> owner.
+      targetMembership.role = RosterRole.Owner;
+      await membersRepo.save(targetMembership);
+
+      // Outgoing owner stays on the roster, demoted to mod. Guarded on the row
+      // still reading `owner` so a retry can't double-demote something already
+      // moved.
+      const actorMembership = await membersRepo.findOne({
+        where: { communityId: community.id, userId: actorId },
+      });
+      if (actorMembership && actorMembership.role === RosterRole.Owner) {
+        actorMembership.role = RosterRole.Mod;
+        await membersRepo.save(actorMembership);
+      }
+
+      return savedCommunity;
+    });
+
+    // The actor is now a moderator of the community they handed off.
+    return this.buildDetail(saved, actorId, RosterRole.Mod);
   }
 
   // `public` joins land on the roster instantly; every other tier
@@ -482,7 +620,11 @@ export class CommunitiesService {
   // deciding whether to join or post somewhere may depend on exactly that.
   // Blocks already do the work that matters here by severing interaction; they
   // are not a "make them disappear from the world" primitive.
-  async roster(slug: string, viewerId: string): Promise<RosterEntryDTO[]> {
+  async roster(
+    slug: string,
+    viewerId: string,
+    page?: number,
+  ): Promise<Paginated<RosterEntryDTO>> {
     const community = await this.loadOr404(slug);
     const role = await this.myRole(community.id, viewerId);
 
@@ -494,18 +636,21 @@ export class CommunitiesService {
       throw new ForbiddenException('Roster is private to members');
     }
 
-    const rows = await this.members.find({
-      where: { communityId: community.id },
-      order: { joinedAt: 'ASC' },
-    });
-    if (!rows.length) return [];
+    const normalizedPage = normalizePage(page);
+    const qb = this.members
+      .createQueryBuilder('m')
+      .where('m.community_id = :communityId', { communityId: community.id })
+      .orderBy('m.joined_at', 'ASC');
 
-    const refs = await new MemberLookup(this.profiles).byUserIds(
-      rows.map((m) => m.userId),
-    );
-    return rows
-      .filter((m) => refs.has(m.userId))
-      .map((m) => toRosterEntry(m, refs.get(m.userId)!));
+    return paginate(qb, normalizedPage, async (rows) => {
+      if (!rows.length) return [];
+      const refs = await new MemberLookup(this.profiles).byUserIds(
+        rows.map((m) => m.userId),
+      );
+      return rows
+        .filter((m) => refs.has(m.userId))
+        .map((m) => toRosterEntry(m, refs.get(m.userId)!));
+    });
   }
 
   // Also NOT block/mute filtered, for a stronger reason than `roster` above:
@@ -732,6 +877,9 @@ export class CommunitiesService {
       .addSelect('m.role', 'role')
       .addSelect('m.joined_at', 'joinedAt')
       .where('m.user_id = :userId', { userId })
+      // An archived community drops out of the caller's membership map too, so
+      // the client stops treating it as a live community they belong to.
+      .andWhere('c.archived_at IS NULL')
       .orderBy('m.joined_at', 'DESC')
       .limit(DEFAULT_LIST_LIMIT)
       .getRawMany<{
@@ -878,6 +1026,16 @@ export class CommunitiesService {
       throw new ForbiddenException('Only the owner or a moderator can do that');
     }
     return membership;
+  }
+
+  /** Owner-only gate, from `Community.ownerId` (the source of truth for
+   * ownership — a roster row can never contradict it). Used by the community-
+   * level destructive actions (`archive`, `transferOwnership`) that a mod must
+   * not reach. Throws Forbidden otherwise. */
+  private assertOwner(community: Community, userId: string): void {
+    if (community.ownerId !== userId) {
+      throw new ForbiddenException('Only the owner can do that');
+    }
   }
 
   private async myRole(

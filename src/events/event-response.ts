@@ -1,4 +1,5 @@
 import { toImageUrl } from '../common/image-url';
+import { Paginated } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
 import { Event } from './entities/event.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
@@ -43,6 +44,18 @@ export interface AttendeeView {
   avatarUrl: string | null;
   status: RsvpStatus;
   waitlistPosition: number | null;
+}
+
+/**
+ * `GET /events/:slug/attendees?status=&page=` — one RSVP status's own
+ * paginated page (`going` or `waitlisted`, never both at once — see
+ * `EventsService.attendees`). `capacity` rides along so the FE doesn't need a
+ * second request just to render the "N of capacity spots filled" bar; `total`
+ * IS that status's count (going-count or waitlist-count, depending on which
+ * `status` was requested).
+ */
+export interface AttendeesPageDTO extends Paginated<AttendeeView> {
+  capacity: number | null;
 }
 
 export function toOrganizerView(

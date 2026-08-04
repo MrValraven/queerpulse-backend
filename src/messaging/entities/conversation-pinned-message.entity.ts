@@ -19,20 +19,20 @@ import {
 @Unique('UQ_conversation_pinned_messages', ['conversationId', 'messageId'])
 export class ConversationPinnedMessage {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_conversation_pinned_messages_conversation_id')
   @Column({ type: 'uuid' })
-  conversationId: string;
+  conversationId!: string;
 
   @Index('IDX_conversation_pinned_messages_message_id')
   @Column({ type: 'uuid' })
-  messageId: string;
+  messageId!: string;
 
   /** The participant who pinned it. */
   @Column({ type: 'uuid' })
-  pinnedBy: string;
+  pinnedBy!: string;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  pinnedAt: Date;
+  pinnedAt!: Date;
 }

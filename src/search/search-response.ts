@@ -3,6 +3,12 @@ import type { DirectoryCardDTO } from '../listings/listing-response';
 import type { CommunityCardDTO } from '../communities/community-response';
 import type { EventSummary } from '../events/event-response';
 import type { ForumThreadResponse } from '../forum/forum-response';
+import type { ArticleSearchRow } from '../magazine/magazine-response';
+import type { JobSearchRow } from '../jobs/job-response';
+import type { HousingSearchRow } from '../housing-listings/housing-listing-response';
+import type { ResourceSearchRow } from '../resources/resource-response';
+import type { WorkshopSearchRow } from '../workshops/workshop-response';
+import type { SubprofileSearchRow } from '../subprofiles/subprofile-response';
 import { SearchResultType } from './dto/search.query';
 
 export interface SearchResultDTO {
@@ -68,5 +74,61 @@ export function businessToResult(card: DirectoryCardDTO): SearchResultDTO {
     slug: card.slug,
     name: card.name,
     sub: joinSub(card.cat, card.hood),
+  };
+}
+
+export function magazineToResult(row: ArticleSearchRow): SearchResultDTO {
+  return {
+    type: 'magazine',
+    slug: row.slug,
+    name: row.title,
+    sub: joinSub(row.dek),
+  };
+}
+
+export function jobToResult(row: JobSearchRow): SearchResultDTO {
+  return {
+    type: 'job',
+    slug: row.slug,
+    name: row.title,
+    sub: joinSub(row.category, row.location),
+  };
+}
+
+export function housingToResult(row: HousingSearchRow): SearchResultDTO {
+  return {
+    type: 'housing',
+    slug: row.slug,
+    name: row.title,
+    sub: joinSub(row.area, row.city),
+  };
+}
+
+export function resourceToResult(row: ResourceSearchRow): SearchResultDTO {
+  return {
+    type: 'resource',
+    slug: row.slug,
+    name: row.title,
+    sub: joinSub(row.category),
+  };
+}
+
+export function workshopToResult(row: WorkshopSearchRow): SearchResultDTO {
+  return {
+    type: 'workshop',
+    slug: row.slug,
+    name: row.title,
+    sub: joinSub(row.cat),
+  };
+}
+
+export function subprofileToResult(row: SubprofileSearchRow): SearchResultDTO {
+  return {
+    type: 'subprofile',
+    // The persona's public handle is its /p/:handle identifier; the frontend
+    // routes a subprofile hit through it (never an owner slug).
+    slug: row.handle,
+    name: row.displayName,
+    sub: joinSub(row.tagline, row.kind),
   };
 }

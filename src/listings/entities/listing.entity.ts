@@ -59,12 +59,24 @@ export interface ListingWitLine {
   text: string;
 }
 
-/** One weekday's opening hours — mirrors the frontend's `DayHours`, keyed by
- * the frontend's `DAYS` id (e.g. `mon`, `tue`, ...) in the `hours` column. */
-export interface ListingDayHours {
-  open: boolean;
+/** One opening interval within a weekday — `from`/`to` are `HH:MM` 24h
+ * strings. When `to <= from` the interval is OVERNIGHT (it closes the next
+ * day, e.g. `22:00`→`02:00`); the frontend renders that from the arithmetic
+ * alone, with no special marker. Mirrors the frontend's `HoursInterval`. */
+export interface ListingHoursInterval {
   from: string;
   to: string;
+}
+
+/** One weekday's opening hours — mirrors the frontend's `DayHours`, keyed by
+ * the frontend's `DAYS` id (e.g. `Mon`, `Tue`, ...) in the `hours` column.
+ * A day can hold 1..2 intervals when `open` (e.g. a lunch + dinner split);
+ * `intervals` is `[]` when the day is closed. Superseded the old flat
+ * `{ open, from, to }` shape (rewritten in place by
+ * `1785801000000-RewriteListingHoursToIntervals`). */
+export interface ListingDayHours {
+  open: boolean;
+  intervals: ListingHoursInterval[];
 }
 
 /** Mirrors the frontend's `ListingDraft["social"]`. */
@@ -100,19 +112,19 @@ export interface ListingPhotoSet {
 @Entity('listings')
 export class Listing {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_listings_ref', { unique: true })
   @Column({ type: 'varchar' })
-  ref: string;
+  ref!: string;
 
   @Index('UQ_listings_slug', { unique: true })
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   @Index('IDX_listings_owner_id')
   @Column({ type: 'uuid' })
-  ownerId: string;
+  ownerId!: string;
 
   // Filtered on nearly every directory read (`DirectoryService`'s
   // `status = live` gates) and the admin moderation queue
@@ -126,111 +138,124 @@ export class Listing {
     enumName: 'listings_status_enum',
     default: ListingStatus.Review,
   })
-  status: ListingStatus;
+  status!: ListingStatus;
 
   // --- ListingDraft fields (flat, one column each) ---
 
   @Column({ type: 'varchar', default: '' })
-  path: string;
+  path!: string;
 
   @Column({ type: 'varchar', default: '' })
-  verify: string;
+  verify!: string;
 
   @Column({ type: 'varchar' })
-  name: string;
+  name!: string;
 
   @Column({ type: 'text', array: true, default: '{}' })
-  cats: string[];
+  cats!: string[];
 
   @Column({ type: 'varchar', default: '' })
-  hood: string;
+  hood!: string;
+
+  /** City the venue sits in. Drives the detail page's location eyebrow and the
+   * JSON-LD `addressRegion`; empty ⇒ the frontend defaults to Lisbon (where the
+   * directory currently lives). Not part of the member wizard yet — populated by
+   * seed/ops for non-Lisbon listings. */
+  @Column({ type: 'varchar', default: '' })
+  city!: string;
+
+  /** IANA timezone the venue's `hours` are expressed in (e.g. `Europe/Lisbon`),
+   * so the frontend's "Open now" is correct regardless of the visitor's own
+   * timezone. Empty ⇒ the frontend defaults to Europe/Lisbon. */
+  @Column({ type: 'varchar', default: '' })
+  timezone!: string;
 
   @Column({ type: 'varchar', default: '' })
-  badge: string;
+  badge!: string;
 
   @Column({ type: 'text', default: '' })
-  evidence: string;
+  evidence!: string;
 
   @Column({ type: 'varchar', default: '' })
-  price: string;
+  price!: string;
 
   @Column({ type: 'varchar', length: 140, default: '' })
-  blurb: string;
+  blurb!: string;
 
   @Column({ type: 'varchar', default: '' })
-  tagline: string;
+  tagline!: string;
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  whatItIs: ListingWitLine[];
+  whatItIs!: ListingWitLine[];
 
   @Column({ type: 'text', array: true, default: '{}' })
-  tags: string[];
+  tags!: string[];
 
   @Column({ type: 'text', array: true, default: '{}' })
-  goodFor: string[];
+  goodFor!: string[];
 
   @Column({ type: 'text', array: true, default: '{}' })
-  langs: string[];
+  langs!: string[];
 
   @Column({ type: 'text', default: '' })
-  address: string;
+  address!: string;
 
   @Column({ type: 'boolean', default: false })
-  geocoded: boolean;
+  geocoded!: boolean;
 
   @Column({ type: 'double precision', nullable: true })
-  latitude: number | null;
+  latitude!: number | null;
 
   @Column({ type: 'double precision', nullable: true })
-  longitude: number | null;
+  longitude!: number | null;
 
   @Column({ type: 'jsonb', default: () => "'{}'" })
-  hours: Record<string, ListingDayHours>;
+  hours!: Record<string, ListingDayHours>;
 
   @Column({ type: 'text', default: '' })
-  hoursNote: string;
+  hoursNote!: string;
 
   // Always populated by the service (`ListingsService`'s `normalizeSocial`)
   // so every subfield is present (never omitted), mirroring
   // `PartnersService.normalizeContact`'s precedent.
   @Column({ type: 'jsonb', default: () => "'{}'" })
-  social: ListingSocial;
+  social!: ListingSocial;
 
   @Column({ type: 'jsonb', default: () => "'{}'" })
-  photos: ListingPhotoSet;
+  photos!: ListingPhotoSet;
 
   @Column({ type: 'jsonb', default: () => "'{}'" })
-  alt: ListingPhotoSet;
+  alt!: ListingPhotoSet;
 
   @Column({ type: 'varchar', default: '' })
-  rel: string;
+  rel!: string;
 
   @Column({ type: 'varchar', default: '' })
-  ownerName: string;
+  ownerName!: string;
 
   @Column({ type: 'varchar', default: '' })
-  ownerRole: string;
+  ownerRole!: string;
 
   @Column({ type: 'text', default: '' })
-  ownerBio: string;
+  ownerBio!: string;
 
   @Column({ type: 'varchar', default: '' })
-  visibility: string;
+  visibility!: string;
 
   @Column({ type: 'boolean', default: false })
-  linkToProfile: boolean;
+  linkToProfile!: boolean;
 
   @Column({ type: 'varchar', default: '' })
-  contactEmail: string;
+  contactEmail!: string;
 
   @Column({ type: 'text', array: true, default: '{}' })
-  notify: string[];
+  notify!: string[];
 
   @Column({ type: 'boolean', default: false })
-  consentOuting: boolean;
+  consentOuting!: boolean;
 
   @Column({ type: 'boolean', default: false })
-  consentGuide: boolean;
+  consentGuide!: boolean;
 
   // --- Partner-space fields (host directory) ---
   // A listing flagged as a QueerPulse partner venue surfaces on the public
@@ -240,19 +265,19 @@ export class Listing {
 
   @Index('IDX_listings_is_partnered_with_queerpulse')
   @Column({ type: 'boolean', default: false })
-  isPartneredWithQueerpulse: boolean;
+  isPartneredWithQueerpulse!: boolean;
 
   /** Human venue type shown on the host card, e.g. "Warehouse". */
   @Column({ type: 'varchar', default: '' })
-  spaceType: string;
+  spaceType!: string;
 
   /** Max guests the venue hosts ("up to N"); null when not specified. */
   @Column({ type: 'int', nullable: true })
-  capacity: number | null;
+  capacity!: number | null;
 
   /** Trailing qualifier on the host card, e.g. "events only". */
   @Column({ type: 'varchar', default: '' })
-  hostNote: string;
+  hostNote!: string;
 
   // --- Safe-space fields (safety directory) ---
   // A listing a moderator has vetted as a safe space surfaces on the public
@@ -266,32 +291,32 @@ export class Listing {
     enumName: 'listings_safe_space_status_enum',
     default: SafeSpaceStatus.None,
   })
-  safeSpaceStatus: SafeSpaceStatus;
+  safeSpaceStatus!: SafeSpaceStatus;
 
   @Column({ type: 'int', nullable: true })
-  safeSpaceTier: number | null;
+  safeSpaceTier!: number | null;
 
   @Column({ type: 'varchar', default: '' })
-  safeSpaceVerifier: string;
+  safeSpaceVerifier!: string;
 
   @Column({ type: 'date', nullable: true })
-  safeSpaceReVerifiedAt: string | null;
+  safeSpaceReVerifiedAt!: string | null;
 
   @Column({ type: 'text', default: '' })
-  safeSpaceSub: string;
+  safeSpaceSub!: string;
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  safeSpacePromises: SafeSpacePromise[];
+  safeSpacePromises!: SafeSpacePromise[];
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  safeSpaceVouches: SafeSpaceVouch[];
+  safeSpaceVouches!: SafeSpaceVouch[];
 
   @Column({ type: 'jsonb', nullable: true })
-  safeSpaceRemoval: SafeSpaceRemoval | null;
+  safeSpaceRemoval!: SafeSpaceRemoval | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

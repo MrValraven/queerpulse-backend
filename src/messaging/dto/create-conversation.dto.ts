@@ -6,5 +6,5 @@ export class CreateConversationDto {
   @IsString()
   @MinLength(1)
   @MaxLength(255)
-  recipientHandle: string;
+  recipientHandle!: string;
 }

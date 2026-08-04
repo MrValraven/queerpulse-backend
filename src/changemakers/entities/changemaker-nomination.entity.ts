@@ -17,16 +17,16 @@ import {
 @Entity('changemaker_nomination')
 export class ChangemakerNomination {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_changemaker_nomination_nominator_id')
   @Column({ type: 'uuid' })
-  nominatorId: string;
+  nominatorId!: string;
 
   // The form's only field: "Their name…".
   @Column({ type: 'varchar', length: 200 })
-  nomineeName: string;
+  nomineeName!: string;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

@@ -6,8 +6,9 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { CompanyOpenRolesService } from '../jobs/company-open-roles.service';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
@@ -108,7 +109,19 @@ export class CompaniesService {
     // `forwardRef` needed here (`JobsService` still injects `CompaniesService`,
     // but that edge is now one-directional).
     private readonly openRoles: CompanyOpenRolesService,
+    // Read-only: a `hide_content`/`remove_content` takedown on a `company`
+    // subject (keyed by the company slug — matching what the frontend report
+    // control sends) withholds the company from every public read below.
+    private readonly contentModeration: ContentModerationService,
   ) {}
+
+  // A company is reported (and taken down) under the `company` subject code,
+  // keyed by the company slug. A hidden OR removed company vanishes from the
+  // public list/detail/reviews for everyone — this service is a public surface
+  // with no per-viewer staff role, so (like the directory) a takedown withholds
+  // it entirely rather than rendering a tombstone. The owner still manages it
+  // through the owner-gated write routes, which don't re-check this state.
+  private static readonly SUBJECT_TYPE = 'company';
 
   async create(
     ownerId: string,
@@ -200,6 +213,7 @@ export class CompaniesService {
     const qb = this.companies
       .createQueryBuilder('c')
       .orderBy('c.created_at', 'DESC');
+    this.excludeModeratedCompanies(qb);
 
     return paginate(qb, page, async (rows) => {
       if (!rows.length) return [];
@@ -220,6 +234,7 @@ export class CompaniesService {
 
   async getBySlug(slug: string, viewerId: string): Promise<CompanyDetailDTO> {
     const company = await this.loadOr404(slug);
+    await this.assertNotModerated(slug);
     return this.buildDetail(company, viewerId);
   }
 
@@ -256,6 +271,9 @@ export class CompaniesService {
     query: CompanyListQuery,
   ): Promise<Paginated<CompanyReviewDTO>> {
     const company = await this.loadOr404(slug);
+    // A taken-down company's reviews are not publicly readable either — the
+    // company itself has been withheld, so its sub-resources 404 too.
+    await this.assertNotModerated(slug);
     const page = normalizePage(query.page);
 
     const qb = this.reviews
@@ -311,6 +329,35 @@ export class CompaniesService {
       throw new NotFoundException('Company not found');
     }
     return company;
+  }
+
+  // Public reads treat a moderator takedown as a 404 — a hidden OR removed
+  // company is withheld entirely (no tombstone on this surface). Deliberately
+  // NOT called from the owner-gated write paths (`update`/`createReview`) so a
+  // takedown never blocks the owner's own management, mirroring the directory.
+  private async assertNotModerated(slug: string): Promise<void> {
+    const state = await this.contentModeration.stateFor(
+      CompaniesService.SUBJECT_TYPE,
+      slug,
+    );
+    if (state.hidden || state.removed) {
+      throw new NotFoundException('Company not found');
+    }
+  }
+
+  // NOT EXISTS predicate dropping any company under a `company` takedown
+  // (hidden OR removed) from a company query builder, in-query so the paginated
+  // count stays consistent. Mirrors `DirectoryService.excludeModeratedListings`.
+  private excludeModeratedCompanies(qb: SelectQueryBuilder<Company>): void {
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "content_moderation" "cm"
+        WHERE "cm"."subject_type" = :companySubjectType
+          AND "cm"."subject_id" = c.slug
+          AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
+      )`,
+      { companySubjectType: CompaniesService.SUBJECT_TYPE },
+    );
   }
 
   // Resolves a single userId to a MemberRef for an actor who just created a

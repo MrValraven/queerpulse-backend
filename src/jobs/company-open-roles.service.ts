@@ -1,8 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { Job, JobStatus } from './entities/job.entity';
 import { JobCardDTO, JobCompanyRef, toJobCard } from './job-response';
+
+// A job is taken down under the `job` subject, keyed by slug (see
+// `JobsService`). A company's open-roles surface is a public company page with
+// no per-viewer staff role, so a hidden OR removed job is dropped for everyone
+// — mirroring `DirectoryService`'s public read filtering.
+const JOB_SUBJECT_TYPE = 'job';
 
 /**
  * Read-only view over a company's *open* roles, backing
@@ -18,7 +25,10 @@ import { JobCardDTO, JobCompanyRef, toJobCard } from './job-response';
  */
 @Injectable()
 export class CompanyOpenRolesService {
-  constructor(@InjectRepository(Job) private readonly jobs: Repository<Job>) {}
+  constructor(
+    @InjectRepository(Job) private readonly jobs: Repository<Job>,
+    private readonly contentModeration: ContentModerationService,
+  ) {}
 
   /**
    * Batched open-role counts for a set of companies: a single
@@ -41,6 +51,17 @@ export class CompanyOpenRolesService {
       .addSelect('COUNT(*)', 'count')
       .where('j.status = :status', { status: JobStatus.Open })
       .andWhere('j.company_id IN (:...ids)', { ids: companyIds })
+      // Don't count a moderator-taken-down job toward a company's open-roles
+      // count — the count must match the (also-filtered) list below.
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1 FROM "content_moderation" "cmj"
+          WHERE "cmj"."subject_type" = :jobSubjectType
+            AND "cmj"."subject_id" = j.slug
+            AND ("cmj"."hidden_at" IS NOT NULL OR "cmj"."removed_at" IS NOT NULL)
+        )`,
+        { jobSubjectType: JOB_SUBJECT_TYPE },
+      )
       .groupBy('j.company_id')
       .getRawMany<{ companyId: string; count: string }>();
 
@@ -65,6 +86,22 @@ export class CompanyOpenRolesService {
       where: { companyId, status: JobStatus.Open },
       order: { createdAt: 'DESC' },
     });
-    return rows.map((job) => toJobCard(job, companyRef));
+    // Drop any job carrying a `job` takedown so a removed role never renders on
+    // the public company page (post-filter mirrors
+    // `DirectoryService.dropModeratedListings`, keyed by slug).
+    const visible = await this.dropModeratedJobs(rows);
+    return visible.map((job) => toJobCard(job, companyRef));
+  }
+
+  private async dropModeratedJobs(rows: Job[]): Promise<Job[]> {
+    if (!rows.length) return rows;
+    const states = await this.contentModeration.statesFor(
+      JOB_SUBJECT_TYPE,
+      rows.map((job) => job.slug),
+    );
+    return rows.filter((job) => {
+      const state = states.get(job.slug);
+      return !state || (!state.hidden && !state.removed);
+    });
   }
 }

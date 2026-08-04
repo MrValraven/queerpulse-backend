@@ -9,21 +9,21 @@ import {
 @Entity('social_links')
 export class SocialLink {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_social_links_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({ type: 'varchar' })
-  platform: string;
+  platform!: string;
 
   @Column({ type: 'varchar' })
-  urlOrHandle: string;
+  urlOrHandle!: string;
 
   @Column({ type: 'int', default: 0 })
-  position: number;
+  position!: number;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

@@ -10,5 +10,5 @@ import { UserRole } from '../../users/entities/user.entity';
  */
 export class UpdateMemberRoleDto {
   @IsEnum(UserRole)
-  role: UserRole;
+  role!: UserRole;
 }

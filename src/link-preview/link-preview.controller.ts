@@ -32,8 +32,12 @@ export class LinkPreviewController {
   @Throttle({ default: { limit: 40, ttl: seconds(60) } })
   @Get()
   @ApiOperation({ summary: 'Server-side unfurl a URL for a chat link preview' })
-  @ApiOkResponse({ description: 'A preview card; all-null when the URL cannot be previewed.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiOkResponse({
+    description: 'A preview card; all-null when the URL cannot be previewed.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   preview(@Query() query: LinkPreviewQuery): Promise<LinkPreviewResponse> {
     return this.linkPreviewService.preview(query.url);
   }

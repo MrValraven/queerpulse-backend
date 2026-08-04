@@ -1,4 +1,6 @@
+import { getRepositoryToken } from '@nestjs/typeorm';
 import { Test, TestingModule } from '@nestjs/testing';
+import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
 import { NotificationType } from './entities/notification.entity';
 import { NotificationsListener } from './notifications.listener';
 import { NotificationsService } from './notifications.service';
@@ -6,13 +8,19 @@ import { NotificationsService } from './notifications.service';
 describe('NotificationsListener', () => {
   let listener: NotificationsListener;
   let notifications: { create: jest.Mock; createForRecipients: jest.Mock };
+  let subprofileMembers: { find: jest.Mock };
 
   beforeEach(async () => {
     notifications = { create: jest.fn(), createForRecipients: jest.fn() };
+    subprofileMembers = { find: jest.fn() };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         NotificationsListener,
         { provide: NotificationsService, useValue: notifications },
+        {
+          provide: getRepositoryToken(SubprofileMember),
+          useValue: subprofileMembers,
+        },
       ],
     }).compile();
     listener = module.get(NotificationsListener);
@@ -99,5 +107,57 @@ describe('NotificationsListener', () => {
       {},
     );
     expect(notifications.create.mock.calls[0]).toHaveLength(3);
+  });
+
+  it('notifies the invitee on a subprofile co-owner invite', async () => {
+    await listener.onSubprofileInvited({
+      subprofileId: 'sp1',
+      invitedUserId: 'u2',
+      invitedByUserId: 'owner',
+      displayName: 'Persona One',
+    });
+    expect(notifications.create).toHaveBeenCalledWith(
+      'u2',
+      NotificationType.SubprofileInvite,
+      {
+        subprofileId: 'sp1',
+        displayName: 'Persona One',
+        invitedByUserId: 'owner',
+      },
+      'owner',
+    );
+  });
+
+  it('notifies the other current co-owners when an invite is accepted, excluding the joiner', async () => {
+    subprofileMembers.find.mockResolvedValue([
+      { userId: 'owner' },
+      { userId: 'u2' },
+      { userId: 'newJoiner' },
+    ]);
+    await listener.onSubprofileInviteAccepted({
+      subprofileId: 'sp1',
+      joinedUserId: 'newJoiner',
+      invitedByUserId: 'owner',
+    });
+    expect(subprofileMembers.find).toHaveBeenCalledWith({
+      where: { subprofileId: 'sp1' },
+      select: { userId: true },
+    });
+    expect(notifications.createForRecipients).toHaveBeenCalledWith(
+      ['owner', 'u2'],
+      NotificationType.SubprofileCoOwnerJoined,
+      { subprofileId: 'sp1', joinedUserId: 'newJoiner' },
+      'newJoiner',
+    );
+  });
+
+  it('skips the fan-out when the joiner was the only co-owner found', async () => {
+    subprofileMembers.find.mockResolvedValue([{ userId: 'newJoiner' }]);
+    await listener.onSubprofileInviteAccepted({
+      subprofileId: 'sp1',
+      joinedUserId: 'newJoiner',
+      invitedByUserId: 'owner',
+    });
+    expect(notifications.createForRecipients).not.toHaveBeenCalled();
   });
 });

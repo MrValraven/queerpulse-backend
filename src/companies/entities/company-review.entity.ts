@@ -11,28 +11,28 @@ import {
 @Unique('UQ_company_reviews', ['companyId', 'authorId'])
 export class CompanyReview {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_company_reviews_company_id')
   @Column({ type: 'uuid' })
-  companyId: string;
+  companyId!: string;
 
   @Index('IDX_company_reviews_author_id')
   @Column({ type: 'uuid' })
-  authorId: string;
+  authorId!: string;
 
   @Column({ type: 'varchar' })
-  title: string;
+  title!: string;
 
   @Column({ type: 'int' })
-  stars: number;
+  stars!: number;
 
   @Column({ type: 'varchar' })
-  byline: string;
+  byline!: string;
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  body: string[];
+  body!: string[];
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

@@ -1,5 +1,7 @@
+import { ForbiddenException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { Message } from '../messaging/entities/message.entity';
 import {
   Report,
   ReportSeverity,
@@ -15,6 +17,9 @@ describe('ReportsService', () => {
     create: jest.Mock;
     save: jest.Mock;
   };
+  let messages: {
+    findOne: jest.Mock;
+  };
 
   beforeEach(async () => {
     reports = {
@@ -28,11 +33,15 @@ describe('ReportsService', () => {
         }),
       ),
     };
+    messages = {
+      findOne: jest.fn().mockResolvedValue(null),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ReportsService,
         { provide: getRepositoryToken(Report), useValue: reports },
+        { provide: getRepositoryToken(Message), useValue: messages },
       ],
     }).compile();
     service = module.get(ReportsService);
@@ -120,6 +129,38 @@ describe('ReportsService', () => {
           evidence: [{ type: 'screenshot', uploadId: 'upload-1' }],
         }),
       );
+    });
+
+    it('rejects reporting your own message', async () => {
+      messages.findOne.mockResolvedValue({
+        id: 'msg-1',
+        senderId: 'reporter-1',
+      });
+
+      await expect(
+        service.create('reporter-1', {
+          subjectType: ReportSubjectType.Message,
+          subjectId: 'msg-1',
+          reasonCode: 'harassment',
+        }),
+      ).rejects.toThrow(ForbiddenException);
+      expect(reports.save).not.toHaveBeenCalled();
+    });
+
+    it('allows reporting a message authored by someone else', async () => {
+      messages.findOne.mockResolvedValue({
+        id: 'msg-1',
+        senderId: 'someone-else',
+      });
+
+      await expect(
+        service.create('reporter-1', {
+          subjectType: ReportSubjectType.Message,
+          subjectId: 'msg-1',
+          reasonCode: 'harassment',
+        }),
+      ).resolves.toBeDefined();
+      expect(reports.save).toHaveBeenCalled();
     });
   });
 

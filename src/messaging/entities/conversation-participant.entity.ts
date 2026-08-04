@@ -16,15 +16,15 @@ export enum ConversationRole {
 @Unique('UQ_conversation_participants', ['conversationId', 'userId'])
 export class ConversationParticipant {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_conversation_participants_conversation_id')
   @Column({ type: 'uuid' })
-  conversationId: string;
+  conversationId!: string;
 
   @Index('IDX_conversation_participants_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   /**
    * Group standing. `member` for DMs and every pre-group row; a group creator is
@@ -36,7 +36,7 @@ export class ConversationParticipant {
     enumName: 'conversation_participants_role_enum',
     default: ConversationRole.Member,
   })
-  role: ConversationRole;
+  role!: ConversationRole;
 
   /**
    * When this participant LEFT a group. The row is kept (not deleted) so past
@@ -45,10 +45,10 @@ export class ConversationParticipant {
    * read access to history but is blocked from sending.
    */
   @Column({ type: 'timestamptz', nullable: true })
-  leftAt: Date | null;
+  leftAt!: Date | null;
 
   @Column({ type: 'timestamptz', nullable: true })
-  lastReadAt: Date | null;
+  lastReadAt!: Date | null;
 
   /**
    * Delivered watermark: everything in this conversation created at-or-before
@@ -57,11 +57,11 @@ export class ConversationParticipant {
    * implies delivered, so `markRead` advances both. Null until the first ack.
    */
   @Column({ type: 'timestamptz', nullable: true })
-  deliveredAt: Date | null;
+  deliveredAt!: Date | null;
 
   @Column({ type: 'timestamptz', nullable: true })
-  clearedAt: Date | null;
+  clearedAt!: Date | null;
 
   @Column({ type: 'boolean', default: false })
-  muted: boolean;
+  muted!: boolean;
 }

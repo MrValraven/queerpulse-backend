@@ -27,22 +27,22 @@ import {
 @Entity('topics')
 export class Topic {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_topics_tag', { unique: true })
   @Column({ type: 'varchar' })
-  tag: string;
+  tag!: string;
 
   /** Plain-text label (the mock's JSX-composed serif heading, flattened). */
   @Column({ type: 'varchar' })
-  label: string;
+  label!: string;
 
   /** Plain-text summary (the mock's JSX `sub`, flattened, links stripped). */
   @Column({ type: 'text' })
-  description: string;
+  description!: string;
 
   @Column({ type: 'int', default: 0 })
-  totalPosts: number;
+  totalPosts!: number;
 
   /** "Members following" on `TopicHeader`'s stat row. There is no follow/
    *  unfollow endpoint in this task's scope (the frontend's "Follow topic"
@@ -50,15 +50,15 @@ export class Topic {
    *  counter seeded/maintained the same way `totalPosts` is, not derived
    *  from a join. */
   @Column({ type: 'int', default: 0 })
-  followerCount: number;
+  followerCount!: number;
 
   /** Whether the topic page should surface the crisis-support sidebar card. */
   @Column({ type: 'boolean', default: false })
-  crisisCard: boolean;
+  crisisCard!: boolean;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

@@ -19,15 +19,15 @@ import {
 @Unique('UQ_recognition_perk_claims_user_perk', ['userId', 'perkKey'])
 export class RecognitionPerkClaim {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_recognition_perk_claims_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({ type: 'varchar' })
-  perkKey: string;
+  perkKey!: string;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  claimedAt: Date;
+  claimedAt!: Date;
 }

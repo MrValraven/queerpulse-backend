@@ -1,5 +1,5 @@
 import { toImageUrl } from '../common/image-url';
-import { User } from '../users/entities/user.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import { Invite, InviteStatus } from './entities/invite.entity';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -23,6 +23,11 @@ export interface PublicInviteView {
   validForDays: number | null;
   memberCount: number;
   inviter: PublicInviterView;
+  // Whether the member who sent this invite is still active. `false` lets the
+  // landing page distinguish "the person who invited you is no longer here" from
+  // a plain invalid/expired code — the `status` union stays unchanged. Signup
+  // will reject an inactive-inviter redemption with `invite_inviter_inactive`.
+  inviterActive: boolean;
   note: string | null;
   vouch: string | null;
 }
@@ -49,10 +54,22 @@ export function resolveInviteStatus(
   return 'valid';
 }
 
+// The person who redeemed the invite, surfaced on the inviter's own list so the
+// UI can show "X joined". Public profile fields only — no id or email.
+export interface InviteAcceptedByView {
+  firstName: string;
+  lastName: string;
+  slug: string;
+  avatarUrl: string | null;
+}
+
 // The inviter-facing row shape for GET /invites (the member's own invites).
-// Whitelisted fields only — never internal ids — with a freshly-computed status
-// so a not-yet-swept expiry reads as 'expired' instead of a stale 'pending'.
+// Carries the invite `id` (the stable handle the revoke/resend routes target)
+// and a freshly-computed status so a not-yet-swept expiry reads as 'expired'
+// instead of a stale 'pending'. `acceptedBy` is populated only for a 'used'
+// invite; null otherwise. Still never leaks the inviter's own internal fields.
 export interface MyInviteView {
+  id: string;
   code: string;
   note: string | null;
   vouch: string | null;
@@ -60,17 +77,39 @@ export interface MyInviteView {
   status: PublicInviteStatus;
   expiresAt: string | null;
   createdAt: string;
+  acceptedBy: InviteAcceptedByView | null;
 }
 
-export function toMyInviteView(invite: Invite, now: Date): MyInviteView {
+// `acceptedByUser` is the (optionally profile-loaded) redeemer the caller
+// batch-loads for a 'used' invite; pass null/undefined for any other status.
+// It is mapped in only when the computed status is 'used', so a caller that
+// over-supplies it for a non-used invite still produces a null `acceptedBy`.
+export function toMyInviteView(
+  invite: Invite,
+  now: Date,
+  acceptedByUser?: User | null,
+): MyInviteView {
+  const status = resolveInviteStatus(invite, now);
+  const acceptedProfile = acceptedByUser?.profile;
+  const acceptedBy: InviteAcceptedByView | null =
+    status === 'used' && acceptedProfile
+      ? {
+          firstName: acceptedProfile.firstName ?? '',
+          lastName: acceptedProfile.lastName ?? '',
+          slug: acceptedProfile.slug ?? '',
+          avatarUrl: toImageUrl(acceptedProfile.avatarUrl),
+        }
+      : null;
   return {
+    id: invite.id,
     code: invite.code,
     note: invite.note ?? null,
     vouch: invite.vouch ?? null,
     email: invite.email ?? null,
-    status: resolveInviteStatus(invite, now),
+    status,
     expiresAt: invite.expiresAt ? invite.expiresAt.toISOString() : null,
     createdAt: invite.createdAt.toISOString(),
+    acceptedBy,
   };
 }
 
@@ -110,6 +149,9 @@ export function toPublicInviteView(
       avatarUrl: toImageUrl(profile?.avatarUrl),
       ...(memberSince ? { memberSince } : {}),
     },
+    // Only an active member can meaningfully be "your inviter" — a missing row
+    // (erased) or any non-active status reads as inactive.
+    inviterActive: inviter?.status === UserStatus.Active,
     note: invite.note ?? null,
     vouch: invite.vouch ?? null,
   };

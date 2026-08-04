@@ -15,16 +15,20 @@ describe('ForumController', () => {
   let controller: ForumController;
   let threadsService: {
     list: jest.Mock;
+    counts: jest.Mock;
     getBySlug: jest.Mock;
     create: jest.Mock;
+    setLocked: jest.Mock;
   };
   let postsService: { listPosts: jest.Mock; reply: jest.Mock; vote: jest.Mock };
 
   beforeEach(async () => {
     threadsService = {
       list: jest.fn().mockResolvedValue({ data: [], pageInfo: {} }),
+      counts: jest.fn().mockResolvedValue({ all: 0 }),
       getBySlug: jest.fn().mockResolvedValue({}),
       create: jest.fn().mockResolvedValue({}),
+      setLocked: jest.fn().mockResolvedValue({}),
     };
     postsService = {
       listPosts: jest.fn().mockResolvedValue({ data: [], pageInfo: {} }),
@@ -42,17 +46,50 @@ describe('ForumController', () => {
     controller = module.get(ForumController);
   });
 
-  it('delegates listThreads with the caller id and category/cursor/limit', async () => {
+  it('delegates listThreads with the caller id and category/cursor/limit/sort/tag/q', async () => {
     await controller.listThreads(user, {
       category: 'housing',
       cursor: 'c1',
       limit: 10,
+      sort: 'top',
+      tag: 'rent',
+      q: 'lease',
     });
     expect(threadsService.list).toHaveBeenCalledWith(
       'user-1',
       'housing',
       'c1',
       10,
+      'top',
+      'rent',
+      'lease',
+      // A plain member: the OP card lock/moderation flags stay off.
+      false,
+    );
+  });
+
+  it('delegates threadCounts with the caller id and q/tag', async () => {
+    await controller.threadCounts(user, { q: 'lease', tag: 'rent' });
+    expect(threadsService.counts).toHaveBeenCalledWith(
+      'user-1',
+      'lease',
+      'rent',
+    );
+  });
+
+  it('delegates lock/unlock with the caller and the target state', async () => {
+    await controller.lockThread(user, 'hello-world');
+    expect(threadsService.setLocked).toHaveBeenCalledWith(
+      'hello-world',
+      user,
+      true,
+    );
+
+    await controller.unlockThread(user, 'hello-world');
+    expect(threadsService.setLocked).toHaveBeenCalledWith(
+      'hello-world',
+      user,
+      false,
     );
   });
 
@@ -61,6 +98,7 @@ describe('ForumController', () => {
     expect(threadsService.getBySlug).toHaveBeenCalledWith(
       'hello-world',
       'user-1',
+      false,
     );
   });
 
@@ -79,7 +117,34 @@ describe('ForumController', () => {
   it('delegates createThread with the caller id', async () => {
     const dto = { title: 'Hi', body: 'Body', category: 'general' };
     await controller.createThread(user, dto);
-    expect(threadsService.create).toHaveBeenCalledWith('user-1', dto);
+    expect(threadsService.create).toHaveBeenCalledWith('user-1', dto, false);
+  });
+
+  it('threads the moderator role into the read paths', async () => {
+    const mod: CurrentUserData = { ...user, role: 'moderator' };
+
+    await controller.listThreads(mod, {});
+    expect(threadsService.list).toHaveBeenLastCalledWith(
+      'user-1',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+
+    await controller.getThread(mod, 'hello-world');
+    expect(threadsService.getBySlug).toHaveBeenLastCalledWith(
+      'hello-world',
+      'user-1',
+      true,
+    );
+
+    const dto = { title: 'Hi', body: 'Body', category: 'general' };
+    await controller.createThread(mod, dto);
+    expect(threadsService.create).toHaveBeenLastCalledWith('user-1', dto, true);
   });
 
   it('delegates reply with the caller user', async () => {

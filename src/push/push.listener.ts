@@ -11,6 +11,8 @@ import {
   MessageCreatedEvent,
 } from '../messaging/messaging.events';
 import { requireAuthorSummary } from '../messaging/message-response';
+import { NotificationPreferenceCategory } from '../notifications/notification-preferences';
+import { NotificationPreferencesService } from '../notifications/notification-preferences.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { PushService } from './push.service';
@@ -38,6 +40,7 @@ export class PushMessageListener {
     private readonly presence: PresenceService,
     private readonly pushService: PushService,
     private readonly blockFilter: BlockFilterService,
+    private readonly notificationPreferences: NotificationPreferencesService,
   ) {}
 
   @OnEvent(MESSAGE_CREATED)
@@ -68,19 +71,43 @@ export class PushMessageListener {
       );
       if (targets.length === 0) return;
 
-      // P0 hardening: a block either way must stop a push from ever reaching
-      // the blocked party's phone. `sendMessage` already refuses to CREATE a
-      // direct message between blocked members, but a group has no single
-      // "other" party to gate the send on, so a blocked group member is
-      // filtered out here instead — belt-and-braces for the direct case too.
-      const blockedUserIds = await this.blockFilter.blockedUserIds(
-        message.senderId,
-        targets.map((participant) => participant.userId),
-      );
+      // P0/P1-3 hardening: a block either way — OR a person-level mute of the
+      // sender — must stop a push from ever reaching that recipient's phone.
+      // `sendMessage` already refuses to CREATE a direct message between blocked
+      // members, but a group has no single "other" party to gate the send on, so
+      // blocked/muting group members are filtered out here instead (belt-and-
+      // braces for the direct case too). Two directional lookups: `blockedUserIds`
+      // (block either way between sender and recipient) and `mutersOf` (recipients
+      // who muted the SENDER at the person level — NOT `mutedUserIds`, which would
+      // be whom the sender muted, the wrong direction). The person-level mute is
+      // distinct from the thread-level `muted: false` already applied by the query
+      // above, which only silences a conversation, not a person.
+      const recipientUserIds = targets.map((participant) => participant.userId);
+      const [blockedUserIds, muterUserIds] = await Promise.all([
+        this.blockFilter.blockedUserIds(message.senderId, recipientUserIds),
+        this.blockFilter.mutersOf(message.senderId, recipientUserIds),
+      ]);
       const deliverable = targets.filter(
-        (participant) => !blockedUserIds.has(participant.userId),
+        (participant) =>
+          !blockedUserIds.has(participant.userId) &&
+          !muterUserIds.has(participant.userId),
       );
       if (deliverable.length === 0) return;
+
+      // Member preference gate (after the block/mute safety filter): drop anyone
+      // who turned the "New message" push category off. Batched — one query for
+      // all deliverable recipients. This is the push twin of the in-app category
+      // gate in `NotificationsService`; the two channels share one switch.
+      const pushEnabledUserIds = new Set(
+        await this.notificationPreferences.recipientsPushEnabled(
+          deliverable.map((participant) => participant.userId),
+          NotificationPreferenceCategory.NewMessages,
+        ),
+      );
+      const pushable = deliverable.filter((participant) =>
+        pushEnabledUserIds.has(participant.userId),
+      );
+      if (pushable.length === 0) return;
 
       const senderProfile = await this.profiles.findOne({
         where: { userId: message.senderId },
@@ -88,15 +115,16 @@ export class PushMessageListener {
       const senderName = requireAuthorSummary(senderProfile).displayName;
       const body = preview(message.body);
 
-      await Promise.all(
-        deliverable.map((participant) =>
-          this.pushService.sendToUser(participant.userId, {
-            title: senderName,
-            body,
-            tag: conversationId,
-            data: { conversationId, url: `/messages?c=${conversationId}` },
-          }),
-        ),
+      // One subscription lookup for every deliverable participant instead of
+      // one per participant — `sendToUsers` batches the `find` with `IN (...)`.
+      await this.pushService.sendToUsers(
+        pushable.map((participant) => participant.userId),
+        {
+          title: senderName,
+          body,
+          tag: conversationId,
+          data: { conversationId, url: `/messages?c=${conversationId}` },
+        },
       );
     } catch (error) {
       // Push is best-effort and must never affect message delivery.

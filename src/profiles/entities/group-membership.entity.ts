@@ -12,19 +12,19 @@ import {
 })
 export class GroupMembership {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_group_memberships_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Index('IDX_group_memberships_group_id')
   @Column({ type: 'uuid' })
-  groupId: string;
+  groupId!: string;
 
   @Column({ type: 'varchar' })
-  role: string;
+  role!: string;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

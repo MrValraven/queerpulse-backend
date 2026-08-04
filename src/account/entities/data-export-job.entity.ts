@@ -23,11 +23,11 @@ export enum DataExportFormat {
 @Entity('data_export_job')
 export class DataExportJob {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_data_export_job_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({
     type: 'enum',
@@ -35,27 +35,27 @@ export class DataExportJob {
     enumName: 'data_export_job_status_enum',
     default: DataExportStatus.Queued,
   })
-  status: DataExportStatus;
+  status!: DataExportStatus;
 
   @Column({ type: 'jsonb' })
-  categories: string[];
+  categories!: string[];
 
   @Column({
     type: 'enum',
     enum: DataExportFormat,
     enumName: 'data_export_job_format_enum',
   })
-  format: DataExportFormat;
+  format!: DataExportFormat;
 
   @Column({ type: 'timestamptz' })
-  requestedAt: Date;
+  requestedAt!: Date;
 
   @Column({ type: 'timestamptz', nullable: true })
-  generatedAt: Date | null;
+  generatedAt!: Date | null;
 
   @Column({ type: 'jsonb', nullable: true })
-  data: Record<string, unknown> | null;
+  data!: Record<string, unknown> | null;
 
   @Column({ type: 'varchar', nullable: true })
-  error: string | null;
+  error!: string | null;
 }

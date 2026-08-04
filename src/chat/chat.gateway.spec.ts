@@ -10,6 +10,7 @@ import { ConfigService } from '@nestjs/config';
 import { parseCookie } from 'cookie';
 import { ConnectionsService } from '../connections/connections.service';
 import { MessagingService } from '../messaging/messaging.service';
+import { MetricsService } from '../metrics/metrics.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { UserRole } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
@@ -98,6 +99,13 @@ describe('ChatGateway', () => {
         { provide: ConnectionsService, useValue: connections },
         { provide: UsersService, useValue: users },
         { provide: PlatformSettingsService, useValue: platformSettings },
+        {
+          provide: MetricsService,
+          useValue: {
+            incrementWebsocketConnections: jest.fn(),
+            decrementWebsocketConnections: jest.fn(),
+          },
+        },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
       ],
     }).compile();

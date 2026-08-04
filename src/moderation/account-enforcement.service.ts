@@ -114,9 +114,11 @@ export class AccountEnforcementService {
    * Applies a moderator action to the reported *member*, if the action is one
    * that has an effect on an account.
    *
-   * Returns the suspended user's id so the caller can revoke their sessions
-   * outside the transaction, or `null` when the action was not an enforcement
-   * action.
+   * Returns the suspended user's id (so the caller can revoke their sessions
+   * outside the transaction) alongside the suspension's expiry — `null` for a
+   * permanent ban, a `Date` for a time-boxed suspension — so the caller can put
+   * "suspended until X" in the outcome notification. Returns `null` when the
+   * action was not an enforcement action.
    *
    * `restrict` is deliberately NOT handled here: there is no scoped-restriction
    * model in this codebase to write to. It continues to resolve the report and
@@ -127,7 +129,7 @@ export class AccountEnforcementService {
     manager: EntityManager,
     report: Report,
     dto: { action: ModActionCode; duration?: string },
-  ): Promise<string | null> {
+  ): Promise<{ userId: string; suspendedUntil: Date | null } | null> {
     if (dto.action !== 'suspend' && dto.action !== 'ban') {
       return null;
     }
@@ -202,7 +204,7 @@ export class AccountEnforcementService {
       UserStatus.Suspended,
     );
 
-    return userId;
+    return { userId, suspendedUntil };
   }
 
   /**

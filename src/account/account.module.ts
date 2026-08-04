@@ -13,6 +13,7 @@ import { Message } from '../messaging/entities/message.entity';
 import { Notification } from '../notifications/entities/notification.entity';
 import { Activity } from '../profiles/entities/activity.entity';
 import { SavedItem } from '../saved/entities/saved-item.entity';
+import { StorageModule } from '../storage/storage.module';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -37,6 +38,9 @@ import { EmailPreference } from './entities/email-preference.entity';
 
 @Module({
   imports: [
+    // The account-erasure sweep uses StorageService to delete an erased member's
+    // uploaded objects from bucket storage (see AccountDeletionProcessorService).
+    StorageModule,
     TypeOrmModule.forFeature([
       DeletionRequest,
       DsarRequest,

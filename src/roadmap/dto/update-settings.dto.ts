@@ -9,13 +9,24 @@ import {
   ValidateNested,
 } from 'class-validator';
 
-// One hero stat tile, e.g. `{ label: "12 shipped this year", jade: true }` —
-// matches the `HeroStat` interface on `RoadmapSettings`.
+// One hero stat tile, e.g. `{ label: "12 shipped this year", value: "12",
+// note: "since launch", jade: true }` — matches the `HeroStat` interface on
+// `RoadmapSettings`.
 export class HeroStatDto {
   @IsString()
   @MinLength(1)
   @MaxLength(120)
-  label: string;
+  label!: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  value?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  note?: string;
 
   @IsOptional()
   @IsBoolean()
@@ -28,5 +39,5 @@ export class UpdateSettingsDto {
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => HeroStatDto)
-  heroStats: HeroStatDto[];
+  heroStats!: HeroStatDto[];
 }

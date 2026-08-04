@@ -13,17 +13,17 @@ import { GifAttachmentDto } from '../../messaging/dto/send-message.dto';
 
 export class JoinPayload {
   @IsUUID('4')
-  conversationId: string;
+  conversationId!: string;
 }
 
 export class SendMessagePayload {
   @IsUUID('4')
-  conversationId: string;
+  conversationId!: string;
 
   @IsString()
   @MinLength(1)
   @MaxLength(5000)
-  body: string;
+  body!: string;
 
   @IsOptional()
   @IsUUID('4')
@@ -47,18 +47,18 @@ export class SendMessagePayload {
 
 export class TypingPayload {
   @IsUUID('4')
-  conversationId: string;
+  conversationId!: string;
 
   @IsBoolean()
-  isTyping: boolean;
+  isTyping!: boolean;
 }
 
 export class ReadPayload {
   @IsUUID('4')
-  conversationId: string;
+  conversationId!: string;
 }
 
 export class DeliveredPayload {
   @IsUUID('4')
-  conversationId: string;
+  conversationId!: string;
 }

@@ -18,17 +18,17 @@ import { HousingListingType } from '../entities/housing-listing.entity';
  * never the body; `status` is always forced to `review` server-side. */
 export class CreateHousingListingDto {
   @IsEnum(HousingListingType)
-  type: HousingListingType;
+  type!: HousingListingType;
 
-  @IsString() @MinLength(1) @MaxLength(200) title: string;
+  @IsString() @MinLength(1) @MaxLength(200) title!: string;
 
   @IsOptional() @IsString() @MaxLength(200) blurb?: string;
 
-  @IsString() @MinLength(1) @MaxLength(120) city: string;
+  @IsString() @MinLength(1) @MaxLength(120) city!: string;
 
   @IsOptional() @IsString() @MaxLength(120) area?: string;
 
-  @IsInt() @Min(0) rentEuros: number;
+  @IsInt() @Min(0) rentEuros!: number;
 
   @IsOptional() @IsBoolean() billsIncluded?: boolean;
 

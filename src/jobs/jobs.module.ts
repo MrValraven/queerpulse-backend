@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CompaniesModule } from '../companies/companies.module';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersModule } from '../users/users.module';
@@ -21,6 +22,9 @@ import { JobsService } from './jobs.service';
     UsersModule,
     // `NotificationsService` — tell the job's poster when someone applies.
     NotificationsModule,
+    // `ContentModerationService` — read `job` takedown state so a
+    // moderator-removed job is withheld from members' read paths.
+    ContentModerationModule,
   ],
   controllers: [JobsController, MeApplicationsController],
   providers: [JobsService],

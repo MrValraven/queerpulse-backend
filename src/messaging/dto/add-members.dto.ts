@@ -18,5 +18,5 @@ export class AddMembersDto {
   @ArrayMaxSize(50)
   @IsString({ each: true })
   @MaxLength(255, { each: true })
-  memberHandles: string[];
+  memberHandles!: string[];
 }

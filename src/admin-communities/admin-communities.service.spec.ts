@@ -58,6 +58,7 @@ function makeCommunity(overrides: Partial<Community> = {}): Community {
     ref: 'CMT-0001',
     createdAt: daysAgo(400),
     updatedAt: daysAgo(400),
+    archivedAt: null,
     ...overrides,
   };
 }

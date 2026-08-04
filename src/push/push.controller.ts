@@ -27,7 +27,9 @@ export class PushController {
   // A device (re)subscribes rarely; a modest cap keeps the endpoint from being
   // used to churn subscription rows without disrupting legitimate use.
   @ApiOperation({ summary: 'Register a Web Push subscription for the caller' })
-  @ApiCreatedResponse({ description: 'The subscription was saved (`{ ok: true }`).' })
+  @ApiCreatedResponse({
+    description: 'The subscription was saved (`{ ok: true }`).',
+  })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
   @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
@@ -42,7 +44,9 @@ export class PushController {
   }
 
   @ApiOperation({ summary: 'Remove a Web Push subscription for the caller' })
-  @ApiCreatedResponse({ description: 'The subscription was removed (`{ ok: true }`).' })
+  @ApiCreatedResponse({
+    description: 'The subscription was removed (`{ ok: true }`).',
+  })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
   @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })

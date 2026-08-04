@@ -11,21 +11,21 @@ import {
 @Entity('subprofile_social_links')
 export class SubprofileSocialLink {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_subprofile_social_links_subprofile_id')
   @Column({ type: 'uuid' })
-  subprofileId: string;
+  subprofileId!: string;
 
   @Column({ type: 'varchar' })
-  platform: string;
+  platform!: string;
 
   @Column({ type: 'varchar' })
-  urlOrHandle: string;
+  urlOrHandle!: string;
 
   @Column({ type: 'int', default: 0 })
-  position: number;
+  position!: number;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

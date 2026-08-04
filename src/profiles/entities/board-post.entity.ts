@@ -15,28 +15,28 @@ export enum BoardKind {
 @Index('UQ_board_posts_user_slug', ['userId', 'slug'], { unique: true })
 export class BoardPost {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_board_posts_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({
     type: 'enum',
     enum: BoardKind,
     enumName: 'board_posts_kind_enum',
   })
-  kind: BoardKind;
+  kind!: BoardKind;
 
   @Column({ type: 'varchar' })
-  title: string;
+  title!: string;
 
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   @Column({ type: 'int', default: 0 })
-  position: number;
+  position!: number;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

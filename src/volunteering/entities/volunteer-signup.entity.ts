@@ -11,19 +11,19 @@ import {
 @Unique('UQ_volunteer_signups', ['opportunityId', 'userId'])
 export class VolunteerSignup {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_volunteer_signups_opportunity_id')
   @Column({ type: 'uuid' })
-  opportunityId: string;
+  opportunityId!: string;
 
   @Index('IDX_volunteer_signups_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({ type: 'text', nullable: true })
-  note: string | null;
+  note!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

@@ -24,7 +24,7 @@ import { UpdatePostDto } from './dto/update-post.dto';
 import { UpdateThreadDto } from './dto/update-thread.dto';
 import { VotePostDto } from './dto/vote-post.dto';
 import { ForumPostsService } from './forum-posts.service';
-import { ForumThreadsService } from './forum-threads.service';
+import { ForumThreadsService, isModeratorRole } from './forum-threads.service';
 import {
   ApiBadRequestResponse,
   ApiConflictResponse,
@@ -64,7 +64,24 @@ export class ForumController {
       query.category,
       query.cursor,
       query.limit,
+      query.sort,
+      query.tag,
+      query.q,
+      isModeratorRole(user.role),
     );
+  }
+
+  // Declared BEFORE `threads/:slug` so Express doesn't route `counts` as a slug.
+  @Get('threads/counts')
+  @ApiOperation({ summary: 'Per-category thread counts (block-filtered)' })
+  @ApiOkResponse({
+    description: 'An `all` total plus a count per category.',
+  })
+  threadCounts(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: ListThreadsQuery,
+  ) {
+    return this.threadsService.counts(user.userId, query.q, query.tag);
   }
 
   @Get('threads/:slug')
@@ -72,7 +89,11 @@ export class ForumController {
   @ApiOkResponse({ description: 'The forum thread.' })
   @ApiNotFoundResponse({ description: 'Thread not found.' })
   getThread(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
-    return this.threadsService.getBySlug(slug, user.userId);
+    return this.threadsService.getBySlug(
+      slug,
+      user.userId,
+      isModeratorRole(user.role),
+    );
   }
 
   @Get('threads/:slug/posts')
@@ -97,11 +118,17 @@ export class ForumController {
     @CurrentUser() user: CurrentUserData,
     @Body() dto: CreateThreadDto,
   ) {
-    return this.threadsService.create(user.userId, dto);
+    return this.threadsService.create(
+      user.userId,
+      dto,
+      isModeratorRole(user.role),
+    );
   }
 
   @Post('threads/:slug/posts')
-  @ApiOperation({ summary: 'Reply to a thread (optionally nested under a post)' })
+  @ApiOperation({
+    summary: 'Reply to a thread (optionally nested under a post)',
+  })
   @ApiCreatedResponse({ description: 'The created reply post.' })
   @ApiForbiddenResponse({ description: 'The thread is locked.' })
   @ApiBadRequestResponse({
@@ -119,7 +146,9 @@ export class ForumController {
 
   @Post('posts/:id/vote')
   @ApiOperation({ summary: 'Cast or clear an upvote on a post (idempotent)' })
-  @ApiCreatedResponse({ description: 'Updated vote count and the caller vote.' })
+  @ApiCreatedResponse({
+    description: 'Updated vote count and the caller vote.',
+  })
   @ApiBadRequestResponse({ description: 'Malformed post id.' })
   @ApiNotFoundResponse({ description: 'Post not found.' })
   vote(
@@ -192,13 +221,44 @@ export class ForumController {
   @Patch('threads/:slug')
   @ApiOperation({ summary: 'Edit a thread title (author only)' })
   @ApiOkResponse({ description: 'The updated thread.' })
-  @ApiForbiddenResponse({ description: 'Only the author can edit this thread.' })
+  @ApiForbiddenResponse({
+    description: 'Only the author can edit this thread.',
+  })
   @ApiNotFoundResponse({ description: 'Thread not found.' })
   updateThread(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
     @Body() dto: UpdateThreadDto,
   ) {
-    return this.threadsService.updateThreadTitle(slug, user, dto.title);
+    return this.threadsService.updateThreadTitle(
+      slug,
+      user,
+      dto.title,
+      dto.tags,
+    );
+  }
+
+  @Post('threads/:slug/lock')
+  @ApiOperation({ summary: 'Lock a thread (moderator only)' })
+  @ApiCreatedResponse({ description: 'The updated (locked) thread.' })
+  @ApiForbiddenResponse({ description: 'Only a moderator can lock threads.' })
+  @ApiNotFoundResponse({ description: 'Thread not found.' })
+  lockThread(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.threadsService.setLocked(slug, user, true);
+  }
+
+  @Post('threads/:slug/unlock')
+  @ApiOperation({ summary: 'Unlock a thread (moderator only)' })
+  @ApiCreatedResponse({ description: 'The updated (unlocked) thread.' })
+  @ApiForbiddenResponse({ description: 'Only a moderator can lock threads.' })
+  @ApiNotFoundResponse({ description: 'Thread not found.' })
+  unlockThread(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.threadsService.setLocked(slug, user, false);
   }
 }

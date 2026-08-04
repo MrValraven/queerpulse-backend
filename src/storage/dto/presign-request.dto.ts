@@ -8,12 +8,12 @@ import { UPLOAD_KINDS, UploadKind } from '../upload-kinds';
 // frontend contract this mirrors).
 export class PresignRequestDto {
   @IsIn(UPLOAD_KINDS)
-  kind: UploadKind;
+  kind!: UploadKind;
 
   @IsIn(ALLOWED_IMAGE_TYPES)
-  contentType: string;
+  contentType!: string;
 
   @IsInt()
   @Min(1)
-  byteSize: number;
+  byteSize!: number;
 }

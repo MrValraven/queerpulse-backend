@@ -1,7 +1,18 @@
 import { CommunityPost, PostKind } from './entities/community-post.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { RosterRole } from './entities/community-member.entity';
-import { toCommunityPost, toCommunityReply } from './community-response';
+import {
+  ReactionAggregate,
+  toCommunityPost,
+  toCommunityReply,
+} from './community-response';
+
+// No reactions / no replies — the shared "empty" input every permission-flag
+// test below passes, since none of them exercise reaction/reply content.
+const EMPTY_REACTIONS: ReactionAggregate = {
+  counts: new Map(),
+  mine: new Set(),
+};
 
 function makePost(overrides: Partial<CommunityPost> = {}): CommunityPost {
   return {
@@ -39,8 +50,9 @@ describe('toCommunityPost / toCommunityReply permission flags', () => {
     const dto = toCommunityPost(
       makePost(),
       null,
+      EMPTY_REACTIONS,
       [],
-      [],
+      0,
       'author-1',
       RosterRole.Member,
     );
@@ -53,8 +65,9 @@ describe('toCommunityPost / toCommunityReply permission flags', () => {
     const dto = toCommunityPost(
       makePost(),
       null,
+      EMPTY_REACTIONS,
       [],
-      [],
+      0,
       'mod-1',
       RosterRole.Mod,
     );
@@ -66,8 +79,9 @@ describe('toCommunityPost / toCommunityReply permission flags', () => {
     const dto = toCommunityPost(
       makePost(),
       null,
+      EMPTY_REACTIONS,
       [],
-      [],
+      0,
       'other-1',
       RosterRole.Member,
     );
@@ -78,12 +92,28 @@ describe('toCommunityPost / toCommunityReply permission flags', () => {
   });
 
   it('a non-member viewer can do nothing', () => {
-    const dto = toCommunityPost(makePost(), null, [], [], 'nobody', null);
+    const dto = toCommunityPost(
+      makePost(),
+      null,
+      EMPTY_REACTIONS,
+      [],
+      0,
+      'nobody',
+      null,
+    );
     expect(dto.canDelete).toBe(false);
   });
 
   it('an ex-member author (left the community) can no longer edit or delete', () => {
-    const dto = toCommunityPost(makePost(), null, [], [], 'author-1', null);
+    const dto = toCommunityPost(
+      makePost(),
+      null,
+      EMPTY_REACTIONS,
+      [],
+      0,
+      'author-1',
+      null,
+    );
     expect(dto.canEdit).toBe(false);
     expect(dto.canDelete).toBe(false);
   });
@@ -92,8 +122,9 @@ describe('toCommunityPost / toCommunityReply permission flags', () => {
     const dto = toCommunityPost(
       makePost({ deletedAt: new Date() }),
       { slug: 'a', firstName: 'A', lastName: 'B', avatarUrl: null },
+      EMPTY_REACTIONS,
       [],
-      [],
+      0,
       'mod-1',
       RosterRole.Owner,
     );
@@ -107,20 +138,48 @@ describe('toCommunityPost / toCommunityReply permission flags', () => {
   it('canViewHistory only once edited, for author/owner/mod', () => {
     const edited = makePost({ editedAt: new Date() });
     expect(
-      toCommunityPost(edited, null, [], [], 'author-1', RosterRole.Member)
-        .canViewHistory,
+      toCommunityPost(
+        edited,
+        null,
+        EMPTY_REACTIONS,
+        [],
+        0,
+        'author-1',
+        RosterRole.Member,
+      ).canViewHistory,
     ).toBe(true);
     expect(
-      toCommunityPost(edited, null, [], [], 'mod-1', RosterRole.Mod)
-        .canViewHistory,
+      toCommunityPost(
+        edited,
+        null,
+        EMPTY_REACTIONS,
+        [],
+        0,
+        'mod-1',
+        RosterRole.Mod,
+      ).canViewHistory,
     ).toBe(true);
     expect(
-      toCommunityPost(edited, null, [], [], 'other-1', RosterRole.Member)
-        .canViewHistory,
+      toCommunityPost(
+        edited,
+        null,
+        EMPTY_REACTIONS,
+        [],
+        0,
+        'other-1',
+        RosterRole.Member,
+      ).canViewHistory,
     ).toBe(false);
     expect(
-      toCommunityPost(makePost(), null, [], [], 'author-1', RosterRole.Member)
-        .canViewHistory,
+      toCommunityPost(
+        makePost(),
+        null,
+        EMPTY_REACTIONS,
+        [],
+        0,
+        'author-1',
+        RosterRole.Member,
+      ).canViewHistory,
     ).toBe(false);
   });
 

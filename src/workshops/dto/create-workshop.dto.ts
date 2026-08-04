@@ -17,26 +17,26 @@ import {
 import { WorkshopHeroTint, WorkshopMode } from '../entities/workshop.entity';
 
 export class WorkshopTierDto {
-  @IsString() @MinLength(1) @MaxLength(120) label: string;
+  @IsString() @MinLength(1) @MaxLength(120) label!: string;
 
   // Numeric, not the frontend's formatted "€180" — the client formats it.
-  @IsNumber() @Min(0) amount: number;
+  @IsNumber() @Min(0) amount!: number;
 
   @IsOptional() @IsBoolean() sliding?: boolean;
 }
 
 export class WorkshopSessionDto {
-  @IsString() @MinLength(1) @MaxLength(10) n: string;
-  @IsString() @MinLength(1) @MaxLength(200) title: string;
-  @IsString() @MaxLength(1000) desc: string;
-  @IsString() @MaxLength(100) date: string;
-  @IsString() @MaxLength(50) length: string;
+  @IsString() @MinLength(1) @MaxLength(10) n!: string;
+  @IsString() @MinLength(1) @MaxLength(200) title!: string;
+  @IsString() @MaxLength(1000) desc!: string;
+  @IsString() @MaxLength(100) date!: string;
+  @IsString() @MaxLength(50) length!: string;
   @IsOptional() @IsBoolean() done?: boolean;
 }
 
 export class WorkshopNeedDto {
-  @IsString() @MinLength(1) @MaxLength(120) label: string;
-  @IsString() @MaxLength(1000) detail: string;
+  @IsString() @MinLength(1) @MaxLength(120) label!: string;
+  @IsString() @MaxLength(1000) detail!: string;
   @IsOptional() @IsBoolean() included?: boolean;
   @IsOptional() @IsString() @MaxLength(60) tag?: string;
 }
@@ -48,25 +48,25 @@ export class WorkshopLocationDto {
 }
 
 export class CreateWorkshopDto {
-  @IsString() @MinLength(3) @MaxLength(200) title: string;
+  @IsString() @MinLength(3) @MaxLength(200) title!: string;
 
   // Optional: `buildWorkshop` leaves it empty for member-added workshops.
   @IsOptional() @IsString() @MaxLength(200) titleEm?: string;
 
   // The modal gates on `blurb.trim().length > 8` / `about.trim().length > 12`;
   // `MinLength` here mirrors those thresholds server-side.
-  @IsString() @MinLength(9) @MaxLength(2000) blurb: string;
+  @IsString() @MinLength(9) @MaxLength(2000) blurb!: string;
 
-  @IsString() @MinLength(1) @MaxLength(100) cat: string;
+  @IsString() @MinLength(1) @MaxLength(100) cat!: string;
 
-  @IsEnum(WorkshopMode) mode: WorkshopMode;
+  @IsEnum(WorkshopMode) mode!: WorkshopMode;
 
   // Clamps mirror `buildWorkshop`'s `Math.max(1, Math.min(52, ...))` and
   // `Math.max(2, Math.min(40, ...))`, plus the modal's `min`/`max` attributes.
-  @Type(() => Number) @IsInt() @Min(1) @Max(52) weeks: number;
-  @Type(() => Number) @IsInt() @Min(2) @Max(40) spotsTotal: number;
+  @Type(() => Number) @IsInt() @Min(1) @Max(52) weeks!: number;
+  @Type(() => Number) @IsInt() @Min(2) @Max(40) spotsTotal!: number;
 
-  @IsNumber() @Min(0) price: number;
+  @IsNumber() @Min(0) price!: number;
 
   @IsOptional() @IsString() @MaxLength(10) currency?: string;
 
@@ -83,7 +83,7 @@ export class CreateWorkshopDto {
   @ArrayMaxSize(50)
   @IsString({ each: true })
   @MaxLength(5000, { each: true })
-  about: string[];
+  about!: string[];
 
   @IsOptional()
   @IsArray()

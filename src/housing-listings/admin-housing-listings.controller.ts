@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Param, Patch, UseGuards } from '@nestjs/common';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Feature } from '../common/feature.decorator';
 import { UserRole } from '../users/entities/user.entity';
@@ -29,7 +30,7 @@ import {
 })
 @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
 @Controller('admin/housing-listings')
-@UseGuards(RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)
 export class AdminHousingListingsController {
   constructor(private readonly service: HousingListingsService) {}

@@ -3,7 +3,9 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Put,
@@ -19,11 +21,13 @@ import { Public } from '../auth/decorators/public.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { CreateSubprofileDTO } from './dto/create-subprofile.dto';
 import { EndorseDTO } from './dto/endorse.dto';
+import { InviteCollaboratorDTO } from './dto/invite-collaborator.dto';
 import { ListDirectoryQuery } from './dto/list-directory.query';
 import { ReplaceAffiliationsDTO } from './dto/replace-affiliations.dto';
 import { ReplaceItemsDTO } from './dto/replace-items.dto';
 import { ReplaceSocialLinksDTO } from './dto/replace-social-links.dto';
 import { UpdateSubprofileDTO } from './dto/update-subprofile.dto';
+import { SubprofileInvitesService } from './subprofile-invites.service';
 import { SubprofilesService } from './subprofiles.service';
 import {
   ApiBadRequestResponse,
@@ -43,14 +47,19 @@ import {
 @ApiCookieAuth()
 @Controller('subprofiles')
 export class SubprofilesController {
-  constructor(private readonly subprofilesService: SubprofilesService) {}
+  constructor(
+    private readonly subprofilesService: SubprofilesService,
+    private readonly subprofileInvitesService: SubprofileInvitesService,
+  ) {}
 
   // --- literal routes first, so 'mine'/'directory'/'by-handle' are never
   //     captured by the ':id' param route below. ----------------------------
 
   @Get('mine')
   @ApiOperation({ summary: 'List the current member’s own subprofiles' })
-  @ApiOkResponse({ description: 'The member’s subprofiles (owner-facing view).' })
+  @ApiOkResponse({
+    description: 'The member’s subprofiles (owner-facing view).',
+  })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   listMine(@CurrentUser() user: CurrentUserData) {
     return this.subprofilesService.listMine(user.userId);
@@ -60,7 +69,9 @@ export class SubprofilesController {
   @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Browse the public subprofile directory' })
   @ApiOkResponse({ description: 'Directory cards matching the query.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   directory(
     @CurrentUser() user: CurrentUserData,
     @Query() query: ListDirectoryQuery,
@@ -70,10 +81,16 @@ export class SubprofilesController {
 
   @Get('by-handle/:handle')
   @UseGuards(ActiveMemberGuard)
-  @ApiOperation({ summary: 'Get a published subprofile by its handle (public view)' })
+  @ApiOperation({
+    summary: 'Get a published subprofile by its handle (public view)',
+  })
   @ApiOkResponse({ description: 'The subprofile’s public view.' })
-  @ApiNotFoundResponse({ description: 'No published subprofile with that handle.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiNotFoundResponse({
+    description: 'No published subprofile with that handle.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   getByHandle(
     @CurrentUser() user: CurrentUserData,
     @Param('handle') handle: string,
@@ -85,22 +102,88 @@ export class SubprofilesController {
   // generator + the Playwright prerenderer (no class guard on this
   // controller, so `@Public()` alone is enough to bypass the global JWT
   // guard — mirrors `DirectoryController` in `listings/directory.controller.ts`).
+  // Same response for every anonymous caller, so it also carries a positive
+  // `Cache-Control` — see AUDIT-2026-07-30.md §I "No CDN cache headers on
+  // public GETs" / `caching-and-cost.md`.
   @Public()
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Get('public-handles')
-  @ApiOperation({ summary: 'List every crawlable persona handle (public, for sitemap/prerender)' })
+  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @ApiOperation({
+    summary:
+      'List every crawlable persona handle (public, for sitemap/prerender)',
+  })
   @ApiOkResponse({ description: 'All published persona handles.' })
   listPublicHandles() {
     return this.subprofilesService.listPublicHandles();
   }
 
+  // --- invitee-scoped co-owner invites — literal 'invites/...' routes, must
+  //     sit above ':id' below (else ':id' would capture 'invites'). ---------
+
+  @Get('invites/mine')
+  @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'List co-owner invites sent to the current member' })
+  @ApiOkResponse({ description: 'The member’s pending co-owner invites.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  listMyInvites(@CurrentUser() user: CurrentUserData) {
+    return this.subprofileInvitesService.listMine(user.userId);
+  }
+
+  @Post('invites/:inviteId/accept')
+  @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'Accept a co-owner invite' })
+  @ApiCreatedResponse({ description: '`{ ok: true }` once accepted.' })
+  @ApiNotFoundResponse({
+    description: 'No invite addressed to you with that id.',
+  })
+  @ApiConflictResponse({ description: 'That invite is no longer pending.' })
+  @ApiBadRequestResponse({ description: 'The persona is already full.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  async acceptInvite(
+    @CurrentUser() user: CurrentUserData,
+    @Param('inviteId', ParseUUIDPipe) inviteId: string,
+  ): Promise<{ ok: true }> {
+    await this.subprofileInvitesService.accept(user.userId, inviteId);
+    return { ok: true };
+  }
+
+  @Post('invites/:inviteId/decline')
+  @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'Decline a co-owner invite' })
+  @ApiCreatedResponse({ description: '`{ ok: true }` once declined.' })
+  @ApiNotFoundResponse({
+    description: 'No invite addressed to you with that id.',
+  })
+  @ApiConflictResponse({ description: 'That invite is no longer pending.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  async declineInvite(
+    @CurrentUser() user: CurrentUserData,
+    @Param('inviteId', ParseUUIDPipe) inviteId: string,
+  ): Promise<{ ok: true }> {
+    await this.subprofileInvitesService.decline(user.userId, inviteId);
+    return { ok: true };
+  }
+
   @Post()
   @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Create a subprofile' })
-  @ApiCreatedResponse({ description: 'The newly created subprofile (owner-facing view).' })
-  @ApiBadRequestResponse({ description: 'Invalid field (e.g. unknown accent, CTA pairing).' })
+  @ApiCreatedResponse({
+    description: 'The newly created subprofile (owner-facing view).',
+  })
+  @ApiBadRequestResponse({
+    description: 'Invalid field (e.g. unknown accent, CTA pairing).',
+  })
   @ApiConflictResponse({ description: 'Slug or handle already in use.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   create(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: CreateSubprofileDTO,
@@ -114,7 +197,7 @@ export class SubprofilesController {
   @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-  getOne(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
+  getOne(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
     return this.subprofilesService.getOwnedDTO(user.userId, id);
   }
 
@@ -122,14 +205,18 @@ export class SubprofilesController {
   @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Update a subprofile’s core fields' })
   @ApiOkResponse({ description: 'The updated subprofile (owner-facing view).' })
-  @ApiBadRequestResponse({ description: 'Invalid field (e.g. unknown accent, CTA pairing).' })
+  @ApiBadRequestResponse({
+    description: 'Invalid field (e.g. unknown accent, CTA pairing).',
+  })
   @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
   @ApiConflictResponse({ description: 'Slug or handle already in use.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   update(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateSubprofileDTO,
   ) {
     return this.subprofilesService.update(user.userId, id, dto);
@@ -139,13 +226,17 @@ export class SubprofilesController {
   @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Replace all items in one section of a subprofile' })
   @ApiOkResponse({ description: 'The updated subprofile (owner-facing view).' })
-  @ApiBadRequestResponse({ description: 'Unknown section, or invalid items (e.g. multiple featured).' })
+  @ApiBadRequestResponse({
+    description: 'Unknown section, or invalid items (e.g. multiple featured).',
+  })
   @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   replaceSection(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Param('section') section: string,
     @Body() dto: ReplaceItemsDTO,
   ) {
@@ -164,10 +255,12 @@ export class SubprofilesController {
   @ApiBadRequestResponse({ description: 'Invalid social links.' })
   @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   replaceSocialLinks(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ReplaceSocialLinksDTO,
   ) {
     return this.subprofilesService.replaceSocialLinks(
@@ -179,15 +272,19 @@ export class SubprofilesController {
 
   @Put(':id/affiliations')
   @UseGuards(ActiveMemberGuard)
-  @ApiOperation({ summary: 'Replace a subprofile’s event/community affiliations' })
+  @ApiOperation({
+    summary: 'Replace a subprofile’s event/community affiliations',
+  })
   @ApiOkResponse({ description: 'The updated subprofile (owner-facing view).' })
   @ApiBadRequestResponse({ description: 'Invalid affiliations.' })
   @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   replaceAffiliations(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ReplaceAffiliationsDTO,
   ) {
     return this.subprofilesService.replaceAffiliations(
@@ -200,25 +297,34 @@ export class SubprofilesController {
   @Post(':id/publish')
   @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Publish a subprofile' })
-  @ApiCreatedResponse({ description: 'The published subprofile (owner-facing view).' })
+  @ApiCreatedResponse({
+    description: 'The published subprofile (owner-facing view).',
+  })
   @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
   @ApiUnprocessableEntityResponse({
-    description: 'The persona is not ready to publish (unmet requirements or the handle was just taken).',
+    description:
+      'The persona is not ready to publish (unmet requirements or the handle was just taken).',
   })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
-  publish(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  publish(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
     return this.subprofilesService.publish(user.userId, id);
   }
 
   @Post(':id/unpublish')
   @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Unpublish a subprofile back to draft' })
-  @ApiCreatedResponse({ description: 'The unpublished subprofile (owner-facing view).' })
+  @ApiCreatedResponse({
+    description: 'The unpublished subprofile (owner-facing view).',
+  })
   @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
-  unpublish(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  unpublish(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
     return this.subprofilesService.unpublish(user.userId, id);
   }
 
@@ -228,12 +334,110 @@ export class SubprofilesController {
   @ApiOkResponse({ description: '`{ ok: true }` once deleted.' })
   @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   async remove(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
   ): Promise<{ ok: true }> {
     await this.subprofilesService.remove(user.userId, id);
+    return { ok: true };
+  }
+
+  // --- co-owners — sit below every literal route above (':id' captures
+  //     anything not already matched), but before the endorsement routes. ---
+
+  @Get(':id/members')
+  @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'List the co-owners of a subprofile' })
+  @ApiOkResponse({ description: 'The persona co-owners.' })
+  @ApiForbiddenResponse({ description: 'You are not a co-owner.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  listMembers(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
+    return this.subprofilesService.listMembers(user.userId, id);
+  }
+
+  @Delete(':id/members/me')
+  @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'Leave a subprofile you co-own' })
+  @ApiOkResponse({ description: '`{ ok: true }` once you have left.' })
+  @ApiForbiddenResponse({ description: 'You are not a co-owner.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiConflictResponse({
+    description: 'You are the only owner — delete it instead.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  async leave(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<{ ok: true }> {
+    await this.subprofilesService.leave(user.userId, id);
+    return { ok: true };
+  }
+
+  @Post(':id/invites')
+  @UseGuards(ActiveMemberGuard)
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
+  @ApiOperation({ summary: 'Invite a member to co-own a subprofile' })
+  @ApiCreatedResponse({ description: 'The newly created pending invite.' })
+  @ApiForbiddenResponse({ description: 'You are not a co-owner.' })
+  @ApiNotFoundResponse({
+    description: 'No subprofile with that id, or no such member.',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'You cannot invite yourself/a blocked member, or the persona is at its co-owner cap.',
+  })
+  @ApiConflictResponse({
+    description:
+      'They already co-own this persona or already have a pending invite.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  inviteCoOwner(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: InviteCollaboratorDTO,
+  ) {
+    return this.subprofileInvitesService.invite(user.userId, id, dto.slug);
+  }
+
+  @Get(':id/invites')
+  @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'List a subprofile’s pending co-owner invites' })
+  @ApiOkResponse({ description: 'The pending co-owner invites.' })
+  @ApiForbiddenResponse({ description: 'You are not a co-owner.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  listInvites(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
+    return this.subprofileInvitesService.listInvites(user.userId, id);
+  }
+
+  @Delete(':id/invites/:inviteId')
+  @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'Revoke a pending co-owner invite' })
+  @ApiOkResponse({ description: '`{ ok: true }` once revoked.' })
+  @ApiForbiddenResponse({ description: 'You are not a co-owner.' })
+  @ApiNotFoundResponse({ description: 'No subprofile or invite with that id.' })
+  @ApiConflictResponse({ description: 'That invite is no longer pending.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  async revokeInvite(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('inviteId', ParseUUIDPipe) inviteId: string,
+  ): Promise<{ ok: true }> {
+    await this.subprofileInvitesService.revoke(user.userId, id, inviteId);
     return { ok: true };
   }
 
@@ -245,12 +449,16 @@ export class SubprofilesController {
   @Post(':id/endorse')
   @ApiOperation({ summary: 'Endorse a subprofile (optionally with a note)' })
   @ApiCreatedResponse({ description: 'The updated endorsement standing.' })
-  @ApiBadRequestResponse({ description: 'You cannot endorse your own persona.' })
+  @ApiBadRequestResponse({
+    description: 'You cannot endorse your own persona.',
+  })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   endorse(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: EndorseDTO,
   ) {
     return this.subprofilesService.endorse(user.userId, id, dto.note);
@@ -261,10 +469,12 @@ export class SubprofilesController {
   @ApiOperation({ summary: 'Withdraw your endorsement of a subprofile' })
   @ApiOkResponse({ description: 'The updated endorsement standing.' })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   withdrawEndorsement(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.subprofilesService.withdrawEndorsement(user.userId, id);
   }
@@ -274,8 +484,10 @@ export class SubprofilesController {
   @ApiOperation({ summary: 'List a subprofile’s endorsers' })
   @ApiOkResponse({ description: 'The endorsers of the subprofile.' })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
-  listEndorsers(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  listEndorsers(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
     return this.subprofilesService.listEndorsers(user.userId, id);
   }
 
@@ -289,8 +501,10 @@ export class SubprofilesController {
   @ApiCreatedResponse({ description: 'The updated follow standing.' })
   @ApiBadRequestResponse({ description: 'You cannot follow your own persona.' })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
-  follow(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  follow(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
     return this.subprofilesService.follow(user.userId, id);
   }
 
@@ -299,8 +513,10 @@ export class SubprofilesController {
   @ApiOperation({ summary: 'Unfollow a subprofile' })
   @ApiOkResponse({ description: 'The updated follow standing.' })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
-  unfollow(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  unfollow(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
     return this.subprofilesService.unfollow(user.userId, id);
   }
 }
@@ -320,7 +536,9 @@ export class ProfileSubprofilesController {
   @ApiOperation({ summary: 'List a member’s linked, published subprofiles' })
   @ApiOkResponse({ description: 'The member’s public subprofiles.' })
   @ApiNotFoundResponse({ description: 'No member with that slug.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   listForProfile(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,

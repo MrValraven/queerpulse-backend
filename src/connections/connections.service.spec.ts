@@ -7,7 +7,7 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { In, QueryFailedError } from 'typeorm';
+import { DataSource, In, QueryFailedError } from 'typeorm';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
@@ -34,6 +34,7 @@ describe('ConnectionsService', () => {
   let service: ConnectionsService;
   let connections: {
     findOne: jest.Mock;
+    findOneByOrFail: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
     update: jest.Mock;
@@ -49,10 +50,29 @@ describe('ConnectionsService', () => {
   };
   let emitter: { emit: jest.Mock };
   let blockFilter: { isBlockedEitherWay: jest.Mock };
+  let manager: {
+    update: jest.Mock;
+    findOneByOrFail: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
+  let dataSource: { transaction: jest.Mock };
+
+  // Chainable insert query-builder stub for the `blocks` row written inside
+  // `respond('block')`'s transaction (`.insert().into().values().orIgnore()
+  // .execute()`).
+  const insertQbStub = (): Record<string, jest.Mock> => {
+    const qb: Record<string, jest.Mock> = {};
+    for (const method of ['insert', 'into', 'values', 'orIgnore']) {
+      qb[method] = jest.fn().mockReturnValue(qb);
+    }
+    qb.execute = jest.fn().mockResolvedValue({ raw: [] });
+    return qb;
+  };
 
   beforeEach(async () => {
     connections = {
       findOne: jest.fn(),
+      findOneByOrFail: jest.fn(),
       create: jest.fn((v: Record<string, unknown>) => v),
       save: jest.fn((v: Record<string, unknown>) =>
         Promise.resolve({ id: 'c1', ...v }),
@@ -62,6 +82,19 @@ describe('ConnectionsService', () => {
       find: jest.fn().mockResolvedValue([]),
       findAndCount: jest.fn().mockResolvedValue([[], 0]),
       count: jest.fn().mockResolvedValue(0),
+    };
+    manager = {
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+      findOneByOrFail: jest.fn(),
+      createQueryBuilder: jest.fn(() => insertQbStub()),
+    };
+    dataSource = {
+      transaction: jest
+        .fn()
+        .mockImplementation(
+          (runInTransaction: (entityManager: typeof manager) => unknown) =>
+            runInTransaction(manager),
+        ),
     };
     profiles = { findOne: jest.fn(), find: jest.fn().mockResolvedValue([]) };
     vouchService = {
@@ -81,6 +114,7 @@ describe('ConnectionsService', () => {
         { provide: VouchService, useValue: vouchService },
         { provide: EventEmitter2, useValue: emitter },
         { provide: BlockFilterService, useValue: blockFilter },
+        { provide: DataSource, useValue: dataSource },
       ],
     }).compile();
     service = module.get(ConnectionsService);
@@ -444,11 +478,19 @@ describe('ConnectionsService', () => {
       expect(emitter.emit).not.toHaveBeenCalled();
     });
 
-    it('cannot seize a block the OTHER party placed', async () => {
+    it('cannot seize a block the OTHER party placed (atomic, no-op update)', async () => {
       connections.findOne.mockResolvedValue({
         id: 'c1',
         requesterId: 'me',
         addresseeId: 'them',
+        status: ConnectionStatus.Blocked,
+        blockedBy: 'them',
+      });
+      // The conditional UPDATE matches nothing (row already Blocked), so the
+      // in-transaction re-read finds the other party still owns the block.
+      manager.update.mockResolvedValue({ affected: 0 });
+      manager.findOneByOrFail.mockResolvedValue({
+        id: 'c1',
         status: ConnectionStatus.Blocked,
         blockedBy: 'them',
       });
@@ -457,7 +499,7 @@ describe('ConnectionsService', () => {
       );
     });
 
-    it('places a block on a pending connection', async () => {
+    it('places a block on a pending connection and records a blocks row', async () => {
       connections.findOne.mockResolvedValue({
         id: 'c1',
         requesterId: 'me',
@@ -465,9 +507,17 @@ describe('ConnectionsService', () => {
         status: ConnectionStatus.Pending,
         blockedBy: null,
       });
+      manager.update.mockResolvedValue({ affected: 1 });
+      connections.findOneByOrFail.mockResolvedValue({
+        id: 'c1',
+        status: ConnectionStatus.Blocked,
+        blockedBy: 'me',
+      });
       const result = await service.respond('c1', 'me', 'block');
       expect(result.status).toBe(ConnectionStatus.Blocked);
       expect(result.blockedBy).toBe('me');
+      // A first-class `blocks` row is written so BlockFilterService sees it.
+      expect(manager.createQueryBuilder).toHaveBeenCalled();
     });
 
     it('only the blocker can unblock', async () => {

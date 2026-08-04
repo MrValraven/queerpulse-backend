@@ -26,6 +26,7 @@ import {
   ReportStatus,
   ReportSubjectType,
 } from '../reports/entities/report.entity';
+import { Listing } from '../listings/entities/listing.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { AccountEnforcementService } from './account-enforcement.service';
@@ -36,8 +37,9 @@ import {
 } from './dto/list-mod-reports.query';
 import { AuditFeedQuery } from './dto/audit-feed.query';
 import { CreateAppealDto } from './dto/create-appeal.dto';
-import { ModActionDto } from './dto/mod-action.dto';
+import { ModActionCode, ModActionDto } from './dto/mod-action.dto';
 import { ModBulkActionDto } from './dto/mod-bulk-action.dto';
+import { ReasonCode } from '../reports/reason-catalogue';
 import { ReviewAppealDto } from './dto/review-appeal.dto';
 import { Appeal, AppealStatus } from './entities/appeal.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
@@ -100,6 +102,11 @@ export class ModerationService {
     @InjectRepository(ModAuditLog)
     private readonly auditLogs: Repository<ModAuditLog>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    // Read-only: a `listing`-subject report's detail view surfaces the live
+    // listing's pasted evidence (item #13). Registered directly on
+    // `ModerationModule` (TypeORM allows the same entity in multiple modules —
+    // see the module's `AccountDeactivation` precedent).
+    @InjectRepository(Listing) private readonly listings: Repository<Listing>,
     private readonly dataSource: DataSource,
     private readonly auth: AuthService,
     private readonly audit: ModAuditService,
@@ -117,10 +124,22 @@ export class ModerationService {
     'remove_content',
   ]);
 
+  // The actions that produce a member-facing outcome the sanctioned member
+  // should be told about. `warn` has no account effect (so `enforceAgainstUser`
+  // returns null for it) but is still an outcome the member must hear — the
+  // audit named "warned" first.
+  private static readonly OUTCOME_ACTIONS = new Set<string>([
+    'warn',
+    'suspend',
+    'ban',
+  ]);
+
   // GET /mod/reports — filterable, cursor-paginated queue. `tab` (not
   // `status`, which the frontend never sends — C4) is mapped to a status
-  // filter server-side; the envelope is `{items, counts, page}` (C5), not the
-  // shared `CursorPage` used by other list endpoints in this codebase.
+  // filter server-side. The envelope is now the shared `CursorPage`
+  // (`{ data, pageInfo: { nextCursor, hasMore } }`) every other list endpoint
+  // uses, with the queue's real per-tab `counts` carried alongside it — the
+  // former one-off `{ items, counts, page: { cursor } }` outlier is gone.
   async list(query: ListModReportsQuery): Promise<ModReportsResponse> {
     const qb = this.reports.createQueryBuilder('r');
     this.applyTabFilter(qb, query.tab);
@@ -146,7 +165,7 @@ export class ModerationService {
     // doesn't touch) — both fall back to the default age ordering rather than
     // rejecting the request, which is what C4 requires.
 
-    const { rows, nextCursor } = await cursorPaginate(
+    const { rows, nextCursor, hasMore } = await cursorPaginate(
       qb,
       query.cursor,
       query.limit ?? DEFAULT_LIMIT,
@@ -158,7 +177,7 @@ export class ModerationService {
       this.computeCounts(),
     ]);
 
-    return { items, counts, page: { cursor: nextCursor } };
+    return { data: items, pageInfo: { nextCursor, hasMore }, counts };
   }
 
   // GET /mod/reports/:id — includes the `detail{...}` block the drawer
@@ -182,17 +201,16 @@ export class ModerationService {
     // Report status, enforcement against the member, and the audit row commit
     // together or not at all. A resolved report whose suspension failed to
     // write is exactly the bug this method exists to fix, in a subtler form.
-    const { saved, suspendedUserId } = await this.dataSource.transaction(
+    const { saved, enforceResult } = await this.dataSource.transaction(
       async (manager) => {
         report.status = statusForAction(dto.action);
         const saved = await manager.save(report);
 
-        const suspendedUserId =
-          await this.accountEnforcement.enforceAgainstUser(
-            manager,
-            report,
-            dto,
-          );
+        const enforceResult = await this.accountEnforcement.enforceAgainstUser(
+          manager,
+          report,
+          dto,
+        );
 
         await this.audit.writeAuditLog(
           saved.id,
@@ -219,7 +237,7 @@ export class ModerationService {
           });
         }
 
-        return { saved, suspendedUserId };
+        return { saved, enforceResult };
       },
     );
 
@@ -227,8 +245,8 @@ export class ModerationService {
     // must not be able to roll the enforcement back if it fails. It is defence
     // in depth anyway — `JwtStrategy` re-reads status per request, so the
     // member is already locked out with or without this.
-    if (suspendedUserId) {
-      await this.auth.revokeAllForUser(suspendedUserId);
+    if (enforceResult) {
+      await this.auth.revokeAllForUser(enforceResult.userId);
     }
 
     // Tell the reporter their report has been dealt with. Skipped for an
@@ -247,6 +265,14 @@ export class ModerationService {
       }
     }
 
+    // Tell the *sanctioned member* the outcome and why (warn/suspend/ban) — the
+    // gap the audit named. Best-effort, post-commit, same as the reporter path.
+    await this.notifyModerationOutcome(
+      actorId,
+      dto,
+      await this.resolveOutcomeTarget(report, dto, enforceResult),
+    );
+
     return this.toRow(saved);
   }
 
@@ -263,56 +289,144 @@ export class ModerationService {
 
     const status = statusForAction(dto.action);
 
-    const suspendedUserIds = await this.dataSource.transaction(
-      async (manager) => {
-        for (const report of rows) {
-          report.status = status;
-        }
-        await manager.save(rows);
+    const outcomes = await this.dataSource.transaction(async (manager) => {
+      for (const report of rows) {
+        report.status = status;
+      }
+      await manager.save(rows);
 
-        const suspended: string[] = [];
-        for (const report of rows) {
-          // Any unenforceable subject fails the whole batch rather than
-          // partially applying. A moderator selecting twelve reports and
-          // suspending needs to know all twelve landed, not eleven.
-          const userId = await this.accountEnforcement.enforceAgainstUser(
-            manager,
-            report,
-            dto,
-          );
-          if (userId) suspended.push(userId);
+      // Each report paired with its enforcement result, so the post-commit
+      // pass can revoke sessions AND notify the right member with the right
+      // suspension expiry.
+      const outcomes: Array<{
+        report: Report;
+        enforceResult: { userId: string; suspendedUntil: Date | null } | null;
+      }> = [];
+      for (const report of rows) {
+        // Any unenforceable subject fails the whole batch rather than
+        // partially applying. A moderator selecting twelve reports and
+        // suspending needs to know all twelve landed, not eleven.
+        const enforceResult = await this.accountEnforcement.enforceAgainstUser(
+          manager,
+          report,
+          dto,
+        );
+        outcomes.push({ report, enforceResult });
 
-          await this.audit.writeAuditLog(
-            report.id,
+        await this.audit.writeAuditLog(
+          report.id,
+          actorId,
+          dto.action,
+          dto.reasonCode,
+          dto.note,
+          dto.duration,
+          manager,
+        );
+
+        if (ModerationService.CONTENT_ACTIONS.has(dto.action)) {
+          await this.contentModeration.applyAction(manager, {
+            subjectType: report.subjectType,
+            subjectId: report.subjectId,
+            action: dto.action as 'hide_content' | 'remove_content',
             actorId,
-            dto.action,
-            dto.reasonCode,
-            dto.note,
-            dto.duration,
-            manager,
-          );
-
-          if (ModerationService.CONTENT_ACTIONS.has(dto.action)) {
-            await this.contentModeration.applyAction(manager, {
-              subjectType: report.subjectType,
-              subjectId: report.subjectId,
-              action: dto.action as 'hide_content' | 'remove_content',
-              actorId,
-              reportId: report.id,
-              reasonCode: dto.reasonCode,
-              note: dto.note,
-            });
-          }
+            reportId: report.id,
+            reasonCode: dto.reasonCode,
+            note: dto.note,
+          });
         }
-        return suspended;
-      },
-    );
+      }
+      return outcomes;
+    });
 
+    const suspendedUserIds = outcomes
+      .map((outcome) => outcome.enforceResult?.userId)
+      .filter((userId): userId is string => Boolean(userId));
     for (const userId of new Set(suspendedUserIds)) {
       await this.auth.revokeAllForUser(userId);
     }
 
+    // Notify each sanctioned member of the outcome — one row per report, so a
+    // member named in several reports of the same batch hears about each. Same
+    // best-effort, post-commit contract as the single-report path.
+    for (const { report, enforceResult } of outcomes) {
+      await this.notifyModerationOutcome(
+        actorId,
+        dto,
+        await this.resolveOutcomeTarget(report, dto, enforceResult),
+      );
+    }
+
     return { updated: rows.map((r) => r.id) };
+  }
+
+  /**
+   * The member an outcome notification should reach, plus a suspension's expiry
+   * when there is one.
+   *
+   * `warn` does no account enforcement (so `enforceResult` is null for it) — it
+   * resolves the reported member directly, and yields nothing when the subject
+   * can't be tied to an account (a warn on a content report). `suspend`/`ban`
+   * reuse the account the enforcement already landed on, carrying its expiry
+   * (`null` = permanent ban). Any non-outcome action yields null.
+   */
+  private async resolveOutcomeTarget(
+    report: Report,
+    dto: { action: ModActionCode },
+    enforceResult: { userId: string; suspendedUntil: Date | null } | null,
+  ): Promise<{ userId: string; expiresAt: Date | null } | null> {
+    if (!ModerationService.OUTCOME_ACTIONS.has(dto.action)) return null;
+    if (dto.action === 'warn') {
+      const profile =
+        await this.accountEnforcement.resolveReportedProfile(report);
+      return profile ? { userId: profile.userId, expiresAt: null } : null;
+    }
+    return enforceResult
+      ? {
+          userId: enforceResult.userId,
+          expiresAt: enforceResult.suspendedUntil,
+        }
+      : null;
+  }
+
+  /**
+   * Tell the sanctioned member what happened and why — the exact gap the audit
+   * named ("a warned/suspended member has no idea why").
+   *
+   * No actor is passed, so `notifications.create` bypasses the block/mute filter
+   * and the per-type preference gate (there is deliberately no toggle for
+   * moderation outcomes) and always writes: a moderation outcome is the
+   * platform's word, not a member action. The moderator's `note` — documented as
+   * "the exact member-facing text the member reads" — rides along so the member
+   * sees the reason. Best-effort and post-commit: the enforcement already
+   * committed and must not roll back on a notification failure.
+   */
+  private async notifyModerationOutcome(
+    actorId: string,
+    dto: { action: ModActionCode; reasonCode: ReasonCode; note?: string },
+    target: { userId: string; expiresAt: Date | null } | null,
+  ): Promise<void> {
+    // A moderator acting on their own report never notifies themselves.
+    if (!target || target.userId === actorId) return;
+    try {
+      await this.notifications.create(
+        target.userId,
+        NotificationType.ModerationOutcome,
+        {
+          source: 'moderation',
+          action: dto.action,
+          reasonCode: dto.reasonCode,
+          // Always a string (never omitted) so the client's `{note}` copy token
+          // resolves to "" rather than rendering the literal placeholder — a
+          // bulk action may carry no note.
+          note: dto.note ?? '',
+          ...(target.expiresAt
+            ? { expiresAt: target.expiresAt.toISOString() }
+            : {}),
+        },
+      );
+    } catch {
+      // Intentionally ignored — the moderation action already committed.
+    }
   }
 
   // GET /mod/reports/audit?reportId= — the immutable trail for one report,
@@ -348,7 +462,10 @@ export class ModerationService {
     appellantUserId: string,
     dto: CreateAppealDto,
   ): Promise<SubmittedAppealDTO> {
-    const target = await this.resolveAppealTarget(appellantUserId, dto.actionId);
+    const target = await this.resolveAppealTarget(
+      appellantUserId,
+      dto.actionId,
+    );
 
     // One OPEN (awaiting) appeal at a time. Keyed on the resolved action when
     // there is one, else on the appellant alone (a cold appeal with no
@@ -616,7 +733,7 @@ export class ModerationService {
       this.describeReported(report),
     ]);
     const detail = withDetail
-      ? this.buildDetail(report, reporter, reported)
+      ? await this.buildDetail(report, reporter, reported)
       : undefined;
     return toModReportDTO(report, reporter, reported, detail);
   }
@@ -803,11 +920,17 @@ export class ModerationService {
     return { id: report.subjectId, handle: report.subjectId, priorReports };
   }
 
-  private buildDetail(
+  private async buildDetail(
     report: Report,
     reporter: ModReporterDTO,
     reported: ModReportedDTO,
-  ): ModReportDetail {
+  ): Promise<ModReportDetail> {
+    // Listing-report enrichment (item #13): a `listing`-subject report is keyed
+    // by the listing's slug, so pull the live listing to surface its pasted
+    // ownership/claim evidence, and expose a `listing_dispute`'s free-text
+    // reason as its own field (over and above the shared `excerpt`).
+    const listingEnrichment = await this.buildListingEnrichment(report);
+
     return {
       contentAuthor: reported.handle,
       excerpt: report.detail ?? '',
@@ -831,6 +954,42 @@ export class ModerationService {
           meta: `${reported.priorReports} prior report(s)`,
         },
       ],
+      ...listingEnrichment,
+    };
+  }
+
+  /** The `disputeReason` + `listingEvidence` + `contactEmail` fields for a
+   * `listing`-subject report (item #13), or an empty object for every other
+   * subject type. The evidence is read from the live listing row (keyed by the
+   * report's `subjectId` slug); it degrades to omitted if the listing no longer
+   * exists. `contactEmail` is the off-account contact the disputer left
+   * (`DisputeListingDto.contactEmail`), persisted on the report row and surfaced
+   * moderator-only so a reviewer can reach a disputer with no account. */
+  private async buildListingEnrichment(
+    report: Report,
+  ): Promise<
+    Pick<ModReportDetail, 'disputeReason' | 'listingEvidence' | 'contactEmail'>
+  > {
+    if (report.subjectType !== ReportSubjectType.Listing) return {};
+
+    const listing = await this.listings.findOne({
+      where: { slug: report.subjectId },
+      select: { evidence: true },
+    });
+
+    const disputeReason =
+      report.reasonCode === 'listing_dispute' && report.detail
+        ? report.detail
+        : undefined;
+    const listingEvidence = listing?.evidence ? listing.evidence : undefined;
+    // Read straight off the report row — `findReportOrThrow` loads the full
+    // entity (no column `select`), so `contactEmail` is already present.
+    const contactEmail = report.contactEmail ? report.contactEmail : undefined;
+
+    return {
+      ...(disputeReason ? { disputeReason } : {}),
+      ...(listingEvidence ? { listingEvidence } : {}),
+      ...(contactEmail ? { contactEmail } : {}),
     };
   }
 

@@ -12,7 +12,7 @@ export class ReplyThreadDto {
   @IsString()
   @MinLength(1)
   @MaxLength(10000)
-  body: string;
+  body!: string;
 
   @IsOptional()
   @IsUUID()

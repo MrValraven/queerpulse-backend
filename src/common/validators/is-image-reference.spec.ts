@@ -23,7 +23,7 @@ function firstError(value: unknown): string | undefined {
 // decorator itself is what has to accept or reject `null` and `''`.
 class RequiredImageHolder {
   @IsImageReference()
-  imageUrl: string | null;
+  imageUrl!: string | null;
 }
 
 function firstRequiredError(value: unknown): string | undefined {

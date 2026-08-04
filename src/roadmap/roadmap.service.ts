@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { IsNull, Not, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { RoadmapItem, RoadmapColumn } from './entities/roadmap-item.entity';
 import { RoadmapIdea, RoadmapIdeaStatus } from './entities/roadmap-idea.entity';
@@ -13,6 +13,7 @@ import {
   toBuildingDTO,
   toPlannedDTO,
   toTopIdeaDTO,
+  toNotBuildingDTO,
 } from './roadmap-response';
 import { CastVoteDto } from './dto/cast-vote.dto';
 import { SubmitIdeaDto } from './dto/submit-idea.dto';
@@ -58,7 +59,14 @@ export class RoadmapService {
   }
 
   async getPublic(): Promise<RoadmapResponse> {
-    const allItems = await this.items.find({ order: { sortOrder: 'ASC' } });
+    // `isPublic`/`archived` gate what an anonymous visitor can see — an item
+    // hidden by the admin (isPublic=false) or sent to the Archive view
+    // (archived=true) must never appear on `/about/roadmap`, so this is the
+    // one place that filter is enforced for the public read.
+    const allItems = await this.items.find({
+      where: { isPublic: true, archived: false },
+      order: { sortOrder: 'ASC' },
+    });
     const shipped = allItems.filter(
       (item) => item.column === RoadmapColumn.Shipped,
     );
@@ -68,17 +76,37 @@ export class RoadmapService {
     const planned = allItems.filter(
       (item) => item.column === RoadmapColumn.Planned,
     );
+    // "Someday" — public backlog-column items, same card shape as `planned`.
+    const backlog = allItems.filter(
+      (item) => item.column === RoadmapColumn.Backlog,
+    );
     const publishedIdeas = await this.ideas.find({
       where: { status: RoadmapIdeaStatus.Published },
       order: { sortOrder: 'ASC' },
     });
-    const plannedVotes = await this.liveVoteCounts(
+    // "Not building this, and why" — dismissed ideas the admin gave a
+    // member-facing reason for. A dismissed idea with no `declineReason`
+    // (quietly dropped) stays fully internal.
+    const notBuildingIdeas = await this.ideas.find({
+      where: {
+        status: RoadmapIdeaStatus.Dismissed,
+        declineReason: Not(IsNull()),
+      },
+      order: { updatedAt: 'DESC' },
+    });
+    // One batched vote-count query for both item groups that show a vote
+    // count (planned + backlog share the "item" vote target).
+    const itemVotes = await this.liveVoteCounts(
       RoadmapVoteTarget.Item,
-      planned.map((item) => item.id),
+      [...planned, ...backlog].map((item) => item.id),
     );
     const ideaVotes = await this.liveVoteCounts(
       RoadmapVoteTarget.Idea,
       publishedIdeas.map((idea) => idea.id),
+    );
+    const notBuildingVotes = await this.liveVoteCounts(
+      RoadmapVoteTarget.Idea,
+      notBuildingIdeas.map((idea) => idea.id),
     );
     const settings = await this.settings.findOne({ where: { id: 1 } });
     return {
@@ -86,10 +114,16 @@ export class RoadmapService {
       shipped: shipped.map(toShippedDTO),
       building: building.map(toBuildingDTO),
       planned: planned.map((item) =>
-        toPlannedDTO(item, plannedVotes.get(item.id) ?? 0),
+        toPlannedDTO(item, itemVotes.get(item.id) ?? 0),
+      ),
+      backlog: backlog.map((item) =>
+        toPlannedDTO(item, itemVotes.get(item.id) ?? 0),
       ),
       topIdeas: publishedIdeas.map((idea) =>
         toTopIdeaDTO(idea, ideaVotes.get(idea.id) ?? 0),
+      ),
+      notBuilding: notBuildingIdeas.map((idea) =>
+        toNotBuildingDTO(idea, notBuildingVotes.get(idea.id) ?? 0),
       ),
     };
   }

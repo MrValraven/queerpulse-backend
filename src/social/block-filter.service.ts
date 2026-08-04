@@ -159,6 +159,27 @@ export class BlockFilterService {
     return new Set(rows.map((r) => r.mutedId));
   }
 
+  /**
+   * Directional mirror of `mutedUserIds`: the subset of `candidateIds` who
+   * have muted `targetId` — i.e. members from whose point of view `targetId`
+   * is silenced. Where `mutedUserIds(actor, …)` answers "whom did the actor
+   * mute?", this answers "who muted this member?". Used to suppress a push to a
+   * recipient who muted the sender (a person-level mute, distinct from muting a
+   * single conversation). `targetId` is never reported as muting itself.
+   */
+  async mutersOf(
+    targetId: string,
+    candidateIds: string[],
+  ): Promise<Set<string>> {
+    const ids = [...new Set(candidateIds)].filter((id) => id !== targetId);
+    if (!ids.length) return new Set();
+    const rows = await this.mutes.find({
+      where: { muterId: In(ids), mutedId: targetId },
+      select: { muterId: true },
+    });
+    return new Set(rows.map((r) => r.muterId));
+  }
+
   /** Union of `blockedUserIds` and `mutedUserIds` — the post-query analogue
    *  of `excludeHidden`, for non-paginated collections. */
   async hiddenUserIds(

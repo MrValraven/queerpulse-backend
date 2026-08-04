@@ -18,6 +18,9 @@ import type { DatabasePoolConfig } from '../config/database.config';
         // is a wiring bug, not a runtime condition to paper over with defaults.
         const databasePool =
           config.getOrThrow<DatabasePoolConfig>('database.pool');
+        const slowQueryThresholdMillis = config.getOrThrow<number>(
+          'database.slowQueryThresholdMillis',
+        );
         return {
           type: 'postgres' as const,
           url: config.get<string>('database.url'),
@@ -30,6 +33,16 @@ import type { DatabasePoolConfig } from '../config/database.config';
           ssl: resolvePostgresSsl(
             isPostgresSslEnabled(config.get<string>('app.nodeEnv')),
           ),
+          // `logging: ['error', 'warn']` (not `true`/`'all'`, which is far too
+          // noisy for a live service) so a slow-query line from
+          // `maxQueryExecutionTime` lands in the same log stream without
+          // drowning it. `maxQueryExecutionTime` LOGS any query slower than
+          // `DATABASE_SLOW_QUERY_THRESHOLD_MS` (default 500ms) — independent of,
+          // and well below, the `statement_timeout` kill-switch in `extra`
+          // below — so a degrading query is visible in logs before it ever
+          // risks the 30s cutoff. Previously unset anywhere in this DataSource.
+          logging: ['error', 'warn'],
+          maxQueryExecutionTime: slowQueryThresholdMillis,
           extra: {
             max: databasePool.max,
             min: databasePool.min,

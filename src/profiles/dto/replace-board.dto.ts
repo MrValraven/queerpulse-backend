@@ -11,9 +11,9 @@ import {
 import { BoardKind } from '../entities/board-post.entity';
 
 export class BoardItemDto {
-  @IsEnum(BoardKind) kind: BoardKind;
-  @IsString() @MinLength(1) @MaxLength(120) title: string;
-  @IsString() @MinLength(1) @MaxLength(120) slug: string;
+  @IsEnum(BoardKind) kind!: BoardKind;
+  @IsString() @MinLength(1) @MaxLength(120) title!: string;
+  @IsString() @MinLength(1) @MaxLength(120) slug!: string;
 }
 
 export class ReplaceBoardDto {
@@ -21,5 +21,5 @@ export class ReplaceBoardDto {
   @ArrayMaxSize(100)
   @ValidateNested({ each: true })
   @Type(() => BoardItemDto)
-  items: BoardItemDto[];
+  items!: BoardItemDto[];
 }

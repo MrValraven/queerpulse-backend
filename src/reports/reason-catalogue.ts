@@ -24,6 +24,16 @@ export type ReasonCode =
   | 'venue_accessibility'
   | 'housing_unsafe'
   | 'housing_scam'
+  // System-filed listing-domain codes (NOT member-selectable — deliberately
+  // absent from `REASON_CODES` / `SUBJECT_REASONS`, so `GET /reports/reasons`
+  // never offers them and `POST /reports`'s `@IsIn(REASON_CODES)` rejects them).
+  // They are set only by `ListingsService` when it files through the reports
+  // pipeline: `listing_dispute` = a member (possibly the named business)
+  // contesting a "friendly"/unowned listing via `POST /listings/:ref/dispute`;
+  // `listing_owner_notify` = the owner-outreach task auto-enqueued when a
+  // friendly/suggested listing is created (item #13).
+  | 'listing_dispute'
+  | 'listing_owner_notify'
   | 'other';
 
 /** Every valid `ReasonCode`, for `@IsIn` validation (no native string enum). */
@@ -67,6 +77,10 @@ const REASON_LABELS: Record<ReasonCode, string> = {
   venue_accessibility: 'An accessibility problem',
   housing_unsafe: 'Unsafe, discriminatory, or misrepresented housing',
   housing_scam: 'Scam or fake listing',
+  // System-filed listing codes (see the `ReasonCode` union comment) — labelled
+  // so any code→label lookup is total, but never surfaced as a report option.
+  listing_dispute: 'Dispute or claim of a business listing',
+  listing_owner_notify: 'Owner outreach — friendly/suggested listing',
   other: 'Something else — explained in detail',
 };
 
@@ -211,6 +225,18 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'harassment',
     'impersonation',
     'discrimination',
+    'spam',
+    'other',
+  ],
+  // A directory-listing review. No new codes: `harassment` covers an abusive
+  // review, `hate_speech` a slur, `discrimination` a discriminatory one,
+  // `housing_scam` ("Scam or fake listing") a fake/planted review, `spam`
+  // self-promotion abuse, and `other` (free-text) anything else.
+  [ReportSubjectType.Review]: [
+    'harassment',
+    'hate_speech',
+    'discrimination',
+    'housing_scam',
     'spam',
     'other',
   ],

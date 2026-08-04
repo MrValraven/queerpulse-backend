@@ -81,47 +81,47 @@ const numericTransformer = {
 @Entity('workshops')
 export class Workshop {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_workshops_slug', { unique: true })
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   @Index('IDX_workshops_host_id')
   @Column({ type: 'uuid' })
-  hostId: string;
+  hostId!: string;
 
   // Free-text descriptor of the host's standing for *this* workshop ("Editora
   // Anjos · 9 years printing"). Not part of `MemberRef` — that is the shared,
   // cross-domain member identity; this is workshop-owned copy.
   @Column({ type: 'varchar', nullable: true })
-  hostRole: string | null;
+  hostRole!: string | null;
 
   @Index('IDX_workshops_cat')
   @Column({ type: 'varchar' })
-  cat: string;
+  cat!: string;
 
   @Column({ type: 'varchar' })
-  title: string;
+  title!: string;
 
   // Second half of the headline, rendered in coral italic. Empty for
   // member-added workshops (`buildWorkshop` sets `titleEm: ""`).
   @Column({ type: 'varchar', default: '' })
-  titleEm: string;
+  titleEm!: string;
 
   @Column({
     type: 'enum',
     enum: WorkshopMode,
     enumName: 'workshop_mode_enum',
   })
-  mode: WorkshopMode;
+  mode!: WorkshopMode;
 
   // The numeric truth behind the frontend's derived `format` string
   // ("Workshop · 6 weeks · group of 8"). That string is i18n chrome composed
   // client-side (see `addWorkshop.build.ts`'s header comment), so the API
   // ships the inputs, not the sentence.
   @Column({ type: 'integer' })
-  weeks: number;
+  weeks!: number;
 
   // The cap. `spotsFilled` is deliberately NOT a column beside it: it is
   // derived with a COUNT over `workshop_rsvps` rows with status 'going' (see
@@ -130,17 +130,17 @@ export class Workshop {
   // than leave a denormalized counter to drift away from the bookings it
   // counts. Same treatment `volunteering` gives its own `spotsFilled`.
   @Column({ type: 'integer' })
-  spotsTotal: number;
+  spotsTotal!: number;
 
   @Column({ type: 'text' })
-  blurb: string;
+  blurb!: string;
 
   // "What you'll actually do" — one paragraph per entry.
   @Column({ type: 'text', array: true, default: '{}' })
-  about: string[];
+  about!: string[];
 
   @Column({ type: 'varchar', nullable: true })
-  heroPlaceholder: string | null;
+  heroPlaceholder!: string | null;
 
   @Column({
     type: 'enum',
@@ -148,53 +148,53 @@ export class Workshop {
     enumName: 'workshop_hero_tint_enum',
     default: WorkshopHeroTint.Default,
   })
-  heroTint: WorkshopHeroTint;
+  heroTint!: WorkshopHeroTint;
 
   // Headline price. The frontend's `price` is the formatted "€180"; the
   // structured value lives here (0 = free) with `currency` alongside, matching
   // how `jobs` separates `salary` (display) from `rateMin`/`rateMax` +
   // `currency` (structured). No formatted string is stored.
   @Column({ type: 'numeric', default: 0, transformer: numericTransformer })
-  price: number;
+  price!: number;
 
   @Column({ type: 'varchar', default: 'EUR' })
-  currency: string;
+  currency!: string;
 
   // The three below are nullable because `buildWorkshop` fills them with i18n
   // placeholders ("date TBA", "six weeks · solidarity rate available") that the
   // client composes itself. NULL means "the host gave us nothing — render your
   // own default"; a value is the host's own words and passes through.
   @Column({ type: 'varchar', nullable: true })
-  priceSub: string | null;
+  priceSub!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  startDate: string | null;
+  startDate!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  cancellation: string | null;
+  cancellation!: string | null;
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  tiers: WorkshopTier[];
+  tiers!: WorkshopTier[];
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  sessions: WorkshopSession[];
+  sessions!: WorkshopSession[];
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  needs: WorkshopNeed[];
+  needs!: WorkshopNeed[];
 
   @Column({ type: 'text', array: true, default: '{}' })
-  pastWork: string[];
+  pastWork!: string[];
 
   @Column({ type: 'text', array: true, default: '{}' })
-  tags: string[];
+  tags!: string[];
 
   // Always fully populated by the service — see `normalizeLocation`.
   @Column({ type: 'jsonb' })
-  location: WorkshopLocation;
+  location!: WorkshopLocation;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { SelectQueryBuilder } from 'typeorm';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
+import { Activity } from '../profiles/entities/activity.entity';
 import { SocialLink } from '../profiles/entities/social-link.entity';
 import { WorkItem } from '../profiles/entities/work-item.entity';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
@@ -178,6 +179,7 @@ describe('PublicProfilesService', () => {
     };
     const socialLinks = { find: jest.fn(() => Promise.resolve(socialRows)) };
     const workItems = { find: jest.fn(() => Promise.resolve(workRows)) };
+    const activities = { find: jest.fn(() => Promise.resolve([])) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -185,6 +187,7 @@ describe('PublicProfilesService', () => {
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: getRepositoryToken(SocialLink), useValue: socialLinks },
         { provide: getRepositoryToken(WorkItem), useValue: workItems },
+        { provide: getRepositoryToken(Activity), useValue: activities },
         { provide: getRepositoryToken(MemberPreferences), useValue: {} },
       ],
     }).compile();

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { MessagingModule } from '../messaging/messaging.module';
 import { UsersModule } from '../users/users.module';
 import { AdminHousingListingsController } from './admin-housing-listings.controller';
@@ -16,6 +17,9 @@ import { HousingListing } from './entities/housing-listing.entity';
     UsersModule,
     // MessagingModule exports MessagingService (enquiry delivery).
     MessagingModule,
+    // Read-only: public housing browse/detail/search withhold a
+    // moderator-taken-down listing (keyed by slug), mirroring the directory.
+    ContentModerationModule,
   ],
   controllers: [
     HousingListingsController,
@@ -23,5 +27,9 @@ import { HousingListing } from './entities/housing-listing.entity';
     AdminHousingListingsController,
   ],
   providers: [HousingListingsService, HousingDirectoryService],
+  // HousingDirectoryService is exported for the cross-entity SearchModule
+  // (public LIVE-listing search); the owner-mutation HousingListingsService
+  // stays module-private.
+  exports: [HousingDirectoryService],
 })
 export class HousingListingsModule {}

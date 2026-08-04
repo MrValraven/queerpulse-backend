@@ -38,9 +38,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * the table already holds duplicate awaiting appeals for a (member, action) —
  * de-duplicate those rows first if so.
  */
-export class AddAppealsOpenDedupeIndex1785003500000
-  implements MigrationInterface
-{
+export class AddAppealsOpenDedupeIndex1785003500000 implements MigrationInterface {
   name = 'AddAppealsOpenDedupeIndex1785003500000';
 
   // Runs outside a transaction for `CREATE UNIQUE INDEX CONCURRENTLY`; requires

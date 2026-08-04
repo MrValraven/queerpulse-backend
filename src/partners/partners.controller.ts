@@ -111,7 +111,9 @@ export class PartnerApplicationsController {
   @ApiOkResponse({ description: 'The triaged partner application.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({ description: 'Requires an admin role.' })
-  @ApiNotFoundResponse({ description: 'The partner application does not exist.' })
+  @ApiNotFoundResponse({
+    description: 'The partner application does not exist.',
+  })
   triage(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: TriagePartnerApplicationDto,

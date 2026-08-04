@@ -72,21 +72,21 @@ export interface DraftPayload {
 @Index('IDX_draft_user_id_updated_at', ['userId', 'updatedAt'])
 export class Draft {
   @PrimaryColumn({ type: 'varchar' })
-  id: string;
+  id!: string;
 
   @Index('IDX_draft_user_id')
   @PrimaryColumn({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({ type: 'varchar' })
-  kind: string;
+  kind!: string;
 
   @Column({ type: 'jsonb' })
-  payload: DraftPayload;
+  payload!: DraftPayload;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

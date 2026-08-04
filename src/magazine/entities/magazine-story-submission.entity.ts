@@ -25,20 +25,20 @@ export enum SubmissionStatus {
 @Entity('magazine_story_submission')
 export class MagazineStorySubmission {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_magazine_story_submission_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({ type: 'varchar' })
-  format: string;
+  format!: string;
 
   @Column({ type: 'varchar' })
-  workingTitle: string;
+  workingTitle!: string;
 
   @Column({ type: 'text' })
-  pitch: string;
+  pitch!: string;
 
   @Column({
     type: 'enum',
@@ -46,8 +46,8 @@ export class MagazineStorySubmission {
     enumName: 'magazine_submission_status_enum',
     default: SubmissionStatus.Submitted,
   })
-  status: SubmissionStatus;
+  status!: SubmissionStatus;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

@@ -140,6 +140,23 @@ export interface MessageResponse {
    *  for any non-deleted message a DM participant can see (the endpoint re-checks
    *  participation); false for tombstones. Groups may narrow this later. */
   canPin: boolean;
+  /** Server-authoritative: whether this viewer may edit this message's body.
+   *  True iff the viewer is the author AND the message is within the same
+   *  `EDIT_WINDOW_MS` of `createdAt` that `MessagesService.editMessage` itself
+   *  enforces — computed from the identical constant so this flag can never
+   *  drift from what the edit endpoint would actually accept. False for a
+   *  tombstone (the edit endpoint 404s a deleted message). */
+  canEdit: boolean;
+  /** Server-authoritative: whether this viewer may delete this message. True
+   *  for the author OR a platform admin/moderator — mirrors
+   *  `MessagesService.deleteMessage`'s own actor check exactly. False for an
+   *  already-deleted message (deleting again is a harmless no-op server-side,
+   *  but there is nothing left to delete). */
+  canDelete: boolean;
+  /** Server-authoritative: whether this viewer may report this message. True
+   *  for any non-deleted message the viewer did not author — reporting your
+   *  own message, or a tombstone with no content left, is never offered. */
+  canReport: boolean;
   /** The quoted message this one replies to, resolved server-side. Null if not a reply. */
   replyTo: {
     id: string;

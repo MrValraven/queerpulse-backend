@@ -9,10 +9,10 @@ export class SetAffiliationDto {
   @IsString()
   @IsNotEmpty()
   @MaxLength(200)
-  companySlug: string;
+  companySlug!: string;
 
   @IsString()
   @IsNotEmpty()
   @MaxLength(200)
-  role: string;
+  role!: string;
 }

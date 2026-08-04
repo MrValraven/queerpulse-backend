@@ -10,15 +10,15 @@ export type DsarArticleInput = 15 | 16 | 17 | 21;
 
 export class SubmitDsarDto {
   @IsIn([15, 16, 17, 21])
-  article: DsarArticleInput;
+  article!: DsarArticleInput;
 
   @IsArray()
   @IsString({ each: true })
-  scopes: string[];
+  scopes!: string[];
 
   @IsString()
   @MinLength(1)
-  details: string;
+  details!: string;
 
   @IsOptional()
   @IsString()
@@ -26,5 +26,5 @@ export class SubmitDsarDto {
 
   @IsString()
   @MinLength(1)
-  reauthToken: string;
+  reauthToken!: string;
 }

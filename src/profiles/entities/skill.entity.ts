@@ -9,21 +9,21 @@ import {
 @Entity('skills')
 export class Skill {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_skills_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({ type: 'varchar' })
-  name: string;
+  name!: string;
 
   @Column({ type: 'varchar' })
-  meta: string;
+  meta!: string;
 
   @Column({ type: 'int', default: 0 })
-  position: number;
+  position!: number;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

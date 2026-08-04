@@ -9,7 +9,14 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { EntityManager, FindOptionsWhere, In, Repository } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  FindOptionsWhere,
+  In,
+  Not,
+  Repository,
+} from 'typeorm';
 import {
   CONNECTION_ACCEPTED,
   ConnectionAcceptedEvent,
@@ -17,6 +24,7 @@ import {
   ConnectionRequestedEvent,
 } from './connection.events';
 import { BlockFilterService } from '../social/block-filter.service';
+import { Block } from '../social/entities/block.entity';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { VouchService } from '../vouch/vouch.service';
@@ -48,6 +56,7 @@ export class ConnectionsService {
     private readonly vouchService: VouchService,
     private readonly eventEmitter: EventEmitter2,
     private readonly blockFilter: BlockFilterService,
+    private readonly dataSource: DataSource,
   ) {}
 
   async requestConnection(
@@ -292,20 +301,64 @@ export class ConnectionsService {
         return conn;
       }
       case 'block': {
-        // Can't seize a block the OTHER party already placed (else they could
-        // re-block → unblock/remove to escape someone else's block).
-        if (
-          conn.status === ConnectionStatus.Blocked &&
-          conn.blockedBy !== actorId
-        ) {
-          throw new ForbiddenException(
-            'This connection is already blocked by the other member',
+        // Two changes here close P1-3:
+        //
+        // 1. TOCTOU fix. The old code read the row, checked `blockedBy` in
+        //    memory, then did an UNCONDITIONAL `save`. Between the read and the
+        //    save the OTHER party could place their own block, which this
+        //    actor's save would then overwrite (`blockedBy = actorId`) —
+        //    letting them seize, then `unblock`/`remove`, and escape someone
+        //    else's block. The write is now an atomic CONDITIONAL update
+        //    (`status != Blocked`), mirroring `social.service.blockMember`: a
+        //    racing block by the other party leaves `affected === 0`, so the
+        //    seizure can never land. Re-blocking one's own block is idempotent.
+        //
+        // 2. Unify the two block systems. Connection-level block now ALSO
+        //    writes a first-class `blocks` row (same transaction), so
+        //    `BlockFilterService` — which feeds/search/notifications/group-adds
+        //    consult — sees a connection-level block just like a `/blocks` one.
+        //    Previously `respond('block')` wrote no `blocks` row and those
+        //    surfaces were blind to it.
+        const blockerId = actorId;
+        const blockedId = this.otherId(conn, actorId);
+        const { low, high } = this.pair(conn.requesterId, conn.addresseeId);
+        const respondedAt = new Date();
+        await this.dataSource.transaction(async (manager) => {
+          const claim = await manager.update(
+            Connection,
+            {
+              userLow: low,
+              userHigh: high,
+              status: Not(ConnectionStatus.Blocked),
+            },
+            {
+              status: ConnectionStatus.Blocked,
+              blockedBy: blockerId,
+              respondedAt,
+            },
           );
-        }
-        conn.status = ConnectionStatus.Blocked;
-        conn.blockedBy = actorId;
-        conn.respondedAt = new Date();
-        return this.connections.save(conn);
+          if (claim.affected === 0) {
+            // Already blocked. If the OTHER party owns the block, refuse (no
+            // seizure) and roll back so no `blocks` row is written; if this
+            // actor already owns it, fall through — re-blocking is idempotent.
+            const current = await manager.findOneByOrFail(Connection, {
+              id: conn.id,
+            });
+            if (current.blockedBy !== blockerId) {
+              throw new ForbiddenException(
+                'This connection is already blocked by the other member',
+              );
+            }
+          }
+          await manager
+            .createQueryBuilder()
+            .insert()
+            .into(Block)
+            .values({ blockerId, blockedId, reason: null })
+            .orIgnore()
+            .execute();
+        });
+        return this.connections.findOneByOrFail({ id: conn.id });
       }
       case 'unblock': {
         if (conn.status !== ConnectionStatus.Blocked) {
@@ -314,9 +367,31 @@ export class ConnectionsService {
         if (conn.blockedBy !== actorId) {
           throw new ForbiddenException('Only the blocker can unblock');
         }
-        conn.status = ConnectionStatus.Declined;
-        conn.blockedBy = null;
-        return this.connections.save(conn);
+        // Symmetric inverse of the `block` case (P1-3, unblock side): lifting a
+        // connection-level block must ALSO delete the first-class `blocks` row
+        // that block wrote, or `BlockFilterService` (feeds, search,
+        // notifications, group-adds) would keep hiding the pair even though the
+        // connection edge is restored. Mirrors `social.service.unblockMember`
+        // exactly — both entry points now agree, whichever placed the block.
+        // The connection flip is CONDITIONAL on `blockedBy = actorId` so a
+        // racing seizure by the other party can't be lifted by the wrong actor,
+        // matching the in-memory guard above without a TOCTOU window. The pair
+        // returns to `Declined` (re-connecting needs a fresh request), not
+        // `Accepted`.
+        const blockedId = this.otherId(conn, actorId);
+        await this.dataSource.transaction(async (manager) => {
+          await manager.update(
+            Connection,
+            {
+              id: conn.id,
+              status: ConnectionStatus.Blocked,
+              blockedBy: actorId,
+            },
+            { status: ConnectionStatus.Declined, blockedBy: null },
+          );
+          await manager.delete(Block, { blockerId: actorId, blockedId });
+        });
+        return this.connections.findOneByOrFail({ id: conn.id });
       }
     }
   }

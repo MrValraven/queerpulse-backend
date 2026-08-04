@@ -55,7 +55,9 @@ export class AccountRetentionService {
         'retention.maxBatchesPerRun',
         50,
       );
-      const cutoff = new Date(Date.now() - retentionDays * MILLISECONDS_PER_DAY);
+      const cutoff = new Date(
+        Date.now() - retentionDays * MILLISECONDS_PER_DAY,
+      );
 
       // Only `ready` archives carry a payload worth reclaiming; expiring those
       // is what makes the `Expired` status reachable. `COALESCE` falls back to

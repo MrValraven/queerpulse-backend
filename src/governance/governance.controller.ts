@@ -49,7 +49,9 @@ export class GovernanceController {
   }
 
   @Get('finances')
-  @ApiOperation({ summary: 'Get the quarterly financial-transparency snapshot' })
+  @ApiOperation({
+    summary: 'Get the quarterly financial-transparency snapshot',
+  })
   @ApiOkResponse({ description: 'The finance report for the quarter.' })
   @ApiNotFoundResponse({
     description: 'No finance report exists for the requested quarter.',

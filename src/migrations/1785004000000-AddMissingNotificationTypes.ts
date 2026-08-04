@@ -15,9 +15,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * keeps it re-run-safe alongside the enum's existing values. `down()` is a
  * documented no-op — Postgres has no `ALTER TYPE ... DROP VALUE`.
  */
-export class AddMissingNotificationTypes1785004000000
-  implements MigrationInterface
-{
+export class AddMissingNotificationTypes1785004000000 implements MigrationInterface {
   name = 'AddMissingNotificationTypes1785004000000';
 
   private static readonly VALUES = [

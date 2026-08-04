@@ -34,6 +34,25 @@ export function toResourceResponse(resource: Resource): ResourceResponseDTO {
   };
 }
 
+/**
+ * Lightweight row for the cross-entity global search (`SearchService`) — the
+ * body/meta columns stay out of it. Mapped to a `SearchResultDTO` by hand in
+ * `search/search-response.ts`.
+ */
+export interface ResourceSearchRow {
+  slug: string;
+  title: string;
+  category: string;
+}
+
+export function toResourceSearchRow(resource: Resource): ResourceSearchRow {
+  return {
+    slug: resource.slug,
+    title: resource.title,
+    category: resource.category,
+  };
+}
+
 export function toGlossaryTermResponse(
   term: GlossaryTerm,
 ): GlossaryTermResponseDTO {

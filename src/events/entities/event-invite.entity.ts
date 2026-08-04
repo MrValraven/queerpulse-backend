@@ -17,18 +17,18 @@ export enum EventInviteStatus {
 @Unique('UQ_event_invites', ['eventId', 'inviteeId'])
 export class EventInvite {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_event_invites_event_id')
   @Column({ type: 'uuid' })
-  eventId: string;
+  eventId!: string;
 
   @Column({ type: 'uuid' })
-  inviterId: string;
+  inviterId!: string;
 
   @Index('IDX_event_invites_invitee_id')
   @Column({ type: 'uuid' })
-  inviteeId: string;
+  inviteeId!: string;
 
   @Column({
     type: 'enum',
@@ -36,8 +36,8 @@ export class EventInvite {
     enumName: 'event_invites_status_enum',
     default: EventInviteStatus.Pending,
   })
-  status: EventInviteStatus;
+  status!: EventInviteStatus;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

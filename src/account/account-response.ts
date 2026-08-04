@@ -137,4 +137,13 @@ export interface EmailPreferenceResponse {
   category: string;
   email: boolean;
   locked?: boolean;
+  /**
+   * ⚠️ ALWAYS `true` AT LAUNCH. There is NO transactional mailer wired (no
+   * provider, no dependency, no sender) — see `docs/ops/no-email-at-launch.md`.
+   * Every toggle here is stored but NOTHING IS DELIVERED. This flag exists so
+   * the endpoint's own payload states the gap rather than implying delivery;
+   * the FE must render it as "email isn't live yet", not a working switch.
+   * Drop it (or flip to omitted) when the mailer lands.
+   */
+  comingSoon: boolean;
 }

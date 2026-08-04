@@ -10,15 +10,15 @@ import {
 class AffiliationInputDTO {
   @IsString()
   @MaxLength(20)
-  targetType: string;
+  targetType!: string;
 
   @IsString()
   @MaxLength(200)
-  targetSlug: string;
+  targetSlug!: string;
 
   @IsString()
   @MaxLength(20)
-  role: string;
+  role!: string;
 }
 
 export class ReplaceAffiliationsDTO {
@@ -26,5 +26,5 @@ export class ReplaceAffiliationsDTO {
   @ArrayMaxSize(12)
   @ValidateNested({ each: true })
   @Type(() => AffiliationInputDTO)
-  items: AffiliationInputDTO[];
+  items!: AffiliationInputDTO[];
 }

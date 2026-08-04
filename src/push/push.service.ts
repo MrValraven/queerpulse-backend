@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import webPush from 'web-push';
 import { assertPublicUrl } from '../link-preview/ssrf';
 import { PushSubscription } from './entities/push-subscription.entity';
@@ -92,9 +92,23 @@ export class PushService implements OnModuleInit {
     await this.subscriptions.delete({ userId, endpoint });
   }
 
+  // Single-recipient convenience wrapper — delegates to `sendToUsers` so every
+  // caller (single or fan-out) shares the one-query subscription lookup below.
   async sendToUser(userId: string, payload: PushPayload): Promise<void> {
-    if (!this.enabled) return;
-    const rows = await this.subscriptions.find({ where: { userId } });
+    return this.sendToUsers([userId], payload);
+  }
+
+  // Fan out one push payload to every recipient's subscriptions in ONE query
+  // instead of one `find` per recipient. Callers that used to loop
+  // `userIds.map((userId) => this.push.sendToUser(userId, payload))`
+  // (`push.listener.ts`'s group/DM message fan-out, `event-reminders.service.ts`'s
+  // reminder fan-out) turned N recipients into N subscription lookups; this
+  // resolves every recipient's subscriptions with a single `IN (...)` query.
+  async sendToUsers(userIds: string[], payload: PushPayload): Promise<void> {
+    if (!this.enabled || userIds.length === 0) return;
+    const rows = await this.subscriptions.find({
+      where: { userId: In(userIds) },
+    });
     const body = JSON.stringify(payload);
     await Promise.all(
       rows.map(async (row) => {

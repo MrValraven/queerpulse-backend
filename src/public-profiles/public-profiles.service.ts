@@ -1,7 +1,9 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
+import { Activity } from '../profiles/entities/activity.entity';
 import { SocialLink } from '../profiles/entities/social-link.entity';
 import { WorkItem } from '../profiles/entities/work-item.entity';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
@@ -23,13 +25,25 @@ const NOT_FOUND_MESSAGE = 'Profile not found';
 
 @Injectable()
 export class PublicProfilesService {
+  // A member is taken down under the `member` subject type, keyed by slug or
+  // userId (see `Report.subjectId`) — the gate below checks both.
+  private static readonly MEMBER_SUBJECT_TYPE = 'member';
+
   constructor(
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     @InjectRepository(SocialLink)
     private readonly socialLinks: Repository<SocialLink>,
     @InjectRepository(WorkItem)
     private readonly workItems: Repository<WorkItem>,
+    @InjectRepository(Activity)
+    private readonly activities: Repository<Activity>,
+    private readonly contentModeration: ContentModerationService,
   ) {}
+
+  // The public page shows the same short "Recent activity" window the
+  // member-facing profile does. Only reached after the publish + takedown
+  // gates, and every row is already write-filtered to public-visible actions.
+  private static readonly ACTIVITY_LIMIT = 6;
 
   /**
    * Resolve a published profile for an anonymous caller.
@@ -105,9 +119,28 @@ export class PublicProfilesService {
       throw new NotFoundException(NOT_FOUND_MESSAGE);
     }
 
+    // Moderator takedown gate. An anonymous caller is never the owner and never
+    // staff, so a `hide_content`/`remove_content` on this member is absolute
+    // here — the open web must not serve a hidden/removed member. The SAME
+    // not-found answer as every other gate above, for the same reason: the
+    // rejection must not distinguish "taken down" from "never existed". Checked
+    // by slug OR userId, matching how a member is addressed in a report.
+    const subjectIds = [profile.slug, profile.userId];
+    const moderationStates = await this.contentModeration.statesForAnyType(
+      [PublicProfilesService.MEMBER_SUBJECT_TYPE],
+      subjectIds,
+    );
+    const takenDown = subjectIds.some((subjectId) => {
+      const state = moderationStates.get(subjectId);
+      return !!state && (state.hidden || state.removed);
+    });
+    if (takenDown) {
+      throw new NotFoundException(NOT_FOUND_MESSAGE);
+    }
+
     // Only reached once the profile is confirmed published, so an un-published
-    // member's socials/work are never even read out of the database.
-    const [socials, work] = await Promise.all([
+    // member's socials/work/activity are never even read out of the database.
+    const [socials, work, activity] = await Promise.all([
       this.socialLinks.find({
         where: { userId: profile.userId },
         order: { position: 'ASC' },
@@ -116,8 +149,13 @@ export class PublicProfilesService {
         where: { userId: profile.userId },
         order: { position: 'ASC' },
       }),
+      this.activities.find({
+        where: { userId: profile.userId },
+        order: { occurredAt: 'DESC' },
+        take: PublicProfilesService.ACTIVITY_LIMIT,
+      }),
     ]);
 
-    return toPublicProfile(profile, socials, work);
+    return toPublicProfile(profile, socials, work, activity);
   }
 }

@@ -4,11 +4,11 @@ export class CreateJoinRequestDto {
   @IsString()
   @MinLength(2)
   @MaxLength(120)
-  name: string;
+  name!: string;
 
   @IsString()
   @MaxLength(120)
-  householdSize: string;
+  householdSize!: string;
 
   @IsOptional()
   @IsString()

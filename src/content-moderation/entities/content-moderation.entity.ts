@@ -36,46 +36,46 @@ import {
 })
 export class ContentModeration {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Column({ type: 'varchar' })
-  subjectType: string;
+  subjectType!: string;
 
   @Column({ type: 'varchar' })
-  subjectId: string;
+  subjectId!: string;
 
   // Set by `hide_content` (or the hidden side of `remove_content`). A hidden
   // item is withheld from public/member read paths but is NOT tombstoned —
   // reversing it restores the original content untouched.
   @Column({ type: 'timestamptz', nullable: true })
-  hiddenAt: Date | null;
+  hiddenAt!: Date | null;
 
   // Set by `remove_content`. A removed item is a tombstone: read paths that
   // already tombstone (forum/community) render it "[removed]"; others withhold
   // it entirely.
   @Column({ type: 'timestamptz', nullable: true })
-  removedAt: Date | null;
+  removedAt!: Date | null;
 
   // The moderator who last changed this state. `uuid` with no FK, mirroring
   // `listing_reviews.reviewer_id` / `mod_audit_log.actor_id`: a snapshot
   // identity reference, not a relationship an erasure sweep cascades through.
   @Column({ type: 'uuid', nullable: true })
-  moderatedBy: string | null;
+  moderatedBy!: string | null;
 
   // The report the action was taken against, when there was one (bulk/queue
   // actions always have one). Snapshot reference, no FK.
   @Column({ type: 'uuid', nullable: true })
-  reportId: string | null;
+  reportId!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  reasonCode: string | null;
+  reasonCode!: string | null;
 
   @Column({ type: 'text', nullable: true })
-  note: string | null;
+  note!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

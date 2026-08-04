@@ -27,29 +27,29 @@ export const COMMUNITY_FEATURES = [
 export type CommunityFeature = (typeof COMMUNITY_FEATURES)[number];
 
 export class CreateCommunityDto {
-  @IsString() @MinLength(1) @MaxLength(200) name: string;
-  @IsString() @MinLength(1) @MaxLength(5000) purpose: string;
-  @IsEnum(CommunityType) type: CommunityType;
-  @IsString() @MinLength(1) @MaxLength(2000) whoFor: string;
-  @IsEnum(AccessTier) accessTier: AccessTier;
-  @IsBoolean() rosterVisible: boolean;
+  @IsString() @MinLength(1) @MaxLength(200) name!: string;
+  @IsString() @MinLength(1) @MaxLength(5000) purpose!: string;
+  @IsEnum(CommunityType) type!: CommunityType;
+  @IsString() @MinLength(1) @MaxLength(2000) whoFor!: string;
+  @IsEnum(AccessTier) accessTier!: AccessTier;
+  @IsBoolean() rosterVisible!: boolean;
 
   @IsArray()
   @ArrayMaxSize(COMMUNITY_FEATURES.length)
   @IsIn(COMMUNITY_FEATURES, { each: true })
-  features: string[];
+  features!: string[];
 
   @IsArray()
   @ArrayMaxSize(50)
   @IsString({ each: true })
   @MaxLength(300, { each: true })
-  rules: string[];
+  rules!: string[];
 
-  @IsString() @MinLength(1) @MaxLength(200) tagline: string;
+  @IsString() @MinLength(1) @MaxLength(200) tagline!: string;
 
   // Desired slug; `CommunitiesService.createWithUniqueRef` slugifies +
   // de-dupes it. Ignored entirely on PATCH (see `UpdateCommunityDto`).
-  @IsString() @MinLength(1) @MaxLength(100) handle: string;
+  @IsString() @MinLength(1) @MaxLength(100) handle!: string;
 
   // Member slugs -> seeded as 'mod' roster rows on creation.
   @IsOptional()

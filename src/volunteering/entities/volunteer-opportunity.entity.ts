@@ -46,14 +46,14 @@ export interface OpportunityDetailBody {
 @Entity('volunteer_opportunities')
 export class VolunteerOpportunity {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_volunteer_opportunities_slug', { unique: true })
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   @Column({ type: 'varchar' })
-  org: string;
+  org!: string;
 
   // Nullable, no FK constraint yet — the `partners` table doesn't exist
   // until Phase D, which adds the FK constraint in its own migration (see
@@ -62,54 +62,54 @@ export class VolunteerOpportunity {
   // nothing in Phase C reads it back out.
   @Index('IDX_volunteer_opportunities_partner_id')
   @Column({ type: 'uuid', nullable: true })
-  partnerId: string | null;
+  partnerId!: string | null;
 
   @Column({ type: 'varchar' })
-  role: string;
+  role!: string;
 
   @Column({
     type: 'enum',
     enum: OpportunityCause,
     enumName: 'volunteer_opportunities_cause_enum',
   })
-  cause: OpportunityCause;
+  cause!: OpportunityCause;
 
   @Column({
     type: 'enum',
     enum: OpportunityCommitLevel,
     enumName: 'volunteer_opportunities_commit_enum',
   })
-  commit: OpportunityCommitLevel;
+  commit!: OpportunityCommitLevel;
 
   // Display-only commitment string (e.g. "2 hrs / week"); `commit` above is
   // the coarse low/medium filter facet.
   @Column({ type: 'varchar' })
-  time: string;
+  time!: string;
 
   @Column({ type: 'varchar' })
-  location: string;
+  location!: string;
 
   @Column({ type: 'text', array: true, default: '{}' })
-  skills: string[];
+  skills!: string[];
 
   // Card blurb; maps to `CreateOpportunityDto.desc` at the request boundary.
   @Column({ type: 'text' })
-  desc: string;
+  desc!: string;
 
   // Always populated by the service (never relies on a DB default) — see
   // `VolunteeringService`'s `normalizeDetail`.
   @Column({ type: 'jsonb' })
-  detail: OpportunityDetailBody;
+  detail!: OpportunityDetailBody;
 
   @Column({ type: 'int' })
-  spotsTotal: number;
+  spotsTotal!: number;
 
   @Column({ type: 'varchar' })
-  applyRole: string;
+  applyRole!: string;
 
   @Index('IDX_volunteer_opportunities_poster_id')
   @Column({ type: 'uuid' })
-  posterId: string;
+  posterId!: string;
 
   @Column({
     type: 'enum',
@@ -117,11 +117,11 @@ export class VolunteerOpportunity {
     enumName: 'volunteer_opportunities_status_enum',
     default: OpportunityStatus.Open,
   })
-  status: OpportunityStatus;
+  status!: OpportunityStatus;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

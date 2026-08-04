@@ -1,6 +1,7 @@
 import { toImageUrl } from '../common/image-url';
 import { MagazineArticle } from './entities/magazine-article.entity';
 import { MagazineAuthor } from './entities/magazine-author.entity';
+import { DeckSlide, MagazineDeck } from './entities/magazine-deck.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
 import {
   MagazineStorySubmission,
@@ -110,6 +111,78 @@ export function toArticleResponse(
   return {
     ...toArticleListItem(article, author, issueNumber),
     body: article.body,
+  };
+}
+
+/**
+ * Lightweight row for the cross-entity global search (`SearchService`) — just
+ * the fields the search-result card needs, so a magazine hit never has to
+ * hydrate its author/issue. Mapped to a `SearchResultDTO` by hand in
+ * `search/search-response.ts` (no column leakage).
+ */
+export interface ArticleSearchRow {
+  slug: string;
+  title: string;
+  dek: string;
+}
+
+export function toArticleSearchRow(article: MagazineArticle): ArticleSearchRow {
+  return {
+    slug: article.slug,
+    title: article.title,
+    dek: article.dek,
+  };
+}
+
+/**
+ * `id` is included (unlike `ArticleListItem`/`ArticleResponse` above) because
+ * the sub-project 3 authoring UI loads a deck for editing by uuid, not slug.
+ * Exposing it on the public read is harmless — the reader keys off `slug`.
+ */
+export interface DeckListItemResponse {
+  id: string;
+  slug: string;
+  title: string;
+  kicker: string;
+  section: string;
+  byline: string;
+  role: string | null;
+  readTime: string;
+  cover: string;
+  coverDesc: string;
+  tags: string[];
+  publishedAt: string | null;
+}
+
+export interface DeckResponse extends DeckListItemResponse {
+  authorBio: string;
+  related: string[];
+  slides: DeckSlide[];
+}
+
+export function toDeckListItem(deck: MagazineDeck): DeckListItemResponse {
+  return {
+    id: deck.id,
+    slug: deck.slug,
+    title: deck.title,
+    kicker: deck.kicker,
+    section: deck.section,
+    byline: deck.byline,
+    role: deck.role,
+    readTime: deck.readTime,
+    cover: deck.cover,
+    coverDesc: deck.coverDesc,
+    tags: deck.tags,
+    publishedAt: deck.publishedAt ? deck.publishedAt.toISOString() : null,
+  };
+}
+
+export function toDeckResponse(deck: MagazineDeck): DeckResponse {
+  return {
+    ...toDeckListItem(deck),
+    authorBio: deck.authorBio,
+    related: deck.related,
+    slides: deck.slides,
   };
 }
 

@@ -14,10 +14,7 @@ import {
   RosterRole,
 } from './entities/community-member.entity';
 import { CommunityPost, PostKind } from './entities/community-post.entity';
-import {
-  CommunityPostReaction,
-  ReactionKey,
-} from './entities/community-post-reaction.entity';
+import { ReactionKey } from './entities/community-post-reaction.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 
 /** The viewer, as the post/reply mappers need them: their user id plus their
@@ -75,6 +72,11 @@ export interface CommunityDetailDTO extends CommunityCardDTO {
   rules: string[];
   owner: MemberRef | null;
   createdAt: string;
+  // True once an owner has archived the community. Only ever reaches an
+  // owner/mod — outsiders get a 404 for an archived community, never this
+  // detail — so the mod panel can show the archived state instead of pretending
+  // the community is still live.
+  archived: boolean;
   myJoinRequestStatus: JoinRequestStatus | null;
   // A moderator takedown. Only ever surfaced to an owner/mod — outsiders get a
   // 404 for a moderated community, never this detail — so they know why the
@@ -119,6 +121,7 @@ export function toCommunityDetail(
     rules: c.rules,
     owner,
     createdAt: c.createdAt.toISOString(),
+    archived: c.archivedAt != null,
     myJoinRequestStatus,
     moderationRemoved: moderation?.removed ?? false,
     moderationHidden: moderation?.hidden ?? false,
@@ -257,24 +260,30 @@ const REACTION_KEY_ORDER: ReactionKey[] = [
 ];
 
 /**
+ * Aggregate reaction data for a single post: a count per key plus the
+ * viewer's own reacted keys — resolved via a `GROUP BY` and a viewer-scoped
+ * lookup (`CommunityPostsService.reactionAggregatesByPost`), never by
+ * fetching every reaction row. A post with thousands of reactions used to
+ * mean thousands of rows fetched (and shipped, pre-truncation) just to
+ * compute 4 numbers; this is the bounded replacement.
+ */
+export interface ReactionAggregate {
+  counts: Map<ReactionKey, number>;
+  mine: Set<ReactionKey>;
+}
+
+/**
  * Builds the 4-entry (one per `ReactionKey`, always present even at count 0)
- * summary for a single post from its raw reaction rows. `mine` is true iff
- * `viewerId` has a row for that key (callers pass every reaction row for the
- * post — one `IN`-batched query across a whole page, not a per-post query —
- * mirrors `EventsService.summarize`'s "single query across the page" shape).
+ * summary for a single post from its pre-aggregated reaction data.
  */
 export function toReactionSummaries(
-  reactionRows: Pick<CommunityPostReaction, 'key' | 'userId'>[],
-  viewerId: string,
+  reactions: ReactionAggregate,
 ): CommunityReactionSummary[] {
-  return REACTION_KEY_ORDER.map((key) => {
-    const rows = reactionRows.filter((r) => r.key === key);
-    return {
-      key,
-      count: rows.length,
-      mine: rows.some((r) => r.userId === viewerId),
-    };
-  });
+  return REACTION_KEY_ORDER.map((key) => ({
+    key,
+    count: reactions.counts.get(key) ?? 0,
+    mine: reactions.mine.has(key),
+  }));
 }
 
 export function toCommunityReply(
@@ -310,16 +319,21 @@ export function toCommunityReply(
 }
 
 /**
- * `reactionRows` is the raw, per-post reaction rows (see
- * `toReactionSummaries`); `replies` is already `CommunityReplyDTO[]` (mapped
- * via `toCommunityReply` by the caller, which is the one that knows how to
- * resolve each reply author's `MemberRef`).
+ * `reactions` is the pre-aggregated reaction data (see `toReactionSummaries`);
+ * `replies` is already `CommunityReplyDTO[]` (mapped via `toCommunityReply` by
+ * the caller, which is the one that knows how to resolve each reply author's
+ * `MemberRef`) — bounded to a preview page, NOT every reply. `replyCount` is
+ * the true total (`CommunityPostsService.replyCountByPost`), passed
+ * separately so it stays correct even once `replies` is truncated — the
+ * client compares `replies.length < replyCount` to know whether to fetch more
+ * via `GET .../posts/:id/replies`.
  */
 export function toCommunityPost(
   post: CommunityPost,
   author: MemberRef | null,
-  reactionRows: Pick<CommunityPostReaction, 'key' | 'userId'>[],
+  reactions: ReactionAggregate,
   replies: CommunityReplyDTO[],
+  replyCount: number,
   viewerId: string,
   viewerRole: RosterRole | null,
   moderation?: CommunityContentModeration,
@@ -345,9 +359,9 @@ export function toCommunityPost(
     canDelete: canManage && !blanked,
     canRestore: canManage && authorTombstoned && !moderationRemoved,
     canViewHistory: canManage && post.editedAt != null,
-    reactions: toReactionSummaries(reactionRows, viewerId),
+    reactions: toReactionSummaries(reactions),
     replies,
-    replyCount: replies.length,
+    replyCount,
     moderationRemoved,
     moderationHidden,
   };

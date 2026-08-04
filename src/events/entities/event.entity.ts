@@ -26,33 +26,33 @@ export enum EventStatus {
 })
 export class Event {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_events_host_id')
   @Column({ type: 'uuid' })
-  hostId: string;
+  hostId!: string;
 
   @Index('UQ_events_slug', { unique: true })
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   @Column({ type: 'varchar' })
-  title: string;
+  title!: string;
 
   @Column({ type: 'text' })
-  description: string;
+  description!: string;
 
   @Column({ type: 'timestamptz' })
-  startAt: Date;
+  startAt!: Date;
 
   @Column({ type: 'timestamptz', nullable: true })
-  endAt: Date | null;
+  endAt!: Date | null;
 
   @Column({ type: 'varchar' })
-  timezone: string;
+  timezone!: string;
 
   @Column({ type: 'varchar', nullable: true })
-  venue: string | null;
+  venue!: string | null;
 
   // Optional link to the directory listing (business) hosting this event, so a
   // listing's detail page can show its upcoming events. Free-text `venue` is
@@ -60,16 +60,16 @@ export class Event {
   // listed venue".
   @Index('IDX_events_listing_id')
   @Column({ type: 'uuid', nullable: true })
-  listingId: string | null;
+  listingId!: string | null;
 
   @Column({ type: 'boolean', default: false })
-  isOnline: boolean;
+  isOnline!: boolean;
 
   @Column({ type: 'varchar', nullable: true })
-  onlineUrl: string | null;
+  onlineUrl!: string | null;
 
   @Column({ type: 'int', nullable: true })
-  capacity: number | null;
+  capacity!: number | null;
 
   @Column({
     type: 'enum',
@@ -77,7 +77,7 @@ export class Event {
     enumName: 'events_visibility_enum',
     default: EventVisibility.Public,
   })
-  visibility: EventVisibility;
+  visibility!: EventVisibility;
 
   @Column({
     type: 'enum',
@@ -85,13 +85,13 @@ export class Event {
     enumName: 'events_status_enum',
     default: EventStatus.Draft,
   })
-  status: EventStatus;
+  status!: EventStatus;
 
   @Column({ type: 'varchar', nullable: true })
-  coverImageUrl: string | null;
+  coverImageUrl!: string | null;
 
   @Column({ type: 'timestamptz', nullable: true })
-  reminderSentAt: Date | null;
+  reminderSentAt!: Date | null;
 
   // Millisecond precision (not Postgres's microsecond default): matches the
   // resolution of the JS `Date` cursor `cursorPaginate` builds from this
@@ -100,8 +100,8 @@ export class Event {
   // `1785001400000-NarrowCursorCreatedAtPrecision.ts` and
   // `common/cursor-pagination.ts`.
   @CreateDateColumn({ type: 'timestamptz', precision: 3 })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

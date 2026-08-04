@@ -44,6 +44,7 @@ import {
   PLATFORM_LOCKDOWN_ENABLED,
   PlatformLockdownEnabledEvent,
 } from '../platform-settings/platform-settings.events';
+import { MetricsService } from '../metrics/metrics.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
@@ -172,7 +173,7 @@ function allowHandshakeOrigin(
   }),
 )
 export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
-  @WebSocketServer() namespace: Namespace;
+  @WebSocketServer() namespace!: Namespace;
   private readonly logger = new Logger(ChatGateway.name);
 
   // WS abuse limits — the global HTTP ThrottlerGuard skips WS contexts, so the
@@ -201,6 +202,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly connections: ConnectionsService,
     private readonly users: UsersService,
     private readonly platformSettings: PlatformSettingsService,
+    private readonly metrics: MetricsService,
   ) {}
 
   async handleConnection(client: ChatSocket): Promise<void> {
@@ -208,6 +210,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const { userId, exp } = await this.authenticate(client);
       client.data.userId = userId;
       client.data.exp = exp;
+      // Count the live socket now that it is authenticated. Set BEFORE any step
+      // that can throw: a later failure disconnects the socket, and
+      // handleDisconnect (which sees `userId` set) decrements to rebalance.
+      this.metrics.incrementWebsocketConnections();
       await client.join(`user:${userId}`);
       // A socket must not outlive its 15-min access token; drop it at expiry so
       // the client reconnects with a freshly-refreshed cookie.
@@ -242,6 +248,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!userId) {
       return;
     }
+    // Balances the increment in handleConnection (only reached once `userId` is
+    // set, i.e. only for sockets that were counted).
+    this.metrics.decrementWebsocketConnections();
     if (this.presence.remove(userId, client.id)) {
       await this.broadcastPresence(userId, false);
       // Last socket gone — free the per-user rate-limit buckets.

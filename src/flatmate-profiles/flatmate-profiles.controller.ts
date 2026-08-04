@@ -70,7 +70,9 @@ export class FlatmateProfilesController {
 
   @Delete('mine')
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: "Delete the caller's flatmate profile (idempotent)" })
+  @ApiOperation({
+    summary: "Delete the caller's flatmate profile (idempotent)",
+  })
   @ApiNoContentResponse({ description: 'Profile deleted (or none existed).' })
   deleteMine(@CurrentUser() user: CurrentUserData) {
     return this.service.deleteMine(user.userId);

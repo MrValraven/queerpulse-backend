@@ -14,14 +14,14 @@ import {
 @Unique('UQ_event_photos_storage_key', ['storageKey'])
 export class EventPhoto {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_event_photos_event_id')
   @Column({ type: 'uuid' })
-  eventId: string;
+  eventId!: string;
 
   @Column({ type: 'text' })
-  storageKey: string;
+  storageKey!: string;
 
   // Nullable + indexed since
   // `AddEventPhotoAndFeaturedCommunityForeignKeys1785001300000`: the
@@ -31,11 +31,11 @@ export class EventPhoto {
   // `IDX_event_photos_uploader_id` index backs that SET-NULL column.
   @Index('IDX_event_photos_uploader_id')
   @Column({ type: 'uuid', nullable: true })
-  uploaderId: string | null;
+  uploaderId!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  caption: string | null;
+  caption!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

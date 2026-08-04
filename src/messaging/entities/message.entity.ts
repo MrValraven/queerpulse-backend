@@ -72,18 +72,18 @@ export interface GifAttachment {
 ])
 export class Message {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_messages_conversation_id')
   @Column({ type: 'uuid' })
-  conversationId: string;
+  conversationId!: string;
 
   @Index('IDX_messages_sender_id')
   @Column({ type: 'uuid' })
-  senderId: string;
+  senderId!: string;
 
   @Column({ type: 'text' })
-  body: string;
+  body!: string;
 
   /**
    * `user` (an ordinary bubble) or `system` (a rendered event pill). Defaults to
@@ -95,7 +95,7 @@ export class Message {
     enumName: 'messages_kind_enum',
     default: MessageKind.User,
   })
-  kind: MessageKind;
+  kind!: MessageKind;
 
   /**
    * Structured event for a `system` message (else NULL). The client renders this
@@ -103,18 +103,18 @@ export class Message {
    * notification listeners that don't understand the event).
    */
   @Column({ type: 'jsonb', nullable: true })
-  systemEvent: SystemEvent | null;
+  systemEvent!: SystemEvent | null;
 
   /**
    * Provider-hosted GIF for a `kind:'gif'` message (else NULL). `body` still
    * carries a "GIF" text fallback for push/notification/last-message previews.
    */
   @Column({ type: 'jsonb', nullable: true })
-  attachment: GifAttachment | null;
+  attachment!: GifAttachment | null;
 
   @Index('IDX_messages_reply_to_id')
   @Column({ type: 'uuid', nullable: true })
-  replyToId: string | null;
+  replyToId!: string | null;
 
   /**
    * Client-generated idempotency key (`crypto.randomUUID()` on the sender). A
@@ -137,7 +137,7 @@ export class Message {
     },
   )
   @Column({ type: 'uuid', nullable: true })
-  clientMessageId: string | null;
+  clientMessageId!: string | null;
 
   /**
    * True when this message was created by FORWARDING another message's content
@@ -147,14 +147,14 @@ export class Message {
    * copied — only the body.
    */
   @Column({ type: 'boolean', default: false })
-  forwarded: boolean;
+  forwarded!: boolean;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @Column({ type: 'timestamptz', nullable: true })
-  editedAt: Date | null;
+  editedAt!: Date | null;
 
   @DeleteDateColumn({ type: 'timestamptz' })
-  deletedAt: Date | null;
+  deletedAt!: Date | null;
 }

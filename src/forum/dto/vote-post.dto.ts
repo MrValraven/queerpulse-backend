@@ -7,5 +7,5 @@ import { IsIn, IsInt } from 'class-validator';
 export class VotePostDto {
   @IsInt()
   @IsIn([0, 1])
-  value: number;
+  value!: number;
 }

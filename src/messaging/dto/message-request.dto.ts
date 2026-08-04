@@ -2,10 +2,10 @@ import { IsString, MaxLength, MinLength } from 'class-validator';
 
 export class MessageRequestDto {
   @IsString()
-  toSlug: string;
+  toSlug!: string;
 
   @IsString()
   @MinLength(1)
   @MaxLength(5000)
-  body: string;
+  body!: string;
 }

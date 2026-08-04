@@ -6,6 +6,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
 import { DeletionRequest } from '../account/entities/deletion-request.entity';
 import { EmailSuppression } from '../account/entities/email-suppression.entity';
+import { Notification } from '../notifications/entities/notification.entity';
 import { UsersModule } from '../users/users.module';
 import { MembershipModule } from '../membership/membership.module';
 import { VouchModule } from '../vouch/vouch.module';
@@ -44,12 +45,19 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     // (`AuthService.reactivateIfDeactivated`) needs to tell a reversible
     // pause apart from a pending erasure — only the former is undone by
     // signing in. Read-side registration, same pattern as EmailSuppression.
+    // Notification: read-side only, so `GET /auth/me` can surface a suspended
+    // member's latest `moderation_outcome` reason on the account-suspended /
+    // account-banned page (they're locked out of every gated endpoint, so the
+    // reason has to ride on `me`). Same read-side registration pattern as
+    // EmailSuppression/AccountDeactivation above — injecting NotificationsService
+    // would pull NotificationsModule (and its SocialModule graph) into AuthModule.
     TypeOrmModule.forFeature([
       RefreshToken,
       User,
       EmailSuppression,
       AccountDeactivation,
       DeletionRequest,
+      Notification,
     ]),
     JwtModule.registerAsync({
       inject: [ConfigService],

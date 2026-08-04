@@ -12,10 +12,10 @@ export class CreateReviewDto {
   @IsInt()
   @Min(1)
   @Max(5)
-  stars: number;
+  stars!: number;
 
   @IsString()
   @MinLength(1)
   @MaxLength(2000)
-  text: string;
+  text!: string;
 }

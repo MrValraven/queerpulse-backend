@@ -80,7 +80,9 @@ export class AccountController {
     return this.accountService.deactivate(user.userId, dto);
   }
 
-  @ApiOperation({ summary: 'Schedule account deletion (opens the grace period).' })
+  @ApiOperation({
+    summary: 'Schedule account deletion (opens the grace period).',
+  })
   @ApiCreatedResponse({ description: 'Deletion request scheduled.' })
   @ApiBadRequestResponse({ description: 'Malformed request body.' })
   @ApiUnauthorizedResponse({
@@ -160,7 +162,8 @@ export class AccountController {
     summary: 'Download a ready export as a .json file or a .zip archive.',
   })
   @ApiOkResponse({
-    description: 'The export file stream (application/json or application/zip).',
+    description:
+      'The export file stream (application/json or application/zip).',
   })
   @ApiBadRequestResponse({ description: 'Malformed job id.' })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
@@ -354,8 +357,16 @@ export class AccountController {
     );
   }
 
-  @ApiOperation({ summary: "Get the caller's email-notification preferences." })
-  @ApiOkResponse({ description: 'The email preferences.' })
+  // NOT-YET-ACTIVE: no transactional mailer is wired at launch (see
+  // docs/ops/no-email-at-launch.md). These toggles are stored but nothing is
+  // delivered; every item comes back with `comingSoon: true`.
+  @ApiOperation({
+    summary:
+      "Get the caller's email-notification preferences. NOTE: no mailer is wired at launch — toggles are stored but not delivered (every item carries comingSoon: true).",
+  })
+  @ApiOkResponse({
+    description: 'The email preferences (delivery not yet active).',
+  })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Get('email-preferences')
   getEmailPreferences(@CurrentUser() user: CurrentUserData) {
@@ -365,8 +376,13 @@ export class AccountController {
   // PATCH (not POST): this partially updates an existing settings resource and
   // is idempotent. API CONTRACT CHANGE — the frontend must call PATCH
   // /account/email-preferences (was POST).
-  @ApiOperation({ summary: 'Update one email-notification preference.' })
-  @ApiOkResponse({ description: 'The updated email preferences.' })
+  @ApiOperation({
+    summary:
+      'Update one email-notification preference. NOTE: no mailer is wired at launch — the toggle is persisted but no email is sent (see docs/ops/no-email-at-launch.md).',
+  })
+  @ApiOkResponse({
+    description: 'The updated email preferences (delivery not yet active).',
+  })
   @ApiBadRequestResponse({ description: 'Malformed request body.' })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Patch('email-preferences')

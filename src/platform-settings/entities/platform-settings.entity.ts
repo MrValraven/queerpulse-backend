@@ -20,27 +20,27 @@ export const PLATFORM_SETTINGS_ID = 1;
 @Entity('platform_settings')
 export class PlatformSettings {
   @PrimaryColumn({ type: 'int' })
-  id: number;
+  id!: number;
 
   /** Gates creation of new `User` rows. Returning users are unaffected. */
   @Column({ type: 'boolean', default: true })
-  registrationEnabled: boolean;
+  registrationEnabled!: boolean;
 
   /** Gates `POST /join-requests`, the public "request an invite" form. */
   @Column({ type: 'boolean', default: true })
-  joinRequestsEnabled: boolean;
+  joinRequestsEnabled!: boolean;
 
   /** The platform kill switch: blocks everyone except staff. */
   @Column({ type: 'boolean', default: false })
-  lockdownEnabled: boolean;
+  lockdownEnabled!: boolean;
 
   /** Whether moderators are staff for the purposes of the switch above. */
   @Column({ type: 'boolean', default: false })
-  lockdownAllowsModerators: boolean;
+  lockdownAllowsModerators!: boolean;
 
   /** Admin-authored copy shown on the maintenance screen. */
   @Column({ type: 'text', nullable: true })
-  lockdownMessage: string | null;
+  lockdownMessage!: string | null;
 
   /**
    * Shared by BOTH the registration and join-request closed states — the two
@@ -48,12 +48,12 @@ export class PlatformSettings {
    * audience, so they deliberately do not get separate copy.
    */
   @Column({ type: 'text', nullable: true })
-  registrationClosedMessage: string | null;
+  registrationClosedMessage!: string | null;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 
   // NULLable + ON DELETE SET NULL: the stamp outlives an erased admin.
   @Column({ type: 'uuid', nullable: true })
-  updatedBy: string | null;
+  updatedBy!: string | null;
 }

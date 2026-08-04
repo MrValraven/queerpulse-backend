@@ -10,15 +10,15 @@ import {
 import { SafeSpaceStatus } from '../entities/listing.entity';
 
 class SafeSpacePromiseInput {
-  @IsString() title: string;
-  @IsString() desc: string;
+  @IsString() title!: string;
+  @IsString() desc!: string;
 }
 
 class SafeSpaceVouchInput {
-  @IsString() name: string;
-  @IsString() byline: string;
-  @IsString() text: string;
-  @IsString() when: string;
+  @IsString() name!: string;
+  @IsString() byline!: string;
+  @IsString() text!: string;
+  @IsString() when!: string;
 }
 
 /** `PATCH /listings/:ref/safe-space` body — moderator/admin-only (see
@@ -27,7 +27,7 @@ class SafeSpaceVouchInput {
  * from it, preserving any existing sub-fields (seed-populated for now). */
 export class UpdateSafeSpaceDto {
   @IsEnum(SafeSpaceStatus)
-  status: SafeSpaceStatus;
+  status!: SafeSpaceStatus;
 
   @IsOptional()
   @IsInt()

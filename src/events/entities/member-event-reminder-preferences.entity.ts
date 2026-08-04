@@ -29,14 +29,14 @@ export const ALLOWED_REMINDER_LEAD_MINUTES = [60, 1440, 10080] as const;
 @Entity('member_event_reminder_preferences')
 export class MemberEventReminderPreferences {
   @PrimaryColumn({ name: 'user_id', type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({ type: 'int', default: DEFAULT_REMINDER_LEAD_MINUTES })
-  leadMinutes: number;
+  leadMinutes!: number;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

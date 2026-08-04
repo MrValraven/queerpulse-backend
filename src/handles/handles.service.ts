@@ -2,8 +2,13 @@ import { ConflictException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { EntityManager, Repository } from 'typeorm';
-import { handleFormatError, normalizeHandle } from '../common/handles';
+import {
+  HANDLE_RECLAIM_COOLDOWN_MS,
+  handleFormatError,
+  normalizeHandle,
+} from '../common/handles';
 import { Handle, HandleOwnerKind } from './entities/handle.entity';
+import { HandleHistory } from './entities/handle-history.entity';
 
 // Who a handle belongs to. A `profile` owner is keyed by `userId`; a
 // `subprofile` owner by `subprofileId`. Exactly one identifier is meaningful per
@@ -37,23 +42,48 @@ export class HandlesService {
 
   // Read-only availability check for `GET /handles/check`. Format/reserved
   // problems short-circuit before any DB hit; otherwise the registry decides.
-  async check(name: string): Promise<HandleCheck> {
+  //
+  // `exceptOwner` (the caller's own identity, when known) lets a name that is
+  // still inside its reclaim cooldown read as AVAILABLE to the previous owner
+  // reclaiming it, while remaining `taken` for everyone else.
+  async check(name: string, exceptOwner?: HandleOwner): Promise<HandleCheck> {
     const formatError = handleFormatError(name);
     if (formatError) {
       return { available: false, reason: formatError };
     }
-    const taken = await this.isTaken(this.handles.manager, name);
+    const taken = await this.isTaken(this.handles.manager, name, exceptOwner);
     return { available: !taken, reason: taken ? 'taken' : null };
   }
 
   // Inserts a registry row for `owner`. A PK collision (name already held by
   // anyone, in either namespace) surfaces as a 409 ConflictException.
+  //
+  // Reclaim cooldown: if a `handle_history` reservation for `name` is still
+  // active (`reclaimableAt` in the future) and belongs to SOMEONE ELSE, the
+  // claim is refused so a stranger cannot hijack a just-freed handle (and the
+  // old `@mentions` that still point at it). The previous owner reclaiming
+  // within the window — and anyone at all once it has lapsed — is allowed, and
+  // the stale reservation row is cleared as part of the same transaction.
   async claim(
     m: EntityManager,
     name: string,
     owner: HandleOwner,
   ): Promise<void> {
     const normalized = normalizeHandle(name);
+    const reservation = await m.findOne(HandleHistory, {
+      where: { name: normalized },
+    });
+    if (reservation) {
+      const withinCooldown = reservation.reclaimableAt > new Date();
+      if (withinCooldown && !this.reservationHeldBy(reservation, owner)) {
+        throw new ConflictException(
+          'That handle was recently released and is reserved for a short while',
+        );
+      }
+      // Previous owner reclaiming, or the cooldown has lapsed: drop the
+      // reservation so the fresh claim below owns the name outright.
+      await m.delete(HandleHistory, { name: normalized });
+    }
     const row = m.create(Handle, {
       name: normalized,
       ownerKind:
@@ -96,7 +126,8 @@ export class HandlesService {
   }
 
   /**
-   * Frees a handle. Safe to call when the row does not exist.
+   * Frees a handle AND records a reclaim reservation. Safe to call when the row
+   * does not exist (a true no-op then — no reservation is written).
    *
    * `owner` scopes the delete, and passing it is strongly preferred. Names are
    * normalized (lowercased) but `profiles.slug` is stored raw and is only
@@ -107,6 +138,14 @@ export class HandlesService {
    *
    * Omitting `owner` deletes by name regardless of ownership; only do so where
    * the row is already known to belong to the caller.
+   *
+   * Instead of hard-deleting and forgetting the name, this upserts a
+   * `handle_history` row for whoever actually held it, with `reclaimableAt` set
+   * one cooldown window out. Until then the name reads as TAKEN to everyone but
+   * that previous owner (see `isTaken`/`claim`), which prevents a stranger from
+   * instantly reclaiming a freed handle and silently inheriting its old
+   * `@mentions`. All writes use the passed `EntityManager`, so they commit (or
+   * roll back) with the rename/unpublish that called in.
    */
   async release(
     m: EntityManager,
@@ -114,24 +153,51 @@ export class HandlesService {
     owner?: HandleOwner,
   ): Promise<void> {
     const normalized = normalizeHandle(name);
-    if (!owner) {
-      await m.delete(Handle, { name: normalized });
+    const where = {
+      name: normalized,
+      ...(owner
+        ? owner.kind === 'profile'
+          ? { ownerKind: HandleOwnerKind.Profile, userId: owner.userId }
+          : {
+              ownerKind: HandleOwnerKind.Subprofile,
+              subprofileId: owner.subprofileId,
+            }
+        : {}),
+    };
+    // Read the exact row being freed so the reservation records its TRUE owner
+    // (never the passed `owner`, which may differ under the case-fold caveat
+    // above). No matching row → nothing was held → nothing to reserve.
+    const freed = await m.findOne(Handle, { where });
+    if (!freed) {
       return;
     }
-    await m.delete(Handle, {
-      name: normalized,
-      ...(owner.kind === 'profile'
-        ? { ownerKind: HandleOwnerKind.Profile, userId: owner.userId }
-        : {
-            ownerKind: HandleOwnerKind.Subprofile,
-            subprofileId: owner.subprofileId,
-          }),
-    });
+    await m.delete(Handle, where);
+    const releasedAt = new Date();
+    const reclaimableAt = new Date(
+      releasedAt.getTime() + HANDLE_RECLAIM_COOLDOWN_MS,
+    );
+    await m.upsert(
+      HandleHistory,
+      {
+        name: normalized,
+        previousOwnerKind: freed.ownerKind,
+        previousOwnerUserId: freed.userId,
+        previousOwnerSubprofileId: freed.subprofileId,
+        releasedAt,
+        reclaimableAt,
+      },
+      ['name'],
+    );
   }
 
   // True when `name` is held by someone other than `exceptOwner`. Passing the
   // caller's own owner lets an owner "keep" its current handle without it
   // reading as taken.
+  //
+  // A name with no live registry row can still be TAKEN: a `handle_history`
+  // reservation whose cooldown has not lapsed reserves the name for its previous
+  // owner. It reads as available only to that previous owner (`exceptOwner`
+  // matches the reservation) or once the window has passed.
   async isTaken(
     m: EntityManager,
     name: string,
@@ -139,25 +205,51 @@ export class HandlesService {
   ): Promise<boolean> {
     const normalized = normalizeHandle(name);
     const row = await m.findOne(Handle, { where: { name: normalized } });
-    if (!row) {
+    if (row) {
+      if (exceptOwner) {
+        if (
+          exceptOwner.kind === 'profile' &&
+          row.ownerKind === HandleOwnerKind.Profile &&
+          row.userId === exceptOwner.userId
+        ) {
+          return false;
+        }
+        if (
+          exceptOwner.kind === 'subprofile' &&
+          row.ownerKind === HandleOwnerKind.Subprofile &&
+          row.subprofileId === exceptOwner.subprofileId
+        ) {
+          return false;
+        }
+      }
+      return true;
+    }
+    // No live claim — is it still cooling down under a reservation?
+    const reservation = await m.findOne(HandleHistory, {
+      where: { name: normalized },
+    });
+    if (!reservation || reservation.reclaimableAt <= new Date()) {
       return false;
     }
-    if (exceptOwner) {
-      if (
-        exceptOwner.kind === 'profile' &&
-        row.ownerKind === HandleOwnerKind.Profile &&
-        row.userId === exceptOwner.userId
-      ) {
-        return false;
-      }
-      if (
-        exceptOwner.kind === 'subprofile' &&
-        row.ownerKind === HandleOwnerKind.Subprofile &&
-        row.subprofileId === exceptOwner.subprofileId
-      ) {
-        return false;
-      }
+    // Reserved and still cooling: taken for all but the previous owner.
+    return !(exceptOwner && this.reservationHeldBy(reservation, exceptOwner));
+  }
+
+  // Whether a reclaim reservation belongs to `owner` — the previous owner
+  // allowed to reclaim the name during its cooldown window.
+  private reservationHeldBy(
+    reservation: HandleHistory,
+    owner: HandleOwner,
+  ): boolean {
+    if (owner.kind === 'profile') {
+      return (
+        reservation.previousOwnerKind === HandleOwnerKind.Profile &&
+        reservation.previousOwnerUserId === owner.userId
+      );
     }
-    return true;
+    return (
+      reservation.previousOwnerKind === HandleOwnerKind.Subprofile &&
+      reservation.previousOwnerSubprofileId === owner.subprofileId
+    );
   }
 }

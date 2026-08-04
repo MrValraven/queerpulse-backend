@@ -19,7 +19,7 @@ export class SearchMessagesQuery {
   @IsString()
   @MinLength(1)
   @MaxLength(200)
-  q: string;
+  q!: string;
 
   @IsOptional()
   @Type(() => Number)

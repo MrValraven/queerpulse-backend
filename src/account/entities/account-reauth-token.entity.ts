@@ -14,19 +14,19 @@ import {
 @Entity('account_reauth_token')
 export class AccountReauthToken {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_account_reauth_token_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Index('UQ_account_reauth_token_token', { unique: true })
   @Column({ type: 'varchar' })
-  token: string;
+  token!: string;
 
   @Column({ type: 'timestamptz' })
-  expiresAt: Date;
+  expiresAt!: Date;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

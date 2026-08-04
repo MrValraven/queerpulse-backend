@@ -4,5 +4,5 @@ import { IsBoolean } from 'class-validator';
  * (idempotent toggle), mirrored back in the response along with the
  * recomputed `likeCount`. */
 export class LikePostDto {
-  @IsBoolean() liked: boolean;
+  @IsBoolean() liked!: boolean;
 }

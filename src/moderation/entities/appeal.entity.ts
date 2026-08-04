@@ -46,21 +46,21 @@ export enum AppealStatus {
 })
 export class Appeal {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_appeals_report_id')
   @Column({ type: 'uuid', nullable: true })
-  reportId: string | null;
+  reportId!: string | null;
 
   // The specific moderator action (a `mod_audit_logs` row) being appealed.
   @Index('IDX_appeals_action_id')
   @Column({ type: 'uuid', nullable: true })
-  actionId: string | null;
+  actionId!: string | null;
 
   // The member filing the appeal.
   @Index('IDX_appeals_appellant_id')
   @Column({ type: 'uuid', nullable: true })
-  appellantId: string | null;
+  appellantId!: string | null;
 
   // Denormalized from the linked report at filing time, for queue
   // sorting/filtering without a join.
@@ -70,14 +70,14 @@ export class Appeal {
     enumName: 'reports_severity_enum',
     default: ReportSeverity.Medium,
   })
-  severity: ReportSeverity;
+  severity!: ReportSeverity;
 
   @Column({ type: 'varchar', nullable: true })
-  community: string | null;
+  community!: string | null;
 
   // The member's appeal text — renamed from `body` (I8).
   @Column({ type: 'text' })
-  argument: string;
+  argument!: string;
 
   @Index('IDX_appeals_status')
   @Column({
@@ -86,11 +86,11 @@ export class Appeal {
     enumName: 'appeals_status_enum',
     default: AppealStatus.Awaiting,
   })
-  status: AppealStatus;
+  status!: AppealStatus;
 
   @Column({ type: 'text', nullable: true })
-  decision: string | null;
+  decision!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

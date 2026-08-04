@@ -8,14 +8,14 @@ import {
 @Entity('groups')
 export class Group {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Column({ type: 'varchar', unique: true })
-  slug: string;
+  slug!: string;
 
   @Column({ type: 'varchar' })
-  name: string;
+  name!: string;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

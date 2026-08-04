@@ -16,11 +16,11 @@ import {
 @Entity('resources')
 export class Resource {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_resources_slug', { unique: true })
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   // Free-form category key (mirrors the FE's `library.data.ts` `CATEGORIES`
   // ids: "housing" | "health" | "legal" | "finance" | "trans" — kept as a
@@ -28,35 +28,35 @@ export class Resource {
   // grow new categories without a schema migration).
   @Index('IDX_resources_category')
   @Column({ type: 'varchar' })
-  category: string;
+  category!: string;
 
   @Column({ type: 'varchar' })
-  title: string;
+  title!: string;
 
   @Column({ type: 'text' })
-  description: string;
+  description!: string;
 
   @Column({ type: 'text' })
-  body: string;
+  body!: string;
 
   // Short card-footer chip the FE's `library.data.ts` `Guide.meta` renders
   // (e.g. "Guide · 12 min · PT / EN") — format, read time, language
   // availability. Nullable so older/unauthored rows degrade gracefully.
   @Column({ type: 'varchar', nullable: true })
-  meta: string | null;
+  meta!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  externalUrl: string | null;
+  externalUrl!: string | null;
 
   // NULL (or a future date) hides the resource from the public list/detail
   // endpoints — mirrors `Partner.status !== approved` gating: existence of
   // an unpublished resource is a 404, not a distinct "not visible yet" body.
   @Column({ type: 'timestamptz', nullable: true })
-  publishedAt: Date | null;
+  publishedAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

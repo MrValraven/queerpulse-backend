@@ -13,6 +13,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Feature } from '../common/feature.decorator';
 import { UserRole } from '../users/entities/user.entity';
@@ -40,13 +41,15 @@ import {
 @ApiTags('Admin — Landlords')
 @ApiCookieAuth()
 @Controller('admin/landlords')
-@UseGuards(RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)
 export class AdminLandlordsController {
   constructor(private readonly service: LandlordsService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List every landlord (including non-live) for moderation' })
+  @ApiOperation({
+    summary: 'List every landlord (including non-live) for moderation',
+  })
   @ApiOkResponse({ description: 'All landlord cards, newest first.' })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
@@ -57,7 +60,9 @@ export class AdminLandlordsController {
   @Post()
   @ApiOperation({ summary: 'Create a landlord directory entry as an admin' })
   @ApiCreatedResponse({ description: 'The newly created landlord detail.' })
-  @ApiConflictResponse({ description: 'Could not allocate a unique landlord slug.' })
+  @ApiConflictResponse({
+    description: 'Could not allocate a unique landlord slug.',
+  })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
   create(@Body() dto: CreateLandlordDto) {
@@ -66,7 +71,9 @@ export class AdminLandlordsController {
 
   // Literal `intro-requests` routes declared before `:id` so they win the match.
   @Get('intro-requests')
-  @ApiOperation({ summary: 'List intro requests, optionally filtered by landlord' })
+  @ApiOperation({
+    summary: 'List intro requests, optionally filtered by landlord',
+  })
   @ApiOkResponse({ description: 'Matching intro requests, newest first.' })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })

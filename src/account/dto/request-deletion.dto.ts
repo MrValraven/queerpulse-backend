@@ -8,5 +8,5 @@ export class RequestDeletionDto {
 
   @IsString()
   @MinLength(1)
-  reauthToken: string;
+  reauthToken!: string;
 }

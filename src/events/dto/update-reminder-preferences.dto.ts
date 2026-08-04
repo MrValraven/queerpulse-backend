@@ -7,5 +7,5 @@ export class UpdateReminderPreferencesDto {
   // `startAt − leadMinutes` arithmetic, so an out-of-range integer must 400.
   @IsInt()
   @IsIn(ALLOWED_REMINDER_LEAD_MINUTES)
-  leadMinutes: number;
+  leadMinutes!: number;
 }

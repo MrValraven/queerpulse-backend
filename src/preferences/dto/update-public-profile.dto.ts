@@ -6,5 +6,5 @@ import { IsBoolean } from 'class-validator';
 // See the doc comment on `MemberPreferences.publicProfileEnabled`.
 export class UpdatePublicProfileDto {
   @IsBoolean()
-  enabled: boolean;
+  enabled!: boolean;
 }

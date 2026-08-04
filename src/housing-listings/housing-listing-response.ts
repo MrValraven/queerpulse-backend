@@ -35,6 +35,27 @@ export interface HousingListingDTO {
   gallery: string[];
 }
 
+/**
+ * Lightweight row for the cross-entity global search (`SearchService`) — no
+ * lister/gallery hydration, just what the search-result card renders. Mapped
+ * to a `SearchResultDTO` by hand in `search/search-response.ts`.
+ */
+export interface HousingSearchRow {
+  slug: string;
+  title: string;
+  city: string;
+  area: string;
+}
+
+export function toHousingSearchRow(listing: HousingListing): HousingSearchRow {
+  return {
+    slug: listing.slug,
+    title: listing.title,
+    city: listing.city,
+    area: listing.area,
+  };
+}
+
 export function toHousingListingDTO(
   listing: HousingListing,
   lister: MemberRef | null,

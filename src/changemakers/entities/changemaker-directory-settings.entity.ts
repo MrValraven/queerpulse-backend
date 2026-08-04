@@ -11,14 +11,14 @@ export const CHANGEMAKER_SETTINGS_ID = 'default';
 @Entity('changemaker_directory_settings')
 export class ChangemakerDirectorySettings {
   @PrimaryColumn({ type: 'varchar', length: 20 })
-  id: string;
+  id!: string;
 
   @Column({ type: 'int', default: 0 })
-  peopleHelped: number;
+  peopleHelped!: number;
 
   @Column({ type: 'int', default: 0 })
-  activeCampaigns: number;
+  activeCampaigns!: number;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

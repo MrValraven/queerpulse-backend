@@ -25,23 +25,23 @@ export enum ReactionKey {
 @Unique('UQ_community_post_reactions', ['postId', 'userId', 'key'])
 export class CommunityPostReaction {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_community_post_reactions_post_id')
   @Column({ type: 'uuid' })
-  postId: string;
+  postId!: string;
 
   @Index('IDX_community_post_reactions_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({
     type: 'enum',
     enum: ReactionKey,
     enumName: 'community_post_reactions_key_enum',
   })
-  key: ReactionKey;
+  key!: ReactionKey;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

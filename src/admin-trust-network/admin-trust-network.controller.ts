@@ -1,5 +1,6 @@
 import { Controller, Get, UseGuards } from '@nestjs/common';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminTrustNetworkService } from './admin-trust-network.service';
@@ -17,7 +18,7 @@ import {
  * every vouch (incl. withdrawn) as an edge, with derived standing + scene.
  * Not `@LockdownExempt()` — mirrors AdminMembersController.
  */
-@UseGuards(RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesGuard)
 @Roles(UserRole.Admin)
 @ApiTags('Admin — Trust Network')
 @ApiCookieAuth('access_token')

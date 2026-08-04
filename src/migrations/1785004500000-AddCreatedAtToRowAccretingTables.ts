@@ -18,9 +18,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * data_export_job.requested_at, activities.occurred_at,
  * cinema_watch_progress.updated_at) are deliberately left alone.
  */
-export class AddCreatedAtToRowAccretingTables1785004500000
-  implements MigrationInterface
-{
+export class AddCreatedAtToRowAccretingTables1785004500000 implements MigrationInterface {
   name = 'AddCreatedAtToRowAccretingTables1785004500000';
 
   private readonly tables: readonly string[] = [

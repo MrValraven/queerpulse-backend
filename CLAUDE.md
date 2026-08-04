@@ -87,9 +87,13 @@ see the test-database safety guard below.
 
 ## Notes
 
-- TypeScript (`tsconfig.json`) has `strictNullChecks`, `noImplicitAny`, and
-  `strictBindCallApply` on; full `strict` is a deliberate follow-up (not yet
-  enabled). ESLint promotes `@typescript-eslint/no-floating-promises` to `error`.
+- TypeScript (`tsconfig.json`) has `strictNullChecks`, `noImplicitAny`,
+  `strictBindCallApply`, and `strictPropertyInitialization` on; full `strict` is
+  a deliberate follow-up (not yet enabled). Because `strictPropertyInitialization`
+  is on, TypeORM entity columns/relations and class-validator DTO fields (which
+  the ORM / class-transformer populate, not a constructor) carry the
+  definite-assignment assertion (`name!: string`). ESLint promotes
+  `@typescript-eslint/no-floating-promises` to `error`.
 - The schema lives in migrations only. Add a migration for every schema change;
   never rely on `synchronize`.
 - **An applied migration's name is frozen history — never rename or renumber

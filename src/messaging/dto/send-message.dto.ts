@@ -14,19 +14,19 @@ import {
 import { Type } from 'class-transformer';
 
 export class GifAttachmentDto {
-  @IsUrl() url: string;
-  @IsUrl() previewUrl: string;
-  @IsInt() @Min(1) width: number;
-  @IsInt() @Min(1) height: number;
+  @IsUrl() url!: string;
+  @IsUrl() previewUrl!: string;
+  @IsInt() @Min(1) width!: number;
+  @IsInt() @Min(1) height!: number;
   // Free-form (bounded) so swapping the GIF provider never needs a DTO change.
-  @IsString() @MaxLength(32) provider: string;
+  @IsString() @MaxLength(32) provider!: string;
 }
 
 export class SendMessageDto {
   @IsString()
   @MinLength(1)
   @MaxLength(5000)
-  body: string;
+  body!: string;
 
   @IsOptional()
   @IsUUID()

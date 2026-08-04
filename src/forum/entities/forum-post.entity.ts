@@ -16,41 +16,55 @@ import {
  * value means a nested reply to that specific post.
  */
 @Entity('forum_post')
-@Index('IDX_forum_post_thread_id_created_at_id', ['threadId', 'createdAt', 'id'])
+@Index('IDX_forum_post_thread_id_created_at_id', [
+  'threadId',
+  'createdAt',
+  'id',
+])
 @Index('IDX_forum_post_thread_id_parent_post_id', ['threadId', 'parentPostId'])
 export class ForumPost {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_forum_post_thread_id')
   @Column({ type: 'uuid' })
-  threadId: string;
+  threadId!: string;
 
   @Column({ type: 'uuid', nullable: true })
-  parentPostId: string | null;
+  parentPostId!: string | null;
 
   @Index('IDX_forum_post_author_id')
   @Column({ type: 'uuid' })
-  authorId: string;
+  authorId!: string;
 
   @Column({ type: 'text' })
-  body: string;
+  body!: string;
 
   // Denormalized count of `forum_post_vote` rows with `value = 1` for this
   // post, kept in sync by `ForumPostsService.vote` — avoids a `COUNT(*)`
   // join on every post render.
   @Column({ type: 'int', default: 0 })
-  voteCount: number;
+  voteCount!: number;
+
+  // Denormalization flag marking this post as its thread's opening post (the
+  // oldest post). The ordering *is* still the source of truth, but this flag
+  // lets the thread-list page batch-load every page's OP in one
+  // `WHERE is_op AND thread_id IN (...)` query (no N+1) and lets
+  // `ForumPostsService.vote` know when to mirror `voteCount` onto
+  // `forum_thread.op_vote_count`. Set true when the OP is created (Wave 2) and
+  // backfilled for existing threads by `AddForumOpDenormalization`.
+  @Column({ type: 'boolean', default: false })
+  isOp!: boolean;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @Column({ type: 'timestamptz', nullable: true })
-  editedAt: Date | null;
+  editedAt!: Date | null;
 
   // Soft-tombstone marker. When set, the post renders as "[deleted]" but the
   // `body` above is preserved so an author/moderator can restore it and its
   // edit history stays readable (see `ForumPostsService.tombstonePost`).
   @Column({ type: 'timestamptz', nullable: true })
-  deletedAt: Date | null;
+  deletedAt!: Date | null;
 }

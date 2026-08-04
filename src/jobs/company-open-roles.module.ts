@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { CompanyOpenRolesService } from './company-open-roles.service';
 import { Job } from './entities/job.entity';
 
@@ -16,7 +17,7 @@ import { Job } from './entities/job.entity';
  * entity itself is loaded once at the data-source level.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([Job])],
+  imports: [TypeOrmModule.forFeature([Job]), ContentModerationModule],
   providers: [CompanyOpenRolesService],
   exports: [CompanyOpenRolesService],
 })

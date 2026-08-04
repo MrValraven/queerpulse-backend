@@ -6,6 +6,7 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { CompaniesService } from '../companies/companies.service';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
   JobApplication,
@@ -49,6 +50,10 @@ describe('JobsService', () => {
     create: jest.Mock;
     getCompanyForJobPosting: jest.Mock;
     companyRefsByIds: jest.Mock;
+  };
+  let contentModeration: {
+    stateFor: jest.Mock;
+    statesFor: jest.Mock;
   };
 
   const baseJobDto = {
@@ -103,6 +108,10 @@ describe('JobsService', () => {
       getCompanyForJobPosting: jest.fn(),
       companyRefsByIds: jest.fn().mockResolvedValue(new Map()),
     };
+    contentModeration = {
+      stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
+      statesFor: jest.fn().mockResolvedValue(new Map()),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -114,6 +123,7 @@ describe('JobsService', () => {
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: CompaniesService, useValue: companiesService },
+        { provide: ContentModerationService, useValue: contentModeration },
       ],
     }).compile();
     service = module.get(JobsService);

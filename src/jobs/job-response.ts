@@ -140,6 +140,27 @@ export function toJobDetail(
   };
 }
 
+/**
+ * Lightweight row for the cross-entity global search (`SearchService`) — no
+ * company/poster hydration, just what the search-result card renders. Mapped
+ * to a `SearchResultDTO` by hand in `search/search-response.ts`.
+ */
+export interface JobSearchRow {
+  slug: string;
+  title: string;
+  category: string;
+  location: string;
+}
+
+export function toJobSearchRow(job: Job): JobSearchRow {
+  return {
+    slug: job.slug,
+    title: job.title,
+    category: job.category,
+    location: job.location,
+  };
+}
+
 export function toJobApplication(
   app: JobApplication,
   job: { slug: string; title: string },

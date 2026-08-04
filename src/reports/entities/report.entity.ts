@@ -29,6 +29,13 @@ export enum ReportSubjectType {
   Company = 'company',
   Job = 'job',
   Subprofile = 'subprofile',
+  // A review of a directory listing (`listing_reviews`), addressed by the
+  // review's uuid. Added so a moderator can take a review down: a
+  // `hide_content`/`remove_content` on a `review` subject writes a
+  // `content_moderation` row that `DirectoryService`'s review reads filter on.
+  // Backed by `AddReviewReportSubject` (adds the value to
+  // `reports_subject_type_enum`).
+  Review = 'review',
 }
 
 // Mirrors the frontend's `ReportDTO`/`ModReportDTO` status union
@@ -66,18 +73,26 @@ export enum ReportSeverity {
  */
 @Entity('reports')
 // De-dupe guard for `ReportsService.create`: at most one OPEN report per
-// (reporter, subject). Partial (`WHERE status = 'open'`) so a member can file
-// afresh once a prior report is resolved/escalated. Backs the check-then-insert
-// against a concurrent-duplicate race — matches
-// `UQ_reports_open_reporter_subject` in
-// `1785003000000-AddReportsOpenDedupeIndex`.
-@Index('UQ_reports_open_reporter_subject', ['reporterId', 'subjectType', 'subjectId'], {
-  unique: true,
-  where: `"status" = 'open'`,
-})
+// (reporter, subject, reasonCode). Partial (`WHERE status = 'open'`) so a member
+// can file afresh once a prior report is resolved/escalated. `reasonCode` is
+// part of the key so two DISTINCT reasons on the same subject (e.g. a
+// `listing_dispute` then a higher-severity abuse report on the same listing)
+// are both allowed — only same-reason duplicates collapse. Backs the
+// check-then-insert against a concurrent-duplicate race — matches
+// `UQ_reports_open_reporter_subject` as rebuilt in
+// `1785902300000-AddReasonCodeToReportsOpenDedupeIndex` (superseding the
+// reasonCode-less shape created in `1785003000000-AddReportsOpenDedupeIndex`).
+@Index(
+  'UQ_reports_open_reporter_subject',
+  ['reporterId', 'subjectType', 'subjectId', 'reasonCode'],
+  {
+    unique: true,
+    where: `"status" = 'open'`,
+  },
+)
 export class Report {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_reports_subject')
   @Column({
@@ -85,33 +100,33 @@ export class Report {
     enum: ReportSubjectType,
     enumName: 'reports_subject_type_enum',
   })
-  subjectType: ReportSubjectType;
+  subjectType!: ReportSubjectType;
 
   @Column({ type: 'varchar' })
-  subjectId: string;
+  subjectId!: string;
 
   // Server-owned reason taxonomy code (see `../reason-catalogue.ts`) — renamed
   // from the stale `reason` free-string column (C2).
   @Column({ type: 'varchar' })
-  reasonCode: string;
+  reasonCode!: string;
 
   @Column({ type: 'text', nullable: true })
-  detail: string | null;
+  detail!: string | null;
 
   // Shields the reporter's identity from mods + the reported party.
   @Column({ type: 'boolean', default: false })
-  anonymous: boolean;
+  anonymous!: boolean;
 
   // Only for anonymous follow-up when the reporter has no account.
   @Column({ type: 'varchar', nullable: true })
-  contactEmail: string | null;
+  contactEmail!: string | null;
 
   // `ReportEvidence[]` as sent by the frontend (`{type:'url',value} |
   // {type:'screenshot',uploadId}`), stored verbatim. Typed `unknown[]` (not
   // `Record<string, unknown>[]`) so TypeORM's `create()` doesn't reject the
   // concrete `ReportEvidenceInput` shape for lacking an index signature.
   @Column({ type: 'jsonb', nullable: true })
-  evidence: unknown[] | null;
+  evidence!: unknown[] | null;
 
   // Derived server-side from `reasonCode` at creation (see
   // `../report-severity.ts`) — drives `slaDueAt` and the moderation queue's
@@ -122,11 +137,11 @@ export class Report {
     enum: ReportSeverity,
     enumName: 'reports_severity_enum',
   })
-  severity: ReportSeverity;
+  severity!: ReportSeverity;
 
   // Computed at creation from `severity` (see `../report-severity.ts`).
   @Column({ type: 'timestamptz' })
-  slaDueAt: Date;
+  slaDueAt!: Date;
 
   @Index('IDX_reports_status')
   @Column({
@@ -135,7 +150,7 @@ export class Report {
     enumName: 'reports_status_enum',
     default: ReportStatus.Open,
   })
-  status: ReportStatus;
+  status!: ReportStatus;
 
   // Nullable since `AddDeletionErasureSupport1782800700000`: when the reporter
   // erases their account this is NULLed (FK is `ON DELETE SET NULL`) so the
@@ -145,8 +160,8 @@ export class Report {
   // write time (`ReportsService.create`); only erasure produces a NULL.
   @Index('IDX_reports_reporter_id')
   @Column({ type: 'uuid', nullable: true })
-  reporterId: string | null;
+  reporterId!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

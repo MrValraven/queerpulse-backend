@@ -109,23 +109,23 @@ const EMPTY_SOCIAL: ListingSocial = {
 };
 
 const OPEN_LATE_WED_TO_SUN: Record<string, ListingDayHours> = {
-  Mon: { open: false, from: '', to: '' },
-  Tue: { open: false, from: '', to: '' },
-  Wed: { open: true, from: '21:00', to: '03:00' },
-  Thu: { open: true, from: '21:00', to: '03:00' },
-  Fri: { open: true, from: '21:00', to: '03:00' },
-  Sat: { open: true, from: '21:00', to: '03:00' },
-  Sun: { open: true, from: '21:00', to: '03:00' },
+  Mon: { open: false, intervals: [] },
+  Tue: { open: false, intervals: [] },
+  Wed: { open: true, intervals: [{ from: '21:00', to: '03:00' }] },
+  Thu: { open: true, intervals: [{ from: '21:00', to: '03:00' }] },
+  Fri: { open: true, intervals: [{ from: '21:00', to: '03:00' }] },
+  Sat: { open: true, intervals: [{ from: '21:00', to: '03:00' }] },
+  Sun: { open: true, intervals: [{ from: '21:00', to: '03:00' }] },
 };
 
 const OPEN_DAILY_MORNING_TO_EVENING: Record<string, ListingDayHours> = {
-  Mon: { open: true, from: '08:00', to: '19:00' },
-  Tue: { open: true, from: '08:00', to: '19:00' },
-  Wed: { open: true, from: '08:00', to: '19:00' },
-  Thu: { open: true, from: '08:00', to: '19:00' },
-  Fri: { open: true, from: '08:00', to: '19:00' },
-  Sat: { open: true, from: '08:00', to: '19:00' },
-  Sun: { open: true, from: '08:00', to: '19:00' },
+  Mon: { open: true, intervals: [{ from: '08:00', to: '19:00' }] },
+  Tue: { open: true, intervals: [{ from: '08:00', to: '19:00' }] },
+  Wed: { open: true, intervals: [{ from: '08:00', to: '19:00' }] },
+  Thu: { open: true, intervals: [{ from: '08:00', to: '19:00' }] },
+  Fri: { open: true, intervals: [{ from: '08:00', to: '19:00' }] },
+  Sat: { open: true, intervals: [{ from: '08:00', to: '19:00' }] },
+  Sun: { open: true, intervals: [{ from: '08:00', to: '19:00' }] },
 };
 
 /**

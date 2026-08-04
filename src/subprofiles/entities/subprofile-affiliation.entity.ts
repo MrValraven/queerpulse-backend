@@ -15,24 +15,24 @@ import {
 ])
 export class SubprofileAffiliation {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_subprofile_affiliations_subprofile_id')
   @Column({ type: 'uuid' })
-  subprofileId: string;
+  subprofileId!: string;
 
   @Column({ type: 'varchar' })
-  targetType: string; // 'event' | 'community'
+  targetType!: string; // 'event' | 'community'
 
   @Column({ type: 'varchar' })
-  targetSlug: string;
+  targetSlug!: string;
 
   @Column({ type: 'varchar' })
-  role: string;
+  role!: string;
 
   @Column({ type: 'int', default: 0 })
-  position: number;
+  position!: number;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

@@ -31,10 +31,12 @@ export class FlatmateDirectoryController {
 
   @Get()
   @ApiOperation({
-    summary: 'Browse flatmate profiles (match-ranked for members with a profile)',
+    summary:
+      'Browse flatmate profiles (match-ranked for members with a profile)',
   })
   @ApiOkResponse({
-    description: 'Paginated flatmate profiles, best match first when applicable.',
+    description:
+      'Paginated flatmate profiles, best match first when applicable.',
   })
   browse(
     @CurrentUser() user: CurrentUserData,

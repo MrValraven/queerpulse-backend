@@ -1,4 +1,5 @@
 import { toImageUrl } from '../common/image-url';
+import { Activity } from '../profiles/entities/activity.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { SocialLink } from '../profiles/entities/social-link.entity';
 import { WorkItem } from '../profiles/entities/work-item.entity';
@@ -6,6 +7,20 @@ import { WorkItem } from '../profiles/entities/work-item.entity';
 export interface PublicSocialLinkView {
   platform: string;
   urlOrHandle: string;
+}
+
+/**
+ * One "Recent activity" entry as the open web sees it.
+ *
+ * Deliberately carries NO deep link (`toLink` is dropped): a public activity
+ * entry states a fact ("Posted in X"), it does not hand a logged-out visitor a
+ * map of the member's in-app URLs. Only `kind` (for the icon), `title` and an
+ * optional `sub` cross the boundary.
+ */
+export interface PublicActivityView {
+  kind: string;
+  title: string;
+  sub: string | null;
 }
 
 export interface PublicWorkView {
@@ -36,6 +51,17 @@ export interface PublicProfileResponse {
   bio: string | null;
   socials: PublicSocialLinkView[];
   work: PublicWorkView[];
+  // Recent public activity. This is a DELIBERATE addition to the published set
+  // (2026-08-03): the profile "Recent activity" feed became real, and it is now
+  // shown on the opt-in public page for a doubly-opted-in member (visibility =
+  // open AND public_profile_enabled). It is safe to publish because the rows
+  // are already filtered at the WRITE: the activity table only ever records
+  // public-visibility events, forum threads, and posts in public-tier
+  // communities — nothing from a members-only / invite / private space (see the
+  // profiles `ActivityListener`). No deep links are exposed (see
+  // `PublicActivityView`). Reconsider this the day a non-public action can
+  // reach the activity table.
+  activity: PublicActivityView[];
 }
 
 /**
@@ -70,12 +96,17 @@ export interface PublicProfileResponse {
  *                                             in particular is safety-sensitive.
  *   - `verified`, `joinedAt`, `visibility`  — account/moderation state.
  *   - `board`, `skills`, `shapings`,
- *     `activity`, `related`                 — not in the decided set.
+ *     `related`                             — not in the decided set.
+ *
+ * `activity` IS now published (see the field's note on `PublicProfileResponse`)
+ * — a deliberate 2026-08-03 decision, safe only because the activity table is
+ * write-filtered to public-visible actions.
  */
 export function toPublicProfile(
   profile: Profile,
   socials: SocialLink[],
   work: WorkItem[],
+  activity: Activity[],
 ): PublicProfileResponse {
   return {
     slug: profile.slug,
@@ -105,6 +136,13 @@ export function toPublicProfile(
       title: workItem.title,
       year: workItem.year,
       imageUrl: toImageUrl(workItem.imageUrl),
+    })),
+    // Named-field projection, no `toLink`: the open web gets the fact of the
+    // action, never the in-app path (see `PublicActivityView`).
+    activity: activity.map((entry) => ({
+      kind: entry.kind,
+      title: entry.title,
+      sub: entry.sub,
     })),
   };
 }

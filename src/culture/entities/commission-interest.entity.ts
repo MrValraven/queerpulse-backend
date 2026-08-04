@@ -29,28 +29,28 @@ export enum CommissionCategory {
 @Entity('commission_interest')
 export class CommissionInterest {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_commission_interest_member_id')
   @Column({ type: 'uuid' })
-  memberId: string;
+  memberId!: string;
 
   @Column({ type: 'varchar', length: 500 })
-  commissionTitle: string;
+  commissionTitle!: string;
 
   @Column({ type: 'enum', enum: CommissionCategory })
-  commissionCategory: CommissionCategory;
+  commissionCategory!: CommissionCategory;
 
   // Verbatim `commission.who.name` at the time of submission — who the
   // member is reaching out to (denormalized for the same reason as
   // `commissionTitle`; see class doc).
   @Column({ type: 'varchar', length: 200 })
-  recipientName: string;
+  recipientName!: string;
 
   // The modal's optional "Your message" textarea.
   @Column({ type: 'text', nullable: true })
-  message: string | null;
+  message!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

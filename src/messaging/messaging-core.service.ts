@@ -15,7 +15,10 @@ import { Conversation } from './entities/conversation.entity';
 import { MessageReaction } from './entities/message-reaction.entity';
 import { MessageStar } from './entities/message-star.entity';
 import { GifAttachment, Message, MessageKind } from './entities/message.entity';
+import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { UserRole } from '../users/entities/user.entity';
+import { UsersService } from '../users/users.service';
 import {
   buildReplyTo,
   buildSystemEvent,
@@ -27,6 +30,7 @@ import {
   toMessageReactionSummaries,
   toMessageView,
 } from './message-response';
+import { EDIT_WINDOW_MS } from './messaging.constants';
 import { MESSAGE_CREATED, MessageCreatedEvent } from './messaging.events';
 
 /**
@@ -68,6 +72,10 @@ export type MessageLike = Pick<
  */
 @Injectable()
 export class MessagingCoreService {
+  // A message is reported (and taken down) under the `message` subject code,
+  // keyed by the message uuid — mirrors `ReportSubjectType.Message`.
+  private static readonly MESSAGE_SUBJECT_TYPE = 'message';
+
   constructor(
     @InjectRepository(Conversation)
     private readonly conversations: Repository<Conversation>,
@@ -81,9 +89,19 @@ export class MessagingCoreService {
     private readonly pins: Repository<ConversationPinnedMessage>,
     @InjectRepository(MessageStar)
     private readonly stars: Repository<MessageStar>,
+    // Read-only: the shared moderation-state table. A `hide_content` /
+    // `remove_content` takedown on a `message` subject (keyed by the message
+    // uuid) lands here, and `toMessageResponses` reads it to tombstone the
+    // message in the thread — the messaging mirror of forum/community's
+    // takedown read-enforcement. Injected as the repository (not the service)
+    // because the thread needs the takedown TIMESTAMP for `deletedAt`, which
+    // the service's boolean `ContentModerationState` doesn't carry.
+    @InjectRepository(ContentModeration)
+    private readonly moderationStates: Repository<ContentModeration>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly dataSource: DataSource,
     private readonly eventEmitter: EventEmitter2,
+    private readonly usersService: UsersService,
   ) {}
 
   /**
@@ -106,6 +124,24 @@ export class MessagingCoreService {
     return part;
   }
 
+  /**
+   * A `NOT EXISTS` SQL fragment (message alias `m`) that is TRUE only when the
+   * message carries no moderator takedown (neither hidden nor removed). Shared
+   * by the message-counting/preview query builders so a taken-down message is
+   * uniformly excluded. The caller must bind the `messageSubjectType` parameter
+   * (`.setParameter('messageSubjectType', MESSAGE_SUBJECT_TYPE)`); it isn't
+   * bound here so the fragment can be composed into any builder. `subject_id`
+   * is varchar while `m.id` is uuid, hence the `::text` cast.
+   */
+  private notModeratedPredicate(): string {
+    return `NOT EXISTS (
+      SELECT 1 FROM "content_moderation" "cm"
+      WHERE "cm"."subject_type" = :messageSubjectType
+        AND "cm"."subject_id" = m.id::text
+        AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
+    )`;
+  }
+
   /** Newest non-deleted message per conversation, in one DISTINCT ON pass. */
   async lastMessagesByConversation(
     convoIds: string[],
@@ -114,6 +150,15 @@ export class MessagingCoreService {
       .createQueryBuilder('m')
       .distinctOn(['m.conversation_id'])
       .where('m.conversation_id IN (:...convoIds)', { convoIds })
+      // A moderator-taken-down message (hidden OR removed) is skipped as a
+      // preview candidate too, so the inbox falls back to the newest CLEAN
+      // message rather than leaking a withheld body — the preview never passes
+      // through `toMessageResponses`, so the filter has to live here.
+      .andWhere(this.notModeratedPredicate())
+      .setParameter(
+        'messageSubjectType',
+        MessagingCoreService.MESSAGE_SUBJECT_TYPE,
+      )
       // DISTINCT ON must lead its ORDER BY with the distinct column; the
       // (created_at DESC, id DESC) tail then selects the newest row per
       // conversation deterministically. Backed by the composite index
@@ -147,6 +192,13 @@ export class MessagingCoreService {
       .andWhere('m.sender_id != :userId', { userId })
       .andWhere('(p.last_read_at IS NULL OR m.created_at > p.last_read_at)')
       .andWhere('(p.cleared_at IS NULL OR m.created_at > p.cleared_at)')
+      // A moderator-taken-down message never counts toward unread — the viewer
+      // can no longer see it, so it must not drive a badge.
+      .andWhere(this.notModeratedPredicate())
+      .setParameter(
+        'messageSubjectType',
+        MessagingCoreService.MESSAGE_SUBJECT_TYPE,
+      )
       .groupBy('m.conversation_id')
       .getRawMany<{ conversationId: string; count: string }>();
     return new Map(rows.map((r) => [r.conversationId, Number(r.count)]));
@@ -177,6 +229,12 @@ export class MessagingCoreService {
       .where('m.sender_id != :userId', { userId })
       .andWhere('(p.last_read_at IS NULL OR m.created_at > p.last_read_at)')
       .andWhere('(p.cleared_at IS NULL OR m.created_at > p.cleared_at)')
+      // A moderator-taken-down message never counts toward the unread badge.
+      .andWhere(this.notModeratedPredicate())
+      .setParameter(
+        'messageSubjectType',
+        MessagingCoreService.MESSAGE_SUBJECT_TYPE,
+      )
       .getRawOne<{ count: string }>();
     return Number(raw?.count ?? 0);
   }
@@ -250,6 +308,11 @@ export class MessagingCoreService {
       pinnedAt: null,
       starred: false,
       canPin: false,
+      // The inbox preview is never actionable (no long-press overlay renders
+      // against it) — false across the board, mirroring `canPin` above.
+      canEdit: false,
+      canDelete: false,
+      canReport: false,
       replyTo: null,
       kind:
         message.kind === MessageKind.System
@@ -398,6 +461,8 @@ export class MessagingCoreService {
       otherParticipantRows,
       pinRows,
       starRows,
+      viewer,
+      moderationRows,
     ] = await Promise.all([
       this.profiles.find({ where: { userId: In(senderIds) } }),
       this.reactionSummariesByMessage(messageIds, viewerId),
@@ -410,7 +475,28 @@ export class MessagingCoreService {
       this.stars.find({
         where: { userId: viewerId, messageId: In(messageIds) },
       }),
+      // ONE lookup for the whole page (not per-message) of whether the viewer
+      // is platform staff — feeds `canDelete` below, mirroring
+      // `MessagesService.deleteMessage`'s own staff check exactly.
+      this.usersService.findById(viewerId),
+      // Moderator takedowns for this page of messages, in ONE `IN(...)` query
+      // (subject key is the message uuid). A hidden/removed message is rendered
+      // as a tombstone below — the messaging mirror of the forum/community
+      // read-enforcement, gap-free because a tombstone still occupies its slot.
+      this.moderationStates.find({
+        where: {
+          subjectType: MessagingCoreService.MESSAGE_SUBJECT_TYPE,
+          subjectId: In(messageIds),
+        },
+      }),
     ]);
+    const viewerIsStaff =
+      viewer?.role === UserRole.Admin || viewer?.role === UserRole.Moderator;
+    // subjectId -> its takedown row, so each message can resolve the tombstone
+    // timestamp its `deletedAt` will carry.
+    const moderationByMessage = new Map(
+      moderationRows.map((row) => [row.subjectId, row]),
+    );
     const pinnedAtByMessage = new Map(
       pinRows.map((pin) => [pin.messageId, pin.pinnedAt]),
     );
@@ -436,10 +522,22 @@ export class MessagingCoreService {
         : null;
     const profileByUser = new Map(senders.map((p) => [p.userId, p]));
     return rows.map((m) => {
-      // A soft-deleted row renders as a tombstone: id/sender/createdAt are
-      // kept (so the thread still shows who/when), but `body` and
-      // `reactions` are blanked rather than leaking the deleted content.
-      const isDeleted = Boolean(m.deletedAt);
+      // A moderator takedown tombstones the message the same way an author's
+      // own soft-delete does. A `remove_content` takedown (`removedAt`) hides
+      // it from EVERYONE; a `hide_content` takedown (`hiddenAt` without
+      // `removedAt`) hides it from ordinary participants but stays visible to
+      // platform staff — the exact hidden/removed split forum/community use.
+      // `deletedAt` carries the takedown timestamp so the client renders its
+      // existing tombstone (it keys purely on `deletedAt` being set).
+      const moderation = moderationByMessage.get(m.id);
+      const moderationTombstoneAt = moderation
+        ? (moderation.removedAt ?? (viewerIsStaff ? null : moderation.hiddenAt))
+        : null;
+      // A soft-deleted (or taken-down) row renders as a tombstone: id/sender/
+      // createdAt are kept (so the thread still shows who/when), but `body`
+      // and `reactions` are blanked rather than leaking the withheld content.
+      const effectiveDeletedAt = m.deletedAt ?? moderationTombstoneAt;
+      const isDeleted = Boolean(effectiveDeletedAt);
       // Delivered only applies to the viewer's OWN outgoing messages (the only
       // side that renders a delivery tick), and only once the recipient's
       // watermark has reached this message. The watermark ISO is a truthful
@@ -448,6 +546,12 @@ export class MessagingCoreService {
         m.senderId === viewerId &&
         otherDeliveredAt !== null &&
         m.createdAt <= otherDeliveredAt;
+      const isAuthor = m.senderId === viewerId;
+      // Identical predicate to `MessagesService.editMessage`'s own guard
+      // (same `EDIT_WINDOW_MS` constant), so this flag can never promise an
+      // edit the endpoint would then reject.
+      const withinEditWindow =
+        Date.now() - m.createdAt.getTime() <= EDIT_WINDOW_MS;
       return {
         id: m.id,
         conversationId: m.conversationId,
@@ -456,7 +560,7 @@ export class MessagingCoreService {
         createdAt: m.createdAt.toISOString(),
         editedAt: m.editedAt ? m.editedAt.toISOString() : null,
         reactions: isDeleted ? [] : (reactionsByMessage.get(m.id) ?? []),
-        deletedAt: m.deletedAt ? m.deletedAt.toISOString() : null,
+        deletedAt: effectiveDeletedAt ? effectiveDeletedAt.toISOString() : null,
         deliveredAt: delivered ? otherDeliveredAt.toISOString() : null,
         clientMessageId: m.clientMessageId,
         forwarded: m.forwarded,
@@ -467,6 +571,14 @@ export class MessagingCoreService {
           : (pinnedAtByMessage.get(m.id)?.toISOString() ?? null),
         starred: isDeleted ? false : starredMessageIds.has(m.id),
         canPin: !isDeleted,
+        // Mirrors `MessagesService.editMessage`/`deleteMessage`'s own guards
+        // exactly (author + window; author-or-staff) so the client never
+        // offers an action the endpoint would then reject. `canReport`
+        // excludes the author's own messages and tombstones (nothing left to
+        // report).
+        canEdit: !isDeleted && isAuthor && withinEditWindow,
+        canDelete: !isDeleted && (isAuthor || viewerIsStaff),
+        canReport: !isDeleted && !isAuthor,
         replyTo: buildReplyTo(m.replyToId, parentById, profileByUser),
         // Timeline kind + resolved system event. A `user` message carries a null
         // event; a `system` one resolves actor/target ids to display names so the

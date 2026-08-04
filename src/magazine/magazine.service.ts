@@ -1,18 +1,33 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
+import { escapeLikeTerm } from '../common/like-escape';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
+import { validateDeckSlides } from './deck-slides.validation';
+import { CreateDeckDto } from './dto/create-deck.dto';
+import { UpdateDeckDto } from './dto/update-deck.dto';
 import { MagazineArticle } from './entities/magazine-article.entity';
 import { MagazineAuthor } from './entities/magazine-author.entity';
+import { MagazineDeck } from './entities/magazine-deck.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
 import {
   ArticleListItem,
   ArticleResponse,
+  ArticleSearchRow,
   AuthorResponse,
+  DeckListItemResponse,
+  DeckResponse,
   IssueResponse,
   toArticleListItem,
   toArticleResponse,
+  toArticleSearchRow,
   toAuthorResponse,
+  toDeckListItem,
+  toDeckResponse,
   toIssueResponse,
 } from './magazine-response';
 
@@ -20,6 +35,11 @@ export interface ListArticlesInput {
   issue?: string;
   tag?: string;
   author?: string;
+  page?: number;
+}
+
+export interface ListDecksInput {
+  tag?: string;
   page?: number;
 }
 
@@ -37,6 +57,8 @@ export class MagazineService {
     private readonly authors: Repository<MagazineAuthor>,
     @InjectRepository(MagazineIssue)
     private readonly issues: Repository<MagazineIssue>,
+    @InjectRepository(MagazineDeck)
+    private readonly decks: Repository<MagazineDeck>,
   ) {}
 
   async listIssues(): Promise<IssueResponse[]> {
@@ -91,6 +113,25 @@ export class MagazineService {
     return paginate(qb, page, (rows) => this.toListItems(rows));
   }
 
+  // Cross-entity global search (SearchService) — published articles only
+  // (same `published_at <= now` gate as `listArticles`, so unpublished/
+  // future-dated pieces never surface). ILIKE over title / dek. No author or
+  // issue hydration — the search row needs neither.
+  async searchByText(term: string, limit: number): Promise<ArticleSearchRow[]> {
+    const pattern = `%${escapeLikeTerm(term)}%`;
+    const rows = await this.articles
+      .createQueryBuilder('article')
+      .where('article.published_at <= :now', { now: new Date() })
+      .andWhere(
+        '(article.title ILIKE :pattern OR article.dek ILIKE :pattern)',
+        { pattern },
+      )
+      .orderBy('article.published_at', 'DESC', 'NULLS LAST')
+      .take(limit)
+      .getMany();
+    return rows.map(toArticleSearchRow);
+  }
+
   async getArticleBySlug(slug: string): Promise<ArticleResponse> {
     const article = await this.articles.findOne({ where: { slug } });
     // 404 an unknown slug and an unpublished/future-dated one alike — hide its
@@ -115,6 +156,125 @@ export class MagazineService {
       throw new NotFoundException('Author not found');
     }
     return toAuthorResponse(author);
+  }
+
+  // --- decks ---
+
+  async listPublishedDecks(
+    query: ListDecksInput,
+  ): Promise<Paginated<DeckListItemResponse>> {
+    const page = normalizePage(query.page);
+    const qb = this.decks
+      .createQueryBuilder('deck')
+      // Same NULL-excluding gate as `listArticles` — a draft (`published_at`
+      // null) or future-dated deck never surfaces here.
+      .andWhere('deck.published_at <= :now', { now: new Date() });
+
+    if (query.tag) {
+      qb.andWhere(':tag = ANY(deck.tags)', { tag: query.tag });
+    }
+
+    qb.orderBy('deck.published_at', 'DESC').addOrderBy(
+      'deck.created_at',
+      'DESC',
+    );
+
+    return paginate(qb, page, (rows) => rows.map(toDeckListItem));
+  }
+
+  async getPublishedDeckBySlug(slug: string): Promise<DeckResponse> {
+    const deck = await this.decks.findOne({ where: { slug } });
+    // 404 an unknown slug and an unpublished/future-dated one alike, mirroring
+    // `getArticleBySlug` / `ContentPagesService.getBySlug`.
+    if (!deck || !deck.publishedAt || deck.publishedAt > new Date()) {
+      throw new NotFoundException('Deck not found');
+    }
+    return toDeckResponse(deck);
+  }
+
+  // Admin/moderator listing — every deck, drafts included, newest edit first.
+  async listAllDecks(): Promise<DeckListItemResponse[]> {
+    const rows = await this.decks.find({ order: { updatedAt: 'DESC' } });
+    return rows.map(toDeckListItem);
+  }
+
+  // Admin/moderator single-deck load by id (drafts included) — the sub-
+  // project 3 authoring UI edits a deck this way, not by slug.
+  async getDeckById(id: string): Promise<DeckResponse> {
+    const deck = await this.decks.findOne({ where: { id } });
+    if (!deck) {
+      throw new NotFoundException('Deck not found');
+    }
+    return toDeckResponse(deck);
+  }
+
+  async createDeck(dto: CreateDeckDto): Promise<DeckResponse> {
+    const slides = validateDeckSlides(dto.slides);
+
+    const existing = await this.decks.findOne({ where: { slug: dto.slug } });
+    if (existing) {
+      throw new ConflictException('A deck with this slug already exists');
+    }
+
+    const deck = this.decks.create({
+      ...dto,
+      slides,
+      role: dto.role ?? null,
+      publishedAt: null,
+      kicker: dto.kicker ?? '',
+      section: dto.section ?? '',
+      byline: dto.byline ?? '',
+      readTime: dto.readTime ?? '',
+      cover: dto.cover ?? '',
+      coverDesc: dto.coverDesc ?? '',
+    });
+    await this.decks.save(deck);
+    return toDeckResponse(deck);
+  }
+
+  async updateDeck(id: string, dto: UpdateDeckDto): Promise<DeckResponse> {
+    const deck = await this.decks.findOne({ where: { id } });
+    if (!deck) {
+      throw new NotFoundException('Deck not found');
+    }
+
+    if (dto.slides !== undefined) {
+      deck.slides = validateDeckSlides(dto.slides);
+    }
+
+    if (dto.published !== undefined) {
+      // Re-publishing an already-published deck keeps its original
+      // `publishedAt` (first-publish date); only a null -> true transition
+      // stamps "now". Unpublishing always clears it.
+      deck.publishedAt = dto.published
+        ? (deck.publishedAt ?? new Date())
+        : null;
+    }
+
+    Object.assign(deck, {
+      ...(dto.slug !== undefined ? { slug: dto.slug } : {}),
+      ...(dto.title !== undefined ? { title: dto.title } : {}),
+      ...(dto.kicker !== undefined ? { kicker: dto.kicker } : {}),
+      ...(dto.section !== undefined ? { section: dto.section } : {}),
+      ...(dto.byline !== undefined ? { byline: dto.byline } : {}),
+      ...(dto.role !== undefined ? { role: dto.role } : {}),
+      ...(dto.authorBio !== undefined ? { authorBio: dto.authorBio } : {}),
+      ...(dto.cover !== undefined ? { cover: dto.cover } : {}),
+      ...(dto.coverDesc !== undefined ? { coverDesc: dto.coverDesc } : {}),
+      ...(dto.readTime !== undefined ? { readTime: dto.readTime } : {}),
+      ...(dto.tags !== undefined ? { tags: dto.tags } : {}),
+      ...(dto.related !== undefined ? { related: dto.related } : {}),
+    });
+
+    await this.decks.save(deck);
+    return toDeckResponse(deck);
+  }
+
+  async deleteDeck(id: string): Promise<void> {
+    const res = await this.decks.delete(id);
+    if (res.affected === 0) {
+      throw new NotFoundException('Deck not found');
+    }
   }
 
   // --- internals ---

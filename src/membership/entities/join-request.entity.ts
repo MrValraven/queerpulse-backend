@@ -21,10 +21,10 @@ export enum JoinRequestStatus {
 @Entity('join_requests')
 export class JoinRequest {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Column({ type: 'varchar' })
-  name: string;
+  name!: string;
 
   /**
    * Stored trimmed + lowercased by the service. The open-request uniqueness
@@ -32,13 +32,13 @@ export class JoinRequest {
    * can never be used to queue a second open request.
    */
   @Column({ type: 'varchar' })
-  email: string;
+  email!: string;
 
   @Column({ type: 'varchar', nullable: true })
-  city: string | null;
+  city!: string | null;
 
   @Column({ type: 'text' })
-  message: string;
+  message!: string;
 
   @Column({
     type: 'enum',
@@ -46,22 +46,22 @@ export class JoinRequest {
     enumName: 'join_requests_status_enum',
     default: JoinRequestStatus.Pending,
   })
-  status: JoinRequestStatus;
+  status!: JoinRequestStatus;
 
   /** 18+ self-attestation, mirroring `User.ageAttestedAt` (Terms §eligibility). */
   @Column({ type: 'timestamptz' })
-  ageAttestedAt: Date;
+  ageAttestedAt!: Date;
 
   /** Terms revision the attestation was made against, e.g. "2.4". */
   @Column({ type: 'varchar', length: 32 })
-  termsVersion: string;
+  termsVersion!: string;
 
   @Index('IDX_join_requests_reviewed_by')
   @Column({ type: 'uuid', nullable: true })
-  reviewedBy: string | null;
+  reviewedBy!: string | null;
 
   @Column({ type: 'timestamptz', nullable: true })
-  reviewedAt: Date | null;
+  reviewedAt!: Date | null;
 
   /**
    * The invite minted by the approval, bound to `email`. Null while pending and
@@ -70,8 +70,8 @@ export class JoinRequest {
    */
   @Index('IDX_join_requests_invite_id')
   @Column({ type: 'uuid', nullable: true })
-  inviteId: string | null;
+  inviteId!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

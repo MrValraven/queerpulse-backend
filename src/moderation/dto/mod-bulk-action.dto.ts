@@ -23,13 +23,13 @@ export class ModBulkActionDto {
   // comfortably above any real bulk-bar selection.
   @ArrayMaxSize(100)
   @IsUUID('4', { each: true })
-  ids: string[];
+  ids!: string[];
 
   @IsIn(MOD_ACTION_CODES)
-  action: ModActionCode;
+  action!: ModActionCode;
 
   @IsIn(REASON_CODES)
-  reasonCode: ReasonCode;
+  reasonCode!: ReasonCode;
 
   @IsOptional()
   @IsString()

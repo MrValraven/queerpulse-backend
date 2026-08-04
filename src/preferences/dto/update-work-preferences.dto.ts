@@ -18,15 +18,15 @@ export class UpdateWorkPreferencesDto {
   // `UpdateProfileDto`, which is the repo's precedent for a closed set backed
   // by a Postgres enum type.
   @IsEnum(OutAtWork)
-  outAtWork: OutAtWork;
+  outAtWork!: OutAtWork;
 
   // An unknown id is a 400 here, never a stored value — see the reasoning on
   // `normalizeTransSupport`.
   @IsArray()
   @ArrayMaxSize(TRANS_SUPPORT_IDS.length)
   @IsIn(TRANS_SUPPORT_IDS, { each: true })
-  transSupport: string[];
+  transSupport!: string[];
 
   @IsBoolean()
-  safeOnly: boolean;
+  safeOnly!: boolean;
 }

@@ -288,6 +288,21 @@ export class MessagesService {
       // clearedAt floor: at-or-before the caller's clear point does not exist
       // for them (mirrors getMessages' history floor).
       .andWhere('(p.cleared_at IS NULL OR m.created_at > p.cleared_at)')
+      // Moderator-taken-down messages (hidden OR removed, keyed by the message
+      // uuid) never surface as a search hit — the searcher is always an
+      // ordinary participant here (never acting as staff), and a tombstoned
+      // body is meaningless to match on. In-query NOT EXISTS so the capped page
+      // isn't under-filled. `content_moderation.subject_id` is varchar while
+      // `m.id` is uuid, hence the `::text` cast.
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1 FROM "content_moderation" "cm"
+          WHERE "cm"."subject_type" = :messageSubjectType
+            AND "cm"."subject_id" = m.id::text
+            AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
+        )`,
+        { messageSubjectType: 'message' },
+      )
       // No `.withDeleted()`: the @DeleteDateColumn default filter drops
       // soft-deleted rows, so tombstoned bodies are never returned.
       .orderBy('m.created_at', 'DESC')

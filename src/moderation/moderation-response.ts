@@ -4,6 +4,7 @@ import {
   ReportSubjectType,
   Report,
 } from '../reports/entities/report.entity';
+import { CursorPage } from '../common/cursor-pagination';
 import { Appeal, AppealStatus } from './entities/appeal.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
 
@@ -34,6 +35,19 @@ export interface ModReportDetail {
     flagged?: boolean;
   }[];
   people: { role: string; name: string; handle?: string; meta: string }[];
+  // Listing-report enrichment (item #13), only present on a `listing`-subject
+  // report's detail. `disputeReason` is the free-text a disputer/claimer typed
+  // (`POST /listings/:ref/dispute`); `listingEvidence` is the ownership/claim
+  // proof the submitter pasted into the listing itself — surfaced here so a
+  // reviewer can weigh a claim without leaving the queue.
+  disputeReason?: string;
+  listingEvidence?: string;
+  // Off-account contact the disputer left when they filed
+  // (`DisputeListingDto.contactEmail`, stored on the report row). MODERATOR-ONLY
+  // — surfaced here so a reviewer can reach a disputer who has no account;
+  // deliberately absent from every member-facing/report-list DTO. Present only
+  // when the report actually carries one.
+  contactEmail?: string;
 }
 
 // Mirrors `ModReportDTO` (`moderation.api.ts:24-40`).
@@ -59,11 +73,15 @@ export interface ModCounts {
   resolved: number;
 }
 
-// Mirrors `ModReportsResponse` (`moderation.api.ts:61-65`).
-export interface ModReportsResponse {
-  items: ModReportDTO[];
+// The moderation queue now answers with the repo's canonical cursor-page
+// envelope — `CursorPage<T>` = `{ data, pageInfo: { nextCursor, hasMore } }`,
+// the same shape the feed/forum/blocks/mutes/saved lists use — instead of its
+// former one-off `{ items, counts, page: { cursor } }`. `counts` (the real
+// per-tab totals the queue header renders) is orthogonal domain data with no
+// home in the pagination envelope, so it is carried alongside rather than
+// dropped. Mirrors `ModReportsResponse` in `moderation.api.ts`.
+export interface ModReportsResponse extends CursorPage<ModReportDTO> {
   counts: ModCounts;
-  page: { cursor: string | null };
 }
 
 export function toModReportDTO(
@@ -159,9 +177,16 @@ export interface AuditFeedModerator {
   name: string;
 }
 
+// The canonical offset envelope (`{items,total,page,pageSize}`, see
+// `common/pagination.ts`) plus the audit-feed-specific `moderators` options.
+// `page`/`pageSize` echo back the request so the client's page-count maths and
+// server truth can never drift; earlier this shape omitted them, making it a
+// pagination-envelope outlier.
 export interface AuditFeedResponseDTO {
   items: AuditFeedRowDTO[];
   total: number;
+  page: number;
+  pageSize: number;
   /** Distinct actors across the whole table, for the moderator filter's options. */
   moderators: AuditFeedModerator[];
 }

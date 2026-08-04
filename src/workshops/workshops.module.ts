@@ -30,5 +30,7 @@ import { WorkshopsService } from './workshops.service';
   ],
   controllers: [WorkshopsController],
   providers: [WorkshopsService, WorkshopRsvpsService],
+  // Exported for the cross-entity SearchModule (workshop search).
+  exports: [WorkshopsService],
 })
 export class WorkshopsModule {}

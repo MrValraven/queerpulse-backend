@@ -1,5 +1,5 @@
 import { IsBoolean } from 'class-validator';
 
 export class PublishChangemakerDto {
-  @IsBoolean() published: boolean;
+  @IsBoolean() published!: boolean;
 }

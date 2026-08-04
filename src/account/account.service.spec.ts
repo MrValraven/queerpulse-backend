@@ -833,6 +833,8 @@ describe('AccountService', () => {
       expect(productUpdates).toEqual({
         category: 'productUpdates',
         email: true,
+        // No mailer at launch — every item is flagged not-yet-delivered.
+        comingSoon: true,
       });
     });
 
@@ -860,6 +862,7 @@ describe('AccountService', () => {
         category: 'securityAlerts',
         email: true,
         locked: true,
+        comingSoon: true,
       });
     });
 

@@ -1,8 +1,11 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { StorageService } from '../storage/storage.service';
 import { Profile } from '../users/entities/profile.entity';
 import { CommunityPostsService } from './community-posts.service';
 import {
@@ -42,7 +45,11 @@ const qbStub = () => {
 };
 
 // The `.insert().into().values().orIgnore().execute()` chain used by
-// `addReaction` (mirrors `EventsService.addCohost`'s idiom).
+// `addReaction` (mirrors `EventsService.addCohost`'s idiom). Also carries the
+// `select/groupBy/getRawMany` chain, because `addReaction`/`likeFlatPost`
+// reuse this SAME mocked `createQueryBuilder` return value for the
+// `reactionAggregatesByPost` aggregate query that runs afterward while
+// building the returned post DTO.
 const insertQbStub = () => {
   const qb: Record<string, jest.Mock> = {};
   qb.insert = jest.fn().mockReturnValue(qb);
@@ -50,6 +57,40 @@ const insertQbStub = () => {
   qb.values = jest.fn().mockReturnValue(qb);
   qb.orIgnore = jest.fn().mockReturnValue(qb);
   qb.execute = jest.fn().mockResolvedValue({ raw: [], generatedMaps: [] });
+  for (const m of ['select', 'addSelect', 'where', 'groupBy', 'addGroupBy']) {
+    qb[m] = jest.fn().mockReturnValue(qb);
+  }
+  qb.getRawMany = jest.fn().mockResolvedValue([]);
+  return qb;
+};
+
+// A raw-query-builder stub for the aggregate / `ROW_NUMBER()` window queries
+// behind `topRepliesByPost`/`replyCountByPost`/`reactionAggregatesByPost`
+// (terminal `getRawMany()`, default empty). `.from()` invokes its subquery
+// callback (if given one) against a fresh stub of the same shape, so
+// `blockFilter.excludeHidden` still gets exercised on the inner builder,
+// mirroring the real subquery `topRepliesByPost` builds.
+const rawQbStub = (rows: unknown[] = []) => {
+  const qb: Record<string, jest.Mock> = {};
+  for (const m of [
+    'select',
+    'addSelect',
+    'where',
+    'andWhere',
+    'groupBy',
+    'addGroupBy',
+    'orderBy',
+    'addOrderBy',
+  ]) {
+    qb[m] = jest.fn().mockReturnValue(qb);
+  }
+  qb.from = jest.fn((arg: unknown) => {
+    if (typeof arg === 'function') {
+      (arg as (sub: Record<string, jest.Mock>) => unknown)(rawQbStub());
+    }
+    return qb;
+  });
+  qb.getRawMany = jest.fn().mockResolvedValue(rows);
   return qb;
 };
 
@@ -69,6 +110,7 @@ const COMMUNITY: Community = {
   ref: 'QP-C-0001',
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+  archivedAt: null,
 };
 
 const POST: CommunityPost = {
@@ -116,6 +158,8 @@ describe('CommunityPostsService', () => {
     find: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
+    createQueryBuilder: jest.Mock;
+    manager: { createQueryBuilder: jest.Mock };
   };
   let profiles: { find: jest.Mock };
   let blockFilter: {
@@ -125,6 +169,15 @@ describe('CommunityPostsService', () => {
   let postEdits: { create: jest.Mock; save: jest.Mock; find: jest.Mock };
   let replyEdits: { create: jest.Mock; save: jest.Mock; find: jest.Mock };
   let mentions: { notify: jest.Mock };
+  // `statesForAnyType` returns an empty map by default (every subject falls
+  // back to `CommunityPostsService.VISIBLE`); `excludeHidden` is a pass-through
+  // on the query builder, mirroring the `blockFilter` stub above — the real
+  // in-SQL exclusion is exercised against a live DB in e2e, not here.
+  let contentModeration: {
+    statesForAnyType: jest.Mock;
+    excludeHidden: jest.Mock;
+  };
+  let storage: { deleteObjectByReference: jest.Mock };
 
   beforeEach(async () => {
     communities = { findOne: jest.fn().mockResolvedValue(COMMUNITY) };
@@ -179,6 +232,11 @@ describe('CommunityPostsService', () => {
           createdAt: new Date('2026-01-03T00:00:00.000Z'),
         }),
       ),
+      // `replyCountByPost`'s `GROUP BY post_id` aggregate — default empty
+      // (no replies), matching the old `find.mockResolvedValue([])` default.
+      createQueryBuilder: jest.fn(() => rawQbStub()),
+      // `topRepliesByPost`'s `ROW_NUMBER()` window subquery — default empty.
+      manager: { createQueryBuilder: jest.fn(() => rawQbStub()) },
     };
     profiles = { find: jest.fn().mockResolvedValue([]) };
     blockFilter = {
@@ -196,6 +254,13 @@ describe('CommunityPostsService', () => {
       find: jest.fn().mockResolvedValue([]),
     };
     mentions = { notify: jest.fn().mockResolvedValue(undefined) };
+    contentModeration = {
+      statesForAnyType: jest.fn().mockResolvedValue(new Map()),
+      excludeHidden: jest.fn((qb: unknown) => qb),
+    };
+    storage = {
+      deleteObjectByReference: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -216,6 +281,9 @@ describe('CommunityPostsService', () => {
           useValue: replyEdits,
         },
         { provide: MentionNotificationService, useValue: mentions },
+        { provide: ContentModerationService, useValue: contentModeration },
+        { provide: StorageService, useValue: storage },
+        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
       ],
     }).compile();
     service = module.get(CommunityPostsService);
@@ -286,8 +354,16 @@ describe('CommunityPostsService', () => {
       members.findOne.mockResolvedValue({ role: RosterRole.Member });
       // Simulate the post-insert DB state: exactly one row regardless of how
       // many times `addReaction` was called for the same (post,user,key).
+      // `reactionAggregatesByPost` reads this via the SAME mocked
+      // `createQueryBuilder` return value the insert chain uses (see
+      // `insertQbStub`'s doc comment).
+      const qb = insertQbStub();
+      qb.getRawMany!.mockResolvedValue([
+        { postId: 'p1', key: ReactionKey.Heart, count: '1' },
+      ]);
+      reactions.createQueryBuilder.mockReturnValue(qb);
       reactions.find.mockResolvedValue([
-        { key: ReactionKey.Heart, userId: 'u1' },
+        { postId: 'p1', key: ReactionKey.Heart },
       ]);
 
       await service.addReaction('queer-devs', 'p1', 'u1', ReactionKey.Heart);
@@ -307,10 +383,17 @@ describe('CommunityPostsService', () => {
   describe('reaction summary', () => {
     it('returns all 4 keys with count + mine for the viewer', async () => {
       members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      // Two Heart reactions (someone-else + viewer), one Fire (someone-else
+      // only) — `reactionAggregatesByPost`'s `GROUP BY` count plus the
+      // viewer-scoped "mine" lookup, not the raw per-user rows.
+      const qb = insertQbStub();
+      qb.getRawMany!.mockResolvedValue([
+        { postId: 'p1', key: ReactionKey.Heart, count: '2' },
+        { postId: 'p1', key: ReactionKey.Fire, count: '1' },
+      ]);
+      reactions.createQueryBuilder.mockReturnValue(qb);
       reactions.find.mockResolvedValue([
-        { key: ReactionKey.Heart, userId: 'someone-else' },
-        { key: ReactionKey.Heart, userId: 'viewer' },
-        { key: ReactionKey.Fire, userId: 'someone-else' },
+        { postId: 'p1', key: ReactionKey.Heart },
       ]);
 
       const res = await service.addReaction(
@@ -798,40 +881,40 @@ describe('CommunityPostsService', () => {
       );
     });
 
-    // Replies are a nested, unpaginated collection, so post-query filtering is
-    // safe here — there is no page length to under-fill.
-    it('drops nested replies whose author is blocked or muted', async () => {
+    // Blocked/muted reply authors are excluded IN-QUERY by
+    // `topRepliesByPost`'s inner subquery (mirrors `listPosts`'s own posts
+    // filter), so a bounded reply preview fills with visible rows instead of
+    // coming back short — only what the real DB WHERE would ever return is
+    // stubbed here (`blocked-1`'s reply never comes back at all).
+    it('excludes blocked/muted reply authors in-query, keyed on the reply author column', async () => {
       const qb = qbStub();
       qb.getManyAndCount!.mockResolvedValue([
         [{ ...POST, id: 'post-id', authorId: 'u1' }],
         1,
       ]);
       posts.createQueryBuilder.mockReturnValue(qb);
-      replies.find.mockResolvedValue([
-        {
-          id: 'r1',
-          postId: 'post-id',
-          authorId: 'blocked-1',
-          text: 'hi',
-          createdAt: new Date('2026-01-03T00:00:00.000Z'),
-          editedAt: null,
-          deletedAt: null,
-        },
-        {
-          id: 'r2',
-          postId: 'post-id',
-          authorId: 'ok-1',
-          text: 'hello',
-          createdAt: new Date('2026-01-03T00:00:00.000Z'),
-          editedAt: null,
-          deletedAt: null,
-        },
-      ]);
-      blockFilter.hiddenUserIds.mockResolvedValue(new Set(['blocked-1']));
+      replies.manager.createQueryBuilder.mockReturnValue(
+        rawQbStub([
+          {
+            id: 'r2',
+            postId: 'post-id',
+            authorId: 'ok-1',
+            text: 'hello',
+            createdAt: new Date('2026-01-03T00:00:00.000Z'),
+            editedAt: null,
+            deletedAt: null,
+          },
+        ]),
+      );
 
       const page = await service.listPosts('queer-devs', 'u1');
 
       expect(page.items[0]!.replies.map((r) => r.id)).toEqual(['r2']);
+      expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
+        expect.anything(),
+        'u1',
+        '"r"."author_id"',
+      );
     });
 
     it("404s a private community's feed for a non-member", async () => {

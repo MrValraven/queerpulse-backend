@@ -8,5 +8,5 @@ import { IsString, MaxLength, MinLength } from 'class-validator';
  * a moderator's clarifying question can legitimately be a single short line.
  */
 export class AskListingQuestionDto {
-  @IsString() @MinLength(1) @MaxLength(2000) body: string;
+  @IsString() @MinLength(1) @MaxLength(2000) body!: string;
 }

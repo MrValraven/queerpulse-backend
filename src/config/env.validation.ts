@@ -33,7 +33,7 @@ export enum NodeEnv {
 
 export class EnvironmentVariables {
   @IsEnum(NodeEnv)
-  NODE_ENV: NodeEnv;
+  NODE_ENV!: NodeEnv;
 
   // Optional so the `?? 3000` fallbacks in app.config/main are reachable rather
   // than dead code. Platforms that inject PORT (Railway, Heroku) still win.
@@ -44,24 +44,24 @@ export class EnvironmentVariables {
   PORT?: number;
 
   @IsString()
-  DATABASE_URL: string;
+  DATABASE_URL!: string;
 
   @IsString()
   @MinLength(32)
-  JWT_ACCESS_SECRET: string;
+  JWT_ACCESS_SECRET!: string;
 
   @IsString()
   @MinLength(32)
-  JWT_REFRESH_SECRET: string;
+  JWT_REFRESH_SECRET!: string;
 
   @IsString()
-  GOOGLE_CLIENT_ID: string;
+  GOOGLE_CLIENT_ID!: string;
 
   @IsString()
-  GOOGLE_CLIENT_SECRET: string;
+  GOOGLE_CLIENT_SECRET!: string;
 
   @IsString()
-  GOOGLE_CALLBACK_URL: string;
+  GOOGLE_CALLBACK_URL!: string;
 
   @IsOptional()
   @IsString()
@@ -122,6 +122,14 @@ export class EnvironmentVariables {
   @Min(0)
   DATABASE_STATEMENT_TIMEOUT_MS?: number;
 
+  // Slow-query logging threshold (TypeORM `maxQueryExecutionTime`) — logs,
+  // never kills, a query slower than this. Default (500ms) applied in
+  // src/config/database.config.ts.
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  DATABASE_SLOW_QUERY_THRESHOLD_MS?: number;
+
   @IsOptional() @IsString() AWS_ENDPOINT_URL?: string;
   @IsOptional() @IsString() AWS_DEFAULT_REGION?: string;
   @IsOptional() @IsString() AWS_S3_BUCKET_NAME?: string;
@@ -178,6 +186,42 @@ export class EnvironmentVariables {
   @IsOptional()
   @IsEmail()
   GENESIS_EMAIL?: string;
+
+  // Bearer token guarding GET /metrics (see MetricsTokenGuard). Optional so
+  // local dev scrapes unauthenticated; REQUIRED in production by the cross-field
+  // rule below so a prod /metrics is never accidentally world-readable.
+  @IsOptional()
+  @IsString()
+  @MinLength(16)
+  METRICS_TOKEN?: string;
+
+  // --- Multi-replica gate ---------------------------------------------------
+  // This app keeps three stores IN PROCESS MEMORY — the @nestjs/throttler
+  // counters, socket.io presence/fan-out (no Redis adapter), and the presence
+  // map — so it is SINGLE-REPLICA ONLY. Run N replicas and every rate limit
+  // becomes N×, live socket fan-out (revoke/lockdown/presence) reaches only the
+  // instance that handled the event, and presence goes inconsistent. These
+  // knobs make that constraint enforced at boot rather than merely documented.
+
+  // Declared replica/worker count the operator is scaling to. `REPLICA_COUNT`
+  // is the explicit knob; `WEB_CONCURRENCY` is honoured as the de-facto standard
+  // (each worker is a separate process with its own in-memory stores, so it
+  // multiplies the same way). Absent ⇒ 1.
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  REPLICA_COUNT?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  WEB_CONCURRENCY?: number;
+
+  // Explicit override acknowledging the single-replica constraint. Only the
+  // exact string `true` enables it; see the cross-field rule below.
+  @IsOptional()
+  @IsString()
+  ALLOW_MULTI_REPLICA?: string;
 }
 
 export function validate(
@@ -299,6 +343,43 @@ export function validate(
     ) {
       problems.push(
         'MUX_SIGNING_KEY_ID and MUX_SIGNING_PRIVATE_KEY must be set together (required for signed playback)',
+      );
+    }
+  }
+
+  // /metrics must not be world-readable in production. Unset METRICS_TOKEN
+  // leaves MetricsTokenGuard open (correct for dev / private-network scraping);
+  // require it in prod so route inventory and pool/traffic shape never leak.
+  if (validated.NODE_ENV === NodeEnv.Production && !validated.METRICS_TOKEN) {
+    problems.push(
+      'METRICS_TOKEN is required when NODE_ENV=production (an unauthenticated /metrics endpoint leaks internal topology)',
+    );
+  }
+
+  // Single-replica gate. The throttler store, socket.io fan-out and presence
+  // map all live in process memory (see the ThrottlerModule + ChatGateway
+  // notes), so running >1 replica/worker silently breaks rate limits, live
+  // socket delivery and presence. If the operator declares more than one
+  // without explicitly acknowledging the constraint, fail fast at boot.
+  const declaredReplicas = Math.max(
+    validated.REPLICA_COUNT ?? 1,
+    validated.WEB_CONCURRENCY ?? 1,
+  );
+  const allowMultiReplica = validated.ALLOW_MULTI_REPLICA === 'true';
+  if (declaredReplicas > 1) {
+    if (!allowMultiReplica) {
+      problems.push(
+        `This app is single-replica only (in-memory throttler + no socket.io Redis adapter + in-memory presence), but REPLICA_COUNT/WEB_CONCURRENCY declares ${declaredReplicas}. Scale to one replica, or wire the shared stores (Redis throttler storage + @socket.io/redis-adapter + Redis presence) and set ALLOW_MULTI_REPLICA=true to acknowledge you have`,
+      );
+    } else {
+      // Acknowledged. We cannot verify the shared stores are actually wired
+      // (they aren't shipped yet), so this is a loud warning, not silence: the
+      // operator is asserting responsibility for having wired them.
+      console.warn(
+        `[env] ALLOW_MULTI_REPLICA=true with ${declaredReplicas} declared replicas/workers. ` +
+          'The in-memory throttler, socket.io fan-out and presence map are NOT shared across processes; ' +
+          'rate limits, live socket delivery (session-revoke/lockdown/presence) and presence will be WRONG ' +
+          'unless you have wired Redis throttler storage, @socket.io/redis-adapter and a shared presence store.',
       );
     }
   }

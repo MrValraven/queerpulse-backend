@@ -32,35 +32,35 @@ export enum HandleOwnerKind {
 export class Handle {
   // The normalized handle, PRIMARY KEY — this is what makes the namespace global.
   @PrimaryColumn({ type: 'varchar' })
-  name: string;
+  name!: string;
 
   @Column({
     type: 'enum',
     enum: HandleOwnerKind,
     enumName: 'handles_owner_kind_enum',
   })
-  ownerKind: HandleOwnerKind;
+  ownerKind!: HandleOwnerKind;
 
   // Set when ownerKind === 'profile'; null otherwise (enforced by the migration
   // CHECK constraint). Cascades so a deleted user frees the handle.
   @Index('IDX_handles_user_id')
   @Column({ type: 'uuid', nullable: true })
-  userId: string | null;
+  userId!: string | null;
 
   @ManyToOne(() => User, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'user_id' })
-  user: User | null;
+  user!: User | null;
 
   // Set when ownerKind === 'subprofile'; null otherwise. Cascades so a deleted
   // subprofile frees the handle.
   @Index('IDX_handles_subprofile_id')
   @Column({ type: 'uuid', nullable: true })
-  subprofileId: string | null;
+  subprofileId!: string | null;
 
   @ManyToOne(() => Subprofile, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'subprofile_id' })
-  subprofile: Subprofile | null;
+  subprofile!: Subprofile | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

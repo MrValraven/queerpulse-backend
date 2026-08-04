@@ -55,12 +55,17 @@ export class AdminTrustNetworkService {
     const slugs = profiles.map((profile) => profile.slug);
     const slugByUserId = new Map(profiles.map((p) => [p.userId, p.slug]));
 
-    const [openReportCountByUserId, suspendedUserIds, membershipsByUserId] =
-      await Promise.all([
-        this.loadOpenReportCounts(userIds, slugs),
-        this.loadSuspendedUserIds(userIds),
-        this.loadMemberships(userIds),
-      ]);
+    const [
+      openReportCountByUserId,
+      suspendedUserIds,
+      membershipsByUserId,
+      invitedByUserId,
+    ] = await Promise.all([
+      this.loadOpenReportCounts(userIds, slugs),
+      this.loadSuspendedUserIds(userIds),
+      this.loadMemberships(userIds),
+      this.loadInvitedByMap(userIds),
+    ]);
 
     // Nodes. sceneId is a community id; collect labels for the scenes list.
     const sceneLabelById = new Map<string, string>();
@@ -121,6 +126,10 @@ export class AdminTrustNetworkService {
       const mutual =
         vouch.withdrawnAt === null &&
         activePairs.has(`${vouch.voucheeId}>${vouch.voucherId}`);
+      const kind: 'invite' | 'vouch' =
+        invitedByUserId.get(vouch.voucheeId) === vouch.voucherId
+          ? 'invite'
+          : 'vouch';
       edges.push({
         id: `${fromSlug}>${toSlug}`,
         from: fromSlug,
@@ -131,6 +140,7 @@ export class AdminTrustNetworkService {
         relationship: vouch.relationship,
         note: vouch.note,
         anonymous: vouch.anonymous,
+        kind,
       });
     }
 
@@ -168,6 +178,23 @@ export class AdminTrustNetworkService {
       );
     }
     return byUserId;
+  }
+
+  /** userId → the userId of whoever invited them (User.invited_by), or null. */
+  private async loadInvitedByMap(
+    userIds: string[],
+  ): Promise<Map<string, string | null>> {
+    if (userIds.length === 0) return new Map();
+    const rows = await this.users.find({
+      where: { id: In(userIds) },
+      loadRelationIds: { relations: ['invitedBy'] },
+    });
+    return new Map(
+      rows.map((user) => [
+        user.id,
+        (user.invitedBy as unknown as string | null) ?? null,
+      ]),
+    );
   }
 
   private async loadSuspendedUserIds(userIds: string[]): Promise<Set<string>> {

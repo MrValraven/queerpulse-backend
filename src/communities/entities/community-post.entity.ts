@@ -18,7 +18,7 @@ export enum PostKind {
 @Index('IDX_community_posts_feed_order', ['communityId', 'pinned', 'createdAt'])
 export class CommunityPost {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   // Nullable: a `null` community_id is a "flat"/global post created via
   // `POST /community-posts` without a `communitySlug` (see
@@ -27,17 +27,17 @@ export class CommunityPost {
   // `GET /:slug/posts` feed.
   @Index('IDX_community_posts_community_id')
   @Column({ type: 'uuid', nullable: true })
-  communityId: string | null;
+  communityId!: string | null;
 
   @Index('IDX_community_posts_author_id')
   @Column({ type: 'uuid' })
-  authorId: string;
+  authorId!: string;
 
   @Column({ type: 'text' })
-  body: string;
+  body!: string;
 
   @Column({ type: 'varchar', nullable: true })
-  image: string | null;
+  image!: string | null;
 
   @Column({
     type: 'enum',
@@ -45,10 +45,10 @@ export class CommunityPost {
     enumName: 'community_posts_kind_enum',
     default: PostKind.Post,
   })
-  kind: PostKind;
+  kind!: PostKind;
 
   @Column({ type: 'boolean', default: false })
-  pinned: boolean;
+  pinned!: boolean;
 
   // Millisecond precision (not Postgres's microsecond default): matches the
   // resolution of the JS `Date` cursor `cursorPaginate` builds from this
@@ -57,15 +57,15 @@ export class CommunityPost {
   // `1785001400000-NarrowCursorCreatedAtPrecision.ts` and
   // `common/cursor-pagination.ts`.
   @CreateDateColumn({ type: 'timestamptz', precision: 3 })
-  createdAt: Date;
+  createdAt!: Date;
 
   @Column({ type: 'timestamptz', nullable: true })
-  editedAt: Date | null;
+  editedAt!: Date | null;
 
   // Soft-tombstone marker. When set, the post renders as "[deleted]" but the
   // `body` above is preserved so the author (or the community's owner/mod) can
   // restore it and its edit history stays readable
   // (see `CommunityPostsService.deletePost`).
   @Column({ type: 'timestamptz', nullable: true })
-  deletedAt: Date | null;
+  deletedAt!: Date | null;
 }

@@ -27,39 +27,39 @@ export enum ConsentAction {
 @Index('IDX_consent_record_user_id', ['userId', 'createdAt'])
 export class ConsentRecord {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   // Pre-auth analytics id echoed from the client, when present. Lets a consent
   // decision be correlated to anonymous activity that preceded sign-in.
   @Column({ type: 'varchar', nullable: true })
-  anonId: string | null;
+  anonId!: string | null;
 
   @Column({ type: 'boolean' })
-  analytics: boolean;
+  analytics!: boolean;
 
   @Column({ type: 'boolean' })
-  monitoring: boolean;
+  monitoring!: boolean;
 
   @Column({ type: 'varchar' })
-  policyVersion: string;
+  policyVersion!: string;
 
   @Column({
     type: 'enum',
     enum: ConsentSource,
     enumName: 'consent_record_source_enum',
   })
-  source: ConsentSource;
+  source!: ConsentSource;
 
   @Column({
     type: 'enum',
     enum: ConsentAction,
     enumName: 'consent_record_action_enum',
   })
-  action: ConsentAction;
+  action!: ConsentAction;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

@@ -11,27 +11,27 @@ import {
 @Unique('UQ_push_subscriptions_endpoint', ['endpoint'])
 export class PushSubscription {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_push_subscriptions_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({ type: 'text' })
-  endpoint: string;
+  endpoint!: string;
 
   @Column({ type: 'text' })
-  p256dh: string;
+  p256dh!: string;
 
   @Column({ type: 'text' })
-  auth: string;
+  auth!: string;
 
   @Column({ type: 'text', nullable: true })
-  userAgent: string | null;
+  userAgent!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @Column({ type: 'timestamptz', nullable: true })
-  lastUsedAt: Date | null;
+  lastUsedAt!: Date | null;
 }

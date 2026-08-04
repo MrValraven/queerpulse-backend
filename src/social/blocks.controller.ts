@@ -44,7 +44,9 @@ export class BlocksController {
   @Get()
   @ApiOperation({ summary: 'List members you have blocked (paginated)' })
   @ApiOkResponse({ description: 'A page of blocked-member records.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   list(@CurrentUser() user: CurrentUserData, @Query() query: ListPageQuery) {
     return this.social.listBlocks(user.userId, query.page);
   }
@@ -52,10 +54,14 @@ export class BlocksController {
   /** Idempotent: blocking an already-blocked member returns the existing row. */
   @Post(':slug')
   @ApiOperation({ summary: 'Block a member by slug (idempotent)' })
-  @ApiCreatedResponse({ description: 'The block record (new or pre-existing).' })
+  @ApiCreatedResponse({
+    description: 'The block record (new or pre-existing).',
+  })
   @ApiBadRequestResponse({ description: 'You cannot block yourself.' })
   @ApiNotFoundResponse({ description: 'No member with that slug.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   block(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
@@ -69,8 +75,12 @@ export class BlocksController {
   @ApiOperation({ summary: 'Unblock a member by slug' })
   @ApiNoContentResponse({ description: 'Block removed.' })
   @ApiBadRequestResponse({ description: 'You cannot target yourself.' })
-  @ApiNotFoundResponse({ description: 'No member with that slug, or no block to remove.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiNotFoundResponse({
+    description: 'No member with that slug, or no block to remove.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   unblock(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.social.unblockMember(user.userId, slug);
   }
@@ -78,9 +88,13 @@ export class BlocksController {
   /** `{ blocking, blockedBy }` — never leaks who blocked whom beyond that. */
   @Get(':slug')
   @ApiOperation({ summary: 'Directional block status with a member' })
-  @ApiOkResponse({ description: '`{ blocking, blockedBy }` for the actor and that member.' })
+  @ApiOkResponse({
+    description: '`{ blocking, blockedBy }` for the actor and that member.',
+  })
   @ApiNotFoundResponse({ description: 'No member with that slug.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   status(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.social.getBlockStatus(user.userId, slug);
   }

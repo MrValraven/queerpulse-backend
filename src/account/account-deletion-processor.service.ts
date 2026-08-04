@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, LessThanOrEqual, Repository } from 'typeorm';
+import { StorageService } from '../storage/storage.service';
 import { User } from '../users/entities/user.entity';
 import {
   EmailSuppression,
@@ -30,6 +31,7 @@ export class AccountDeletionProcessorService {
     @InjectRepository(DeletionRequest)
     private readonly deletionRequests: Repository<DeletionRequest>,
     private readonly dataSource: DataSource,
+    private readonly storage: StorageService,
   ) {}
 
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
@@ -98,7 +100,11 @@ export class AccountDeletionProcessorService {
    * Order matters:
    *  1. suppress the email — must be read off the user row *before* it is gone;
    *  2. pseudonymize the moderation history we are keeping;
-   *  3. delete the user row, which cascades everything else away.
+   *  3. delete the user row, which cascades every member-owned DB row away.
+   *
+   * Then, AFTER the transaction commits, erase the member's uploaded objects from
+   * bucket storage (step 4). This lives outside the transaction on purpose — see
+   * the comment there.
    */
   private async eraseAccount(userId: string): Promise<void> {
     await this.dataSource.transaction(async (manager) => {
@@ -173,5 +179,37 @@ export class AccountDeletionProcessorService {
       //    survives the row it describes.
       await manager.delete(User, { id: userId });
     });
+
+    // 4. Erase the member's uploaded objects from bucket storage (audit §B P1).
+    //    The DB columns that referenced them (avatar, work images, listing and
+    //    gathering photos, group/story covers) were cascaded away above, but the
+    //    objects themselves live in Railway Buckets outside Postgres and would
+    //    otherwise keep serving through `GET /files/*` forever — an avatar of an
+    //    erased member still fetchable is exactly the leak the erasure exists to
+    //    close.
+    //
+    //    Runs AFTER the transaction commits, never inside it: object deletion is
+    //    not transactional, so deleting first and then having the DB transaction
+    //    roll back would wipe a still-live member's files. Best-effort — a
+    //    storage failure is logged, not thrown, so it cannot strand the
+    //    already-committed DB erasure back in `processing`; the legally-critical
+    //    record removal has happened, and an orphaned object is a storage-cost
+    //    residual an operator can sweep, not a correctness failure.
+    //
+    //    `deleteUserObjects` enumerates by key prefix (`<kind>/<userId>/…`), so
+    //    it removes every object THIS member uploaded, including presigned-then-
+    //    abandoned ones with no DB row. It does NOT reach objects other members
+    //    uploaded that happen to depict this person (e.g. a gathering photo taken
+    //    by someone else) — those are keyed to the uploader and are out of scope.
+    try {
+      const deletedCount = await this.storage.deleteUserObjects(userId);
+      this.logger.log(
+        `Erased ${deletedCount} storage object(s) for account ${userId}`,
+      );
+    } catch (err) {
+      this.logger.error(
+        `Storage object erasure failed for account ${userId} (DB erasure already committed): ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+      );
+    }
   }
 }

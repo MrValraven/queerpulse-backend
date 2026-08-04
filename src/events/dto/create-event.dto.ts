@@ -16,11 +16,11 @@ import { IsImageReference } from '../../common/validators/is-image-reference.dec
 import { EventStatus, EventVisibility } from '../entities/event.entity';
 
 export class CreateEventDto {
-  @IsString() @MinLength(1) @MaxLength(200) title: string;
-  @IsString() @MinLength(1) @MaxLength(10000) description: string;
-  @IsISO8601() startAt: string;
+  @IsString() @MinLength(1) @MaxLength(200) title!: string;
+  @IsString() @MinLength(1) @MaxLength(10000) description!: string;
+  @IsISO8601() startAt!: string;
   @IsOptional() @IsISO8601() endAt?: string;
-  @IsTimeZone() timezone: string;
+  @IsTimeZone() timezone!: string;
   @IsOptional() @IsString() @MaxLength(300) venue?: string;
   @IsOptional() @IsBoolean() isOnline?: boolean;
   @IsOptional()

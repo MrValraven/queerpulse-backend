@@ -16,16 +16,16 @@ import {
 @Unique('UQ_message_stars', ['userId', 'messageId'])
 export class MessageStar {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_message_stars_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Index('IDX_message_stars_message_id')
   @Column({ type: 'uuid' })
-  messageId: string;
+  messageId!: string;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

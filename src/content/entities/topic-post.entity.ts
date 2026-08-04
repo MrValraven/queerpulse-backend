@@ -44,11 +44,11 @@ import {
 @Index('IDX_topic_post_topic_id_created_at_id', ['topicId', 'createdAt', 'id'])
 export class TopicPost {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_topic_post_topic_id')
   @Column({ type: 'uuid' })
-  topicId: string;
+  topicId!: string;
 
   /** The authoring member, when there is one. NULLABLE on purpose, and the
    *  FK is `ON DELETE SET NULL` — the same rationale
@@ -67,17 +67,17 @@ export class TopicPost {
    *  to filter against; see `../topics.service.ts#listPosts`. */
   @Index('IDX_topic_post_author_id', { where: '"author_id" IS NOT NULL' })
   @Column({ type: 'uuid', nullable: true })
-  authorId: string | null;
+  authorId!: string | null;
 
   @Column({ type: 'varchar' })
-  authorName: string;
+  authorName!: string;
 
   @Column({ type: 'varchar' })
-  authorInitials: string;
+  authorInitials!: string;
 
   /** The frontend's `AvatarTint` ('coral' | 'jade' | 'plum'). */
   @Column({ type: 'varchar' })
-  authorTone: string;
+  authorTone!: string;
 
   /** The segment of the mock's `meta` after the author line — a community
    *  name, a read time, or an event's schedule (e.g. "Trans Hub", "8 min
@@ -86,45 +86,45 @@ export class TopicPost {
    *  don't share a schema (see the module doc above). Null when a post has
    *  no second meta segment. */
   @Column({ type: 'varchar', nullable: true })
-  contextLabel: string | null;
+  contextLabel!: string | null;
 
   /** `PostKind` — the badge shown top-right of `TopicPostCard`. */
   @Column({ type: 'varchar' })
-  kind: string;
+  kind!: string;
 
   /** `PostCategory` — the bucket the `TopicFeed` filter chips group by. */
   @Column({ type: 'varchar' })
-  category: string;
+  category!: string;
 
   @Column({ type: 'varchar' })
-  title: string;
+  title!: string;
 
   @Column({ type: 'text' })
-  body: string;
+  body!: string;
 
   /** Generalized "primary" engagement count — relate/upvotes/reads/going,
    *  depending on `kind`. `reactionLabel` names which one. */
   @Column({ type: 'int', default: 0 })
-  reactionCount: number;
+  reactionCount!: number;
 
   @Column({ type: 'varchar' })
-  reactionLabel: string;
+  reactionLabel!: string;
 
   /** Generalized "secondary" engagement count — replies/bookmarks,
    *  depending on `kind`. Zero + a null label when a post kind has no
    *  second stat. */
   @Column({ type: 'int', default: 0 })
-  replyCount: number;
+  replyCount!: number;
 
   @Column({ type: 'varchar', nullable: true })
-  replyLabel: string | null;
+  replyLabel!: string | null;
 
   @Column({ type: 'text', array: true, default: '{}' })
-  tags: string[];
+  tags!: string[];
 
   @Column({ type: 'varchar' })
-  href: string;
+  href!: string;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

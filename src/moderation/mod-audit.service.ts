@@ -158,7 +158,7 @@ export class ModAuditService {
       }),
     );
 
-    return { items, total, moderators };
+    return { items, total, page, pageSize, moderators };
   }
 
   async writeAuditLog(

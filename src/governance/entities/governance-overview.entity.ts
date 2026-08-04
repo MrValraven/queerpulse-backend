@@ -72,23 +72,23 @@ export const GOVERNANCE_OVERVIEW_ID = 'current';
 @Entity('governance_overview')
 export class GovernanceOverview {
   @PrimaryColumn({ type: 'varchar', length: 20 })
-  id: string;
+  id!: string;
 
   @Column({ type: 'jsonb' })
-  health: OverviewHealthStat[];
+  health!: OverviewHealthStat[];
 
   @Column({ type: 'jsonb', name: 'moderation_steps' })
-  moderationSteps: OverviewModerationStep[];
+  moderationSteps!: OverviewModerationStep[];
 
   @Column({ type: 'jsonb' })
-  council: OverviewCouncilSeat[];
+  council!: OverviewCouncilSeat[];
 
   @Column({ type: 'jsonb' })
-  principles: OverviewPrinciple[];
+  principles!: OverviewPrinciple[];
 
   @Column({ type: 'jsonb' })
-  decisions: OverviewDecision[];
+  decisions!: OverviewDecision[];
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

@@ -56,7 +56,8 @@ export class MemberRecognitionController {
 
   @ApiOperation({ summary: "Get another member's recognition by slug" })
   @ApiOkResponse({
-    description: "The member's recognition (perk state omitted for non-owners).",
+    description:
+      "The member's recognition (perk state omitted for non-owners).",
   })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
   @ApiForbiddenResponse({ description: 'Caller is not an active member.' })

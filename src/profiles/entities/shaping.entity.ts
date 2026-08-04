@@ -17,25 +17,25 @@ export enum ShapingKind {
 @Index('UQ_shapings_user_kind', ['userId', 'kind'], { unique: true })
 export class Shaping {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_shapings_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({
     type: 'enum',
     enum: ShapingKind,
     enumName: 'shapings_kind_enum',
   })
-  kind: ShapingKind;
+  kind!: ShapingKind;
 
   @Column({ type: 'varchar' })
-  title: string;
+  title!: string;
 
   @Column({ type: 'text' })
-  note: string;
+  note!: string;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

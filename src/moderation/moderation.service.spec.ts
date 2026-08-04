@@ -13,6 +13,7 @@ import {
   ReportStatus,
   ReportSubjectType,
 } from '../reports/entities/report.entity';
+import { Listing } from '../listings/entities/listing.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { Appeal, AppealStatus } from './entities/appeal.entity';
@@ -20,6 +21,9 @@ import { ModAuditLog } from './entities/mod-audit-log.entity';
 import { AccountEnforcementService } from './account-enforcement.service';
 import { ModAuditService } from './mod-audit.service';
 import { ModerationService } from './moderation.service';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
 
 // Chainable query-builder stub whose terminal method resolves to a
 // configurable row list (mirrors `partners.service.spec.ts`'s `qbStub`,
@@ -98,6 +102,8 @@ describe('ModerationService', () => {
   let users: { findOne: jest.Mock; createQueryBuilder: jest.Mock };
   let profiles: { findOne: jest.Mock; find: jest.Mock };
   let revokeAllForUser: jest.Mock;
+  let notificationsCreate: jest.Mock;
+  let applyContentAction: jest.Mock;
   let managerUpdate: jest.Mock;
 
   beforeEach(async () => {
@@ -130,6 +136,8 @@ describe('ModerationService', () => {
       find: jest.fn().mockResolvedValue([]),
     };
     revokeAllForUser = jest.fn().mockResolvedValue(undefined);
+    notificationsCreate = jest.fn().mockResolvedValue(null);
+    applyContentAction = jest.fn().mockResolvedValue(undefined);
     managerUpdate = jest.fn().mockResolvedValue({ affected: 1 });
 
     // `actOnReport`/`bulkActOnReports`/`reviewAppeal` now run inside
@@ -165,6 +173,12 @@ describe('ModerationService', () => {
         { provide: getRepositoryToken(ModAuditLog), useValue: auditLogs },
         { provide: getRepositoryToken(User), useValue: users },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        // Item #13: a `listing`-subject report's detail surfaces the live
+        // listing's pasted evidence. A bare findOne mock suffices.
+        {
+          provide: getRepositoryToken(Listing),
+          useValue: { findOne: jest.fn().mockResolvedValue(null) },
+        },
         {
           provide: DataSource,
           useValue: {
@@ -172,6 +186,14 @@ describe('ModerationService', () => {
           },
         },
         { provide: AuthService, useValue: { revokeAllForUser } },
+        {
+          provide: ContentModerationService,
+          useValue: { applyAction: applyContentAction },
+        },
+        {
+          provide: NotificationsService,
+          useValue: { create: notificationsCreate },
+        },
       ],
     }).compile();
     service = module.get(ModerationService);
@@ -281,7 +303,7 @@ describe('ModerationService', () => {
 
       const page = await service.list({});
 
-      expect(page.items).toEqual([
+      expect(page.data).toEqual([
         expect.objectContaining({
           id: 'report-1',
           severity: ReportSeverity.High,
@@ -289,19 +311,19 @@ describe('ModerationService', () => {
           status: ReportStatus.Open,
         }),
       ]);
-      expect(page.items[0]!.reporter).toEqual({
+      expect(page.data[0]!.reporter).toEqual({
         anonymous: false,
         id: 'reporter-1',
         name: 'Member',
       });
-      expect(page.items[0]!.reported).toEqual({
+      expect(page.data[0]!.reported).toEqual({
         id: 'post-1',
         handle: 'post-1',
         priorReports: 0,
       });
-      expect(page.items[0]).not.toHaveProperty('detail');
+      expect(page.data[0]).not.toHaveProperty('detail');
       expect(page.counts).toEqual({ open: 3, resolved: 5, appeals: 2 });
-      expect(page.page).toEqual({ cursor: null });
+      expect(page.pageInfo).toEqual({ nextCursor: null, hasMore: false });
     });
 
     it('resolves a non-anonymous reporter name from their profile', async () => {
@@ -314,7 +336,7 @@ describe('ModerationService', () => {
       ]);
 
       const page = await service.list({});
-      expect(page.items[0]!.reporter).toEqual({
+      expect(page.data[0]!.reporter).toEqual({
         anonymous: false,
         id: 'reporter-1',
         name: 'Ada Lovelace',
@@ -326,7 +348,7 @@ describe('ModerationService', () => {
       reports.createQueryBuilder.mockReturnValue(qb);
 
       const page = await service.list({});
-      expect(page.items[0]!.reporter).toEqual({ anonymous: true });
+      expect(page.data[0]!.reporter).toEqual({ anonymous: true });
     });
 
     it('sets community for community-subject reports and null otherwise', async () => {
@@ -339,7 +361,7 @@ describe('ModerationService', () => {
       reports.createQueryBuilder.mockReturnValue(qb);
 
       const page = await service.list({});
-      expect(page.items[0]!.community).toBe('my-community');
+      expect(page.data[0]!.community).toBe('my-community');
     });
   });
 
@@ -501,6 +523,52 @@ describe('ModerationService', () => {
       expect(res.updated).toEqual(['report-1']);
       expect(reports.save).toHaveBeenCalledWith([
         expect.objectContaining({ status: ReportStatus.Escalated }),
+      ]);
+    });
+
+    it('notifies each sanctioned member — one row per report', async () => {
+      reports.find.mockResolvedValue([
+        baseReport({
+          id: 'report-1',
+          subjectType: ReportSubjectType.Member,
+          subjectId: 'reported-member',
+        }),
+        baseReport({
+          id: 'report-2',
+          subjectType: ReportSubjectType.Member,
+          subjectId: 'reported-member',
+        }),
+      ]);
+      profiles.findOne.mockResolvedValue({
+        userId: 'user-1',
+        slug: 'reported-member',
+      });
+      users.findOne.mockResolvedValue({
+        id: 'user-1',
+        role: UserRole.Member,
+        status: UserStatus.Active,
+      });
+
+      await service.bulkActOnReports('actor-1', {
+        ids: ['report-1', 'report-2'],
+        action: 'suspend',
+        reasonCode: 'harassment',
+        note: 'Bulk suspend.',
+        duration: '7d',
+      });
+
+      const memberCalls = notificationsCreate.mock.calls.filter(
+        (args) => args[1] === NotificationType.ModerationOutcome,
+      );
+      expect(memberCalls).toHaveLength(2);
+      expect(memberCalls[0]).toEqual([
+        'user-1',
+        NotificationType.ModerationOutcome,
+        expect.objectContaining({
+          source: 'moderation',
+          action: 'suspend',
+          expiresAt: expect.any(String),
+        }),
       ]);
     });
   });
@@ -724,6 +792,112 @@ describe('ModerationService', () => {
       });
 
       expect(revokeAllForUser).toHaveBeenCalledWith('user-1');
+    });
+
+    // The audit's open gap: a warned/suspended/banned member was told nothing.
+    // The reporter got `report_resolved`; the sanctioned member now gets
+    // `moderation_outcome` with the reason.
+    describe('outcome notification to the sanctioned member', () => {
+      // The `moderation_outcome` create call, past the reporter's
+      // `report_resolved` create that `actOnReport` also fires.
+      const memberCall = () =>
+        notificationsCreate.mock.calls.find(
+          (args) => args[1] === NotificationType.ModerationOutcome,
+        );
+
+      it('warn notifies the warned member with the reason', async () => {
+        await service.actOnReport('report-1', 'actor-1', {
+          action: 'warn',
+          reasonCode: 'harassment',
+          note: 'Please stop.',
+        });
+
+        expect(memberCall()).toEqual([
+          'user-1',
+          NotificationType.ModerationOutcome,
+          expect.objectContaining({
+            source: 'moderation',
+            action: 'warn',
+            reasonCode: 'harassment',
+            note: 'Please stop.',
+          }),
+        ]);
+      });
+
+      it('suspend notifies the member and carries the expiry', async () => {
+        await service.actOnReport('report-1', 'actor-1', {
+          action: 'suspend',
+          reasonCode: 'harassment',
+          note: 'Seven days.',
+          duration: '7d',
+        });
+
+        const call = memberCall();
+        expect(call?.[0]).toBe('user-1');
+        expect(call?.[2]).toEqual(
+          expect.objectContaining({
+            action: 'suspend',
+            expiresAt: expect.any(String),
+          }),
+        );
+      });
+
+      it('ban notifies the member with no expiry', async () => {
+        await service.actOnReport('report-1', 'actor-1', {
+          action: 'ban',
+          reasonCode: 'harassment',
+          note: 'Out.',
+        });
+
+        const call = memberCall();
+        expect(call?.[0]).toBe('user-1');
+        expect(call?.[2]).toMatchObject({ action: 'ban' });
+        expect(call?.[2]).not.toHaveProperty('expiresAt');
+      });
+
+      it('is delivered with no actor — bypassing the block/mute + mute gate', async () => {
+        await service.actOnReport('report-1', 'actor-1', {
+          action: 'warn',
+          reasonCode: 'harassment',
+          note: 'n',
+        });
+
+        // `create(userId, type, payload)` — a fourth `actorId` arg would
+        // re-enable the block/mute + per-type-mute filter a moderation outcome
+        // must always skip.
+        expect(memberCall()).toHaveLength(3);
+      });
+
+      it.each([
+        'dismiss',
+        'escalate',
+        'hide_content',
+        'remove_content',
+        'restrict',
+      ])(
+        '%s does not notify the member (no account-facing outcome)',
+        async (action) => {
+          await service.actOnReport('report-1', 'actor-1', {
+            action,
+            reasonCode: 'harassment',
+            note: 'n',
+            ...(action === 'restrict' ? { duration: '7d' } : {}),
+          } as never);
+
+          expect(memberCall()).toBeUndefined();
+        },
+      );
+
+      it('never notifies a moderator acting on their own report', async () => {
+        // The reported member IS the actor (edge case) — no self-notification.
+        await service.actOnReport('report-1', 'user-1', {
+          action: 'warn',
+          reasonCode: 'harassment',
+          note: 'n',
+        });
+
+        expect(memberCall()).toBeUndefined();
+      });
     });
 
     it('keeps an open deactivation row’s previousStatus in step', async () => {

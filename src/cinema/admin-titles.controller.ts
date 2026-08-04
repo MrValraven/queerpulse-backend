@@ -89,7 +89,9 @@ export class AdminTitlesController {
   // Mints a one-time Mux direct-upload URL; the browser PUTs the source file
   // straight to Mux — video bytes never pass through this backend.
   @Post(':id/upload')
-  @ApiOperation({ summary: 'Mint a one-time Mux direct-upload URL for a title.' })
+  @ApiOperation({
+    summary: 'Mint a one-time Mux direct-upload URL for a title.',
+  })
   @ApiCreatedResponse({
     description: 'A one-time Mux upload id and upload URL.',
   })

@@ -46,7 +46,9 @@ export class NotificationRetentionService {
         'retention.maxBatchesPerRun',
         50,
       );
-      const cutoff = new Date(Date.now() - retentionDays * MILLISECONDS_PER_DAY);
+      const cutoff = new Date(
+        Date.now() - retentionDays * MILLISECONDS_PER_DAY,
+      );
       const removed = await deleteInBatches(
         this.notifications,
         'read = true AND created_at < :cutoff',

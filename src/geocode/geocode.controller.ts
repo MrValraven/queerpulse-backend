@@ -1,6 +1,7 @@
 import { Body, Controller, HttpCode, Post, UseGuards } from '@nestjs/common';
 import { Throttle, seconds } from '@nestjs/throttler';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { GeocodeAddressDto } from './dto/geocode-address.dto';
 import { ResolveLinkDto } from './dto/resolve-link.dto';
 import { GeocodeService } from './geocode.service';
 import {
@@ -42,5 +43,23 @@ export class GeocodeController {
   })
   resolveLink(@Body() dto: ResolveLinkDto) {
     return this.geocodeService.resolveLink(dto.url);
+  }
+
+  // Free-text street address → coordinates (item #1). Same tighter throttle as
+  // `resolve-link`: it makes a server-side outbound geocoder fetch, the same
+  // cost/SSRF-amplification surface worth capping.
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
+  @Post('address')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Resolve a typed street address to coordinates' })
+  @ApiOkResponse({ description: 'The resolved latitude/longitude.' })
+  @ApiUnprocessableEntityResponse({
+    description: 'The address could not be resolved to coordinates.',
+  })
+  @ApiServiceUnavailableResponse({
+    description: 'The upstream geocoding fetch failed.',
+  })
+  resolveAddress(@Body() dto: GeocodeAddressDto) {
+    return this.geocodeService.resolveAddress(dto.address);
   }
 }

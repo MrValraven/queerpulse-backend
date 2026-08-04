@@ -62,7 +62,9 @@ export class PreferencesController {
 
   // Full replace, echoing the persisted state back so the client renders what
   // was actually stored (normalised) rather than what it optimistically sent.
-  @ApiOperation({ summary: "Replace the member's work/collaboration preferences." })
+  @ApiOperation({
+    summary: "Replace the member's work/collaboration preferences.",
+  })
   @ApiOkResponse({ description: 'The persisted, normalised work preferences.' })
   @ApiBadRequestResponse({ description: 'Validation failed.' })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
@@ -76,15 +78,21 @@ export class PreferencesController {
 
   // Defaults to `{ enabled: false }` when no row exists — off unless the member
   // has said otherwise.
-  @ApiOperation({ summary: "Get the member's public-profile visibility setting." })
-  @ApiOkResponse({ description: 'The public-profile setting (defaults to off).' })
+  @ApiOperation({
+    summary: "Get the member's public-profile visibility setting.",
+  })
+  @ApiOkResponse({
+    description: 'The public-profile setting (defaults to off).',
+  })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Get('public-profile')
   getPublicProfile(@CurrentUser() user: CurrentUserData) {
     return this.preferencesService.getPublicProfile(user.userId);
   }
 
-  @ApiOperation({ summary: "Replace the member's public-profile visibility setting." })
+  @ApiOperation({
+    summary: "Replace the member's public-profile visibility setting.",
+  })
   @ApiOkResponse({ description: 'The persisted public-profile setting.' })
   @ApiBadRequestResponse({ description: 'Validation failed.' })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })

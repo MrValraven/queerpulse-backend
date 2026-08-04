@@ -42,37 +42,37 @@ export enum SavedKind {
 @Index('IDX_saved_item_subject', ['subjectType', 'subjectId'])
 export class SavedItem {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_saved_item_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({
     type: 'enum',
     enum: SavedKind,
     enumName: 'saved_item_subject_type_enum',
   })
-  subjectType: SavedKind;
+  subjectType!: SavedKind;
 
   @Column({ type: 'varchar' })
-  subjectId: string;
+  subjectId!: string;
 
   @Column({ type: 'varchar' })
-  title: string;
+  title!: string;
 
   @Column({ type: 'varchar', nullable: true })
-  href: string | null;
+  href!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  meta: string | null;
+  meta!: string | null;
 
   @Column({ type: 'text', nullable: true })
-  description: string | null;
+  description!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  readTime: string | null;
+  readTime!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

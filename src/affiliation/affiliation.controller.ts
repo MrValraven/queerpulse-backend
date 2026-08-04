@@ -43,7 +43,7 @@ export class AffiliationController {
   @ApiOperation({ summary: "Get the caller's employer affiliation, or null." })
   @ApiOkResponse({ description: 'The affiliation, or null if none.' })
   @ApiNotFoundResponse({
-    description: "The affiliated company no longer exists.",
+    description: 'The affiliated company no longer exists.',
   })
   @Get()
   get(@CurrentUser() user: CurrentUserData) {
@@ -51,7 +51,9 @@ export class AffiliationController {
   }
 
   /** `POST /me/affiliation` — set/claim (or replace) the caller's affiliation. */
-  @ApiOperation({ summary: "Set or replace the caller's employer affiliation." })
+  @ApiOperation({
+    summary: "Set or replace the caller's employer affiliation.",
+  })
   @ApiCreatedResponse({ description: 'The saved affiliation.' })
   @ApiBadRequestResponse({ description: 'Malformed request body.' })
   @ApiNotFoundResponse({ description: 'Company not found.' })

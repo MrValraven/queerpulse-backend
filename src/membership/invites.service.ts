@@ -1,4 +1,5 @@
 import {
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -10,11 +11,16 @@ import { randomBytes } from 'node:crypto';
 import {
   DataSource,
   EntityManager,
+  In,
   MoreThanOrEqual,
   Repository,
 } from 'typeorm';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
+import {
+  EmailSuppression,
+  hashSuppressedEmail,
+} from '../account/entities/email-suppression.entity';
 import { SignupRejectedError } from '../auth/errors/signup-rejected.error';
 import { Invite, InviteStatus } from './entities/invite.entity';
 import {
@@ -89,6 +95,17 @@ export class InvitesService {
     const trimmedVouch = opts.vouch?.trim();
     const vouch = trimmedVouch ? trimmedVouch : null;
     const email = opts.email ?? null;
+    // Fail fast on an invite pinned to an erasure-suppressed address. That
+    // address deleted their account and can never sign up again (signup rejects
+    // it with `account_suppressed`), so this is a dead invite — reject it at
+    // mint time rather than letting the member spend a quota slot on a link that
+    // can never be redeemed. Only the personal-invite path checks this; the
+    // admin approval / genesis mint (createInviteForApproval) is exempt.
+    if (email && (await this.isEmailSuppressed(email))) {
+      throw new ConflictException(
+        'That email address can’t be invited — its owner has left the platform.',
+      );
+    }
     const fields = { email, note, vouch, skipQuota: false, personal: true };
 
     for (let attempt = 1; ; attempt++) {
@@ -202,7 +219,9 @@ export class InvitesService {
   }
 
   // Returns a mapped view (never raw entities): whitelisted fields only, plus a
-  // freshly-computed status so a not-yet-swept expiry reads as 'expired'.
+  // freshly-computed status so a not-yet-swept expiry reads as 'expired'. For
+  // any 'used' invite the redeemer (acceptedBy) is batch-loaded WITH profile in
+  // a single query — never per-row — and mapped to public fields only.
   async listMyInvites(
     inviterId: string,
     page?: PageParams,
@@ -214,7 +233,182 @@ export class InvitesService {
       skip: page?.offset ?? 0,
     });
     const now = new Date();
-    return invites.map((invite) => toMyInviteView(invite, now));
+    // Collect the redeemer ids for accepted invites and resolve them in one
+    // `IN (...)` query, then index by id so the map below is O(1) per row.
+    const acceptedByIds = Array.from(
+      new Set(
+        invites
+          .filter((invite) => invite.status === InviteStatus.Accepted)
+          .map((invite) => invite.acceptedBy)
+          .filter((id): id is string => id !== null),
+      ),
+    );
+    const acceptedByUsers =
+      await this.usersService.findByIdsWithProfile(acceptedByIds);
+    const usersById = new Map(acceptedByUsers.map((user) => [user.id, user]));
+    return invites.map((invite) =>
+      toMyInviteView(
+        invite,
+        now,
+        invite.acceptedBy ? usersById.get(invite.acceptedBy) : null,
+      ),
+    );
+  }
+
+  /**
+   * Cancel one of the inviter's own still-pending invites, addressed by its
+   * `code` (the identifier the inviter's own invite list, `listMyInvites`,
+   * exposes — that view deliberately omits internal ids). Sets the status to
+   * `Revoked` so the shared link stops working: a Revoked invite fails
+   * `validateInviteForSignup`'s `status !== Pending` check at redemption, and
+   * the recipient's landing page resolves it as 'revoked'.
+   *
+   * Ownership + terminal-state guards, all returning a mapped view (never the
+   * raw entity):
+   *  - 404 if no invite with that code exists;
+   *  - 403 if the invite belongs to another member (never act on, or confirm
+   *    the existence of, another member's invite);
+   *  - 409 if it was already accepted (redeemed — nothing to cancel) or is
+   *    already expired (a terminal state a revoke can't meaningfully change);
+   *  - already-revoked is an idempotent no-op: returns the current view.
+   *
+   * The write is a conditional `status = Pending` update (mirroring
+   * `claimInvite`'s single-consume guard) so a redemption racing the revoke
+   * can't both win — the loser sees `affected === 0` and re-reads the true
+   * terminal state to report.
+   */
+  async revokeInvite(inviterId: string, code: string): Promise<MyInviteView> {
+    const now = new Date();
+    const invite = await this.invites.findOne({ where: { code } });
+    if (!invite) {
+      throw new NotFoundException('Invite not found');
+    }
+    if (invite.inviterId !== inviterId) {
+      throw new ForbiddenException('This invite belongs to another member.');
+    }
+    if (invite.status === InviteStatus.Accepted) {
+      throw new ConflictException(
+        'This invite has already been accepted and can’t be revoked.',
+      );
+    }
+    if (invite.status === InviteStatus.Revoked) {
+      // Idempotent: revoking an already-revoked invite is a no-op.
+      return toMyInviteView(invite, now);
+    }
+    if (invite.status === InviteStatus.Expired) {
+      throw new ConflictException(
+        'This invite has already expired, so there’s nothing to revoke.',
+      );
+    }
+
+    const result = await this.invites.update(
+      { id: invite.id, inviterId, status: InviteStatus.Pending },
+      { status: InviteStatus.Revoked },
+    );
+    if (result.affected !== 1) {
+      // Lost a race with a redemption (or a concurrent revoke) that flipped the
+      // status out from under us — re-read to report the real terminal state.
+      const current = await this.invites.findOne({ where: { id: invite.id } });
+      if (!current) {
+        throw new NotFoundException('Invite not found');
+      }
+      if (current.status === InviteStatus.Revoked) {
+        return toMyInviteView(current, now);
+      }
+      if (current.status === InviteStatus.Accepted) {
+        throw new ConflictException(
+          'This invite has already been accepted and can’t be revoked.',
+        );
+      }
+      throw new ConflictException('Only a pending invite can be revoked.');
+    }
+
+    const revoked = await this.invites.findOne({ where: { id: invite.id } });
+    // The conditional update just succeeded, so the row is present; the
+    // non-null assertion documents that invariant for the type checker. A
+    // revoked invite is never 'used', so acceptedBy is always null here.
+    return toMyInviteView(revoked!, now);
+  }
+
+  /**
+   * Re-mint one of the inviter's OWN invites that has lapsed, addressed by its
+   * `code`. Refreshes the SAME row — resets `expires_at` to now + INVITE_TTL and
+   * flips the status back to Pending — so the original share link works again.
+   *
+   * Deliberately quota-NEUTRAL: this is the same invitation, not a new one. The
+   * monthly quota counts every invite created since the UTC month start
+   * regardless of status (see `assertWithinMonthlyQuota`), and this reuses the
+   * existing row (createdAt unchanged), so no new slot is consumed and none is
+   * reclaimed — it stays counted exactly once, in the month it was first minted.
+   *
+   * Only an EXPIRED invite is resendable. Guards, all returning a mapped view:
+   *  - 404 if no invite with that code exists;
+   *  - 403 if it belongs to another member;
+   *  - 409 if it was accepted (redeemed — resending would re-open a used invite),
+   *    revoked (a revoke is deliberate and stays revoked), or still valid
+   *    (nothing to resend yet).
+   *
+   * The write is a conditional update guarded on the row still being resendable
+   * (status IN pending/expired). A pending row can be past its `expires_at` but
+   * not yet swept — it resolves to 'expired' and is resendable; a redemption
+   * racing the resend flips it to Accepted, the loser sees `affected === 0` and
+   * re-reads the true terminal state to report (mirrors `revokeInvite`).
+   */
+  async resendInvite(inviterId: string, code: string): Promise<MyInviteView> {
+    const now = new Date();
+    const invite = await this.invites.findOne({ where: { code } });
+    if (!invite) {
+      throw new NotFoundException('Invite not found');
+    }
+    if (invite.inviterId !== inviterId) {
+      throw new ForbiddenException('This invite belongs to another member.');
+    }
+    const status = resolveInviteStatus(invite, now);
+    if (status === 'used') {
+      throw new ConflictException(
+        'This invite has already been accepted, so it can’t be resent.',
+      );
+    }
+    if (status === 'revoked') {
+      throw new ConflictException(
+        'This invite was revoked. Create a new invite instead.',
+      );
+    }
+    if (status !== 'expired') {
+      // Still valid — the existing link works, nothing to resend.
+      throw new ConflictException(
+        'This invite is still active, so there’s nothing to resend.',
+      );
+    }
+
+    const refreshedExpiry = new Date(now.getTime() + INVITE_TTL_MS);
+    const result = await this.invites.update(
+      // Resendable == not yet in a terminal accepted/revoked state. A lazily
+      // unexpired row is still `Pending` in the DB; a swept one is `Expired`.
+      { id: invite.id, inviterId, status: In([InviteStatus.Pending, InviteStatus.Expired]) },
+      { status: InviteStatus.Pending, expiresAt: refreshedExpiry },
+    );
+    if (result.affected !== 1) {
+      // Lost a race with a redemption that claimed the invite between our read
+      // and the update — re-read to report the real terminal state.
+      const current = await this.invites.findOne({ where: { id: invite.id } });
+      if (!current) {
+        throw new NotFoundException('Invite not found');
+      }
+      if (current.status === InviteStatus.Accepted) {
+        throw new ConflictException(
+          'This invite has already been accepted, so it can’t be resent.',
+        );
+      }
+      throw new ConflictException(
+        'This invite could not be resent. Please try again.',
+      );
+    }
+
+    const resent = await this.invites.findOne({ where: { id: invite.id } });
+    // Just-refreshed to Pending with a future expiry, so it resolves to 'valid'
+    // and is never 'used' — acceptedBy is null.
+    return toMyInviteView(resent!, now);
   }
 
   // Read-only quota snapshot for the compose page's "N invites available this
@@ -269,11 +463,16 @@ export class InvitesService {
       throw new SignupRejectedError('invite_invalid');
     }
     if (invite.email && invite.email.toLowerCase() !== email.toLowerCase()) {
-      throw new SignupRejectedError('invite_invalid');
+      // Distinct reason: the invite was pinned to a different address than the
+      // one this Google account signs in with (see SignupRejectedError).
+      throw new SignupRejectedError('invite_email_mismatch');
     }
     const inviter = await this.usersService.findById(invite.inviterId);
     if (!inviter || inviter.status !== UserStatus.Active) {
-      throw new SignupRejectedError('invite_invalid');
+      // Distinct reason: the code is well-formed and unredeemed, but the member
+      // who sent it is no longer active, so redeeming it can't create the
+      // inviter→member vouch/connection the invite promises.
+      throw new SignupRejectedError('invite_inviter_inactive');
     }
     return {
       inviteId: invite.id,
@@ -341,6 +540,18 @@ export class InvitesService {
         'Monthly invite limit reached. Try again next month.',
       );
     }
+  }
+
+  // Reuses the erasure suppression list — the same check `AuthService` runs at
+  // signup — so an invite to an address that deleted its account fails at mint
+  // instead of at redemption. Reads the repo off the DataSource (the entity is
+  // registered by AccountModule/AuthModule and autoloaded) rather than taking a
+  // new constructor dependency. Only ever called with a non-empty email.
+  private async isEmailSuppressed(email: string): Promise<boolean> {
+    const hit = await this.dataSource.getRepository(EmailSuppression).findOne({
+      where: { emailHash: hashSuppressedEmail(email) },
+    });
+    return hit !== null;
   }
 
   private generateCode(): string {

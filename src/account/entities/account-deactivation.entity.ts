@@ -15,17 +15,17 @@ import { UserStatus } from '../../users/entities/user.entity';
 @Entity('account_deactivation')
 export class AccountDeactivation {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_account_deactivation_user_id', { unique: true })
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({ type: 'timestamptz' })
-  deactivatedAt: Date;
+  deactivatedAt!: Date;
 
   @Column({ type: 'timestamptz', nullable: true })
-  reactivatedAt: Date | null;
+  reactivatedAt!: Date | null;
 
   /**
    * The `users.status` this member held when they deactivated, so reactivation
@@ -51,5 +51,5 @@ export class AccountDeactivation {
     enumName: 'users_status_enum',
     nullable: true,
   })
-  previousStatus: UserStatus | null;
+  previousStatus!: UserStatus | null;
 }

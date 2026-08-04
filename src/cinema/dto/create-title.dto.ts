@@ -10,12 +10,12 @@ import { TitleKind } from '../entities/cinema-title.entity';
 
 export class CreateTitleDto {
   @IsEnum(TitleKind)
-  kind: TitleKind;
+  kind!: TitleKind;
 
   @IsString()
   @IsNotEmpty()
   @MaxLength(200)
-  title: string;
+  title!: string;
 
   @IsOptional()
   @IsString()

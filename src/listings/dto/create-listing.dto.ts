@@ -1,27 +1,32 @@
 import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
+  ArrayMinSize,
   IsArray,
   IsBoolean,
   IsIn,
   IsLatitude,
   IsLongitude,
+  IsNotEmpty,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
   MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 import { IsSafeExternalUrl } from '../../common/validators/is-safe-external-url.decorator';
 import { LISTING_CATEGORY_SLUGS } from '../listing-categories';
+import { IsValidDayHours } from './day-hours.validator';
 
 // Fixed-shape nested pieces of `ListingDraft` — each maps 1:1 to a frontend
 // interface (`WitLine`, `ListingDraft["social"]`, the `PhotoKey`-keyed photo
 // records) so they get real per-field validation instead of a bare `IsObject`.
 
 export class ListingWitLineDto {
-  @IsString() @MinLength(1) @MaxLength(60) id: string;
+  @IsString() @MinLength(1) @MaxLength(60) id!: string;
   @IsOptional() @IsString() @MaxLength(300) text?: string;
 }
 
@@ -66,15 +71,34 @@ export class ListingPhotoAltSetDto {
 }
 
 /**
+ * One opening interval within a weekday — mirrors the entity's
+ * `ListingHoursInterval`. `from`/`to` are strict `HH:MM` 24h strings; when
+ * `to <= from` the interval is OVERNIGHT (closes the next day). Per-interval
+ * format is checked here; the cross-interval rules (open ⇒ ≥1 interval,
+ * `to === from` invalid, no overlap) live on `ListingDayHoursDto` via
+ * `@IsValidDayHours()`.
+ */
+export class ListingHoursIntervalDto {
+  @IsString() @Matches(/^([01]\d|2[0-3]):[0-5]\d$/) from!: string;
+  @IsString() @Matches(/^([01]\d|2[0-3]):[0-5]\d$/) to!: string;
+}
+
+/**
  * One weekday's opening hours — mirrors the entity's `ListingDayHours`
- * (`open`/`from`/`to`). `from`/`to` are `HH:MM` strings (or empty when the day
- * is closed), so they are validated as short strings rather than a strict time
- * format, matching how the frontend wizard emits partial/blank times.
+ * (`open`/`intervals`, the split-interval + overnight shape from item #6). A
+ * closed day carries `intervals: []`; an open day carries 1..2 non-overlapping
+ * intervals. `@IsValidDayHours()` enforces those relationships across the whole
+ * object (see `day-hours.validator.ts`).
  */
 export class ListingDayHoursDto {
-  @IsBoolean() open: boolean;
-  @IsOptional() @IsString() @MaxLength(20) from?: string;
-  @IsOptional() @IsString() @MaxLength(20) to?: string;
+  @IsBoolean() @IsValidDayHours() open!: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(2)
+  @ValidateNested({ each: true })
+  @Type(() => ListingHoursIntervalDto)
+  intervals?: ListingHoursIntervalDto[];
 }
 
 /**
@@ -85,13 +109,48 @@ export class ListingDayHoursDto {
  * then rejects any stray/unknown day key instead of persisting it to jsonb.
  */
 export class ListingHoursDto {
-  @IsOptional() @ValidateNested() @Type(() => ListingDayHoursDto) Mon?: ListingDayHoursDto;
-  @IsOptional() @ValidateNested() @Type(() => ListingDayHoursDto) Tue?: ListingDayHoursDto;
-  @IsOptional() @ValidateNested() @Type(() => ListingDayHoursDto) Wed?: ListingDayHoursDto;
-  @IsOptional() @ValidateNested() @Type(() => ListingDayHoursDto) Thu?: ListingDayHoursDto;
-  @IsOptional() @ValidateNested() @Type(() => ListingDayHoursDto) Fri?: ListingDayHoursDto;
-  @IsOptional() @ValidateNested() @Type(() => ListingDayHoursDto) Sat?: ListingDayHoursDto;
-  @IsOptional() @ValidateNested() @Type(() => ListingDayHoursDto) Sun?: ListingDayHoursDto;
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ListingDayHoursDto)
+  Mon?: ListingDayHoursDto;
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ListingDayHoursDto)
+  Tue?: ListingDayHoursDto;
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ListingDayHoursDto)
+  Wed?: ListingDayHoursDto;
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ListingDayHoursDto)
+  Thu?: ListingDayHoursDto;
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ListingDayHoursDto)
+  Fri?: ListingDayHoursDto;
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ListingDayHoursDto)
+  Sat?: ListingDayHoursDto;
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ListingDayHoursDto)
+  Sun?: ListingDayHoursDto;
+}
+
+/**
+ * A field that is REQUIRED on the `claim` path but OPTIONAL on `suggest`
+ * (item #2). On `claim` the field is always validated (so an absent/empty value
+ * fails); on `suggest` it is validated only when the submitter actually
+ * supplied a non-empty value — so a suggester who fills it in still gets format
+ * checking, but leaving it blank never blocks the submission. Attach the
+ * value's format validators (`@IsString()`, `@IsIn()`, `@IsNotEmpty()`, …)
+ * AFTER this so they run under exactly that condition.
+ */
+function requiredOnClaim(field: keyof CreateListingDto) {
+  return (dto: CreateListingDto) =>
+    dto.path === 'claim' || (dto[field] !== undefined && dto[field] !== '');
 }
 
 /**
@@ -100,32 +159,58 @@ export class ListingHoursDto {
  * `hours` is the per-weekday opening-hours map (`ListingHoursDto`), the one
  * request-body shape that used to be persisted to jsonb with only a loose
  * `@IsObject()` check.
+ *
+ * Required-field gating is path-branched (item #2): name, cats, hood, address,
+ * coordinates, blurb, and ≥1 `whatItIs` line are required for BOTH paths; the
+ * owner identity (ownerName/ownerRole/rel), price, and tagline are required
+ * only on the `claim` path (via `requiredOnClaim`). Claim-required `hours` and
+ * `photos` are nested shapes, so their presence is enforced in
+ * `ListingsService` rather than here (see `assertPathRequirements`).
  */
 export class CreateListingDto {
   @IsOptional() @IsIn(['claim', 'suggest', '']) path?: string;
   @IsOptional() @IsString() @MaxLength(120) verify?: string;
 
-  @IsString() @MinLength(1) @MaxLength(200) name: string;
+  @IsString() @MinLength(1) @MaxLength(200) name!: string;
 
-  @IsOptional()
+  // Required for both paths: at least one (up to two) category slug.
   @IsArray()
+  @ArrayMinSize(1)
   @ArrayMaxSize(2)
   @IsIn(LISTING_CATEGORY_SLUGS, { each: true })
-  cats?: string[];
+  cats!: string[];
 
-  @IsOptional() @IsString() @MaxLength(120) hood?: string;
+  // Required for both paths.
+  @IsString() @IsNotEmpty() @MaxLength(120) hood!: string;
+  @IsOptional() @IsString() @MaxLength(120) city?: string;
+  @IsOptional() @IsString() @MaxLength(60) timezone?: string;
   @IsOptional() @IsIn(['owned', 'friendly', '']) badge?: string;
   @IsOptional() @IsString() @MaxLength(2000) evidence?: string;
-  @IsOptional() @IsString() @MaxLength(120) price?: string;
-  @IsOptional() @IsString() @MaxLength(140) blurb?: string;
-  @IsOptional() @IsString() @MaxLength(200) tagline?: string;
 
-  @IsOptional()
+  // Required on `claim`, optional (but format-checked when supplied) on `suggest`.
+  @ValidateIf(requiredOnClaim('price'))
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(120)
+  price?: string;
+
+  // Required for both paths: the one-line blurb.
+  @IsString() @IsNotEmpty() @MaxLength(140) blurb!: string;
+
+  // Required on `claim`, optional on `suggest`.
+  @ValidateIf(requiredOnClaim('tagline'))
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(200)
+  tagline?: string;
+
+  // Required for both paths: at least one "what it actually is" line.
   @IsArray()
+  @ArrayMinSize(1)
   @ArrayMaxSize(4)
   @ValidateNested({ each: true })
   @Type(() => ListingWitLineDto)
-  whatItIs?: ListingWitLineDto[];
+  whatItIs!: ListingWitLineDto[];
 
   @IsOptional()
   @IsArray()
@@ -146,16 +231,18 @@ export class CreateListingDto {
   @IsString({ each: true })
   langs?: string[];
 
-  @IsOptional() @IsString() @MaxLength(300) address?: string;
+  // Required for both paths.
+  @IsString() @IsNotEmpty() @MaxLength(300) address!: string;
   @IsOptional() @IsBoolean() geocoded?: boolean;
 
-  @IsOptional()
+  // Coordinates are required for both paths — the frontend always resolves a
+  // pin (geocode, a pasted Google Maps link, or a neighbourhood-centroid
+  // fallback) before submit, so a listing can never land without a location.
   @IsLatitude()
-  latitude?: number;
+  latitude!: number;
 
-  @IsOptional()
   @IsLongitude()
-  longitude?: number;
+  longitude!: number;
 
   @IsOptional()
   @ValidateNested()
@@ -179,9 +266,25 @@ export class CreateListingDto {
   @Type(() => ListingPhotoAltSetDto)
   alt?: ListingPhotoAltSetDto;
 
-  @IsOptional() @IsIn(['own', 'run', 'work', 'regular', '']) rel?: string;
-  @IsOptional() @IsString() @MaxLength(120) ownerName?: string;
-  @IsOptional() @IsString() @MaxLength(120) ownerRole?: string;
+  // Owner identity — required on `claim`, optional on `suggest` (item #2). On
+  // `claim` a real relationship must be chosen (the empty-string sentinel is
+  // NOT in the accepted set); on `suggest` the empty sentinel / omission is
+  // fine and only a supplied value is enum-checked.
+  @ValidateIf(requiredOnClaim('rel'))
+  @IsIn(['own', 'run', 'work', 'regular'])
+  rel?: string;
+
+  @ValidateIf(requiredOnClaim('ownerName'))
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(120)
+  ownerName?: string;
+
+  @ValidateIf(requiredOnClaim('ownerRole'))
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(120)
+  ownerRole?: string;
   @IsOptional() @IsString() @MaxLength(2000) ownerBio?: string;
   @IsOptional() @IsIn(['public', 'role', 'anon']) visibility?: string;
   @IsOptional() @IsBoolean() linkToProfile?: boolean;

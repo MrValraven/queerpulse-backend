@@ -20,20 +20,20 @@ import {
 @Unique('UQ_profile_featured_communities', ['userId', 'communityId'])
 export class ProfileFeaturedCommunity {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_profile_featured_communities_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Index('IDX_profile_featured_communities_community_id')
   @Column({ type: 'uuid' })
-  communityId: string;
+  communityId!: string;
 
   /** 0-based display order; the write path assigns it from the array index. */
   @Column({ type: 'int' })
-  position: number;
+  position!: number;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

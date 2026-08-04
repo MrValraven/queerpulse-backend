@@ -1,5 +1,9 @@
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { HandleCheck, HandlesService } from './handles.service';
 import {
   ApiCookieAuth,
@@ -27,7 +31,17 @@ export class HandlesController {
   @ApiUnauthorizedResponse({
     description: 'Not authenticated as an active member.',
   })
-  check(@Query('name') name: string): Promise<HandleCheck> {
-    return this.handlesService.check(name ?? '');
+  check(
+    @Query('name') name: string,
+    @CurrentUser() user: CurrentUserData,
+  ): Promise<HandleCheck> {
+    // Pass the caller's own profile identity so a name they just released reads
+    // as available to THEM during its reclaim cooldown, while staying `taken`
+    // for everyone else. (Subprofile-owned reservations never match a profile
+    // owner, so they correctly stay `taken` here — the safe default.)
+    return this.handlesService.check(name ?? '', {
+      kind: 'profile',
+      userId: user.userId,
+    });
   }
 }

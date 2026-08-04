@@ -6,7 +6,7 @@ export class AttachEventPhotoDto {
   // globally by `StorageKeyOwnershipInterceptor`.
   @IsString()
   @MaxLength(512)
-  key: string;
+  key!: string;
 
   @IsOptional()
   @IsString()

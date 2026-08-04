@@ -46,7 +46,9 @@ export class ConnectionsController {
   constructor(private readonly connectionsService: ConnectionsService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List your connections (paginated, filtered by tab).' })
+  @ApiOperation({
+    summary: 'List your connections (paginated, filtered by tab).',
+  })
   @ApiOkResponse({ description: 'A page of connection list items.' })
   list(
     @CurrentUser() user: CurrentUserData,

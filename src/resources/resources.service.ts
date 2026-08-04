@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { escapeLikeTerm } from '../common/like-escape';
 import {
   DEFAULT_LIST_LIMIT,
   normalizePage,
@@ -12,8 +13,10 @@ import { Resource } from './entities/resource.entity';
 import {
   GlossaryTermResponseDTO,
   ResourceResponseDTO,
+  ResourceSearchRow,
   toGlossaryTermResponse,
   toResourceResponse,
+  toResourceSearchRow,
 } from './resource-response';
 
 export interface ListResourcesInput {
@@ -64,6 +67,26 @@ export class ResourcesService {
       throw new NotFoundException('Resource not found');
     }
     return toResourceResponse(resource);
+  }
+
+  // Cross-entity global search (SearchService) — published resources only
+  // (same gate as `list`), ILIKE over title / description. Body/meta stay out.
+  async searchByText(
+    term: string,
+    limit: number,
+  ): Promise<ResourceSearchRow[]> {
+    const pattern = `%${escapeLikeTerm(term)}%`;
+    const rows = await this.resources
+      .createQueryBuilder('r')
+      .where('r.publishedAt IS NOT NULL')
+      .andWhere('r.publishedAt <= :now', { now: new Date() })
+      .andWhere('(r.title ILIKE :pattern OR r.description ILIKE :pattern)', {
+        pattern,
+      })
+      .orderBy('r.publishedAt', 'DESC')
+      .take(limit)
+      .getMany();
+    return rows.map(toResourceSearchRow);
   }
 
   // Glossary is small and unpaginated by design (the FE renders every

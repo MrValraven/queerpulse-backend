@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   Param,
   Post,
   Query,
@@ -40,6 +41,15 @@ import {
  *
  * `spaces` is a static segment declared before the `:slug` detail route (added
  * in a later sub-project) so route matching resolves it literally.
+ *
+ * Every read here carries a positive `Cache-Control` (AUDIT-2026-07-30.md §I
+ * "No CDN cache headers on public GETs"): none of these responses vary by
+ * caller (no `@CurrentUser()`, no session-scoped filtering), so Vercel's CDN
+ * can answer repeat anonymous requests without invoking the Function or
+ * touching Postgres at all for up to 60s, then serve one more stale response
+ * while revalidating in the background for up to 5 more minutes (see
+ * `caching-and-cost.md`). The two write routes below stay uncached (POST is
+ * never cached regardless).
  */
 @Feature('listings')
 @ApiTags('Local Directory')
@@ -54,6 +64,7 @@ export class DirectoryController {
   // Host page "Partner spaces" — live listings flagged as partner venues.
   @Public()
   @Get('spaces')
+  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
   @ApiOperation({ summary: 'List live listings flagged as partner venues' })
   @ApiOkResponse({ description: 'The partner spaces.' })
   listPartnerSpaces() {
@@ -63,6 +74,7 @@ export class DirectoryController {
   // Public directory grid — every live listing, optionally filtered.
   @Public()
   @Get()
+  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
   @ApiOperation({ summary: 'List the public directory of live listings' })
   @ApiOkResponse({ description: 'Matching directory cards.' })
   listDirectory(@Query() query: ListDirectoryQuery) {
@@ -72,7 +84,10 @@ export class DirectoryController {
   // Public Safe Spaces page — verified + removed safe spaces with hero stats.
   @Public()
   @Get('safe-spaces')
-  @ApiOperation({ summary: 'List verified and removed safe spaces with hero stats' })
+  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @ApiOperation({
+    summary: 'List verified and removed safe spaces with hero stats',
+  })
   @ApiOkResponse({ description: 'The safe-spaces list and stats.' })
   listSafeSpaces() {
     return this.directoryService.listSafeSpaces();
@@ -81,6 +96,7 @@ export class DirectoryController {
   // Public Safe Space detail (verified or removed).
   @Public()
   @Get('safe-spaces/:slug')
+  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
   @ApiOperation({ summary: 'Get a safe space (verified or removed) by slug' })
   @ApiOkResponse({ description: 'The safe-space detail.' })
   @ApiNotFoundResponse({ description: 'No safe space with that slug.' })
@@ -95,8 +111,14 @@ export class DirectoryController {
   // unknown/inactive member yields an empty array, not a 404.
   @Public()
   @Get('by-member/:slug')
-  @ApiOperation({ summary: "List live listings owned by a member's profile slug" })
-  @ApiOkResponse({ description: 'Redacted directory cards (empty for an unknown/inactive member).' })
+  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @ApiOperation({
+    summary: "List live listings owned by a member's profile slug",
+  })
+  @ApiOkResponse({
+    description:
+      'Redacted directory cards (empty for an unknown/inactive member).',
+  })
   listByMember(@Param('slug') slug: string) {
     return this.directoryService.listByMemberSlug(slug);
   }
@@ -105,6 +127,7 @@ export class DirectoryController {
   // so route matching resolves those literally rather than as `:slug`.
   @Public()
   @Get(':slug')
+  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
   @ApiOperation({ summary: 'Get a live directory listing by slug' })
   @ApiOkResponse({ description: 'The directory detail.' })
   @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
@@ -115,6 +138,7 @@ export class DirectoryController {
   // Public: paginated reviews for a listing.
   @Public()
   @Get(':slug/reviews')
+  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
   @ApiOperation({ summary: 'List paginated reviews for a live listing' })
   @ApiOkResponse({ description: 'A page of reviews.' })
   @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
@@ -133,7 +157,9 @@ export class DirectoryController {
   @ApiOperation({ summary: 'Leave a review on a live listing' })
   @ApiCreatedResponse({ description: 'The created review.' })
   @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   addReview(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
@@ -151,11 +177,19 @@ export class DirectoryController {
   // doc comment). Guarded per-route, same as `addReview`.
   @Post(':slug/edit-suggestions')
   @UseGuards(ActiveMemberGuard)
-  @ApiOperation({ summary: 'Suggest an edit to a live listing (moderator queue)' })
-  @ApiCreatedResponse({ description: 'The created edit suggestion id and status.' })
+  @ApiOperation({
+    summary: 'Suggest an edit to a live listing (moderator queue)',
+  })
+  @ApiCreatedResponse({
+    description: 'The created edit suggestion id and status.',
+  })
   @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
-  @ApiBadRequestResponse({ description: 'You own the listing, or the message is empty.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiBadRequestResponse({
+    description: 'You own the listing, or the message is empty.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   suggestEdit(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,

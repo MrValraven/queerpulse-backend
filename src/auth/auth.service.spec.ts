@@ -17,6 +17,7 @@ import { VouchService } from '../vouch/vouch.service';
 import { ConnectionsService } from '../connections/connections.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { User, UserStatus } from '../users/entities/user.entity';
+import { Notification } from '../notifications/entities/notification.entity';
 import { UsersService } from '../users/users.service';
 import { AuthService } from './auth.service';
 import { SignupRejectedError } from './errors/signup-rejected.error';
@@ -107,6 +108,9 @@ function buildMocks() {
   // or from a pending erasure (leave alone). Empty by default.
   const deactivations = { findOne: jest.fn().mockResolvedValue(null) };
   const deletionRequests = { findOne: jest.fn().mockResolvedValue(null) };
+  // Read-side only — `suspensionInfoFor` reads the member's latest
+  // moderation-outcome notification for the reason. Empty by default.
+  const notifications = { findOne: jest.fn().mockResolvedValue(null) };
   // Registration kill switch — on by default, so signup is unaffected unless
   // a test explicitly turns it off.
   const platformSettings = {
@@ -125,6 +129,7 @@ function buildMocks() {
     suppressions,
     deactivations,
     deletionRequests,
+    notifications,
     platformSettings,
   };
 }
@@ -158,6 +163,11 @@ async function buildService(
       {
         provide: getRepositoryToken(DeletionRequest),
         useValue: mocks.deletionRequests,
+      },
+      {
+        // Read-side only — backs `suspensionInfoFor`'s latest-outcome lookup.
+        provide: getRepositoryToken(Notification),
+        useValue: mocks.notifications,
       },
       {
         provide: PlatformSettingsService,
@@ -706,6 +716,82 @@ describe('AuthService.validateOrCreateGoogleUser', () => {
           lastName: 'Person',
         }),
       ).rejects.toMatchObject({ reason: 'registration_disabled' });
+    });
+  });
+});
+
+describe('AuthService.suspensionInfoFor', () => {
+  let service: AuthService;
+  let mocks: ReturnType<typeof buildMocks>;
+
+  beforeEach(async () => {
+    mocks = buildMocks();
+    service = await buildService(mocks);
+  });
+
+  const asUser = (partial: Partial<User>): User => partial as User;
+
+  it('returns nulls for an active member and never queries notifications', async () => {
+    const info = await service.suspensionInfoFor(
+      asUser({ id: 'u1', status: UserStatus.Active, suspendedUntil: null }),
+    );
+
+    expect(info).toEqual({ suspendedUntil: null, suspension: null });
+    expect(mocks.notifications.findOne).not.toHaveBeenCalled();
+  });
+
+  it('returns the expiry + reason from the latest moderation-outcome notification', async () => {
+    const until = new Date('2026-09-01T00:00:00.000Z');
+    mocks.notifications.findOne.mockResolvedValue({
+      payload: { note: 'Seven days for harassment.', reasonCode: 'harassment' },
+    });
+
+    const info = await service.suspensionInfoFor(
+      asUser({ id: 'u1', status: UserStatus.Suspended, suspendedUntil: until }),
+    );
+
+    expect(mocks.notifications.findOne).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ userId: 'u1' }),
+        order: { createdAt: 'DESC' },
+      }),
+    );
+    expect(info).toEqual({
+      suspendedUntil: until.toISOString(),
+      suspension: {
+        note: 'Seven days for harassment.',
+        reasonCode: 'harassment',
+      },
+    });
+  });
+
+  it('reports a permanent ban as suspended with a null expiry', async () => {
+    mocks.notifications.findOne.mockResolvedValue({
+      payload: { note: 'Permanent removal.', reasonCode: 'harassment' },
+    });
+
+    const info = await service.suspensionInfoFor(
+      asUser({ id: 'u1', status: UserStatus.Suspended, suspendedUntil: null }),
+    );
+
+    expect(info.suspendedUntil).toBeNull();
+    expect(info.suspension).toEqual({
+      note: 'Permanent removal.',
+      reasonCode: 'harassment',
+    });
+  });
+
+  it('falls back to a null reason when no moderation-outcome notification exists', async () => {
+    const until = new Date('2026-09-01T00:00:00.000Z');
+    mocks.notifications.findOne.mockResolvedValue(null);
+
+    const info = await service.suspensionInfoFor(
+      asUser({ id: 'u1', status: UserStatus.Suspended, suspendedUntil: until }),
+    );
+
+    expect(info).toEqual({
+      suspendedUntil: until.toISOString(),
+      suspension: null,
     });
   });
 });

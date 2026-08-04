@@ -45,7 +45,9 @@ export class ReportsController {
   }
 
   @ApiOperation({ summary: 'List the report reasons for a subject type' })
-  @ApiOkResponse({ description: 'The reason taxonomy for the given subject type.' })
+  @ApiOkResponse({
+    description: 'The reason taxonomy for the given subject type.',
+  })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
   @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
   @Get('reasons')

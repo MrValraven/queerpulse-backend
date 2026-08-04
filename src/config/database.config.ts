@@ -41,4 +41,14 @@ export default registerAs('database', () => ({
       30_000,
     ),
   } satisfies DatabasePoolConfig,
+  // Slow-query visibility: TypeORM LOGS (does not kill) any query running
+  // longer than this many ms, well ahead of the blanket `statement_timeout`
+  // kill-switch above — the early warning this backend didn't have before
+  // (no `maxQueryExecutionTime`/query `logging` was configured anywhere; the
+  // only prior signal was a query surviving to the full 30s cutoff). See
+  // `database-and-indexing.md` / `observability-and-resilience.md`.
+  slowQueryThresholdMillis: integerFromEnv(
+    process.env.DATABASE_SLOW_QUERY_THRESHOLD_MS,
+    500,
+  ),
 }));

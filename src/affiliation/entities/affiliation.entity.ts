@@ -30,18 +30,18 @@ export enum AffiliationStatus {
 @Entity('affiliations')
 export class Affiliation {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_affiliations_user_id', { unique: true })
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Index('IDX_affiliations_company_id')
   @Column({ type: 'uuid' })
-  companyId: string;
+  companyId!: string;
 
   @Column({ type: 'varchar' })
-  role: string;
+  role!: string;
 
   @Column({
     type: 'enum',
@@ -49,8 +49,8 @@ export class Affiliation {
     enumName: 'affiliation_status_enum',
     default: AffiliationStatus.Pending,
   })
-  status: AffiliationStatus;
+  status!: AffiliationStatus;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Get,
   Post,
@@ -36,6 +37,7 @@ import {
   CurrentUser,
   CurrentUserData,
 } from './decorators/current-user.decorator';
+import { CompleteOnboardingDto } from './dto/complete-onboarding.dto';
 import { SignupRejectedError } from './errors/signup-rejected.error';
 import { OAuthCallbackFilter } from './filters/oauth-callback.filter';
 import { Public } from './decorators/public.decorator';
@@ -47,13 +49,19 @@ import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 
 // This controller inherits the app-wide `defaultVersion: '1'`, so its routes
 // answer at `/v1/auth/...` — which is where the SPA's versioned API client
-// (src/shared/api/client.ts) sends `me`, `logout`, and `logout-all`.
+// (src/shared/api/client.ts) sends `me` and `logout-all`.
 //
-// The exceptions are the three EXTERNALLY-referenced routes, which must keep
-// their fixed, unversioned paths and therefore carry `@Version(VERSION_NEUTRAL)`
-// per-method: the Google OAuth callback URL is registered in Google Cloud, and
-// the SPA hits `/auth/google` and `/auth/refresh` directly (unprefixed) — none
-// can change path in lockstep with the API version.
+// The exceptions carry `@Version(VERSION_NEUTRAL)` per-method and keep their
+// fixed, unversioned paths:
+//   - the Google OAuth callback URL is registered in Google Cloud, and the SPA
+//     hits `/auth/google` and `/auth/refresh` directly (unprefixed);
+//   - `logout` MUST answer at `/auth/logout`, not `/v1/auth/logout`. The refresh
+//     token cookie is scoped to `path=/auth` (see `auth-cookies.ts`), so a
+//     browser only attaches it to request paths under `/auth`. A versioned
+//     `/v1/auth/logout` never receives the cookie, so `revokeRefreshToken`
+//     (which revokes the row AND force-disconnects the member's live sockets via
+//     `USER_SESSION_REVOKED`) silently no-ops. Keeping logout neutral puts it
+//     back inside the cookie scope, exactly like `refresh`.
 @ApiTags('auth')
 @LockdownExempt()
 @Controller({ path: 'auth' })
@@ -214,6 +222,7 @@ export class AuthController {
   // cookies, ALWAYS return ok.
   @ApiOperation({ summary: 'Log out this device and clear auth cookies.' })
   @ApiCreatedResponse({ description: 'Logged out; auth cookies cleared.' })
+  @Version(VERSION_NEUTRAL)
   @Public()
   @Post('logout')
   async logout(
@@ -265,6 +274,10 @@ export class AuthController {
     if (!user) {
       throw new UnauthorizedException();
     }
+    // A suspended/banned member is locked out of every gated route, so the
+    // account-suspended/banned page has no authed endpoint to call for the
+    // reason — it rides on `me` (JWT-only) instead. Null for everyone else.
+    const suspensionInfo = await this.authService.suspensionInfoFor(user);
     return {
       id: user.id,
       // From the JWT (re-read from the DB every request by JwtStrategy), not the
@@ -276,7 +289,41 @@ export class AuthController {
       // NULL for accounts created before the 18+ gate shipped — the frontend
       // contract (AuthUser.ageAttestedAt) already expects a nullable ISO string.
       ageAttestedAt: user.ageAttestedAt?.toISOString() ?? null,
+      // NULL only while a brand-new member is still mid-onboarding. The frontend
+      // gate reads this to keep an already-onboarded member out of the wizard.
+      onboardedAt: user.onboardedAt?.toISOString() ?? null,
       profile: user.profile ?? null,
+      // { suspendedUntil, suspension } — both null unless the member is suspended.
+      ...suspensionInfo,
+    };
+  }
+
+  @ApiOperation({
+    summary:
+      'Mark the current member as having finished onboarding and agreed to the community guidelines.',
+  })
+  @ApiCookieAuth('access_token')
+  @ApiCreatedResponse({
+    description:
+      'Onboarding recorded; returns the onboarding + guidelines-agreement stamps.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @Post('onboarding/complete')
+  async completeOnboarding(
+    @CurrentUser() current: CurrentUserData,
+    @Body() dto: CompleteOnboardingDto,
+  ): Promise<{
+    onboardedAt: string;
+    guidelinesAcceptedAt: string;
+    guidelinesVersion: string;
+  }> {
+    const result = await this.usersService.markOnboarded(current.userId, {
+      guidelinesVersion: dto.guidelinesVersion,
+    });
+    return {
+      onboardedAt: result.onboardedAt.toISOString(),
+      guidelinesAcceptedAt: result.guidelinesAcceptedAt.toISOString(),
+      guidelinesVersion: result.guidelinesVersion,
     };
   }
 }

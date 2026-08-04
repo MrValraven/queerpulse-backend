@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Header, Param, Post } from '@nestjs/common';
 import { Throttle, seconds } from '@nestjs/throttler';
 import { Public } from '../auth/decorators/public.decorator';
 import { Feature } from '../common/feature.decorator';
@@ -36,8 +36,12 @@ import {
 export class HousingController {
   constructor(private readonly housing: HousingService) {}
 
+  // Same published-co-op response for every anonymous visitor — see
+  // AUDIT-2026-07-30.md §I "No CDN cache headers on public GETs" /
+  // `caching-and-cost.md`.
   @Public()
   @Get('coops')
+  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
   @ApiOperation({ summary: 'List published co-ops in the public directory' })
   @ApiOkResponse({ description: 'All published co-ops.' })
   listCoops() {
@@ -50,7 +54,9 @@ export class HousingController {
   @Public()
   @Throttle({ default: { limit: 5, ttl: seconds(60) } })
   @Post('coops/:slug/join-requests')
-  @ApiOperation({ summary: 'Submit a join request to a co-op (anonymous allowed)' })
+  @ApiOperation({
+    summary: 'Submit a join request to a co-op (anonymous allowed)',
+  })
   @ApiCreatedResponse({ description: 'The created join request.' })
   @ApiNotFoundResponse({ description: 'No co-op with that slug.' })
   submitJoinRequest(

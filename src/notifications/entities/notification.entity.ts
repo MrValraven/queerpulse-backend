@@ -38,6 +38,16 @@ export enum NotificationType {
   InviteAccepted = 'invite_accepted',
   ListingReview = 'listing_review',
   RoadmapStatus = 'roadmap_status',
+  // Co-owned subprofiles (see migration
+  // `AddSubprofileInviteNotificationTypes1785800500000`).
+  SubprofileInvite = 'subprofile_invite',
+  SubprofileCoOwnerJoined = 'subprofile_co_owner_joined',
+  // Sent to the member a moderation action lands on (warn/suspend/ban) so they
+  // learn the outcome and why — the exact gap the audit named. Delivered with
+  // no actor and no preference toggle: a moderation outcome is the platform's
+  // word, always written. See migration
+  // `AddModerationOutcomeNotificationType1785900000000`.
+  ModerationOutcome = 'moderation_outcome',
 }
 
 @Entity('notifications')
@@ -45,25 +55,25 @@ export enum NotificationType {
 @Index('IDX_notifications_user_id_read', ['userId', 'read'])
 export class Notification {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_notifications_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({
     type: 'enum',
     enum: NotificationType,
     enumName: 'notifications_type_enum',
   })
-  type: NotificationType;
+  type!: NotificationType;
 
   @Column({ type: 'jsonb', default: {} })
-  payload: Record<string, unknown>;
+  payload!: Record<string, unknown>;
 
   @Column({ type: 'boolean', default: false })
-  read: boolean;
+  read!: boolean;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

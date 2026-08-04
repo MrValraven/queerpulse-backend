@@ -12,5 +12,7 @@ import { ResourcesService } from './resources.service';
   imports: [TypeOrmModule.forFeature([Resource, GlossaryTerm])],
   controllers: [ResourcesController, GlossaryController],
   providers: [ResourcesService],
+  // Exported for the cross-entity SearchModule (resource search).
+  exports: [ResourcesService],
 })
 export class ResourcesModule {}

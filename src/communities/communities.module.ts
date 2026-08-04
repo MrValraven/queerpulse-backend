@@ -4,6 +4,7 @@ import { ContentModerationModule } from '../content-moderation/content-moderatio
 import { MentionsModule } from '../mentions/mentions.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { SocialModule } from '../social/social.module';
+import { StorageModule } from '../storage/storage.module';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersModule } from '../users/users.module';
 import { CommunitiesController } from './communities.controller';
@@ -52,6 +53,9 @@ import { MeCommunitiesController } from './me-communities.controller';
     // `NotificationsModule` imports only `SocialModule`, not `CommunitiesModule`,
     // so there is no cycle.
     NotificationsModule,
+    // `StorageService` — delete a post's previous image object when an author
+    // replaces or clears it on edit, so the superseded upload stops orphaning.
+    StorageModule,
   ],
   controllers: [
     CommunitiesController,

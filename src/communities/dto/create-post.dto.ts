@@ -9,7 +9,7 @@ import { IsImageReference } from '../../common/validators/is-image-reference.dec
 import { PostKind } from '../entities/community-post.entity';
 
 export class CreatePostDto {
-  @IsString() @MinLength(1) @MaxLength(5000) body: string;
+  @IsString() @MinLength(1) @MaxLength(5000) body!: string;
   @IsOptional() @IsImageReference() image?: string;
   @IsOptional() @IsEnum(PostKind) kind?: PostKind;
 }

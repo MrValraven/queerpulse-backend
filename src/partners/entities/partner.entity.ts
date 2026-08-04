@@ -59,81 +59,81 @@ export interface PartnerContact {
 @Entity('partners')
 export class Partner {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_partners_slug', { unique: true })
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   @Column({ type: 'varchar' })
-  name: string;
+  name!: string;
 
   @Column({ type: 'varchar' })
-  logo: string;
+  logo!: string;
 
   @Column({
     type: 'enum',
     enum: PartnerRegion,
     enumName: 'partners_region_enum',
   })
-  region: PartnerRegion;
+  region!: PartnerRegion;
 
   @Column({ type: 'varchar' })
-  regionLabel: string;
+  regionLabel!: string;
 
   @Column({ type: 'varchar' })
-  city: string;
+  city!: string;
 
   @Column({ type: 'text' })
-  desc: string;
+  desc!: string;
 
   @Column({ type: 'text', array: true, default: '{}' })
-  tags: string[];
+  tags!: string[];
 
   @Column({ type: 'varchar' })
-  tier: string;
+  tier!: string;
 
   @Column({ type: 'varchar' })
-  since: string;
+  since!: string;
 
   @Column({ type: 'varchar' })
-  eyebrow: string;
+  eyebrow!: string;
 
   @Column({ type: 'varchar' })
-  tagline: string;
+  tagline!: string;
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  about: string[];
+  about!: string[];
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  stats: PartnerStat[];
+  stats!: PartnerStat[];
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  aboutMore: PartnerSection[];
+  aboutMore!: PartnerSection[];
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  jointWork: PartnerJointWork[];
+  jointWork!: PartnerJointWork[];
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  timeline: PartnerTimelineItem[];
+  timeline!: PartnerTimelineItem[];
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  how: PartnerSection[];
+  how!: PartnerSection[];
 
   // No DB default — always populated by the service (`dto.funding ?? ''`),
   // mirroring `contact` below and `VolunteerOpportunity.detail`'s "always
   // fully populated by the service, not the schema" precedent.
   @Column({ type: 'text' })
-  funding: string;
+  funding!: string;
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  atGlance: PartnerAtGlance[];
+  atGlance!: PartnerAtGlance[];
 
   // Always populated by the service (`PartnersService`'s `normalizeContact`)
   // so every subfield is present (`null`, not omitted) even when a caller
   // supplies only part of `contact` (or omits it entirely).
   @Column({ type: 'jsonb' })
-  contact: PartnerContact;
+  contact!: PartnerContact;
 
   @Column({
     type: 'enum',
@@ -141,34 +141,34 @@ export class Partner {
     enumName: 'partners_status_enum',
     default: PartnerStatus.Pending,
   })
-  status: PartnerStatus;
+  status!: PartnerStatus;
 
   @Index('IDX_partners_submitted_by_id')
   @Column({ type: 'uuid' })
-  submittedById: string;
+  submittedById!: string;
 
   @Column({ type: 'text', nullable: true })
-  reviewNote: string | null;
+  reviewNote!: string | null;
 
   @Column({ type: 'boolean', default: false })
-  featured: boolean;
+  featured!: boolean;
 
   // Optional featured testimonial shown on the For Organisations page. All
   // three are populated together or all null; the service never writes a
   // partial quote (no author without a quote). Plain display strings — not
   // i18n'd, same precedent as the rest of a partner's owned content.
   @Column({ type: 'text', nullable: true })
-  testimonialQuote: string | null;
+  testimonialQuote!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  testimonialAuthor: string | null;
+  testimonialAuthor!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  testimonialRole: string | null;
+  testimonialRole!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

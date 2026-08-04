@@ -22,15 +22,15 @@ export enum FlatmateProfileType {
 @Entity('flatmate_profiles')
 export class FlatmateProfile {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_flatmate_profiles_owner_id', { unique: true })
   @Column({ type: 'uuid' })
-  ownerId: string;
+  ownerId!: string;
 
   @Index('UQ_flatmate_profiles_slug', { unique: true })
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   @Index('IDX_flatmate_profiles_type')
   @Column({
@@ -38,34 +38,34 @@ export class FlatmateProfile {
     enum: FlatmateProfileType,
     enumName: 'flatmate_profiles_type_enum',
   })
-  type: FlatmateProfileType;
+  type!: FlatmateProfileType;
 
   @Column({ type: 'varchar', length: 60, default: '' })
-  pronouns: string;
+  pronouns!: string;
 
   @Column({ type: 'varchar', length: 120, default: '' })
-  neighbourhood: string;
+  neighbourhood!: string;
 
   // Seeker's max budget / offering's room rent (euros). Used for both the
   // budget filter and match scoring.
   @Column({ type: 'int' })
-  budgetEuros: number;
+  budgetEuros!: number;
 
   @Column({ type: 'date', nullable: true })
-  moveInFrom: string | null;
+  moveInFrom!: string | null;
 
   @Column({ type: 'boolean', default: false })
-  flexibleTiming: boolean;
+  flexibleTiming!: boolean;
 
   @Column({ type: 'text', default: '' })
-  about: string;
+  about!: string;
 
   @Column({ type: 'text', array: true, default: '{}' })
-  lifestyleTags: string[];
+  lifestyleTags!: string[];
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

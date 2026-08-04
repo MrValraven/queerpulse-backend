@@ -62,13 +62,62 @@ export interface ForumThreadResponse {
   lastActivityAt: string;
   createdAt: string;
   canEdit: boolean;
+  // Per-viewer moderation/lock affordances for the OP post, mirroring
+  // `ForumPostResponse`'s flags so the thread-list/detail card can render the OP
+  // row's moderation menu without a second post fetch. `canDelete`/`canRestore`/
+  // `canViewHistory` mirror `toForumPostResponse`'s OP logic (author-or-
+  // moderator; restore only when author-tombstoned; history only when edited);
+  // `canLock` is true iff the viewer is a moderator. All default `false` on the
+  // echoes that don't resolve the OP post or the viewer's role.
+  canDelete: boolean;
+  canRestore: boolean;
+  canViewHistory: boolean;
+  canLock: boolean;
+  // Id of the thread's opening post (the oldest `ForumPost`). Lets the
+  // list-row upvote button + row moderation act on the OP without a second
+  // request. Empty string when the caller hasn't resolved it (e.g. a
+  // create/edit echo that maps a single thread without a batch OP lookup).
+  opPostId: string;
+  // The OP post's vote count (mirror of `thread.opVoteCount`), driving the card
+  // upvotes and the `top` sort.
+  opVoteCount: number;
+  // The viewer's own vote on the OP (0 or 1). Defaults to 0 until the batch
+  // vote lookup resolves it (Wave 2 `toThreadResponses`).
+  myVote: number;
+  // Normalized (lowercase, deduped) tags for the thread — mirror of
+  // `thread.tags`.
+  tags: string[];
 }
 
+// The viewer of a thread card — their id plus whether they hold a moderator
+// role. Mirrors `ForumPostViewer`; the OP moderation/lock flags need the role,
+// not just the id.
+export interface ForumThreadViewer {
+  userId: string;
+  isModerator: boolean;
+}
+
+/**
+ * `opPost` and `myVote` are supplied by the batched list/detail mappers that
+ * resolve the OP post and the viewer's vote on it in one query each. `opPost`
+ * defaults to `null` (and `myVote` to 0) so any echo that doesn't resolve the
+ * OP still returns a well-formed object — with the OP moderation flags off.
+ *
+ * The `canDelete`/`canRestore`/`canViewHistory` flags mirror
+ * `toForumPostResponse`'s logic applied to the OP post (moderation-table state
+ * isn't consulted on this path, so a merely author-tombstoned OP is the only
+ * "blanked" case here); `canLock` is a plain moderator check.
+ */
 export function toForumThreadResponse(
   thread: ForumThread,
   author: MemberRef | null,
-  viewerId: string,
+  viewer: ForumThreadViewer,
+  opPost: ForumPost | null = null,
+  myVote = 0,
 ): ForumThreadResponse {
+  const opTombstoned = opPost?.deletedAt != null;
+  const opIsAuthor = opPost != null && opPost.authorId === viewer.userId;
+  const canModerateOp = opIsAuthor || viewer.isModerator;
   return {
     id: thread.id,
     slug: thread.slug,
@@ -80,7 +129,16 @@ export function toForumThreadResponse(
     replyCount: thread.replyCount,
     lastActivityAt: thread.lastActivityAt.toISOString(),
     createdAt: thread.createdAt.toISOString(),
-    canEdit: thread.authorId === viewerId,
+    canEdit: thread.authorId === viewer.userId,
+    canDelete: opPost != null && canModerateOp && !opTombstoned,
+    // Only an author's own tombstone is restorable through the forum route.
+    canRestore: opPost != null && canModerateOp && opTombstoned,
+    canViewHistory: opPost != null && canModerateOp && opPost.editedAt != null,
+    canLock: viewer.isModerator,
+    opPostId: opPost?.id ?? '',
+    opVoteCount: thread.opVoteCount,
+    myVote,
+    tags: thread.tags,
   };
 }
 

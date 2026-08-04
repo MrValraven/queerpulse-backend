@@ -48,7 +48,7 @@ export class TitlesController {
   })
   @ApiOkResponse({
     description:
-      'Visible titles with the caller\'s watch progress; admin fields when all=true.',
+      "Visible titles with the caller's watch progress; admin fields when all=true.",
   })
   @ApiForbiddenResponse({
     description: 'all=true requires a moderator or admin role.',
@@ -59,7 +59,7 @@ export class TitlesController {
 
   @Get(':id')
   @ApiOperation({ summary: 'Get a single visible cinema title by id.' })
-  @ApiOkResponse({ description: 'The title with the caller\'s watch progress.' })
+  @ApiOkResponse({ description: "The title with the caller's watch progress." })
   @ApiBadRequestResponse({ description: 'Malformed title id.' })
   @ApiNotFoundResponse({ description: 'No visible title exists for this id.' })
   get(
@@ -77,7 +77,8 @@ export class TitlesController {
     summary: 'Start a playback session (signed Mux tokens + resume position).',
   })
   @ApiOkResponse({
-    description: 'Signed playback tokens with the resume position and duration.',
+    description:
+      'Signed playback tokens with the resume position and duration.',
   })
   @ApiBadRequestResponse({ description: 'Malformed title id.' })
   @ApiNotFoundResponse({ description: 'No playable title exists for this id.' })

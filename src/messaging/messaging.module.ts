@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConnectionsModule } from '../connections/connections.module';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
 import { ConversationsService } from './conversations.service';
@@ -46,6 +47,10 @@ import { MessagingService } from './messaging.service';
     // Exports `BlockFilterService`, used to reject conversation/message-request
     // creation when either party has blocked the other (spec §2).
     SocialModule,
+    // Re-exports `TypeOrmModule.forFeature([ContentModeration])`, so
+    // `MessagingCoreService` can inject the moderation-state repository to
+    // tombstone moderator-taken-down messages in thread reads.
+    ContentModerationModule,
   ],
   controllers: [ConversationsController, MessageRequestController],
   providers: [

@@ -108,6 +108,13 @@ import {
 } from '../governance/governance-finance.seed';
 import { GovernanceOverview } from '../governance/entities/governance-overview.entity';
 import { governanceOverviewSeed } from '../governance/governance-overview.seed';
+import { RoadmapItem } from '../roadmap/entities/roadmap-item.entity';
+import { RoadmapIdea } from '../roadmap/entities/roadmap-idea.entity';
+import { RoadmapTeamMember } from '../roadmap/entities/roadmap-team-member.entity';
+import { RoadmapAuditLog } from '../roadmap/entities/roadmap-audit-log.entity';
+import { RoadmapItemDependency } from '../roadmap/entities/roadmap-item-dependency.entity';
+import { RoadmapSettings } from '../roadmap/entities/roadmap-settings.entity';
+import { seedRoadmapAdminContent } from '../roadmap/roadmap.seed';
 
 // Representative members for local frontend integration. Replace/extend with the
 // prototype's mock members (frontend src/features/members/data/members.ts) as
@@ -569,6 +576,92 @@ const MEMBERS: Array<{
     openTo: [],
     verified: false,
     joinedAt: '2026-07-22T12:00:00.000Z',
+  },
+  // Task A8 (admin roadmap redesign): the 5-person team roster shown in the
+  // admin roadmap's Capacity view (`ROADMAP_ADMIN_SEED_TEAM` in
+  // `src/roadmap/roadmap.seed.ts`) and the `ownerSlug`/`actorSlug` values
+  // its rich item/audit fixtures reference. Ordinary members otherwise —
+  // nothing here marks them as platform staff at the `users` row level; only
+  // their presence in `roadmap_team_members` does that.
+  {
+    googleId: 'seed-tiago-costa',
+    email: 'tiago.costa@example.com',
+    status: UserStatus.Active,
+    slug: 'tiago-costa',
+    firstName: 'Tiago',
+    lastName: 'Costa',
+    pronouns: 'he/him',
+    tagline: 'Trust & Safety lead',
+    location: 'Lisbon',
+    visibility: ProfileVisibility.Open,
+    tags: ['Safety', 'Moderation'],
+    openTo: [{ kind: 'preset', id: 'collaborating' }],
+    verified: true,
+    joinedAt: '2025-01-15T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-mariana-reis',
+    email: 'mariana.reis@example.com',
+    status: UserStatus.Active,
+    slug: 'mariana-reis',
+    firstName: 'Mariana',
+    lastName: 'Reis',
+    pronouns: 'she/her',
+    tagline: 'Community lead',
+    location: 'Porto',
+    visibility: ProfileVisibility.Open,
+    tags: ['Community', 'Events'],
+    openTo: [{ kind: 'preset', id: 'collaborating' }],
+    verified: true,
+    joinedAt: '2025-02-01T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-jo-silva',
+    email: 'jo.silva@example.com',
+    status: UserStatus.Active,
+    slug: 'jo-silva',
+    firstName: 'Jo',
+    lastName: 'Silva',
+    pronouns: 'they/them',
+    tagline: 'Product & build',
+    location: 'Lisbon',
+    visibility: ProfileVisibility.Open,
+    tags: ['Engineering', 'Product'],
+    openTo: [{ kind: 'preset', id: 'mentoring' }],
+    verified: true,
+    joinedAt: '2025-01-20T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-ana-duarte',
+    email: 'ana.duarte@example.com',
+    status: UserStatus.Active,
+    slug: 'ana-duarte',
+    firstName: 'Ana',
+    lastName: 'Duarte',
+    pronouns: 'she/her',
+    tagline: 'Editorial',
+    location: 'Lisbon',
+    visibility: ProfileVisibility.Open,
+    tags: ['Writing', 'Health'],
+    openTo: [{ kind: 'preset', id: 'collaborating' }],
+    verified: true,
+    joinedAt: '2025-03-10T09:00:00.000Z',
+  },
+  {
+    googleId: 'seed-vera-lopes',
+    email: 'vera.lopes@example.com',
+    status: UserStatus.Active,
+    slug: 'vera-lopes',
+    firstName: 'Vera',
+    lastName: 'Lopes',
+    pronouns: 'she/her',
+    tagline: 'Volunteer researcher',
+    location: 'Coimbra',
+    visibility: ProfileVisibility.Network,
+    tags: ['Research', 'Legal'],
+    openTo: [{ kind: 'preset', id: 'collaborating' }],
+    verified: false,
+    joinedAt: '2025-06-01T09:00:00.000Z',
   },
 ];
 
@@ -4137,6 +4230,12 @@ async function seed(): Promise<void> {
       CoopJoinRequest,
       GovernanceFinanceReport,
       GovernanceOverview,
+      RoadmapItem,
+      RoadmapIdea,
+      RoadmapTeamMember,
+      RoadmapAuditLog,
+      RoadmapItemDependency,
+      RoadmapSettings,
     ],
     namingStrategy: new SnakeNamingStrategy(),
     synchronize: false,
@@ -4281,6 +4380,12 @@ async function seed(): Promise<void> {
       await seedChangemakers(manager);
       await seedGovernanceFinance(manager);
       await seedGovernanceOverview(manager);
+      // Task A8: the admin roadmap's rich board content (owners/team/audit
+      // resolved via the same `memberIdBySlug` map every domain above uses).
+      // Depends on migrations `CreateRoadmap` + `AddRoadmapAdminModel` having
+      // already run — see `roadmap.seed.ts`'s file-level doc comment for why
+      // this lives in the seed runner rather than a migration.
+      await seedRoadmapAdminContent(manager, memberIdBySlug);
     });
 
     console.log('Seed complete.');

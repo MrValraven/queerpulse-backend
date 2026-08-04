@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { EntityManager, Repository } from 'typeorm';
+import { EntityManager, In, Repository } from 'typeorm';
 import { Profile } from './entities/profile.entity';
 import { User, UserStatus } from './entities/user.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
@@ -12,6 +12,22 @@ import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 // It would only be exhausted by this many sign-ups racing the exact same base
 // slug in the same instant.
 const MAX_SLUG_ATTEMPTS = 5;
+
+/**
+ * The community-guidelines revision a member agrees to when they finish
+ * onboarding, used when the client does not send an explicit version. Bump this
+ * whenever the guidelines change materially so the stamped `guidelinesVersion`
+ * reflects what was actually agreed to. Kept ≤ 32 chars (the column length).
+ */
+export const CURRENT_GUIDELINES_VERSION = '1.0';
+
+/** The outcome of `markOnboarded` — the effective onboarding + guidelines
+ *  agreement stamps for the member. */
+export interface OnboardingResult {
+  onboardedAt: Date;
+  guidelinesAcceptedAt: Date;
+  guidelinesVersion: string;
+}
 
 export interface CreateGoogleUserInput {
   googleId: string;
@@ -59,6 +75,73 @@ export class UsersService {
       where: { id },
       relations: { profile: true },
     });
+  }
+
+  // Batch variant of `findByIdWithProfile` for list views that need several
+  // users at once (e.g. the "who accepted" column on a member's sent-invites
+  // list). ONE query with `IN (...)`, avoiding an N+1 per row. Order is not
+  // guaranteed, so callers should index the result by id. An empty input
+  // short-circuits without hitting the DB.
+  findByIdsWithProfile(ids: string[]): Promise<User[]> {
+    if (ids.length === 0) {
+      return Promise.resolve([]);
+    }
+    return this.usersRepo.find({
+      where: { id: In(ids) },
+      relations: { profile: true },
+    });
+  }
+
+  /**
+   * Stamp the member as having finished the post-signup onboarding wizard, and
+   * record their agreement to the community guidelines (the checkbox on the
+   * welcome step) in the same act. Idempotent and monotonic: the FIRST
+   * completion wins and is never overwritten, so a member who replays the wizard
+   * (or whose second finish races the first) keeps their original stamps.
+   * Returns the effective onboarding + guidelines stamps. The caller is always
+   * the authenticated member (JwtStrategy has already confirmed the row exists),
+   * so a missing row is treated as a no-op stamp rather than an error.
+   *
+   * The guidelines version is taken from the client when it sends one (the
+   * revision it actually showed the member), otherwise it falls back to the
+   * server-side `CURRENT_GUIDELINES_VERSION`.
+   */
+  async markOnboarded(
+    id: string,
+    opts: { guidelinesVersion?: string | null } = {},
+  ): Promise<OnboardingResult> {
+    const existing = await this.usersRepo.findOne({
+      where: { id },
+      select: {
+        id: true,
+        onboardedAt: true,
+        guidelinesAcceptedAt: true,
+        guidelinesVersion: true,
+      },
+    });
+    if (existing?.onboardedAt) {
+      // Already onboarded — return the stamps on record. `guidelinesAcceptedAt`
+      // may be NULL for a member onboarded before this consent was captured
+      // (never backfilled); fall back to `onboardedAt`/the current version so
+      // the caller always gets a concrete answer.
+      return {
+        onboardedAt: existing.onboardedAt,
+        guidelinesAcceptedAt:
+          existing.guidelinesAcceptedAt ?? existing.onboardedAt,
+        guidelinesVersion:
+          existing.guidelinesVersion ?? CURRENT_GUIDELINES_VERSION,
+      };
+    }
+    const now = new Date();
+    const trimmedVersion = opts.guidelinesVersion?.trim();
+    const guidelinesVersion = trimmedVersion
+      ? trimmedVersion
+      : CURRENT_GUIDELINES_VERSION;
+    await this.usersRepo.update(
+      { id },
+      { onboardedAt: now, guidelinesAcceptedAt: now, guidelinesVersion },
+    );
+    return { onboardedAt: now, guidelinesAcceptedAt: now, guidelinesVersion };
   }
 
   // Current community size — active members only (pending/suspended excluded).

@@ -62,7 +62,9 @@ export class CommunityPostsController {
   @ApiCreatedResponse({
     description: 'The like state and updated like count.',
   })
-  @ApiBadRequestResponse({ description: 'Malformed post id or invalid payload.' })
+  @ApiBadRequestResponse({
+    description: 'Malformed post id or invalid payload.',
+  })
   @ApiForbiddenResponse({
     description: "Not a member of the post's community.",
   })
@@ -78,7 +80,9 @@ export class CommunityPostsController {
   @Post(':id/replies')
   @ApiOperation({ summary: 'Reply to a post by id.' })
   @ApiCreatedResponse({ description: 'The created reply id (`{ id }`).' })
-  @ApiBadRequestResponse({ description: 'Malformed post id or invalid payload.' })
+  @ApiBadRequestResponse({
+    description: 'Malformed post id or invalid payload.',
+  })
   @ApiForbiddenResponse({
     description: "Not a member of the post's community.",
   })

@@ -43,7 +43,9 @@ export class AdminChangemakersController {
   @ApiOperation({
     summary: 'List all changemaker profiles (drafts included) for admins.',
   })
-  @ApiOkResponse({ description: 'Every changemaker profile, draft or published.' })
+  @ApiOkResponse({
+    description: 'Every changemaker profile, draft or published.',
+  })
   list() {
     return this.changemakers.listAdmin();
   }
@@ -76,7 +78,9 @@ export class AdminChangemakersController {
 
   @Patch(':id/publish')
   @ApiOperation({ summary: 'Publish or unpublish a changemaker profile.' })
-  @ApiOkResponse({ description: 'The changemaker profile with its new status.' })
+  @ApiOkResponse({
+    description: 'The changemaker profile with its new status.',
+  })
   @ApiNotFoundResponse({ description: 'No changemaker exists for this id.' })
   publish(@Param('id') id: string, @Body() body: PublishChangemakerDto) {
     return this.changemakers.setPublished(id, body.published);

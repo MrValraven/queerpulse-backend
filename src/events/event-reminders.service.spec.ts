@@ -11,23 +11,44 @@ import { EventRemindersService } from './event-reminders.service';
 describe('EventRemindersService', () => {
   let service: EventRemindersService;
   let events: { find: jest.Mock; update: jest.Mock };
-  let rsvps: { find: jest.Mock; update: jest.Mock };
+  let rsvps: { find: jest.Mock; createQueryBuilder: jest.Mock };
+  let claimQueryBuilder: {
+    update: jest.Mock;
+    set: jest.Mock;
+    where: jest.Mock;
+    andWhere: jest.Mock;
+    returning: jest.Mock;
+    execute: jest.Mock;
+  };
   let preferences: { find: jest.Mock };
   let notifications: { createForRecipients: jest.Mock };
-  let push: { sendToUser: jest.Mock };
+  let push: { sendToUsers: jest.Mock };
 
   beforeEach(async () => {
     events = {
       find: jest.fn(),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
+    // The claim is now ONE batched `createQueryBuilder().update(...)` instead
+    // of one repository-level `.update()` per RSVP — see
+    // `EventRemindersService.remindForEvent`. `execute` defaults to claiming
+    // nobody; individual tests override its resolved value with the rows
+    // RETURNING would hand back.
+    claimQueryBuilder = {
+      update: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockReturnThis(),
+      execute: jest.fn().mockResolvedValue({ raw: [] }),
+    };
     rsvps = {
       find: jest.fn().mockResolvedValue([]),
-      update: jest.fn().mockResolvedValue({ affected: 1 }),
+      createQueryBuilder: jest.fn().mockReturnValue(claimQueryBuilder),
     };
     preferences = { find: jest.fn().mockResolvedValue([]) };
     notifications = { createForRecipients: jest.fn() };
-    push = { sendToUser: jest.fn().mockResolvedValue(undefined) };
+    push = { sendToUsers: jest.fn().mockResolvedValue(undefined) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         EventRemindersService,
@@ -44,7 +65,7 @@ describe('EventRemindersService', () => {
     service = module.get(EventRemindersService);
   });
 
-  it('claims each due RSVP before notifying (stamp-before-send)', async () => {
+  it('claims every due RSVP in one batched UPDATE before notifying (stamp-before-send)', async () => {
     const event = {
       id: 'e1',
       slug: 'x',
@@ -56,20 +77,61 @@ describe('EventRemindersService', () => {
       { id: 'r1', userId: 'a' },
       { id: 'r2', userId: 'b' },
     ]);
+    // RETURNING hands back exactly the rows this statement claimed.
+    claimQueryBuilder.execute.mockResolvedValue({
+      raw: [
+        { id: 'r1', user_id: 'a' },
+        { id: 'r2', user_id: 'b' },
+      ],
+    });
 
     await service.sendDueReminders();
 
-    // The conditional claim stamps reminderSentAt on each still-unsent RSVP row...
-    expect(rsvps.update).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'r1' }),
+    // ONE claim UPDATE for both due attendees, not one per attendee.
+    expect(rsvps.createQueryBuilder).toHaveBeenCalledTimes(1);
+    expect(claimQueryBuilder.set).toHaveBeenCalledWith(
       expect.objectContaining({ reminderSentAt: expect.any(Date) as unknown }),
     );
+    expect(claimQueryBuilder.where).toHaveBeenCalledWith(
+      'id IN (:...dueRsvpIds)',
+      { dueRsvpIds: ['r1', 'r2'] },
+    );
+    expect(claimQueryBuilder.andWhere).toHaveBeenCalledWith(
+      'reminder_sent_at IS NULL',
+    );
     // ...and only then does the fan-out happen (at-most-once ordering).
-    expect(rsvps.update.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(claimQueryBuilder.execute.mock.invocationCallOrder[0]).toBeLessThan(
       notifications.createForRecipients.mock.invocationCallOrder[0]!,
     );
     expect(notifications.createForRecipients).toHaveBeenCalledWith(
       ['a', 'b'],
+      NotificationType.EventReminder,
+      expect.objectContaining({ eventId: 'e1' }),
+    );
+  });
+
+  it('excludes a due RSVP that RETURNING reports as already claimed by another tick', async () => {
+    const event = {
+      id: 'e1',
+      slug: 'x',
+      startAt: new Date(),
+      reminderSentAt: null,
+    };
+    events.find.mockResolvedValue([event]);
+    rsvps.find.mockResolvedValue([
+      { id: 'r1', userId: 'a' },
+      { id: 'r2', userId: 'b' },
+    ]);
+    // Both were due, but an overlapping tick already claimed 'r2' — RETURNING
+    // only reports the row THIS statement actually flipped.
+    claimQueryBuilder.execute.mockResolvedValue({
+      raw: [{ id: 'r1', user_id: 'a' }],
+    });
+
+    await service.sendDueReminders();
+
+    expect(notifications.createForRecipients).toHaveBeenCalledWith(
+      ['a'],
       NotificationType.EventReminder,
       expect.objectContaining({ eventId: 'e1' }),
     );

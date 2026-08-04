@@ -6,6 +6,7 @@ import { BlockFilterService } from '../social/block-filter.service';
 import { Mute } from '../social/entities/mute.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { Notification, NotificationType } from './entities/notification.entity';
+import { NotificationPreferencesService } from './notification-preferences.service';
 import { NOTIFICATION_CREATED } from './notification.events';
 import { NotificationsService } from './notifications.service';
 
@@ -26,6 +27,10 @@ describe('NotificationsService', () => {
   };
   let profileRepo: { find: jest.Mock };
   let muteRepo: { find: jest.Mock };
+  let notificationPreferences: {
+    isInAppEnabled: jest.Mock;
+    recipientsInAppEnabled: jest.Mock;
+  };
 
   beforeEach(async () => {
     repo = {
@@ -44,6 +49,14 @@ describe('NotificationsService', () => {
       // Batched, either-way block lookup used by the fan-out path.
       blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
     };
+    // Default: every category is on (no stored override) — the single-create
+    // gate lets everything through, and the fan-out gate echoes its input back.
+    notificationPreferences = {
+      isInAppEnabled: jest.fn().mockResolvedValue(true),
+      recipientsInAppEnabled: jest
+        .fn()
+        .mockImplementation((userIds: string[]) => Promise.resolve(userIds)),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         NotificationsService,
@@ -52,6 +65,10 @@ describe('NotificationsService', () => {
         { provide: getRepositoryToken(Mute), useValue: muteRepo },
         { provide: EventEmitter2, useValue: { emit } },
         { provide: BlockFilterService, useValue: blockFilter },
+        {
+          provide: NotificationPreferencesService,
+          useValue: notificationPreferences,
+        },
       ],
     }).compile();
     service = module.get(NotificationsService);
@@ -226,6 +243,43 @@ describe('NotificationsService', () => {
     });
   });
 
+  // The member's own per-category switch, gated at the same write time as
+  // block/mute (so a suppressed row also suppresses its push).
+  describe('per-category preference suppression', () => {
+    it('writes nothing when the recipient disabled the category', async () => {
+      notificationPreferences.isInAppEnabled.mockResolvedValue(false);
+
+      const result = await service.create(
+        'u1',
+        NotificationType.EventInvite,
+        { inviterId: 'u2' },
+        'u2',
+      );
+
+      expect(result).toBeNull();
+      expect(repo.save).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
+    });
+
+    it('drops only the fan-out recipients who disabled the category', async () => {
+      notificationPreferences.recipientsInAppEnabled.mockResolvedValue(['u2']);
+      repo.save.mockResolvedValue([{ id: 'n2', userId: 'u2' }]);
+
+      await service.createForRecipients(
+        ['u1', 'u2'],
+        NotificationType.CommunityReply,
+        { actorId: 'sender-1' },
+        'sender-1',
+      );
+
+      expect(repo.create).toHaveBeenCalledTimes(1);
+      expect(repo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 'u2' }),
+      );
+      expect(emit).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('list filters to unread when requested', async () => {
     await service.list('u1', { unread: true });
     expect(repo.find).toHaveBeenCalledWith(
@@ -233,14 +287,18 @@ describe('NotificationsService', () => {
     );
   });
 
-  it('list reports a following page via the +1 probe row', async () => {
-    // 21 rows for a page size of 20 → there is more.
-    repo.find.mockResolvedValue(new Array(21).fill({ id: 'n' }));
+  it('returns the canonical offset envelope with an authoritative total', async () => {
+    // A full page of 20 rows, with the count reporting 21 in total → the client
+    // derives "there is a next page" from `page * pageSize < total`.
+    repo.find.mockResolvedValue(new Array(20).fill({ id: 'n' }));
+    repo.count.mockResolvedValue(21);
     const page = await service.list('u1', { page: 1 });
     expect(page.items).toHaveLength(20);
-    expect(page.hasMore).toBe(true);
+    expect(page.total).toBe(21);
+    expect(page.page).toBe(1);
+    expect(page.pageSize).toBe(20);
     expect(repo.find).toHaveBeenCalledWith(
-      expect.objectContaining({ skip: 0, take: 21 }),
+      expect.objectContaining({ skip: 0, take: 20 }),
     );
   });
 

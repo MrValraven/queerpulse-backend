@@ -8,5 +8,5 @@ export class ReactionDto {
     ReactionKey.Support,
     ReactionKey.Fire,
   ])
-  key: ReactionKey;
+  key!: ReactionKey;
 }

@@ -9,7 +9,7 @@ import {
 
 /** POST /landlords/:slug/recommendations — upserts my one recommendation. */
 export class CreateRecommendationDto {
-  @IsInt() @Min(1) @Max(5) stars: number;
+  @IsInt() @Min(1) @Max(5) stars!: number;
 
-  @IsString() @MinLength(10) @MaxLength(2000) text: string;
+  @IsString() @MinLength(10) @MaxLength(2000) text!: string;
 }

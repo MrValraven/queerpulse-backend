@@ -140,15 +140,41 @@ export class SocialService {
     return toBlockDTO(row, members.get(blockedId));
   }
 
+  /**
+   * Transactional inverse of {@link blockMember}: deletes the `blocks` row AND
+   * restores the connection edge this actor's block severed (P1-3 — P0 left
+   * this as a flagged residual, so `blockMember` severed the connection but
+   * `unblockMember` never lifted it, leaving the pair stuck at `Blocked`). The
+   * connection flip is conditional on `blockedBy = actorId`, exactly mirroring
+   * `ConnectionsService.respond('unblock')`: a `Blocked` row the OTHER party
+   * placed is left untouched (only they can lift it), and the pair is returned
+   * to `Declined` (not `Accepted` — re-connecting requires a fresh request),
+   * matching the connections-side unblock. A pair that never had a connection
+   * row (a block placed on a stranger) simply matches nothing here.
+   */
   async unblockMember(actorId: string, slug: string): Promise<void> {
     const blockedId = await this.resolveMutationTarget(actorId, slug);
-    const result = await this.blocks.delete({
-      blockerId: actorId,
-      blockedId,
+    const { low, high } = this.orderedPair(actorId, blockedId);
+
+    await this.dataSource.transaction(async (manager) => {
+      const result = await manager.delete(Block, {
+        blockerId: actorId,
+        blockedId,
+      });
+      if (!result.affected) {
+        throw new NotFoundException('Block not found');
+      }
+      await manager.update(
+        Connection,
+        {
+          userLow: low,
+          userHigh: high,
+          status: ConnectionStatus.Blocked,
+          blockedBy: actorId,
+        },
+        { status: ConnectionStatus.Declined, blockedBy: null },
+      );
     });
-    if (!result.affected) {
-      throw new NotFoundException('Block not found');
-    }
   }
 
   /**

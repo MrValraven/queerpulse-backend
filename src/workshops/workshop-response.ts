@@ -71,6 +71,25 @@ export interface WorkshopDTO {
   createdAt: string;
 }
 
+/**
+ * Lightweight row for the cross-entity global search (`SearchService`) — no
+ * host/rsvp hydration, just what the search-result card renders. Mapped to a
+ * `SearchResultDTO` by hand in `search/search-response.ts`.
+ */
+export interface WorkshopSearchRow {
+  slug: string;
+  title: string;
+  cat: string;
+}
+
+export function toWorkshopSearchRow(workshop: Workshop): WorkshopSearchRow {
+  return {
+    slug: workshop.slug,
+    title: workshop.title,
+    cat: workshop.cat,
+  };
+}
+
 export function toWorkshopDTO(
   workshop: Workshop,
   host: MemberRef | null,

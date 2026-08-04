@@ -42,6 +42,32 @@ const SPARKLINE_WINDOW_MS = SPARKLINE_WEEK_COUNT * WEEK_MS;
 /** Roster roles that count as moderation staff. Plain members are excluded. */
 const MODERATOR_ROLES = [RosterRole.Owner, RosterRole.Mod];
 
+/** Payload cap for `listCommunities`: `this.communities.find(...)` had no
+ *  `take` at all — an unbounded, full-platform scan on every admin dashboard
+ *  load (AUDIT-2026-07-30.md §I "admin-communities full-platform scan").
+ *  Well above current scale; matches the precedent at
+ *  `admin-trust-network.service.ts`'s `MAX_NODES`. The endpoint's response is
+ *  a flat `AdminCommunityCardDTO[]` with no pagination envelope the frontend
+ *  already reads, so — unlike `AdminTrustNetworkService`, whose DTO has room
+ *  for a `truncated` field — truncation here is only surfaced via the logger
+ *  warning below, not the response body, to avoid an API-contract change. */
+const MAX_LISTED_COMMUNITIES = 1000;
+
+/** Payload cap for `loadReportScope`'s platform-wide report scan (AUDIT item
+ *  #18). That query filtered only on `subjectType IN (...)` with no `take` — an
+ *  unbounded read of every post/reply/community report on the platform, run on
+ *  both admin endpoints (`getCommunity(slug)` pays it just to render one
+ *  community's queue). Sized well above `MAX_LISTED_COMMUNITIES` because reports
+ *  naturally outnumber communities and this set feeds the platform-wide
+ *  aggregate report counts, not a single page; ordered `created_at DESC` so the
+ *  cap keeps the newest reports. Like `MAX_LISTED_COMMUNITIES`, truncation is
+ *  surfaced only via the logger warning (the response is a flat DTO with no
+ *  envelope), and the new `IDX_reports_subject_type_created_at`
+ *  (`1785903000000-AddReportsSubjectTypeCreatedAtIndex`) lets Postgres serve the
+ *  `subject_type IN (...) ORDER BY created_at DESC LIMIT` as a bounded index
+ *  scan rather than sorting the whole table first. */
+const MAX_SCANNED_REPORTS = 2000;
+
 /** Subject types whose reports can ever be attributed to a community.
  *  `member`, `venue` and `message` reports have no community and are dropped
  *  by `summariseReportsByCommunity` anyway — excluding them here keeps the
@@ -149,9 +175,19 @@ export class AdminCommunitiesService {
   ) {}
 
   async listCommunities(): Promise<AdminCommunityCardDTO[]> {
+    // `take` bounds the scan to `MAX_LISTED_COMMUNITIES` — `IDX_communities_created_at`
+    // (`1785700200000-AddCommunitiesCreatedAtIndex`) lets Postgres serve this
+    // `ORDER BY created_at ASC LIMIT` as an `Index Scan ... Limit` that stops
+    // after the cap, rather than sorting the whole table first.
     const allCommunities = await this.communities.find({
       order: { createdAt: 'ASC' },
+      take: MAX_LISTED_COMMUNITIES,
     });
+    if (allCommunities.length === MAX_LISTED_COMMUNITIES) {
+      this.logger.warn(
+        `listCommunities truncated at ${MAX_LISTED_COMMUNITIES} communities — the admin dashboard is no longer showing every community on the platform.`,
+      );
+    }
     if (!allCommunities.length) return [];
 
     const now = new Date();
@@ -460,7 +496,13 @@ export class AdminCommunitiesService {
         subjectTypes: COMMUNITY_SCOPED_SUBJECT_TYPES,
       })
       .orderBy('report.createdAt', 'DESC')
+      .take(MAX_SCANNED_REPORTS)
       .getMany();
+    if (reports.length === MAX_SCANNED_REPORTS) {
+      this.logger.warn(
+        `loadReportScope truncated at ${MAX_SCANNED_REPORTS} reports — the admin community dashboard's report aggregates and queues are no longer counting every community-scoped report on the platform.`,
+      );
+    }
 
     // `community` reports carry a slug, resolved through `slugToCommunityId`;
     // only post and reply subjects need a content-id lookup. Non-UUID subject

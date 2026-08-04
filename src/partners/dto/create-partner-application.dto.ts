@@ -13,32 +13,32 @@ import { IsSafeExternalUrl } from '../../common/validators/is-safe-external-url.
 import { PartnerRegion } from '../entities/partner.entity';
 
 export class PartnerStatDto {
-  @IsString() @MinLength(1) @MaxLength(80) value: string;
-  @IsString() @MinLength(1) @MaxLength(80) label: string;
+  @IsString() @MinLength(1) @MaxLength(80) value!: string;
+  @IsString() @MinLength(1) @MaxLength(80) label!: string;
 }
 
 export class PartnerSectionDto {
-  @IsString() @MinLength(1) @MaxLength(200) heading: string;
-  @IsString() @MinLength(1) @MaxLength(5000) body: string;
+  @IsString() @MinLength(1) @MaxLength(200) heading!: string;
+  @IsString() @MinLength(1) @MaxLength(5000) body!: string;
 }
 
 export class PartnerJointWorkDto {
-  @IsString() @MinLength(1) @MaxLength(80) kicker: string;
-  @IsString() @MinLength(1) @MaxLength(200) title: string;
-  @IsString() @MinLength(1) @MaxLength(2000) dek: string;
-  @IsString() @MinLength(1) @MaxLength(200) footLeft: string;
-  @IsString() @MinLength(1) @MaxLength(200) footRight: string;
+  @IsString() @MinLength(1) @MaxLength(80) kicker!: string;
+  @IsString() @MinLength(1) @MaxLength(200) title!: string;
+  @IsString() @MinLength(1) @MaxLength(2000) dek!: string;
+  @IsString() @MinLength(1) @MaxLength(200) footLeft!: string;
+  @IsString() @MinLength(1) @MaxLength(200) footRight!: string;
 }
 
 export class PartnerTimelineItemDto {
-  @IsString() @MinLength(1) @MaxLength(80) date: string;
-  @IsString() @MinLength(1) @MaxLength(200) title: string;
-  @IsString() @MinLength(1) @MaxLength(2000) body: string;
+  @IsString() @MinLength(1) @MaxLength(80) date!: string;
+  @IsString() @MinLength(1) @MaxLength(200) title!: string;
+  @IsString() @MinLength(1) @MaxLength(2000) body!: string;
 }
 
 export class PartnerAtGlanceDto {
-  @IsString() @MinLength(1) @MaxLength(80) label: string;
-  @IsString() @MinLength(1) @MaxLength(200) value: string;
+  @IsString() @MinLength(1) @MaxLength(80) label!: string;
+  @IsString() @MinLength(1) @MaxLength(200) value!: string;
 }
 
 export class PartnerContactDto {
@@ -54,12 +54,12 @@ export class PartnerContactDto {
 }
 
 export class CreatePartnerApplicationDto {
-  @IsString() @MinLength(1) @MaxLength(200) name: string;
-  @IsString() @MinLength(1) @MaxLength(500) logo: string;
-  @IsEnum(PartnerRegion) region: PartnerRegion;
-  @IsString() @MinLength(1) @MaxLength(80) regionLabel: string;
-  @IsString() @MinLength(1) @MaxLength(200) city: string;
-  @IsString() @MinLength(1) @MaxLength(10000) desc: string;
+  @IsString() @MinLength(1) @MaxLength(200) name!: string;
+  @IsString() @MinLength(1) @MaxLength(500) logo!: string;
+  @IsEnum(PartnerRegion) region!: PartnerRegion;
+  @IsString() @MinLength(1) @MaxLength(80) regionLabel!: string;
+  @IsString() @MinLength(1) @MaxLength(200) city!: string;
+  @IsString() @MinLength(1) @MaxLength(10000) desc!: string;
 
   @IsOptional()
   @IsArray()
@@ -68,10 +68,10 @@ export class CreatePartnerApplicationDto {
   @MaxLength(100, { each: true })
   tags?: string[];
 
-  @IsString() @MinLength(1) @MaxLength(80) tier: string;
-  @IsString() @MinLength(1) @MaxLength(80) since: string;
-  @IsString() @MinLength(1) @MaxLength(80) eyebrow: string;
-  @IsString() @MinLength(1) @MaxLength(200) tagline: string;
+  @IsString() @MinLength(1) @MaxLength(80) tier!: string;
+  @IsString() @MinLength(1) @MaxLength(80) since!: string;
+  @IsString() @MinLength(1) @MaxLength(80) eyebrow!: string;
+  @IsString() @MinLength(1) @MaxLength(200) tagline!: string;
 
   @IsOptional()
   @IsArray()

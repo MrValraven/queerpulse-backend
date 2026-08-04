@@ -13,20 +13,20 @@ export enum MessageReactionKey {
 @Unique('UQ_message_reactions', ['messageId', 'userId', 'key'])
 export class MessageReaction {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_message_reactions_message_id')
   @Column({ type: 'uuid' })
-  messageId: string;
+  messageId!: string;
 
   @Index('IDX_message_reactions_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({
     type: 'enum',
     enum: MessageReactionKey,
     enumName: 'message_reactions_key_enum',
   })
-  key: MessageReactionKey;
+  key!: MessageReactionKey;
 }

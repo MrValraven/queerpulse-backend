@@ -23,21 +23,21 @@ export interface JobApplicationAnswer {
 @Unique('UQ_job_applications', ['jobId', 'applicantId'])
 export class JobApplication {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_job_applications_job_id')
   @Column({ type: 'uuid' })
-  jobId: string;
+  jobId!: string;
 
   @Index('IDX_job_applications_applicant_id')
   @Column({ type: 'uuid' })
-  applicantId: string;
+  applicantId!: string;
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  answers: JobApplicationAnswer[];
+  answers!: JobApplicationAnswer[];
 
   @Column({ type: 'text', nullable: true })
-  coverNote: string | null;
+  coverNote!: string | null;
 
   @Column({
     type: 'enum',
@@ -45,8 +45,8 @@ export class JobApplication {
     enumName: 'job_applications_status_enum',
     default: JobApplicationStatus.Submitted,
   })
-  status: JobApplicationStatus;
+  status!: JobApplicationStatus;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

@@ -18,6 +18,7 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { Public } from '../auth/decorators/public.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { CreateJoinRequestDto } from './dto/create-join-request.dto';
@@ -81,7 +82,7 @@ export class JoinRequestsController {
   }
 
   @Get()
-  @UseGuards(RolesGuard)
+  @UseGuards(ActiveMemberGuard, RolesGuard)
   @Roles(UserRole.Moderator, UserRole.Admin)
   @ApiOperation({ summary: 'List invite requests for the review queue' })
   @ApiOkResponse({ description: 'The invite request queue.' })
@@ -94,7 +95,7 @@ export class JoinRequestsController {
   }
 
   @Patch(':id')
-  @UseGuards(RolesGuard)
+  @UseGuards(ActiveMemberGuard, RolesGuard)
   @Roles(UserRole.Moderator, UserRole.Admin)
   @ApiOperation({ summary: 'Approve or decline an invite request' })
   @ApiOkResponse({ description: 'The updated invite request.' })

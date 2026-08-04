@@ -22,10 +22,10 @@ export enum ConversationKind {
 @Entity('conversations')
 export class Conversation {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Column({ type: 'boolean', default: false })
-  isOfficial: boolean;
+  isOfficial!: boolean;
 
   /**
    * `direct` (1:1 DM / official thread) or `group` (member-created, titled,
@@ -37,15 +37,15 @@ export class Conversation {
     enumName: 'conversations_kind_enum',
     default: ConversationKind.Direct,
   })
-  kind: ConversationKind;
+  kind!: ConversationKind;
 
   /** Group name. NULL for DMs (their name is the counterpart's profile). */
   @Column({ type: 'varchar', nullable: true })
-  title: string | null;
+  title!: string | null;
 
   /** Group avatar (storage key/URL). NULL for DMs (counterpart's avatar). */
   @Column({ type: 'varchar', nullable: true })
-  avatarUrl: string | null;
+  avatarUrl!: string | null;
 
   /**
    * The member who created a group (also seeded as its `owner` participant).
@@ -53,15 +53,15 @@ export class Conversation {
    * (FK is `ON DELETE SET NULL`).
    */
   @Column({ type: 'uuid', nullable: true })
-  createdBy: string | null;
+  createdBy!: string | null;
 
   // Canonical sorted "userA:userB" key for 1:1 conversations — a UNIQUE guard
   // against duplicate threads under concurrent materialization. NULL for
   // official/group threads (Postgres treats NULLs as distinct in a UNIQUE index).
   @Index('UQ_conversations_pair_key', { unique: true })
   @Column({ type: 'varchar', nullable: true })
-  pairKey: string | null;
+  pairKey!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

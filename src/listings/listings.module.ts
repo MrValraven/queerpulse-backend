@@ -5,12 +5,16 @@ import { Event } from '../events/entities/event.entity';
 import { MessagingModule } from '../messaging/messaging.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { SavedItem } from '../saved/entities/saved-item.entity';
+import { StorageModule } from '../storage/storage.module';
 import { UsersModule } from '../users/users.module';
 import { DirectoryController } from './directory.controller';
 import { DirectoryService } from './directory.service';
 import { ListingEditSuggestion } from './entities/listing-edit-suggestion.entity';
+import { ListingModerationEvent } from './entities/listing-moderation-event.entity';
+import { ListingQuestion } from './entities/listing-question.entity';
 import { ListingReview } from './entities/listing-review.entity';
 import { Listing } from './entities/listing.entity';
+import { ReportsModule } from '../reports/reports.module';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
 import { ListingsController } from './listings.controller';
 import { ListingsService } from './listings.service';
@@ -26,6 +30,10 @@ import { ListingsService } from './listings.service';
       Listing,
       ListingReview,
       ListingEditSuggestion,
+      // Moderation audit trail (#16) + Q&A thread (#17) — the admin
+      // console overhaul's `ListingModerationEvent`/`ListingQuestion`.
+      ListingModerationEvent,
+      ListingQuestion,
       Event,
       SavedItem,
     ]),
@@ -39,6 +47,14 @@ import { ListingsService } from './listings.service';
     // `NotificationsService` — listing approved (submitter, in `ListingsService`)
     // and a new review (owner, in `DirectoryService`).
     NotificationsModule,
+    // `StorageService` — delete a listing's photo objects when they are replaced
+    // on edit or when the listing itself is removed, so superseded/orphaned
+    // gallery uploads stop living in the bucket forever.
+    StorageModule,
+    // `ReportsService` — a listing dispute/claim and the owner-notify task on
+    // creation are filed through the shared report+moderation pipeline (item
+    // #13). `ReportsModule` imports only `TypeOrmModule`, so no cycle.
+    ReportsModule,
   ],
   controllers: [ListingsController, DirectoryController],
   providers: [ListingsService, ListingEditSuggestionsService, DirectoryService],

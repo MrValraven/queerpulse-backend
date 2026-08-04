@@ -19,11 +19,11 @@ export class CreateJoinRequestDto {
   @IsString()
   @MinLength(1)
   @MaxLength(120)
-  name: string;
+  name!: string;
 
   @IsEmail()
   @MaxLength(254)
-  email: string;
+  email!: string;
 
   @IsOptional()
   @IsString()
@@ -33,7 +33,7 @@ export class CreateJoinRequestDto {
   @IsString()
   @MinLength(1)
   @MaxLength(1000)
-  message: string;
+  message!: string;
 
   /**
    * 18+ self-attestation (Terms §eligibility). Must be literally `true` — an
@@ -42,12 +42,12 @@ export class CreateJoinRequestDto {
    */
   @IsBoolean()
   @Equals(true)
-  ageAttested: true;
+  ageAttested!: true;
 
   @IsString()
   @MinLength(1)
   @MaxLength(32)
-  termsVersion: string;
+  termsVersion!: string;
 
   /**
    * Optional date of birth (`YYYY-MM-DD`). When supplied it is checked against

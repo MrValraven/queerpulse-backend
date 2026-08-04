@@ -124,7 +124,9 @@ describe('toDirectoryDetail', () => {
       vibe: 'https://cdn.example.com/vibe.jpg',
     };
     listing.alt = { wide: 'Main room', d1: 'The bar', d2: '', vibe: 'Crowd' };
-    listing.hours = { Fri: { open: true, from: '18:00', to: '02:00' } };
+    listing.hours = {
+      Fri: { open: true, intervals: [{ from: '18:00', to: '02:00' }] },
+    };
     listing.langs = ['pt', 'en'];
 
     const detail = toDirectoryDetail(listing, [], [], 0);

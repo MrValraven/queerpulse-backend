@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
@@ -12,11 +13,13 @@ import { handleFormatError, normalizeHandle } from '../common/handles';
 import { toImageUrl } from '../common/image-url';
 import { ConnectionsService } from '../connections/connections.service';
 import { ConnectionStatus } from '../connections/entities/connection.entity';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { escapeLikeTerm } from '../common/like-escape';
 import { HandlesService } from '../handles/handles.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { StorageService } from '../storage/storage.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
-import { UserStatus } from '../users/entities/user.entity';
+import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { VouchService } from '../vouch/vouch.service';
 import {
   AccessTier,
@@ -79,6 +82,17 @@ function csv(raw: string | undefined): string[] {
 
 @Injectable()
 export class ProfilesService {
+  private readonly logger = new Logger(ProfilesService.name);
+
+  // A member is reported (and taken down) under the `member` subject type,
+  // keyed by EITHER the member's slug OR their raw userId (see
+  // `Report.subjectId`'s doc) — the read gate below checks both.
+  private static readonly MEMBER_SUBJECT_TYPE = 'member';
+
+  private static isStaffRole(role: string | undefined): boolean {
+    return role === UserRole.Admin || role === UserRole.Moderator;
+  }
+
   constructor(
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     @InjectRepository(SocialLink)
@@ -105,6 +119,8 @@ export class ProfilesService {
     private readonly connectionsService: ConnectionsService,
     private readonly blockFilter: BlockFilterService,
     private readonly handles: HandlesService,
+    private readonly storage: StorageService,
+    private readonly contentModeration: ContentModerationService,
   ) {}
 
   /**
@@ -124,16 +140,38 @@ export class ProfilesService {
     if (!profile) {
       throw new NotFoundException('Profile not found');
     }
+    // The viewer IS the owner here, so the moderation gate short-circuits on the
+    // owner arm regardless of role — the passed role never matters for `getMine`.
     return this.getBySlug(profile.slug, userId);
   }
 
   async getBySlug(
     slug: string,
     viewerUserId: string,
+    viewerRole?: string,
   ): Promise<FullProfileResponse | LimitedProfileResponse> {
     const profile = await this.profiles.findOne({ where: { slug } });
     if (!profile) {
       throw new NotFoundException('Profile not found');
+    }
+    // Block-gate the lookup (P1-3): never surface a member's profile to someone
+    // they've blocked, or who has blocked them — the same 404 subprofiles and
+    // flatmate profiles already return, so a block is indistinguishable from a
+    // non-existent slug. `isBlockedEitherWay` short-circuits to false for the
+    // viewer's own profile (equal ids), so `getMine` is unaffected.
+    if (
+      await this.blockFilter.isBlockedEitherWay(viewerUserId, profile.userId)
+    ) {
+      throw new NotFoundException('Profile not found');
+    }
+    // Moderator takedown gate. A `hide_content`/`remove_content` on this member
+    // 404s the profile for everyone but the member themselves and platform
+    // staff (admin/moderator) — the same don't-leak-existence posture as a
+    // block above and `CommunitiesService.getBySlug`. The member subject is
+    // addressed by slug OR userId, so both are checked.
+    const isOwner = profile.userId === viewerUserId;
+    if (!isOwner && !ProfilesService.isStaffRole(viewerRole)) {
+      await this.assertNotTakenDown(profile.slug, profile.userId);
     }
     const vouchCount = await this.vouchService.getVouchCount(profile.userId);
     if (!(await this.canViewFull(profile, viewerUserId))) {
@@ -333,6 +371,31 @@ export class ProfilesService {
     return false; // private → limited card to everyone but the owner
   }
 
+  /**
+   * 404s the profile when a moderator has hidden or removed this member. The
+   * member subject can be keyed by either the slug or the userId in a report
+   * (`Report.subjectId`), so both are checked and the strongest state wins —
+   * either a hide or a removal takes the profile down for a non-staff,
+   * non-owner viewer (callers gate the owner/staff bypass before calling).
+   */
+  private async assertNotTakenDown(
+    slug: string,
+    userId: string,
+  ): Promise<void> {
+    const subjectIds = [slug, userId];
+    const states = await this.contentModeration.statesForAnyType(
+      [ProfilesService.MEMBER_SUBJECT_TYPE],
+      subjectIds,
+    );
+    const takenDown = subjectIds.some((subjectId) => {
+      const state = states.get(subjectId);
+      return !!state && (state.hidden || state.removed);
+    });
+    if (takenDown) {
+      throw new NotFoundException('Profile not found');
+    }
+  }
+
   async updateMe(
     userId: string,
     dto: UpdateProfileDto,
@@ -346,6 +409,9 @@ export class ProfilesService {
     // `{ openTo: [] }` clears the chips, so neither empty value may be treated
     // as "field omitted". `openTo` is a full replace, not a merge.
     const { now, openTo, featuredCommunities, ...rest } = dto;
+    // Snapshot the avatar the profile pointed at BEFORE `Object.assign` overwrites
+    // it, so a replaced/cleared upload can be deleted from the bucket afterwards.
+    const previousAvatarUrl = profile.avatarUrl;
     // Resolve + validate the featured-community pins BEFORE any write, so an
     // ineligible slug rejects the WHOLE patch (400) rather than half-applying
     // it — the profile fields and the pins move together. `undefined` = the
@@ -380,6 +446,22 @@ export class ProfilesService {
     await this.profiles.save(profile);
     if (featuredCommunityIds !== undefined) {
       await this.writeFeaturedCommunities(userId, featuredCommunityIds);
+    }
+    // Delete-on-replace: once the new avatar has committed, the object the old
+    // `avatarUrl` referenced is orphaned (avatar keys are per-upload unique).
+    // Only when it actually changed AND was one of our bucket objects — an
+    // external Google/Unsplash URL is never ours to delete. Best-effort +
+    // post-commit: a storage hiccup must never fail the profile update.
+    if (previousAvatarUrl && previousAvatarUrl !== profile.avatarUrl) {
+      try {
+        await this.storage.deleteObjectByReference(previousAvatarUrl);
+      } catch (error) {
+        this.logger.warn(
+          `Failed to delete replaced avatar object for member ${userId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
     }
     const vouchCount = await this.vouchService.getVouchCount(userId);
     return this.buildFullProfile(profile, vouchCount, true);

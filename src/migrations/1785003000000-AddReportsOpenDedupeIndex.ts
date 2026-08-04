@@ -33,9 +33,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * the table already holds duplicate OPEN reports for a (reporter, subject) —
  * de-duplicate those rows first if so.
  */
-export class AddReportsOpenDedupeIndex1785003000000
-  implements MigrationInterface
-{
+export class AddReportsOpenDedupeIndex1785003000000 implements MigrationInterface {
   name = 'AddReportsOpenDedupeIndex1785003000000';
 
   // Runs outside a transaction for `CREATE UNIQUE INDEX CONCURRENTLY`; requires

@@ -10,9 +10,9 @@ import {
 import { ShapingKind } from '../entities/shaping.entity';
 
 export class ShapingItemDto {
-  @IsEnum(ShapingKind) kind: ShapingKind;
-  @IsString() @MaxLength(200) title: string;
-  @IsString() @MaxLength(500) note: string;
+  @IsEnum(ShapingKind) kind!: ShapingKind;
+  @IsString() @MaxLength(200) title!: string;
+  @IsString() @MaxLength(500) note!: string;
 }
 
 export class ReplaceShapingsDto {
@@ -20,5 +20,5 @@ export class ReplaceShapingsDto {
   @ArrayMaxSize(4)
   @ValidateNested({ each: true })
   @Type(() => ShapingItemDto)
-  items: ShapingItemDto[];
+  items!: ShapingItemDto[];
 }

@@ -3,5 +3,5 @@ import { LandlordStatus } from '../entities/landlord.entity';
 
 export class UpdateLandlordStatusDto {
   @IsEnum(LandlordStatus)
-  status: LandlordStatus;
+  status!: LandlordStatus;
 }

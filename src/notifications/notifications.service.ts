@@ -6,6 +6,7 @@ import { BlockFilterService } from '../social/block-filter.service';
 import { Mute } from '../social/entities/mute.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { Notification, NotificationType } from './entities/notification.entity';
+import { NotificationPreferencesService } from './notification-preferences.service';
 import {
   NOTIFICATION_CREATED,
   NotificationCreatedEvent,
@@ -15,14 +16,7 @@ import {
   actorIdOf,
   toNotificationResponse,
 } from './notification-response';
-
-const PAGE_SIZE = 20;
-
-export interface NotificationsPage {
-  items: NotificationResponse[];
-  page: number;
-  hasMore: boolean;
-}
+import { PAGE_SIZE, Paginated, normalizePage } from '../common/pagination';
 
 @Injectable()
 export class NotificationsService {
@@ -35,6 +29,7 @@ export class NotificationsService {
     private readonly mutes: Repository<Mute>,
     private readonly eventEmitter: EventEmitter2,
     private readonly blockFilter: BlockFilterService,
+    private readonly notificationPreferences: NotificationPreferencesService,
   ) {}
 
   /**
@@ -70,6 +65,13 @@ export class NotificationsService {
     if (actorId && (await this.isHiddenFrom(userId, actorId))) {
       return null;
     }
+    // Per-type preference gate (after block/mute, which is a safety control the
+    // member can't override). A recipient who turned this category off gets no
+    // row — and so no live `notification:new` push, since that hangs off the
+    // write, exactly like the block gate above.
+    if (!(await this.notificationPreferences.isInAppEnabled(userId, type))) {
+      return null;
+    }
     const saved = await this.notifications.save(
       this.notifications.create({ userId, type, payload }),
     );
@@ -94,9 +96,14 @@ export class NotificationsService {
     payload: Record<string, unknown> = {},
     actorId?: string,
   ): Promise<string[]> {
-    const recipients = actorId
+    const visible = actorId
       ? await this.visibleRecipients(userIds, actorId)
       : userIds;
+    // Drop recipients who turned this category off (batched, one query). The
+    // block/mute filter above is a safety control; this is the member's own
+    // preference — both narrow the same fan-out before any row is written.
+    const recipients =
+      await this.notificationPreferences.recipientsInAppEnabled(visible, type);
     if (!recipients.length) {
       return [];
     }
@@ -114,18 +121,30 @@ export class NotificationsService {
   async list(
     userId: string,
     opts: { unread?: boolean; page?: number } = {},
-  ): Promise<NotificationsPage> {
-    const page = opts.page && opts.page > 0 ? opts.page : 1;
-    // Fetch one extra row to detect a following page without a second count.
-    const rows = await this.notifications.find({
-      where: { userId, ...(opts.unread ? { read: false } : {}) },
-      order: { createdAt: 'DESC' },
-      skip: (page - 1) * PAGE_SIZE,
-      take: PAGE_SIZE + 1,
-    });
-    const hasMore = rows.length > PAGE_SIZE;
-    const items = hasMore ? rows.slice(0, PAGE_SIZE) : rows;
-    return { items: await this.attachActors(items), page, hasMore };
+  ): Promise<Paginated<NotificationResponse>> {
+    const page = normalizePage(opts.page);
+    const where = { userId, ...(opts.unread ? { read: false } : {}) };
+    // Canonical offset envelope (`{items,total,page,pageSize}`, see
+    // `common/pagination.ts`) instead of the old bespoke `{items,page,hasMore}`:
+    // `total` is authoritative (the client derives "has a next page" from
+    // `page * pageSize < total`) and a `(createdAt DESC, id DESC)` tiebreaker
+    // keeps offset paging deterministic so no same-millisecond row is silently
+    // skipped or repeated between pages. The count runs alongside the page read.
+    const [rows, total] = await Promise.all([
+      this.notifications.find({
+        where,
+        order: { createdAt: 'DESC', id: 'DESC' },
+        skip: (page - 1) * PAGE_SIZE,
+        take: PAGE_SIZE,
+      }),
+      this.notifications.count({ where }),
+    ]);
+    return {
+      items: await this.attachActors(rows),
+      total,
+      page,
+      pageSize: PAGE_SIZE,
+    };
   }
 
   /**

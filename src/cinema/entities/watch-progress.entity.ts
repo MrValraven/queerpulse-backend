@@ -15,31 +15,31 @@ import { CinemaTitle } from './cinema-title.entity';
 @Unique('UQ_cinema_watch_progress_user_title', ['userId', 'titleId'])
 export class WatchProgress {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Index('IDX_cinema_watch_progress_title_id')
   @Column({ type: 'uuid' })
-  titleId: string;
+  titleId!: string;
 
   @ManyToOne(() => User, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'user_id' })
-  user: User;
+  user!: User;
 
   @ManyToOne(() => CinemaTitle, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'title_id' })
-  title: CinemaTitle;
+  title!: CinemaTitle;
 
   @Column({ type: 'integer' })
-  positionSeconds: number;
+  positionSeconds!: number;
 
   // Set exactly once, when this user's first progress report crosses the
   // view threshold — the NULL guard makes view counting idempotent.
   @Column({ type: 'timestamptz', nullable: true })
-  viewCountedAt: Date | null;
+  viewCountedAt!: Date | null;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

@@ -29,11 +29,11 @@ export interface LandlordStat {
 @Entity('landlords')
 export class Landlord {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_landlords_slug', { unique: true })
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   @Index('IDX_landlords_status')
   @Column({
@@ -42,44 +42,44 @@ export class Landlord {
     enumName: 'landlords_status_enum',
     default: LandlordStatus.Review,
   })
-  status: LandlordStatus;
+  status!: LandlordStatus;
 
   // The member who suggested the entry (null for admin-created). Nullable +
   // ON DELETE SET NULL so erasing that member preserves the community entry.
   @Index('IDX_landlords_submitted_by_user_id')
   @Column({ type: 'uuid', nullable: true })
-  submittedByUserId: string | null;
+  submittedByUserId!: string | null;
 
   @Column({ type: 'varchar' })
-  name: string;
+  name!: string;
 
   @Column({ type: 'varchar', default: '' })
-  hood: string;
+  hood!: string;
 
   @Column({ type: 'varchar', default: '' })
-  photo: string;
+  photo!: string;
 
   @Column({ type: 'varchar', default: '' })
-  tagline: string;
+  tagline!: string;
 
   @Column({ type: 'varchar', default: '' })
-  note: string;
+  note!: string;
 
   @Column({ type: 'text', array: true, default: '{}' })
-  about: string[];
+  about!: string[];
 
   @Column({ type: 'text', array: true, default: '{}' })
-  areas: string[];
+  areas!: string[];
 
   @Column({ type: 'text', default: '' })
-  rentingNote: string;
+  rentingNote!: string;
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  stats: LandlordStat[];
+  stats!: LandlordStat[];
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

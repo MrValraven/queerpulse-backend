@@ -6,5 +6,5 @@ import { IsString, MaxLength, MinLength } from 'class-validator';
  * `forbidNonWhitelisted: true` (see `src/main.ts`) would otherwise reject the
  * frontend's actual payload. */
 export class FlatReplyDto {
-  @IsString() @MinLength(1) @MaxLength(2000) body: string;
+  @IsString() @MinLength(1) @MaxLength(2000) body!: string;
 }

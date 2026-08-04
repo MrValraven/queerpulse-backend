@@ -1,5 +1,7 @@
 import { NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { Response } from 'express';
+import { Repository } from 'typeorm';
+import { User } from '../users/entities/user.entity';
 import { FilesController } from './files.controller';
 import { StorageService } from './storage.service';
 
@@ -25,14 +27,22 @@ const OTHER_MEMBER = {
 describe('FilesController', () => {
   let controller: FilesController;
   let storage: { createPresignedDownload: jest.Mock };
+  let users: { findOne: jest.Mock };
   let response: { redirect: jest.Mock; setHeader: jest.Mock };
 
   beforeEach(() => {
     storage = {
       createPresignedDownload: jest.fn().mockResolvedValue(PRESIGNED_DOWNLOAD),
     };
+    // Default: the key owner is not a withheld (suspended) member, so serving
+    // proceeds. `null` stands in for "no matching owner row" — the gate only
+    // withholds on a resolved Suspended owner.
+    users = { findOne: jest.fn().mockResolvedValue(null) };
     response = { redirect: jest.fn(), setHeader: jest.fn() };
-    controller = new FilesController(storage as unknown as StorageService);
+    controller = new FilesController(
+      storage as unknown as StorageService,
+      users as unknown as Repository<User>,
+    );
   });
 
   // Express 5 / path-to-regexp 8 hand `@Param('key')` back as an ARRAY of

@@ -114,6 +114,11 @@ export interface SubprofilePublicView {
   affiliations: AffiliationView[];
   ownerSlug?: string; // linked only
   ownerName?: string; // linked only
+  // Is the current viewer a co-owner (creator or invited member) of THIS
+  // persona? Lets the frontend show the "edit" affordance on a co-owner's
+  // nested persona even when viewing a co-owner's profile, without an N+1
+  // members fetch per card.
+  viewerIsMember: boolean;
 }
 
 // Directory / list card.
@@ -225,6 +230,7 @@ export function toPublicDTO(
   viewerFollowing = false,
   affiliations: AffiliationView[] = [],
   collaboratorsByHandle: Map<string, CollaboratorView> = new Map(),
+  viewerIsMember = false,
 ): SubprofilePublicView {
   const view: SubprofilePublicView = {
     id: subprofile.id,
@@ -258,6 +264,7 @@ export function toPublicDTO(
     followerCount,
     viewerFollowing,
     affiliations,
+    viewerIsMember,
   };
   // Owner identity is exposed ONLY for linked personas — never leak the tie for
   // an unlinked (pseudonymous) persona (design spec §4).
@@ -266,6 +273,30 @@ export function toPublicDTO(
     view.ownerName = owner.name;
   }
   return view;
+}
+
+/**
+ * Lightweight row for the cross-entity global search (`SearchService`) — only
+ * standalone (unlinked) personas ever reach it, so the public `handle` is the
+ * identifier and no owner tie is exposed. Mapped to a `SearchResultDTO` by
+ * hand in `search/search-response.ts`.
+ */
+export interface SubprofileSearchRow {
+  handle: string;
+  displayName: string;
+  tagline: string | null;
+  kind: SubprofileKind;
+}
+
+export function toSubprofileSearchRow(
+  subprofile: Subprofile,
+): SubprofileSearchRow {
+  return {
+    handle: subprofile.handle ?? '',
+    displayName: subprofile.displayName,
+    tagline: subprofile.tagline,
+    kind: subprofile.kind,
+  };
 }
 
 export function toCardDTO(

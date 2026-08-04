@@ -8,11 +8,11 @@ import { SavedKind } from '../entities/saved-item.entity';
  */
 export class SavedItemBodyDto {
   @IsEnum(SavedKind)
-  kind: SavedKind;
+  kind!: SavedKind;
 
   @IsString()
   @IsNotEmpty()
-  title: string;
+  title!: string;
 
   @IsOptional()
   @IsString()

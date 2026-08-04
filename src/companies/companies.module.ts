@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CompanyOpenRolesModule } from '../jobs/company-open-roles.module';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersModule } from '../users/users.module';
 import { CompaniesController } from './companies.controller';
@@ -24,6 +25,10 @@ import { Company } from './entities/company.entity';
     // `forwardRef(() => JobsModule)` cycle is gone. (`JobsModule` still imports
     // `CompaniesModule`, but that edge no longer loops back here.)
     CompanyOpenRolesModule,
+    // Read-only: lets public company reads (`list`/`getBySlug`/`listReviews`)
+    // withhold a moderator-taken-down company, mirroring the directory's
+    // takedown read-enforcement.
+    ContentModerationModule,
   ],
   controllers: [CompaniesController],
   providers: [CompaniesService],

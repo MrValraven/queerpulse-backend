@@ -21,7 +21,7 @@ import { REASON_CODES, ReasonCode } from '../reason-catalogue';
 // `whitelist` doesn't reject either shape.
 export class ReportEvidenceDto {
   @IsIn(['url', 'screenshot'])
-  type: 'url' | 'screenshot';
+  type!: 'url' | 'screenshot';
 
   @ValidateIf((o: ReportEvidenceDto) => o.type === 'url')
   @IsString()
@@ -39,17 +39,17 @@ export class ReportEvidenceDto {
 // `.superpowers/sdd/connect-FINAL-review.md` C2/I5).
 export class CreateReportDto {
   @IsIn(Object.values(ReportSubjectType))
-  subjectType: ReportSubjectType;
+  subjectType!: ReportSubjectType;
 
   // slug/uuid for member/community, content id for post/reply/message, safe-
   // space id for venue.
   @IsString()
   @MinLength(1)
   @MaxLength(200)
-  subjectId: string;
+  subjectId!: string;
 
   @IsIn(REASON_CODES)
-  reasonCode: ReasonCode;
+  reasonCode!: ReasonCode;
 
   @IsOptional()
   @IsString()

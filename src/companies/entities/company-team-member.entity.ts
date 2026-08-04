@@ -11,16 +11,16 @@ import {
 @Unique('UQ_company_team_members', ['companyId', 'userId'])
 export class CompanyTeamMember {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_company_team_members_company_id')
   @Column({ type: 'uuid' })
-  companyId: string;
+  companyId!: string;
 
   @Index('IDX_company_team_members_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

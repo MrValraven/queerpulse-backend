@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Handle } from './entities/handle.entity';
+import { HandleHistory } from './entities/handle-history.entity';
 import { HandlesController } from './handles.controller';
 import { HandlesService } from './handles.service';
 
@@ -11,7 +12,7 @@ import { HandlesService } from './handles.service';
  * the same namespace (Task C2).
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([Handle])],
+  imports: [TypeOrmModule.forFeature([Handle, HandleHistory])],
   controllers: [HandlesController],
   providers: [HandlesService],
   exports: [HandlesService],

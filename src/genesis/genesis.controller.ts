@@ -61,9 +61,13 @@ export class GenesisController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(ActiveMemberGuard)
   @ApiCookieAuth('access_token')
-  @ApiOperation({ summary: 'Promote the genesis account to admin (self-closing)' })
+  @ApiOperation({
+    summary: 'Promote the genesis account to admin (self-closing)',
+  })
   @ApiNoContentResponse({ description: 'Caller promoted to admin.' })
-  @ApiUnauthorizedResponse({ description: 'Not authenticated as an active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not authenticated as an active member.',
+  })
   @ApiForbiddenResponse({
     description: 'Not the genesis account, or genesis is already closed.',
   })

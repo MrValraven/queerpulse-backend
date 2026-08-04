@@ -16,6 +16,12 @@ export enum SearchResultType {
   Event = 'event',
   Forum = 'forum',
   Business = 'business',
+  Magazine = 'magazine',
+  Job = 'job',
+  Housing = 'housing',
+  Resource = 'resource',
+  Workshop = 'workshop',
+  Subprofile = 'subprofile',
 }
 
 export class SearchQuery {

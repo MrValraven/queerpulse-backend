@@ -17,32 +17,32 @@ import { FaceDto } from './face.dto';
 export class CreateCoopDto {
   @IsString()
   @Matches(/^[a-z0-9-]+$/)
-  slug: string;
+  slug!: string;
 
   @IsString()
-  name: string;
+  name!: string;
 
   @IsOptional()
   @IsString()
   nameEm?: string;
 
   @IsString()
-  city: string;
+  city!: string;
 
   @IsString()
-  area: string;
+  area!: string;
 
   @IsInt()
   @Min(0)
-  householdCount: number;
+  householdCount!: number;
 
   @IsEnum(HousingPhase)
-  phase: HousingPhase;
+  phase!: HousingPhase;
 
   @IsInt()
   @Min(0)
   @Max(100)
-  progress: number;
+  progress!: number;
 
   @IsOptional()
   @IsBoolean()
@@ -57,7 +57,7 @@ export class CreateCoopDto {
   formingSince?: string;
 
   @IsString()
-  description: string;
+  description!: string;
 
   @IsOptional()
   @IsInt()
@@ -74,7 +74,7 @@ export class CreateCoopDto {
   sharesAreTarget?: boolean;
 
   @IsEnum(CoopCtaKind)
-  ctaKind: CoopCtaKind;
+  ctaKind!: CoopCtaKind;
 
   @IsOptional()
   @IsArray()

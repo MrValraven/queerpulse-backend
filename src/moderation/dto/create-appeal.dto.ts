@@ -1,4 +1,10 @@
-import { IsOptional, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
+import {
+  IsOptional,
+  IsString,
+  IsUUID,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 
 // `POST /appeals` body — a member contesting a moderation decision taken on
 // them (a warn, content removal, suspension, or ban).
@@ -26,5 +32,5 @@ export class CreateAppealDto {
   @IsString()
   @MinLength(20)
   @MaxLength(4000)
-  reason: string;
+  reason!: string;
 }

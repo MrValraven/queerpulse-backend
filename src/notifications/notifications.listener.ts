@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import {
   CONNECTION_ACCEPTED,
   CONNECTION_REQUESTED,
@@ -18,11 +20,16 @@ import {
   INVITE_ACCEPTED,
   InviteAcceptedEvent,
 } from '../membership/membership.events';
+import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
 import {
   SUBPROFILE_ENDORSED,
   SUBPROFILE_FOLLOWED,
+  SUBPROFILE_INVITE_ACCEPTED,
+  SUBPROFILE_INVITED,
   SubprofileEndorsedEvent,
   SubprofileFollowedEvent,
+  SubprofileInviteAcceptedEvent,
+  SubprofileInvitedEvent,
 } from '../subprofiles/subprofile.events';
 import { USER_PROMOTED, UserPromotedEvent } from '../users/user.events';
 import { VOUCH_CREATED, VouchCreatedEvent } from '../vouch/vouch.events';
@@ -31,7 +38,15 @@ import { NotificationsService } from './notifications.service';
 
 @Injectable()
 export class NotificationsListener {
-  constructor(private readonly notifications: NotificationsService) {}
+  constructor(
+    private readonly notifications: NotificationsService,
+    // Read-only — only used to resolve a persona's CURRENT co-owner roster on
+    // `subprofile.invite.accepted` (to fan the join notification out to
+    // everyone but the joiner). No write path here; the roster write itself
+    // lives entirely in `SubprofileInvitesService`.
+    @InjectRepository(SubprofileMember)
+    private readonly subprofileMembers: Repository<SubprofileMember>,
+  ) {}
 
   // Every `create`/`createForRecipients` call below passes the acting member as
   // the trailing `actorId` argument so `NotificationsService` can suppress the
@@ -158,6 +173,45 @@ export class NotificationsListener {
       NotificationType.PersonaFollowed,
       { subprofileId: e.subprofileId },
       e.followerId,
+    );
+  }
+
+  @OnEvent(SUBPROFILE_INVITED)
+  async onSubprofileInvited(e: SubprofileInvitedEvent): Promise<void> {
+    await this.notifications.create(
+      e.invitedUserId,
+      NotificationType.SubprofileInvite,
+      {
+        subprofileId: e.subprofileId,
+        displayName: e.displayName,
+        invitedByUserId: e.invitedByUserId,
+      },
+      e.invitedByUserId,
+    );
+  }
+
+  // Fans out to every CURRENT co-owner of the persona except the member who
+  // just joined — one batched roster query, one batched insert
+  // (`createForRecipients`), regardless of how many co-owners there are.
+  @OnEvent(SUBPROFILE_INVITE_ACCEPTED)
+  async onSubprofileInviteAccepted(
+    e: SubprofileInviteAcceptedEvent,
+  ): Promise<void> {
+    const members = await this.subprofileMembers.find({
+      where: { subprofileId: e.subprofileId },
+      select: { userId: true },
+    });
+    const recipientIds = members
+      .map((member) => member.userId)
+      .filter((userId) => userId !== e.joinedUserId);
+    if (!recipientIds.length) {
+      return;
+    }
+    await this.notifications.createForRecipients(
+      recipientIds,
+      NotificationType.SubprofileCoOwnerJoined,
+      { subprofileId: e.subprofileId, joinedUserId: e.joinedUserId },
+      e.joinedUserId,
     );
   }
 }

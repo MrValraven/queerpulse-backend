@@ -11,5 +11,5 @@ export class ReplyToReviewDto {
   @IsString()
   @IsNotEmpty()
   @MaxLength(2000)
-  text: string;
+  text!: string;
 }

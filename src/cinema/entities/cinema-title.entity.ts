@@ -26,23 +26,23 @@ export enum TitleStatus {
 @Entity('cinema_titles')
 export class CinemaTitle {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Column({
     type: 'enum',
     enum: TitleKind,
     enumName: 'cinema_titles_kind_enum',
   })
-  kind: TitleKind;
+  kind!: TitleKind;
 
   @Column({ type: 'varchar' })
-  title: string;
+  title!: string;
 
   @Column({ type: 'text', nullable: true })
-  description: string | null;
+  description!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  coverImageUrl: string | null;
+  coverImageUrl!: string | null;
 
   @Index('IDX_cinema_titles_status')
   @Column({
@@ -51,27 +51,27 @@ export class CinemaTitle {
     enumName: 'cinema_titles_status_enum',
     default: TitleStatus.Draft,
   })
-  status: TitleStatus;
+  status!: TitleStatus;
 
   @Column({ type: 'text', nullable: true })
-  errorMessage: string | null;
+  errorMessage!: string | null;
 
   @Index('UQ_cinema_titles_mux_upload_id', {
     unique: true,
     where: '"mux_upload_id" IS NOT NULL',
   })
   @Column({ type: 'varchar', nullable: true })
-  muxUploadId: string | null;
+  muxUploadId!: string | null;
 
   @Index('UQ_cinema_titles_mux_asset_id', {
     unique: true,
     where: '"mux_asset_id" IS NOT NULL',
   })
   @Column({ type: 'varchar', nullable: true })
-  muxAssetId: string | null;
+  muxAssetId!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  muxPlaybackId: string | null;
+  muxPlaybackId!: string | null;
 
   // In-flight replacement of a ready title: the new upload/asset live here
   // until video.asset.ready, then swap into the mux_* columns atomically.
@@ -80,14 +80,14 @@ export class CinemaTitle {
     where: '"pending_mux_upload_id" IS NOT NULL',
   })
   @Column({ type: 'varchar', nullable: true })
-  pendingMuxUploadId: string | null;
+  pendingMuxUploadId!: string | null;
 
   @Index('UQ_cinema_titles_pending_mux_asset_id', {
     unique: true,
     where: '"pending_mux_asset_id" IS NOT NULL',
   })
   @Column({ type: 'varchar', nullable: true })
-  pendingMuxAssetId: string | null;
+  pendingMuxAssetId!: string | null;
 
   // Stamped on every ingest state transition (upload minted, asset created,
   // asset ready/errored). Reconciliation cuts stale in-flight titles on THIS,
@@ -95,29 +95,29 @@ export class CinemaTitle {
   // hide a title that is genuinely stuck mid-ingest.
   @Index('IDX_cinema_titles_last_ingest_event_at')
   @Column({ type: 'timestamptz', nullable: true })
-  lastIngestEventAt: Date | null;
+  lastIngestEventAt!: Date | null;
 
   @Column({ type: 'integer', nullable: true })
-  durationSeconds: number | null;
+  durationSeconds!: number | null;
 
   @Column({ type: 'varchar', nullable: true })
-  aspectRatio: string | null;
+  aspectRatio!: string | null;
 
   @Index('IDX_cinema_titles_published_at')
   @Column({ type: 'timestamptz', nullable: true })
-  publishedAt: Date | null;
+  publishedAt!: Date | null;
 
   @Column({ type: 'integer', default: 0 })
-  viewCount: number;
+  viewCount!: number;
 
   @Index('IDX_cinema_titles_created_by')
   @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
   @JoinColumn({ name: 'created_by' })
-  createdBy: User | null;
+  createdBy!: User | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

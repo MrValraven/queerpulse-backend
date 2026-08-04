@@ -15,18 +15,18 @@ import {
 })
 export class EmailPreference {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_email_preference_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({ type: 'varchar' })
-  category: string;
+  category!: string;
 
   @Column({ type: 'boolean', default: true })
-  enabled: boolean;
+  enabled!: boolean;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

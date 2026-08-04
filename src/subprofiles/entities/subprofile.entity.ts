@@ -24,6 +24,9 @@ export enum SubprofileKind {
   Performer = 'performer',
   Photographer = 'photographer',
   Videomaker = 'videomaker',
+  Chef = 'chef',
+  Mixologist = 'mixologist',
+  Therapist = 'therapist',
   Generic = 'generic',
 }
 
@@ -50,26 +53,26 @@ export enum SubprofileStatus {
 @Index('UQ_subprofiles_user_slug', ['userId', 'slug'], { unique: true })
 export class Subprofile {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_subprofiles_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @ManyToOne(() => User, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'user_id' })
-  user: User;
+  user!: User;
 
   @Column({
     type: 'enum',
     enum: SubprofileKind,
     enumName: 'subprofiles_kind_enum',
   })
-  kind: SubprofileKind;
+  kind!: SubprofileKind;
 
   // Per-owner unique — the nested URL `/members/<main>/<slug>`.
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   // Globally unique when set; the `/p/<handle>` handle for unlinked+published.
   @Index('UQ_subprofiles_handle', {
@@ -77,34 +80,34 @@ export class Subprofile {
     where: '"handle" IS NOT NULL',
   })
   @Column({ type: 'varchar', nullable: true })
-  handle: string | null;
+  handle!: string | null;
 
   @Column({ type: 'varchar' })
-  displayName: string;
+  displayName!: string;
 
   @Column({ type: 'varchar', nullable: true })
-  avatarUrl: string | null;
+  avatarUrl!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  tagline: string | null;
+  tagline!: string | null;
 
   @Column({ type: 'text', nullable: true })
-  bio: string | null;
+  bio!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  coverUrl: string | null;
+  coverUrl!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  accent: string | null; // curated palette key
+  accent!: string | null; // curated palette key
 
   @Column({ type: 'varchar', nullable: true })
-  availability: string | null; // AVAILABILITY_KEYS
+  availability!: string | null; // AVAILABILITY_KEYS
 
   @Column({ type: 'varchar', nullable: true })
-  ctaLabel: string | null;
+  ctaLabel!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  ctaUrl: string | null;
+  ctaUrl!: string | null;
 
   @Column({
     type: 'enum',
@@ -112,7 +115,7 @@ export class Subprofile {
     enumName: 'subprofiles_link_visibility_enum',
     default: SubprofileLinkVisibility.Linked,
   })
-  linkVisibility: SubprofileLinkVisibility;
+  linkVisibility!: SubprofileLinkVisibility;
 
   @Column({
     type: 'enum',
@@ -120,7 +123,7 @@ export class Subprofile {
     enumName: 'subprofiles_visibility_enum',
     default: SubprofileVisibility.Open,
   })
-  visibility: SubprofileVisibility;
+  visibility!: SubprofileVisibility;
 
   @Column({
     type: 'enum',
@@ -128,15 +131,15 @@ export class Subprofile {
     enumName: 'subprofiles_status_enum',
     default: SubprofileStatus.Draft,
   })
-  status: SubprofileStatus;
+  status!: SubprofileStatus;
 
   // Ordering under the main profile.
   @Column({ type: 'int', default: 0 })
-  position: number;
+  position!: number;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

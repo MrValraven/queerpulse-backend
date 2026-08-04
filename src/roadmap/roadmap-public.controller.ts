@@ -1,4 +1,4 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Header } from '@nestjs/common';
 import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Public } from '../auth/decorators/public.decorator';
 import { Feature } from '../common/feature.decorator';
@@ -20,10 +20,17 @@ export class RoadmapPublicController {
   @ApiOperation({ summary: 'Get the public roadmap (unauthenticated)' })
   @ApiOkResponse({
     description:
-      'Hero stats plus shipped, building, planned, and top-idea entries.',
+      'Hero stats (label/value/note) plus shipped, building, planned, ' +
+      'backlog, top-idea, and not-building entries. Item cards carry a ' +
+      'public-safe `committed`/`latestSlip` (reason only). Only ' +
+      '`isPublic && !archived` items surface.',
   })
   @Public()
   @Get()
+  // Same caller-agnostic response for every anonymous visitor — see
+  // AUDIT-2026-07-30.md §I "No CDN cache headers on public GETs" /
+  // `caching-and-cost.md`.
+  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
   getPublic() {
     return this.roadmapService.getPublic();
   }

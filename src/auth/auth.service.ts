@@ -32,6 +32,18 @@ import {
 import { SignupRejectedError } from './errors/signup-rejected.error';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import {
+  Notification,
+  NotificationType,
+} from '../notifications/entities/notification.entity';
+
+/** The suspension detail `GET /auth/me` surfaces to a locked-out member. */
+export interface SuspensionInfo {
+  /** ISO expiry for a timed suspension; `null` while Suspended = permanent ban. */
+  suspendedUntil: string | null;
+  /** The moderator's reason, or `null` when none is on record. */
+  suspension: { note: string; reasonCode: string } | null;
+}
 
 export interface GoogleUserInput {
   googleId: string;
@@ -71,8 +83,54 @@ export class AuthService {
     private readonly deactivations: Repository<AccountDeactivation>,
     @InjectRepository(DeletionRequest)
     private readonly deletionRequests: Repository<DeletionRequest>,
+    // Read-side only (registered on AuthModule, not via NotificationsModule) —
+    // reads the member's latest moderation-outcome reason for `suspensionInfoFor`.
+    @InjectRepository(Notification)
+    private readonly notifications: Repository<Notification>,
     private readonly platformSettings: PlatformSettingsService,
   ) {}
+
+  /**
+   * The suspension detail surfaced on `GET /auth/me` so a locked-out member can
+   * see WHY on the account-suspended / account-banned page — they can't reach a
+   * gated endpoint, so the reason has to ride on `me`.
+   *
+   * The reason text comes from the member's latest `moderation_outcome`
+   * notification: the one store that already ties the moderator's note +
+   * reasonCode to this user (the mod audit log is keyed to the report, not the
+   * member). Returns nulls for a member who isn't suspended, and a null
+   * `suspension` when no such notification exists (a suspension predating that
+   * feature) — the page then falls back to its generic copy.
+   */
+  async suspensionInfoFor(user: User): Promise<SuspensionInfo> {
+    if (user.status !== UserStatus.Suspended) {
+      return { suspendedUntil: null, suspension: null };
+    }
+    const latest = await this.notifications.findOne({
+      where: { userId: user.id, type: NotificationType.ModerationOutcome },
+      order: { createdAt: 'DESC' },
+    });
+    const payload = (latest?.payload ?? {}) as {
+      note?: unknown;
+      reasonCode?: unknown;
+    };
+    const hasReason =
+      typeof payload.note === 'string' || typeof payload.reasonCode === 'string';
+    return {
+      // NULL while Suspended = a permanent ban; the frontend reads that to show
+      // the banned page rather than the timed-suspension one.
+      suspendedUntil: user.suspendedUntil
+        ? user.suspendedUntil.toISOString()
+        : null,
+      suspension: hasReason
+        ? {
+            note: typeof payload.note === 'string' ? payload.note : '',
+            reasonCode:
+              typeof payload.reasonCode === 'string' ? payload.reasonCode : '',
+          }
+        : null,
+    };
+  }
 
   // The suppression list is a plain lookup table with no service of its own,
   // and `AccountModule` already imports `AuthModule`'s entity the same way —

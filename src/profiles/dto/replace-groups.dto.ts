@@ -8,8 +8,8 @@ import {
 } from 'class-validator';
 
 export class GroupItemDto {
-  @IsString() @MaxLength(120) groupSlug: string;
-  @IsString() @MaxLength(80) role: string;
+  @IsString() @MaxLength(120) groupSlug!: string;
+  @IsString() @MaxLength(80) role!: string;
 }
 
 export class ReplaceGroupsDto {
@@ -17,5 +17,5 @@ export class ReplaceGroupsDto {
   @ArrayMaxSize(50)
   @ValidateNested({ each: true })
   @Type(() => GroupItemDto)
-  items: GroupItemDto[];
+  items!: GroupItemDto[];
 }

@@ -6,5 +6,5 @@ export class SubmitIdeaDto {
   @IsString()
   @MinLength(3)
   @MaxLength(280)
-  text: string;
+  text!: string;
 }

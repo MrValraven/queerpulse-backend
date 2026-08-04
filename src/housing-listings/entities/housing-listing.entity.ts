@@ -35,19 +35,19 @@ export enum HousingListingType {
 @Entity('housing_listings')
 export class HousingListing {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_housing_listings_ref', { unique: true })
   @Column({ type: 'varchar' })
-  ref: string;
+  ref!: string;
 
   @Index('UQ_housing_listings_slug', { unique: true })
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   @Index('IDX_housing_listings_owner_id')
   @Column({ type: 'uuid' })
-  ownerId: string;
+  ownerId!: string;
 
   @Index('IDX_housing_listings_status')
   @Column({
@@ -56,59 +56,59 @@ export class HousingListing {
     enumName: 'housing_listings_status_enum',
     default: HousingListingStatus.Review,
   })
-  status: HousingListingStatus;
+  status!: HousingListingStatus;
 
   @Column({
     type: 'enum',
     enum: HousingListingType,
     enumName: 'housing_listings_type_enum',
   })
-  type: HousingListingType;
+  type!: HousingListingType;
 
   @Column({ type: 'varchar', length: 200 })
-  title: string;
+  title!: string;
 
   @Column({ type: 'varchar', length: 200, default: '' })
-  blurb: string;
+  blurb!: string;
 
   @Column({ type: 'varchar', length: 120 })
-  city: string;
+  city!: string;
 
   @Column({ type: 'varchar', length: 120, default: '' })
-  area: string;
+  area!: string;
 
   @Column({ type: 'int' })
-  rentEuros: number;
+  rentEuros!: number;
 
   @Column({ type: 'boolean', default: false })
-  billsIncluded: boolean;
+  billsIncluded!: boolean;
 
   @Column({ type: 'boolean', default: false })
-  lgbtqFriendly: boolean;
+  lgbtqFriendly!: boolean;
 
   @Column({ type: 'date', nullable: true })
-  availableFrom: string | null;
+  availableFrom!: string | null;
 
   @Column({ type: 'int', nullable: true })
-  minStayMonths: number | null;
+  minStayMonths!: number | null;
 
   @Column({ type: 'text', default: '' })
-  description: string;
+  description!: string;
 
   @Column({ type: 'text', array: true, default: '{}' })
-  features: string[];
+  features!: string[];
 
   @Column({ type: 'text', array: true, default: '{}' })
-  idealFor: string[];
+  idealFor!: string[];
 
   // Storage keys or external https:// URLs (validated with @IsImageReference on
   // input); resolved to URLs at the response boundary via toImageUrl.
   @Column({ type: 'text', array: true, default: '{}' })
-  gallery: string[];
+  gallery!: string[];
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

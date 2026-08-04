@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   HttpCode,
   HttpStatus,
   Param,
@@ -41,7 +42,11 @@ import {
 export class OrgTiersController {
   constructor(private readonly orgTiersService: OrgTiersService) {}
 
+  // Same published-tiers response for every anonymous visitor — see
+  // AUDIT-2026-07-30.md §I "No CDN cache headers on public GETs" /
+  // `caching-and-cost.md`.
   @Get()
+  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
   @ApiOperation({ summary: 'List published organisation tiers' })
   @ApiOkResponse({ description: 'Published tiers in display order.' })
   list() {
@@ -71,7 +76,9 @@ export class AdminOrgTiersController {
   @ApiCreatedResponse({ description: 'The created tier.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({ description: 'Requires an admin role.' })
-  @ApiConflictResponse({ description: 'Could not allocate a unique tier slug.' })
+  @ApiConflictResponse({
+    description: 'Could not allocate a unique tier slug.',
+  })
   create(@Body() dto: CreateOrgTierDto) {
     return this.orgTiersService.create(dto);
   }

@@ -8,8 +8,8 @@ import {
 } from 'class-validator';
 
 export class SocialLinkDto {
-  @IsString() @MaxLength(50) platform: string;
-  @IsString() @MaxLength(300) urlOrHandle: string;
+  @IsString() @MaxLength(50) platform!: string;
+  @IsString() @MaxLength(300) urlOrHandle!: string;
 }
 
 export class ReplaceSocialsDto {
@@ -17,5 +17,5 @@ export class ReplaceSocialsDto {
   @ArrayMaxSize(50)
   @ValidateNested({ each: true })
   @Type(() => SocialLinkDto)
-  items: SocialLinkDto[];
+  items!: SocialLinkDto[];
 }

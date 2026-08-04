@@ -6,5 +6,5 @@ import { IsIn } from 'class-validator';
  */
 export class ResolveEditSuggestionDto {
   @IsIn(['accepted', 'dismissed'])
-  status: 'accepted' | 'dismissed';
+  status!: 'accepted' | 'dismissed';
 }

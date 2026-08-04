@@ -25,70 +25,70 @@ export type ChangemakerTint = 'coral' | 'jade' | 'plum';
 @Entity('changemaker')
 export class Changemaker {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_changemaker_slug', { unique: true })
   @Column({ type: 'varchar', length: 200 })
-  slug: string;
+  slug!: string;
 
   @Column({ type: 'varchar', length: 200 })
-  name: string;
+  name!: string;
 
   @Column({ type: 'varchar', length: 12 })
-  initials: string;
+  initials!: string;
 
   @Column({ type: 'varchar', length: 120 })
-  cause: string;
+  cause!: string;
 
   @Column({ type: 'varchar', length: 12, default: 'plum' })
-  tint: ChangemakerTint;
+  tint!: ChangemakerTint;
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  tags: string[];
+  tags!: string[];
 
   @Column({ type: 'text' })
-  summary: string;
+  summary!: string;
 
   @Column({ type: 'varchar', length: 500, nullable: true })
-  imageUrl: string | null;
+  imageUrl!: string | null;
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  impact: string[];
+  impact!: string[];
 
   @Column({ type: 'varchar', length: 200, default: '' })
-  byline: string;
+  byline!: string;
 
   @Column({ type: 'varchar', length: 300, default: '' })
-  heroNote: string;
+  heroNote!: string;
 
   @Column({ type: 'text', default: '' })
-  lead: string;
+  lead!: string;
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
-  body: string[];
+  body!: string[];
 
   @Column({ type: 'text', default: '' })
-  pullQuoteText: string;
+  pullQuoteText!: string;
 
   @Column({ type: 'varchar', length: 200, default: '' })
-  pullQuoteCite: string;
+  pullQuoteCite!: string;
 
   @Index('IDX_changemaker_status')
   @Column({ type: 'varchar', length: 20, default: ChangemakerStatus.Draft })
-  status: ChangemakerStatus;
+  status!: ChangemakerStatus;
 
   @Column({ type: 'boolean', default: false })
-  isFeatured: boolean;
+  isFeatured!: boolean;
 
   @Column({ type: 'int', default: 0 })
-  sortOrder: number;
+  sortOrder!: number;
 
   @Column({ type: 'timestamptz', nullable: true })
-  publishedAt: Date | null;
+  publishedAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

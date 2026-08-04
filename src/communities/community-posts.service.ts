@@ -1,16 +1,28 @@
 import {
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import {
   ContentModerationService,
   ContentModerationState,
 } from '../content-moderation/content-moderation.service';
+import {
+  COMMUNITY_POST_CREATED,
+  CommunityPostCreatedEvent,
+} from './community.events';
+import { StorageService } from '../storage/storage.service';
 import { MemberLookup } from '../common/member-ref';
-import { normalizePage, paginate, Paginated } from '../common/pagination';
+import {
+  PAGE_SIZE,
+  normalizePage,
+  paginate,
+  Paginated,
+} from '../common/pagination';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -19,6 +31,7 @@ import {
   CommunityPostHistoryResponse,
   CommunityReplyDTO,
   CommunityReplyHistoryResponse,
+  ReactionAggregate,
   toCommunityPost,
   toCommunityPostHistoryEntry,
   toCommunityReply,
@@ -78,7 +91,11 @@ export class CommunityPostsService {
     private readonly replyEdits: Repository<CommunityPostReplyEdit>,
     private readonly mentions: MentionNotificationService,
     private readonly contentModeration: ContentModerationService,
+    private readonly storage: StorageService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
+
+  private readonly logger = new Logger(CommunityPostsService.name);
 
   // A community post/reply can be taken down under either taxonomy code
   // (`post` / `reply`), keyed by the row's uuid — reads check both.
@@ -146,6 +163,19 @@ export class CommunityPostsService {
       postId: saved.id,
       excerpt: dto.body.slice(0, 140),
     });
+    // Record the post as public profile activity — but only for PUBLIC
+    // communities; the listener drops request/invite/private ones (the
+    // `accessTier` is carried so that gate happens off the platform's own
+    // visibility model, not a guess). Fire-and-forget: a listener failure must
+    // never affect posting.
+    this.eventEmitter.emit(COMMUNITY_POST_CREATED, {
+      authorId,
+      communitySlug: slug,
+      communityName: community.name,
+      accessTier: community.accessTier,
+      postId: saved.id,
+      excerpt: dto.body.slice(0, 80),
+    } satisfies CommunityPostCreatedEvent);
     return this.buildPostDTO(saved, authorId, membership.role);
   }
 
@@ -173,7 +203,14 @@ export class CommunityPostsService {
     // one transaction below — never as a separate write, or a failure would
     // record a "previous body" for an edit that never landed (phantom revision).
     let pendingEdit: CommunityPostEdit | null = null;
-    if (dto.body !== undefined || dto.kind !== undefined) {
+    // Captured only when the image is genuinely swapped/cleared, so the object
+    // the post USED to reference can be deleted after the write commits.
+    let replacedImage: string | null = null;
+    if (
+      dto.body !== undefined ||
+      dto.kind !== undefined ||
+      dto.image !== undefined
+    ) {
       if (post.deletedAt) {
         throw new NotFoundException('Post not found');
       }
@@ -190,6 +227,15 @@ export class CommunityPostsService {
         post.editedAt = new Date();
       }
       if (dto.kind !== undefined) post.kind = dto.kind;
+      if (dto.image !== undefined) {
+        // `''`/`null` both clear the image (matches the DTO doc). Only when the
+        // value truly changes do we mark the old object for deletion.
+        const nextImage = dto.image || null;
+        if (nextImage !== post.image) {
+          replacedImage = post.image;
+          post.image = nextImage;
+        }
+      }
     }
 
     const saved = await this.posts.manager.transaction(async (manager) => {
@@ -198,6 +244,20 @@ export class CommunityPostsService {
       }
       return manager.save(post);
     });
+    // Delete-on-replace, post-commit + best-effort: the superseded image object
+    // is orphaned once the new value has committed. A non-key value (external
+    // URL) no-ops; a storage failure must never fail the edit.
+    if (replacedImage) {
+      try {
+        await this.storage.deleteObjectByReference(replacedImage);
+      } catch (error) {
+        this.logger.warn(
+          `Failed to delete replaced image for post ${saved.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
     return this.buildPostDTO(saved, actorId, membership.role);
   }
 
@@ -479,6 +539,75 @@ export class CommunityPostsService {
     );
   }
 
+  // GET /communities/:slug/posts/:id/replies?page= — every reply beyond the
+  // bounded preview a post already embeds (`toPostDTOs`/`buildPostDTO` cap the
+  // preview at `PAGE_SIZE`, oldest-first). `page=1` here is deliberately the
+  // SAME window as that preview (same `PAGE_SIZE`, same `created_at ASC, id
+  // ASC` order), so a "load more" click just requests `page=2` onward — no
+  // separate cursor to keep in sync between the embedded preview and this
+  // endpoint. Offset pagination (not keyset) is the right fit: this is a
+  // single post's own reply thread, browsed forward-only and rarely deep —
+  // see `nestjs-and-queries.md`'s keyset-vs-offset guidance.
+  async listReplies(
+    slug: string,
+    postId: string,
+    viewerId: string,
+    page?: number,
+  ): Promise<Paginated<CommunityReplyDTO>> {
+    const community = await this.loadCommunityOr404(slug);
+    const post = await this.loadPostOr404(community.id, postId);
+    const viewerRole = await this.viewerRoleIn(community.id, viewerId);
+    const viewerIsStaff = CommunityPostsService.isStaffRole(viewerRole);
+    const normalizedPage = normalizePage(page);
+
+    const qb = this.replies
+      .createQueryBuilder('r')
+      .where('r.post_id = :postId', { postId: post.id })
+      .orderBy('r.created_at', 'ASC')
+      .addOrderBy('r.id', 'ASC');
+    // In-query (not post-query) so a page of `PAGE_SIZE` replies comes back
+    // full instead of silently short — mirrors `listPosts`'s own use of
+    // `excludeHidden` for exactly this reason.
+    this.blockFilter.excludeHidden(qb, viewerId, '"r"."author_id"');
+    // Same reasoning for moderator takedowns, and it matters MORE here than
+    // for block/mute: this is OFFSET pagination, so filtering hidden replies
+    // out AFTER the fixed-size fetch (as this used to) doesn't just under-fill
+    // page N — page N+1's offset is computed from the RAW row order, so the
+    // reply just past the hidden one would never be served on ANY page. A
+    // staff viewer (owner/mod) still sees hidden-but-not-removed replies, so
+    // this is skipped for them, mirroring `isStaffRole` everywhere else here.
+    if (!viewerIsStaff) {
+      this.contentModeration.excludeHidden(
+        qb,
+        CommunityPostsService.SUBJECT_TYPES,
+        '"r"."id"',
+      );
+    }
+
+    return paginate(qb, normalizedPage, async (rows) => {
+      if (!rows.length) return [];
+      // No post-fetch moderation filter here anymore — `excludeHidden` above
+      // already means every fetched row is one this viewer may see, so
+      // `total`/the page's offset math stay correct across pages.
+      const states = await this.moderationStatesFor(
+        [],
+        rows.map((row) => row.id),
+      );
+      const authors = await new MemberLookup(this.profiles).byUserIds(
+        rows.map((row) => row.authorId),
+      );
+      return rows.map((row) =>
+        toCommunityReply(
+          row,
+          authors.get(row.authorId) ?? null,
+          viewerId,
+          viewerRole,
+          states.get(row.id) ?? CommunityPostsService.VISIBLE,
+        ),
+      );
+    });
+  }
+
   // --- flat aliases (`POST /community-posts*` — see `CommunityPostsController`) ---
   //
   // These reuse the same `community_posts`/`community_post_reactions`/
@@ -706,28 +835,6 @@ export class CommunityPostsService {
     }
   }
 
-  /**
-   * Drops replies whose author the viewer has blocked (either way) or muted.
-   *
-   * Post-query rather than in-query on purpose, and without the short-page
-   * flaw that makes post-query filtering wrong for `listPosts`: replies are a
-   * nested collection fetched *whole* per post, with no LIMIT to under-fill —
-   * removing rows just shortens a list that was never promised a length. One
-   * batched `BlockFilterService.hiddenUserIds` call covers the entire page of
-   * posts, so this stays two queries regardless of how many replies there are.
-   */
-  private async visibleReplies(
-    rows: CommunityPostReply[],
-    viewerId: string,
-  ): Promise<CommunityPostReply[]> {
-    if (!rows.length) return rows;
-    const hidden = await this.blockFilter.hiddenUserIds(
-      viewerId,
-      rows.map((r) => r.authorId),
-    );
-    return hidden.size ? rows.filter((r) => !hidden.has(r.authorId)) : rows;
-  }
-
   // States for a page of posts + their replies, keyed by row id. One query for
   // the whole set (post ids and reply ids never collide — both are uuids).
   private async moderationStatesFor(
@@ -740,19 +847,209 @@ export class CommunityPostsService {
     );
   }
 
+  /**
+   * Bounded, batched reply preview for a page of posts: at most `limit`
+   * replies per post (oldest-first, matching `listReplies`'s own window),
+   * resolved in ONE query for the whole page via a `ROW_NUMBER() OVER
+   * (PARTITION BY post_id ...)` top-N-per-group — not `limit` separate
+   * per-post queries, which would reintroduce the N+1 shape this file
+   * otherwise avoids (see `nestjs-and-queries.md` rule 1). This is the fix for
+   * the structural gap this service used to have: a post's `replies` used to
+   * be `this.replies.find({ where: { postId } })` with no LIMIT at all — a
+   * viral post's entire reply history rode along on every feed page it
+   * appeared on. Blocked (either way) / muted authors are excluded IN-QUERY
+   * (mirrors `listPosts`'s use of `excludeHidden`), so a post's preview fills
+   * with `limit` visible replies instead of coming back short.
+   *
+   * `excludeModerationHidden` is opt-in (not folded in unconditionally) so
+   * `buildPostDTO`'s mutation echo can keep its deliberate, pre-existing
+   * choice to show the acting viewer every reply regardless of moderation
+   * state, while `toPostDTOs`'s feed listing (which DOES need to withhold
+   * hidden replies from non-staff) can ask for it. Pass `true` only when the
+   * caller is about to withhold hidden rows anyway — mirrors `listReplies`'s
+   * own `!viewerIsStaff` gate on `ContentModerationService.excludeHidden`.
+   */
+  private async topRepliesByPost(
+    postIds: string[],
+    viewerId: string,
+    limit: number,
+    excludeModerationHidden: boolean,
+  ): Promise<Map<string, CommunityPostReply[]>> {
+    const repliesByPost = new Map<string, CommunityPostReply[]>();
+    if (!postIds.length) return repliesByPost;
+
+    const rankedRows = await this.replies.manager
+      .createQueryBuilder()
+      .select('ranked.id', 'id')
+      .addSelect('ranked."postId"', 'postId')
+      .addSelect('ranked."authorId"', 'authorId')
+      .addSelect('ranked.text', 'text')
+      .addSelect('ranked."createdAt"', 'createdAt')
+      .addSelect('ranked."editedAt"', 'editedAt')
+      .addSelect('ranked."deletedAt"', 'deletedAt')
+      .from((subQuery) => {
+        const inner = subQuery
+          .select('r.id', 'id')
+          .addSelect('r.post_id', 'postId')
+          .addSelect('r.author_id', 'authorId')
+          .addSelect('r.text', 'text')
+          .addSelect('r.created_at', 'createdAt')
+          .addSelect('r.edited_at', 'editedAt')
+          .addSelect('r.deleted_at', 'deletedAt')
+          .addSelect(
+            'ROW_NUMBER() OVER (PARTITION BY r.post_id ORDER BY r.created_at ASC, r.id ASC)',
+            'rn',
+          )
+          .from(CommunityPostReply, 'r')
+          .where('r.post_id IN (:...postIds)', { postIds });
+        this.blockFilter.excludeHidden(inner, viewerId, '"r"."author_id"');
+        if (excludeModerationHidden) {
+          this.contentModeration.excludeHidden(
+            inner,
+            CommunityPostsService.SUBJECT_TYPES,
+            '"r"."id"',
+          );
+        }
+        return inner;
+      }, 'ranked')
+      .where('ranked.rn <= :limit', { limit })
+      .orderBy('ranked."postId"', 'ASC')
+      .addOrderBy('ranked."createdAt"', 'ASC')
+      .getRawMany<{
+        id: string;
+        postId: string;
+        authorId: string;
+        text: string;
+        createdAt: Date;
+        editedAt: Date | null;
+        deletedAt: Date | null;
+      }>();
+
+    for (const row of rankedRows) {
+      const reply: CommunityPostReply = {
+        id: row.id,
+        postId: row.postId,
+        authorId: row.authorId,
+        text: row.text,
+        createdAt: new Date(row.createdAt),
+        editedAt: row.editedAt ? new Date(row.editedAt) : null,
+        deletedAt: row.deletedAt ? new Date(row.deletedAt) : null,
+      };
+      const list = repliesByPost.get(reply.postId);
+      if (list) list.push(reply);
+      else repliesByPost.set(reply.postId, [reply]);
+    }
+    return repliesByPost;
+  }
+
+  /**
+   * The TRUE total reply count per post, independent of `topRepliesByPost`'s
+   * bounded preview — so `CommunityPostDTO.replyCount` still reflects every
+   * reply even though `replies` is capped. Same block/mute exclusion as the
+   * preview and `listReplies`, so the count matches what a "load more" click
+   * can actually page through, not a count of rows the viewer could never
+   * reach anyway. Same moderation exclusion too (gated on `viewerIsStaff`,
+   * exactly like `listReplies`'s own count via `paginate()`'s
+   * `getManyAndCount()`) — otherwise a page of moderator-hidden replies would
+   * inflate this count past what `listReplies` can ever actually return,
+   * making "load more" appear when every remaining page is entirely hidden.
+   */
+  private async replyCountByPost(
+    postIds: string[],
+    viewerId: string,
+    viewerIsStaff: boolean,
+  ): Promise<Map<string, number>> {
+    const counts = new Map<string, number>();
+    if (!postIds.length) return counts;
+
+    const qb = this.replies
+      .createQueryBuilder('r')
+      .select('r.post_id', 'postId')
+      .addSelect('COUNT(*)', 'count')
+      .where('r.post_id IN (:...postIds)', { postIds })
+      .groupBy('r.post_id');
+    this.blockFilter.excludeHidden(qb, viewerId, '"r"."author_id"');
+    if (!viewerIsStaff) {
+      this.contentModeration.excludeHidden(
+        qb,
+        CommunityPostsService.SUBJECT_TYPES,
+        '"r"."id"',
+      );
+    }
+
+    const rows = await qb.getRawMany<{ postId: string; count: string }>();
+    for (const row of rows) counts.set(row.postId, Number(row.count));
+    return counts;
+  }
+
+  /**
+   * Reaction summary data, batched AND bounded: an aggregate `COUNT` per
+   * (post, key) instead of fetching every reaction row — a post with
+   * thousands of reactions used to mean thousands of rows over the wire just
+   * to compute 4 numbers. `mine` is resolved separately, scoped to the
+   * viewer's own rows (at most 4 per post, per `UQ_community_post_reactions`)
+   * rather than pulled out of the full row set.
+   */
+  private async reactionAggregatesByPost(
+    postIds: string[],
+    viewerId: string,
+  ): Promise<Map<string, ReactionAggregate>> {
+    const aggregatesByPost = new Map<string, ReactionAggregate>();
+    if (!postIds.length) return aggregatesByPost;
+
+    const aggregateFor = (postId: string): ReactionAggregate => {
+      const existing = aggregatesByPost.get(postId);
+      if (existing) return existing;
+      const created: ReactionAggregate = {
+        counts: new Map(),
+        mine: new Set(),
+      };
+      aggregatesByPost.set(postId, created);
+      return created;
+    };
+
+    const [countRows, mineRows] = await Promise.all([
+      this.reactions
+        .createQueryBuilder('rx')
+        .select('rx.post_id', 'postId')
+        .addSelect('rx.key', 'key')
+        .addSelect('COUNT(*)', 'count')
+        .where('rx.post_id IN (:...postIds)', { postIds })
+        .groupBy('rx.post_id')
+        .addGroupBy('rx.key')
+        .getRawMany<{ postId: string; key: ReactionKey; count: string }>(),
+      this.reactions.find({
+        where: { postId: In(postIds), userId: viewerId },
+        select: { postId: true, key: true },
+      }),
+    ]);
+
+    for (const row of countRows) {
+      aggregateFor(row.postId).counts.set(row.key, Number(row.count));
+    }
+    for (const row of mineRows) {
+      aggregateFor(row.postId).mine.add(row.key);
+    }
+    return aggregatesByPost;
+  }
+
   private async buildPostDTO(
     post: CommunityPost,
     viewerId: string,
     viewerRole: RosterRole | null,
   ): Promise<CommunityPostDTO> {
-    const [reactionRows, allReplyRows] = await Promise.all([
-      this.reactions.find({ where: { postId: post.id } }),
-      this.replies.find({
-        where: { postId: post.id },
-        order: { createdAt: 'ASC' },
-      }),
-    ]);
-    const replyRows = await this.visibleReplies(allReplyRows, viewerId);
+    // `replyCount` still uses the viewer's real staff-ness (it drives the
+    // client's "load more" trigger against `listReplies`, which DOES withhold
+    // hidden replies from non-staff), even though the echoed `replies` preview
+    // below deliberately does not (see the comment further down).
+    const viewerIsStaff = CommunityPostsService.isStaffRole(viewerRole);
+    const [repliesByPost, replyCountByPost, reactionsByPost] =
+      await Promise.all([
+        this.topRepliesByPost([post.id], viewerId, PAGE_SIZE, false),
+        this.replyCountByPost([post.id], viewerId, viewerIsStaff),
+        this.reactionAggregatesByPost([post.id], viewerId),
+      ]);
+    const replyRows = repliesByPost.get(post.id) ?? [];
 
     const authorIds = [post.authorId, ...replyRows.map((r) => r.authorId)];
     const [authors, states] = await Promise.all([
@@ -778,17 +1075,19 @@ export class CommunityPostsService {
     return toCommunityPost(
       post,
       authors.get(post.authorId) ?? null,
-      reactionRows,
+      reactionsByPost.get(post.id) ?? { counts: new Map(), mine: new Set() },
       replies,
+      replyCountByPost.get(post.id) ?? replies.length,
       viewerId,
       viewerRole,
       states.get(post.id) ?? CommunityPostsService.VISIBLE,
     );
   }
 
-  // Batched mapping for a page of posts (`listPosts`): one `IN`-query each for
-  // reactions/replies/authors across the whole page instead of N+1 per-post
-  // lookups — mirrors `EventsService.summarize` / `CommunitiesService.statsForMany`.
+  // Batched mapping for a page of posts (`listPosts`): one query each for
+  // reply previews/counts/reactions/authors across the whole page instead of
+  // N+1 per-post lookups — mirrors `EventsService.summarize` /
+  // `CommunitiesService.statsForMany`.
   private async toPostDTOs(
     rows: CommunityPost[],
     viewerId: string,
@@ -796,24 +1095,24 @@ export class CommunityPostsService {
   ): Promise<CommunityPostDTO[]> {
     if (!rows.length) return [];
     const postIds = rows.map((p) => p.id);
+    const viewerIsStaff = CommunityPostsService.isStaffRole(viewerRole);
 
-    const [reactionRows, allReplyRows] = await Promise.all([
-      this.reactions.find({ where: { postId: In(postIds) } }),
-      this.replies.find({
-        where: { postId: In(postIds) },
-        order: { createdAt: 'ASC' },
-      }),
-    ]);
-    const blockFilteredReplies = await this.visibleReplies(
-      allReplyRows,
-      viewerId,
-    );
+    const [repliesByPostPreview, replyCountByPost, reactionsByPost] =
+      await Promise.all([
+        // Fold moderation-hidden exclusion into the SQL window itself (when
+        // non-staff) — post-filtering it afterward (as this used to) could
+        // under-fill a post's reply preview below `PAGE_SIZE` even when
+        // enough later-ranked visible replies existed to fill it.
+        this.topRepliesByPost(postIds, viewerId, PAGE_SIZE, !viewerIsStaff),
+        this.replyCountByPost(postIds, viewerId, viewerIsStaff),
+        this.reactionAggregatesByPost(postIds, viewerId),
+      ]);
+    const allReplyRows = [...repliesByPostPreview.values()].flat();
 
     const states = await this.moderationStatesFor(
       postIds,
-      blockFilteredReplies.map((r) => r.id),
+      allReplyRows.map((r) => r.id),
     );
-    const viewerIsStaff = CommunityPostsService.isStaffRole(viewerRole);
     const isWithheld = (id: string): boolean => {
       const state = states.get(id);
       // Hidden-but-not-removed content is withheld from non-staff; removed
@@ -821,13 +1120,16 @@ export class CommunityPostsService {
       return !!state && state.hidden && !state.removed && !viewerIsStaff;
     };
 
-    // Drop hidden posts and hidden replies from a member's feed entirely.
+    // Drop hidden posts from a member's feed entirely — pre-existing,
+    // post-level pagination behavior; out of scope for this fix (the same
+    // fixed-fetch-then-filter shape exists for `listPosts`'s own page/total,
+    // untouched here).
     const visiblePosts = rows.filter((post) => !isWithheld(post.id));
-    const replyRows = blockFilteredReplies.filter(
-      (reply) => !isWithheld(reply.id),
-    );
+    // Reply rows are already moderation-filtered in SQL by `topRepliesByPost`
+    // above (when non-staff), so this is now harmless defense-in-depth, not
+    // the primary filter.
+    const replyRows = allReplyRows.filter((reply) => !isWithheld(reply.id));
 
-    const reactionsByPost = groupBy(reactionRows, (r) => r.postId);
     const repliesByPost = groupBy(replyRows, (r) => r.postId);
 
     const authorIds = new Set<string>();
@@ -850,8 +1152,9 @@ export class CommunityPostsService {
       return toCommunityPost(
         post,
         authors.get(post.authorId) ?? null,
-        reactionsByPost.get(post.id) ?? [],
+        reactionsByPost.get(post.id) ?? { counts: new Map(), mine: new Set() },
         replies,
+        replyCountByPost.get(post.id) ?? replies.length,
         viewerId,
         viewerRole,
         states.get(post.id) ?? CommunityPostsService.VISIBLE,

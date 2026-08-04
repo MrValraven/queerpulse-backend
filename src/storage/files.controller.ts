@@ -7,6 +7,8 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { Response } from 'express';
 import { Public } from '../auth/decorators/public.decorator';
 import {
@@ -14,6 +16,10 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+// A ban is a permanent suspension (`AccountEnforcementService` sets
+// `status = Suspended`, `suspendedUntil = null` for both `suspend` and `ban`),
+// so gating on `Suspended` covers both — there is no separate `Banned` status.
 import { OptionalJwtAuthGuard } from './optional-jwt-auth.guard';
 import { PRESIGN_EXPIRY_SECONDS, StorageService } from './storage.service';
 import { parseStorageKey, storageKeyOwnerId } from './storage-key';
@@ -52,7 +58,21 @@ const PUBLIC_IMAGE_MAX_AGE_SECONDS = PRESIGN_EXPIRY_SECONDS - 60;
 @ApiTags('Files')
 @Controller('files')
 export class FilesController {
-  constructor(private readonly storage: StorageService) {}
+  constructor(
+    private readonly storage: StorageService,
+    @InjectRepository(User) private readonly users: Repository<User>,
+  ) {}
+
+  // The owner status whose media is withheld from ordinary viewers — the
+  // moderation-imposed suspend/ban state (both set `Suspended`). A member the
+  // platform has acted against should not keep an avatar/photo serving to
+  // everyone. Deactivation (a member's own "pause my account") is deliberately
+  // NOT withheld here: it is member-initiated and fully reversible on their own
+  // next login, and the profile surfaces that read it already gate on
+  // `status = active` elsewhere.
+  private static isStaffViewer(user: CurrentUserData | null): boolean {
+    return user?.role === UserRole.Admin || user?.role === UserRole.Moderator;
+  }
 
   // `@Public()` bypasses the global JwtAuthGuard; OptionalJwtAuthGuard then
   // populates the user when a valid cookie is present without rejecting when it
@@ -108,6 +128,28 @@ export class FilesController {
       // route still never reveals which keys exist. Widen this to event
       // participants once gathering photos are linked to an event.
       if (storageKeyOwnerId(storageKey) !== user.userId) {
+        throw new NotFoundException();
+      }
+    }
+    // Suspension media safety: a suspended/banned member's media must not keep
+    // serving to ordinary viewers. Every key embeds its owner's userId
+    // (`<prefix>/<ownerId>/<uuid>.<ext>`), so we resolve that owner's status and
+    // 404 (never a distinct code — same don't-leak posture as the checks above)
+    // when they are withheld. Skipped — no lookup at all — when the viewer is
+    // the owner (they may always see their own media) or platform staff
+    // (admins/mods must still review it), so this only costs a single indexed
+    // status read on the cross-member view of a possibly-actioned member.
+    const ownerUserId = storageKeyOwnerId(storageKey);
+    if (
+      ownerUserId &&
+      ownerUserId !== user?.userId &&
+      !FilesController.isStaffViewer(user)
+    ) {
+      const owner = await this.users.findOne({
+        where: { id: ownerUserId },
+        select: ['id', 'status'],
+      });
+      if (owner && owner.status === UserStatus.Suspended) {
         throw new NotFoundException();
       }
     }

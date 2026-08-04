@@ -17,19 +17,19 @@ import {
 @Unique('UQ_blocks_pair', ['blockerId', 'blockedId'])
 export class Block {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_blocks_blocker_id')
   @Column({ type: 'uuid' })
-  blockerId: string;
+  blockerId!: string;
 
   @Index('IDX_blocks_blocked_id')
   @Column({ type: 'uuid' })
-  blockedId: string;
+  blockedId!: string;
 
   @Column({ type: 'text', nullable: true })
-  reason: string | null;
+  reason!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

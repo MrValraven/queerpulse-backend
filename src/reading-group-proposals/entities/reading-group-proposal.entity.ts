@@ -26,28 +26,28 @@ export enum ReadingGroupProposalFormat {
 @Entity('reading_group_proposal')
 export class ReadingGroupProposal {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_reading_group_proposal_member_id')
   @Column({ type: 'uuid' })
-  memberId: string;
+  memberId!: string;
 
   // The form's "Book title & author" input, entered as free text (e.g.
   // "Giovanni's Room — James Baldwin").
   @Column({ type: 'varchar', length: 200 })
-  book: string;
+  book!: string;
 
   // The form's optional "Why this book?" input.
   @Column({ type: 'varchar', length: 500, nullable: true })
-  why: string | null;
+  why!: string | null;
 
   @Column({ type: 'enum', enum: ReadingGroupProposalFormat })
-  format: ReadingGroupProposalFormat;
+  format!: ReadingGroupProposalFormat;
 
   // The form's "Max people" select (4, 6, or 8).
   @Column({ type: 'smallint' })
-  maxPeople: number;
+  maxPeople!: number;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

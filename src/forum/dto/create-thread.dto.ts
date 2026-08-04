@@ -1,20 +1,43 @@
-import { IsString, MaxLength, MinLength } from 'class-validator';
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 
 // `POST /forum/threads` body — matches `CreateThreadDto` in the frontend's
-// `forum.api.ts` exactly (`title`, `body`, `category`).
+// `forum.api.ts` (`title`, `body`, `category`, optional `tags`).
 export class CreateThreadDto {
   @IsString()
   @MinLength(1)
   @MaxLength(200)
-  title: string;
+  title!: string;
 
   @IsString()
   @MinLength(1)
   @MaxLength(10000)
-  body: string;
+  body!: string;
 
+  // `"all"` (any case) is reserved: `ThreadCategoryCounts` returns a flat
+  // `{ all, ...perCategory }` map, so a category literally named `all` would
+  // overwrite the total and corrupt the counts response. Reject it here so it
+  // can never become a real category. (There is no `category` field on
+  // `UpdateThreadDto`, so create is the only path a category is set.)
   @IsString()
   @MinLength(1)
   @MaxLength(50)
-  category: string;
+  @Matches(/^(?!all$).+/i, { message: '"all" is a reserved category' })
+  category!: string;
+
+  // Up to 5 free-text tags, each ≤ 24 chars. The service normalizes them
+  // (trim, lowercase, strip `#`, dedupe, drop empties) before persisting.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(5)
+  @IsString({ each: true })
+  @MaxLength(24, { each: true })
+  tags?: string[];
 }

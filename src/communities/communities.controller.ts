@@ -29,6 +29,7 @@ import { JoinCommunityDto } from './dto/join-community.dto';
 import { ListCommunitiesQuery } from './dto/list-communities.query';
 import { ReactionDto } from './dto/reaction.dto';
 import { ReplyDto } from './dto/reply.dto';
+import { TransferOwnershipDto } from './dto/transfer-ownership.dto';
 import { TriageJoinRequestDto } from './dto/triage-join-request.dto';
 import { UpdateCommunityDto } from './dto/update-community.dto';
 import { UpdateMemberRoleDto } from './dto/update-member-role.dto';
@@ -74,7 +75,8 @@ export class CommunitiesController {
   @ApiOperation({ summary: 'Get a community by slug.' })
   @ApiOkResponse({ description: 'The community detail for the viewer.' })
   @ApiNotFoundResponse({
-    description: 'Unknown slug, or a private/removed community the viewer cannot see.',
+    description:
+      'Unknown slug, or a private/removed community the viewer cannot see.',
   })
   get(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.communitiesService.getBySlug(slug, user.userId);
@@ -108,8 +110,44 @@ export class CommunitiesController {
     return this.communitiesService.update(slug, user.userId, dto);
   }
 
+  @Post(':slug/archive')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Archive a community — take it down (owner only, idempotent).',
+  })
+  @ApiOkResponse({ description: 'The community detail, now archived.' })
+  @ApiForbiddenResponse({ description: 'Only the owner may archive.' })
+  @ApiNotFoundResponse({ description: 'No community exists for this slug.' })
+  archive(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
+    return this.communitiesService.archive(slug, user.userId);
+  }
+
+  @Post(':slug/transfer')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Transfer ownership to another member (owner only).',
+  })
+  @ApiOkResponse({ description: 'The community detail under the new owner.' })
+  @ApiBadRequestResponse({
+    description:
+      'Self-transfer, or a transfer to the house account, is not allowed.',
+  })
+  @ApiForbiddenResponse({ description: 'Only the owner may transfer.' })
+  @ApiNotFoundResponse({ description: 'No such community or member.' })
+  transfer(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: TransferOwnershipDto,
+  ) {
+    return this.communitiesService.transferOwnership(
+      slug,
+      user.userId,
+      dto.memberSlug,
+    );
+  }
+
   @Get(':slug/posts')
-  @ApiOperation({ summary: 'List a community\'s posts, paginated.' })
+  @ApiOperation({ summary: "List a community's posts, paginated." })
   @ApiOkResponse({ description: 'A paginated page of community posts.' })
   @ApiNotFoundResponse({
     description: 'Unknown slug, or a private community the viewer is not in.',
@@ -141,7 +179,9 @@ export class CommunitiesController {
     summary: 'Update a post (author edits body/kind; owner/mod pins).',
   })
   @ApiOkResponse({ description: 'The updated community post.' })
-  @ApiBadRequestResponse({ description: 'Malformed post id or invalid payload.' })
+  @ApiBadRequestResponse({
+    description: 'Malformed post id or invalid payload.',
+  })
   @ApiForbiddenResponse({
     description: 'Only the author may edit; only a moderator may pin.',
   })
@@ -158,7 +198,9 @@ export class CommunitiesController {
   @Post(':slug/posts/:id/reactions')
   @ApiOperation({ summary: 'Add a reaction to a post (idempotent).' })
   @ApiCreatedResponse({ description: 'The post with updated reactions.' })
-  @ApiBadRequestResponse({ description: 'Malformed post id or invalid payload.' })
+  @ApiBadRequestResponse({
+    description: 'Malformed post id or invalid payload.',
+  })
   @ApiForbiddenResponse({ description: 'Community membership required.' })
   @ApiNotFoundResponse({ description: 'No such community or post.' })
   addReaction(
@@ -200,7 +242,9 @@ export class CommunitiesController {
   @Post(':slug/posts/:id/replies')
   @ApiOperation({ summary: 'Reply to a community post.' })
   @ApiCreatedResponse({ description: 'The created reply.' })
-  @ApiBadRequestResponse({ description: 'Malformed post id or invalid payload.' })
+  @ApiBadRequestResponse({
+    description: 'Malformed post id or invalid payload.',
+  })
   @ApiForbiddenResponse({ description: 'Community membership required.' })
   @ApiNotFoundResponse({ description: 'No such community or post.' })
   addReply(
@@ -212,11 +256,29 @@ export class CommunitiesController {
     return this.communityPostsService.addReply(slug, id, user.userId, dto.text);
   }
 
+  @Get(':slug/posts/:id/replies')
+  @ApiOperation({
+    summary:
+      "List a post's replies beyond its bounded preview, paginated (oldest-first).",
+  })
+  @ApiOkResponse({ description: "A paginated page of the post's replies." })
+  @ApiNotFoundResponse({ description: 'No such community or post.' })
+  listReplies(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+  ) {
+    return this.communityPostsService.listReplies(slug, id, user.userId, page);
+  }
+
   @Delete(':slug/posts/:id')
   @ApiOperation({ summary: 'Soft-delete a post (author or owner/mod).' })
   @ApiOkResponse({ description: 'The post, now tombstoned.' })
   @ApiBadRequestResponse({ description: 'Malformed post id.' })
-  @ApiForbiddenResponse({ description: 'Author or owner/moderator role required.' })
+  @ApiForbiddenResponse({
+    description: 'Author or owner/moderator role required.',
+  })
   @ApiNotFoundResponse({ description: 'No such community or post.' })
   deletePost(
     @CurrentUser() user: CurrentUserData,
@@ -227,10 +289,14 @@ export class CommunitiesController {
   }
 
   @Post(':slug/posts/:id/restore')
-  @ApiOperation({ summary: 'Restore a soft-deleted post (author or owner/mod).' })
+  @ApiOperation({
+    summary: 'Restore a soft-deleted post (author or owner/mod).',
+  })
   @ApiCreatedResponse({ description: 'The post, tombstone cleared.' })
   @ApiBadRequestResponse({ description: 'Malformed post id.' })
-  @ApiForbiddenResponse({ description: 'Author or owner/moderator role required.' })
+  @ApiForbiddenResponse({
+    description: 'Author or owner/moderator role required.',
+  })
   @ApiNotFoundResponse({ description: 'No such community or post.' })
   restorePost(
     @CurrentUser() user: CurrentUserData,
@@ -241,10 +307,14 @@ export class CommunitiesController {
   }
 
   @Get(':slug/posts/:id/history')
-  @ApiOperation({ summary: 'List a post\'s edit history (author or owner/mod).' })
-  @ApiOkResponse({ description: 'The post\'s revisions, newest first.' })
+  @ApiOperation({
+    summary: "List a post's edit history (author or owner/mod).",
+  })
+  @ApiOkResponse({ description: "The post's revisions, newest first." })
   @ApiBadRequestResponse({ description: 'Malformed post id.' })
-  @ApiForbiddenResponse({ description: 'Author or owner/moderator role required.' })
+  @ApiForbiddenResponse({
+    description: 'Author or owner/moderator role required.',
+  })
   @ApiNotFoundResponse({ description: 'No such community or post.' })
   postHistory(
     @CurrentUser() user: CurrentUserData,
@@ -280,7 +350,9 @@ export class CommunitiesController {
   @ApiOperation({ summary: 'Soft-delete a reply (author or owner/mod).' })
   @ApiOkResponse({ description: 'The reply, now tombstoned.' })
   @ApiBadRequestResponse({ description: 'Malformed id.' })
-  @ApiForbiddenResponse({ description: 'Author or owner/moderator role required.' })
+  @ApiForbiddenResponse({
+    description: 'Author or owner/moderator role required.',
+  })
   @ApiNotFoundResponse({ description: 'No such community, post, or reply.' })
   deleteReply(
     @CurrentUser() user: CurrentUserData,
@@ -297,10 +369,14 @@ export class CommunitiesController {
   }
 
   @Post(':slug/posts/:id/replies/:replyId/restore')
-  @ApiOperation({ summary: 'Restore a soft-deleted reply (author or owner/mod).' })
+  @ApiOperation({
+    summary: 'Restore a soft-deleted reply (author or owner/mod).',
+  })
   @ApiCreatedResponse({ description: 'The reply, tombstone cleared.' })
   @ApiBadRequestResponse({ description: 'Malformed id.' })
-  @ApiForbiddenResponse({ description: 'Author or owner/moderator role required.' })
+  @ApiForbiddenResponse({
+    description: 'Author or owner/moderator role required.',
+  })
   @ApiNotFoundResponse({ description: 'No such community, post, or reply.' })
   restoreReply(
     @CurrentUser() user: CurrentUserData,
@@ -317,10 +393,14 @@ export class CommunitiesController {
   }
 
   @Get(':slug/posts/:id/replies/:replyId/history')
-  @ApiOperation({ summary: 'List a reply\'s edit history (author or owner/mod).' })
-  @ApiOkResponse({ description: 'The reply\'s revisions, newest first.' })
+  @ApiOperation({
+    summary: "List a reply's edit history (author or owner/mod).",
+  })
+  @ApiOkResponse({ description: "The reply's revisions, newest first." })
   @ApiBadRequestResponse({ description: 'Malformed id.' })
-  @ApiForbiddenResponse({ description: 'Author or owner/moderator role required.' })
+  @ApiForbiddenResponse({
+    description: 'Author or owner/moderator role required.',
+  })
   @ApiNotFoundResponse({ description: 'No such community, post, or reply.' })
   replyHistory(
     @CurrentUser() user: CurrentUserData,
@@ -337,16 +417,22 @@ export class CommunitiesController {
   }
 
   @Get(':slug/roster')
-  @ApiOperation({ summary: 'List a community\'s roster.' })
-  @ApiOkResponse({ description: 'The community\'s roster entries.' })
+  @ApiOperation({ summary: "List a community's roster, paginated." })
+  @ApiOkResponse({
+    description: "A paginated page of the community's roster entries.",
+  })
   @ApiForbiddenResponse({
     description: 'The roster is members-only and the caller is not a member.',
   })
   @ApiNotFoundResponse({
     description: 'Unknown slug, or a private community the caller is not in.',
   })
-  roster(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
-    return this.communitiesService.roster(slug, user.userId);
+  roster(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+  ) {
+    return this.communitiesService.roster(slug, user.userId, page);
   }
 
   @Post(':slug/join')
@@ -430,9 +516,9 @@ export class CommunitiesController {
   @ApiOperation({
     summary: 'Promote a member to moderator, or demote a moderator to member.',
   })
-  @ApiOkResponse({ description: 'The member\'s new role.' })
+  @ApiOkResponse({ description: "The member's new role." })
   @ApiBadRequestResponse({
-    description: 'Invalid role, or the owner\'s role cannot be changed.',
+    description: "Invalid role, or the owner's role cannot be changed.",
   })
   @ApiForbiddenResponse({
     description:

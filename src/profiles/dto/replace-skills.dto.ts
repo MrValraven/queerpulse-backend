@@ -8,8 +8,8 @@ import {
 } from 'class-validator';
 
 export class SkillItemDto {
-  @IsString() @MaxLength(120) name: string;
-  @IsString() @MaxLength(200) meta: string;
+  @IsString() @MaxLength(120) name!: string;
+  @IsString() @MaxLength(200) meta!: string;
 }
 
 export class ReplaceSkillsDto {
@@ -17,5 +17,5 @@ export class ReplaceSkillsDto {
   @ArrayMaxSize(100)
   @ValidateNested({ each: true })
   @Type(() => SkillItemDto)
-  items: SkillItemDto[];
+  items!: SkillItemDto[];
 }

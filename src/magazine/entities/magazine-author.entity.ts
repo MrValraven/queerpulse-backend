@@ -16,24 +16,24 @@ import {
 @Entity('magazine_author')
 export class MagazineAuthor {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_magazine_author_slug', { unique: true })
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   @Column({ type: 'varchar' })
-  name: string;
+  name!: string;
 
   @Column({ type: 'text', nullable: true })
-  bio: string | null;
+  bio!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  avatarUrl: string | null;
+  avatarUrl!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

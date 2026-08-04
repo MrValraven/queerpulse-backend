@@ -494,6 +494,9 @@ export class AccountService {
           // rows.
           email: locked ? true : (overrides.get(category) ?? defaultEnabled),
           ...(locked ? { locked: true } : {}),
+          // No mailer at launch — the stored toggle is never acted on. See
+          // EmailPreferenceResponse.comingSoon + docs/ops/no-email-at-launch.md.
+          comingSoon: true,
         };
       },
     );

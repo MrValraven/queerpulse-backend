@@ -61,6 +61,8 @@ const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   [NotificationType.JobApplication]: 'actorId',
   [NotificationType.InviteAccepted]: 'actorId',
   [NotificationType.ListingReview]: 'actorId',
+  [NotificationType.SubprofileInvite]: 'invitedByUserId',
+  [NotificationType.SubprofileCoOwnerJoined]: 'joinedUserId',
 };
 
 /** The acting member's user id for a notification, or `null` when its type

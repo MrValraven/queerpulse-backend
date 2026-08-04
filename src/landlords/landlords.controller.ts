@@ -45,7 +45,9 @@ export class LandlordsController {
   @Get()
   @ApiOperation({ summary: 'Browse the live community landlord directory' })
   @ApiOkResponse({ description: 'Matching live landlord cards.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   browse(@Query() query: BrowseLandlordsQuery) {
     return this.service.browse(query);
   }
@@ -54,7 +56,9 @@ export class LandlordsController {
   @ApiOperation({ summary: 'Get a live landlord by slug' })
   @ApiOkResponse({ description: 'The landlord detail.' })
   @ApiNotFoundResponse({ description: 'No live landlord with that slug.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   detail(@Param('slug') slug: string) {
     return this.service.detail(slug);
   }
@@ -62,8 +66,12 @@ export class LandlordsController {
   @Post()
   @ApiOperation({ summary: 'Suggest a landlord directory entry for review' })
   @ApiCreatedResponse({ description: 'The suggested landlord entry.' })
-  @ApiConflictResponse({ description: 'Could not allocate a unique landlord slug.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiConflictResponse({
+    description: 'Could not allocate a unique landlord slug.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   suggest(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: CreateLandlordDto,
@@ -72,10 +80,14 @@ export class LandlordsController {
   }
 
   @Post(':slug/recommendations')
-  @ApiOperation({ summary: 'Recommend a landlord (creates or updates your rating)' })
+  @ApiOperation({
+    summary: 'Recommend a landlord (creates or updates your rating)',
+  })
   @ApiCreatedResponse({ description: 'The saved recommendation.' })
   @ApiNotFoundResponse({ description: 'No live landlord with that slug.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   recommend(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
@@ -86,9 +98,13 @@ export class LandlordsController {
 
   @Post(':slug/intro-requests')
   @ApiOperation({ summary: 'Request an introduction to a landlord' })
-  @ApiCreatedResponse({ description: 'The created intro request id and status.' })
+  @ApiCreatedResponse({
+    description: 'The created intro request id and status.',
+  })
   @ApiNotFoundResponse({ description: 'No live landlord with that slug.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   introRequest(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,

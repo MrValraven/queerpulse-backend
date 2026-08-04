@@ -13,7 +13,7 @@ import { MAX_ITEMS_PER_SECTION } from '../subprofile-validation';
 
 // One item of a section. `section` comes from the URL, not the body (C4).
 export class SubprofileItemInputDTO {
-  @IsString() @MaxLength(200) title: string;
+  @IsString() @MaxLength(200) title!: string;
 
   @IsOptional() @IsString() @MaxLength(200) subtitle?: string;
 
@@ -49,5 +49,5 @@ export class ReplaceItemsDTO {
   @ArrayMaxSize(MAX_ITEMS_PER_SECTION)
   @ValidateNested({ each: true })
   @Type(() => SubprofileItemInputDTO)
-  items: SubprofileItemInputDTO[];
+  items!: SubprofileItemInputDTO[];
 }

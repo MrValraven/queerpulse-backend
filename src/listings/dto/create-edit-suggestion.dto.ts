@@ -26,10 +26,10 @@ export type EditSuggestionField = (typeof EDIT_SUGGESTION_FIELDS)[number];
 export class CreateEditSuggestionDto {
   @IsString()
   @IsIn(EDIT_SUGGESTION_FIELDS)
-  field: EditSuggestionField;
+  field!: EditSuggestionField;
 
   @IsString()
   @IsNotEmpty()
   @MaxLength(2000)
-  message: string;
+  message!: string;
 }

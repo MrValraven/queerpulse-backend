@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { escapeLikeTerm } from '../common/like-escape';
 import { Repository } from 'typeorm';
 import { MemberLookup, toMemberRef } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
@@ -22,7 +23,12 @@ import {
   WorkshopTier,
 } from './entities/workshop.entity';
 import { WorkshopRsvpsService } from './workshop-rsvps.service';
-import { toWorkshopDTO, WorkshopDTO } from './workshop-response';
+import {
+  toWorkshopDTO,
+  toWorkshopSearchRow,
+  WorkshopDTO,
+  WorkshopSearchRow,
+} from './workshop-response';
 
 // Postgres unique-violation SQLSTATE. Mirrors `JobsService`'s identical
 // file-local helper (not shared/exported, kept consistent with that
@@ -240,6 +246,23 @@ export class WorkshopsService {
   async getBySlug(slug: string, viewerId: string): Promise<WorkshopDTO> {
     const workshop = await this.loadOr404(slug);
     return this.buildDTO(workshop, viewerId);
+  }
+
+  // Cross-entity global search (SearchService) — ILIKE over title / blurb.
+  // Reuses `list`'s block filter (workshops hosted by a blocked/muted member
+  // are dropped in-query). No host/rsvp hydration — the search row needs none.
+  async searchByText(
+    viewerId: string,
+    term: string,
+    limit: number,
+  ): Promise<WorkshopSearchRow[]> {
+    const pattern = `%${escapeLikeTerm(term)}%`;
+    const qb = this.workshops
+      .createQueryBuilder('w')
+      .where('(w.title ILIKE :pattern OR w.blurb ILIKE :pattern)', { pattern });
+    this.blockFilter.excludeHidden(qb, viewerId, '"w"."host_id"');
+    const rows = await qb.orderBy('w.created_at', 'DESC').take(limit).getMany();
+    return rows.map(toWorkshopSearchRow);
   }
 
   async update(

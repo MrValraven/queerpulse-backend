@@ -22,6 +22,7 @@ describe('PublicProfilesController', () => {
     bio: null,
     socials: [],
     work: [],
+    activity: [],
   };
 
   beforeEach(async () => {

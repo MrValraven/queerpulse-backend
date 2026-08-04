@@ -50,7 +50,7 @@ export enum UserRole {
 @Entity('users')
 export class User {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   // `googleId` and `email` are the only PII on the auth row, and they are
   // `select: false` as column-level defense-in-depth: there is no global
@@ -63,10 +63,10 @@ export class User {
   // to enumerate every place that reads real PII. `googleId` currently has NO
   // value-reader in app code (only WHERE clauses, which are unaffected).
   @Column({ type: 'varchar', unique: true, select: false })
-  googleId: string;
+  googleId!: string;
 
   @Column({ type: 'varchar', unique: true, select: false })
-  email: string;
+  email!: string;
 
   @Column({
     type: 'enum',
@@ -74,7 +74,7 @@ export class User {
     enumName: 'users_status_enum',
     default: UserStatus.Active,
   })
-  status: UserStatus;
+  status!: UserStatus;
 
   @Column({
     type: 'enum',
@@ -82,11 +82,11 @@ export class User {
     enumName: 'users_role_enum',
     default: UserRole.Member,
   })
-  role: UserRole;
+  role!: UserRole;
 
   @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
   @JoinColumn({ name: 'invited_by' })
-  invitedBy: User | null;
+  invitedBy!: User | null;
 
   /**
    * When a moderation suspension lapses. Only meaningful while
@@ -106,10 +106,10 @@ export class User {
    * meant to be set but wasn't is an accidental permanent ban.
    */
   @Column({ type: 'timestamptz', nullable: true })
-  suspendedUntil: Date | null;
+  suspendedUntil!: Date | null;
 
   @Column({ type: 'timestamptz', nullable: true })
-  activatedAt: Date | null;
+  activatedAt!: Date | null;
 
   /**
    * When the member self-attested to being 18+ (Terms §eligibility). Set once,
@@ -117,17 +117,46 @@ export class User {
    * account predates the gate — see the backfill note in the migration.
    */
   @Column({ type: 'timestamptz', nullable: true })
-  ageAttestedAt: Date | null;
+  ageAttestedAt!: Date | null;
 
   /** Terms revision the attestation was made against, e.g. "2.4". */
   @Column({ type: 'varchar', length: 32, nullable: true })
-  termsVersion: string | null;
+  termsVersion!: string | null;
+
+  /**
+   * When the member finished the one-time post-signup onboarding wizard. NULL
+   * means they haven't yet; a timestamp means done and is stamped once (never
+   * overwritten) by `UsersService.markOnboarded`. Surfaced as
+   * `AuthUser.onboardedAt` so the frontend gate can keep an already-onboarded
+   * member out of the wizard. Backfilled to `created_at` for pre-existing rows
+   * — see `AddOnboardedAt1785003000000`.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  onboardedAt!: Date | null;
+
+  /**
+   * When the member agreed to the community guidelines. Stamped once, alongside
+   * `onboardedAt`, when they finish the onboarding wizard (the guidelines
+   * checkbox on the welcome step). NULL means no explicit agreement is on
+   * record — either they haven't onboarded yet, or their account predates this
+   * consent being captured (deliberately NOT backfilled: agreeing is a specific
+   * act, so a manufactured timestamp would be a lie — see
+   * `AddGuidelinesAgreement1785800100000`). Recorded by
+   * `UsersService.markOnboarded`.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  guidelinesAcceptedAt!: Date | null;
+
+  /** The community-guidelines revision the agreement was made against, e.g.
+   *  "1.0". NULL whenever `guidelinesAcceptedAt` is NULL. */
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  guidelinesVersion!: string | null;
 
   // Per-user override for the monthly invite quota. NULL means "use the global
   // default" (app.inviteMonthlyQuota, itself defaulting to 5). Set directly in
   // the database to grant a member a higher (or lower) allowance.
   @Column({ type: 'integer', nullable: true })
-  inviteMonthlyQuota: number | null;
+  inviteMonthlyQuota!: number | null;
 
   /**
    * Marks a non-human platform account (currently only the permanent
@@ -138,14 +167,14 @@ export class User {
    * surface; everywhere else it remains an ordinary member.
    */
   @Column({ type: 'boolean', default: false })
-  isSystem: boolean;
+  isSystem!: boolean;
 
   @OneToOne(() => Profile, (profile) => profile.user)
-  profile: Profile;
+  profile!: Profile;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

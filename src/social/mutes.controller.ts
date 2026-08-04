@@ -42,7 +42,9 @@ export class MutesController {
   @Get()
   @ApiOperation({ summary: 'List members you have muted (paginated)' })
   @ApiOkResponse({ description: 'A page of muted-member records.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   list(@CurrentUser() user: CurrentUserData, @Query() query: ListPageQuery) {
     return this.social.listMutes(user.userId, query.page);
   }
@@ -53,7 +55,9 @@ export class MutesController {
   @ApiCreatedResponse({ description: 'The mute record (new or pre-existing).' })
   @ApiBadRequestResponse({ description: 'You cannot mute yourself.' })
   @ApiNotFoundResponse({ description: 'No member with that slug.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   mute(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.social.muteMember(user.userId, slug);
   }
@@ -63,8 +67,12 @@ export class MutesController {
   @ApiOperation({ summary: 'Unmute a member by slug' })
   @ApiNoContentResponse({ description: 'Mute removed.' })
   @ApiBadRequestResponse({ description: 'You cannot target yourself.' })
-  @ApiNotFoundResponse({ description: 'No member with that slug, or no mute to remove.' })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiNotFoundResponse({
+    description: 'No member with that slug, or no mute to remove.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   unmute(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.social.unmuteMember(user.userId, slug);
   }

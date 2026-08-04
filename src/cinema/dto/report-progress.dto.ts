@@ -4,5 +4,5 @@ export class ReportProgressDto {
   @IsInt()
   @Min(0)
   @Max(1_000_000)
-  positionSeconds: number;
+  positionSeconds!: number;
 }

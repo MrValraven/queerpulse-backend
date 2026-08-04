@@ -68,7 +68,9 @@ export class CompaniesController {
   @Patch(':slug')
   @ApiOperation({ summary: 'Update a company you own.' })
   @ApiOkResponse({ description: 'The updated company detail.' })
-  @ApiForbiddenResponse({ description: 'Only the owner can update the company.' })
+  @ApiForbiddenResponse({
+    description: 'Only the owner can update the company.',
+  })
   @ApiNotFoundResponse({ description: 'No company with that slug.' })
   update(
     @CurrentUser() user: CurrentUserData,

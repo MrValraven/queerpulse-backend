@@ -20,58 +20,58 @@ export enum OrgTierCtaType {
 @Entity('org_tiers')
 export class OrgTier {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_org_tiers_slug', { unique: true })
   @Column({ type: 'varchar' })
-  slug: string;
+  slug!: string;
 
   @Column({ type: 'varchar' })
-  name: string;
+  name!: string;
 
   // Display string, not a number — "€2.4k", "Custom", "€15k+".
   @Column({ type: 'varchar' })
-  priceDisplay: string;
+  priceDisplay!: string;
 
   @Column({ type: 'varchar' })
-  pricePeriod: string;
+  pricePeriod!: string;
 
   @Column({ type: 'text' })
-  dek: string;
+  dek!: string;
 
   @Column({ type: 'text', array: true, default: '{}' })
-  bullets: string[];
+  bullets!: string[];
 
   @Column({ type: 'text' })
-  footnote: string;
+  footnote!: string;
 
   @Column({
     type: 'enum',
     enum: OrgTierCtaType,
     enumName: 'org_tiers_cta_type_enum',
   })
-  ctaType: OrgTierCtaType;
+  ctaType!: OrgTierCtaType;
 
   @Column({ type: 'varchar' })
-  ctaLabel: string;
+  ctaLabel!: string;
 
   // Route/anchor for `ctaType = link`; null otherwise.
   @Column({ type: 'varchar', nullable: true })
-  ctaTarget: string | null;
+  ctaTarget!: string | null;
 
   // The highlighted middle tier (one expected, not enforced).
   @Column({ type: 'boolean', default: false })
-  featured: boolean;
+  featured!: boolean;
 
   @Column({ type: 'int', default: 0 })
-  sortOrder: number;
+  sortOrder!: number;
 
   @Column({ type: 'boolean', default: true })
-  published: boolean;
+  published!: boolean;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

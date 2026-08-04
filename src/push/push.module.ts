@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ChatModule } from '../chat/chat.module';
 import { Conversation } from '../messaging/entities/conversation.entity';
 import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
 import { PushController } from './push.controller';
@@ -21,6 +22,10 @@ import { PushSubscription } from './entities/push-subscription.entity';
     UsersModule, // provides UsersService + Profile repo (re-exported TypeOrmModule)
     ChatModule, // provides PresenceService
     SocialModule, // provides BlockFilterService (P0: block check before push)
+    // provides NotificationPreferencesService — the new-message push honours the
+    // member's "New message" category switch. One-way edge: NotificationsModule
+    // imports only SocialModule + TypeOrm, so it never reaches back to PushModule.
+    NotificationsModule,
   ],
   controllers: [PushController],
   providers: [

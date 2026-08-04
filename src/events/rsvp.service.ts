@@ -58,6 +58,10 @@ export class RsvpService {
         notifyHost,
         hostId: event.hostId,
         eventSlug: event.slug,
+        // Carried through `outcome` so the post-commit EVENT_RSVPED emit can
+        // title + visibility-gate the profile activity row (see event.events.ts).
+        eventTitle: event.title,
+        eventVisibility: event.visibility,
       };
 
       if (status === 'maybe') {
@@ -142,6 +146,8 @@ export class RsvpService {
         eventSlug: outcome.eventSlug,
         hostId: outcome.hostId,
         rsvperId: userId,
+        eventTitle: outcome.eventTitle,
+        eventVisibility: outcome.eventVisibility,
       } satisfies EventRsvpedEvent);
     }
     return outcome.result;

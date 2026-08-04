@@ -6,7 +6,10 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  DeleteObjectCommand,
+  DeleteObjectsCommand,
   GetObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
@@ -14,6 +17,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { randomUUID } from 'node:crypto';
 import { IMAGE_UPLOAD_TYPES } from './upload-content-types';
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
+import { isStorageKey } from './storage-key';
 
 export const PRESIGN_EXPIRY_SECONDS = 300; // 5 minutes
 
@@ -122,6 +126,149 @@ export class StorageService {
     return getSignedUrl(this.storageClient(), command, {
       expiresIn: PRESIGN_EXPIRY_SECONDS,
     });
+  }
+
+  /**
+   * Best-effort delete of a SINGLE stored object, addressed by the raw value an
+   * image column holds. Used on avatar / listing-photo / community-post media
+   * REPLACE or CLEAR so the object the column USED to point at stops orphaning
+   * in the bucket the moment that column is overwritten — the per-object twin of
+   * {@link deleteUserObjects}, which only ever ran at whole-account erasure.
+   *
+   * The stored value is one of two things (see `common/image-url.ts`): a storage
+   * KEY this service minted, or an external `https://…` URL (a Google OAuth
+   * avatar, a seeded Unsplash image). Only a key is ours to delete — anything
+   * that is not a well-formed key (external URL, empty, malformed) is ignored
+   * and returns `false` WITHOUT touching storage, so a caller can pass the old
+   * column value blindly.
+   *
+   * Callers treat this as non-fatal: it is invoked AFTER the DB mutation that
+   * dropped the reference has committed, object deletion is not transactional,
+   * and a stale object is a storage-cost issue never a correctness one — so a
+   * genuine storage failure DOES throw here and the caller wraps the call in
+   * try/catch + log rather than letting it roll back (or fail) the primary
+   * write. Returns whether a delete was actually issued.
+   */
+  async deleteObjectByReference(
+    storedValue: string | null | undefined,
+  ): Promise<boolean> {
+    if (!storedValue || !isStorageKey(storedValue)) {
+      return false;
+    }
+    await this.storageClient().send(
+      new DeleteObjectCommand({
+        Bucket: this.requireConfig('storage.bucket'),
+        Key: storedValue,
+      }),
+    );
+    return true;
+  }
+
+  // The S3 `DeleteObjects` API deletes at most 1000 keys per request.
+  private static readonly DELETE_BATCH_SIZE = 1000;
+
+  /**
+   * Erase every stored object a member uploaded — the storage-side half of
+   * account erasure (audit §B P1). The DB rows that referenced these objects
+   * (avatar, work images, listing/gathering photos, group/story covers) are
+   * cascaded away when the `users` row is hard-deleted, but the objects
+   * themselves live in the bucket outside Postgres and would otherwise keep
+   * serving through `GET /files/*` forever.
+   *
+   * Enumeration is by key PREFIX, not from the DB: every key this service mints
+   * embeds the uploader's user id as its middle segment
+   * (`<prefix>/<userId>/<uuid><ext>` — see `presignImageUpload` and
+   * `storageKeyOwnerId`), so listing `<prefix>/<userId>/` under each upload kind
+   * returns exactly this member's objects — including any abandoned/orphaned
+   * uploads that were presigned but never persisted to a DB column, which a
+   * DB-column sweep would miss.
+   *
+   * Returns the number of objects deleted. Per-object delete errors are logged
+   * and counted out (the batch call itself does not fail on them), so the caller
+   * gets an honest count. The caller runs this AFTER the erasure DB transaction
+   * commits and treats a thrown failure as best-effort — object deletion is not
+   * transactional, so it must never run before the row removal it mirrors.
+   */
+  async deleteUserObjects(userId: string): Promise<number> {
+    const bucket = this.requireConfig('storage.bucket');
+    const client = this.storageClient();
+    let deletedCount = 0;
+    // Distinct prefixes only — every upload kind namespaces under its own.
+    const prefixes = new Set(
+      Object.values(UPLOAD_KIND_SPECS).map((spec) => spec.prefix),
+    );
+    for (const prefix of prefixes) {
+      const keys = await this.listObjectKeys(
+        client,
+        bucket,
+        `${prefix}/${userId}/`,
+      );
+      deletedCount += await this.deleteObjectsByKey(client, bucket, keys);
+    }
+    return deletedCount;
+  }
+
+  // Every key under a prefix, following `ListObjectsV2` pagination to the end so
+  // a member with more than one page of objects is fully enumerated.
+  private async listObjectKeys(
+    client: S3Client,
+    bucket: string,
+    prefix: string,
+  ): Promise<string[]> {
+    const keys: string[] = [];
+    let continuationToken: string | undefined;
+    do {
+      const response = await client.send(
+        new ListObjectsV2Command({
+          Bucket: bucket,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        }),
+      );
+      for (const object of response.Contents ?? []) {
+        if (object.Key) {
+          keys.push(object.Key);
+        }
+      }
+      continuationToken = response.IsTruncated
+        ? response.NextContinuationToken
+        : undefined;
+    } while (continuationToken);
+    return keys;
+  }
+
+  // Deletes keys in `DeleteObjects`-sized batches, returning how many actually
+  // went. `DeleteObjects` reports per-object failures in `Errors` WITHOUT failing
+  // the request, so each is logged and subtracted from the deleted count.
+  private async deleteObjectsByKey(
+    client: S3Client,
+    bucket: string,
+    keys: string[],
+  ): Promise<number> {
+    let deletedCount = 0;
+    for (
+      let start = 0;
+      start < keys.length;
+      start += StorageService.DELETE_BATCH_SIZE
+    ) {
+      const batch = keys.slice(start, start + StorageService.DELETE_BATCH_SIZE);
+      const response = await client.send(
+        new DeleteObjectsCommand({
+          Bucket: bucket,
+          Delete: {
+            Objects: batch.map((key) => ({ Key: key })),
+            Quiet: true,
+          },
+        }),
+      );
+      for (const error of response.Errors ?? []) {
+        this.logger.error(
+          `Failed to delete object ${error.Key}: ${error.Code ?? ''} ${error.Message ?? ''}`.trim(),
+        );
+      }
+      deletedCount += batch.length - (response.Errors?.length ?? 0);
+    }
+    return deletedCount;
   }
 
   private storageClient(): S3Client {

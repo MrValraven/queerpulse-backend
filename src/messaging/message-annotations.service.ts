@@ -327,6 +327,19 @@ export class MessageAnnotationsService {
         { userId },
       )
       .where('(p.cleared_at IS NULL OR m.created_at > p.cleared_at)')
+      // A moderator-taken-down message (hidden OR removed, keyed by the message
+      // uuid) is dropped from the starred list too — its snippet below would
+      // otherwise leak the withheld body. In-query so the capped page isn't
+      // under-filled. `content_moderation.subject_id` is varchar; `m.id` is uuid.
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1 FROM "content_moderation" "cm"
+          WHERE "cm"."subject_type" = :messageSubjectType
+            AND "cm"."subject_id" = m.id::text
+            AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
+        )`,
+        { messageSubjectType: 'message' },
+      )
       // No `.withDeleted()`: the @DeleteDateColumn default filter drops tombstones.
       .orderBy('s.created_at', 'DESC')
       .addOrderBy('m.id', 'DESC')

@@ -2,6 +2,10 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import {
+  Connection,
+  ConnectionStatus,
+} from '../connections/entities/connection.entity';
 import { ReportsService } from '../reports/reports.service';
 import { Profile } from '../users/entities/profile.entity';
 import { Block } from './entities/block.entity';
@@ -52,7 +56,11 @@ describe('SocialService', () => {
   };
   let profiles: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let reportsService: { create: jest.Mock };
-  let manager: { createQueryBuilder: jest.Mock; update: jest.Mock };
+  let manager: {
+    createQueryBuilder: jest.Mock;
+    update: jest.Mock;
+    delete: jest.Mock;
+  };
   let dataSource: { transaction: jest.Mock };
 
   // Resolves any slug to a userId equal to the slug prefixed with `user-`,
@@ -89,6 +97,7 @@ describe('SocialService', () => {
     manager = {
       createQueryBuilder: jest.fn(() => qbStub()),
       update: jest.fn().mockResolvedValue({ affected: 0 }),
+      delete: jest.fn().mockResolvedValue({ affected: 1 }),
     };
     dataSource = {
       transaction: jest
@@ -291,7 +300,7 @@ describe('SocialService', () => {
   describe('unblockMember', () => {
     it('404s when there is nothing to unblock', async () => {
       stubSlugResolution({ them: 'them' });
-      blocks.delete.mockResolvedValue({ affected: 0 });
+      manager.delete.mockResolvedValue({ affected: 0 });
       await expect(service.unblockMember('me', 'them')).rejects.toBeInstanceOf(
         NotFoundException,
       );
@@ -300,9 +309,29 @@ describe('SocialService', () => {
     it('deletes the block row for the caller and slug', async () => {
       stubSlugResolution({ them: 'them' });
       await service.unblockMember('me', 'them');
-      expect(blocks.delete).toHaveBeenCalledWith({
+      expect(manager.delete).toHaveBeenCalledWith(Block, {
         blockerId: 'me',
         blockedId: 'them',
+      });
+    });
+
+    it('restores the connection edge this actor blocked (P1-3)', async () => {
+      stubSlugResolution({ them: 'them' });
+      await service.unblockMember('me', 'them');
+      // Conditional flip: only a connection this actor blocked is reopened.
+      const [entity, where, set] = manager.update.mock.calls[0] as [
+        unknown,
+        Record<string, unknown>,
+        Record<string, unknown>,
+      ];
+      expect(entity).toBe(Connection);
+      expect(where).toMatchObject({
+        status: ConnectionStatus.Blocked,
+        blockedBy: 'me',
+      });
+      expect(set).toMatchObject({
+        status: ConnectionStatus.Declined,
+        blockedBy: null,
       });
     });
   });

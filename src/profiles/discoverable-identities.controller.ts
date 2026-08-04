@@ -59,7 +59,8 @@ export class DiscoverableIdentitiesController {
   // what they have. Empty `published` for anyone who has never opted in, which
   // is everyone by default.
   @ApiOperation({
-    summary: "Get the caller's publishable and published discoverable identities",
+    summary:
+      "Get the caller's publishable and published discoverable identities",
   })
   @ApiOkResponse({
     description:
@@ -80,7 +81,8 @@ export class DiscoverableIdentitiesController {
     summary: "Replace the caller's published discoverable-identities set",
   })
   @ApiOkResponse({
-    description: 'The persisted `available` and `published` sets after the replace.',
+    description:
+      'The persisted `available` and `published` sets after the replace.',
   })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
   @ApiNotFoundResponse({ description: 'The caller has no profile.' })

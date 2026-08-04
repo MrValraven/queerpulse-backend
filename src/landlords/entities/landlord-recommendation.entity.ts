@@ -17,22 +17,22 @@ import {
 })
 export class LandlordRecommendation {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_landlord_recommendations_landlord_id')
   @Column({ type: 'uuid' })
-  landlordId: string;
+  landlordId!: string;
 
   @Index('IDX_landlord_recommendations_author_user_id')
   @Column({ type: 'uuid' })
-  authorUserId: string;
+  authorUserId!: string;
 
   @Column({ type: 'int' })
-  stars: number;
+  stars!: number;
 
   @Column({ type: 'text' })
-  text: string;
+  text!: string;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

@@ -46,7 +46,8 @@ export class HealthController {
   @ApiOperation({ summary: 'Full health check (includes a database ping)' })
   @ApiOkResponse({ description: 'The service and database are healthy.' })
   @ApiServiceUnavailableResponse({
-    description: 'A health indicator failed (e.g. the database is unreachable).',
+    description:
+      'A health indicator failed (e.g. the database is unreachable).',
   })
   check() {
     return this.health.check([() => this.db.pingCheck('database')]);

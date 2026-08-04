@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { Repository } from 'typeorm';
 import {
   CoopJoinRequest,
@@ -113,10 +114,18 @@ export class HousingService {
   }
 
   async listJoinRequests(coopSlug?: string): Promise<AdminJoinRequestDTO[]> {
+    // `take` bounds this admin list to `DEFAULT_LIST_LIMIT` (AUDIT item #19) —
+    // it previously returned every join request on the platform, newest first,
+    // with no cap. The response stays a flat `AdminJoinRequestDTO[]` (no
+    // pagination envelope callers read), matching every other bounded-but-
+    // unpaginated list in the repo. The coop-scoped path is served by
+    // `IDX_coop_join_requests_coop_id_created_at`
+    // (`1785903100000-AddCoopJoinRequestsCoopCreatedAtIndex`).
     const query = this.joinRequests
       .createQueryBuilder('request')
       .leftJoinAndSelect('request.coop', 'coop')
-      .orderBy('request.createdAt', 'DESC');
+      .orderBy('request.createdAt', 'DESC')
+      .take(DEFAULT_LIST_LIMIT);
     if (coopSlug) query.where('coop.slug = :coopSlug', { coopSlug });
     const requests = await query.getMany();
     return requests.map(toAdminJoinRequestDTO);

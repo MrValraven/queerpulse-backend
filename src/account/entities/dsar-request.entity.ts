@@ -15,18 +15,18 @@ export enum DsarStatus {
 @Entity('dsar_request')
 export class DsarRequest {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_dsar_request_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Index('UQ_dsar_request_reference', { unique: true })
   @Column({ type: 'varchar' })
-  reference: string;
+  reference!: string;
 
   @Column({ type: 'smallint' })
-  article: DsarArticle;
+  article!: DsarArticle;
 
   @Column({
     type: 'enum',
@@ -34,26 +34,26 @@ export class DsarRequest {
     enumName: 'dsar_request_status_enum',
     default: DsarStatus.Received,
   })
-  status: DsarStatus;
+  status!: DsarStatus;
 
   @Column({ type: 'jsonb' })
-  scopes: string[];
+  scopes!: string[];
 
   @Column({ type: 'text' })
-  details: string;
+  details!: string;
 
   @Column({ type: 'varchar', nullable: true })
-  context: string | null;
+  context!: string | null;
 
   // Deliberately a plain column (not `@CreateDateColumn`): the service sets it
   // explicitly so `dueBy` (submittedAt + 30 days) is computed from the exact
   // same instant that gets persisted.
   @Column({ type: 'timestamptz' })
-  submittedAt: Date;
+  submittedAt!: Date;
 
   @Column({ type: 'timestamptz' })
-  dueBy: Date;
+  dueBy!: Date;
 
   @Column({ type: 'timestamptz', nullable: true })
-  respondedAt: Date | null;
+  respondedAt!: Date | null;
 }

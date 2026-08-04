@@ -9,5 +9,5 @@ import { ConversationRole } from '../entities/conversation-participant.entity';
  */
 export class ChangeMemberRoleDto {
   @IsIn([ConversationRole.Admin, ConversationRole.Member])
-  role: ConversationRole.Admin | ConversationRole.Member;
+  role!: ConversationRole.Admin | ConversationRole.Member;
 }

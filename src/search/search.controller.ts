@@ -23,12 +23,15 @@ export class SearchController {
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Get()
   @ApiOperation({
-    summary: 'Global search across members, communities, events, forum and businesses',
+    summary:
+      'Global search across members, communities, events, forum, businesses, magazine, jobs, housing, resources, workshops and subprofiles',
   })
   @ApiOkResponse({
     description: 'Grouped, per-type-capped search results for the query.',
   })
-  @ApiUnauthorizedResponse({ description: 'Not an authenticated active member.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
   search(@CurrentUser() user: CurrentUserData, @Query() query: SearchQuery) {
     return this.searchService.search(
       user.userId,

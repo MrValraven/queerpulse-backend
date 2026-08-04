@@ -20,21 +20,21 @@ import {
 @Unique('UQ_recognition_awards_user_badge', ['userId', 'badgeKey'])
 export class RecognitionAward {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_recognition_awards_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({ type: 'varchar' })
-  badgeKey: string;
+  badgeKey!: string;
 
   // Free text describing when/how this specific member earned the badge
   // (e.g. "Pride Brunch · Jun 2025"). Falls back to the catalogue's generic
   // `earnedContext` when null.
   @Column({ type: 'text', nullable: true })
-  context: string | null;
+  context!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  awardedAt: Date;
+  awardedAt!: Date;
 }

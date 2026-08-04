@@ -10,9 +10,9 @@ import {
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 
 export class WorkItemDto {
-  @IsString() @MaxLength(80) category: string;
-  @IsString() @MaxLength(200) title: string;
-  @IsString() @MaxLength(20) year: string;
+  @IsString() @MaxLength(80) category!: string;
+  @IsString() @MaxLength(200) title!: string;
+  @IsString() @MaxLength(20) year!: string;
   @IsOptional() @IsImageReference() imageUrl?: string;
 }
 
@@ -21,5 +21,5 @@ export class ReplaceWorkDto {
   @ArrayMaxSize(100)
   @ValidateNested({ each: true })
   @Type(() => WorkItemDto)
-  items: WorkItemDto[];
+  items!: WorkItemDto[];
 }

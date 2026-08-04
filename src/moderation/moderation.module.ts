@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
+import { Listing } from '../listings/entities/listing.entity';
 import { AuthModule } from '../auth/auth.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -23,7 +24,17 @@ import { ModerationService } from './moderation.service';
     // registration exists to guarantee the entity is loaded into the DataSource
     // for this module regardless of what `AuthModule`/`AccountModule` (which
     // both register it independently) do later. TypeORM permits the overlap.
-    TypeOrmModule.forFeature([Appeal, ModAuditLog, AccountDeactivation]),
+    // `Listing` is registered read-only so a `listing`-subject report's detail
+    // view can surface the live listing's pasted evidence (item #13). TypeORM
+    // permits the same entity registered in multiple modules (mirrors the
+    // `AccountDeactivation` overlap above); the listing domain itself is owned
+    // by `ListingsModule`.
+    TypeOrmModule.forFeature([
+      Appeal,
+      ModAuditLog,
+      AccountDeactivation,
+      Listing,
+    ]),
     // Gets `Repository<Report>` via `ReportsModule`'s re-exported
     // `TypeOrmModule` rather than registering its own
     // `TypeOrmModule.forFeature([Report])` — see `reports.module.ts`.

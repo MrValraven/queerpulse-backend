@@ -7,8 +7,8 @@ import { IsBoolean, IsNotEmpty, IsString } from 'class-validator';
 export class UpdateEmailPreferenceDto {
   @IsString()
   @IsNotEmpty()
-  category: string;
+  category!: string;
 
   @IsBoolean()
-  email: boolean;
+  email!: boolean;
 }

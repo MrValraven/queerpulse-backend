@@ -26,12 +26,32 @@ describe('EventsService', () => {
     findOne: jest.Mock;
     exists: jest.Mock;
     find: jest.Mock;
+    createQueryBuilder: jest.Mock;
   };
   let invites: { exists: jest.Mock };
   let rsvpService: { reconcileWaitlist: jest.Mock };
   let notifications: { createForRecipients: jest.Mock };
-  let blockFilter: { blockedUserIds: jest.Mock };
+  let blockFilter: { excludeBlocked: jest.Mock };
   let profiles: { find: jest.Mock };
+
+  // A chainable query-builder stub for `attendees`' paginated RSVP query
+  // (`.skip().take().getManyAndCount()`, matching `common/pagination.ts`'s
+  // `paginate()`).
+  const attendeesQbStub = () => {
+    const qb: Record<string, jest.Mock> = {};
+    for (const m of [
+      'where',
+      'andWhere',
+      'orderBy',
+      'addOrderBy',
+      'skip',
+      'take',
+    ]) {
+      qb[m] = jest.fn().mockReturnValue(qb);
+    }
+    qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
+    return qb;
+  };
 
   beforeEach(async () => {
     events = {
@@ -48,6 +68,7 @@ describe('EventsService', () => {
       findOne: jest.fn().mockResolvedValue(null),
       exists: jest.fn().mockResolvedValue(false),
       find: jest.fn().mockResolvedValue([]),
+      createQueryBuilder: jest.fn(() => attendeesQbStub()),
     };
     invites = { exists: jest.fn().mockResolvedValue(false) };
     rsvpService = { reconcileWaitlist: jest.fn().mockResolvedValue(undefined) };
@@ -55,7 +76,7 @@ describe('EventsService', () => {
       createForRecipients: jest.fn().mockResolvedValue(undefined),
     };
     blockFilter = {
-      blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
+      excludeBlocked: jest.fn((qb: unknown) => qb),
     };
     profiles = { find: jest.fn().mockResolvedValue([]) };
     const module: TestingModule = await Test.createTestingModule({
@@ -78,6 +99,10 @@ describe('EventsService', () => {
   // Attendee lists filter BLOCKS ONLY, never mutes: a mute silences content,
   // it is not an "erase them from the guest list" tool, and misstating who is
   // actually attending could matter for a viewer's own safety planning.
+  // Filtering is IN-QUERY (`excludeBlocked`), not post-query, so a page of
+  // `PAGE_SIZE` attendees comes back full instead of silently short — and
+  // `status` scopes the query to one RSVP status per call (`going`
+  // /`waitlisted`), paginated, rather than the whole unbounded guest list.
   describe('attendees', () => {
     const publishedEvent = {
       id: 'e1',
@@ -85,24 +110,56 @@ describe('EventsService', () => {
       hostId: 'host-1',
       status: EventStatus.Published,
       visibility: EventVisibility.Public,
+      capacity: 20,
     };
 
-    it('drops blocked members from the attendee list', async () => {
+    it('filters going attendees by status, in-query and block-excluded', async () => {
       events.findOne.mockResolvedValue(publishedEvent);
-      rsvps.find.mockResolvedValue([
-        { eventId: 'e1', userId: 'blocked-1', status: 'going' },
-        { eventId: 'e1', userId: 'ok-1', status: 'going' },
-      ]);
-      blockFilter.blockedUserIds.mockResolvedValue(new Set(['blocked-1']));
+      const qb = attendeesQbStub();
+      rsvps.createQueryBuilder.mockReturnValue(qb);
 
-      await service.attendees('party', 'viewer-1');
+      await service.attendees('party', 'viewer-1', 'going');
 
-      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith('viewer-1', [
-        'blocked-1',
-        'ok-1',
+      expect(qb.andWhere).toHaveBeenCalledWith('r.status = :status', {
+        status: 'going',
+      });
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+        qb,
+        'viewer-1',
+        '"r"."user_id"',
+      );
+    });
+
+    it('filters waitlisted attendees separately from going', async () => {
+      events.findOne.mockResolvedValue(publishedEvent);
+      const qb = attendeesQbStub();
+      rsvps.createQueryBuilder.mockReturnValue(qb);
+
+      await service.attendees('party', 'viewer-1', 'waitlisted');
+
+      expect(qb.andWhere).toHaveBeenCalledWith('r.status = :status', {
+        status: 'waitlisted',
+      });
+    });
+
+    it('resolves profiles only for the rows the (block-filtered) query returns, and carries capacity', async () => {
+      events.findOne.mockResolvedValue(publishedEvent);
+      const qb = attendeesQbStub();
+      qb.getManyAndCount!.mockResolvedValue([
+        [
+          {
+            eventId: 'e1',
+            userId: 'ok-1',
+            status: 'going',
+            waitlistPosition: null,
+          },
+        ],
+        1,
       ]);
-      // The blocked member is gone before the profile hydration step, so no
-      // trace of them can reach the response.
+      rsvps.createQueryBuilder.mockReturnValue(qb);
+
+      const page = await service.attendees('party', 'viewer-1', 'going');
+
       expect(profiles.find).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { userId: expect.anything() as unknown },
@@ -112,35 +169,8 @@ describe('EventsService', () => {
         { where: { userId: { _value: string[] } } },
       ];
       expect(where.userId._value).toEqual(['ok-1']);
-    });
-
-    // The `blockFilter` stub deliberately exposes ONLY `blockedUserIds`: if
-    // `attendees` ever reached for a mute-aware helper it would throw here,
-    // which is the assertion. Mutes must not hide people from a guest list.
-    it('consults the block list only, never the mute list', async () => {
-      events.findOne.mockResolvedValue(publishedEvent);
-      rsvps.find.mockResolvedValue([
-        { eventId: 'e1', userId: 'muted-1', status: 'going' },
-      ]);
-
-      await expect(
-        service.attendees('party', 'viewer-1'),
-      ).resolves.toBeDefined();
-      expect(blockFilter.blockedUserIds).toHaveBeenCalled();
-    });
-
-    it('excludes cancelled RSVPs from the block lookup', async () => {
-      events.findOne.mockResolvedValue(publishedEvent);
-      rsvps.find.mockResolvedValue([
-        { eventId: 'e1', userId: 'gone-1', status: 'cancelled' },
-        { eventId: 'e1', userId: 'ok-1', status: 'going' },
-      ]);
-
-      await service.attendees('party', 'viewer-1');
-
-      expect(blockFilter.blockedUserIds).toHaveBeenCalledWith('viewer-1', [
-        'ok-1',
-      ]);
+      expect(page.total).toBe(1);
+      expect(page.capacity).toBe(20);
     });
   });
 

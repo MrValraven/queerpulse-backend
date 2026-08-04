@@ -36,7 +36,7 @@ export const DEFAULT_PUBLIC_PROFILE_ENABLED = false;
 @Entity('member_preferences')
 export class MemberPreferences {
   @PrimaryColumn({ name: 'user_id', type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   // --- Work-profile safety (GET/PUT /me/work-preferences) -------------------
 
@@ -46,15 +46,15 @@ export class MemberPreferences {
     enumName: 'member_preferences_out_at_work_enum',
     default: DEFAULT_OUT_AT_WORK,
   })
-  outAtWork: OutAtWork;
+  outAtWork!: OutAtWork;
 
   // Closed-set option ids (see `trans-support.ts`). `text[]` with a `{}`
   // default, matching `profiles.identities` / `profiles.lookingFor`.
   @Column({ type: 'text', array: true, default: '{}' })
-  transSupport: string[];
+  transSupport!: string[];
 
   @Column({ type: 'boolean', default: DEFAULT_SAFE_ONLY })
-  safeOnly: boolean;
+  safeOnly!: boolean;
 
   // --- Public-profile visibility (GET/PUT /me/public-profile) ---------------
 
@@ -84,8 +84,8 @@ export class MemberPreferences {
    * on purpose so a new `profiles` column cannot auto-appear.
    */
   @Column({ type: 'boolean', default: DEFAULT_PUBLIC_PROFILE_ENABLED })
-  publicProfileEnabled: boolean;
+  publicProfileEnabled!: boolean;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

@@ -1,3 +1,5 @@
+import { EventVisibility } from './entities/event.entity';
+
 export const EVENT_INVITED = 'event.invited';
 export const EVENT_WAITLIST_PROMOTED = 'event.waitlist_promoted';
 export const EVENT_RSVPED = 'event.rsvped';
@@ -25,4 +27,10 @@ export interface EventRsvpedEvent {
   eventSlug: string;
   hostId: string;
   rsvperId: string;
+  // Carried so the profiles `ActivityListener` can (a) title the activity row
+  // with the event name and (b) gate on visibility — only a `public` event's
+  // RSVP is recorded as public activity. Additive: the notifications listener
+  // ignores both.
+  eventTitle: string;
+  eventVisibility: EventVisibility;
 }

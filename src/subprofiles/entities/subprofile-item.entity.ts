@@ -44,6 +44,15 @@ export enum SubprofileSection {
   Series = 'series',
   // videomaker
   Videos = 'videos',
+  // chef
+  Menus = 'menus',
+  // chef + mixologist
+  Residencies = 'residencies',
+  // mixologist
+  Cocktails = 'cocktails',
+  // therapist
+  Specialisms = 'specialisms',
+  Credentials = 'credentials',
   // generic
   Showcase = 'showcase',
   // every kind
@@ -53,54 +62,54 @@ export enum SubprofileSection {
 @Entity('subprofile_items')
 export class SubprofileItem {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_subprofile_items_subprofile_id')
   @Column({ type: 'uuid' })
-  subprofileId: string;
+  subprofileId!: string;
 
   @Column({
     type: 'enum',
     enum: SubprofileSection,
     enumName: 'subprofile_items_section_enum',
   })
-  section: SubprofileSection;
+  section!: SubprofileSection;
 
   @Column({ type: 'varchar' })
-  title: string;
+  title!: string;
 
   @Column({ type: 'varchar', nullable: true })
-  subtitle: string | null;
+  subtitle!: string | null;
 
   @Column({ type: 'text', nullable: true })
-  description: string | null;
+  description!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  url: string | null;
+  url!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  imageUrl: string | null;
+  imageUrl!: string | null;
 
   // Freeform, e.g. "2025".
   @Column({ type: 'varchar', nullable: true })
-  date: string | null;
+  date!: string | null;
 
   // Short supporting line (role, stars, client, …).
   @Column({ type: 'varchar', nullable: true })
-  meta: string | null;
+  meta!: string | null;
 
   @Column({ type: 'text', array: true, default: '{}' })
-  tags: string[];
+  tags!: string[];
 
   @Column({ type: 'text', array: true, default: '{}' })
-  collaborators: string[];
+  collaborators!: string[];
 
   @Column({ type: 'boolean', default: false })
-  isFeatured: boolean;
+  isFeatured!: boolean;
 
   @Column({ type: 'int', default: 0 })
-  position: number;
+  position!: number;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

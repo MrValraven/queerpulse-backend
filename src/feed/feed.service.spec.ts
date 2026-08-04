@@ -69,6 +69,8 @@ const baseThread = (overrides: Partial<ForumThread> = {}): ForumThread => ({
   replyCount: 3,
   lastActivityAt: t('2026-07-10T00:00:00.000Z'),
   createdAt: t('2026-07-09T00:00:00.000Z'),
+  tags: [],
+  opVoteCount: 0,
   ...overrides,
 });
 
@@ -111,6 +113,7 @@ const baseCommunity = (overrides: Partial<Community> = {}): Community => ({
   ref: 'ref-1',
   createdAt: t('2026-01-01T00:00:00.000Z'),
   updatedAt: t('2026-01-01T00:00:00.000Z'),
+  archivedAt: null,
   ...overrides,
 });
 

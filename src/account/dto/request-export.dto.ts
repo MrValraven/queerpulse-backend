@@ -5,10 +5,10 @@ export type ExportFormat = 'json' | 'csv' | 'both';
 export class RequestExportDto {
   @IsArray()
   @IsString({ each: true })
-  categories: string[];
+  categories!: string[];
 
   @IsIn(['json', 'csv', 'both'])
-  format: ExportFormat;
+  format!: ExportFormat;
 
   // Required, matching DeactivateDto/RequestDeletionDto. An Art. 20 export is a
   // complete dump of everything we hold on a person, so it gets the same
@@ -18,5 +18,5 @@ export class RequestExportDto {
   // only real gate on the route.)
   @IsString()
   @MinLength(1)
-  reauthToken: string;
+  reauthToken!: string;
 }

@@ -22,18 +22,18 @@ export const VOUCH_RELATIONSHIPS: VouchRelationship[] = [
 @Unique('UQ_vouches_voucher_vouchee', ['voucherId', 'voucheeId'])
 export class Vouch {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_vouches_voucher_id')
   @Column({ type: 'uuid' })
-  voucherId: string;
+  voucherId!: string;
 
   @Index('IDX_vouches_vouchee_id')
   @Column({ type: 'uuid' })
-  voucheeId: string;
+  voucheeId!: string;
 
   @Column({ type: 'text', nullable: true })
-  note: string | null;
+  note!: string | null;
 
   @Column({
     type: 'enum',
@@ -41,16 +41,16 @@ export class Vouch {
     enumName: 'vouches_relationship_enum',
     nullable: true,
   })
-  relationship: VouchRelationship | null;
+  relationship!: VouchRelationship | null;
 
   @Column({ type: 'boolean', default: false })
-  anonymous: boolean;
+  anonymous!: boolean;
 
   // Soft-delete: a withdrawn vouch keeps its row (history + admin graph) but is
   // excluded from every count/list. Null = active.
   @Column({ type: 'timestamptz', nullable: true })
-  withdrawnAt: Date | null;
+  withdrawnAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

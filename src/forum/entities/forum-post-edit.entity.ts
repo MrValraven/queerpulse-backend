@@ -15,21 +15,21 @@ import {
 @Entity('forum_post_edit')
 export class ForumPostEdit {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_forum_post_edit_post_id')
   @Column({ type: 'uuid' })
-  postId: string;
+  postId!: string;
 
   @Column({ type: 'text' })
-  previousBody: string;
+  previousBody!: string;
 
   @Column({ type: 'text', nullable: true })
-  previousTitle: string | null;
+  previousTitle!: string | null;
 
   @Column({ type: 'uuid', nullable: true })
-  editorId: string | null;
+  editorId!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

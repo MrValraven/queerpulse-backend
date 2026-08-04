@@ -4,5 +4,5 @@ import { IsString, MaxLength } from 'class-validator';
 // normalized + format/reserved/uniqueness checked in the service against the ONE
 // global handle namespace; here we only cap the raw length.
 export class UpdateUsernameDto {
-  @IsString() @MaxLength(30) username: string;
+  @IsString() @MaxLength(30) username!: string;
 }

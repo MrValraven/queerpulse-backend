@@ -4,11 +4,11 @@ import { REASON_CODES, ReasonCode } from '../../reports/reason-catalogue';
 // `PATCH /mod/users/:userId/suspension` body — lift a suspension or ban.
 export class LiftSuspensionDto {
   @IsIn(REASON_CODES)
-  reasonCode: ReasonCode;
+  reasonCode!: ReasonCode;
 
   @IsString()
   @MaxLength(2000)
-  note: string;
+  note!: string;
 
   /**
    * The report this lift responds to, when there is one.

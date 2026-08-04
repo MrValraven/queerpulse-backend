@@ -100,24 +100,24 @@ const numericTransformer = {
 @Entity('governance_finance_report')
 export class GovernanceFinanceReport {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   // e.g. "2026-Q2". One published report per quarter.
   @Index('UQ_governance_finance_report_quarter', { unique: true })
   @Column({ type: 'varchar', length: 20 })
-  quarter: string;
+  quarter!: string;
 
   @Column({ type: 'jsonb' })
-  stats: FinanceStat[];
+  stats!: FinanceStat[];
 
   @Column({ type: 'jsonb' })
-  income: FinanceLine[];
+  income!: FinanceLine[];
 
   @Column({ type: 'jsonb' })
-  expense: FinanceLine[];
+  expense!: FinanceLine[];
 
   @Column({ type: 'jsonb', name: 'event_notes' })
-  eventNotes: FinanceEventNote[];
+  eventNotes!: FinanceEventNote[];
 
   // Reserve progress + disclosed partners render inside `FinancesSection`
   // alongside the income/expense breakdown, and (like the reserve total) they
@@ -125,10 +125,10 @@ export class GovernanceFinanceReport {
   // the evergreen `governance_overview`. Added after the initial table, hence
   // nullable — the seeded Q2 2026 row is backfilled by the seed.
   @Column({ type: 'jsonb', nullable: true })
-  reserve: FinanceReserve | null;
+  reserve!: FinanceReserve | null;
 
   @Column({ type: 'jsonb', nullable: true })
-  partners: FinancePartner[] | null;
+  partners!: FinancePartner[] | null;
 
   // Numeric per-quarter totals + MRR figures backing the admin governance
   // Finances tab (`/admin/governance` → Finances). Nullable — added after the
@@ -140,7 +140,7 @@ export class GovernanceFinanceReport {
     nullable: true,
     transformer: numericTransformer,
   })
-  incomeTotal: number | null;
+  incomeTotal!: number | null;
 
   @Column({
     type: 'numeric',
@@ -148,24 +148,24 @@ export class GovernanceFinanceReport {
     nullable: true,
     transformer: numericTransformer,
   })
-  expenseTotal: number | null;
+  expenseTotal!: number | null;
 
   @Column({
     type: 'numeric',
     nullable: true,
     transformer: numericTransformer,
   })
-  surplus: number | null;
+  surplus!: number | null;
 
   @Column({
     type: 'numeric',
     nullable: true,
     transformer: numericTransformer,
   })
-  mrr: number | null;
+  mrr!: number | null;
 
   @Column({ type: 'int', name: 'sustainer_count', nullable: true })
-  sustainerCount: number | null;
+  sustainerCount!: number | null;
 
   @Column({
     type: 'numeric',
@@ -173,15 +173,15 @@ export class GovernanceFinanceReport {
     nullable: true,
     transformer: numericTransformer,
   })
-  solidarityRate: number | null;
+  solidarityRate!: number | null;
 
   @Index('IDX_governance_finance_report_published_at')
   @Column({ type: 'timestamptz', name: 'published_at' })
-  publishedAt: Date;
+  publishedAt!: Date;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

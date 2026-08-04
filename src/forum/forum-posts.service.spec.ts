@@ -1,5 +1,6 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { MemberLookup } from '../common/member-ref';
+import { ForumThread } from './entities/forum-thread.entity';
 import { ForumPostsService } from './forum-posts.service';
 
 // Minimal fake repositories; only the paths exercised below are stubbed.
@@ -125,6 +126,105 @@ describe('ForumPostsService authorization', () => {
     await service.restorePost('p1', mod);
     expect(posts.save).toHaveBeenCalledWith(
       expect.objectContaining({ deletedAt: null }),
+    );
+  });
+});
+
+// `vote()` runs entirely on the transaction `manager` (findOne / insert
+// builder / increment / decrement / delete / update), so this harness stubs a
+// manager whose `increment`/`decrement` mutate the shared `post` object — the
+// re-read inside `vote()` then reflects the toggled count, exactly like the DB.
+function buildVote(options: { isOp: boolean; voteCount: number }) {
+  const post = {
+    id: 'p1',
+    threadId: 't1',
+    authorId: 'author-1',
+    body: 'op',
+    voteCount: options.voteCount,
+    isOp: options.isOp,
+    createdAt: new Date(),
+    editedAt: null as Date | null,
+    deletedAt: null as Date | null,
+  };
+  // Chainable stub for `.insert().into().values().orIgnore().execute()`; a
+  // single `raw` row means "this call did the insert", so `vote()` increments.
+  const insertBuilder = {
+    insert: jest.fn().mockReturnThis(),
+    into: jest.fn().mockReturnThis(),
+    values: jest.fn().mockReturnThis(),
+    orIgnore: jest.fn().mockReturnThis(),
+    execute: jest.fn().mockResolvedValue({ raw: [{ id: 'v1' }] }),
+  };
+  const threadUpdate = jest.fn().mockResolvedValue({ affected: 1 });
+  const manager = {
+    findOne: jest.fn().mockResolvedValue(post),
+    createQueryBuilder: jest.fn().mockReturnValue(insertBuilder),
+    increment: jest
+      .fn()
+      .mockImplementation(
+        (_entity: unknown, _where: unknown, _column: string, by: number) => {
+          post.voteCount += by;
+          return Promise.resolve({ affected: 1 });
+        },
+      ),
+    decrement: jest
+      .fn()
+      .mockImplementation(
+        (_entity: unknown, _where: unknown, _column: string, by: number) => {
+          post.voteCount -= by;
+          return Promise.resolve({ affected: 1 });
+        },
+      ),
+    delete: jest.fn().mockResolvedValue({ affected: 1 }),
+    update: threadUpdate,
+  };
+  const posts = {
+    manager: {
+      transaction: jest.fn(
+        async (cb: (m: typeof manager) => Promise<unknown>) => cb(manager),
+      ),
+    },
+  };
+  const service = new ForumPostsService(
+    posts as never,
+    {} as never, // votes repo — unused by vote() (it deletes via the manager)
+    {} as never, // profiles
+    { markActivity: jest.fn(), loadOr404: jest.fn() } as never,
+    { excludeHidden: jest.fn() } as never,
+    {} as never, // edits
+    {} as never, // mentions
+    { statesForAnyType: jest.fn() } as never,
+  );
+  return { service, post, threadUpdate };
+}
+
+describe('ForumPostsService vote → op_vote_count denorm', () => {
+  it('upvoting the OP mirrors the new count onto the thread', async () => {
+    const { service, threadUpdate } = buildVote({ isOp: true, voteCount: 0 });
+    const result = await service.vote('p1', 'voter-1', 1);
+    expect(result).toEqual({ voteCount: 1, myVote: 1 });
+    expect(threadUpdate).toHaveBeenCalledWith(
+      ForumThread,
+      { id: 't1' },
+      { opVoteCount: 1 },
+    );
+  });
+
+  it('upvoting a non-OP reply leaves the thread untouched', async () => {
+    const { service, threadUpdate } = buildVote({ isOp: false, voteCount: 0 });
+    const result = await service.vote('p1', 'voter-1', 1);
+    expect(result).toEqual({ voteCount: 1, myVote: 1 });
+    expect(threadUpdate).not.toHaveBeenCalled();
+  });
+
+  it('clearing a vote on the OP decrements the mirrored count', async () => {
+    const { service, threadUpdate } = buildVote({ isOp: true, voteCount: 1 });
+    const result = await service.vote('p1', 'voter-1', 0);
+    expect(result).toEqual({ voteCount: 0, myVote: 0 });
+    expect(threadUpdate).toHaveBeenCalledWith(
+      ForumThread,
+      { id: 't1' },
+      { opVoteCount: 0 },
     );
   });
 });

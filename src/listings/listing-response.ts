@@ -80,6 +80,35 @@ export interface ListingDTO {
 }
 
 /**
+ * One near-duplicate the wizard's live dedupe check surfaces (item #5,
+ * `GET /listings/similar`). Deliberately tiny — the frontend only needs to
+ * show "we already have a listing like this" with a link, so this leaks no
+ * owner/contact/moderation fields. `cat` is the listing's PRIMARY category
+ * slug (`cats[0]`); `distanceM` is the metres between the query coordinates
+ * and this listing's pin, or `null` when either side has no coordinates.
+ */
+export interface SimilarListingDTO {
+  name: string;
+  cat: string;
+  hood: string;
+  slug: string;
+  distanceM: number | null;
+}
+
+export function toSimilarListing(
+  listing: Listing,
+  distanceM: number | null,
+): SimilarListingDTO {
+  return {
+    name: listing.name,
+    cat: listing.cats[0] ?? '',
+    hood: listing.hood,
+    slug: listing.slug,
+    distanceM,
+  };
+}
+
+/**
  * Compact card for the public host page's "Partner spaces" list
  * (`GET /directory/spaces`). Deliberately NOT the full `ListingDTO`: the host
  * sidebar renders only venue-identity + capacity primitives, and this is a
@@ -288,6 +317,12 @@ export interface DirectoryOwner {
   bio: string;
   inQueerPulse: boolean;
   first: string;
+  /** The owner's public profile slug, for the "View profile" deep link —
+   * present only when they linked their profile AND their chosen visibility
+   * exposes their identity (`public`). `null` otherwise (anon/role/unlinked),
+   * where the frontend hides the profile link. Resolved by the directory
+   * service from `ownerId`; never derived from a display name. */
+  slug: string | null;
 }
 
 /**
@@ -392,7 +427,18 @@ export function ratingFromReviews(reviews: ListingReview[]): {
  * section, so this renders cleanly before that lands.
  */
 export interface DirectoryDetailDTO extends DirectoryCardDTO {
+  /** The listing's human-readable business reference (e.g. `QPL-2026-0007`) —
+   * the same id the owner-facing mutation paths address (`GET/PATCH/DELETE
+   * /listings/:ref`, `POST /listings/:ref/dispute`). Surfaced on the detail
+   * (not the card/grid) so a non-owner viewing a listing can address the
+   * report/dispute endpoint. Read-only, non-sensitive reference id. */
+  ref: string;
   tagline: string;
+  /** City the venue sits in; `null` ⇒ the frontend defaults to Lisbon. */
+  city: string | null;
+  /** IANA timezone the hours run on; `null` ⇒ the frontend defaults to
+   * Europe/Lisbon for its "Open now" computation. */
+  timezone: string | null;
   pills: string[];
   gallery: string[];
   /** Real uploaded images (storage-resolved URLs), paired with `alt`. `null`
@@ -441,11 +487,19 @@ export function toDirectoryDetail(
    * carry a profile avatar + link. Missing keys (seeded/non-member reviews)
    * render with initials only — see `toReviewDTO`. */
   reviewAuthors: Map<string, ReviewAuthor> = new Map(),
+  /** The owner's resolved public profile slug (directory service looks it up
+   * from `ownerId`), or `null` when the owner isn't linked/public. */
+  ownerSlug: string | null = null,
 ): DirectoryDetailDTO {
   const tint = tintForSlug(listing.slug);
   return {
     ...toDirectoryCard(listing),
+    ref: listing.ref,
     tagline: listing.tagline,
+    // Empty text columns read as "unset" (frontend then defaults to Lisbon /
+    // Europe-Lisbon), same `|| null` idiom the safe-space fields below use.
+    city: listing.city || null,
+    timezone: listing.timezone || null,
     // Price tier first (when set), then the listing's own tags, as detail pills.
     pills: [...(listing.price ? [listing.price] : []), ...listing.tags],
     // The gallery renders caption cells (no images in the prototype), so we
@@ -483,6 +537,9 @@ export function toDirectoryDetail(
         bio: identity.bio,
         inQueerPulse: identity.inQueerPulse,
         first: identity.first,
+        // Only a public, profile-linked owner exposes a clickable profile — the
+        // caller passes null for anon/role/unlinked, matching `inQueerPulse`.
+        slug: identity.inQueerPulse ? ownerSlug : null,
       };
     })(),
     social: listing.social,
@@ -491,7 +548,9 @@ export function toDirectoryDetail(
     reviews: reviews.map((review) =>
       toReviewDTO(
         review,
-        review.reviewerId ? (reviewAuthors.get(review.reviewerId) ?? null) : null,
+        review.reviewerId
+          ? (reviewAuthors.get(review.reviewerId) ?? null)
+          : null,
       ),
     ),
     upcoming: upcomingEvents.map(toUpcomingEvent),
@@ -706,7 +765,7 @@ export function toSafeSpaceDetail(
   }
   return {
     ...card,
-    eyebrow: `${card.typeLabel} · ${listing.hood} · Lisbon`,
+    eyebrow: `${card.typeLabel} · ${listing.hood} · ${listing.city || 'Lisbon'}`,
     sub: listing.safeSpaceSub || listing.blurb,
     verifier: listing.safeSpaceVerifier,
     reVerified: listing.safeSpaceReVerifiedAt ?? '',

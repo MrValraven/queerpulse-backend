@@ -13,28 +13,28 @@ export enum ActivityKind {
 @Entity('activities')
 export class Activity {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_activities_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({
     type: 'enum',
     enum: ActivityKind,
     enumName: 'activities_kind_enum',
   })
-  kind: ActivityKind;
+  kind!: ActivityKind;
 
   @Column({ type: 'varchar' })
-  title: string;
+  title!: string;
 
   @Column({ type: 'varchar', nullable: true })
-  sub: string | null;
+  sub!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
-  toLink: string | null;
+  toLink!: string | null;
 
   @Column({ type: 'timestamptz' })
-  occurredAt: Date;
+  occurredAt!: Date;
 }

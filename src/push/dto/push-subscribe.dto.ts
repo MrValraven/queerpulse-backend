@@ -10,11 +10,11 @@ import {
 class PushKeysDto {
   @IsString()
   @IsNotEmpty()
-  p256dh: string;
+  p256dh!: string;
 
   @IsString()
   @IsNotEmpty()
-  auth: string;
+  auth!: string;
 }
 
 export class PushSubscribeDto {
@@ -25,9 +25,9 @@ export class PushSubscribeDto {
   @IsUrl({ require_protocol: true, protocols: ['https'], require_tld: true })
   @MaxLength(1024)
   @IsNotEmpty()
-  endpoint: string;
+  endpoint!: string;
 
   @ValidateNested()
   @Type(() => PushKeysDto)
-  keys: PushKeysDto;
+  keys!: PushKeysDto;
 }

@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
   Brackets,
@@ -9,6 +13,7 @@ import {
   SelectQueryBuilder,
 } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
 import { MemberLookup } from '../common/member-ref';
 import {
@@ -76,6 +81,52 @@ export class DirectoryService {
   // `business` code (what the directory's own report control sends) or the
   // `listing` code, both keyed by the listing slug. Reads check both.
   private static readonly SUBJECT_TYPES = ['business', 'listing'];
+
+  // A review is reported (and taken down) under the `review` code, keyed by the
+  // review's uuid. A hidden OR removed review is dropped from every public
+  // review read here — the directory is a public marketing surface with no
+  // per-viewer staff role, so a takedown withholds the review from everyone (a
+  // removed review isn't rendered as a tombstone here the way a post is; it just
+  // vanishes, keeping the star aggregate honest).
+  private static readonly REVIEW_SUBJECT_TYPE = 'review';
+
+  // NOT EXISTS predicate dropping any review under a `review` takedown (hidden
+  // OR removed) from a review query builder, in-query so pagination/aggregates
+  // stay consistent. `reviewIdColumn` is spliced verbatim into raw SQL, so pass
+  // an actual column reference (never user input); it is cast to text because
+  // `content_moderation.subject_id` is varchar while a review id is uuid. Mirrors
+  // `excludeModeratedListings` and `ContentModerationService.excludeHidden`.
+  private excludeModeratedReviews(
+    qb: SelectQueryBuilder<ListingReview>,
+    reviewIdColumn: string,
+  ): void {
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "content_moderation" "cmr"
+        WHERE "cmr"."subject_type" = :reviewSubjectType
+          AND "cmr"."subject_id" = ${reviewIdColumn}::text
+          AND ("cmr"."hidden_at" IS NOT NULL OR "cmr"."removed_at" IS NOT NULL)
+      )`,
+      { reviewSubjectType: DirectoryService.REVIEW_SUBJECT_TYPE },
+    );
+  }
+
+  // Post-query variant for the `find`-based review reads that already hold rows
+  // (`getDirectoryBySlug`, `getSafeSpaceBySlug`). Drops any review carrying a
+  // `review` takedown so it never renders and never skews the derived rating.
+  private async dropModeratedReviews(
+    reviews: ListingReview[],
+  ): Promise<ListingReview[]> {
+    if (!reviews.length) return reviews;
+    const states = await this.contentModeration.statesFor(
+      DirectoryService.REVIEW_SUBJECT_TYPE,
+      reviews.map((review) => review.id),
+    );
+    return reviews.filter((review) => {
+      const state = states.get(review.id);
+      return !state || (!state.hidden && !state.removed);
+    });
+  }
 
   // Excludes moderator-taken-down listings from a directory query, in-query so
   // the "showing X of Y" count stays consistent. The directory is a public
@@ -215,11 +266,14 @@ export class DirectoryService {
     // listing's review count (DEFAULT_LIST_LIMIT is sized for exactly that) to
     // avoid skewing the rating — full pagination is served separately by
     // `listReviews`. Order matches `listReviews` (most-helpful, then newest).
-    const reviews = await this.reviews.find({
+    const allReviews = await this.reviews.find({
       where: { listingId: listing.id },
       order: { helpful: 'DESC', createdAt: 'DESC' },
       take: DEFAULT_LIST_LIMIT,
     });
+    // Drop moderator-taken-down reviews before they reach the DTO or the derived
+    // rating aggregate.
+    const reviews = await this.dropModeratedReviews(allReviews);
     // Upcoming, published events at this venue — soonest first, capped so the
     // sidebar card stays short. `new Date()` here is server "now" at request
     // time (not a cached value), which is exactly the cutoff we want.
@@ -239,13 +293,37 @@ export class DirectoryService {
       where: { subjectType: SavedKind.Listing, subjectId: listing.slug },
     });
     const reviewAuthors = await this.resolveReviewAuthors(reviews);
+    const ownerSlug = await this.resolveOwnerSlug(listing);
     return toDirectoryDetail(
       listing,
       reviews,
       upcoming,
       savedCount,
       reviewAuthors,
+      ownerSlug,
     );
+  }
+
+  /**
+   * The listing owner's public profile slug for the "View profile" deep link —
+   * but only when they linked their profile (`linkToProfile`) AND their chosen
+   * visibility exposes their identity. `anon`/`role` deliberately reveal no
+   * clickable profile (mirrors `ownerIdentity`'s redaction in listing-response),
+   * and an owner whose profile no longer exists resolves to `null`.
+   */
+  private async resolveOwnerSlug(listing: Listing): Promise<string | null> {
+    if (
+      !listing.linkToProfile ||
+      listing.visibility === 'anon' ||
+      listing.visibility === 'role'
+    ) {
+      return null;
+    }
+    const profile = await this.profiles.findOne({
+      where: { userId: listing.ownerId },
+      select: { slug: true },
+    });
+    return profile?.slug ?? null;
   }
 
   /**
@@ -289,6 +367,10 @@ export class DirectoryService {
       .where('review.listing_id = :listingId', { listingId: listing.id })
       .orderBy('review.helpful', 'DESC')
       .addOrderBy('review.created_at', 'DESC');
+    // In-query so a page comes back full and `total` counts only visible
+    // reviews — filtering after a fixed-size fetch would under-fill the page and
+    // (under OFFSET) permanently skip the review just past a taken-down one.
+    this.excludeModeratedReviews(qb, 'review.id');
     return paginate(qb, normalizePage(page), async (rows) => {
       const authors = await this.resolveReviewAuthors(rows);
       return rows.map((review) =>
@@ -315,17 +397,29 @@ export class DirectoryService {
     const reviewerName = profile
       ? `${profile.firstName} ${profile.lastName}`.trim()
       : 'A QueerPulse member';
-    const saved = await this.reviews.save(
-      this.reviews.create({
-        listingId: listing.id,
-        reviewerId: userId,
-        reviewerName,
-        byline: profile?.pronouns ?? '',
-        stars: dto.stars,
-        text: dto.text,
-        helpful: 0,
-      }),
-    );
+    let saved: ListingReview;
+    try {
+      saved = await this.reviews.save(
+        this.reviews.create({
+          listingId: listing.id,
+          reviewerId: userId,
+          reviewerName,
+          byline: profile?.pronouns ?? '',
+          stars: dto.stars,
+          text: dto.text,
+          helpful: 0,
+        }),
+      );
+    } catch (error) {
+      // One member gets one review per listing, guarded by the partial unique
+      // index `UQ_listing_reviews_reviewer` (member reviews only). A duplicate
+      // submit — a double-tap or a rating-spam attempt — surfaces as a clean 409
+      // instead of a 500. Mirrors `SavedService.add`'s 23505 handling.
+      if (isUniqueViolation(error, 'UQ_listing_reviews_reviewer')) {
+        throw new ConflictException('You have already reviewed this listing.');
+      }
+      throw error;
+    }
     // Tell the listing's owner about the new review (skip a self-review, and
     // listings with no real owner). Best-effort; deep-links to the business
     // detail page via `slug`. Actor is the reviewer, so a blocked/muted
@@ -380,7 +474,7 @@ export class DirectoryService {
       { count: number; starSum: number }
     >();
     if (verifiedListings.length > 0) {
-      const ratingRows = await this.reviews
+      const ratingsQb = this.reviews
         .createQueryBuilder('review')
         .select('review.listing_id', 'listingId')
         .addSelect('COUNT(*)', 'reviewCount')
@@ -388,12 +482,15 @@ export class DirectoryService {
         .where('review.listing_id IN (:...verifiedListingIds)', {
           verifiedListingIds: verifiedListings.map((listing) => listing.id),
         })
-        .groupBy('review.listing_id')
-        .getRawMany<{
-          listingId: string;
-          reviewCount: string;
-          starSum: string;
-        }>();
+        .groupBy('review.listing_id');
+      // Keep the safe-space card rating consistent with the detail page: a
+      // taken-down review must not count toward the COUNT/AVG here either.
+      this.excludeModeratedReviews(ratingsQb, 'review.id');
+      const ratingRows = await ratingsQb.getRawMany<{
+        listingId: string;
+        reviewCount: string;
+        starSum: string;
+      }>();
       for (const ratingRow of ratingRows) {
         ratingByListingId.set(ratingRow.listingId, {
           count: Number(ratingRow.reviewCount),
@@ -449,11 +546,12 @@ export class DirectoryService {
     // Bounded like `getDirectoryBySlug`: the safe-space card derives its rating
     // aggregate from this same array, so the cap sits above any real listing's
     // review count rather than truncating to a short preview.
-    const reviews = await this.reviews.find({
+    const allReviews = await this.reviews.find({
       where: { listingId: listing.id },
       order: { helpful: 'DESC', createdAt: 'DESC' },
       take: DEFAULT_LIST_LIMIT,
     });
+    const reviews = await this.dropModeratedReviews(allReviews);
     return toSafeSpaceDetail(listing, reviews);
   }
 

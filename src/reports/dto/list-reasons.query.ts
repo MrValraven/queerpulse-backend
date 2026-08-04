@@ -4,5 +4,5 @@ import { ReportSubjectType } from '../entities/report.entity';
 // `GET /reports/reasons?subjectType=` query.
 export class ListReasonsQuery {
   @IsEnum(ReportSubjectType)
-  subjectType: ReportSubjectType;
+  subjectType!: ReportSubjectType;
 }

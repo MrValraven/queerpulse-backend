@@ -15,6 +15,7 @@ interface AuthServiceMock {
   rotateRefreshToken: jest.Mock;
   revokeRefreshToken: jest.Mock;
   revokeAllForUser: jest.Mock;
+  suspensionInfoFor: jest.Mock;
 }
 
 function makeRes() {
@@ -55,6 +56,9 @@ function build(configNodeEnv = 'test', domain?: string) {
     rotateRefreshToken: jest.fn(),
     revokeRefreshToken: jest.fn().mockResolvedValue(undefined),
     revokeAllForUser: jest.fn().mockResolvedValue(undefined),
+    suspensionInfoFor: jest
+      .fn()
+      .mockResolvedValue({ suspendedUntil: null, suspension: null }),
   };
   const usersService = { findByIdWithProfile: jest.fn() };
   const config = makeConfig(configNodeEnv, domain);
@@ -335,7 +339,12 @@ describe('AuthController.me', () => {
       // NULL for accounts created before the 18+ gate shipped (this fixture has
       // no ageAttestedAt), surfaced as a nullable ISO string.
       ageAttestedAt: null,
+      // Likewise null for a fixture with no onboardedAt.
+      onboardedAt: null,
       profile: { displayName: 'Ada' },
+      // Suspension detail — null for an active member (mocked `suspensionInfoFor`).
+      suspendedUntil: null,
+      suspension: null,
     });
   });
 

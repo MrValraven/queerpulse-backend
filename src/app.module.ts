@@ -20,6 +20,7 @@ import { AuthModule } from './auth/auth.module';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
+import { MetricsModule } from './metrics/metrics.module';
 import { MembershipModule } from './membership/membership.module';
 import { PlatformSettingsModule } from './platform-settings/platform-settings.module';
 import { ProfilesModule } from './profiles/profiles.module';
@@ -41,6 +42,7 @@ import { GovernanceModule } from './governance/governance.module';
 import { RoadmapModule } from './roadmap/roadmap.module';
 import { AdminCommunitiesModule } from './admin-communities/admin-communities.module';
 import { AdminMembersModule } from './admin-members/admin-members.module';
+import { AdminInvitesModule } from './admin-invites/admin-invites.module';
 import { AdminTrustNetworkModule } from './admin-trust-network/admin-trust-network.module';
 import { AdminOverviewModule } from './admin-overview/admin-overview.module';
 import { AdminBotsModule } from './admin-bots/admin-bots.module';
@@ -69,6 +71,7 @@ import { ConsentModule } from './consent/consent.module';
 import { SavedModule } from './saved/saved.module';
 import { PreferencesModule } from './preferences/preferences.module';
 import { DraftsModule } from './drafts/drafts.module';
+import { ListingDraftsModule } from './listing-drafts/listing-drafts.module';
 import { RecognitionModule } from './recognition/recognition.module';
 import { AffiliationModule } from './affiliation/affiliation.module';
 import { ForumModule } from './forum/forum.module';
@@ -207,6 +210,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     StorageModule,
     CinemaModule,
     HealthModule,
+    MetricsModule,
     SecurityModule,
     SocialModule,
     ReportsModule,
@@ -219,6 +223,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     GenesisModule,
     PreferencesModule,
     DraftsModule,
+    ListingDraftsModule,
     RecognitionModule,
     AffiliationModule,
     ForumModule,
@@ -240,6 +245,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     ChangemakersModule,
     AdminCommunitiesModule,
     AdminMembersModule,
+    AdminInvitesModule,
     AdminTrustNetworkModule,
     AdminOverviewModule,
     AdminBotsModule,

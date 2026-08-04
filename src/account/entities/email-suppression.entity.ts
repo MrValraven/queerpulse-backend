@@ -40,17 +40,17 @@ import { createHash } from 'node:crypto';
 @Entity('email_suppression')
 export class EmailSuppression {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('UQ_email_suppression_email_hash', { unique: true })
   @Column({ type: 'varchar' })
-  emailHash: string;
+  emailHash!: string;
 
   @Column({ type: 'varchar', default: 'account_deleted' })
-  reason: string;
+  reason!: string;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }
 
 /**

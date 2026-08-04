@@ -15,7 +15,7 @@ import {
 @Entity('platform_setting_changes')
 export class PlatformSettingChange {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   // Nullable with ON DELETE SET NULL, matching `ModAuditLog` since
   // `AddDeletionErasureSupport1782800700000`: the trail must survive erasure of
@@ -23,26 +23,26 @@ export class PlatformSettingChange {
   // not an audit log. Always non-null at write time.
   @Index('IDX_platform_setting_changes_actor_id')
   @Column({ type: 'uuid', nullable: true })
-  actorId: string | null;
+  actorId!: string | null;
 
   /** e.g. `lockdownEnabled`. One of `TOGGLEABLE_KEYS`. */
   @Column({ type: 'varchar' })
-  settingKey: string;
+  settingKey!: string;
 
   /** Stringified previous value; null when the previous value was null. */
   @Column({ type: 'text', nullable: true })
-  oldValue: string | null;
+  oldValue!: string | null;
 
   /** Stringified new value; null when the new value is null. */
   @Column({ type: 'text', nullable: true })
-  newValue: string | null;
+  newValue!: string | null;
 
   /** Optional note the admin supplied with the change. */
   @Column({ type: 'text', nullable: true })
-  note: string | null;
+  note!: string | null;
 
   // Indexed: the history list is always "newest first".
   @Index('IDX_platform_setting_changes_created_at')
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

@@ -24,6 +24,7 @@ import { UserRole } from '../users/entities/user.entity';
 import { ForumPostEdit } from './entities/forum-post-edit.entity';
 import { ForumPostVote } from './entities/forum-post-vote.entity';
 import { ForumPost } from './entities/forum-post.entity';
+import { ForumThread } from './entities/forum-thread.entity';
 import { ForumThreadsService } from './forum-threads.service';
 import {
   ForumPostHistoryResponse,
@@ -125,10 +126,15 @@ export class ForumPostsService {
       ForumPostsService.SUBJECT_TYPES,
       rows.map((post) => post.id),
     );
-    const visible: Array<{ post: ForumPost; moderation: ContentModerationState }> =
-      [];
+    const visible: Array<{
+      post: ForumPost;
+      moderation: ContentModerationState;
+    }> = [];
     for (const post of rows) {
-      const moderation = states.get(post.id) ?? { hidden: false, removed: false };
+      const moderation = states.get(post.id) ?? {
+        hidden: false,
+        removed: false,
+      };
       // A hidden-but-not-removed post is withheld from ordinary members; a
       // removed post survives as a tombstone for everyone.
       if (moderation.hidden && !moderation.removed && !viewer.isModerator) {
@@ -173,6 +179,11 @@ export class ForumPostsService {
           authorId: user.userId,
           body,
           voteCount: 0,
+          // A reply is never the OP — that's created alongside the thread in
+          // `ForumThreadsService`. Set explicitly (the entity default is also
+          // false) so the invariant is visible at the call site and a voted
+          // reply never mirrors onto `forum_thread.op_vote_count`.
+          isOp: false,
           parentPostId: parentPost?.id ?? null,
         }),
       );
@@ -248,6 +259,16 @@ export class ForumPostsService {
   // counter is touched *only* when a row is genuinely inserted/deleted (the
   // insert's `RETURNING` row / the delete's `affected` count), so the two
   // idempotent no-op paths leave it untouched.
+  //
+  // When the voted post is the thread's OP (`is_op`), the thread's
+  // denormalized `op_vote_count` is mirrored to the post's *post-toggle*
+  // `voteCount` in the SAME transaction, so the thread-list card and the OP
+  // post never diverge (and the `top` keyset sort stays correct). The mirror
+  // is an assignment to the freshly-read count — not an independent
+  // increment — so it self-heals any prior drift and stays exactly consistent
+  // with the value this call returns. The atomic `voteCount` increment above
+  // holds the post's row lock, which serializes concurrent OP votes, so the
+  // last committer writes the final count to both places.
   async vote(
     postId: string,
     userId: string,
@@ -285,8 +306,21 @@ export class ForumPostsService {
       const refreshed = await manager.findOne(ForumPost, {
         where: { id: postId },
       });
+      const voteCount = refreshed?.voteCount ?? post.voteCount;
+
+      // Mirror the OP's count onto its thread's denormalized `op_vote_count`
+      // within this same transaction, so both commit together. Guarded on
+      // `is_op` so ordinary replies never touch the thread row.
+      if (post.isOp) {
+        await manager.update(
+          ForumThread,
+          { id: post.threadId },
+          { opVoteCount: voteCount },
+        );
+      }
+
       return {
-        voteCount: refreshed?.voteCount ?? post.voteCount,
+        voteCount,
         myVote: value,
       };
     });

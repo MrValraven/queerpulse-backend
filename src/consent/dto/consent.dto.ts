@@ -13,9 +13,9 @@ import { ConsentSource } from '../entities/consent-record.entity';
 
 export class ConsentCategoriesDto {
   // `necessary` is always on; the client sends `true` and we require it.
-  @Equals(true) necessary: true;
-  @IsBoolean() analytics: boolean;
-  @IsBoolean() monitoring: boolean;
+  @Equals(true) necessary!: true;
+  @IsBoolean() analytics!: boolean;
+  @IsBoolean() monitoring!: boolean;
 }
 
 export class ConsentDto {
@@ -23,9 +23,9 @@ export class ConsentDto {
 
   @ValidateNested()
   @Type(() => ConsentCategoriesDto)
-  categories: ConsentCategoriesDto;
+  categories!: ConsentCategoriesDto;
 
-  @IsString() @MinLength(1) @MaxLength(50) policyVersion: string;
+  @IsString() @MinLength(1) @MaxLength(50) policyVersion!: string;
 
-  @IsEnum(ConsentSource) source: ConsentSource;
+  @IsEnum(ConsentSource) source!: ConsentSource;
 }

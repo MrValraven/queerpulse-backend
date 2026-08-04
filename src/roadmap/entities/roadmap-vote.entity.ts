@@ -31,17 +31,17 @@ export enum RoadmapVoteTarget {
 @Index('IDX_roadmap_votes_target', ['targetType', 'targetId'])
 export class RoadmapVote {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Column({ type: 'uuid' })
-  memberId: string;
+  memberId!: string;
 
   @Column({ type: 'enum', enum: RoadmapVoteTarget })
-  targetType: RoadmapVoteTarget;
+  targetType!: RoadmapVoteTarget;
 
   @Column({ type: 'uuid' })
-  targetId: string;
+  targetId!: string;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

@@ -6,5 +6,5 @@ export class UpdatePostDto {
   @IsString()
   @MinLength(1)
   @MaxLength(10000)
-  body: string;
+  body!: string;
 }

@@ -1,11 +1,14 @@
-import { NotFoundException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { ForumPostEdit } from './entities/forum-post-edit.entity';
+import { ForumPostVote } from './entities/forum-post-vote.entity';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
 import { ForumThreadsService } from './forum-threads.service';
@@ -15,10 +18,19 @@ import { ForumThreadsService } from './forum-threads.service';
 // which itself adapts `cursorPaginate`'s terminal-call shape.
 function qbStub(rows: ForumThread[] = []) {
   const qb: Record<string, jest.Mock> = {};
-  for (const m of ['andWhere', 'orderBy', 'addOrderBy', 'take']) {
+  for (const m of [
+    'andWhere',
+    'orderBy',
+    'addOrderBy',
+    'take',
+    'select',
+    'addSelect',
+    'groupBy',
+  ]) {
     qb[m] = jest.fn().mockReturnValue(qb);
   }
   qb.getMany = jest.fn().mockResolvedValue(rows);
+  qb.getRawMany = jest.fn().mockResolvedValue([]);
   return qb;
 }
 
@@ -30,11 +42,27 @@ const baseThread = (overrides: Partial<ForumThread> = {}): ForumThread => ({
   category: 'general',
   isPinned: false,
   isLocked: false,
+  tags: [],
+  opVoteCount: 0,
   replyCount: 0,
   lastActivityAt: new Date('2026-01-01T00:00:00.000Z'),
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   ...overrides,
 });
+
+const moderator: CurrentUserData = {
+  userId: 'mod-1',
+  email: 'mod@example.com',
+  status: 'active',
+  role: 'moderator',
+};
+
+const member: CurrentUserData = {
+  userId: 'member-1',
+  email: 'member@example.com',
+  status: 'active',
+  role: 'member',
+};
 
 const baseProfile = (overrides: Partial<Profile> = {}): Profile =>
   ({
@@ -53,9 +81,16 @@ describe('ForumThreadsService', () => {
     exists: jest.Mock;
     increment: jest.Mock;
     update: jest.Mock;
+    save: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
-  let posts: { createQueryBuilder: jest.Mock };
+  let posts: {
+    createQueryBuilder: jest.Mock;
+    find: jest.Mock;
+    findOne: jest.Mock;
+    save: jest.Mock;
+  };
+  let votes: { find: jest.Mock; findOne: jest.Mock };
   let profiles: { find: jest.Mock };
   let edits: { find: jest.Mock; create: jest.Mock; save: jest.Mock };
   let dataSource: { transaction: jest.Mock };
@@ -74,9 +109,23 @@ describe('ForumThreadsService', () => {
       exists: jest.fn().mockResolvedValue(false),
       increment: jest.fn().mockResolvedValue(undefined),
       update: jest.fn().mockResolvedValue(undefined),
+      save: jest.fn((thread: unknown) => Promise.resolve(thread)),
       createQueryBuilder: jest.fn(() => qbStub()),
     };
-    posts = { createQueryBuilder: jest.fn(() => qbStub()) };
+    posts = {
+      createQueryBuilder: jest.fn(() => qbStub()),
+      // `toThreadResponses` batch-loads OP posts; `resolveOp`/`updateThreadTitle`
+      // point-load the single OP. Default: no OP found.
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(null),
+      save: jest.fn((post: unknown) => Promise.resolve(post)),
+    };
+    // The viewer's votes on OP posts — batched (`find`) on lists, point
+    // (`findOne`) on single-thread echoes. Default: no vote cast.
+    votes = {
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(null),
+    };
     profiles = { find: jest.fn().mockResolvedValue([]) };
     edits = {
       find: jest.fn().mockResolvedValue([]),
@@ -119,6 +168,10 @@ describe('ForumThreadsService', () => {
     };
     const manager = {
       ...txManager,
+      // `updateThreadTitle` writes the edit snapshot + OP + thread through the
+      // manager directly (not via a repo), so it needs `create`/`save` too.
+      create: jest.fn((_entity: unknown, value: object) => value),
+      save: jest.fn((value: unknown) => Promise.resolve(value)),
       getRepository: jest.fn((entity: unknown) => {
         if (entity === ForumThread) return threadsRepoInTx;
         if (entity === ForumPost) return postsRepoInTx;
@@ -138,11 +191,13 @@ describe('ForumThreadsService', () => {
         ForumThreadsService,
         { provide: getRepositoryToken(ForumThread), useValue: threads },
         { provide: getRepositoryToken(ForumPost), useValue: posts },
+        { provide: getRepositoryToken(ForumPostVote), useValue: votes },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: getRepositoryToken(ForumPostEdit), useValue: edits },
         { provide: DataSource, useValue: dataSource },
         { provide: BlockFilterService, useValue: blockFilter },
         { provide: MentionNotificationService, useValue: mentions },
+        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
       ],
     }).compile();
     service = module.get(ForumThreadsService);
@@ -328,6 +383,445 @@ describe('ForumThreadsService', () => {
       expect(entity).toBe(ForumThread);
       expect(idArg).toEqual({ id: 'thread-1' });
       expect(patch.lastActivityAt).toBeInstanceOf(Date);
+    });
+  });
+
+  describe('list sort', () => {
+    it('orders by op_vote_count DESC for sort=top', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('viewer-1', undefined, undefined, undefined, 'top');
+
+      expect(qb.orderBy).toHaveBeenCalledWith('"t"."op_vote_count"', 'DESC');
+    });
+
+    it('orders by last_activity_at DESC for sort=active', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('viewer-1', undefined, undefined, undefined, 'active');
+
+      expect(qb.orderBy).toHaveBeenCalledWith('"t"."last_activity_at"', 'DESC');
+    });
+
+    it('narrows to reply-less threads on the created_at keyset for sort=unanswered', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list(
+        'viewer-1',
+        undefined,
+        undefined,
+        undefined,
+        'unanswered',
+      );
+
+      expect(qb.andWhere).toHaveBeenCalledWith('t.reply_count = 0');
+      // Still the default createdAt keyset (raw ms-precision column), not a
+      // swapped leading column.
+      expect(qb.orderBy).toHaveBeenCalledWith('"t"."created_at"', 'DESC');
+    });
+
+    it('uses the default created_at keyset for sort=new (and when omitted)', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('viewer-1', undefined, undefined, undefined, 'new');
+
+      expect(qb.orderBy).toHaveBeenCalledWith('"t"."created_at"', 'DESC');
+      expect(qb.andWhere).not.toHaveBeenCalledWith('t.reply_count = 0');
+    });
+  });
+
+  describe('list q/tag filters', () => {
+    it('folds an escaped title ILIKE for q', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list(
+        'viewer-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        '  rent  ',
+      );
+
+      expect(qb.andWhere).toHaveBeenCalledWith('t.title ILIKE :q', {
+        q: '%rent%',
+      });
+    });
+
+    it('normalizes a filter tag and matches it against the tags array', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list(
+        'viewer-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        '#Housing',
+      );
+
+      expect(qb.andWhere).toHaveBeenCalledWith(':tag = ANY(t.tags)', {
+        tag: 'housing',
+      });
+    });
+
+    it('applies neither filter when q is blank and tag is absent', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list(
+        'viewer-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        '   ',
+      );
+
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        't.title ILIKE :q',
+        expect.anything(),
+      );
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        ':tag = ANY(t.tags)',
+        expect.anything(),
+      );
+    });
+  });
+
+  describe('list OP fields', () => {
+    it('batches OP posts + the viewer vote onto each card (no N+1)', async () => {
+      const qb = qbStub([baseThread({ opVoteCount: 5, tags: ['housing'] })]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+      profiles.find.mockResolvedValue([baseProfile()]);
+      posts.find.mockResolvedValue([{ id: 'op-1', threadId: 'thread-1' }]);
+      votes.find.mockResolvedValue([{ postId: 'op-1', value: 1 }]);
+
+      const page = await service.list(
+        'viewer-1',
+        undefined,
+        undefined,
+        undefined,
+      );
+
+      // One OP-post query and one vote query for the whole page.
+      expect(posts.find).toHaveBeenCalledTimes(1);
+      expect(votes.find).toHaveBeenCalledTimes(1);
+      expect(page.data[0]).toEqual(
+        expect.objectContaining({
+          opPostId: 'op-1',
+          opVoteCount: 5,
+          myVote: 1,
+          tags: ['housing'],
+        }),
+      );
+    });
+
+    it('defaults opPostId/myVote when the OP post is missing', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+      profiles.find.mockResolvedValue([baseProfile()]);
+      posts.find.mockResolvedValue([]);
+
+      const page = await service.list(
+        'viewer-1',
+        undefined,
+        undefined,
+        undefined,
+      );
+
+      expect(page.data[0]).toEqual(
+        expect.objectContaining({ opPostId: '', myVote: 0 }),
+      );
+      // No OP posts → skip the vote query entirely.
+      expect(votes.find).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getBySlug OP fields', () => {
+    it('resolves the OP post id and the viewer vote', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ opVoteCount: 3 }));
+      profiles.find.mockResolvedValue([baseProfile()]);
+      posts.findOne.mockResolvedValue({ id: 'op-1', threadId: 'thread-1' });
+      votes.findOne.mockResolvedValue({ postId: 'op-1', value: 1 });
+
+      const res = await service.getBySlug('hello-world', 'viewer-1');
+
+      expect(res.opPostId).toBe('op-1');
+      expect(res.opVoteCount).toBe(3);
+      expect(res.myVote).toBe(1);
+    });
+  });
+
+  describe('counts', () => {
+    it('groups by category and sums an all total, honoring the block filter', async () => {
+      const qb = qbStub();
+      qb.getRawMany!.mockResolvedValue([
+        { category: 'general', count: '4' },
+        { category: 'housing', count: '2' },
+      ]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      const result = await service.counts('viewer-1', undefined, undefined);
+
+      expect(qb.groupBy).toHaveBeenCalledWith('t.category');
+      expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
+        qb,
+        'viewer-1',
+        '"t"."author_id"',
+      );
+      expect(result).toEqual({ all: 6, general: 4, housing: 2 });
+    });
+
+    it('returns just { all: 0 } when there are no visible threads', async () => {
+      const qb = qbStub();
+      qb.getRawMany!.mockResolvedValue([]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      const result = await service.counts('viewer-1', undefined, undefined);
+
+      expect(result).toEqual({ all: 0 });
+    });
+
+    it('folds q/tag into the counts query', async () => {
+      const qb = qbStub();
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.counts('viewer-1', 'rent', '#Housing');
+
+      expect(qb.andWhere).toHaveBeenCalledWith('t.title ILIKE :q', {
+        q: '%rent%',
+      });
+      expect(qb.andWhere).toHaveBeenCalledWith(':tag = ANY(t.tags)', {
+        tag: 'housing',
+      });
+    });
+  });
+
+  describe('setLocked', () => {
+    it('locks a thread for a moderator and echoes the updated state', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ isLocked: false }));
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const res = await service.setLocked('hello-world', moderator, true);
+
+      const [saved] = threads.save.mock.calls[0] as [ForumThread];
+      expect(saved.isLocked).toBe(true);
+      expect(res.isLocked).toBe(true);
+    });
+
+    it('unlocks a thread for a moderator', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ isLocked: true }));
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const res = await service.setLocked('hello-world', moderator, false);
+
+      const [saved] = threads.save.mock.calls[0] as [ForumThread];
+      expect(saved.isLocked).toBe(false);
+      expect(res.isLocked).toBe(false);
+    });
+
+    it('forbids a non-moderator before touching the thread', async () => {
+      await expect(
+        service.setLocked('hello-world', member, true),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(threads.findOne).not.toHaveBeenCalled();
+      expect(threads.save).not.toHaveBeenCalled();
+    });
+
+    it('is a no-op write when already in the target state', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ isLocked: true }));
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      await service.setLocked('hello-world', moderator, true);
+
+      expect(threads.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('OP card moderation/lock flags', () => {
+    // A resolved OP post the single-thread paths hand the mapper. Live +
+    // authored by the thread author by default.
+    const opPost = (overrides: Record<string, unknown> = {}) => ({
+      id: 'op-1',
+      threadId: 'thread-1',
+      authorId: 'author-1',
+      deletedAt: null,
+      editedAt: null,
+      ...overrides,
+    });
+
+    it('getBySlug: the OP author can delete + (once edited) view history; a member cannot lock', async () => {
+      threads.findOne.mockResolvedValue(baseThread());
+      profiles.find.mockResolvedValue([baseProfile()]);
+      posts.findOne.mockResolvedValue(opPost({ editedAt: new Date() }));
+
+      const res = await service.getBySlug('hello-world', 'author-1', false);
+
+      expect(res.canDelete).toBe(true);
+      expect(res.canViewHistory).toBe(true);
+      expect(res.canRestore).toBe(false);
+      expect(res.canLock).toBe(false);
+    });
+
+    it('getBySlug: a moderator gets canLock + canDelete on another member OP', async () => {
+      threads.findOne.mockResolvedValue(baseThread());
+      profiles.find.mockResolvedValue([baseProfile()]);
+      posts.findOne.mockResolvedValue(opPost());
+
+      const res = await service.getBySlug('hello-world', 'mod-1', true);
+
+      expect(res.canLock).toBe(true);
+      expect(res.canDelete).toBe(true);
+      expect(res.canViewHistory).toBe(false);
+    });
+
+    it('getBySlug: a tombstoned OP offers restore (not delete) to a moderator', async () => {
+      threads.findOne.mockResolvedValue(baseThread());
+      profiles.find.mockResolvedValue([baseProfile()]);
+      posts.findOne.mockResolvedValue(opPost({ deletedAt: new Date() }));
+
+      const res = await service.getBySlug('hello-world', 'mod-1', true);
+
+      expect(res.canRestore).toBe(true);
+      expect(res.canDelete).toBe(false);
+    });
+
+    it('list: the OP card flags reflect a moderator viewer', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+      profiles.find.mockResolvedValue([baseProfile()]);
+      posts.find.mockResolvedValue([opPost()]);
+
+      const page = await service.list(
+        'mod-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+
+      expect(page.data[0]!.canLock).toBe(true);
+      expect(page.data[0]!.canDelete).toBe(true);
+    });
+
+    it('create: the author can delete the fresh OP but not lock (non-moderator)', async () => {
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const res = await service.create('author-1', {
+        title: 'Hello, World!',
+        body: 'First post body',
+        category: 'general',
+      });
+
+      expect(res.canDelete).toBe(true);
+      expect(res.canLock).toBe(false);
+      expect(res.canViewHistory).toBe(false);
+    });
+
+    it('setLocked: a moderator gets canLock on the echo', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ isLocked: false }));
+      profiles.find.mockResolvedValue([baseProfile()]);
+      posts.findOne.mockResolvedValue(opPost());
+
+      const res = await service.setLocked('hello-world', moderator, true);
+
+      expect(res.canLock).toBe(true);
+    });
+  });
+
+  describe('tags persistence', () => {
+    it('normalizes tags on create (trim, lowercase, strip #, dedupe, cap 5)', async () => {
+      profiles.find.mockResolvedValue([baseProfile()]);
+      let createdThread: Partial<ForumThread> | undefined;
+      // Capture what the in-transaction repo was asked to create.
+      dataSource.transaction.mockImplementation(
+        async (cb: (m: unknown) => Promise<unknown>) =>
+          cb({
+            increment: jest.fn(),
+            update: jest.fn(),
+            getRepository: (entity: unknown) => {
+              if (entity === ForumThread) {
+                return {
+                  create: (value: Partial<ForumThread>) => {
+                    createdThread = value;
+                    return value;
+                  },
+                  save: (thread: unknown) =>
+                    Promise.resolve({
+                      id: 'thread-1',
+                      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+                      ...(thread as object),
+                    }),
+                };
+              }
+              return {
+                create: (value: object) => value,
+                save: (post: unknown) =>
+                  Promise.resolve({ id: 'op-1', ...(post as object) }),
+              };
+            },
+          }),
+      );
+
+      await service.create('author-1', {
+        title: 'Hello, World!',
+        body: 'First post body',
+        category: 'general',
+        tags: ['  Housing ', '#housing', 'RENT', '', 'a', 'b', 'c', 'd'],
+      });
+
+      // deduped (housing once), '#'-stripped, lowercased, empties dropped,
+      // capped at 5.
+      expect(createdThread?.tags).toEqual(['housing', 'rent', 'a', 'b', 'c']);
+    });
+
+    it('replaces tags on update when the field is provided', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ tags: ['old'] }));
+      profiles.find.mockResolvedValue([baseProfile()]);
+      posts.findOne.mockResolvedValue({
+        id: 'op-1',
+        threadId: 'thread-1',
+        body: 'b',
+      });
+
+      const res = await service.updateThreadTitle(
+        'hello-world',
+        { userId: 'author-1', email: '', status: 'active', role: 'member' },
+        'New title',
+        ['#New', 'new', 'shiny'],
+      );
+
+      expect(res.tags).toEqual(['new', 'shiny']);
+    });
+
+    it('leaves tags untouched on update when the field is omitted', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ tags: ['keep'] }));
+      profiles.find.mockResolvedValue([baseProfile()]);
+      posts.findOne.mockResolvedValue({
+        id: 'op-1',
+        threadId: 'thread-1',
+        body: 'b',
+      });
+
+      const res = await service.updateThreadTitle(
+        'hello-world',
+        { userId: 'author-1', email: '', status: 'active', role: 'member' },
+        'New title',
+      );
+
+      expect(res.tags).toEqual(['keep']);
     });
   });
 });

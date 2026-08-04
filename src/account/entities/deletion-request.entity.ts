@@ -24,24 +24,24 @@ export enum DeletionRequestStatus {
 @Entity('deletion_request')
 export class DeletionRequest {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Index('IDX_deletion_request_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({
     type: 'enum',
     enum: DeletionRequestStatus,
     enumName: 'deletion_request_status_enum',
   })
-  status: DeletionRequestStatus;
+  status!: DeletionRequestStatus;
 
   @Column({ type: 'timestamptz' })
-  scheduledFor: Date;
+  scheduledFor!: Date;
 
   @Column({ type: 'varchar', nullable: true })
-  reason: string | null;
+  reason!: string | null;
 
   // When the erasure sweep actually erased the account — distinct from
   // `scheduledFor` (when it *became* due). Stamped by
@@ -51,7 +51,7 @@ export class DeletionRequest {
   // `AddDeletionErasureSupport1782800700000` precisely so the erasure ledger
   // survives the erasure.
   @Column({ type: 'timestamptz', nullable: true })
-  processedAt: Date | null;
+  processedAt!: Date | null;
 
   /**
    * The `users.status` held when the grace period opened. Opening a deletion
@@ -74,11 +74,11 @@ export class DeletionRequest {
     enumName: 'users_status_enum',
     nullable: true,
   })
-  previousStatus: UserStatus | null;
+  previousStatus!: UserStatus | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
+  updatedAt!: Date;
 }

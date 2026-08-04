@@ -18,18 +18,18 @@ import {
 @Index('UQ_forum_post_vote', ['postId', 'userId'], { unique: true })
 export class ForumPostVote {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Column({ type: 'uuid' })
-  postId: string;
+  postId!: string;
 
   @Index('IDX_forum_post_vote_user_id')
   @Column({ type: 'uuid' })
-  userId: string;
+  userId!: string;
 
   @Column({ type: 'smallint' })
-  value: number;
+  value!: number;
 
   @CreateDateColumn({ type: 'timestamptz' })
-  createdAt: Date;
+  createdAt!: Date;
 }

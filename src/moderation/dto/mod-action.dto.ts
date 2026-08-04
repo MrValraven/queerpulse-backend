@@ -19,15 +19,15 @@ export type ModActionCode = (typeof MOD_ACTION_CODES)[number];
 // `queerpulse/src/features/admin/api/moderation.api.ts` exactly (C6).
 export class ModActionDto {
   @IsIn(MOD_ACTION_CODES)
-  action: ModActionCode;
+  action!: ModActionCode;
 
   @IsIn(REASON_CODES)
-  reasonCode: ReasonCode;
+  reasonCode!: ReasonCode;
 
   // The exact member-facing text — the reason the member reads.
   @IsString()
   @MaxLength(2000)
-  note: string;
+  note!: string;
 
   // e.g. "7d" for restrict/suspend.
   @IsOptional()

@@ -81,7 +81,9 @@ export class ModerationController {
   // is scoped to a single report via `?reportId=`), so there is no routing
   // conflict between the two.
   @Get('audit')
-  @ApiOperation({ summary: 'Get the global cross-report moderation audit feed' })
+  @ApiOperation({
+    summary: 'Get the global cross-report moderation audit feed',
+  })
   @ApiOkResponse({ description: 'The platform-wide moderation audit feed.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })

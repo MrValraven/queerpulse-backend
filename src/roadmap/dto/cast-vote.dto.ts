@@ -6,8 +6,8 @@ import { RoadmapVoteTarget } from '../entities/roadmap-vote.entity';
 // not an error (see `RoadmapService.castVote`).
 export class CastVoteDto {
   @IsEnum(RoadmapVoteTarget)
-  targetType: RoadmapVoteTarget;
+  targetType!: RoadmapVoteTarget;
 
   @IsUUID()
-  targetId: string;
+  targetId!: string;
 }

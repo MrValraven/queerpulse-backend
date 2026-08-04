@@ -7,7 +7,10 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { In, Repository } from 'typeorm';
+import { escapeLikeTerm } from '../common/like-escape';
+import { In, Repository, SelectQueryBuilder } from 'typeorm';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { UserRole } from '../users/entities/user.entity';
 import {
   CompaniesService,
   CreateCompanyInput,
@@ -32,9 +35,11 @@ import {
   JobApplicationDTO,
   JobCardDTO,
   JobDetailDTO,
+  JobSearchRow,
   toJobApplication,
   toJobCard,
   toJobDetail,
+  toJobSearchRow,
 } from './job-response';
 
 // Postgres unique-violation SQLSTATE. Mirrors `CompaniesService`'s identical
@@ -97,6 +102,21 @@ export interface CreateJobApplicationInput {
   coverNote?: string;
 }
 
+// A job is reported (and taken down) under the `job` subject, keyed by the job
+// slug — matching the report control on the job detail page
+// (`subjectType="job"`, `subjectId={job.slug}`) and what the shared
+// `content_moderation` row therefore stores.
+const JOB_SUBJECT_TYPE = 'job';
+
+// Platform staff (moderator/admin) still see moderator-taken-down jobs on the
+// read paths; ordinary members don't. Mirrors `ForumPostsService`'s
+// `MODERATOR_ROLES` / `isModeratorRole`.
+const STAFF_ROLES: readonly string[] = [UserRole.Moderator, UserRole.Admin];
+
+function isStaffRole(role: string | undefined): boolean {
+  return role != null && STAFF_ROLES.includes(role);
+}
+
 /** Fills every `JobDetailBody` subfield so the `jsonb NOT NULL` `detail`
  * column is always fully populated, even when a caller only supplies part
  * of it (or omits it entirely at creation). */
@@ -124,7 +144,33 @@ export class JobsService {
     // is needed on either side.
     private readonly companiesService: CompaniesService,
     private readonly notifications: NotificationsService,
+    // Reads the shared `content_moderation` state so a moderator takedown on a
+    // `job` subject withholds the job from ordinary members' read paths.
+    private readonly contentModeration: ContentModerationService,
   ) {}
+
+  // Drops any job under a `job` takedown (hidden OR removed) from a job query
+  // builder, in-query so pagination/counts stay consistent — the same reason
+  // `DirectoryService.excludeModeratedListings` and
+  // `ContentModerationService.excludeHidden` filter in-query rather than after a
+  // fixed-size fetch. A job is NOT rendered as a tombstone the way a forum post
+  // is, so BOTH hidden and removed are excluded here; staff read paths skip this
+  // call and still see takedowns. The `j.slug` reference is spliced verbatim
+  // into raw SQL (never user input); it is cast to text because
+  // `content_moderation.subject_id` is varchar while `jobs.slug` is varchar too
+  // (no cast needed — both varchar), keyed on the unique
+  // `(subject_type, subject_id)` index.
+  private excludeModeratedJobs(qb: SelectQueryBuilder<Job>): void {
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "content_moderation" "cmj"
+        WHERE "cmj"."subject_type" = :jobSubjectType
+          AND "cmj"."subject_id" = j.slug
+          AND ("cmj"."hidden_at" IS NOT NULL OR "cmj"."removed_at" IS NOT NULL)
+      )`,
+      { jobSubjectType: JOB_SUBJECT_TYPE },
+    );
+  }
 
   async create(posterId: string, dto: CreateJobInput): Promise<JobDetailDTO> {
     const companyRef = await this.resolveCompanyForCreate(posterId, dto);
@@ -238,24 +284,36 @@ export class JobsService {
     throw new ConflictException('Could not allocate a unique job slug');
   }
 
-  async list(query: JobListQuery): Promise<Paginated<JobCardDTO>> {
-    return this.listInternal(query);
+  // Public/member job grid (`GET /jobs`). `viewerRole` gates the moderation
+  // filter: ordinary members never see a taken-down job, platform staff still
+  // do (so the grid a moderator sees matches what they can act on).
+  async list(
+    query: JobListQuery,
+    viewerRole?: string,
+  ): Promise<Paginated<JobCardDTO>> {
+    return this.listInternal(query, {
+      excludeModerated: !isStaffRole(viewerRole),
+    });
   }
 
   // Owner's own postings — backs `GET /me/jobs`. Reuses the same
   // `JobListQuery`/`Paginated<JobCardDTO>` shape as `list()`, just scoped to
   // `posterId` (mirrors `listMyApplications`'s "me" precedent, but keeps
-  // page-number pagination since this is a card list, not a feed).
+  // page-number pagination since this is a card list, not a feed). Moderation
+  // filtering is deliberately NOT applied: a takedown only withholds a job from
+  // the public grid/detail — the poster still manages their own job here,
+  // mirroring `DirectoryService`'s "owner routes don't go through the filtered
+  // public read" contract.
   async listMine(
     posterId: string,
     query: JobListQuery,
   ): Promise<Paginated<JobCardDTO>> {
-    return this.listInternal(query, posterId);
+    return this.listInternal(query, { posterId, excludeModerated: false });
   }
 
   private async listInternal(
     query: JobListQuery,
-    posterId?: string,
+    opts: { posterId?: string; excludeModerated: boolean },
   ): Promise<Paginated<JobCardDTO>> {
     const page = normalizePage(query.page);
     const qb = this.jobs
@@ -268,8 +326,11 @@ export class JobsService {
     if (query.type) {
       qb.andWhere('j.commitment = :type', { type: query.type });
     }
-    if (posterId) {
-      qb.andWhere('j.poster_id = :posterId', { posterId });
+    if (opts.posterId) {
+      qb.andWhere('j.poster_id = :posterId', { posterId: opts.posterId });
+    }
+    if (opts.excludeModerated) {
+      this.excludeModeratedJobs(qb);
     }
 
     return paginate(qb, page, async (rows) => {
@@ -283,9 +344,46 @@ export class JobsService {
     });
   }
 
-  async getBySlug(slug: string, viewerId: string): Promise<JobDetailDTO> {
+  async getBySlug(
+    slug: string,
+    viewerId: string,
+    viewerRole?: string,
+  ): Promise<JobDetailDTO> {
     const job = await this.loadOr404(slug);
+    // A moderator takedown (hidden OR removed) withholds the job's detail from
+    // ordinary members — it 404s exactly as an unknown slug does, so the
+    // takedown isn't even confirmable. Platform staff and the job's own poster
+    // are exempt: staff act on it, the poster still manages it (and still sees
+    // it in `listMine`). A removed job is withheld here rather than blanked —
+    // jobs have no tombstone rendering, unlike forum/community posts.
+    if (!isStaffRole(viewerRole) && job.posterId !== viewerId) {
+      const state = await this.contentModeration.stateFor(
+        JOB_SUBJECT_TYPE,
+        job.slug,
+      );
+      if (state.hidden || state.removed) {
+        throw new NotFoundException('Job not found');
+      }
+    }
     return this.buildDetail(job, viewerId);
+  }
+
+  // Cross-entity global search (SearchService) — open postings only, ILIKE
+  // over title / desc. No company/poster hydration: the search row needs only
+  // slug / title / category / location.
+  async searchByText(term: string, limit: number): Promise<JobSearchRow[]> {
+    const pattern = `%${escapeLikeTerm(term)}%`;
+    const qb = this.jobs
+      .createQueryBuilder('j')
+      .where('j.status = :open', { open: JobStatus.Open })
+      .andWhere('(j.title ILIKE :pattern OR j.desc ILIKE :pattern)', {
+        pattern,
+      });
+    // Global search is a cross-entity discovery surface with no per-viewer staff
+    // role — a taken-down job must never resurface here for anyone.
+    this.excludeModeratedJobs(qb);
+    const rows = await qb.orderBy('j.created_at', 'DESC').take(limit).getMany();
+    return rows.map(toJobSearchRow);
   }
 
   async update(
