@@ -8,7 +8,14 @@ it('maps a profile to a ref and null to null', () => {
       slug: 'a-b',
       firstName: 'A',
       lastName: 'B',
+      pronouns: 'they/them',
       avatarUrl: null,
     } as unknown as Profile),
-  ).toEqual({ slug: 'a-b', firstName: 'A', lastName: 'B', avatarUrl: null });
+  ).toEqual({
+    slug: 'a-b',
+    firstName: 'A',
+    lastName: 'B',
+    pronouns: 'they/them',
+    avatarUrl: null,
+  });
 });

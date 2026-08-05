@@ -37,6 +37,7 @@ const DELETED_MEMBER: MemberRef = {
   slug: '',
   firstName: '',
   lastName: '',
+  pronouns: null,
   avatarUrl: null,
 };
 

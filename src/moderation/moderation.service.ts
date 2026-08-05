@@ -441,6 +441,13 @@ export class ModerationService {
     return this.audit.auditFeed(query);
   }
 
+  // GET /mod/audit.csv — the same filtered audit feed rendered as a CSV
+  // attachment for the governance "Audit" tab's export (P3-8). Delegates to
+  // `ModAuditService`.
+  auditFeedCsv(query: AuditFeedQuery): Promise<string> {
+    return this.audit.auditFeedCsv(query);
+  }
+
   // GET /mod/appeals — newest first, mirrors every other list in this
   // codebase (`orderBy(..., 'DESC')`).
   async listAppeals(): Promise<AppealDTO[]> {

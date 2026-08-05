@@ -10,6 +10,8 @@ import { UsersModule } from '../users/users.module';
 import { Appeal } from './entities/appeal.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
 import { AccountEnforcementService } from './account-enforcement.service';
+import { AdminMemberModerationController } from './admin-member-moderation.controller';
+import { AdminMemberModerationService } from './admin-member-moderation.service';
 import { AppealsController } from './appeals.controller';
 import { ModAuditService } from './mod-audit.service';
 import { ModerationController } from './moderation.controller';
@@ -62,10 +64,24 @@ import { ModerationService } from './moderation.service';
   // `AppealsController` (member-facing `POST /appeals`) shares `ModerationService`
   // with `ModerationController` (the mod/admin queue + review), so submitted
   // appeals land in the very same table the review path reads.
-  controllers: [ModerationController, AppealsController],
-  // The two extracted concerns are registered so Nest owns them as singletons
-  // and injects them into `ModerationService`. Nothing outside this module
-  // consumes them (only `ModerationService` does), so they are not exported.
-  providers: [ModerationService, ModAuditService, AccountEnforcementService],
+  // `AdminMemberModerationController` is the admin member-drawer Verify/Restrict
+  // surface (P2-3) — `@Roles(Moderator, Admin)` on the shared `admin/members`
+  // base path. It lives here (not in the admin-members module) because it
+  // reuses this module's enforcement/audit/notification machinery rather than
+  // duplicating the suspension model.
+  controllers: [
+    ModerationController,
+    AppealsController,
+    AdminMemberModerationController,
+  ],
+  // The extracted concerns are registered so Nest owns them as singletons and
+  // injects them into `ModerationService`/`AdminMemberModerationService`.
+  // Nothing outside this module consumes them, so they are not exported.
+  providers: [
+    ModerationService,
+    ModAuditService,
+    AccountEnforcementService,
+    AdminMemberModerationService,
+  ],
 })
 export class ModerationModule {}

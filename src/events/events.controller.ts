@@ -24,6 +24,7 @@ import { ListEventsQuery } from './dto/list-events.query';
 import { RespondEventInviteDto } from './dto/respond-event-invite.dto';
 import { RsvpDto } from './dto/rsvp.dto';
 import { UpdateEventDto } from './dto/update-event.dto';
+import { EventBookmarksService } from './event-bookmarks.service';
 import { EventInvitesService } from './event-invites.service';
 import { EventsService } from './events.service';
 import { RsvpService } from './rsvp.service';
@@ -53,10 +54,16 @@ export class EventsController {
     private readonly eventsService: EventsService,
     private readonly rsvpService: RsvpService,
     private readonly eventInvitesService: EventInvitesService,
+    private readonly eventBookmarksService: EventBookmarksService,
   ) {}
 
   @Get()
-  @ApiOperation({ summary: 'List events (filtered, paginated).' })
+  @ApiOperation({
+    summary: 'List events (filtered, paginated).',
+    description:
+      '`filter=saved` returns the caller\'s bookmarked ("saved") events, ' +
+      'most-recently-saved first. Every summary carries `isBookmarked`.',
+  })
   @ApiOkResponse({ description: 'Event summaries for the requested filter.' })
   list(@CurrentUser() user: CurrentUserData, @Query() query: ListEventsQuery) {
     return this.eventsService.list(
@@ -139,6 +146,33 @@ export class EventsController {
     @Param('slug') slug: string,
   ) {
     return this.rsvpService.cancelRsvp(slug, user.userId);
+  }
+
+  @Post(':slug/bookmark')
+  @ApiOperation({
+    summary: 'Bookmark ("save") an event. Idempotent.',
+    description:
+      'Saving an already-saved event is a no-op that still reports ' +
+      '`{ bookmarked: true }`. The event then surfaces under GET ' +
+      '/events?filter=saved.',
+  })
+  @ApiCreatedResponse({ description: '`{ bookmarked: true }`.' })
+  @ApiNotFoundResponse({ description: 'No event with that slug.' })
+  bookmark(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
+    return this.eventBookmarksService.bookmark(user.userId, slug);
+  }
+
+  @Delete(':slug/bookmark')
+  @ApiOperation({
+    summary: 'Remove your bookmark from an event. Idempotent.',
+  })
+  @ApiOkResponse({ description: '`{ bookmarked: false }`.' })
+  @ApiNotFoundResponse({ description: 'No event with that slug.' })
+  removeBookmark(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.eventBookmarksService.removeBookmark(user.userId, slug);
   }
 
   @Get(':slug/attendees')

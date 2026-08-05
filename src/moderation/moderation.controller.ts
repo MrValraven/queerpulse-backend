@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -89,6 +90,25 @@ export class ModerationController {
   @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
   auditFeed(@Query() query: AuditFeedQuery) {
     return this.moderationService.auditFeed(query);
+  }
+
+  // Download the filtered audit feed as CSV (P3-8) for the governance "Audit"
+  // tab's export. `audit.csv` is a distinct literal segment from `audit`
+  // above and from `reports/audit` — no route-order concern (mirrors the
+  // roadmap controller's `admin/audit` / `admin/audit.csv` split). Honours the
+  // same moderator/action/range/q filters; `page`/`pageSize` are ignored (an
+  // export dumps every matching row up to the service's hard cap).
+  @Get('audit.csv')
+  @Header('Content-Type', 'text/csv')
+  @Header('Content-Disposition', 'attachment; filename="governance-audit.csv"')
+  @ApiOperation({ summary: 'Download the moderation audit feed as CSV' })
+  @ApiOkResponse({
+    description: 'The filtered audit feed as CSV, newest first.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
+  auditFeedCsv(@Query() query: AuditFeedQuery) {
+    return this.moderationService.auditFeedCsv(query);
   }
 
   // PATCH (not POST): this updates existing report resources. API CONTRACT

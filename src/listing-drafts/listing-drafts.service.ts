@@ -1,13 +1,13 @@
 import {
   BadRequestException,
   Injectable,
-  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomBytes } from 'node:crypto';
 import { Repository } from 'typeorm';
+import { MailerService } from '../mailer/mailer.service';
 import { SaveListingDraftDto } from './dto/save-listing-draft.dto';
 import { ListingDraft } from './entities/listing-draft.entity';
 import {
@@ -24,12 +24,11 @@ const MAX_PAYLOAD_BYTES = 256 * 1024;
 
 @Injectable()
 export class ListingDraftsService {
-  private readonly logger = new Logger(ListingDraftsService.name);
-
   constructor(
     @InjectRepository(ListingDraft)
     private readonly listingDrafts: Repository<ListingDraft>,
     private readonly config: ConfigService,
+    private readonly mailer: MailerService,
   ) {}
 
   /** `GET /listing-drafts` — the caller's own drafts, newest-edited first. */
@@ -102,13 +101,12 @@ export class ListingDraftsService {
    * `frontendUrl` is the canonical origin (first `FRONTEND_URL` allowlist
    * entry) exactly as OAuth redirects and Mux URLs use it.
    *
-   * NOTE ON DELIVERY: this platform ships with **no transactional mailer at
-   * launch** — a documented, deliberate decision (`docs/ops/no-email-at-launch.md`,
-   * mirrored by the `comingSoon` flag on the account email-preferences
-   * surface). So the send is wired end-to-end (token, link, recipient) but the
-   * actual dispatch is a log-only no-op today; the moment the Postmark mailer
-   * lands this method swaps the `logger.log` for a real keyed send and nothing
-   * else changes. The endpoint honestly returns 204 either way.
+   * DELIVERY: sent through the transactional {@link MailerService} with the
+   * keyed `listing_draft_resume_link` template. When SMTP is configured
+   * (SMTP_URL / SMTP_HOST) the link is really delivered; with no SMTP the mailer
+   * falls back to a log-only transport (dev/test) that logs the message instead
+   * of dropping it. The recipient is always the signed-in member's OWN address,
+   * never a caller-supplied one.
    */
   async sendResumeLink(
     userId: string,
@@ -118,13 +116,9 @@ export class ListingDraftsService {
     const draft = await this.loadOwnedOr404(userId, id);
     const resumeUrl = this.buildResumeUrl(draft.resumeToken);
 
-    // TODO(mailer): replace with a real keyed transactional send once the
-    // launch mailer exists — see docs/ops/no-email-at-launch.md. Recipient is
-    // always the signed-in member's own address, never a caller-supplied one.
-    this.logger.log(
-      `Resume-link email is not delivered at launch (no mailer). ` +
-        `Would send draft ${draft.id} resume link to ${userEmail}: ${resumeUrl}`,
-    );
+    await this.mailer.send(userEmail, 'listing_draft_resume_link', {
+      resumeUrl,
+    });
   }
 
   /**

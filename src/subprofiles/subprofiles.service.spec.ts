@@ -31,6 +31,7 @@ import { SubprofileMember } from './entities/subprofile-member.entity';
 import { isSectionAllowed } from './subprofile-kinds';
 import { toPublicDTO } from './subprofile-response';
 import {
+  BLOCKED_TERMS,
   MIN_BIO,
   MIN_CONTENT_ITEMS,
   validatePublish,
@@ -176,10 +177,23 @@ describe('validatePublish', () => {
   });
 
   it('flags blocked_terms when a blocked term appears in the bio', () => {
+    // Reference the real centrally-managed blocklist by index rather than
+    // spelling a slur into the test — the term appears as a standalone word so
+    // the word-boundary matcher fires.
     const sp = completeUnlinked({
-      bio: `${'x'.repeat(MIN_BIO)} slur-placeholder-1`,
+      bio: `${'x'.repeat(MIN_BIO)} ${BLOCKED_TERMS[0]}`,
     });
     expect(validatePublish(sp, contentItems(3))).toContain('blocked_terms');
+  });
+
+  it('does NOT flag blocked_terms on an innocuous substring match', () => {
+    // Word-boundary matching must not trip on a slur embedded in a clean word
+    // (the Scunthorpe problem the old substring `.includes()` had): "conspicuous"
+    // embeds a blocked term as a substring but is not one as a whole word.
+    const sp = completeUnlinked({
+      bio: `${'x'.repeat(MIN_BIO)} a conspicuous and classic assistant`,
+    });
+    expect(validatePublish(sp, contentItems(3))).not.toContain('blocked_terms');
   });
 });
 

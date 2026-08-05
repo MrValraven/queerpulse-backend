@@ -71,11 +71,13 @@ type QueryBuilderStub = Record<string, jest.Mock>;
 const CHAINED_BUILDER_METHODS = [
   'select',
   'addSelect',
+  'from',
   'innerJoin',
   'where',
   'andWhere',
   'groupBy',
   'orderBy',
+  'addOrderBy',
   'skip',
   'take',
 ];
@@ -117,6 +119,10 @@ describe('AdminMembersService', () => {
     find: jest.Mock;
     count: jest.Mock;
     createQueryBuilder: jest.Mock;
+    // `loadTopVouchers` builds its bounded window query through the repo's
+    // EntityManager (`this.vouches.manager.createQueryBuilder()`), so the mock
+    // repo needs a `manager` with its own builder stub.
+    manager: { createQueryBuilder: jest.Mock };
   };
   let communityMembers: { createQueryBuilder: jest.Mock };
   let reports: { find: jest.Mock; createQueryBuilder: jest.Mock };
@@ -160,6 +166,9 @@ describe('AdminMembersService', () => {
       find: jest.fn().mockResolvedValue([]),
       count: jest.fn().mockResolvedValue(0),
       createQueryBuilder: jest.fn(() => makeQueryBuilderStub()),
+      manager: {
+        createQueryBuilder: jest.fn(() => makeQueryBuilderStub()),
+      },
     };
     communityMembers = {
       createQueryBuilder: jest.fn(() => makeQueryBuilderStub()),

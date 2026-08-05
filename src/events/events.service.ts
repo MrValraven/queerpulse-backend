@@ -28,6 +28,7 @@ import {
   toEventSummary,
   toOrganizerView,
 } from './event-response';
+import { EventBookmarksService } from './event-bookmarks.service';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
@@ -85,6 +86,7 @@ export class EventsService {
     private readonly blockFilter: BlockFilterService,
     private readonly contentModeration: ContentModerationService,
     private readonly membership: CommunityMembershipService,
+    private readonly bookmarks: EventBookmarksService,
   ) {}
 
   // Events are reported (and taken down) under the `event` taxonomy code, keyed
@@ -165,6 +167,11 @@ export class EventsService {
 
     const oldStartAt = event.startAt;
     const oldCapacity = event.capacity;
+    // Snapshot the material fields (when + where) before the patch so we can
+    // tell afterwards whether the edit is worth notifying attendees about.
+    const oldVenue = event.venue;
+    const oldIsOnline = event.isOnline;
+    const oldOnlineUrl = event.onlineUrl;
 
     // Validate the resulting schedule (effective start/end after the patch).
     const nextStartAt =
@@ -220,7 +227,76 @@ export class EventsService {
       await this.rsvpService.reconcileWaitlist(saved.slug);
     }
 
+    // Material change → tell the people counting on this event. "Material" is
+    // when (start time) or where (venue / online flag / online URL) — the two
+    // things a member plans around. Trivial edits (title, description, cover,
+    // capacity, visibility) deliberately do NOT notify: this is a "you need to
+    // re-plan" signal, not a changelog, so it stays low-noise. Only published
+    // events fan out — a draft is the organizers' private workspace, and a
+    // cancelled event already got its own EventCancelled notice.
+    const materialChanges: string[] = [];
+    if (saved.startAt.getTime() !== oldStartAt.getTime()) {
+      materialChanges.push('startAt');
+    }
+    if (
+      saved.venue !== oldVenue ||
+      saved.isOnline !== oldIsOnline ||
+      saved.onlineUrl !== oldOnlineUrl
+    ) {
+      materialChanges.push('location');
+    }
+    if (
+      materialChanges.length > 0 &&
+      saved.status === EventStatus.Published
+    ) {
+      await this.notifyEventUpdated(saved, userId, materialChanges);
+    }
+
     return this.buildDetail(saved, userId);
+  }
+
+  /**
+   * Fan an `EventUpdated` notification out to everyone with a stake in the
+   * event — a live RSVP (going/maybe/waitlisted) or a standing invite — minus
+   * the organizer who made the edit. Recipients are de-duplicated so a member
+   * who is both invited and RSVP'd gets exactly one row per update (no spam),
+   * mirroring the `EventCancelled` fan-out in `cancel()`.
+   */
+  private async notifyEventUpdated(
+    event: Event,
+    editorId: string,
+    changes: string[],
+  ): Promise<void> {
+    const [rsvps, invites] = await Promise.all([
+      this.rsvps.find({
+        where: {
+          eventId: event.id,
+          status: In([
+            RsvpStatus.Going,
+            RsvpStatus.Maybe,
+            RsvpStatus.Waitlisted,
+          ]),
+        },
+      }),
+      this.invites.find({ where: { eventId: event.id } }),
+    ]);
+    const recipientIds = [
+      ...new Set([
+        ...rsvps.map((rsvp) => rsvp.userId),
+        ...invites.map((invite) => invite.inviteeId),
+      ]),
+    ].filter((recipientId) => recipientId !== editorId);
+    if (recipientIds.length === 0) return;
+    await this.notifications.createForRecipients(
+      recipientIds,
+      NotificationType.EventUpdated,
+      {
+        eventId: event.id,
+        title: event.title,
+        startAt: event.startAt.toISOString(),
+        changes,
+      },
+    );
   }
 
   async cancel(slug: string, userId: string): Promise<EventDetail> {
@@ -298,8 +374,11 @@ export class EventsService {
         .take(PAGE_SIZE)
         .getMany();
     } else if (filter === 'saved') {
-      // No bookmark entity in the MVP data model — empty for now.
-      events = [];
+      // The member's bookmarked ("saved") events, most-recently-saved first.
+      // One indexed join over `event_bookmarks`, paginated — the same shape as
+      // the `going`/`waitlisted` branches above. (Was an honest empty stub until
+      // the `event_bookmarks` entity landed — see BE-3.)
+      events = await this.bookmarks.listSaved(userId, skip, PAGE_SIZE);
     } else {
       // 'upcoming' — published, future, public/members (invite_only surfaces
       // via going/hosting/invited contexts, not the general browse).
@@ -581,11 +660,18 @@ export class EventsService {
     });
     const myRsvpByEvent = new Map(myRsvps.map((r) => [r.eventId, r]));
 
+    // ...and one IN-query for which of the page's events the viewer bookmarked.
+    const bookmarkedIds = await this.bookmarks.bookmarkedEventIds(
+      userId,
+      eventIds,
+    );
+
     return events.map((e) =>
       toEventSummary(
         e,
         goingByEvent.get(e.id) ?? 0,
         myRsvpByEvent.get(e.id) ?? null,
+        bookmarkedIds.has(e.id),
       ),
     );
   }
@@ -611,8 +697,14 @@ export class EventsService {
     const isOrganizer =
       event.hostId === viewerId ||
       cohostRows.some((c) => c.userId === viewerId);
+    const isBookmarked = await this.bookmarks.isBookmarked(viewerId, event.id);
 
-    const summary = toEventSummary(event, goingCount, myRsvp ?? null);
+    const summary = toEventSummary(
+      event,
+      goingCount,
+      myRsvp ?? null,
+      isBookmarked,
+    );
     return {
       ...summary,
       description: event.description,

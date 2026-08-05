@@ -1,9 +1,14 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
+import { Agent as HttpsAgent } from 'node:https';
 import { In, Repository } from 'typeorm';
 import webPush from 'web-push';
-import { assertPublicUrl } from '../link-preview/ssrf';
+import {
+  assertPublicUrl,
+  pinnedHttpsAgent,
+  type ValidatedTarget,
+} from '../link-preview/ssrf';
 import { PushSubscription } from './entities/push-subscription.entity';
 
 export interface PushPayload {
@@ -118,8 +123,9 @@ export class PushService implements OnModuleInit {
         // rejection, skip this subscription and keep delivering to the others —
         // do NOT prune the row, since a transient DNS failure here would
         // otherwise drop a legitimate device.
+        let validated: ValidatedTarget;
         try {
-          await assertPublicUrl(row.endpoint);
+          validated = await assertPublicUrl(row.endpoint);
         } catch (error) {
           this.logger.warn(
             `Skipping push to non-public endpoint for ${row.id}: ${String(error)}`,
@@ -127,12 +133,18 @@ export class PushService implements OnModuleInit {
           return;
         }
         try {
+          // Pin the send to the exact IP we just validated: web-push uses Node's
+          // `https`, which would otherwise re-resolve the endpoint host at
+          // connect time and could be rebound to an internal address between the
+          // check above and the socket. The pinned Agent fixes the dialled IP
+          // while keeping the original host for TLS SNI / cert validation.
           await this.sendWithTimeout(
             {
               endpoint: row.endpoint,
               keys: { p256dh: row.p256dh, auth: row.auth },
             },
             body,
+            pinnedHttpsAgent(validated),
           );
           await this.subscriptions.update(row.id, { lastUsedAt: new Date() });
         } catch (error) {
@@ -155,6 +167,7 @@ export class PushService implements OnModuleInit {
   private async sendWithTimeout(
     subscription: { endpoint: string; keys: { p256dh: string; auth: string } },
     body: string,
+    agent: HttpsAgent,
   ): Promise<void> {
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
@@ -165,7 +178,8 @@ export class PushService implements OnModuleInit {
     });
     try {
       await Promise.race([
-        webPush.sendNotification(subscription, body),
+        // `agent` pins the connection to the SSRF-validated IP (see caller).
+        webPush.sendNotification(subscription, body, { agent }),
         timeout,
       ]);
     } finally {

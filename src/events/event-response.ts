@@ -25,6 +25,9 @@ export interface EventSummary {
   capacity: number | null;
   goingCount: number;
   myRsvpStatus: RsvpStatus | null;
+  // Whether the viewer has bookmarked ("saved") this event. Computed in batch
+  // (one IN-query per page — see `EventsService.summarize`), never per-row.
+  isBookmarked: boolean;
 }
 
 export interface EventDetail extends EventSummary {
@@ -74,6 +77,7 @@ export function toEventSummary(
   e: Event,
   goingCount: number,
   myRsvp: EventRsvp | null,
+  isBookmarked: boolean,
 ): EventSummary {
   return {
     slug: e.slug,
@@ -89,6 +93,7 @@ export function toEventSummary(
     capacity: e.capacity,
     goingCount,
     myRsvpStatus: myRsvp ? myRsvp.status : null,
+    isBookmarked,
   };
 }
 

@@ -10,6 +10,7 @@ export interface MemberRef {
   slug: string;
   firstName: string;
   lastName: string;
+  pronouns: string | null;
   avatarUrl: string | null;
 }
 
@@ -26,6 +27,7 @@ export function toMemberRef(
     slug: profile.slug,
     firstName: profile.firstName,
     lastName: profile.lastName,
+    pronouns: profile.pronouns,
     avatarUrl: toImageUrl(profile.avatarUrl),
   };
 }

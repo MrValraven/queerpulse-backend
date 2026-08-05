@@ -8,6 +8,8 @@ import { ReportsModule } from '../reports/reports.module';
 import { Profile } from '../users/entities/profile.entity';
 import { AdminCommunitiesController } from './admin-communities.controller';
 import { AdminCommunitiesService } from './admin-communities.service';
+import { AdminCommunityModeratorsController } from './admin-community-moderators.controller';
+import { AdminCommunityModeratorsService } from './admin-community-moderators.service';
 
 @Module({
   imports: [
@@ -23,7 +25,10 @@ import { AdminCommunitiesService } from './admin-communities.service';
     ]),
     ReportsModule,
   ],
-  controllers: [AdminCommunitiesController],
-  providers: [AdminCommunitiesService],
+  controllers: [
+    AdminCommunitiesController,
+    AdminCommunityModeratorsController,
+  ],
+  providers: [AdminCommunitiesService, AdminCommunityModeratorsService],
 })
 export class AdminCommunitiesModule {}

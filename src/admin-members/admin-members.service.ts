@@ -873,26 +873,54 @@ export class AdminMembersService {
     const topVouchersByVouchee = new Map<string, VouchAvatarDTO[]>();
     if (!voucheeIds.length) return topVouchersByVouchee;
 
-    const vouchRows = await this.vouches
-      .createQueryBuilder('vouch')
-      .select(['vouch.voucherId', 'vouch.voucheeId', 'vouch.createdAt'])
-      .where('vouch.voucheeId IN (:...voucheeIds)', { voucheeIds })
-      .andWhere('vouch.withdrawnAt IS NULL')
-      .orderBy('vouch.createdAt', 'DESC')
-      .getMany();
+    // Bounded fetch. The naive "load ALL vouch rows for these voucheeIds, then
+    // cap per-group in JS" pulls thousands of rows for a heavily-vouched member
+    // only to discard all but TOP_VOUCHERS_LIMIT of them. A ROW_NUMBER() window
+    // ranks each vouchee's vouchers newest-first IN SQL and the outer WHERE
+    // keeps only the top N per group, so the DB returns at most
+    // voucheeIds.length * TOP_VOUCHERS_LIMIT rows regardless of vouch volume —
+    // same per-group "most recent N" semantics as the previous JS cap.
+    // (`this.vouches.manager.createQueryBuilder()` — a builder with NO initial
+    // FROM — so the subquery is the sole FROM, not a comma-join against
+    // `vouches`.)
+    const rankedRows = await this.vouches.manager
+      .createQueryBuilder()
+      .select('ranked.voucher_id', 'voucherId')
+      .addSelect('ranked.vouchee_id', 'voucheeId')
+      .from(
+        (subQuery) =>
+          subQuery
+            .select('inner_vouch.voucher_id', 'voucher_id')
+            .addSelect('inner_vouch.vouchee_id', 'vouchee_id')
+            .addSelect(
+              'ROW_NUMBER() OVER (PARTITION BY inner_vouch.vouchee_id ORDER BY inner_vouch.created_at DESC, inner_vouch.id DESC)',
+              'rn',
+            )
+            .from(Vouch, 'inner_vouch')
+            .where('inner_vouch.vouchee_id IN (:...voucheeIds)', { voucheeIds })
+            .andWhere('inner_vouch.withdrawn_at IS NULL'),
+        'ranked',
+      )
+      .where('ranked.rn <= :topVouchersLimit', {
+        topVouchersLimit: TOP_VOUCHERS_LIMIT,
+      })
+      .orderBy('ranked.vouchee_id')
+      .addOrderBy('ranked.rn')
+      .getRawMany<{ voucherId: string; voucheeId: string }>();
 
-    // Rows arrive newest-first across the WHOLE set, so capping each group at
-    // TOP_VOUCHERS_LIMIT while iterating in that order keeps only each
-    // vouchee's most recent vouchers, with no per-vouchee re-sort needed.
-    const vouchRowsByVouchee = new Map<string, Vouch[]>();
-    for (const vouchRow of vouchRows) {
-      const existingRows = vouchRowsByVouchee.get(vouchRow.voucheeId);
+    // Rows arrive already capped at TOP_VOUCHERS_LIMIT per vouchee and ordered
+    // newest-first within each group (rn ascending), so grouping is a plain
+    // append with no re-sort or re-cap needed.
+    const vouchRowsByVouchee = new Map<
+      string,
+      { voucherId: string; voucheeId: string }[]
+    >();
+    for (const rankedRow of rankedRows) {
+      const existingRows = vouchRowsByVouchee.get(rankedRow.voucheeId);
       if (existingRows) {
-        if (existingRows.length < TOP_VOUCHERS_LIMIT) {
-          existingRows.push(vouchRow);
-        }
+        existingRows.push(rankedRow);
       } else {
-        vouchRowsByVouchee.set(vouchRow.voucheeId, [vouchRow]);
+        vouchRowsByVouchee.set(rankedRow.voucheeId, [rankedRow]);
       }
     }
 

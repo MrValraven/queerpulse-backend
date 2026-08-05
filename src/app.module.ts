@@ -11,6 +11,7 @@ import appConfig from './config/app.config';
 import authConfig from './config/auth.config';
 import databaseConfig from './config/database.config';
 import loggingConfig from './config/logging.config';
+import mailConfig from './config/mail.config';
 import muxConfig from './config/mux.config';
 import pushConfig from './config/push.config';
 import retentionConfig from './config/retention.config';
@@ -31,6 +32,7 @@ import { VouchModule } from './vouch/vouch.module';
 import { ConnectionsModule } from './connections/connections.module';
 import { MessagingModule } from './messaging/messaging.module';
 import { LinkPreviewModule } from './link-preview/link-preview.module';
+import { MailerModule } from './mailer/mailer.module';
 import { ChatModule } from './chat/chat.module';
 import { CinemaModule } from './cinema/cinema.module';
 import { CommunitiesModule } from './communities/communities.module';
@@ -70,6 +72,12 @@ import { ModerationModule } from './moderation/moderation.module';
 import { AccountModule } from './account/account.module';
 import { ConsentModule } from './consent/consent.module';
 import { SavedModule } from './saved/saved.module';
+import { CollectionsModule } from './collections/collections.module';
+import { TopicsModule } from './topics/topics.module';
+import { NewsletterModule } from './newsletter/newsletter.module';
+import { SafeSpaceNominationsModule } from './safe-space-nominations/safe-space-nominations.module';
+import { InquiriesModule } from './inquiries/inquiries.module';
+import { IntakesModule } from './intakes/intakes.module';
 import { PreferencesModule } from './preferences/preferences.module';
 import { DraftsModule } from './drafts/drafts.module';
 import { ListingDraftsModule } from './listing-drafts/listing-drafts.module';
@@ -108,6 +116,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
         muxConfig,
         pushConfig,
         retentionConfig,
+        mailConfig,
       ],
       validate,
     }),
@@ -185,6 +194,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     }),
     DatabaseModule,
     CommonModule,
+    MailerModule,
     PlatformSettingsModule,
     UsersModule,
     AuthModule,
@@ -194,6 +204,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     SubprofilesModule,
     HandlesModule,
     VouchModule,
+    SafeSpaceNominationsModule,
     ConnectionsModule,
     MessagingModule,
     LinkPreviewModule,
@@ -204,6 +215,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     JobsModule,
     WorkshopsModule,
     PartnersModule,
+    InquiriesModule,
     OrgTiersModule,
     VolunteeringModule,
     NotificationsModule,
@@ -220,6 +232,9 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     AccountModule,
     ConsentModule,
     SavedModule,
+    CollectionsModule,
+    IntakesModule,
+    NewsletterModule,
     BootstrapModule,
     GenesisModule,
     PreferencesModule,
@@ -238,6 +253,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     LandlordsModule,
     MagazineModule,
     ResourcesModule,
+    TopicsModule,
     ContentModule,
     CultureModule,
     GovernanceModule,

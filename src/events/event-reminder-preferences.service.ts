@@ -2,13 +2,22 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import {
+  DEFAULT_EVENT_EMAILS_ENABLED,
+  DEFAULT_EVENT_VISIBILITY,
   DEFAULT_REMINDER_LEAD_MINUTES,
+  EventVisibility,
   MemberEventReminderPreferences,
 } from './entities/member-event-reminder-preferences.entity';
 import { UpdateReminderPreferencesDto } from './dto/update-reminder-preferences.dto';
+import { UpdateEventSettingsDto } from './dto/update-event-settings.dto';
 
 export interface ReminderPreferencesDTO {
   leadMinutes: number;
+}
+
+export interface EventSettingsDTO {
+  defaultEventVisibility: EventVisibility;
+  eventEmailsEnabled: boolean;
 }
 
 @Injectable()
@@ -39,5 +48,37 @@ export class EventReminderPreferencesService {
     row.leadMinutes = dto.leadMinutes;
     const saved = await this.preferences.save(row);
     return { leadMinutes: saved.leadMinutes };
+  }
+
+  // Like `get`, a read never inserts a row — no row is the coherent "defaults"
+  // state (visibility = connections, emails on), matching the frontend's
+  // `DEFAULT_PREFS`.
+  async getSettings(userId: string): Promise<EventSettingsDTO> {
+    const existing = await this.preferences.findOne({ where: { userId } });
+    return {
+      defaultEventVisibility:
+        existing?.defaultEventVisibility ?? DEFAULT_EVENT_VISIBILITY,
+      eventEmailsEnabled:
+        existing?.eventEmailsEnabled ?? DEFAULT_EVENT_EMAILS_ENABLED,
+    };
+  }
+
+  // Upsert into the same singleton row the lead time lives on. A fresh row
+  // leaves `leadMinutes` unset so its column default (1 day) applies, exactly
+  // as the reminder upsert leaves these settings columns to their defaults.
+  async updateSettings(
+    userId: string,
+    dto: UpdateEventSettingsDto,
+  ): Promise<EventSettingsDTO> {
+    const row =
+      (await this.preferences.findOne({ where: { userId } })) ??
+      this.preferences.create({ userId });
+    row.defaultEventVisibility = dto.defaultEventVisibility;
+    row.eventEmailsEnabled = dto.eventEmailsEnabled;
+    const saved = await this.preferences.save(row);
+    return {
+      defaultEventVisibility: saved.defaultEventVisibility,
+      eventEmailsEnabled: saved.eventEmailsEnabled,
+    };
   }
 }

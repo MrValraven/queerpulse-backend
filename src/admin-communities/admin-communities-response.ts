@@ -62,6 +62,8 @@ export interface AdminCommunityCardDTO {
 }
 
 export interface AdminCommunityModeratorDTO {
+  /** The moderator's user id — the roster identity add/remove act on. */
+  userId: string;
   slug: string;
   name: string;
   initials: string;
@@ -306,11 +308,13 @@ export function toAdminCommunityDetail(
 }
 
 export function toAdminModerator(
+  userId: string,
   memberRef: MemberRef,
   role: 'owner' | 'mod',
   joinedAt: Date,
 ): AdminCommunityModeratorDTO {
   return {
+    userId,
     slug: memberRef.slug,
     name: `${memberRef.firstName} ${memberRef.lastName}`.trim(),
     initials: initialsFor(`${memberRef.firstName} ${memberRef.lastName}`),

@@ -1,4 +1,12 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -75,5 +83,22 @@ export class GovernanceController {
   @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
   getAdminFinances() {
     return this.governanceFinanceService.getAdminFinances();
+  }
+
+  // Admin-only: publish the current governance snapshot (P3-7). Layered on the
+  // class-level `ActiveMemberGuard` with a method-level `RolesGuard`, mirroring
+  // `getAdminFinances` above. Stamps `governance_overview.published_at = now()`
+  // so the public overview can show a "last published" line. State-changing, so
+  // it carries a CSRF token like every other POST behind the global guard chain.
+  @Post('admin/publish')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.Admin, UserRole.Moderator)
+  @ApiOperation({ summary: 'Publish the current governance overview snapshot' })
+  @ApiOkResponse({ description: 'The timestamp the snapshot was published at.' })
+  @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
+  @ApiNotFoundResponse({ description: 'No governance overview is configured.' })
+  publish() {
+    return this.governanceOverviewService.publish();
   }
 }

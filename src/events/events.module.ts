@@ -10,12 +10,14 @@ import { UsersModule } from '../users/users.module';
 import { EventInvitesController, EventsController } from './events.controller';
 import { EventPhotosController } from './event-photos.controller';
 import { EventReminderPreferencesController } from './event-reminder-preferences.controller';
+import { EventBookmark } from './entities/event-bookmark.entity';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
 import { EventPhoto } from './entities/event-photo.entity';
 import { EventRsvp } from './entities/event-rsvp.entity';
 import { Event } from './entities/event.entity';
 import { MemberEventReminderPreferences } from './entities/member-event-reminder-preferences.entity';
+import { EventBookmarksService } from './event-bookmarks.service';
 import { EventInvitesService } from './event-invites.service';
 import { EventPhotosService } from './event-photos.service';
 import { EventReminderPreferencesService } from './event-reminder-preferences.service';
@@ -31,6 +33,7 @@ import { RsvpService } from './rsvp.service';
       EventRsvp,
       EventInvite,
       EventPhoto,
+      EventBookmark,
       MemberEventReminderPreferences,
     ]),
     UsersModule,
@@ -64,6 +67,7 @@ import { RsvpService } from './rsvp.service';
   ],
   providers: [
     EventsService,
+    EventBookmarksService,
     RsvpService,
     EventInvitesService,
     EventRemindersService,

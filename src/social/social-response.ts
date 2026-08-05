@@ -10,6 +10,7 @@ const EMPTY_MEMBER_REF: MemberRef = {
   slug: '',
   firstName: '',
   lastName: '',
+  pronouns: null,
   avatarUrl: null,
 };
 

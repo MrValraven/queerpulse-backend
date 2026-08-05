@@ -112,8 +112,8 @@ export class ListingDraftsController {
   @ApiOperation({
     summary:
       'Email yourself a cross-device resume link for a draft. ' +
-      'NOTE: no transactional mailer at launch (docs/ops/no-email-at-launch.md) — ' +
-      'the link is built but not yet delivered; returns 204 regardless.',
+      'Sent via the transactional mailer; when SMTP is unconfigured (dev/test) ' +
+      'the mailer logs the message instead of delivering it.',
   })
   @ApiNoContentResponse({ description: 'The resume link was dispatched.' })
   @ApiNotFoundResponse({ description: 'No draft with that id for the caller.' })

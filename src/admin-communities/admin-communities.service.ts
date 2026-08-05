@@ -606,6 +606,7 @@ export class AdminCommunitiesService {
       }
       moderators.push(
         toAdminModerator(
+          moderatorMember.userId,
           memberRef,
           moderatorMember.role === RosterRole.Owner ? 'owner' : 'mod',
           moderatorMember.joinedAt,

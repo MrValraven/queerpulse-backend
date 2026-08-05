@@ -13,6 +13,7 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { EventReminderPreferencesService } from './event-reminder-preferences.service';
 import { UpdateReminderPreferencesDto } from './dto/update-reminder-preferences.dto';
+import { UpdateEventSettingsDto } from './dto/update-event-settings.dto';
 
 /**
  * Member event-reminder preference (currently just the lead time).
@@ -53,5 +54,27 @@ export class EventReminderPreferencesController {
     @Body() body: UpdateReminderPreferencesDto,
   ) {
     return this.reminderPreferences.update(user.userId, body);
+  }
+
+  // Returns the defaults (connections / emails on) when no row exists yet.
+  @Get('event-settings')
+  @ApiOperation({
+    summary: 'Get your event settings (default visibility, email notices).',
+  })
+  @ApiOkResponse({
+    description: 'The event settings (defaults when unset).',
+  })
+  getSettings(@CurrentUser() user: CurrentUserData) {
+    return this.reminderPreferences.getSettings(user.userId);
+  }
+
+  @Put('event-settings')
+  @ApiOperation({ summary: 'Update your event settings.' })
+  @ApiOkResponse({ description: 'The updated event settings.' })
+  updateSettings(
+    @CurrentUser() user: CurrentUserData,
+    @Body() body: UpdateEventSettingsDto,
+  ) {
+    return this.reminderPreferences.updateSettings(user.userId, body);
   }
 }

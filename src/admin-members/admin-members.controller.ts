@@ -5,6 +5,7 @@ import {
   Delete,
   Get,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
@@ -74,7 +75,7 @@ export class AdminMembersController {
   @ApiOkResponse({ description: 'The member detail.' })
   @ApiNotFoundResponse({ description: 'Member not found.' })
   @Get(':id')
-  getMember(@Param('id') id: string) {
+  getMember(@Param('id', ParseUUIDPipe) id: string) {
     return this.adminMembers.getMember(id);
   }
 
@@ -94,7 +95,7 @@ export class AdminMembersController {
   @Patch(':id/role')
   updateRole(
     @CurrentUser() currentUser: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() body: UpdateMemberRoleDto,
   ) {
     return this.adminMembers.updateRole(currentUser.userId, id, body.role);
@@ -113,7 +114,7 @@ export class AdminMembersController {
   @Post(':id/staff-roles')
   grantStaffRole(
     @CurrentUser() currentUser: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() body: GrantStaffRoleDto,
   ) {
     return this.adminMembers.grantStaffRole(currentUser.userId, id, body.role);
@@ -129,7 +130,7 @@ export class AdminMembersController {
   @Delete(':id/staff-roles/:role')
   revokeStaffRole(
     @CurrentUser() currentUser: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Param('role') role: string,
   ) {
     if (!isStaffRoleId(role)) {

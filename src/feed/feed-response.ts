@@ -4,7 +4,7 @@ import { CommunityPost } from '../communities/entities/community-post.entity';
 import { Community } from '../communities/entities/community.entity';
 import { Event } from '../events/entities/event.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
-import { Profile } from '../users/entities/profile.entity';
+import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 
 // ── Frontend-contract shapes ─────────────────────────────────────────────
 // Mirror `AuthorSummary`/`FeedItem`/`FeedItemType` from the frontend's
@@ -18,6 +18,7 @@ export type FeedItemType =
 export interface AuthorSummary {
   handle: string;
   displayName: string;
+  pronouns: string | null;
   avatarUrl: string | null;
 }
 
@@ -34,6 +35,7 @@ export function toAuthorSummary(
   return {
     handle: ref.slug,
     displayName: `${ref.firstName} ${ref.lastName}`.trim(),
+    pronouns: ref.pronouns,
     avatarUrl: toImageUrl(ref.avatarUrl),
   };
 }
@@ -46,6 +48,14 @@ export interface FeedItem {
   summary: string;
   link: string;
   actor: AuthorSummary | null;
+  // `new_member` (People tab) enrichment the member card renders — omitted
+  // (undefined) for every other item type. `neighbourhood` HONOURS the
+  // member's profile visibility: it is null unless their profile is `open`,
+  // mirroring `toMemberCard`'s gate so the feed can't leak a location the
+  // profile detail deliberately hides. `interests` are the member's public
+  // `tags` (ungated, same as `toProfileCard`).
+  neighbourhood?: string | null;
+  interests?: string[];
 }
 
 const SUMMARY_MAX = 220;
@@ -123,8 +133,11 @@ export function eventToFeedItem(
  * are read straight off the member's own profile row (not the batched
  * `MemberRef`/`actor` lookup) since the candidate row IS the member — the
  * `actor` field is filled in for the `AuthorSummary` shape the frontend's
- * `NewMemberCard` expects, but isn't the source of truth here. `summary`
- * falls back from `tagline` to `bio` to an empty string (both nullable).
+ * `NewMemberCard` expects (including `pronouns`, which the card renders next
+ * to the name), but isn't the source of truth here. `summary` falls back from
+ * `tagline` to `bio` to an empty string (both nullable). `neighbourhood`
+ * (visibility-gated) and `interests` (public tags) enrich the card off the
+ * profile row directly — see `FeedItem`'s field notes.
  */
 export function newMemberToFeedItem(
   profile: Profile,
@@ -138,6 +151,9 @@ export function newMemberToFeedItem(
     summary: profile.tagline ?? profile.bio ?? '',
     link: `/profile/${profile.slug}`,
     actor: toAuthorSummary(actor),
+    neighbourhood:
+      profile.visibility === ProfileVisibility.Open ? profile.location : null,
+    interests: profile.tags,
   };
 }
 

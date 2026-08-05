@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   UseGuards,
@@ -72,7 +73,7 @@ export class AdminChangemakersController {
   @ApiOperation({ summary: 'Update a changemaker profile by id.' })
   @ApiOkResponse({ description: 'The updated changemaker profile.' })
   @ApiNotFoundResponse({ description: 'No changemaker exists for this id.' })
-  update(@Param('id') id: string, @Body() dto: UpdateChangemakerDto) {
+  update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateChangemakerDto) {
     return this.changemakers.update(id, dto);
   }
 
@@ -82,7 +83,7 @@ export class AdminChangemakersController {
     description: 'The changemaker profile with its new status.',
   })
   @ApiNotFoundResponse({ description: 'No changemaker exists for this id.' })
-  publish(@Param('id') id: string, @Body() body: PublishChangemakerDto) {
+  publish(@Param('id', ParseUUIDPipe) id: string, @Body() body: PublishChangemakerDto) {
     return this.changemakers.setPublished(id, body.published);
   }
 
@@ -90,7 +91,7 @@ export class AdminChangemakersController {
   @ApiOperation({ summary: 'Delete a changemaker profile by id.' })
   @ApiOkResponse({ description: 'The changemaker profile was deleted.' })
   @ApiNotFoundResponse({ description: 'No changemaker exists for this id.' })
-  remove(@Param('id') id: string) {
+  remove(@Param('id', ParseUUIDPipe) id: string) {
     return this.changemakers.remove(id);
   }
 }

@@ -89,6 +89,16 @@ export class GovernanceOverview {
   @Column({ type: 'jsonb' })
   decisions!: OverviewDecision[];
 
+  /**
+   * When an admin/moderator last **published** this snapshot (P3-7). `null`
+   * until the first publish. Distinct from `updatedAt` (which bumps on any
+   * write): publishing is the deliberate "this is now the transparency report
+   * members can rely on" act, so the public `GET /governance/overview` response
+   * carries this timestamp for a "last published" line.
+   */
+  @Column({ type: 'timestamptz', name: 'published_at', nullable: true })
+  publishedAt!: Date | null;
+
   @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt!: Date;
 }

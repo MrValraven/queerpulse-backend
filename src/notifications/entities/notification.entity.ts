@@ -48,6 +48,12 @@ export enum NotificationType {
   // word, always written. See migration
   // `AddModerationOutcomeNotificationType1785900000000`.
   ModerationOutcome = 'moderation_outcome',
+  // Sent to an event's RSVP'd + invited members when the organizer makes a
+  // MATERIAL edit (start time or location) — so nobody shows up at the wrong
+  // time or place. Carries no actor and no preference toggle, like
+  // `EventCancelled`: a schedule/venue change is need-to-know. See migration
+  // `AddEventUpdatedNotificationType1786001600000`.
+  EventUpdated = 'event_updated',
 }
 
 @Entity('notifications')

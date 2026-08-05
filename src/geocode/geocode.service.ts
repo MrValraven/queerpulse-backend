@@ -4,7 +4,11 @@ import {
   ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { assertPublicUrl } from '../link-preview/ssrf';
+import {
+  assertPublicUrl,
+  pinnedDispatcher,
+  type ValidatedTarget,
+} from '../link-preview/ssrf';
 import {
   extractCoordsFromUrl,
   isAllowedGoogleMapsHost,
@@ -63,7 +67,7 @@ export class GeocodeService {
     url.searchParams.set('limit', '1');
     url.searchParams.set('addressdetails', '0');
 
-    let validated: URL;
+    let validated: ValidatedTarget;
     try {
       validated = await assertPublicUrl(url.toString());
     } catch {
@@ -72,19 +76,26 @@ export class GeocodeService {
       );
     }
 
+    // Pin the socket to the vetted IP (closes the resolve-vs-connect rebinding
+    // window). `dispatcher` is set on a narrowly-cast field because Node's fetch
+    // honours it at runtime even where the DOM `RequestInit` type omits it.
+    const requestInit: RequestInit = {
+      method: 'GET',
+      redirect: 'error',
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      headers: {
+        // Nominatim's usage policy requires an identifying UA; no
+        // cookies/credentials are sent.
+        'user-agent': 'QueerPulseBot/1.0 (+listing-geocode)',
+        accept: 'application/json',
+      },
+    };
+    (requestInit as { dispatcher?: unknown }).dispatcher =
+      pinnedDispatcher(validated);
+
     let response: Response;
     try {
-      response = await fetch(validated.toString(), {
-        method: 'GET',
-        redirect: 'error',
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-        headers: {
-          // Nominatim's usage policy requires an identifying UA; no
-          // cookies/credentials are sent.
-          'user-agent': 'QueerPulseBot/1.0 (+listing-geocode)',
-          accept: 'application/json',
-        },
-      });
+      response = await fetch(validated.url.toString(), requestInit);
     } catch {
       throw new ServiceUnavailableException(
         "Couldn't reach the address geocoder.",

@@ -13,6 +13,14 @@ export interface GovernanceOverviewResponseDTO {
   council: OverviewCouncilSeat[];
   principles: OverviewPrinciple[];
   decisions: OverviewDecision[];
+  /** ISO-8601 timestamp of the last publish (P3-7), or `null` if never
+   *  published. Lets the public governance page render a "last published" line. */
+  publishedAt: string | null;
+}
+
+/** Response for `POST /governance/admin/publish` (P3-7). */
+export interface GovernancePublishResponseDTO {
+  publishedAt: string;
 }
 
 /**
@@ -29,5 +37,8 @@ export function toGovernanceOverviewResponse(
     council: overview.council,
     principles: overview.principles,
     decisions: overview.decisions,
+    publishedAt: overview.publishedAt
+      ? overview.publishedAt.toISOString()
+      : null,
   };
 }

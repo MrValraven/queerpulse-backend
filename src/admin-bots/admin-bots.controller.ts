@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Param,
+  ParseUUIDPipe,
   Patch,
   Put,
   UseGuards,
@@ -61,7 +62,7 @@ export class AdminBotsController {
   @ApiNotFoundResponse({ description: 'System account not found.' })
   @Patch(':userId')
   updateBotProfile(
-    @Param('userId') userId: string,
+    @Param('userId', ParseUUIDPipe) userId: string,
     @Body() dto: UpdateProfileDto,
   ) {
     return this.adminBots.updateBotProfile(userId, dto);
@@ -77,7 +78,7 @@ export class AdminBotsController {
   })
   @Put(':userId/username')
   updateBotUsername(
-    @Param('userId') userId: string,
+    @Param('userId', ParseUUIDPipe) userId: string,
     @Body() dto: UpdateUsernameDto,
   ) {
     return this.adminBots.updateBotUsername(userId, dto);
@@ -89,7 +90,7 @@ export class AdminBotsController {
   @ApiNotFoundResponse({ description: 'System account not found.' })
   @Put(':userId/socials')
   replaceBotSocials(
-    @Param('userId') userId: string,
+    @Param('userId', ParseUUIDPipe) userId: string,
     @Body() dto: ReplaceSocialsDto,
   ) {
     return this.adminBots.replaceBotSocials(userId, dto);
@@ -100,7 +101,7 @@ export class AdminBotsController {
   @ApiBadRequestResponse({ description: 'Malformed request body.' })
   @ApiNotFoundResponse({ description: 'System account not found.' })
   @Put(':userId/work')
-  replaceBotWork(@Param('userId') userId: string, @Body() dto: ReplaceWorkDto) {
+  replaceBotWork(@Param('userId', ParseUUIDPipe) userId: string, @Body() dto: ReplaceWorkDto) {
     return this.adminBots.replaceBotWork(userId, dto);
   }
 
@@ -110,7 +111,7 @@ export class AdminBotsController {
   @ApiNotFoundResponse({ description: 'System account not found.' })
   @Put(':userId/skills')
   replaceBotSkills(
-    @Param('userId') userId: string,
+    @Param('userId', ParseUUIDPipe) userId: string,
     @Body() dto: ReplaceSkillsDto,
   ) {
     return this.adminBots.replaceBotSkills(userId, dto);
@@ -122,7 +123,7 @@ export class AdminBotsController {
   @ApiNotFoundResponse({ description: 'System account not found.' })
   @Put(':userId/shapings')
   replaceBotShapings(
-    @Param('userId') userId: string,
+    @Param('userId', ParseUUIDPipe) userId: string,
     @Body() dto: ReplaceShapingsDto,
   ) {
     return this.adminBots.replaceBotShapings(userId, dto);
@@ -134,7 +135,7 @@ export class AdminBotsController {
   @ApiNotFoundResponse({ description: 'System account not found.' })
   @Put(':userId/groups')
   replaceBotGroups(
-    @Param('userId') userId: string,
+    @Param('userId', ParseUUIDPipe) userId: string,
     @Body() dto: ReplaceGroupsDto,
   ) {
     return this.adminBots.replaceBotGroups(userId, dto);

@@ -96,6 +96,21 @@ export class Profile {
   @Column({ type: 'boolean', default: false })
   verified!: boolean;
 
+  // When an admin verified this member, and who. `verified` (above) is the flag
+  // every surface reads; these two are the accountability trail behind it,
+  // written by the admin "Verify" action (`POST /admin/members/:id/verify`).
+  // Both NULL until a verification happens through that endpoint (legacy rows
+  // flipped `verified = true` beforehand keep NULLs — see
+  // `AddMemberModerationFields1786000400000`). Plain `uuid`, not a relation:
+  // `verified_by` is written by id and never eager-loaded, with the FK
+  // (`ON DELETE SET NULL`) enforced at the DB level so the record outlives the
+  // verifying admin's account.
+  @Column({ type: 'timestamptz', nullable: true })
+  verifiedAt!: Date | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  verifiedBy!: string | null;
+
   // Member-controlled: when true, the member's trust network (vouchers/vouches)
   // is hidden on member-facing surfaces. Admins still see it (safety tool),
   // flagged via TrustNodeDTO.private. Default false.

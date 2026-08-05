@@ -208,6 +208,113 @@ export class AccountEnforcementService {
   }
 
   /**
+   * Restricts a member DIRECTLY from the admin drawer (not off a report) —
+   * `POST /admin/members/:id/restrict`. Deliberately reuses the exact
+   * suspension model `enforceAgainstUser` writes (`status = Suspended` +
+   * `suspended_until`) rather than inventing a parallel "restricted" state: a
+   * time-boxed `duration` becomes a suspension, an absent one a permanent ban
+   * (`suspended_until = null`, never expires). There is no scoped/community
+   * restriction model in this codebase, so this is platform-wide.
+   *
+   * Same guardrails as `enforceAgainstUser`: only ordinary members can be
+   * restricted (never a moderator/admin — 403), never the acting admin
+   * themselves, never the house account. A member who had already deactivated
+   * keeps `Deactivated` as their live status (they asked to be hidden), with
+   * `previousStatus` synced to `Suspended` so signing back in cannot launder
+   * the restriction away.
+   *
+   * Returns the member id + the suspension's expiry (`null` = permanent) so the
+   * caller can revoke their live sessions and put "restricted until X" in the
+   * outcome notification, mirroring `enforceAgainstUser`'s contract.
+   */
+  async restrictMember(
+    userId: string,
+    actorId: string,
+    dto: {
+      action: 'suspend' | 'ban';
+      duration?: string;
+      reasonCode: string;
+      note: string;
+    },
+  ): Promise<{
+    userId: string;
+    suspendedUntil: Date | null;
+    status: UserStatus;
+  }> {
+    const now = new Date();
+    // `ban` is permanent (NULL never expires); `suspend` is time-boxed.
+    // Requiring exactly one of these shapes means a missing or malformed
+    // duration can never quietly become a permanent ban.
+    if (dto.action === 'suspend' && !dto.duration) {
+      throw new BadRequestException('A time-boxed restriction requires a duration.');
+    }
+    if (dto.action === 'ban' && dto.duration) {
+      throw new BadRequestException(
+        'A permanent restriction cannot take a duration.',
+      );
+    }
+    const suspendedUntil =
+      dto.action === 'ban' ? null : parseDuration(dto.duration as string, now);
+
+    const user = await this.users.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException('Member not found.');
+    }
+    if (user.id === actorId) {
+      throw new ForbiddenException('You cannot restrict your own account.');
+    }
+    if (user.isSystem) {
+      throw new ForbiddenException('The house account cannot be restricted.');
+    }
+    if (user.role !== UserRole.Member) {
+      throw new ForbiddenException(
+        'Moderation actions cannot target staff accounts.',
+      );
+    }
+
+    const preserveDeactivation = user.status === UserStatus.Deactivated;
+
+    await this.dataSource.transaction(async (manager) => {
+      await manager.update(
+        User,
+        { id: userId },
+        {
+          ...(preserveDeactivation ? {} : { status: UserStatus.Suspended }),
+          suspendedUntil,
+        },
+      );
+      await this.syncDeactivationPreviousStatus(
+        manager,
+        userId,
+        UserStatus.Suspended,
+      );
+      // Report-less audit row (reportId = null): this action answers to no
+      // particular report. It surfaces in the global `GET /mod/audit` feed but
+      // not `GET /mod/reports/audit`, which filters by report.
+      await this.audit.writeAuditLog(
+        null,
+        actorId,
+        dto.action,
+        dto.reasonCode,
+        dto.note,
+        dto.duration,
+        manager,
+      );
+    });
+
+    // A member who was already `Deactivated` keeps that status (only
+    // `suspendedUntil` changes); everyone else becomes `Suspended`. Report the
+    // status actually persisted, not a fixed literal.
+    return {
+      userId,
+      suspendedUntil,
+      status: preserveDeactivation
+        ? UserStatus.Deactivated
+        : UserStatus.Suspended,
+    };
+  }
+
+  /**
    * Clears a suspension and puts the member back in circulation.
    *
    * Mirrors `enforceAgainstUser`: a member who is currently `Deactivated` stays

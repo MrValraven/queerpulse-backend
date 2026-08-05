@@ -1,26 +1,43 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiBadRequestResponse,
   ApiCookieAuth,
   ApiForbiddenResponse,
+  ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminReadingGroupProposalsService } from './admin-reading-group-proposals.service';
+import { DecideReadingGroupProposalDto } from './dto/decide-reading-group-proposal.dto';
 import { ListAdminReadingGroupProposalsQuery } from './dto/list-admin-reading-group-proposals.query';
 
 /**
  * Admin oversight of reading-group proposals: every "Start your own group" a
  * member has submitted, paginated and optionally filtered by format. Guarded
- * exactly like `AdminInvitesController` — `ActiveMemberGuard` + `RolesGuard`
- * with `@Roles(Admin)` — and read-only (the member-facing write stays on
- * `ReadingGroupProposalsController`).
+ * with `ActiveMemberGuard` + `RolesGuard`; the class-level `@Roles(Admin)`
+ * covers the read-only list, while the approve/decline/archive transitions
+ * widen to `@Roles(Moderator, Admin)` at the handler (method-level `@Roles`
+ * overrides the class via `Reflector.getAllAndOverride`). The member-facing
+ * write stays on `ReadingGroupProposalsController`.
  */
 @UseGuards(ActiveMemberGuard, RolesGuard)
 @Roles(UserRole.Admin)
@@ -40,5 +57,47 @@ export class AdminReadingGroupProposalsController {
   @ApiBadRequestResponse({ description: 'Malformed query parameters.' })
   list(@Query() query: ListAdminReadingGroupProposalsQuery) {
     return this.adminReadingGroupProposals.list(query);
+  }
+
+  @Post(':id/approve')
+  @Roles(UserRole.Moderator, UserRole.Admin)
+  @ApiOperation({ summary: 'Approve a reading-group proposal.' })
+  @ApiOkResponse({ description: 'The proposal, now approved.' })
+  @ApiBadRequestResponse({ description: 'Malformed id or note.' })
+  @ApiNotFoundResponse({ description: 'No proposal with that id.' })
+  approve(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: DecideReadingGroupProposalDto,
+  ) {
+    return this.adminReadingGroupProposals.approve(id, user.userId, dto.note);
+  }
+
+  @Post(':id/decline')
+  @Roles(UserRole.Moderator, UserRole.Admin)
+  @ApiOperation({ summary: 'Decline a reading-group proposal.' })
+  @ApiOkResponse({ description: 'The proposal, now declined.' })
+  @ApiBadRequestResponse({ description: 'Malformed id or note.' })
+  @ApiNotFoundResponse({ description: 'No proposal with that id.' })
+  decline(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: DecideReadingGroupProposalDto,
+  ) {
+    return this.adminReadingGroupProposals.decline(id, user.userId, dto.note);
+  }
+
+  @Post(':id/archive')
+  @Roles(UserRole.Moderator, UserRole.Admin)
+  @ApiOperation({ summary: 'Archive a reading-group proposal.' })
+  @ApiOkResponse({ description: 'The proposal, now archived.' })
+  @ApiBadRequestResponse({ description: 'Malformed id or note.' })
+  @ApiNotFoundResponse({ description: 'No proposal with that id.' })
+  archive(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: DecideReadingGroupProposalDto,
+  ) {
+    return this.adminReadingGroupProposals.archive(id, user.userId, dto.note);
   }
 }

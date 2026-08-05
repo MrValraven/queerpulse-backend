@@ -31,6 +31,12 @@ import {
 
 // Always-on member primitive (no @Feature flag) — mirrors the FE's saved.api.ts
 // exactly: `GET /me/saved`, `PUT /me/saved/:id`, `DELETE /me/saved/:id`.
+//
+// NOTE: `:id` here is deliberately NOT a `ParseUUIDPipe` param. It is the
+// frontend's composite `<kind>:<subjectId>` ref (see `parseSavedRef`), where
+// `subjectId` may be a slug, not a uuid — a UUID pipe would 400 valid requests.
+// `parseSavedRef` already 400s on a malformed ref, so a bad id never reaches
+// TypeORM as a raw uuid cast.
 @ApiTags('Saved')
 @ApiCookieAuth('access_token')
 @Controller('me/saved')

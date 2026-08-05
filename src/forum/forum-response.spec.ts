@@ -64,7 +64,7 @@ describe('toForumPostResponse permission flags', () => {
   it('tombstoned post hides body/author and offers restore to staff', () => {
     const dto = toForumPostResponse(
       makePost({ deletedAt: new Date() }),
-      { slug: 'a', firstName: 'A', lastName: 'B', avatarUrl: null },
+      { slug: 'a', firstName: 'A', lastName: 'B', pronouns: null, avatarUrl: null },
       0,
       staff,
     );

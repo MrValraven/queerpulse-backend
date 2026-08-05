@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, In, Repository } from 'typeorm';
+import { EntityManager, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { Report } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -16,6 +16,11 @@ import {
 } from './moderation-response';
 
 const DEFAULT_LIMIT = 20;
+
+// Hard cap on a single CSV export (P3-8). The audit table is append-only and
+// unbounded over time; an export must never buffer the whole table into memory.
+// 5000 mirrors the roadmap admin audit CSV export's ceiling.
+const CSV_EXPORT_LIMIT = 5000;
 
 /**
  * The moderation audit cluster, extracted from `ModerationService` as a
@@ -67,6 +72,75 @@ export class ModAuditService {
     const page = query.page ?? 1;
     const pageSize = query.pageSize ?? 8;
 
+    const builder = this.auditFeedQueryBuilder(query);
+
+    const total = await builder.getCount();
+    const rows = await builder
+      .skip((page - 1) * pageSize)
+      .take(pageSize)
+      .getMany();
+
+    const { resolveName, subjectFor } = await this.enrichAuditRows(rows);
+    const items: AuditFeedRowDTO[] = rows.map((log) =>
+      toAuditFeedRow(log, resolveName(log), subjectFor(log)),
+    );
+
+    // Distinct actors across the *whole* table (not just this page), for the
+    // moderator filter's dropdown options.
+    const distinctActorRows = await this.auditLogs
+      .createQueryBuilder('log')
+      .select('log.actorId', 'actorId')
+      .distinct(true)
+      .where('log.actorId IS NOT NULL')
+      .getRawMany<{ actorId: string }>();
+    const distinctActorIds = distinctActorRows
+      .map((actorRow) => actorRow.actorId)
+      .filter((actorId): actorId is string => actorId !== null);
+    const moderatorNames = await this.namesForUserIds(distinctActorIds);
+    const moderators: AuditFeedModerator[] = distinctActorIds.map(
+      (actorId) => ({
+        id: actorId,
+        name: moderatorNames.get(actorId) ?? 'Member',
+      }),
+    );
+
+    return { items, total, page, pageSize, moderators };
+  }
+
+  // GET /mod/audit.csv (P3-8) — the same filtered, cross-report audit feed as
+  // `auditFeed`, streamed as a CSV attachment for the admin governance "Audit"
+  // tab's export. Honours the moderator/action/range/q filters (pagination is
+  // irrelevant to an export — it dumps every matching row up to
+  // `CSV_EXPORT_LIMIT`, newest first). Columns mirror the audit table the page
+  // renders: when, moderator, action, subject, reason.
+  async auditFeedCsv(query: AuditFeedQuery): Promise<string> {
+    const rows = await this.auditFeedQueryBuilder(query)
+      .take(CSV_EXPORT_LIMIT)
+      .getMany();
+    const { resolveName, subjectFor } = await this.enrichAuditRows(rows);
+
+    const table: string[][] = [
+      ['when', 'moderator', 'action', 'subject', 'reason'],
+      ...rows.map((log) => [
+        log.createdAt.toISOString(),
+        resolveName(log),
+        log.action,
+        subjectFor(log),
+        log.note ?? log.reasonCode ?? '',
+      ]),
+    ];
+    return table
+      .map((row) => row.map((field) => this.toCsvField(field)).join(','))
+      .join('\n');
+  }
+
+  // The shared, filtered, newest-first query builder behind both `auditFeed`
+  // (paginated) and `auditFeedCsv` (bounded dump). Applies the same
+  // moderator/action/range/note-search filters so the export can never drift
+  // from what the on-screen feed shows.
+  private auditFeedQueryBuilder(
+    query: AuditFeedQuery,
+  ): SelectQueryBuilder<ModAuditLog> {
     const builder = this.auditLogs
       .createQueryBuilder('log')
       .orderBy('log.createdAt', 'DESC');
@@ -96,13 +170,17 @@ export class ModAuditService {
         search: `%${query.q.trim()}%`,
       });
     }
+    return builder;
+  }
 
-    const total = await builder.getCount();
-    const rows = await builder
-      .skip((page - 1) * pageSize)
-      .take(pageSize)
-      .getMany();
-
+  // Resolves the per-row derived fields (actor display name + human subject
+  // line) both audit reads need, in a fixed number of batched queries: one
+  // name lookup across all actors and one report lookup across all linked
+  // reports, regardless of row count.
+  private async enrichAuditRows(rows: ModAuditLog[]): Promise<{
+    resolveName: (log: ModAuditLog) => string;
+    subjectFor: (log: ModAuditLog) => string;
+  }> {
     const actorIds = rows
       .map((row) => row.actorId)
       .filter((actorId): actorId is string => actorId !== null);
@@ -120,6 +198,7 @@ export class ModAuditService {
         reportsById.set(linkedReport.id, linkedReport);
       }
     }
+
     const subjectFor = (log: ModAuditLog): string => {
       if (log.reportId) {
         const linkedReport = reportsById.get(log.reportId);
@@ -130,35 +209,27 @@ export class ModAuditService {
       }
       return 'Platform action';
     };
+    const resolveName = (log: ModAuditLog): string =>
+      this.resolveActorName(log.actorId, actorNames);
 
-    const items: AuditFeedRowDTO[] = rows.map((log) =>
-      toAuditFeedRow(
-        log,
-        this.resolveActorName(log.actorId, actorNames),
-        subjectFor(log),
-      ),
-    );
+    return { resolveName, subjectFor };
+  }
 
-    // Distinct actors across the *whole* table (not just this page), for the
-    // moderator filter's dropdown options.
-    const distinctActorRows = await this.auditLogs
-      .createQueryBuilder('log')
-      .select('log.actorId', 'actorId')
-      .distinct(true)
-      .where('log.actorId IS NOT NULL')
-      .getRawMany<{ actorId: string }>();
-    const distinctActorIds = distinctActorRows
-      .map((actorRow) => actorRow.actorId)
-      .filter((actorId): actorId is string => actorId !== null);
-    const moderatorNames = await this.namesForUserIds(distinctActorIds);
-    const moderators: AuditFeedModerator[] = distinctActorIds.map(
-      (actorId) => ({
-        id: actorId,
-        name: moderatorNames.get(actorId) ?? 'Member',
-      }),
-    );
+  // RFC-4180 quote/escape, with a spreadsheet formula-injection guard (mirrors
+  // `roadmap-admin.service`'s CSV export). An audit row can carry
+  // attacker-controlled text (a moderator's own display name, a free-text
+  // `note`), so any field is treated as untrusted.
+  private toCsvField(value: string): string {
+    const guarded = this.neutralizeCsvFormula(value);
+    return `"${guarded.replace(/"/g, '""')}"`;
+  }
 
-    return { items, total, page, pageSize, moderators };
+  // Spreadsheet apps evaluate a cell whose content starts with `=`, `+`, `-`,
+  // `@`, a tab, or a carriage return as a formula on open. Prefixing a `'`
+  // forces plain-text rendering; applied before the quote/escape so the
+  // apostrophe lands inside the quoted field.
+  private neutralizeCsvFormula(value: string): string {
+    return /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
   }
 
   async writeAuditLog(

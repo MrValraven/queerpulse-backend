@@ -1,5 +1,7 @@
 import { lookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
+import { Agent as HttpsAgent, type AgentOptions as HttpsAgentOptions } from 'node:https';
+import { isIP, type LookupFunction } from 'node:net';
+import { Agent as UndiciAgent } from 'undici';
 
 /**
  * SSRF hardening for the link-preview fetcher. An unfurl endpoint fetches a
@@ -18,11 +20,15 @@ import { isIP } from 'node:net';
  *     internal one, so redirects are followed manually and each Location is
  *     re-checked from scratch.
  *  4. Timeout + response-size cap live in `safeFetchHtml`.
- *
- * Residual risk (documented, accepted for this scope): a TOCTOU / DNS-rebinding
- * window exists between our `lookup()` and undici's own connect-time resolution
- * — closing it fully needs pinning the connection to the validated IP. Noted
- * for a future hardening pass; not implemented here.
+ *  5. Connection pinning — closes the TOCTOU / DNS-rebinding window. Validating
+ *     with `lookup()` and then handing the *hostname* to `fetch`/`web-push`
+ *     lets those re-resolve DNS at connect time, so a rebinding host can answer
+ *     with a public IP for our check and a private one for the real socket.
+ *     `assertPublicUrl` now returns the exact validated IP, and callers pin the
+ *     socket to it via a custom `lookup` (an `undici` dispatcher for `fetch`
+ *     paths, an `https.Agent` for `web-push`). The host header / TLS SNI stay
+ *     the original hostname, so certificate validation is unaffected — only the
+ *     address the socket dials is fixed to the one we already vetted.
  */
 
 const MAX_REDIRECTS = 3;
@@ -102,11 +108,25 @@ function isBlockedIp(ip: string): boolean {
   return true; // not a recognizable IP → refuse
 }
 
+/** A URL that passed every SSRF check, plus the exact validated IP the caller
+ *  must pin the socket to (see {@link pinnedDispatcher} / {@link pinnedHttpsAgent}). */
+export interface ValidatedTarget {
+  /** The parsed, scheme-checked URL. Its hostname is still the ORIGINAL host so
+   *  TLS SNI / cert validation and the Host header stay correct. */
+  url: URL;
+  /** The vetted public IP literal the connection must dial. */
+  address: string;
+  /** IP family of {@link address} (4 or 6). */
+  family: 4 | 6;
+}
+
 /** Reject a URL whose scheme isn't http(s) or whose host resolves to any
- *  non-public address. Throws on any violation; returns the parsed URL on
- *  success. Exported so other outbound-request paths (e.g. web-push delivery,
- *  which POSTs to a member-supplied endpoint) can reuse the same guard. */
-export async function assertPublicUrl(rawUrl: string): Promise<URL> {
+ *  non-public address. Throws on any violation; on success returns the parsed
+ *  URL together with the exact validated IP the caller pins to (closing the
+ *  resolve-vs-connect TOCTOU window). Exported so other outbound-request paths
+ *  (e.g. web-push delivery, which POSTs to a member-supplied endpoint) can reuse
+ *  the same guard AND the same pin. */
+export async function assertPublicUrl(rawUrl: string): Promise<ValidatedTarget> {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
@@ -118,10 +138,12 @@ export async function assertPublicUrl(rawUrl: string): Promise<URL> {
   }
   const hostname = parsed.hostname.replace(/^\[|\]$/g, ''); // unwrap [::1]
 
-  // A literal IP in the host bypasses DNS — check it directly.
-  if (isIP(hostname)) {
+  // A literal IP in the host bypasses DNS — check it directly. There is no
+  // rebinding risk (no name to re-resolve), and we pin to the literal itself.
+  const literalFamily = isIP(hostname);
+  if (literalFamily) {
     if (isBlockedIp(hostname)) throw new Error('blocked-ip');
-    return parsed;
+    return { url: parsed, address: hostname, family: literalFamily as 4 | 6 };
   }
 
   // Resolve every A/AAAA record; if ANY is non-public, refuse (a host that
@@ -131,7 +153,63 @@ export async function assertPublicUrl(rawUrl: string): Promise<URL> {
   for (const record of records) {
     if (isBlockedIp(record.address)) throw new Error('blocked-ip');
   }
-  return parsed;
+  // Every record is public; pin the connection to the FIRST one so the socket
+  // dials exactly the address we vetted, not whatever a second resolution
+  // (undici's / web-push's own) might return a moment later.
+  const pin = records[0];
+  if (!pin) throw new Error('no-dns');
+  const pinFamily = isIP(pin.address);
+  if (!pinFamily) throw new Error('blocked-ip');
+  return { url: parsed, address: pin.address, family: pinFamily as 4 | 6 };
+}
+
+/** A `dns.lookup`-shaped function that ignores the hostname and always yields
+ *  the pre-validated {@link ValidatedTarget.address}. Handles both the
+ *  `(err, address, family)` and `{ all: true }` → `(err, [{address,family}])`
+ *  callback shapes that Node's net stack / undici use. */
+function makePinnedLookup(address: string, family: 4 | 6): LookupFunction {
+  const pinned = ((
+    _hostname: string,
+    options: unknown,
+    callback?: unknown,
+  ): void => {
+    const done = (typeof options === 'function' ? options : callback) as (
+      err: NodeJS.ErrnoException | null,
+      address: string | { address: string; family: number }[],
+      family?: number,
+    ) => void;
+    const wantsAll =
+      typeof options === 'object' &&
+      options !== null &&
+      (options as { all?: boolean }).all === true;
+    if (wantsAll) {
+      done(null, [{ address, family }]);
+    } else {
+      done(null, address, family);
+    }
+  }) as unknown as LookupFunction;
+  return pinned;
+}
+
+/** An `undici` dispatcher that pins every connection it makes to the validated
+ *  IP — pass as `fetch(url, { dispatcher })` for the `fetch`-based paths
+ *  (link-preview, geocode). One-shot: built per validated target, not pooled. */
+export function pinnedDispatcher(target: ValidatedTarget): UndiciAgent {
+  return new UndiciAgent({
+    connect: { lookup: makePinnedLookup(target.address, target.family) },
+  });
+}
+
+/** An `https.Agent` that pins its socket to the validated IP — for `web-push`,
+ *  which uses Node's `https` (not `fetch`) and accepts an `agent` option. The
+ *  TLS servername stays the original hostname, so cert validation is unchanged. */
+export function pinnedHttpsAgent(target: ValidatedTarget): HttpsAgent {
+  const options: HttpsAgentOptions & { lookup: LookupFunction } = {
+    lookup: makePinnedLookup(target.address, target.family),
+    keepAlive: false,
+    maxSockets: 1,
+  };
+  return new HttpsAgent(options);
 }
 
 /**
@@ -147,26 +225,34 @@ export async function safeFetchHtml(
 ): Promise<{ html: string; finalUrl: string } | null> {
   let currentUrl = rawUrl;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    let validated: URL;
+    let validated: ValidatedTarget;
     try {
       validated = await assertPublicUrl(currentUrl);
     } catch {
       return null;
     }
 
+    // Pin this hop's socket to the exact IP we just vetted (closes the
+    // resolve-vs-connect rebinding window). Set on a narrowly-cast field
+    // because Node honours `dispatcher` at runtime even where the DOM
+    // `RequestInit` type doesn't declare it.
+    const requestInit: RequestInit = {
+      method: 'GET',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      headers: {
+        // A UA + Accept nudges sites to return HTML with OG tags rather than
+        // a bot wall; we deliberately don't send cookies/credentials.
+        'user-agent': 'QueerPulseBot/1.0 (+link-preview)',
+        accept: 'text/html,application/xhtml+xml',
+      },
+    };
+    (requestInit as { dispatcher?: unknown }).dispatcher =
+      pinnedDispatcher(validated);
+
     let response: Response;
     try {
-      response = await fetch(validated.toString(), {
-        method: 'GET',
-        redirect: 'manual',
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-        headers: {
-          // A UA + Accept nudges sites to return HTML with OG tags rather than
-          // a bot wall; we deliberately don't send cookies/credentials.
-          'user-agent': 'QueerPulseBot/1.0 (+link-preview)',
-          accept: 'text/html,application/xhtml+xml',
-        },
-      });
+      response = await fetch(validated.url.toString(), requestInit);
     } catch {
       return null; // timeout, connection refused, DNS race, etc.
     }
@@ -176,7 +262,7 @@ export async function safeFetchHtml(
       const location = response.headers.get('location');
       if (!location) return null;
       try {
-        currentUrl = new URL(location, validated).toString();
+        currentUrl = new URL(location, validated.url).toString();
       } catch {
         return null;
       }
@@ -194,7 +280,7 @@ export async function safeFetchHtml(
 
     const html = await readCapped(response);
     if (html === null) return null;
-    return { html, finalUrl: validated.toString() };
+    return { html, finalUrl: validated.url.toString() };
   }
   return null; // too many redirects
 }

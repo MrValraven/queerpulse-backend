@@ -2,6 +2,7 @@ import { MemberRef } from '../common/member-ref';
 import {
   ReadingGroupProposal,
   ReadingGroupProposalFormat,
+  ReadingGroupProposalStatus,
 } from './entities/reading-group-proposal.entity';
 
 /** Display-ready proposer on an admin oversight row. Composed from a
@@ -35,6 +36,12 @@ export interface AdminReadingGroupProposalDTO {
   format: ReadingGroupProposalFormat;
   maxPeople: number;
   createdAt: string;
+  // Admin decision lifecycle. `decidedAt`/`decisionNote` are null while the
+  // proposal is still `pending`. `decidedBy` is intentionally NOT exposed — the
+  // oversight surface shows the outcome, not which staff member made it.
+  status: ReadingGroupProposalStatus;
+  decidedAt: string | null;
+  decisionNote: string | null;
 }
 
 export interface AdminReadingGroupProposalsPageDTO {
@@ -56,5 +63,8 @@ export function toAdminReadingGroupProposalDTO(
     format: proposal.format,
     maxPeople: proposal.maxPeople,
     createdAt: proposal.createdAt.toISOString(),
+    status: proposal.status,
+    decidedAt: proposal.decidedAt ? proposal.decidedAt.toISOString() : null,
+    decisionNote: proposal.decisionNote ?? null,
   };
 }

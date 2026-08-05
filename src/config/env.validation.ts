@@ -146,6 +146,18 @@ export class EnvironmentVariables {
   @IsOptional() @IsString() VAPID_PRIVATE_KEY?: string;
   @IsOptional() @IsString() VAPID_SUBJECT?: string;
 
+  // Transactional email (SMTP). All optional: with none set the mailer runs
+  // log-only (dev/test). Set SMTP_URL (a connection string) OR the discrete
+  // SMTP_HOST/PORT/USER/PASSWORD fields to deliver for real. SMTP_SECURE is the
+  // string 'true' for implicit TLS (port 465). MAIL_FROM is the From header.
+  @IsOptional() @IsString() SMTP_URL?: string;
+  @IsOptional() @IsString() SMTP_HOST?: string;
+  @IsOptional() @IsNumber() @Min(0) @Max(65535) SMTP_PORT?: number;
+  @IsOptional() @IsString() SMTP_SECURE?: string;
+  @IsOptional() @IsString() SMTP_USER?: string;
+  @IsOptional() @IsString() SMTP_PASSWORD?: string;
+  @IsOptional() @IsString() MAIL_FROM?: string;
+
   @IsOptional()
   @IsNumber()
   @Min(0)

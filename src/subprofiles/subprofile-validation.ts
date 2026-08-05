@@ -12,6 +12,7 @@ import {
   SubprofileSection,
 } from './entities/subprofile-item.entity';
 import { HANDLE_RE, RESERVED_HANDLES } from '../common/handles';
+import { BLOCKED_TERMS, textHasBlockedTerm } from '../common/blocked-terms';
 
 // --- C5 constants (must stay identical to the frontend mirror) --------------
 // `HANDLE_RE` and `RESERVED_HANDLES` now live in the shared handle module
@@ -28,10 +29,11 @@ export const MAX_ITEMS_PER_SECTION = 100;
 // A persona can have at most this many co-owners (creator + invited members).
 export const MAX_SUBPROFILE_CO_OWNERS = 5;
 
-// Placeholder blocklist for v1. FOLLOW-UP: replace this static list with a hook
-// into the dedicated `moderation` module so terms are centrally managed and the
-// list is not duplicated per feature (documented non-goal in design spec §4/§8).
-export const BLOCKED_TERMS = ['slur-placeholder-1', 'slur-placeholder-2'];
+// The persona name/tagline slur screen now uses the centrally-managed blocklist
+// in `src/common/blocked-terms.ts` (word-boundary matching, single source of
+// truth) rather than the former inert 2-item placeholder array. Re-exported so
+// existing importers keep resolving `BLOCKED_TERMS` from here.
+export { BLOCKED_TERMS };
 
 // Exact publish-unmet codes consumed by the FE checklist (GLOBAL CONTRACT C5).
 export type PublishUnmetCode =
@@ -44,10 +46,7 @@ export type PublishUnmetCode =
   | 'blocked_terms';
 
 function containsBlockedTerm(sp: Subprofile): boolean {
-  const haystack = [sp.displayName, sp.bio ?? '', sp.handle ?? '']
-    .join(' ')
-    .toLowerCase();
-  return BLOCKED_TERMS.some((term) => haystack.includes(term.toLowerCase()));
+  return textHasBlockedTerm(sp.displayName, sp.bio, sp.handle);
 }
 
 /**

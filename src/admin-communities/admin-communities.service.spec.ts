@@ -629,6 +629,7 @@ describe('AdminCommunitiesService', () => {
       });
       expect(result.moderators).toEqual([
         {
+          userId: 'user-owner',
           slug: 'ada-lovelace',
           name: 'Ada Lovelace',
           initials: 'AL',
@@ -636,6 +637,7 @@ describe('AdminCommunitiesService', () => {
           joinedAt: daysAgo(300).toISOString(),
         },
         {
+          userId: 'user-mod',
           slug: 'marsha-p',
           name: 'Marsha Johnson',
           initials: 'MJ',

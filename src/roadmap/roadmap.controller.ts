@@ -5,6 +5,7 @@ import {
   Get,
   Header,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
@@ -193,7 +194,7 @@ export class RoadmapController {
   @Roles(UserRole.Admin, UserRole.Moderator)
   updateItem(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateRoadmapItemDto,
   ) {
     return this.adminService.updateItem(id, dto, this.toActor(user));
@@ -210,7 +211,7 @@ export class RoadmapController {
   @Delete('admin/items/:id')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)
-  deleteItem(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
+  deleteItem(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
     return this.adminService.deleteItem(id, this.toActor(user));
   }
 
@@ -230,7 +231,7 @@ export class RoadmapController {
   @Roles(UserRole.Admin, UserRole.Moderator)
   updateDeps(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateDepsDto,
   ) {
     return this.adminService.updateDeps(id, dto, this.toActor(user));
@@ -249,7 +250,7 @@ export class RoadmapController {
   @Post('admin/items/:id/duplicate')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)
-  duplicateItem(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
+  duplicateItem(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
     return this.adminService.duplicateItem(id, this.toActor(user));
   }
 
@@ -266,7 +267,7 @@ export class RoadmapController {
   @Roles(UserRole.Admin, UserRole.Moderator)
   archiveItem(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ArchiveItemDto,
   ) {
     return this.adminService.archiveItem(id, dto.archived, this.toActor(user));
@@ -287,7 +288,7 @@ export class RoadmapController {
   @Roles(UserRole.Admin, UserRole.Moderator)
   notifyVoters(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: NotifyVotersDto,
   ) {
     return this.adminService.notifyVoters(id, dto, this.toActor(user));
@@ -322,7 +323,7 @@ export class RoadmapController {
   @Roles(UserRole.Admin, UserRole.Moderator)
   updateIdea(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateIdeaDto,
   ) {
     return this.adminService.updateIdea(id, dto, this.toActor(user));
@@ -339,7 +340,7 @@ export class RoadmapController {
   @Delete('admin/ideas/:id')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)
-  deleteIdea(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
+  deleteIdea(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
     return this.adminService.deleteIdea(id, this.toActor(user));
   }
 
@@ -356,7 +357,7 @@ export class RoadmapController {
   @Post('admin/ideas/:id/promote')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)
-  promoteIdea(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
+  promoteIdea(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
     return this.adminService.promoteIdea(id, this.toActor(user));
   }
 
@@ -378,7 +379,7 @@ export class RoadmapController {
   @Roles(UserRole.Admin, UserRole.Moderator)
   mergeIdea(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: MergeIdeaDto,
   ) {
     return this.adminService.mergeIdea(id, dto, this.toActor(user));
@@ -399,7 +400,7 @@ export class RoadmapController {
   @Roles(UserRole.Admin, UserRole.Moderator)
   declineIdea(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: DeclineIdeaDto,
   ) {
     return this.adminService.declineIdea(id, dto, this.toActor(user));
@@ -449,7 +450,7 @@ export class RoadmapController {
   @Roles(UserRole.Admin, UserRole.Moderator)
   updateTeamMember(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateTeamMemberDto,
   ) {
     return this.adminService.updateTeamMember(id, dto, this.toActor(user));
@@ -468,7 +469,7 @@ export class RoadmapController {
   @Roles(UserRole.Admin, UserRole.Moderator)
   deleteTeamMember(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.adminService.deleteTeamMember(id, this.toActor(user));
   }
