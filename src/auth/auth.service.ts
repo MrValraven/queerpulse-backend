@@ -6,6 +6,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash, randomUUID } from 'node:crypto';
 import { DataSource, EntityManager, IsNull, Repository } from 'typeorm';
 import { User, UserStatus } from '../users/entities/user.entity';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { UsersService } from '../users/users.service';
 import { USER_PROMOTED, UserPromotedEvent } from '../users/user.events';
 import {
@@ -87,6 +88,10 @@ export class AuthService {
     // reads the member's latest moderation-outcome reason for `suspensionInfoFor`.
     @InjectRepository(Notification)
     private readonly notifications: Repository<Notification>,
+    // Read-side only, same pattern — reads the caller's additive staff-role
+    // grants for `staffRolesFor` (surfaced on `GET /auth/me`).
+    @InjectRepository(UserStaffRole)
+    private readonly staffRoles: Repository<UserStaffRole>,
     private readonly platformSettings: PlatformSettingsService,
   ) {}
 
@@ -115,7 +120,8 @@ export class AuthService {
       reasonCode?: unknown;
     };
     const hasReason =
-      typeof payload.note === 'string' || typeof payload.reasonCode === 'string';
+      typeof payload.note === 'string' ||
+      typeof payload.reasonCode === 'string';
     return {
       // NULL while Suspended = a permanent ban; the frontend reads that to show
       // the banned page rather than the timed-suspension one.
@@ -130,6 +136,21 @@ export class AuthService {
           }
         : null,
     };
+  }
+
+  /**
+   * The caller's additive "staff role" grants (`STAFF_ROLES`), surfaced on
+   * `GET /auth/me` so the frontend capability layer (`useMyStaffRoles`) has
+   * them without a second fetch. One indexed query by `userId`; empty array
+   * for a member holding none — admin superset logic lives on the frontend
+   * hook (mirroring `StaffRolesGuard`), not here.
+   */
+  async staffRolesFor(userId: string): Promise<string[]> {
+    const grants = await this.staffRoles.find({
+      where: { userId },
+      select: ['role'],
+    });
+    return grants.map((grant) => grant.role);
   }
 
   // The suppression list is a plain lookup table with no service of its own,

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { CommunityMember } from '../communities/entities/community-member.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { Community } from '../communities/entities/community.entity';
 import { Event } from '../events/entities/event.entity';
@@ -24,7 +25,13 @@ import { FeedService } from './feed.service';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([CommunityPost, Community, ForumThread, Event]),
+    TypeOrmModule.forFeature([
+      CommunityPost,
+      Community,
+      ForumThread,
+      Event,
+      CommunityMember,
+    ]),
     UsersModule,
     SocialModule,
   ],

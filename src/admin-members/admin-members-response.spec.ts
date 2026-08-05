@@ -78,6 +78,7 @@ describe('toAdminMemberCard', () => {
       communities: ['circle-of-care'],
       vouchCount: 2,
       vouchedBy: [],
+      staffRoles: [],
     });
 
     expect(card.name).toBe('Inês Martins');
@@ -159,6 +160,7 @@ describe('toAdminMemberDetail', () => {
         center: vouchAvatar,
         nodes: [{ ...vouchAvatar, direction: 'inbound' }],
       },
+      staffRoles: [],
     });
 
     expect(detail.contributions[0]!.at).toBe('2025-03-05T00:00:00.000Z');

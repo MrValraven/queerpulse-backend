@@ -11,11 +11,10 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
-import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { StaffRolesGuard } from '../auth/guards/staff-roles.guard';
 import { Feature } from '../common/feature.decorator';
-import { UserRole } from '../users/entities/user.entity';
 import { CreateDeckDto } from './dto/create-deck.dto';
 import { UpdateDeckDto } from './dto/update-deck.dto';
 import { MagazineService } from './magazine.service';
@@ -34,17 +33,19 @@ import {
 } from '@nestjs/swagger';
 
 // ActiveMemberGuard runs first (a suspended moderator is locked out), then
-// RolesGuard checks moderator/admin — mirrors AdminTitlesController
-// (cinema). Route prefix is `magazine/admin/decks`, distinct from the
+// StaffRolesGuard requires the `magazine_editor` staff role (admins are a
+// superset). Route prefix is `magazine/admin/decks`, distinct from the
 // public `magazine/decks` GET routes on MagazineController.
 @Feature('magazine')
 @ApiTags('Admin — Magazine')
 @ApiCookieAuth()
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Moderator or admin role required.' })
+@ApiForbiddenResponse({
+  description: 'Magazine editor staff role or admin role required.',
+})
 @Controller('magazine/admin/decks')
-@UseGuards(ActiveMemberGuard, RolesGuard)
-@Roles(UserRole.Moderator, UserRole.Admin)
+@UseGuards(ActiveMemberGuard, StaffRolesGuard)
+@StaffRoles('magazine_editor')
 export class AdminMagazineDecksController {
   constructor(private readonly magazine: MagazineService) {}
 

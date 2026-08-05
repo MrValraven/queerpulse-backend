@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, IsNull, Repository } from 'typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { toImageUrl } from '../common/image-url';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import {
@@ -22,6 +23,8 @@ import {
 } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
+import { StaffRoleId } from '../users/staff-roles.registry';
 import { VouchService } from '../vouch/vouch.service';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import {
@@ -118,6 +121,8 @@ export class AdminMembersService {
     @InjectRepository(Report) private readonly reports: Repository<Report>,
     @InjectRepository(ModAuditLog)
     private readonly modAuditLogs: Repository<ModAuditLog>,
+    @InjectRepository(UserStaffRole)
+    private readonly staffRoles: Repository<UserStaffRole>,
     private readonly vouchService: VouchService,
     private readonly dataSource: DataSource,
   ) {}
@@ -158,12 +163,14 @@ export class AdminMembersService {
       openReportCountByUserId,
       communityNamesByUserId,
       roleByUserId,
+      staffRolesByUserId,
     ] = await Promise.all([
       this.vouchService.getVouchCounts(userIds),
       this.loadTopVouchers(userIds),
       this.loadOpenReportCounts(userIds, slugs),
       this.loadCommunityNames(userIds),
       this.loadRolesByUserId(userIds),
+      this.loadStaffRolesByUserId(userIds),
     ]);
 
     const items = profileRows.map((profileRow) =>
@@ -184,6 +191,7 @@ export class AdminMembersService {
         communities: communityNamesByUserId.get(profileRow.userId) ?? [],
         vouchCount: vouchCountsByUserId.get(profileRow.userId) ?? 0,
         vouchedBy: topVouchersByVouchee.get(profileRow.userId) ?? [],
+        staffRoles: staffRolesByUserId.get(profileRow.userId) ?? [],
       }),
     );
 
@@ -280,6 +288,7 @@ export class AdminMembersService {
       memberReports,
       communityRows,
       vouchesGiven,
+      staffRoleRows,
     ] = await Promise.all([
       this.users.findOne({
         where: { id: profile.userId },
@@ -312,6 +321,10 @@ export class AdminMembersService {
         where: { voucherId: profile.userId, withdrawnAt: IsNull() },
         order: { createdAt: 'DESC' },
         take: CONTRIBUTION_LIMIT,
+      }),
+      this.staffRoles.find({
+        where: { userId: profile.userId },
+        select: ['role'],
       }),
     ]);
 
@@ -490,6 +503,7 @@ export class AdminMembersService {
         ),
         nodes: graphNodes,
       },
+      staffRoles: staffRoleRows.map((staffRoleRow) => staffRoleRow.role),
     });
   }
 
@@ -519,13 +533,7 @@ export class AdminMembersService {
     idOrSlug: string,
     targetRole: UserRole,
   ): Promise<AdminMemberRoleDTO> {
-    const where = UUID_RE.test(idOrSlug)
-      ? [{ slug: idOrSlug }, { userId: idOrSlug }]
-      : [{ slug: idOrSlug }];
-    const profile = await this.profiles.findOne({ where });
-    if (!profile) {
-      throw new NotFoundException('Member not found');
-    }
+    const profile = await this.resolveMemberProfile(idOrSlug);
     const targetUserId = profile.userId;
 
     if (targetUserId === actorUserId) {
@@ -593,6 +601,188 @@ export class AdminMembersService {
       role: appliedRole,
       isSystem: false,
     });
+  }
+
+  /**
+   * Resolves the member behind an admin-facing `:id` route param, which may
+   * be either the profile slug or the raw userId — the lookup `updateRole`
+   * has always done, now shared with `grantStaffRole`/`revokeStaffRole` too.
+   */
+  private async resolveMemberProfile(idOrSlug: string): Promise<Profile> {
+    const where = UUID_RE.test(idOrSlug)
+      ? [{ slug: idOrSlug }, { userId: idOrSlug }]
+      : [{ slug: idOrSlug }];
+    const profile = await this.profiles.findOne({ where });
+    if (!profile) {
+      throw new NotFoundException('Member not found');
+    }
+    return profile;
+  }
+
+  /**
+   * Grant one additive "staff role" (`STAFF_ROLES`) to a member — orthogonal
+   * to `updateRole`'s account tier, so unlike it there is deliberately NEITHER
+   * a self-grant block (an admin already holds every capability, so granting
+   * themselves a staff role is harmless) NOR a last-holder guardrail (zero
+   * holders of a given staff role is a valid state).
+   *
+   * Idempotent: granting a role the member already holds writes no duplicate
+   * `user_staff_roles` row and no second audit entry. Mirrors `updateRole`'s
+   * house-account guardrail — the `isSystem` account can't hold staff roles
+   * either. The change is recorded in `mod_audit_logs` with a NULL `reportId`
+   * and the role id as the `note`, the same shape `updateRole` uses for
+   * `role_changed`.
+   *
+   * Also idempotent under a race: two concurrent grants of the same
+   * `(userId, role)` can both pass the `alreadyHeld` check and race on the
+   * INSERT, and the loser hits the `@Unique(['userId', 'role'])` constraint on
+   * `user_staff_roles`. Postgres poisons the whole transaction on that
+   * failure (no further statements can run on it without a ROLLBACK), so the
+   * loser's in-transaction recompute never happens — but the winner already
+   * committed the row (and the one audit entry), so the desired end state is
+   * already true. The `catch` below detects exactly that unique-violation
+   * (mirrors `VouchService.vouch` / `JoinRequestsService`'s use of
+   * `isUniqueViolation`) and recomputes `staffRoles` on a fresh query
+   * instead of surfacing a 500.
+   */
+  async grantStaffRole(
+    actorUserId: string,
+    idOrSlug: string,
+    role: StaffRoleId,
+  ): Promise<{ userId: string; slug: string; staffRoles: string[] }> {
+    const profile = await this.resolveMemberProfile(idOrSlug);
+    const targetUserId = profile.userId;
+
+    let staffRoleList: string[];
+    try {
+      staffRoleList = await this.dataSource.transaction(async (manager) => {
+        const users = manager.getRepository(User);
+        const targetUser = await users.findOne({
+          where: { id: targetUserId },
+          select: ['id', 'isSystem'],
+        });
+        if (!targetUser) {
+          throw new NotFoundException('Member not found');
+        }
+        if (targetUser.isSystem) {
+          throw new ForbiddenException(
+            'The house account can’t hold staff roles.',
+          );
+        }
+
+        const grants = manager.getRepository(UserStaffRole);
+        const alreadyHeld = await grants.findOne({
+          where: { userId: targetUserId, role },
+        });
+        if (!alreadyHeld) {
+          await grants.save(
+            grants.create({
+              userId: targetUserId,
+              role,
+              grantedById: actorUserId,
+            }),
+          );
+
+          const auditLogs = manager.getRepository(ModAuditLog);
+          await auditLogs.save(
+            auditLogs.create({
+              reportId: null,
+              actorId: actorUserId,
+              action: 'staff_role_granted',
+              reasonCode: null,
+              note: role,
+              duration: null,
+            }),
+          );
+        }
+
+        const holdings = await grants.find({
+          where: { userId: targetUserId },
+          select: ['role'],
+        });
+        return holdings.map((holding) => holding.role);
+      });
+    } catch (error) {
+      if (!isUniqueViolation(error)) {
+        throw error;
+      }
+      // Race loser: the winner's grant (and audit row) already committed, so
+      // this is not a real conflict — don't write a second audit row, just
+      // report the now-current holdings from a fresh query (the aborted
+      // transaction above can't run any more statements).
+      const holdings = await this.staffRoles.find({
+        where: { userId: targetUserId },
+        select: ['role'],
+      });
+      staffRoleList = holdings.map((holding) => holding.role);
+    }
+
+    return {
+      userId: targetUserId,
+      slug: profile.slug,
+      staffRoles: staffRoleList,
+    };
+  }
+
+  /**
+   * Revoke one additive staff role. A no-op — no delete, no audit row — when
+   * the member doesn't hold it, mirroring `updateRole`'s no-op-on-same-role
+   * path. Same house-account guardrail as `grantStaffRole`.
+   */
+  async revokeStaffRole(
+    actorUserId: string,
+    idOrSlug: string,
+    role: StaffRoleId,
+  ): Promise<{ userId: string; slug: string; staffRoles: string[] }> {
+    const profile = await this.resolveMemberProfile(idOrSlug);
+    const targetUserId = profile.userId;
+
+    const staffRoleList = await this.dataSource.transaction(async (manager) => {
+      const users = manager.getRepository(User);
+      const targetUser = await users.findOne({
+        where: { id: targetUserId },
+        select: ['id', 'isSystem'],
+      });
+      if (!targetUser) {
+        throw new NotFoundException('Member not found');
+      }
+      if (targetUser.isSystem) {
+        throw new ForbiddenException(
+          'The house account can’t hold staff roles.',
+        );
+      }
+
+      const grants = manager.getRepository(UserStaffRole);
+      const deleteResult = await grants.delete({
+        userId: targetUserId,
+        role,
+      });
+      if (deleteResult.affected) {
+        const auditLogs = manager.getRepository(ModAuditLog);
+        await auditLogs.save(
+          auditLogs.create({
+            reportId: null,
+            actorId: actorUserId,
+            action: 'staff_role_revoked',
+            reasonCode: null,
+            note: role,
+            duration: null,
+          }),
+        );
+      }
+
+      const holdings = await grants.find({
+        where: { userId: targetUserId },
+        select: ['role'],
+      });
+      return holdings.map((holding) => holding.role);
+    });
+
+    return {
+      userId: targetUserId,
+      slug: profile.slug,
+      staffRoles: staffRoleList,
+    };
   }
 
   /**
@@ -817,6 +1007,28 @@ export class AdminMembersService {
       roleByUserId.set(userRow.id, userRow.role);
     }
     return roleByUserId;
+  }
+
+  /** Staff-role grants for a page of members, in one batched query (never one
+   *  per member) — mirrors `loadRolesByUserId`. */
+  private async loadStaffRolesByUserId(
+    userIds: string[],
+  ): Promise<Map<string, string[]>> {
+    const staffRolesByUserId = new Map<string, string[]>();
+    if (!userIds.length) return staffRolesByUserId;
+    const grantRows = await this.staffRoles.find({
+      where: { userId: In(userIds) },
+      select: ['userId', 'role'],
+    });
+    for (const grantRow of grantRows) {
+      const existing = staffRolesByUserId.get(grantRow.userId);
+      if (existing) {
+        existing.push(grantRow.role);
+      } else {
+        staffRolesByUserId.set(grantRow.userId, [grantRow.role]);
+      }
+    }
+    return staffRolesByUserId;
   }
 
   private toRosterRoleLabel(role: RosterRole): 'owner' | 'mod' | 'member' {

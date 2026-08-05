@@ -1,7 +1,7 @@
-import { NotFoundException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityTarget, ObjectLiteral } from 'typeorm';
 import {
   CommunityMember,
   RosterRole,
@@ -15,6 +15,7 @@ import {
 } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import { VouchService } from '../vouch/vouch.service';
 import {
@@ -120,8 +121,28 @@ describe('AdminMembersService', () => {
   let communityMembers: { createQueryBuilder: jest.Mock };
   let reports: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let modAuditLogs: { find: jest.Mock };
+  let staffRoles: { find: jest.Mock };
   let vouchService: { getVouchCounts: jest.Mock; getVouchCount: jest.Mock };
   let dataSource: { transaction: jest.Mock };
+
+  // The repos as seen through `manager.getRepository(...)` inside
+  // `dataSource.transaction` — separate mocks from the top-level injected
+  // repos above, since `updateRole`/`grantStaffRole`/`revokeStaffRole` all do
+  // their reads/writes through the transactional `EntityManager`, not the
+  // constructor-injected repositories.
+  let transactionUsers: {
+    findOne: jest.Mock;
+    update: jest.Mock;
+    count: jest.Mock;
+  };
+  let transactionStaffRoles: {
+    findOne: jest.Mock;
+    find: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+    delete: jest.Mock;
+  };
+  let transactionAuditLogs: { create: jest.Mock; save: jest.Mock };
 
   beforeEach(async () => {
     jest.useFakeTimers().setSystemTime(FIXED_NOW);
@@ -148,16 +169,54 @@ describe('AdminMembersService', () => {
       createQueryBuilder: jest.fn(() => makeQueryBuilderStub()),
     };
     modAuditLogs = { find: jest.fn().mockResolvedValue([]) };
+    staffRoles = { find: jest.fn().mockResolvedValue([]) };
     vouchService = {
       getVouchCounts: jest.fn().mockResolvedValue(new Map()),
       getVouchCount: jest.fn().mockResolvedValue(0),
     };
-    // `updateRole` is the only method that opens a transaction; the existing
-    // `list`/`getMember`/`listFlagged` tests never reach it, so a stub that
-    // simply runs the callback with a manager exposing the repos it touches is
-    // enough to keep the module resolvable.
+
+    transactionUsers = {
+      findOne: jest.fn().mockResolvedValue(null),
+      update: jest.fn().mockResolvedValue(undefined),
+      count: jest.fn().mockResolvedValue(0),
+    };
+    transactionStaffRoles = {
+      findOne: jest.fn().mockResolvedValue(null),
+      find: jest.fn().mockResolvedValue([]),
+      create: jest.fn((row: unknown) => row),
+      save: jest.fn().mockResolvedValue(undefined),
+      delete: jest.fn().mockResolvedValue({ affected: 0 }),
+    };
+    transactionAuditLogs = {
+      create: jest.fn((row: unknown) => row),
+      save: jest.fn().mockResolvedValue(undefined),
+    };
+
+    // `updateRole`/`grantStaffRole`/`revokeStaffRole` are the only methods
+    // that open a transaction. This stub runs the callback for real against a
+    // fake `EntityManager` whose `getRepository` resolves to whichever of the
+    // three transactional repo stubs above matches the entity class asked
+    // for — the same three entities every one of those methods touches.
     dataSource = {
-      transaction: jest.fn(),
+      transaction: jest.fn(
+        async (
+          runInTransaction: (manager: {
+            getRepository: (entity: EntityTarget<ObjectLiteral>) => unknown;
+          }) => Promise<unknown>,
+        ) =>
+          runInTransaction({
+            getRepository: (entity: EntityTarget<ObjectLiteral>) => {
+              if (entity === User) return transactionUsers;
+              if (entity === UserStaffRole) return transactionStaffRoles;
+              if (entity === ModAuditLog) return transactionAuditLogs;
+              const entityName =
+                typeof entity === 'function' ? entity.name : 'unknown';
+              throw new Error(
+                `Unexpected repository requested in transaction stub: ${entityName}`,
+              );
+            },
+          }),
+      ),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -172,6 +231,7 @@ describe('AdminMembersService', () => {
         },
         { provide: getRepositoryToken(Report), useValue: reports },
         { provide: getRepositoryToken(ModAuditLog), useValue: modAuditLogs },
+        { provide: getRepositoryToken(UserStaffRole), useValue: staffRoles },
         { provide: VouchService, useValue: vouchService },
         { provide: DataSource, useValue: dataSource },
       ],
@@ -348,6 +408,160 @@ describe('AdminMembersService', () => {
           (entry) => entry.action === 'no_reports',
         ),
       ).toBe(true);
+    });
+  });
+
+  describe('grantStaffRole', () => {
+    it("inserts a user_staff_roles row and writes a 'staff_role_granted' audit log", async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        isSystem: false,
+      });
+      transactionStaffRoles.findOne.mockResolvedValue(null); // not already held
+      transactionStaffRoles.find.mockResolvedValue([
+        { role: 'magazine_editor' },
+      ]);
+
+      const result = await service.grantStaffRole(
+        'user-admin',
+        'ines-martins',
+        'magazine_editor',
+      );
+
+      expect(transactionStaffRoles.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'user-ines',
+          role: 'magazine_editor',
+          grantedById: 'user-admin',
+        }),
+      );
+      expect(transactionAuditLogs.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reportId: null,
+          actorId: 'user-admin',
+          action: 'staff_role_granted',
+          note: 'magazine_editor',
+        }),
+      );
+      expect(result).toEqual({
+        userId: 'user-ines',
+        slug: 'ines-martins',
+        staffRoles: ['magazine_editor'],
+      });
+    });
+
+    it('throws ForbiddenException for an isSystem house account, without writing anything', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        isSystem: true,
+      });
+
+      await expect(
+        service.grantStaffRole('user-admin', 'ines-martins', 'magazine_editor'),
+      ).rejects.toThrow(ForbiddenException);
+      expect(transactionStaffRoles.save).not.toHaveBeenCalled();
+      expect(transactionAuditLogs.save).not.toHaveBeenCalled();
+    });
+
+    it('is idempotent — granting an already-held role writes no duplicate row and no second audit entry', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        isSystem: false,
+      });
+      transactionStaffRoles.findOne.mockResolvedValue({
+        id: 'grant-1',
+        userId: 'user-ines',
+        role: 'magazine_editor',
+      });
+      transactionStaffRoles.find.mockResolvedValue([
+        { role: 'magazine_editor' },
+      ]);
+
+      const result = await service.grantStaffRole(
+        'user-admin',
+        'ines-martins',
+        'magazine_editor',
+      );
+
+      expect(transactionStaffRoles.save).not.toHaveBeenCalled();
+      expect(transactionAuditLogs.save).not.toHaveBeenCalled();
+      expect(result.staffRoles).toEqual(['magazine_editor']);
+    });
+  });
+
+  describe('revokeStaffRole', () => {
+    it("deletes the row and writes a 'staff_role_revoked' audit log", async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        isSystem: false,
+      });
+      transactionStaffRoles.delete.mockResolvedValue({ affected: 1 });
+      transactionStaffRoles.find.mockResolvedValue([]);
+
+      const result = await service.revokeStaffRole(
+        'user-admin',
+        'ines-martins',
+        'magazine_editor',
+      );
+
+      expect(transactionStaffRoles.delete).toHaveBeenCalledWith({
+        userId: 'user-ines',
+        role: 'magazine_editor',
+      });
+      expect(transactionAuditLogs.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reportId: null,
+          actorId: 'user-admin',
+          action: 'staff_role_revoked',
+          note: 'magazine_editor',
+        }),
+      );
+      expect(result).toEqual({
+        userId: 'user-ines',
+        slug: 'ines-martins',
+        staffRoles: [],
+      });
+    });
+
+    it('throws ForbiddenException for an isSystem house account, without deleting anything', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        isSystem: true,
+      });
+
+      await expect(
+        service.revokeStaffRole(
+          'user-admin',
+          'ines-martins',
+          'magazine_editor',
+        ),
+      ).rejects.toThrow(ForbiddenException);
+      expect(transactionStaffRoles.delete).not.toHaveBeenCalled();
+      expect(transactionAuditLogs.save).not.toHaveBeenCalled();
+    });
+
+    it('is a no-op — no audit row — for a role the member does not hold', async () => {
+      profiles.findOne.mockResolvedValue(makeProfile());
+      transactionUsers.findOne.mockResolvedValue({
+        id: 'user-ines',
+        isSystem: false,
+      });
+      transactionStaffRoles.delete.mockResolvedValue({ affected: 0 });
+      transactionStaffRoles.find.mockResolvedValue([]);
+
+      const result = await service.revokeStaffRole(
+        'user-admin',
+        'ines-martins',
+        'magazine_writer',
+      );
+
+      expect(transactionAuditLogs.save).not.toHaveBeenCalled();
+      expect(result.staffRoles).toEqual([]);
     });
   });
 });

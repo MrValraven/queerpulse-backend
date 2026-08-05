@@ -17,11 +17,7 @@ import { JoinRequestsService } from './join-requests.service';
     PlatformSettingsModule,
   ],
   controllers: [InvitesController, JoinRequestsController],
-  providers: [
-    InvitesService,
-    InviteExpirySweeperService,
-    JoinRequestsService,
-  ],
+  providers: [InvitesService, InviteExpirySweeperService, JoinRequestsService],
   exports: [InvitesService],
 })
 export class MembershipModule {}

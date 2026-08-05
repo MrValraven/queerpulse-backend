@@ -32,4 +32,8 @@ export class CreateEventDto {
   @IsOptional() @IsIn([EventStatus.Draft, EventStatus.Published]) status?:
     EventStatus.Draft | EventStatus.Published;
   @IsOptional() @IsImageReference() coverImageUrl?: string;
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  communitySlug?: string;
 }

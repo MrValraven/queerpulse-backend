@@ -63,6 +63,7 @@ function makeProfile(overrides: Partial<Profile> = {}): Profile {
     tags: [],
     verified: false,
     privateNetwork: false,
+    featuredConsent: false,
     now: null,
     joinedAt: new Date(),
     createdAt: new Date(),

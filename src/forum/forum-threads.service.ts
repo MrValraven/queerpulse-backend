@@ -25,6 +25,7 @@ import { escapeLikeTerm } from '../common/like-escape';
 import { MemberLookup } from '../common/member-ref';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
+import { CommunityMembershipService } from '../communities/community-membership.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole } from '../users/entities/user.entity';
@@ -92,6 +93,7 @@ export interface CreateThreadInput {
   body: string;
   category: string;
   tags?: string[];
+  communitySlug?: string;
 }
 
 @Injectable()
@@ -111,6 +113,7 @@ export class ForumThreadsService {
     private readonly blockFilter: BlockFilterService,
     private readonly mentions: MentionNotificationService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly membership: CommunityMembershipService,
   ) {}
 
   // GET /forum/threads?category=&cursor=&sort=&tag=&q= — a cursor page ordered
@@ -281,7 +284,21 @@ export class ForumThreadsService {
     input: CreateThreadInput,
     viewerIsModerator = false,
   ): Promise<ForumThreadResponse> {
-    const { thread, opPost } = await this.createWithUniqueSlug(authorId, input);
+    // Resolve the optional community BEFORE the create transaction opens —
+    // a non-member gets 403 (or a missing/archived community 404s) without a
+    // thread ever being inserted. Mirrors `EventsService.create`.
+    let communityId: string | null = null;
+    if (input.communitySlug) {
+      communityId = await this.membership.assertMemberBySlug(
+        input.communitySlug,
+        authorId,
+      );
+    }
+    const { thread, opPost } = await this.createWithUniqueSlug(
+      authorId,
+      input,
+      communityId,
+    );
     // After the thread has committed: record it as public profile activity for
     // the author. Fire-and-forget on the event bus — a listener failure must
     // never affect thread creation (see profiles `ActivityListener`).
@@ -442,6 +459,7 @@ export class ForumThreadsService {
   private async createWithUniqueSlug(
     authorId: string,
     input: CreateThreadInput,
+    communityId: string | null = null,
   ): Promise<{ thread: ForumThread; opPost: ForumPost }> {
     for (let attempt = 1; attempt <= MAX_SLUG_ATTEMPTS; attempt++) {
       const slug = await allocateUniqueSlug(
@@ -464,6 +482,7 @@ export class ForumThreadsService {
               isPinned: false,
               isLocked: false,
               tags: normalizeTags(input.tags),
+              communityId,
               // Explicit 0 (not just the DB default) so the create echo returns
               // a number even before a reload — the OP starts with no votes.
               opVoteCount: 0,

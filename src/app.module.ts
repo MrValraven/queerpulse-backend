@@ -40,6 +40,7 @@ import { CompaniesModule } from './companies/companies.module';
 import { CultureModule } from './culture/culture.module';
 import { GovernanceModule } from './governance/governance.module';
 import { RoadmapModule } from './roadmap/roadmap.module';
+import { LandingModule } from './landing/landing.module';
 import { AdminCommunitiesModule } from './admin-communities/admin-communities.module';
 import { AdminMembersModule } from './admin-members/admin-members.module';
 import { AdminInvitesModule } from './admin-invites/admin-invites.module';
@@ -243,6 +244,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     RoadmapModule,
     ReadingGroupProposalsModule,
     ChangemakersModule,
+    LandingModule,
     AdminCommunitiesModule,
     AdminMembersModule,
     AdminInvitesModule,

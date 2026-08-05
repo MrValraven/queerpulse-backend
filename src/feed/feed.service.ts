@@ -8,6 +8,7 @@ import {
   encodeCursor,
 } from '../common/cursor-pagination';
 import { MemberLookup, MemberRef } from '../common/member-ref';
+import { CommunityMember } from '../communities/entities/community-member.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import {
   AccessTier,
@@ -24,6 +25,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { FeedTab } from './dto/get-feed.query';
 import {
+  communityNewMemberToFeedItem,
   communityPostToFeedItem,
   eventToFeedItem,
   FeedItem,
@@ -33,12 +35,23 @@ import {
 
 const DEFAULT_LIMIT = 20;
 
-/** The four underlying stores this read-time aggregation unions. `new_member`
+/** The underlying stores this read-time aggregation unions. `new_member`
  * (recently-joined active members, for the "People" tab) reads `profiles`
- * directly rather than a dedicated feed table — same "no new table" idiom as
- * the other three sources. */
+ * directly rather than a dedicated feed table — same "no new table" idiom the
+ * other sources follow. `community_new_member` (Task 5) is the same idea
+ * scoped to communities the viewer belongs to ("X joined {community}"); it
+ * reads `community_members` directly and is unioned into the `communities`
+ * tab alongside the other three sources, each additionally membership-scoped
+ * there (Task 6 — see `sourcesForTab` and the `membershipScoped` branches in
+ * `fetchCandidates`). Its candidates map to a FINAL `FeedItem.type` of
+ * `'new_member'` too (see `communityNewMemberToFeedItem`'s docstring) —
+ * `'community_new_member'` only exists as this internal discriminator. */
 type SourceKind =
-  'community_post' | 'forum_thread' | 'gathering' | 'new_member';
+  | 'community_post'
+  | 'forum_thread'
+  | 'gathering'
+  | 'new_member'
+  | 'community_new_member';
 
 /**
  * A row from any one source, reduced to just what the cross-source merge
@@ -51,7 +64,7 @@ interface Candidate {
   createdAt: Date;
   type: SourceKind;
   authorId: string;
-  row: CommunityPost | ForumThread | Event | Profile;
+  row: CommunityPost | ForumThread | Event | Profile | CommunityMember;
 }
 
 /** Same ordering `cursorPaginate` applies per-source: newest first, `id`
@@ -106,6 +119,8 @@ export class FeedService {
     private readonly events: Repository<Event>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
+    @InjectRepository(CommunityMember)
+    private readonly communityMembers: Repository<CommunityMember>,
     private readonly blockFilter: BlockFilterService,
   ) {}
 
@@ -115,12 +130,25 @@ export class FeedService {
     cursor: string | undefined,
     limit: number = DEFAULT_LIMIT,
   ): Promise<CursorPage<FeedItem>> {
-    const sources = this.sourcesForTab(tab ?? 'all');
+    const resolvedTab = tab ?? 'all';
+    const sources = this.sourcesForTab(resolvedTab);
+    // Personalizes the community_post/gathering/forum_thread source cases to
+    // the viewer's own memberships when serving the `communities` tab (Task
+    // 6) — see the per-case `if (membershipScoped)` branches below.
+    // `community_new_member` needs no branch: it's already inherently
+    // viewer-scoped (Task 5).
+    const membershipScoped = resolvedTab === 'communities';
 
     const perSourceLimit = limit + 1;
     const candidateLists = await Promise.all(
       sources.map((source) =>
-        this.fetchCandidates(source, viewerId, cursor, perSourceLimit),
+        this.fetchCandidates(
+          source,
+          viewerId,
+          cursor,
+          perSourceLimit,
+          membershipScoped,
+        ),
       ),
     );
     const merged = candidateLists.flat().sort(compareCandidatesDesc);
@@ -142,11 +170,19 @@ export class FeedService {
 
   /** `tab` -> which sources are unioned. `people` unions just `new_member`;
    * `all` includes it alongside the other three, so recently-joined members
-   * surface in the unfiltered feed too. */
+   * surface in the unfiltered feed too. `communities` unions all four
+   * membership-scoped sources (Task 6) — note it uses
+   * `community_new_member`, NOT the global `new_member` that `all`/`people`
+   * use, since this tab is personalized to the viewer's own communities. */
   private sourcesForTab(tab: FeedTab): SourceKind[] {
     switch (tab) {
       case 'communities':
-        return ['community_post'];
+        return [
+          'community_post',
+          'gathering',
+          'forum_thread',
+          'community_new_member',
+        ];
       case 'gatherings':
         return ['gathering'];
       case 'posts':
@@ -164,6 +200,7 @@ export class FeedService {
     viewerId: string,
     cursor: string | undefined,
     limit: number,
+    membershipScoped: boolean,
   ): Promise<Candidate[]> {
     switch (kind) {
       case 'community_post': {
@@ -188,8 +225,20 @@ export class FeedService {
         // pagination" path can't emit that raw expression correctly.
         const qb = this.communityPosts
           .createQueryBuilder('cp')
-          .where('cp.deletedAt IS NULL')
-          .andWhere(
+          .where('cp.deletedAt IS NULL');
+        if (membershipScoped) {
+          // `communities` tab (Task 6): drop the access-tier gate entirely
+          // and restrict to communities the viewer belongs to — this also
+          // drops flat/global posts (`community_id IS NULL`), which have no
+          // community roster to be a member of.
+          qb.andWhere(
+            `cp.community_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM "community_members" "mem"
+               WHERE "mem"."community_id" = cp.community_id AND "mem"."user_id" = :viewerId)`,
+            { viewerId },
+          );
+        } else {
+          qb.andWhere(
             `(
               cp.community_id IS NULL
               OR EXISTS (
@@ -205,6 +254,7 @@ export class FeedService {
             )`,
             { privateTier: AccessTier.Private, viewerId },
           );
+        }
         // `true`: `CommunityPost.createdAt` is migrated to `timestamptz(3)`
         // (see `1785001400000-NarrowCursorCreatedAtPrecision.ts`), so
         // `cursorPaginate` orders/filters on the raw column instead of
@@ -222,6 +272,16 @@ export class FeedService {
       }
       case 'forum_thread': {
         const qb = this.forumThreads.createQueryBuilder('t');
+        if (membershipScoped) {
+          // `communities` tab (Task 6): restrict to threads posted in
+          // communities the viewer belongs to.
+          qb.andWhere(
+            `t.community_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM "community_members" "mem"
+               WHERE "mem"."community_id" = t.community_id AND "mem"."user_id" = :viewerId)`,
+            { viewerId },
+          );
+        }
         // `true`: `ForumThread.createdAt` is migrated to `timestamptz(3)`
         // (see `1785001400000-NarrowCursorCreatedAtPrecision.ts`), so this
         // unfiltered "no WHERE at all" scan can finally use the existing
@@ -250,6 +310,16 @@ export class FeedService {
           .andWhere('e.visibility IN (:...visibilities)', {
             visibilities: [EventVisibility.Public, EventVisibility.Members],
           });
+        if (membershipScoped) {
+          // `communities` tab (Task 6): restrict to gatherings hosted by
+          // communities the viewer belongs to.
+          qb.andWhere(
+            `e.community_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM "community_members" "mem"
+               WHERE "mem"."community_id" = e.community_id AND "mem"."user_id" = :viewerId)`,
+            { viewerId },
+          );
+        }
         // `true`: `Event.createdAt` is migrated to `timestamptz(3)` (see
         // `1785001400000-NarrowCursorCreatedAtPrecision.ts`), so this
         // `status`+`visibility` filter can be served by the partial index
@@ -312,6 +382,60 @@ export class FeedService {
           row,
         }));
       }
+      case 'community_new_member': {
+        // Recently-joined ACTIVE members of communities the VIEWER also
+        // belongs to, newest-first ("X joined {community}" — Task 5; not
+        // unioned into any tab yet, see the `SourceKind` docstring).
+        // `CommunityMember`'s PK IS `id` (unlike `Profile`'s `userId`-keyed
+        // PK above), so this could in principle go through `cursorPaginate`
+        // — but it's kept hand-rolled and join-free for the same reason the
+        // `new_member` case above is: the membership+active-user filters
+        // below are correlated EXISTS subqueries, and TypeORM's `.take()`
+        // forces an innerJoin down the two-query "distinct pagination" path,
+        // which can't emit the raw `date_trunc(...)` ORDER BY verbatim.
+        //
+        // `m.user_id != :viewerId` excludes the viewer's own membership rows
+        // (mirrors `new_member`'s `p.user_id != :viewerId` — you already
+        // know you joined). The first EXISTS restricts to memberships of
+        // communities the viewer is ALSO a member of (a self-join on
+        // `community_members` by `community_id`); the second is the same
+        // active-user gate `new_member` applies.
+        const qb = this.communityMembers
+          .createQueryBuilder('m')
+          .where('m.user_id != :viewerId', { viewerId })
+          .andWhere(
+            `EXISTS (
+              SELECT 1 FROM "community_members" "self"
+              WHERE "self"."community_id" = m.community_id
+                AND "self"."user_id" = :viewerId
+            )`,
+            { viewerId },
+          )
+          .andWhere(
+            `EXISTS (SELECT 1 FROM "users" "u" WHERE "u"."id" = "m"."user_id" AND "u"."status" = :active)`,
+            { active: UserStatus.Active },
+          );
+
+        const joinedAtExpr = `date_trunc('milliseconds', "m"."joined_at")`;
+        qb.orderBy(joinedAtExpr, 'DESC').addOrderBy('m.id', 'DESC');
+
+        const decoded = cursor ? decodeCursor(cursor) : null;
+        if (decoded) {
+          qb.andWhere(
+            `(${joinedAtExpr}, m.id) < (:cursorCreatedAt, :cursorId)`,
+            { cursorCreatedAt: decoded.createdAt, cursorId: decoded.id },
+          );
+        }
+
+        const rows = await qb.take(limit).getMany();
+        return rows.map((row) => ({
+          id: row.id,
+          createdAt: row.joinedAt,
+          type: 'community_new_member' as const,
+          authorId: row.userId,
+          row,
+        }));
+      }
     }
   }
 
@@ -344,11 +468,22 @@ export class FeedService {
     const authorIds = [...new Set(candidates.map((c) => c.authorId))];
     const authors = await new MemberLookup(this.profiles).byUserIds(authorIds);
 
+    // Both `community_post` (nullable `communityId` — a flat/global post has
+    // none) and `community_new_member` (always scoped to a community) need a
+    // community row resolved; batched into the same `IN` query/map as
+    // `authors` above rather than one lookup per source.
     const communityIds = [
       ...new Set(
         candidates
-          .filter((c) => c.type === 'community_post')
-          .map((c) => (c.row as CommunityPost).communityId)
+          .map((c) => {
+            if (c.type === 'community_post') {
+              return (c.row as CommunityPost).communityId;
+            }
+            if (c.type === 'community_new_member') {
+              return (c.row as CommunityMember).communityId;
+            }
+            return null;
+          })
           .filter((id): id is string => id !== null),
       ),
     ];
@@ -373,6 +508,16 @@ export class FeedService {
           return eventToFeedItem(c.row as Event, author);
         case 'new_member':
           return newMemberToFeedItem(c.row as Profile, author);
+        case 'community_new_member': {
+          const membership = c.row as CommunityMember;
+          const community = communityById.get(membership.communityId) ?? null;
+          return communityNewMemberToFeedItem(
+            c.id,
+            c.createdAt,
+            author,
+            community,
+          );
+        }
       }
     });
   }

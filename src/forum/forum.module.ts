@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { CommunityMembershipModule } from '../communities/community-membership.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { MentionsModule } from '../mentions/mentions.module';
 import { SocialModule } from '../social/social.module';
@@ -38,6 +39,10 @@ import { ForumThreadsService } from './forum-threads.service';
     // members (shown to moderators, flagged), removed posts render as a
     // tombstone reusing the existing `deleted` rendering.
     ContentModerationModule,
+    // `CommunityMembershipService` — an optional `communitySlug` on create
+    // resolves + roster-checks a community for the thread to attach to.
+    // Mirrors `EventsModule`'s import.
+    CommunityMembershipModule,
   ],
   controllers: [ForumController],
   providers: [ForumThreadsService, ForumPostsService],

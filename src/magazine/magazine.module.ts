@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Profile } from '../users/entities/profile.entity';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { AdminMagazineDecksController } from './admin-magazine-decks.controller';
 import { AdminStorySubmissionsController } from './admin-story-submissions.controller';
 import { AdminStorySubmissionsService } from './admin-story-submissions.service';
@@ -26,6 +27,8 @@ import { StorySubmissionsService } from './story-submissions.service';
       // Registered here (overlapping `forFeature` is permitted) so the admin
       // submission read model can resolve submitter refs.
       Profile,
+      // StaffRolesGuard (AdminMagazineDecksController) injects this repo.
+      UserStaffRole,
     ]),
   ],
   controllers: [

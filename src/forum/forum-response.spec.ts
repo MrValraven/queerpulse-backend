@@ -25,6 +25,7 @@ function makeThread(overrides: Partial<ForumThread> = {}): ForumThread {
     title: 'Hello',
     authorId: 'author-1',
     category: 'general',
+    communityId: null,
     isPinned: false,
     isLocked: false,
     tags: [],

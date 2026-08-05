@@ -277,7 +277,13 @@ export class AuthController {
     // A suspended/banned member is locked out of every gated route, so the
     // account-suspended/banned page has no authed endpoint to call for the
     // reason — it rides on `me` (JWT-only) instead. Null for everyone else.
-    const suspensionInfo = await this.authService.suspensionInfoFor(user);
+    const [suspensionInfo, staffRoles] = await Promise.all([
+      this.authService.suspensionInfoFor(user),
+      // Additive functional grants (STAFF_ROLES) on top of `role` — the
+      // frontend capability layer (useMyStaffRoles) reads this. Empty array
+      // for a member holding none; admins are a superset resolved client-side.
+      this.authService.staffRolesFor(user.id),
+    ]);
     return {
       id: user.id,
       // From the JWT (re-read from the DB every request by JwtStrategy), not the
@@ -293,6 +299,7 @@ export class AuthController {
       // gate reads this to keep an already-onboarded member out of the wizard.
       onboardedAt: user.onboardedAt?.toISOString() ?? null,
       profile: user.profile ?? null,
+      staffRoles,
       // { suspendedUntil, suspension } — both null unless the member is suspended.
       ...suspensionInfo,
     };

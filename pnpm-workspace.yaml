@@ -1,0 +1,9 @@
+# pnpm settings live here as of pnpm 9.15+/10 — the `pnpm` field in
+# package.json is no longer read. Packages whose install/postinstall build
+# scripts are allowed to run (all others are blocked by default).
+# `packages` is required by pnpm 11+ even for a single-package repo, or every
+# pnpm invocation fails with "packages field missing or empty".
+packages:
+  - .
+onlyBuiltDependencies:
+  - unrs-resolver

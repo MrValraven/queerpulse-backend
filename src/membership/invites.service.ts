@@ -385,7 +385,11 @@ export class InvitesService {
     const result = await this.invites.update(
       // Resendable == not yet in a terminal accepted/revoked state. A lazily
       // unexpired row is still `Pending` in the DB; a swept one is `Expired`.
-      { id: invite.id, inviterId, status: In([InviteStatus.Pending, InviteStatus.Expired]) },
+      {
+        id: invite.id,
+        inviterId,
+        status: In([InviteStatus.Pending, InviteStatus.Expired]),
+      },
       { status: InviteStatus.Pending, expiresAt: refreshedExpiry },
     );
     if (result.affected !== 1) {

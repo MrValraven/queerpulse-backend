@@ -197,7 +197,10 @@ export class SubprofilesController {
   @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
   @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-  getOne(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
+  getOne(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     return this.subprofilesService.getOwnedDTO(user.userId, id);
   }
 
@@ -309,7 +312,10 @@ export class SubprofilesController {
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
-  publish(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
+  publish(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     return this.subprofilesService.publish(user.userId, id);
   }
 
@@ -324,7 +330,10 @@ export class SubprofilesController {
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
-  unpublish(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
+  unpublish(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     return this.subprofilesService.unpublish(user.userId, id);
   }
 
@@ -357,7 +366,10 @@ export class SubprofilesController {
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
-  listMembers(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
+  listMembers(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     return this.subprofilesService.listMembers(user.userId, id);
   }
 
@@ -418,7 +430,10 @@ export class SubprofilesController {
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
-  listInvites(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
+  listInvites(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     return this.subprofileInvitesService.listInvites(user.userId, id);
   }
 
@@ -487,7 +502,10 @@ export class SubprofilesController {
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
-  listEndorsers(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
+  listEndorsers(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     return this.subprofilesService.listEndorsers(user.userId, id);
   }
 
@@ -504,7 +522,10 @@ export class SubprofilesController {
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
-  follow(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
+  follow(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     return this.subprofilesService.follow(user.userId, id);
   }
 
@@ -516,7 +537,10 @@ export class SubprofilesController {
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
-  unfollow(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
+  unfollow(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     return this.subprofilesService.unfollow(user.userId, id);
   }
 }

@@ -115,6 +115,13 @@ export class UpdateProfileDto {
   @IsBoolean()
   privateNetwork?: boolean;
 
+  // Whether the member consents to being featured (member quote /
+  // changemaker highlight) on the admin-curated live landing page. See
+  // Profile.featuredConsent.
+  @IsOptional()
+  @IsBoolean()
+  featuredConsent?: boolean;
+
   // Ordered slugs of the communities the member pins to their profile's
   // "Communities" section — a full REPLACE of the pin set, not a merge, so
   // `[]` clears it. Each slug must be a NON-PRIVATE community the member is

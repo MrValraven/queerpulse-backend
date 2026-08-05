@@ -22,9 +22,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
-export class AddCoopJoinRequestsCoopCreatedAtIndex1785903100000
-  implements MigrationInterface
-{
+export class AddCoopJoinRequestsCoopCreatedAtIndex1785903100000 implements MigrationInterface {
   name = 'AddCoopJoinRequestsCoopCreatedAtIndex1785903100000';
 
   transaction = false as const;

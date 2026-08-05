@@ -78,6 +78,10 @@ export interface AdminMemberCardDTO {
   avatarUrl: string | null;
   vouchCount: number;
   vouchedBy: VouchAvatarDTO[];
+  /** Additive functional grants (`STAFF_ROLES`) this member holds, e.g.
+   *  `['magazine_editor']` — orthogonal to `role`, so the roster can show a
+   *  badge without a second fetch. Empty for members holding none. */
+  staffRoles: string[];
 }
 
 export interface AdminMemberListDTO {
@@ -135,6 +139,10 @@ export interface AdminMemberDetailDTO {
   contributions: { kind: string; detail: string | null; at: string }[];
   moderationTimeline: AdminMemberModerationEntryDTO[];
   graph: { center: VouchAvatarDTO; nodes: VouchGraphNodeDTO[] };
+  /** Additive functional grants (`STAFF_ROLES`) this member holds — see
+   *  `AdminMemberCardDTO.staffRoles`. Drives the drawer's "Roles & access"
+   *  toggle list. */
+  staffRoles: string[];
 }
 
 export function toAdminMemberCard(input: {
@@ -154,6 +162,7 @@ export function toAdminMemberCard(input: {
   communities: string[];
   vouchCount: number;
   vouchedBy: VouchAvatarDTO[];
+  staffRoles: string[];
 }): AdminMemberCardDTO {
   const { profile } = input;
   return {
@@ -172,6 +181,7 @@ export function toAdminMemberCard(input: {
     avatarUrl: profile.avatarUrl,
     vouchCount: input.vouchCount,
     vouchedBy: input.vouchedBy,
+    staffRoles: input.staffRoles,
   };
 }
 
@@ -237,6 +247,7 @@ export function toAdminMemberDetail(input: {
     reportId: string | null;
   }[];
   graph: { center: VouchAvatarDTO; nodes: VouchGraphNodeDTO[] };
+  staffRoles: string[];
 }): AdminMemberDetailDTO {
   const { profile } = input;
   return {
@@ -255,6 +266,7 @@ export function toAdminMemberDetail(input: {
     joinedAt: profile.joinedAt.toISOString(),
     openReportCount: input.openReportCount,
     communities: input.communities,
+    staffRoles: input.staffRoles,
     contributions: input.contributions.map((contribution) => ({
       kind: contribution.kind,
       detail: contribution.detail,

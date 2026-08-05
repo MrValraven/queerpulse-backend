@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { CommunityMembershipModule } from '../communities/community-membership.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PushModule } from '../push/push.module';
@@ -50,6 +51,10 @@ import { RsvpService } from './rsvp.service';
     // `ContentModerationService` — public event browse/search/detail honour a
     // moderator `hide_content`/`remove_content` takedown.
     ContentModerationModule,
+    // `CommunityMembershipService` — an optional `communitySlug` on create
+    // resolves to the caller's own roster membership before the event is
+    // attached to that community. Read-only module; closes no cycle.
+    CommunityMembershipModule,
   ],
   controllers: [
     EventsController,

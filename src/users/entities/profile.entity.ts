@@ -102,6 +102,13 @@ export class Profile {
   @Column({ type: 'boolean', default: false })
   privateNetwork!: boolean;
 
+  // Member-controlled: when true, the member has consented to being featured
+  // (member quote / changemaker highlight) on the admin-curated live landing
+  // page. Default false — opt-in only. See ProfilesController's own-profile
+  // privacy PATCH and the `landing_feature` table.
+  @Column({ type: 'boolean', default: false })
+  featuredConsent!: boolean;
+
   @Column({ type: 'text', nullable: true })
   now!: string | null;
 

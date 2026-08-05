@@ -34,6 +34,13 @@ export class ForumThread {
   @Column({ type: 'varchar' })
   category!: string;
 
+  // Optional link to the community this thread belongs to, so a community's
+  // page can show its own forum threads. Null means the thread isn't tied to
+  // a specific community.
+  @Index('IDX_forum_thread_community_id')
+  @Column({ type: 'uuid', nullable: true })
+  communityId!: string | null;
+
   @Column({ type: 'boolean', default: false })
   isPinned!: boolean;
 

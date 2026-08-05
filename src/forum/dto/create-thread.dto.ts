@@ -40,4 +40,13 @@ export class CreateThreadDto {
   @IsString({ each: true })
   @MaxLength(24, { each: true })
   tags?: string[];
+
+  // Optional community to attach this thread to. When present, the service
+  // resolves it via `CommunityMembershipService.assertMemberBySlug` — 404 if
+  // missing/archived, 403 if the author isn't on its roster — mirroring
+  // `CreateEventDto.communitySlug`.
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  communitySlug?: string;
 }

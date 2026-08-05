@@ -4,6 +4,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
+import { CommunityMembershipService } from '../communities/community-membership.service';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -40,6 +41,7 @@ const baseThread = (overrides: Partial<ForumThread> = {}): ForumThread => ({
   title: 'Hello world',
   authorId: 'author-1',
   category: 'general',
+  communityId: null,
   isPinned: false,
   isLocked: false,
   tags: [],
@@ -198,6 +200,10 @@ describe('ForumThreadsService', () => {
         { provide: BlockFilterService, useValue: blockFilter },
         { provide: MentionNotificationService, useValue: mentions },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        {
+          provide: CommunityMembershipService,
+          useValue: { assertMemberBySlug: jest.fn() },
+        },
       ],
     }).compile();
     service = module.get(ForumThreadsService);

@@ -17,6 +17,7 @@ import { VouchService } from '../vouch/vouch.service';
 import { ConnectionsService } from '../connections/connections.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { User, UserStatus } from '../users/entities/user.entity';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Notification } from '../notifications/entities/notification.entity';
 import { UsersService } from '../users/users.service';
 import { AuthService } from './auth.service';
@@ -111,6 +112,9 @@ function buildMocks() {
   // Read-side only — `suspensionInfoFor` reads the member's latest
   // moderation-outcome notification for the reason. Empty by default.
   const notifications = { findOne: jest.fn().mockResolvedValue(null) };
+  // Read-side only — `staffRolesFor` reads the caller's staff-role grants.
+  // Empty by default.
+  const staffRoles = { find: jest.fn().mockResolvedValue([]) };
   // Registration kill switch — on by default, so signup is unaffected unless
   // a test explicitly turns it off.
   const platformSettings = {
@@ -130,6 +134,7 @@ function buildMocks() {
     deactivations,
     deletionRequests,
     notifications,
+    staffRoles,
     platformSettings,
   };
 }
@@ -168,6 +173,11 @@ async function buildService(
         // Read-side only — backs `suspensionInfoFor`'s latest-outcome lookup.
         provide: getRepositoryToken(Notification),
         useValue: mocks.notifications,
+      },
+      {
+        // Read-side only — backs `staffRolesFor`'s grant lookup.
+        provide: getRepositoryToken(UserStaffRole),
+        useValue: mocks.staffRoles,
       },
       {
         provide: PlatformSettingsService,

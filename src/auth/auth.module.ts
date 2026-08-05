@@ -13,6 +13,7 @@ import { VouchModule } from '../vouch/vouch.module';
 import { ConnectionsModule } from '../connections/connections.module';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
 import { User } from '../users/entities/user.entity';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { AuthMaintenanceService } from './auth-maintenance.service';
@@ -51,6 +52,11 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     // reason has to ride on `me`). Same read-side registration pattern as
     // EmailSuppression/AccountDeactivation above — injecting NotificationsService
     // would pull NotificationsModule (and its SocialModule graph) into AuthModule.
+    // UserStaffRole: read-side only, same pattern again — `GET /auth/me` also
+    // surfaces the caller's additive staff-role grants (`staffRolesFor`) so the
+    // frontend capability layer (`useMyStaffRoles`) has them without a second
+    // fetch. `UsersModule` isn't the owner of this entity's writes (that's
+    // `AdminMembersModule`), so it registers its own copy too.
     TypeOrmModule.forFeature([
       RefreshToken,
       User,
@@ -58,6 +64,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
       AccountDeactivation,
       DeletionRequest,
       Notification,
+      UserStaffRole,
     ]),
     JwtModule.registerAsync({
       inject: [ConfigService],

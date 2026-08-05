@@ -1,9 +1,12 @@
 import {
+  BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
+  Post,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -15,7 +18,9 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
+import { isStaffRoleId } from '../users/staff-roles.registry';
 import { AdminMembersService } from './admin-members.service';
+import { GrantStaffRoleDto } from './dto/grant-staff-role.dto';
 import { ListAdminMembersQuery } from './dto/list-admin-members.query';
 import { UpdateMemberRoleDto } from './dto/update-member-role.dto';
 import {
@@ -93,5 +98,43 @@ export class AdminMembersController {
     @Body() body: UpdateMemberRoleDto,
   ) {
     return this.adminMembers.updateRole(currentUser.userId, id, body.role);
+  }
+
+  // Grant/revoke an additive "staff role" (STAFF_ROLES) — orthogonal to the
+  // moderator/admin tier above. Guardrails (house-account lock, idempotency)
+  // live in the service, same split as updateRole.
+  @ApiOperation({ summary: 'Grant a staff role to a member.' })
+  @ApiOkResponse({ description: "The member's updated staff roles." })
+  @ApiBadRequestResponse({ description: 'Malformed request body.' })
+  @ApiForbiddenResponse({
+    description: 'Requires the admin role, or the target is a house account.',
+  })
+  @ApiNotFoundResponse({ description: 'Member not found.' })
+  @Post(':id/staff-roles')
+  grantStaffRole(
+    @CurrentUser() currentUser: CurrentUserData,
+    @Param('id') id: string,
+    @Body() body: GrantStaffRoleDto,
+  ) {
+    return this.adminMembers.grantStaffRole(currentUser.userId, id, body.role);
+  }
+
+  @ApiOperation({ summary: 'Revoke a staff role from a member.' })
+  @ApiOkResponse({ description: "The member's updated staff roles." })
+  @ApiBadRequestResponse({ description: 'Unknown staff role.' })
+  @ApiForbiddenResponse({
+    description: 'Requires the admin role, or the target is a house account.',
+  })
+  @ApiNotFoundResponse({ description: 'Member not found.' })
+  @Delete(':id/staff-roles/:role')
+  revokeStaffRole(
+    @CurrentUser() currentUser: CurrentUserData,
+    @Param('id') id: string,
+    @Param('role') role: string,
+  ) {
+    if (!isStaffRoleId(role)) {
+      throw new BadRequestException('Unknown staff role.');
+    }
+    return this.adminMembers.revokeStaffRole(currentUser.userId, id, role);
   }
 }

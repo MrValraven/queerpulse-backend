@@ -10,11 +10,6 @@
     "node": ">=20.11.0",
     "pnpm": ">=9.0.0"
   },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "unrs-resolver"
-    ]
-  },
   "scripts": {
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
@@ -84,7 +79,7 @@
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",
-    "@eslint/js": "^9.18.0",
+    "@eslint/js": "^10.0.1",
     "@nestjs/cli": "^11.0.0",
     "@nestjs/schematics": "^11.0.0",
     "@nestjs/testing": "^11.0.1",
@@ -92,25 +87,25 @@
     "@types/cookie-parser": "^1.4.10",
     "@types/express": "^5.0.0",
     "@types/jest": "^30.0.0",
-    "@types/node": "^24.0.0",
+    "@types/node": "^24.12.3",
     "@types/passport-google-oauth20": "^2.0.17",
     "@types/passport-jwt": "^4.0.1",
     "@types/supertest": "^7.0.0",
     "@types/web-push": "^3.6.4",
-    "eslint": "^9.18.0",
+    "eslint": "^10.3.0",
     "eslint-config-prettier": "^10.0.1",
     "eslint-plugin-prettier": "^5.2.2",
-    "globals": "^17.0.0",
+    "globals": "^17.6.0",
     "jest": "^30.0.0",
     "pino-pretty": "^13.0.0",
-    "prettier": "^3.4.2",
+    "prettier": "^3.9.3",
     "supertest": "^7.0.0",
     "ts-jest": "^29.2.5",
     "ts-loader": "^9.5.2",
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
-    "typescript": "^5.7.3",
-    "typescript-eslint": "^8.20.0"
+    "typescript": "~6.0.2",
+    "typescript-eslint": "^8.59.2"
   },
   "jest": {
     "moduleFileExtensions": [

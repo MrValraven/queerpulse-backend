@@ -92,6 +92,10 @@ export interface FullProfileResponse extends ProfileCard {
   // toFullProfile's `isOwner`); omitted entirely for every other viewer so it
   // never leaks on another member's public/network profile.
   privateNetwork?: boolean;
+  // Owner-only: the member's consent to being featured on the admin-curated
+  // homepage (see Profile.featuredConsent). Never surfaced to non-owner
+  // viewers, mirroring privateNetwork above.
+  featuredConsent?: boolean;
   socials: SocialLinkView[];
   work: WorkView[];
   board: BoardView[];
@@ -207,6 +211,7 @@ export function toFullProfile(
     // Owner-only: never included in the object for a non-owner viewer, so it
     // cannot leak on another member's full profile response.
     ...(isOwner ? { privateNetwork: p.privateNetwork ?? false } : {}),
+    ...(isOwner ? { featuredConsent: p.featuredConsent ?? false } : {}),
     socials: rels.socials.map((s) => ({
       platform: s.platform,
       urlOrHandle: s.urlOrHandle,

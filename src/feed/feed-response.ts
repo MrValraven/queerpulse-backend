@@ -98,7 +98,7 @@ export function forumThreadToFeedItem(
     createdAt: thread.createdAt.toISOString(),
     title: thread.title,
     summary: `${thread.category} · ${thread.replyCount} ${replyWord}`,
-    link: `/forum/threads/${thread.slug}`,
+    link: `/thread/${thread.slug}`,
     actor: toAuthorSummary(author),
   };
 }
@@ -138,5 +138,41 @@ export function newMemberToFeedItem(
     summary: profile.tagline ?? profile.bio ?? '',
     link: `/profile/${profile.slug}`,
     actor: toAuthorSummary(actor),
+  };
+}
+
+/**
+ * A recently-joined member of a community the VIEWER also belongs to ("X
+ * joined {community}"), for the `community_new_member` source
+ * (`FeedService`'s `community_new_member` candidate kind — added in Task 5
+ * and wired into the "communities" tab's `sourcesForTab` in Task 6). Unlike
+ * `newMemberToFeedItem` (whose candidate row IS the profile), the joining
+ * member's display fields come from the same
+ * batched `authorId` -> `MemberRef` lookup `toFeedItems` already builds for
+ * every other source, keyed by the joining user's id — `member` is `null`
+ * only if that lookup came back empty (shouldn't happen: `community_members`
+ * FKs to `users`, and every active user has a profile). The FINAL
+ * `FeedItem.type` is deliberately `'new_member'` (not
+ * `'community_new_member'`) so the frontend renders it with the same
+ * `MemberCard`/`NewMemberCard` the People-tab source already uses — the
+ * `'community_new_member'` string only ever exists as `FeedService`'s
+ * internal candidate discriminator.
+ */
+export function communityNewMemberToFeedItem(
+  membershipId: string,
+  joinedAt: Date,
+  member: MemberRef | null,
+  community: Community | null,
+): FeedItem {
+  return {
+    id: membershipId,
+    type: 'new_member',
+    createdAt: joinedAt.toISOString(),
+    title: member
+      ? `${member.firstName} ${member.lastName}`.trim()
+      : 'A member',
+    summary: community ? `Joined ${community.name}` : 'Joined a community',
+    link: member ? `/profile/${member.slug}` : '/feed',
+    actor: toAuthorSummary(member),
   };
 }

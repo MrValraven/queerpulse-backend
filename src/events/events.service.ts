@@ -11,6 +11,7 @@ import { escapeLikeTerm } from '../common/like-escape';
 import { normalizePage, paginate } from '../common/pagination';
 import { randomBytes } from 'node:crypto';
 import { In, Not, Repository, SelectQueryBuilder } from 'typeorm';
+import { CommunityMembershipService } from '../communities/community-membership.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -46,6 +47,7 @@ export interface CreateEventInput {
   visibility?: EventVisibility;
   status?: EventStatus.Draft | EventStatus.Published;
   coverImageUrl?: string;
+  communitySlug?: string;
 }
 
 export type UpdateEventInput = Partial<CreateEventInput>;
@@ -82,6 +84,7 @@ export class EventsService {
     private readonly notifications: NotificationsService,
     private readonly blockFilter: BlockFilterService,
     private readonly contentModeration: ContentModerationService,
+    private readonly membership: CommunityMembershipService,
   ) {}
 
   // Events are reported (and taken down) under the `event` taxonomy code, keyed
@@ -110,6 +113,14 @@ export class EventsService {
     const endAt = dto.endAt ? new Date(dto.endAt) : null;
     this.assertScheduleValid(startAt, endAt, { rejectPast: true });
 
+    let communityId: string | null = null;
+    if (dto.communitySlug) {
+      communityId = await this.membership.assertMemberBySlug(
+        dto.communitySlug,
+        hostId,
+      );
+    }
+
     const event = this.events.create({
       hostId,
       slug: '', // assigned (race-safely) by saveWithUniqueSlug
@@ -125,6 +136,7 @@ export class EventsService {
       visibility: dto.visibility ?? EventVisibility.Public,
       status: dto.status ?? EventStatus.Published,
       coverImageUrl: dto.coverImageUrl ?? null,
+      communityId,
     });
     const saved = await this.saveWithUniqueSlug(event, dto.title);
     return this.buildDetail(saved, hostId);
@@ -247,7 +259,7 @@ export class EventsService {
   ): Promise<EventSummary[]> {
     const now = new Date();
     const skip = (page - 1) * PAGE_SIZE;
-    let events: Event[] = [];
+    let events: Event[];
 
     if (filter === 'hosting') {
       const cohosted = await this.cohosts.find({ where: { userId } });

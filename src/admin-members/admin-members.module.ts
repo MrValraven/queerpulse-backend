@@ -5,6 +5,7 @@ import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import { ReportsModule } from '../reports/reports.module';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import { VouchModule } from '../vouch/vouch.module';
 import { AdminMembersController } from './admin-members.controller';
@@ -21,12 +22,15 @@ import { AdminMembersService } from './admin-members.service';
     // `ModAuditLog` likewise: `ModerationModule` exports nothing at all
     // (no `exports` array), so `Repository<ModAuditLog>` is not reachable
     // by importing it.
+    // `UserStaffRole` (grant/revokeStaffRole) follows the same precedent —
+    // `UsersModule` isn't imported here, so it gets its own registration too.
     TypeOrmModule.forFeature([
       Profile,
       User,
       CommunityMember,
       Vouch,
       ModAuditLog,
+      UserStaffRole,
     ]),
     // `ReportsModule` exports `TypeOrmModule` (re-exporting its own
     // `forFeature([Report])`), so importing it is how `Repository<Report>`

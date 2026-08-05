@@ -2,6 +2,10 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { decodeCursor, encodeCursor } from '../common/cursor-pagination';
 import {
+  CommunityMember,
+  RosterRole,
+} from '../communities/entities/community-member.entity';
+import {
   CommunityPost,
   PostKind,
 } from '../communities/entities/community-post.entity';
@@ -19,6 +23,7 @@ import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
+import { FeedItem } from './feed-response';
 import { FeedService } from './feed.service';
 
 // A chainable query-builder stub whose terminal `getMany()` resolves to a
@@ -64,6 +69,7 @@ const baseThread = (overrides: Partial<ForumThread> = {}): ForumThread => ({
   title: 'Hello world',
   authorId: 'author-2',
   category: 'general',
+  communityId: null,
   isPinned: false,
   isLocked: false,
   replyCount: 3,
@@ -85,6 +91,7 @@ const baseEvent = (overrides: Partial<Event> = {}): Event => ({
   timezone: 'Europe/Lisbon',
   venue: 'Livraria Trama',
   listingId: null,
+  communityId: null,
   isOnline: false,
   onlineUrl: null,
   capacity: null,
@@ -142,6 +149,57 @@ const baseMemberProfile = (overrides: Partial<Profile> = {}): Profile =>
     ...overrides,
   }) as Profile;
 
+/** A `community_members` row as the `community_new_member` source itself
+ * would return it (the candidate row IS the membership). */
+const baseCommunityMember = (
+  overrides: Partial<CommunityMember> = {},
+): CommunityMember => ({
+  id: 'membership-1',
+  communityId: 'community-1',
+  userId: 'member-1',
+  role: RosterRole.Member,
+  joinedAt: t('2026-07-10T00:00:00.000Z'),
+  ...overrides,
+});
+
+/** Exercises `FeedService`'s private `fetchCandidates` directly for the
+ * `community_new_member` source — same qb-stub mocking every other source's
+ * test uses, just invoked one level down so the source's query-building can
+ * be asserted independent of which tab(s) union it in
+ * (`sourcesForTab`/`getFeed` cover that layer separately). */
+interface FetchedCandidate {
+  id: string;
+  createdAt: Date;
+  type: string;
+  authorId: string;
+  row: unknown;
+}
+
+function fetchCommunityNewMemberCandidates(
+  serviceInstance: FeedService,
+  viewerId: string,
+  cursor: string | undefined,
+  limit: number,
+  membershipScoped = false,
+): Promise<FetchedCandidate[]> {
+  const withPrivateAccess = serviceInstance as unknown as {
+    fetchCandidates: (
+      kind: string,
+      viewerId: string,
+      cursor: string | undefined,
+      limit: number,
+      membershipScoped: boolean,
+    ) => Promise<FetchedCandidate[]>;
+  };
+  return withPrivateAccess.fetchCandidates(
+    'community_new_member',
+    viewerId,
+    cursor,
+    limit,
+    membershipScoped,
+  );
+}
+
 describe('FeedService', () => {
   let service: FeedService;
   let communityPosts: { createQueryBuilder: jest.Mock };
@@ -149,6 +207,7 @@ describe('FeedService', () => {
   let forumThreads: { createQueryBuilder: jest.Mock };
   let events: { createQueryBuilder: jest.Mock };
   let profiles: { find: jest.Mock; createQueryBuilder: jest.Mock };
+  let communityMembers: { createQueryBuilder: jest.Mock };
   let blockFilter: { hiddenUserIds: jest.Mock };
 
   beforeEach(async () => {
@@ -160,6 +219,7 @@ describe('FeedService', () => {
       find: jest.fn().mockResolvedValue([]),
       createQueryBuilder: jest.fn(() => qbStub()),
     };
+    communityMembers = { createQueryBuilder: jest.fn(() => qbStub()) };
     // `dropBlocked` now resolves the whole page's hidden authors in one batched
     // `hiddenUserIds(viewerId, authorIds)` call (union of blocked + muted),
     // returning a Set, rather than one `isBlockedEitherWay`/`isMutedBy` call
@@ -179,6 +239,10 @@ describe('FeedService', () => {
         { provide: getRepositoryToken(ForumThread), useValue: forumThreads },
         { provide: getRepositoryToken(Event), useValue: events },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        {
+          provide: getRepositoryToken(CommunityMember),
+          useValue: communityMembers,
+        },
         { provide: BlockFilterService, useValue: blockFilter },
       ],
     }).compile();
@@ -201,16 +265,34 @@ describe('FeedService', () => {
       expect(types).toEqual(['community_post', 'forum_thread', 'gathering']);
     });
 
-    it('"communities" only queries community posts', async () => {
+    it('"communities" (Task 6) queries all four membership-scoped sources: community posts, gatherings, forum threads, and community_new_member', async () => {
       communityPosts.createQueryBuilder.mockReturnValue(qbStub([basePost()]));
+      forumThreads.createQueryBuilder.mockReturnValue(
+        qbStub([baseThread({ communityId: 'community-1' })]),
+      );
+      events.createQueryBuilder.mockReturnValue(
+        qbStub([baseEvent({ communityId: 'community-1' })]),
+      );
+      communityMembers.createQueryBuilder.mockReturnValue(
+        qbStub([baseCommunityMember()]),
+      );
 
       const page = await service.getFeed('viewer-1', 'communities', undefined);
 
       expect(communityPosts.createQueryBuilder).toHaveBeenCalled();
-      expect(forumThreads.createQueryBuilder).not.toHaveBeenCalled();
-      expect(events.createQueryBuilder).not.toHaveBeenCalled();
-      expect(page.data).toHaveLength(1);
-      expect(page.data[0]!.type).toBe('community_post');
+      expect(forumThreads.createQueryBuilder).toHaveBeenCalled();
+      expect(events.createQueryBuilder).toHaveBeenCalled();
+      expect(communityMembers.createQueryBuilder).toHaveBeenCalled();
+      // `community_new_member` candidates map to the FINAL `FeedItem.type`
+      // `'new_member'` (see `communityNewMemberToFeedItem`'s docstring), not
+      // the internal `'community_new_member'` discriminator.
+      const types = page.data.map((i) => i.type).sort();
+      expect(types).toEqual([
+        'community_post',
+        'forum_thread',
+        'gathering',
+        'new_member',
+      ]);
     });
 
     it('"gatherings" only queries events', async () => {
@@ -247,6 +329,118 @@ describe('FeedService', () => {
         data: [],
         pageInfo: { nextCursor: null, hasMore: false },
       });
+    });
+  });
+
+  describe('"communities" tab membership scoping (Task 6)', () => {
+    it('excludes a global/flat community post (community_id IS NULL) from the "communities" tab query', async () => {
+      const qb = qbStub([]);
+      communityPosts.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getFeed('viewer-1', 'communities', undefined);
+
+      // The membership-only predicate requires a non-null community_id,
+      // which alone rules a flat/global post out — unlike the access-tier
+      // gate the other tabs use (that gate explicitly allows
+      // `community_id IS NULL` through).
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('cp.community_id IS NOT NULL'),
+        { viewerId: 'viewer-1' },
+      );
+    });
+
+    it('excludes a community_post from a community the viewer is not a member of, replacing the access-tier gate entirely', async () => {
+      const qb = qbStub([]);
+      communityPosts.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getFeed('viewer-1', 'communities', undefined);
+
+      // Membership-only predicate: a correlated EXISTS against
+      // `community_members` keyed to the viewer — no access-tier fallback.
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /EXISTS \(\s*SELECT 1 FROM "community_members" "mem"\s*WHERE "mem"\."community_id" = cp\.community_id AND "mem"\."user_id" = :viewerId\)/,
+        ),
+        { viewerId: 'viewer-1' },
+      );
+      // The access-tier gate the other tabs use (private community OR
+      // membership OR flat post) must NOT be applied on this tab.
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        expect.stringContaining('access_tier'),
+        expect.anything(),
+      );
+    });
+
+    it('keeps the access-tier gate (not the membership-only predicate) for community_post on "posts"', async () => {
+      // The highest-risk regression the membershipScoped if/else could cause:
+      // a non-"communities" tab silently falling into the membership-only
+      // branch and dropping every flat/global post + every post from a
+      // public community the viewer hasn't joined.
+      const qb = qbStub([]);
+      communityPosts.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getFeed('viewer-1', 'posts', undefined);
+
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('access_tier'),
+        { privateTier: AccessTier.Private, viewerId: 'viewer-1' },
+      );
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        expect.stringContaining('cp.community_id IS NOT NULL'),
+        expect.anything(),
+      );
+    });
+
+    it('applies the community_id + membership EXISTS predicate to the gathering source on the "communities" tab', async () => {
+      const qb = qbStub([]);
+      events.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getFeed('viewer-1', 'communities', undefined);
+
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /e\.community_id IS NOT NULL AND EXISTS \(\s*SELECT 1 FROM "community_members" "mem"\s*WHERE "mem"\."community_id" = e\.community_id AND "mem"\."user_id" = :viewerId\)/,
+        ),
+        { viewerId: 'viewer-1' },
+      );
+    });
+
+    it('does NOT apply the membership predicate to the gathering source on other tabs (e.g. "gatherings")', async () => {
+      const qb = qbStub([]);
+      events.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getFeed('viewer-1', 'gatherings', undefined);
+
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        expect.stringContaining('e.community_id IS NOT NULL'),
+        expect.anything(),
+      );
+    });
+
+    it('applies the community_id + membership EXISTS predicate to the forum_thread source on the "communities" tab', async () => {
+      const qb = qbStub([]);
+      forumThreads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getFeed('viewer-1', 'communities', undefined);
+
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /t\.community_id IS NOT NULL AND EXISTS \(\s*SELECT 1 FROM "community_members" "mem"\s*WHERE "mem"\."community_id" = t\.community_id AND "mem"\."user_id" = :viewerId\)/,
+        ),
+        { viewerId: 'viewer-1' },
+      );
+    });
+
+    it('does NOT apply the membership predicate to the forum_thread source on other tabs (e.g. "posts")', async () => {
+      const qb = qbStub([]);
+      forumThreads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getFeed('viewer-1', 'posts', undefined);
+
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        expect.stringContaining('t.community_id IS NOT NULL'),
+        expect.anything(),
+      );
     });
   });
 
@@ -362,6 +556,117 @@ describe('FeedService', () => {
 
       const types = page.data.map((i) => i.type).sort();
       expect(types).toEqual(['community_post', 'new_member']);
+    });
+  });
+
+  describe('community_new_member source (Task 5, not yet wired to a tab)', () => {
+    it("returns members of the viewer's communities, excludes the viewer, ordered joined_at desc", async () => {
+      const newer = baseCommunityMember({
+        id: 'membership-2',
+        userId: 'member-2',
+        joinedAt: t('2026-07-12T00:00:00.000Z'),
+      });
+      const older = baseCommunityMember({
+        id: 'membership-1',
+        userId: 'member-1',
+        joinedAt: t('2026-07-10T00:00:00.000Z'),
+      });
+      const qb = qbStub([newer, older]);
+      communityMembers.createQueryBuilder.mockReturnValue(qb);
+
+      const candidates = await fetchCommunityNewMemberCandidates(
+        service,
+        'viewer-1',
+        undefined,
+        21,
+      );
+
+      expect(communityMembers.createQueryBuilder).toHaveBeenCalledWith('m');
+      // Excludes the viewer's own membership rows.
+      expect(qb.where).toHaveBeenCalledWith('m.user_id != :viewerId', {
+        viewerId: 'viewer-1',
+      });
+      // Restricted to memberships of communities the viewer also belongs to.
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('"self"."user_id" = :viewerId'),
+        { viewerId: 'viewer-1' },
+      );
+      // Only active users.
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('"u"."status" = :active'),
+        { active: UserStatus.Active },
+      );
+      // Ordered joined_at desc, id desc.
+      expect(qb.orderBy).toHaveBeenCalledWith(
+        expect.stringContaining('"m"."joined_at"'),
+        'DESC',
+      );
+      expect(qb.addOrderBy).toHaveBeenCalledWith('m.id', 'DESC');
+
+      expect(candidates.map((c) => c.id)).toEqual([
+        'membership-2',
+        'membership-1',
+      ]);
+      expect(candidates.every((c) => c.type === 'community_new_member')).toBe(
+        true,
+      );
+      expect(candidates[0]).toMatchObject({
+        authorId: 'member-2',
+        createdAt: t('2026-07-12T00:00:00.000Z'),
+      });
+    });
+
+    it('threads a supplied cursor into the underlying query as the keyset predicate', async () => {
+      const cursor = encodeCursor({
+        createdAt: t('2026-07-10T00:00:00.000Z'),
+        id: 'membership-9',
+      });
+      const qb = qbStub([]);
+      communityMembers.createQueryBuilder.mockReturnValue(qb);
+
+      await fetchCommunityNewMemberCandidates(service, 'viewer-1', cursor, 21);
+
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('< (:cursorCreatedAt, :cursorId)'),
+        {
+          cursorCreatedAt: t('2026-07-10T00:00:00.000Z'),
+          cursorId: 'membership-9',
+        },
+      );
+    });
+
+    it('maps a community_new_member candidate to a "new_member"-typed FeedItem via toFeedItems', async () => {
+      const membership = baseCommunityMember({
+        id: 'membership-2',
+        userId: 'member-2',
+      });
+      communityMembers.createQueryBuilder.mockReturnValue(qbStub([membership]));
+      profiles.find.mockResolvedValue([
+        baseMemberProfile({ userId: 'member-2', slug: 'bilal-kaya' }),
+      ]);
+      communities.find.mockResolvedValue([baseCommunity()]);
+
+      const candidates = await fetchCommunityNewMemberCandidates(
+        service,
+        'viewer-1',
+        undefined,
+        21,
+      );
+      const items = await (
+        service as unknown as {
+          toFeedItems: (candidates: unknown[]) => Promise<FeedItem[]>;
+        }
+      ).toFeedItems(candidates);
+
+      expect(items).toEqual([
+        expect.objectContaining({
+          id: 'membership-2',
+          type: 'new_member',
+          summary: 'Joined Trans & Non-Binary Network',
+          link: '/profile/bilal-kaya',
+          actor: expect.objectContaining({ handle: 'bilal-kaya' }),
+        }),
+      ]);
     });
   });
 
@@ -530,11 +835,16 @@ describe('FeedService', () => {
   });
 
   it('falls back to a generic title/link for a flat (global) community post', async () => {
+    // Uses the "posts" tab rather than "communities": since Task 6, the
+    // "communities" tab's real query excludes flat posts entirely (see the
+    // `membershipScoped` describe block below) — this test is only about
+    // `communityPostToFeedItem`'s mapping fallback for a flat post, which
+    // "posts" (unaffected by membership scoping) still exercises.
     communityPosts.createQueryBuilder.mockReturnValue(
       qbStub([basePost({ communityId: null })]),
     );
 
-    const page = await service.getFeed('viewer-1', 'communities', undefined);
+    const page = await service.getFeed('viewer-1', 'posts', undefined);
 
     expect(page.data[0]).toMatchObject({
       title: 'Community feed',

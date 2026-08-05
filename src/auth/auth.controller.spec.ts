@@ -16,6 +16,7 @@ interface AuthServiceMock {
   revokeRefreshToken: jest.Mock;
   revokeAllForUser: jest.Mock;
   suspensionInfoFor: jest.Mock;
+  staffRolesFor: jest.Mock;
 }
 
 function makeRes() {
@@ -59,6 +60,7 @@ function build(configNodeEnv = 'test', domain?: string) {
     suspensionInfoFor: jest
       .fn()
       .mockResolvedValue({ suspendedUntil: null, suspension: null }),
+    staffRolesFor: jest.fn().mockResolvedValue([]),
   };
   const usersService = { findByIdWithProfile: jest.fn() };
   const config = makeConfig(configNodeEnv, domain);
@@ -342,6 +344,8 @@ describe('AuthController.me', () => {
       // Likewise null for a fixture with no onboardedAt.
       onboardedAt: null,
       profile: { displayName: 'Ada' },
+      // Mocked `staffRolesFor` — no staff-role grants for this fixture.
+      staffRoles: [],
       // Suspension detail — null for an active member (mocked `suspensionInfoFor`).
       suspendedUntil: null,
       suspension: null,

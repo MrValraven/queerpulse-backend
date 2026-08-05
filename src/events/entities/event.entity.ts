@@ -62,6 +62,13 @@ export class Event {
   @Column({ type: 'uuid', nullable: true })
   listingId!: string | null;
 
+  // Optional link to the community this event belongs to, so a community's
+  // page can show its upcoming events. Null means the event isn't tied to a
+  // specific community.
+  @Index('IDX_events_community_id')
+  @Column({ type: 'uuid', nullable: true })
+  communityId!: string | null;
+
   @Column({ type: 'boolean', default: false })
   isOnline!: boolean;
 
