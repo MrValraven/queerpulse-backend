@@ -6,6 +6,10 @@ import { AuthService } from './auth.service';
 import { UsersService } from '../users/users.service';
 import { SignupRejectedError } from './errors/signup-rejected.error';
 import { encodeOAuthState } from './oauth-state';
+import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+} from '../common/image-url';
 
 const FRONTEND = 'https://app.example.com';
 
@@ -318,6 +322,14 @@ describe('AuthController.logoutAll', () => {
 });
 
 describe('AuthController.me', () => {
+  beforeEach(() => {
+    resetImageUrlBaseForTesting();
+    setImageUrlBase('https://api.test');
+  });
+  afterEach(() => {
+    resetImageUrlBaseForTesting();
+  });
+
   it('returns the current user with profile', async () => {
     const { controller, usersService } = build();
     usersService.findByIdWithProfile.mockResolvedValue({
@@ -325,7 +337,7 @@ describe('AuthController.me', () => {
       email: 'a@b.c',
       status: 'active',
       role: 'member',
-      profile: { displayName: 'Ada' },
+      profile: { displayName: 'Ada', avatarUrl: null },
     });
     const out = await controller.me({
       userId: 'u1',
@@ -343,13 +355,59 @@ describe('AuthController.me', () => {
       ageAttestedAt: null,
       // Likewise null for a fixture with no onboardedAt.
       onboardedAt: null,
-      profile: { displayName: 'Ada' },
+      profile: { displayName: 'Ada', avatarUrl: null },
       // Mocked `staffRolesFor` — no staff-role grants for this fixture.
       staffRoles: [],
       // Suspension detail — null for an active member (mocked `suspensionInfoFor`).
       suspendedUntil: null,
       suspension: null,
     });
+  });
+
+  it('resolves an uploaded avatar STORAGE KEY into a fetchable /files URL', async () => {
+    const { controller, usersService } = build();
+    const key =
+      'avatars/11111111-2222-3333-4444-555555555555/66666666-7777-8888-9999-000000000000.jpg';
+    usersService.findByIdWithProfile.mockResolvedValue({
+      id: 'u1',
+      email: 'a@b.c',
+      status: 'active',
+      role: 'member',
+      profile: { displayName: 'Ada', avatarUrl: key },
+    });
+    const out = await controller.me({
+      userId: 'u1',
+      email: 'a@b.c',
+      status: 'active',
+      role: 'member',
+    });
+    // The bare key would render as a broken relative image on the frontend; it
+    // must come back as an absolute URL to the authorizing /files route.
+    expect(out.profile).toEqual({
+      displayName: 'Ada',
+      avatarUrl: `https://api.test/files/${key}`,
+    });
+  });
+
+  it('passes an absolute Google avatar URL through untouched', async () => {
+    const { controller, usersService } = build();
+    const googleUrl = 'https://lh3.googleusercontent.com/a/abc=s96-c';
+    usersService.findByIdWithProfile.mockResolvedValue({
+      id: 'u1',
+      email: 'a@b.c',
+      status: 'active',
+      role: 'member',
+      profile: { displayName: 'Ada', avatarUrl: googleUrl },
+    });
+    const out = await controller.me({
+      userId: 'u1',
+      email: 'a@b.c',
+      status: 'active',
+      role: 'member',
+    });
+    expect((out.profile as { avatarUrl: string | null }).avatarUrl).toBe(
+      googleUrl,
+    );
   });
 
   it('throws 401 when the backing user no longer exists', async () => {

@@ -50,6 +50,7 @@ import { AdminInvitesModule } from './admin-invites/admin-invites.module';
 import { AdminTrustNetworkModule } from './admin-trust-network/admin-trust-network.module';
 import { AdminOverviewModule } from './admin-overview/admin-overview.module';
 import { AdminMediaModule } from './admin-media/admin-media.module';
+import { MyMediaModule } from './my-media/my-media.module';
 import { AdminBotsModule } from './admin-bots/admin-bots.module';
 import { AdminHousingModule } from './admin-housing/admin-housing.module';
 import { PlatformStaffModule } from './platform-staff/platform-staff.module';
@@ -274,6 +275,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     AdminTrustNetworkModule,
     AdminOverviewModule,
     AdminMediaModule,
+    MyMediaModule,
     AdminBotsModule,
     AdminHousingModule,
     PlatformStaffModule,

@@ -46,6 +46,7 @@ import { decodeOAuthState } from './oauth-state';
 import { resolvePostLoginRedirect, signInErrorUrl } from './safe-redirect';
 import { Throttle, seconds } from '@nestjs/throttler';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
+import { toImageUrl } from '../common/image-url';
 
 // This controller inherits the app-wide `defaultVersion: '1'`, so its routes
 // answer at `/v1/auth/...` — which is where the SPA's versioned API client
@@ -298,7 +299,16 @@ export class AuthController {
       // NULL only while a brand-new member is still mid-onboarding. The frontend
       // gate reads this to keep an already-onboarded member out of the wizard.
       onboardedAt: user.onboardedAt?.toISOString() ?? null,
-      profile: user.profile ?? null,
+      // Resolve the avatar the SAME way every other endpoint does (`toImageUrl`):
+      // an uploaded avatar is stored as a bare storage KEY (`avatars/<id>/<uuid>.jpg`),
+      // which is not directly fetchable — it must become a `${API_URL}/files/<key>`
+      // URL. Returning the raw entity here meant `/auth/me` handed the frontend the
+      // bare key, and `<img src="avatars/...">` resolved it relative to the page
+      // origin → a broken image for every uploaded photo. Google avatars are already
+      // absolute `https://` URLs, so `toImageUrl` passes them through untouched.
+      profile: user.profile
+        ? { ...user.profile, avatarUrl: toImageUrl(user.profile.avatarUrl) }
+        : null,
       staffRoles,
       // { suspendedUntil, suspension } — both null unless the member is suspended.
       ...suspensionInfo,
