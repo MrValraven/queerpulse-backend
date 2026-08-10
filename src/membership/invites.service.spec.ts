@@ -74,6 +74,7 @@ describe('toPublicInviteView', () => {
     expiresAt: new Date('2026-07-07T10:42:00.000Z'),
   } as Invite;
   const inviter = {
+    status: UserStatus.Active,
     activatedAt: new Date('2024-03-01T00:00:00.000Z'),
     createdAt: new Date('2024-02-01T00:00:00.000Z'),
     profile: {
@@ -99,6 +100,9 @@ describe('toPublicInviteView', () => {
         avatarUrl: 'https://cdn/ines.jpg',
         memberSince: '2024',
       },
+      // An active inviter maps to `inviterActive: true`; an erased or
+      // non-active inviter reads as inactive (see the null-inviter test).
+      inviterActive: true,
       note: "I've been part of this community for two years now...",
       vouch: 'Why they belong here.',
     });
@@ -468,14 +472,19 @@ describe('InvitesService.createInvite', () => {
 describe('InvitesService.listMyInvites', () => {
   let service: InvitesService;
   let repo: { find: jest.Mock };
+  // `listMyInvites` batch-resolves the redeemers of *accepted* invites via
+  // `usersService.findByIdsWithProfile`. The rows below are pending, so it's
+  // called with an empty id list and returns no users.
+  let users: { findByIdsWithProfile: jest.Mock };
 
   beforeEach(async () => {
     repo = { find: jest.fn().mockResolvedValue([]) };
+    users = { findByIdsWithProfile: jest.fn().mockResolvedValue([]) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         InvitesService,
         { provide: getRepositoryToken(Invite), useValue: repo },
-        { provide: UsersService, useValue: {} },
+        { provide: UsersService, useValue: users },
         { provide: DataSource, useValue: {} },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
         { provide: ConfigService, useValue: { get: jest.fn(() => 1) } },
@@ -507,19 +516,26 @@ describe('InvitesService.listMyInvites', () => {
         skip: 0,
       }),
     );
+    // MyInviteView deliberately carries the invite `id` (the stable handle the
+    // revoke/resend routes target) and an `acceptedBy` redeemer summary
+    // (populated only for a 'used' invite; null here). It still never leaks the
+    // inviter's own internal fields such as `inviterId`.
     expect(Object.keys(rows[0]!).sort()).toEqual(
       [
+        'acceptedBy',
         'code',
         'createdAt',
         'email',
         'expiresAt',
+        'id',
         'note',
         'status',
         'vouch',
       ].sort(),
     );
-    expect(rows[0]).not.toHaveProperty('id');
-    expect(rows[0]).not.toHaveProperty('acceptedBy');
+    expect(rows[0]!.id).toBe('internal-id');
+    expect(rows[0]!.acceptedBy).toBeNull();
+    expect(rows[0]).not.toHaveProperty('inviterId');
     expect(rows[0]!.expiresAt).toBe('2026-07-12T00:00:00.000Z');
   });
 

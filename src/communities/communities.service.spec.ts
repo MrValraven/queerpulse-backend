@@ -7,7 +7,10 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
+import { User } from '../users/entities/user.entity';
 import {
   CommunitiesService,
   CreateCommunityInput,
@@ -68,6 +71,19 @@ const insertQbStub = () => {
   return qb;
 };
 
+// The `.update().set().where().execute()` chain `triageJoinRequest` uses for
+// its atomic conditional claim (flip pending -> approved/declined only while
+// still pending). Defaults to `affected: 1` — the claim succeeded — so the
+// approve branch proceeds to the roster upsert.
+const updateQbStub = () => {
+  const qb: Record<string, jest.Mock> = {};
+  qb.update = jest.fn().mockReturnValue(qb);
+  qb.set = jest.fn().mockReturnValue(qb);
+  qb.where = jest.fn().mockReturnValue(qb);
+  qb.execute = jest.fn().mockResolvedValue({ affected: 1, raw: [] });
+  return qb;
+};
+
 describe('CommunitiesService', () => {
   let service: CommunitiesService;
   let communities: {
@@ -93,12 +109,20 @@ describe('CommunitiesService', () => {
     find: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
+    createQueryBuilder: jest.Mock;
   };
   let profiles: {
     findOne: jest.Mock;
     find: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
+  let users: { findOne: jest.Mock };
+  // `getBySlug` consults the moderation state before returning a detail; a
+  // VISIBLE (`hidden:false, removed:false`) default keeps every non-moderation
+  // test on the normal path. `notifications` is fire-and-forget on join/triage
+  // flows, so a no-op stub suffices.
+  let contentModeration: { stateFor: jest.Mock };
+  let notifications: { create: jest.Mock; createForRecipients: jest.Mock };
 
   beforeEach(async () => {
     communities = {
@@ -140,11 +164,20 @@ describe('CommunitiesService', () => {
           ...(v as object),
         }),
       ),
+      createQueryBuilder: jest.fn(() => updateQbStub()),
     };
     profiles = {
       findOne: jest.fn().mockResolvedValue(null),
       find: jest.fn().mockResolvedValue([]),
       createQueryBuilder: jest.fn(() => qbStub()),
+    };
+    users = { findOne: jest.fn().mockResolvedValue(null) };
+    contentModeration = {
+      stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
+    };
+    notifications = {
+      create: jest.fn().mockResolvedValue(undefined),
+      createForRecipients: jest.fn().mockResolvedValue(undefined),
     };
 
     // `manager.getRepository(Entity)` routes to the same mocks the outer
@@ -180,7 +213,13 @@ describe('CommunitiesService', () => {
           useValue: joinRequests,
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        { provide: getRepositoryToken(User), useValue: users },
         { provide: DataSource, useValue: dataSource },
+        {
+          provide: ContentModerationService,
+          useValue: contentModeration,
+        },
+        { provide: NotificationsService, useValue: notifications },
       ],
     }).compile();
     service = module.get(CommunitiesService);

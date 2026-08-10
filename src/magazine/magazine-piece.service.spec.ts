@@ -705,6 +705,14 @@ describe('MagazinePieceService', () => {
     it('creates and returns a letter', async () => {
       pieces.findOne.mockResolvedValue({ ...PIECE });
       const dto: CreateLetterDto = { who: 'Cláudia, 58', body: 'Thank you.' };
+      // A real `CreateDateColumn` only fills `createdAt` on insert, so this
+      // test's own `create` mock synthesizes it the same way `pieces.save`
+      // fills `id` elsewhere in this file (see `submitPitch`).
+      letters.create.mockImplementation((entity: object) => ({
+        ...entity,
+        id: 'letter-new',
+        createdAt: new Date('2026-08-10T00:00:00.000Z'),
+      }));
 
       const result = await service.addLetter('piece-1', dto);
 
@@ -793,6 +801,14 @@ describe('MagazinePieceService', () => {
     it('creates a correction and records a correction_published audit event', async () => {
       pieces.findOne.mockResolvedValue({ ...PIECE });
       const dto: CreateCorrectionDto = { text: 'We misstated a date.' };
+      // As with letters, the `CreateDateColumn` is DB-populated on insert —
+      // synthesize it in the `create` mock so `toCorrectionResponse` has a
+      // `createdAt` to serialize.
+      corrections.create.mockImplementation((entity: object) => ({
+        ...entity,
+        id: 'correction-new',
+        createdAt: new Date('2026-08-10T00:00:00.000Z'),
+      }));
 
       const result = await service.addCorrection('piece-1', dto, 'editor-1');
 

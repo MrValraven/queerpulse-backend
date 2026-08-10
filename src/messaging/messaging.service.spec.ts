@@ -10,6 +10,7 @@ import { DataSource, FindOperator, QueryFailedError } from 'typeorm';
 import { ConnectionsService } from '../connections/connections.service';
 import { encodeCursor } from '../common/cursor-pagination';
 import { BlockFilterService } from '../social/block-filter.service';
+import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersService } from '../users/users.service';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
@@ -39,6 +40,7 @@ interface MockQb {
   innerJoin: jest.Mock;
   where: jest.Mock;
   andWhere: jest.Mock;
+  setParameter: jest.Mock;
   orderBy: jest.Mock;
   addOrderBy: jest.Mock;
   groupBy: jest.Mock;
@@ -57,6 +59,9 @@ function makeQb(): MockQb {
   qb.innerJoin = jest.fn(self);
   qb.where = jest.fn(self);
   qb.andWhere = jest.fn(self);
+  // Bound by the moderator-takedown NOT EXISTS predicate the message queries now
+  // compose in (`setParameter('messageSubjectType', …)`); chainable like the rest.
+  qb.setParameter = jest.fn(self);
   qb.orderBy = jest.fn(self);
   qb.addOrderBy = jest.fn(self);
   qb.groupBy = jest.fn(self);
@@ -120,6 +125,10 @@ describe('MessagingService', () => {
     createQueryBuilder: jest.Mock;
   };
   let usersService: { findById: jest.Mock };
+  // `MessagingCoreService.toMessageResponses` now reads the shared
+  // `content_moderation` table to tombstone moderator-taken-down messages; the
+  // repo only needs `find` (default: no takedowns) for these tests.
+  let moderationStates: { find: jest.Mock };
 
   beforeEach(async () => {
     conversations = {
@@ -197,6 +206,7 @@ describe('MessagingService', () => {
       createQueryBuilder: jest.fn(() => orIgnoreInsert),
     };
     usersService = { findById: jest.fn().mockResolvedValue(null) };
+    moderationStates = { find: jest.fn().mockResolvedValue([]) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -219,6 +229,10 @@ describe('MessagingService', () => {
           useValue: pins,
         },
         { provide: getRepositoryToken(MessageStar), useValue: stars },
+        {
+          provide: getRepositoryToken(ContentModeration),
+          useValue: moderationStates,
+        },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: DataSource, useValue: dataSource },
         { provide: EventEmitter2, useValue: emitter },
@@ -653,6 +667,11 @@ describe('MessagingService', () => {
           pinnedAt: null,
           starred: false,
           canPin: true,
+          // Not the author (sender is `them`) and viewer isn't staff → may
+          // report but never edit/delete someone else's message.
+          canEdit: false,
+          canDelete: false,
+          canReport: true,
           replyTo: null,
           kind: 'user',
           attachment: null,
@@ -677,6 +696,11 @@ describe('MessagingService', () => {
           pinnedAt: null,
           starred: false,
           canPin: true,
+          // The author's own message: may delete it, but it's already older than
+          // the 15-min edit window and there's nothing to self-report.
+          canEdit: false,
+          canDelete: true,
+          canReport: false,
           replyTo: null,
           kind: 'user',
           attachment: null,
@@ -1030,6 +1054,11 @@ describe('MessagingService', () => {
         pinnedAt: null,
         starred: false,
         canPin: true,
+        // The caller authored this send: deletable by them, past the edit
+        // window (mocked createdAt is months old), and not self-reportable.
+        canEdit: false,
+        canDelete: true,
+        canReport: false,
         replyTo: null,
         kind: 'user',
         attachment: null,

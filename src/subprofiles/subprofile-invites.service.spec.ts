@@ -202,9 +202,15 @@ describe('SubprofileInvitesService', () => {
         .mockImplementation((value: unknown) => Promise.resolve(value)),
       create: jest
         .fn()
-        .mockImplementation((_entity: unknown, value: object) => ({
-          ...value,
-        })),
+        .mockImplementation((entity: unknown, value: object) =>
+          // A real `manager.save(create(SubprofileInvite, …))` returns the
+          // persisted row with its DB-generated `createdAt`/`id` populated —
+          // `toInviteView` reads `createdAt`. Model that here so the invite
+          // path gets a fully-shaped row, not just the columns it set.
+          entity === SubprofileInvite
+            ? makeInvite(value as Partial<SubprofileInvite>)
+            : { ...value },
+        ),
     };
     dataSource = {
       transaction: jest

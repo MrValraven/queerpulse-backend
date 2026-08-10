@@ -6,8 +6,16 @@ import {
 import { GeocodeService } from './geocode.service';
 
 describe('GeocodeService.resolveLink', () => {
-  const service = new GeocodeService();
+  // A fresh instance per test: GeocodeService now holds a bounded in-process
+  // TTL cache that memoizes SUCCESSFUL resolutions keyed on the input URL.
+  // Several tests below resolve the same `maps.app.goo.gl/abc` link, so a
+  // shared instance would serve the later ones from the cache seeded by the
+  // "follows a short link" success — never exercising their fetch paths.
+  let service: GeocodeService;
   const realFetch = global.fetch;
+  beforeEach(() => {
+    service = new GeocodeService();
+  });
   afterEach(() => {
     global.fetch = realFetch;
   });

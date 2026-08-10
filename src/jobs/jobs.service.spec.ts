@@ -7,6 +7,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { CompaniesService } from '../companies/companies.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
   JobApplication,
@@ -54,6 +55,11 @@ describe('JobsService', () => {
   let contentModeration: {
     stateFor: jest.Mock;
     statesFor: jest.Mock;
+  };
+  // `apply` notifies the job poster best-effort after persisting the
+  // application; the mock just records the call.
+  let notifications: {
+    create: jest.Mock;
   };
 
   const baseJobDto = {
@@ -112,6 +118,9 @@ describe('JobsService', () => {
       stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
       statesFor: jest.fn().mockResolvedValue(new Map()),
     };
+    notifications = {
+      create: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -124,6 +133,7 @@ describe('JobsService', () => {
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: CompaniesService, useValue: companiesService },
         { provide: ContentModerationService, useValue: contentModeration },
+        { provide: NotificationsService, useValue: notifications },
       ],
     }).compile();
     service = module.get(JobsService);

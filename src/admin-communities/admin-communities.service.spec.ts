@@ -140,7 +140,11 @@ function stubReportsQueryBuilder(
   reportRows: Report[],
 ): QueryBuilderStub {
   const queryBuilder: QueryBuilderStub = {};
-  for (const chainedMethod of ['select', 'where', 'orderBy']) {
+  // `.take(MAX_SCANNED_REPORTS)` is the payload-cap guard `loadReportScope`
+  // applies before `getMany()` (the platform-wide report-scan safety limit),
+  // so the stub must expose it as a chainable no-op alongside select/where/
+  // orderBy.
+  for (const chainedMethod of ['select', 'where', 'orderBy', 'take']) {
     queryBuilder[chainedMethod] = jest.fn().mockReturnValue(queryBuilder);
   }
   queryBuilder.getMany = jest.fn().mockResolvedValue(reportRows);

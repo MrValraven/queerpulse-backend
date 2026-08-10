@@ -10,7 +10,9 @@ import {
   setImageUrlBase,
 } from '../common/image-url';
 import { ConnectionsService } from '../connections/connections.service';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { HandlesService } from '../handles/handles.service';
+import { StorageService } from '../storage/storage.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Community } from '../communities/entities/community.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
@@ -140,6 +142,15 @@ describe('ProfilesService.getBySlug visibility', () => {
         { provide: ConnectionsService, useValue: connections },
         { provide: BlockFilterService, useValue: blockFilter },
         { provide: HandlesService, useValue: { rename: jest.fn() } },
+        {
+          provide: StorageService,
+          useValue: { deleteObjectByReference: jest.fn() },
+        },
+        {
+          // No takedown by default; `assertNotTakenDown` sees an empty map.
+          provide: ContentModerationService,
+          useValue: { statesForAnyType: jest.fn().mockResolvedValue(new Map()) },
+        },
       ],
     }).compile();
     service = module.get(ProfilesService);
@@ -557,6 +568,14 @@ describe('ProfilesService replace-list endpoints', () => {
           },
         },
         { provide: HandlesService, useValue: { rename: jest.fn() } },
+        {
+          provide: StorageService,
+          useValue: { deleteObjectByReference: jest.fn() },
+        },
+        {
+          provide: ContentModerationService,
+          useValue: { statesForAnyType: jest.fn().mockResolvedValue(new Map()) },
+        },
       ],
     }).compile();
     return module.get(ProfilesService);

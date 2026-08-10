@@ -3,10 +3,12 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { MagazineArticle } from './entities/magazine-article.entity';
 import { MagazineAuthor } from './entities/magazine-author.entity';
+import { MagazineDeck } from './entities/magazine-deck.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
 import { MagazineService } from './magazine.service';
 
 type QueryBuilderMock = {
+  select: jest.Mock;
   innerJoin: jest.Mock;
   andWhere: jest.Mock;
   orderBy: jest.Mock;
@@ -21,6 +23,9 @@ function makeQueryBuilder(
   total: number,
 ): QueryBuilderMock {
   const qb = {} as QueryBuilderMock;
+  // `listArticles` now projects an explicit column list before filtering
+  // (the perf change), so the builder must expose a chainable `.select()`.
+  qb.select = jest.fn().mockReturnValue(qb);
   qb.innerJoin = jest.fn().mockReturnValue(qb);
   qb.andWhere = jest.fn().mockReturnValue(qb);
   qb.orderBy = jest.fn().mockReturnValue(qb);
@@ -84,6 +89,10 @@ describe('MagazineService', () => {
         { provide: getRepositoryToken(MagazineArticle), useValue: articles },
         { provide: getRepositoryToken(MagazineAuthor), useValue: authors },
         { provide: getRepositoryToken(MagazineIssue), useValue: issues },
+        {
+          provide: getRepositoryToken(MagazineDeck),
+          useValue: { find: jest.fn(), findOne: jest.fn() },
+        },
       ],
     }).compile();
     service = module.get(MagazineService);
@@ -101,7 +110,19 @@ describe('MagazineService', () => {
           coverUrl: null,
         },
       ]);
-      expect(issues.find).toHaveBeenCalledWith({ order: { number: 'DESC' } });
+      // The perf change projects only the columns `toIssueResponse` reads
+      // (never the issue-production `runOrder`/`digest`/`coverlines` jsonb),
+      // still ordered newest-issue-first.
+      expect(issues.find).toHaveBeenCalledWith({
+        select: {
+          number: true,
+          title: true,
+          dek: true,
+          publishedOn: true,
+          coverUrl: true,
+        },
+        order: { number: 'DESC' },
+      });
     });
   });
 

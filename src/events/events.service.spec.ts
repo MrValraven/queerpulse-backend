@@ -5,13 +5,17 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { CommunityMembershipService } from '../communities/community-membership.service';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersService } from '../users/users.service';
+import { EventBookmarksService } from './event-bookmarks.service';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
+import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventRsvp } from './entities/event-rsvp.entity';
 import { Event, EventStatus, EventVisibility } from './entities/event.entity';
 import { EventsService } from './events.service';
@@ -29,10 +33,18 @@ describe('EventsService', () => {
     createQueryBuilder: jest.Mock;
   };
   let invites: { exists: jest.Mock };
+  let lineupEntries: { find: jest.Mock };
   let rsvpService: { reconcileWaitlist: jest.Mock };
   let notifications: { createForRecipients: jest.Mock };
   let blockFilter: { excludeBlocked: jest.Mock };
   let profiles: { find: jest.Mock };
+  let contentModeration: { stateFor: jest.Mock };
+  let membership: { assertMemberBySlug: jest.Mock };
+  let bookmarks: {
+    isBookmarked: jest.Mock;
+    bookmarkedEventIds: jest.Mock;
+    listSaved: jest.Mock;
+  };
 
   // A chainable query-builder stub for `attendees`' paginated RSVP query
   // (`.skip().take().getManyAndCount()`, matching `common/pagination.ts`'s
@@ -71,6 +83,7 @@ describe('EventsService', () => {
       createQueryBuilder: jest.fn(() => attendeesQbStub()),
     };
     invites = { exists: jest.fn().mockResolvedValue(false) };
+    lineupEntries = { find: jest.fn().mockResolvedValue([]) };
     rsvpService = { reconcileWaitlist: jest.fn().mockResolvedValue(undefined) };
     notifications = {
       createForRecipients: jest.fn().mockResolvedValue(undefined),
@@ -79,6 +92,16 @@ describe('EventsService', () => {
       excludeBlocked: jest.fn((qb: unknown) => qb),
     };
     profiles = { find: jest.fn().mockResolvedValue([]) };
+    // No moderation takedown by default — every event under test is visible.
+    contentModeration = {
+      stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
+    };
+    membership = { assertMemberBySlug: jest.fn().mockResolvedValue('community-1') };
+    bookmarks = {
+      isBookmarked: jest.fn().mockResolvedValue(false),
+      bookmarkedEventIds: jest.fn().mockResolvedValue(new Set<string>()),
+      listSaved: jest.fn().mockResolvedValue([]),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         EventsService,
@@ -86,11 +109,18 @@ describe('EventsService', () => {
         { provide: getRepositoryToken(EventCohost), useValue: cohosts },
         { provide: getRepositoryToken(EventRsvp), useValue: rsvps },
         { provide: getRepositoryToken(EventInvite), useValue: invites },
+        {
+          provide: getRepositoryToken(EventLineupEntry),
+          useValue: lineupEntries,
+        },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: UsersService, useValue: { findById: jest.fn() } },
         { provide: RsvpService, useValue: rsvpService },
         { provide: NotificationsService, useValue: notifications },
         { provide: BlockFilterService, useValue: blockFilter },
+        { provide: ContentModerationService, useValue: contentModeration },
+        { provide: CommunityMembershipService, useValue: membership },
+        { provide: EventBookmarksService, useValue: bookmarks },
       ],
     }).compile();
     service = module.get(EventsService);

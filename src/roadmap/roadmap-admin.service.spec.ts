@@ -239,7 +239,20 @@ describe('RoadmapAdminService', () => {
       findOne: jest.fn(),
       find: jest.fn().mockResolvedValue([]),
       create: jest.fn((v: object) => v),
-      save: jest.fn((v: unknown) => Promise.resolve(v)),
+      // Synthesizes generated columns (`id`, `createdAt`, `updatedAt`) so a
+      // mapper reading them off a freshly-`save()`d row never sees `undefined`
+      // (e.g. `promoteIdea` creates + maps a brand-new item, and
+      // `toAdminItemDTO` calls `updatedAt.toISOString()`). A caller-supplied
+      // value (spread last) still wins — fixtures based on `BASE_ITEM` keep
+      // their own dates.
+      save: jest.fn((v: unknown) =>
+        Promise.resolve({
+          id: 'item-generated',
+          createdAt: new Date('2026-01-01T00:00:00.000Z'),
+          updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+          ...(v as object),
+        }),
+      ),
       exists: jest.fn().mockResolvedValue(true),
       // Only reached via `manager.getRepository(RoadmapItem)` inside
       // `bulkItems`'s transaction (which routes to this SAME mock — see

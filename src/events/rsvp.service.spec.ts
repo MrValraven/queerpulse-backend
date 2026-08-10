@@ -13,25 +13,48 @@ describe('RsvpService', () => {
   let rsvpRepo: {
     count: jest.Mock;
     findOne: jest.Mock;
+    find: jest.Mock;
     save: jest.Mock;
     create: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
+  // One shared chainable builder stub covering BOTH query shapes the service
+  // now runs through `createQueryBuilder`: the `select().where().getRawOne()`
+  // MAX(waitlist_position) probe on the waitlist-add path, and the bulk
+  // `update().set().where()[.andWhere().returning()].execute()` promotion in
+  // `promoteWaitlist` (the per-attendee findOne/save loop is gone).
+  let rsvpQueryBuilder: Record<string, jest.Mock>;
   let emitter: { emit: jest.Mock };
 
   beforeEach(async () => {
     managerFindOne = jest.fn();
     managerExists = jest.fn().mockResolvedValue(false);
+    rsvpQueryBuilder = {};
+    for (const method of [
+      'select',
+      'update',
+      'set',
+      'where',
+      'andWhere',
+      'returning',
+    ]) {
+      rsvpQueryBuilder[method] = jest
+        .fn()
+        .mockReturnValue(rsvpQueryBuilder);
+    }
+    // MAX(waitlist_position) probe → no one waitlisted yet.
+    rsvpQueryBuilder.getRawOne = jest.fn().mockResolvedValue({ max: 0 });
+    // Bulk UPDATE default: claims nobody (the finite path derives promoted ids
+    // from `find()`, not from RETURNING, so this only matters for the
+    // unlimited-capacity path).
+    rsvpQueryBuilder.execute = jest.fn().mockResolvedValue({ raw: [] });
     rsvpRepo = {
       count: jest.fn().mockResolvedValue(0),
       findOne: jest.fn().mockResolvedValue(null),
+      find: jest.fn().mockResolvedValue([]),
       save: jest.fn((rsvp: unknown) => rsvp),
       create: jest.fn((rsvp: unknown) => rsvp),
-      createQueryBuilder: jest.fn(() => ({
-        select: () => ({
-          where: () => ({ getRawOne: () => ({ max: 0 }) }),
-        }),
-      })),
+      createQueryBuilder: jest.fn(() => rsvpQueryBuilder),
     };
     emitter = { emit: jest.fn() };
     const manager = {
@@ -110,21 +133,34 @@ describe('RsvpService', () => {
       status: EventStatus.Published,
       capacity: 1,
     });
-    rsvpRepo.count.mockResolvedValue(0);
-    rsvpRepo.findOne
-      .mockResolvedValueOnce({
-        eventId: 'e1',
-        userId: 'u1',
-        status: RsvpStatus.Going,
-      }) // existing (mine)
-      .mockResolvedValueOnce({
+    rsvpRepo.count.mockResolvedValue(0); // 0 going after the step-down → 1 seat free
+    rsvpRepo.findOne.mockResolvedValueOnce({
+      eventId: 'e1',
+      userId: 'u1',
+      status: RsvpStatus.Going,
+    }); // existing (mine)
+    // The freed seat's promotion now comes from ONE bulk `find` of the waitlist
+    // head(s), not a per-attendee `findOne`.
+    rsvpRepo.find.mockResolvedValue([
+      {
+        id: 'w2',
         eventId: 'e1',
         userId: 'u2',
         status: RsvpStatus.Waitlisted,
         waitlistPosition: 1,
-      }); // waitlist head
+      },
+    ]);
     const result = await service.rsvp('e', 'u1', 'maybe');
     expect(result.status).toBe(RsvpStatus.Maybe);
+    // Seat-bounded: exactly the one freed seat is filled from the waitlist head.
+    expect(rsvpRepo.find).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ status: RsvpStatus.Waitlisted }),
+        take: 1,
+      }),
+    );
+    // Promotion is a single bulk UPDATE, not a save() per promoted attendee.
+    expect(rsvpQueryBuilder.update).toHaveBeenCalled();
     expect(emitter.emit).toHaveBeenCalledWith(
       'event.waitlist_promoted',
       expect.objectContaining({ eventId: 'e1', userId: 'u2' }),
@@ -137,19 +173,24 @@ describe('RsvpService', () => {
       status: EventStatus.Published,
       capacity: 1,
     });
-    rsvpRepo.findOne
-      .mockResolvedValueOnce({
-        eventId: 'e1',
-        userId: 'u1',
-        status: RsvpStatus.Going,
-      }) // mine
-      .mockResolvedValueOnce({
+    rsvpRepo.findOne.mockResolvedValueOnce({
+      eventId: 'e1',
+      userId: 'u1',
+      status: RsvpStatus.Going,
+    }); // mine
+    // Cancelling a going seat frees one; the waitlist head is pulled up via the
+    // bulk `find` + UPDATE (was a findOne/save per promotion).
+    rsvpRepo.find.mockResolvedValue([
+      {
+        id: 'w2',
         eventId: 'e1',
         userId: 'u2',
         status: RsvpStatus.Waitlisted,
         waitlistPosition: 1,
-      }); // head
+      },
+    ]);
     await service.cancelRsvp('e', 'u1');
+    expect(rsvpQueryBuilder.update).toHaveBeenCalled();
     expect(emitter.emit).toHaveBeenCalledWith(
       'event.waitlist_promoted',
       expect.objectContaining({ eventId: 'e1', userId: 'u2' }),
@@ -171,31 +212,43 @@ describe('RsvpService', () => {
     expect(emitter.emit).not.toHaveBeenCalled();
   });
 
-  it('reconcileWaitlist promotes only while seats remain (capacity-aware loop)', async () => {
+  it('reconcileWaitlist promotes only up to the free seats (capacity-aware bulk promote)', async () => {
     managerFindOne.mockResolvedValue({
       id: 'e1',
       status: EventStatus.Published,
       capacity: 2,
     });
-    // goingCount rises 0 → 1 → 2 across iterations; stops once it hits capacity.
-    rsvpRepo.count
-      .mockResolvedValueOnce(0)
-      .mockResolvedValueOnce(1)
-      .mockResolvedValueOnce(2);
-    rsvpRepo.findOne
-      .mockResolvedValueOnce({
+    // 0 going against a capacity of 2 → exactly 2 free seats. The promotion is
+    // now one seat-bounded `find(take: freeSeats)` + one bulk UPDATE, not a
+    // count/findOne/save loop per seat.
+    rsvpRepo.count.mockResolvedValue(0);
+    rsvpRepo.find.mockResolvedValue([
+      {
+        id: 'w1',
         eventId: 'e1',
         userId: 'h1',
         status: RsvpStatus.Waitlisted,
         waitlistPosition: 1,
-      })
-      .mockResolvedValueOnce({
+      },
+      {
+        id: 'w2',
         eventId: 'e1',
         userId: 'h2',
         status: RsvpStatus.Waitlisted,
         waitlistPosition: 2,
-      });
+      },
+    ]);
     await service.reconcileWaitlist('e');
+    // The `find` is bounded to the free seats (2), earliest waiters first...
+    expect(rsvpRepo.find).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ status: RsvpStatus.Waitlisted }),
+        order: { waitlistPosition: 'ASC' },
+        take: 2,
+      }),
+    );
+    // ...and both freed seats are promoted in a single bulk UPDATE.
+    expect(rsvpQueryBuilder.update).toHaveBeenCalledTimes(1);
     expect(emitter.emit).toHaveBeenCalledTimes(2);
   });
 

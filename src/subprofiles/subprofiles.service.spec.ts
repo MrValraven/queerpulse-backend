@@ -193,7 +193,13 @@ function makeDirectoryQueryBuilderStub(
   rows: Subprofile[],
 ): DirectoryQueryBuilderStub {
   const queryBuilder: DirectoryQueryBuilderStub = {};
-  for (const chainedMethod of ['where', 'andWhere', 'orderBy', 'take']) {
+  for (const chainedMethod of [
+    'select',
+    'where',
+    'andWhere',
+    'orderBy',
+    'take',
+  ]) {
     queryBuilder[chainedMethod] = jest.fn().mockReturnValue(queryBuilder);
   }
   queryBuilder.getMany = jest.fn().mockResolvedValue(rows);
@@ -544,7 +550,7 @@ describe('SubprofilesService', () => {
     excludeBlocked: jest.Mock;
     blockedUserIds: jest.Mock;
   };
-  let contentModeration: { stateFor: jest.Mock };
+  let contentModeration: { stateFor: jest.Mock; statesFor: jest.Mock };
   let followersService: {
     follow: jest.Mock;
     unfollow: jest.Mock;
@@ -656,6 +662,10 @@ describe('SubprofilesService', () => {
     // blocks below override per-case.
     contentModeration = {
       stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
+      // Batched takedown lookup used by `dropModeratedSubprofiles`. Empty map =
+      // nothing moderated, so every persona passes the filter (individual tests
+      // override to hide/remove a specific slug).
+      statesFor: jest.fn().mockResolvedValue(new Map()),
     };
     followersService = {
       follow: jest.fn(),

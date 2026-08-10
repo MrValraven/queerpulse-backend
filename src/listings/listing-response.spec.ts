@@ -57,6 +57,17 @@ function makeDirectoryListing(overrides: Partial<Listing> = {}): Listing {
     ownerBio: 'Runs the studio since 2019.',
     visibility: 'public',
     linkToProfile: true,
+    // A plain (non-safe-space) directory listing: the detail builder reads
+    // these safe-space columns (and spreads `safeSpaceVouches`), so they must
+    // be present and iterable even though this listing carries no badge.
+    safeSpaceStatus: SafeSpaceStatus.None,
+    safeSpaceTier: null,
+    safeSpaceVerifier: '',
+    safeSpaceReVerifiedAt: null,
+    safeSpaceSub: '',
+    safeSpacePromises: [],
+    safeSpaceVouches: [],
+    safeSpaceRemoval: null,
     ...overrides,
   } as unknown as Listing;
 }
@@ -136,10 +147,12 @@ describe('toDirectoryDetail', () => {
     expect(detail.photos.d2).toBeNull(); // empty slot → null
     expect(detail.photos.vibe).toBe('https://cdn.example.com/vibe.jpg');
     expect(detail.alt.wide).toBe('Main room');
+    // Hours pass through in the current interval-based shape (the flat
+    // open/from/to model was superseded by the RewriteListingHoursToIntervals
+    // migration — see `ListingDayHours`).
     expect(detail.hours.Fri).toEqual({
       open: true,
-      from: '18:00',
-      to: '02:00',
+      intervals: [{ from: '18:00', to: '02:00' }],
     });
     expect(detail.langs).toEqual(['pt', 'en']);
   });

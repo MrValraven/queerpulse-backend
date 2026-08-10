@@ -2,6 +2,7 @@ import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { SelectQueryBuilder } from 'typeorm';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { Activity } from '../profiles/entities/activity.entity';
 import { SocialLink } from '../profiles/entities/social-link.entity';
@@ -189,6 +190,14 @@ describe('PublicProfilesService', () => {
         { provide: getRepositoryToken(WorkItem), useValue: workItems },
         { provide: getRepositoryToken(Activity), useValue: activities },
         { provide: getRepositoryToken(MemberPreferences), useValue: {} },
+        {
+          // No takedown by default: every published fixture is servable unless
+          // a test says otherwise. A hidden/removed member is 404'd by the same
+          // fail-closed gate as the others (asserted via the indistinguishable
+          // 404 body), so the mapper never runs on a taken-down profile.
+          provide: ContentModerationService,
+          useValue: { statesForAnyType: jest.fn().mockResolvedValue(new Map()) },
+        },
       ],
     }).compile();
 
@@ -217,6 +226,10 @@ describe('PublicProfilesService', () => {
             imageUrl: null,
           },
         ],
+        // `activity` is a deliberate published field (2026-08-03): the public
+        // page shows recent public-visible activity. The `activities` repo mock
+        // returns [], so the allowlisted projection carries an empty list here.
+        activity: [],
       });
     });
 

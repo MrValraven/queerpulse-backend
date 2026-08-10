@@ -85,7 +85,13 @@ const rawQbStub = (rows: unknown[] = []) => {
     qb[m] = jest.fn().mockReturnValue(qb);
   }
   qb.from = jest.fn((arg: unknown) => {
-    if (typeof arg === 'function') {
+    // `.from()` has two forms: `.from(subQueryCallback, alias)` and
+    // `.from(EntityClass, alias)`. Both an arrow callback and an entity class
+    // are `typeof === 'function'`, so distinguish them: only an arrow
+    // subquery callback (no `prototype`) should be invoked. An entity class
+    // (e.g. `CommunityPostReply`) has a `prototype` and would otherwise be
+    // called without `new` — the "cannot be invoked without 'new'" throw.
+    if (typeof arg === 'function' && !('prototype' in arg)) {
       (arg as (sub: Record<string, jest.Mock>) => unknown)(rawQbStub());
     }
     return qb;
@@ -168,7 +174,7 @@ describe('CommunityPostsService', () => {
   };
   let postEdits: { create: jest.Mock; save: jest.Mock; find: jest.Mock };
   let replyEdits: { create: jest.Mock; save: jest.Mock; find: jest.Mock };
-  let mentions: { notify: jest.Mock };
+  let mentions: { notify: jest.Mock; notifyPostReply: jest.Mock };
   // `statesForAnyType` returns an empty map by default (every subject falls
   // back to `CommunityPostsService.VISIBLE`); `excludeHidden` is a pass-through
   // on the query builder, mirroring the `blockFilter` stub above — the real
@@ -253,7 +259,13 @@ describe('CommunityPostsService', () => {
       save: jest.fn().mockResolvedValue(undefined),
       find: jest.fn().mockResolvedValue([]),
     };
-    mentions = { notify: jest.fn().mockResolvedValue(undefined) };
+    // `notify` resolves to the Set of @mentioned user ids the caller checks
+    // (`if (!mentioned.has(post.authorId))`) before firing the reply-notify;
+    // default empty so the post-author notification always runs.
+    mentions = {
+      notify: jest.fn().mockResolvedValue(new Set<string>()),
+      notifyPostReply: jest.fn().mockResolvedValue(undefined),
+    };
     contentModeration = {
       statesForAnyType: jest.fn().mockResolvedValue(new Map()),
       excludeHidden: jest.fn((qb: unknown) => qb),

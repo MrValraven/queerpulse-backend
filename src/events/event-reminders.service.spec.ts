@@ -73,9 +73,12 @@ describe('EventRemindersService', () => {
       reminderSentAt: null,
     };
     events.find.mockResolvedValue([event]);
+    // The sweep now pulls every candidate RSVP across the whole batch in ONE
+    // query and groups them by `eventId` in memory, so each row must carry the
+    // event it belongs to.
     rsvps.find.mockResolvedValue([
-      { id: 'r1', userId: 'a' },
-      { id: 'r2', userId: 'b' },
+      { id: 'r1', userId: 'a', eventId: 'e1' },
+      { id: 'r2', userId: 'b', eventId: 'e1' },
     ]);
     // RETURNING hands back exactly the rows this statement claimed.
     claimQueryBuilder.execute.mockResolvedValue({
@@ -119,8 +122,8 @@ describe('EventRemindersService', () => {
     };
     events.find.mockResolvedValue([event]);
     rsvps.find.mockResolvedValue([
-      { id: 'r1', userId: 'a' },
-      { id: 'r2', userId: 'b' },
+      { id: 'r1', userId: 'a', eventId: 'e1' },
+      { id: 'r2', userId: 'b', eventId: 'e1' },
     ]);
     // Both were due, but an overlapping tick already claimed 'r2' — RETURNING
     // only reports the row THIS statement actually flipped.
@@ -137,15 +140,20 @@ describe('EventRemindersService', () => {
     );
   });
 
-  it('skips the fan-out when the claim is lost (affected 0)', async () => {
+  it('skips the fan-out when the claim is lost (RETURNING claims nobody)', async () => {
     events.find.mockResolvedValue([
       { id: 'e1', slug: 'x', startAt: new Date(), reminderSentAt: null },
     ]);
-    events.update.mockResolvedValue({ affected: 0 }); // another worker won
+    rsvps.find.mockResolvedValue([{ id: 'r1', userId: 'a', eventId: 'e1' }]);
+    // The RSVP was due, but an overlapping tick flipped `reminder_sent_at`
+    // first, so the guarded UPDATE claims nothing and RETURNING is empty —
+    // nobody to remind.
+    claimQueryBuilder.execute.mockResolvedValue({ raw: [] });
 
     await service.sendDueReminders();
 
     expect(notifications.createForRecipients).not.toHaveBeenCalled();
+    expect(push.sendToUsers).not.toHaveBeenCalled();
   });
 
   it('does nothing when no events are due', async () => {
@@ -159,7 +167,11 @@ describe('EventRemindersService', () => {
   // real reminded-user list, then asserts the rich push payload it built.
   function primeOneDueReminder(event: Record<string, unknown>): void {
     events.find.mockResolvedValue([event]);
-    rsvps.find.mockResolvedValue([{ id: 'r1', userId: 'u1' }]);
+    // `eventId` must match the primed event so the batched sweep groups this
+    // RSVP under it (the fan-out is per-event).
+    rsvps.find.mockResolvedValue([
+      { id: 'r1', userId: 'u1', eventId: event.id },
+    ]);
     claimQueryBuilder.execute.mockResolvedValue({
       raw: [{ id: 'r1', user_id: 'u1' }],
     });

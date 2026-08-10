@@ -6,6 +6,7 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { CompanyOpenRolesService } from '../jobs/company-open-roles.service';
 import { Profile } from '../users/entities/profile.entity';
 import { CompaniesService } from './companies.service';
@@ -65,6 +66,12 @@ describe('CompaniesService', () => {
     openRoleCountsForMany: jest.Mock;
     listForCompany: jest.Mock;
   };
+  // Public reads (`getBySlug`) withhold a company under a moderator takedown;
+  // by default nothing is taken down, so `stateFor` resolves "clean".
+  let contentModeration: {
+    stateFor: jest.Mock;
+    statesFor: jest.Mock;
+  };
 
   beforeEach(async () => {
     companies = {
@@ -105,6 +112,10 @@ describe('CompaniesService', () => {
       openRoleCountsForMany: jest.fn().mockResolvedValue(new Map()),
       listForCompany: jest.fn().mockResolvedValue([]),
     };
+    contentModeration = {
+      stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
+      statesFor: jest.fn().mockResolvedValue(new Map()),
+    };
 
     // `manager.getRepository(Entity)` routes to the same mocks the outer
     // `@InjectRepository` tokens use, so assertions work whether the code
@@ -135,6 +146,7 @@ describe('CompaniesService', () => {
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: DataSource, useValue: dataSource },
         { provide: CompanyOpenRolesService, useValue: openRoles },
+        { provide: ContentModerationService, useValue: contentModeration },
       ],
     }).compile();
     service = module.get(CompaniesService);

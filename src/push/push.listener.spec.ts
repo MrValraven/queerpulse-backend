@@ -1,8 +1,26 @@
+import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+} from '../common/image-url';
 import { MessageKind } from '../messaging/entities/message.entity';
 import { MessageCreatedEvent } from '../messaging/messaging.events';
 import { MessageView } from '../messaging/message-response';
 import { PushMessageListener } from './push.listener';
 import { PushPayload } from './push.service';
+
+// The listener resolves the sender's display name via `requireAuthorSummary`,
+// which runs every avatar through `toImageUrl`. A storage-key avatar needs the
+// module-level API base URL (normally set once at bootstrap by `CommonModule`)
+// or `toImageUrl` throws — the same wiring the real app has. Set it here so the
+// storage-key case exercises the listener's icon logic instead of failing to
+// resolve the sender name.
+beforeAll(() => {
+  setImageUrlBase('https://api.queerpulse.app');
+});
+
+afterAll(() => {
+  resetImageUrlBaseForTesting();
+});
 
 function makeEvent(overrides: Partial<MessageView> = {}): MessageCreatedEvent {
   const message: MessageView = {

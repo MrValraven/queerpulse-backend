@@ -1,0 +1,10 @@
+{
+  "//": "Jest-only TS config. ts-jest 30 no longer honours the deprecated `isolatedModules` transform option, so with the base tsconfig's `isolatedModules: false` it runs a full type-check compile and trips TS5011 (base tsconfig sets `outDir`/`declaration` but no `rootDir`). Transpile-only is what the jest transform always intended — set it here, isolated from the `nest build` tsconfig so the build's type-checking is unchanged. (Transpile-only also runs more suites than a full type-check would, since it doesn't block on pre-existing spec type errors.)",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "isolatedModules": true,
+    "declaration": false,
+    "sourceMap": false,
+    "rootDir": "."
+  }
+}

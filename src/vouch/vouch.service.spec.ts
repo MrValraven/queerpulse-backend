@@ -33,6 +33,8 @@ describe('VouchService', () => {
     insert: jest.Mock;
     update: jest.Mock;
     count: jest.Mock;
+    increment: jest.Mock;
+    decrement: jest.Mock;
   };
   let dataSource: { transaction: jest.Mock };
   let emitter: { emit: jest.Mock };
@@ -53,6 +55,10 @@ describe('VouchService', () => {
       insert: jest.fn().mockResolvedValue(undefined),
       update: jest.fn().mockResolvedValue(undefined),
       count: jest.fn().mockResolvedValue(0),
+      // The denormalized profiles.vouch_count is kept in sync inside the same
+      // transaction (see B3): createVouch increments, withdrawVouch decrements.
+      increment: jest.fn().mockResolvedValue(undefined),
+      decrement: jest.fn().mockResolvedValue(undefined),
     };
     dataSource = {
       transaction: jest
@@ -241,10 +247,23 @@ describe('VouchService', () => {
       await expect(service.withdrawVouch('u1', 'target')).resolves.toEqual({
         ok: true,
       });
-      expect(vouches.update).toHaveBeenCalledWith(
+      // The soft-delete now runs inside the transaction via the EntityManager
+      // (so the withdraw and the denormalized-counter decrement commit or roll
+      // back atomically), not through the `vouches` repository.
+      expect(manager.update).toHaveBeenCalledWith(
+        Vouch,
         { id: 'v1' },
         expect.objectContaining({ withdrawnAt: expect.any(Date) as unknown }),
       );
+      // And the denormalized profiles.vouch_count is decremented in the same
+      // transaction (mirror of createVouch's increment — see B3).
+      expect(manager.decrement).toHaveBeenCalledWith(
+        Profile,
+        { userId: 'u2' },
+        'vouchCount',
+        1,
+      );
+      expect(vouches.update).not.toHaveBeenCalled();
     });
 
     it('404s when there is no active vouch to withdraw', async () => {
