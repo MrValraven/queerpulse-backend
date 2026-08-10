@@ -35,8 +35,8 @@ describe('MyMediaUsageResolverImpl', () => {
       `avatars/${userId}/orphan.jpg`,
     ]);
 
-    expect(used.get(avatarKey)).toMatch(/profile photo/i);
-    expect(used.get(listingKey)).toMatch(/listing/i);
+    expect(used.get(avatarKey)).toBe('profile-photo');
+    expect(used.get(listingKey)).toBe('listing');
     expect(used.has(`avatars/${userId}/orphan.jpg`)).toBe(false);
   });
 

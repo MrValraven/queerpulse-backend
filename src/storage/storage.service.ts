@@ -175,6 +175,27 @@ export class StorageService {
     return true;
   }
 
+  /**
+   * Delete a SINGLE object addressed by an already-validated storage key — the
+   * admin media console's explicit "delete this file" action (audit tooling).
+   *
+   * Unlike {@link deleteObjectByReference}, which is given a column's stored
+   * value and silently no-ops on anything that isn't a key (external URL,
+   * empty), this expects a well-formed key the caller has already asserted
+   * (`AdminMediaService.assertKnownKey`) and always issues the delete — an admin
+   * pressing "delete" on a listed object should never silently do nothing.
+   * Deletes the raw bucket object only; any DB row still referencing the key is
+   * the caller's concern (the console deliberately does not clear references).
+   */
+  async deleteObjectByKey(key: string): Promise<void> {
+    await this.storageClient().send(
+      new DeleteObjectCommand({
+        Bucket: this.requireConfig('storage.bucket'),
+        Key: key,
+      }),
+    );
+  }
+
   // The S3 `DeleteObjects` API deletes at most 1000 keys per request.
   private static readonly DELETE_BATCH_SIZE = 1000;
 

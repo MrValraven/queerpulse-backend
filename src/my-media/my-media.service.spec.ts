@@ -1,4 +1,5 @@
 import { Test } from '@nestjs/testing';
+import { ForbiddenException } from '@nestjs/common';
 import { MyMediaService } from './my-media.service';
 import { StorageService } from '../storage/storage.service';
 
@@ -100,5 +101,59 @@ describe('MyMediaService.listMine', () => {
       `avatars/${userId}/p1.jpg`,
       `avatars/${userId}/p2.jpg`,
     ]);
+  });
+});
+
+describe('MyMediaService.deleteMine', () => {
+  const userId = '11111111-1111-1111-1111-111111111111';
+  const otherId = '22222222-2222-2222-2222-222222222222';
+
+  function makeService(deleteObjectByReference: jest.Mock) {
+    return Test.createTestingModule({
+      providers: [
+        MyMediaService,
+        {
+          provide: StorageService,
+          useValue: { listObjects: jest.fn(), deleteObjectByReference },
+        },
+        {
+          provide: 'MY_MEDIA_USAGE_RESOLVER',
+          useValue: { resolve: jest.fn() },
+        },
+      ],
+    }).compile();
+  }
+
+  it('deletes an object the caller owns', async () => {
+    const deleteObjectByReference = jest.fn().mockResolvedValue(true);
+    const service = (await makeService(deleteObjectByReference)).get(
+      MyMediaService,
+    );
+    await service.deleteMine(userId, `avatars/${userId}/mine.jpg`);
+    expect(deleteObjectByReference).toHaveBeenCalledWith(
+      `avatars/${userId}/mine.jpg`,
+    );
+  });
+
+  it('refuses a key owned by someone else', async () => {
+    const deleteObjectByReference = jest.fn();
+    const service = (await makeService(deleteObjectByReference)).get(
+      MyMediaService,
+    );
+    await expect(
+      service.deleteMine(userId, `avatars/${otherId}/theirs.jpg`),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(deleteObjectByReference).not.toHaveBeenCalled();
+  });
+
+  it('refuses a malformed key', async () => {
+    const deleteObjectByReference = jest.fn();
+    const service = (await makeService(deleteObjectByReference)).get(
+      MyMediaService,
+    );
+    await expect(
+      service.deleteMine(userId, '../../etc/passwd'),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(deleteObjectByReference).not.toHaveBeenCalled();
   });
 });

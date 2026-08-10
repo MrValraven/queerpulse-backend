@@ -19,7 +19,7 @@ migrations in `src/migrations` — `synchronize` is never enabled. Entities use 
 
 Uses **pnpm** (see `pnpm-lock.yaml`). Use `pnpm`, not
 `npm` or `yarn`. The repo pins `pnpm@9.15.0` via `package.json#packageManager`
-and requires Node `>=20.11` (`package.json#engines`).
+and requires Node `>=22.11` (`package.json#engines`).
 
 ## Commands
 

@@ -1,6 +1,14 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiCookieAuth,
+  ApiForbiddenResponse,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
@@ -10,6 +18,7 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { MyMediaService } from './my-media.service';
+import { DeleteMyMediaDto } from './dto/delete-my-media.dto';
 
 @UseGuards(ActiveMemberGuard)
 @ApiTags('Account — My uploads')
@@ -25,5 +34,20 @@ export class MyMediaController {
   async list(@CurrentUser() user: CurrentUserData) {
     const items = await this.myMedia.listMine(user.userId);
     return { items };
+  }
+
+  @ApiOperation({ summary: 'Delete one image the current member uploaded.' })
+  @ApiOkResponse({ description: 'The object was deleted.' })
+  @ApiForbiddenResponse({
+    description: 'The key is not the caller-owned upload.',
+  })
+  @Delete()
+  @HttpCode(200)
+  async remove(
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: DeleteMyMediaDto,
+  ) {
+    await this.myMedia.deleteMine(user.userId, dto.key);
+    return { deleted: true };
   }
 }

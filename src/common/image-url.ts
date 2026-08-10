@@ -57,3 +57,33 @@ export function toImageUrl(value: string | null | undefined): string | null {
   }
   return null;
 }
+
+/**
+ * Reverse of `toImageUrl` for a value arriving on a WRITE.
+ *
+ * Frontend edit forms are seeded with the RESOLVED display URL `toImageUrl`
+ * produced (`<apiBaseUrl>/files/<key>`), not the raw storage key, and several
+ * re-send it on save. Persisting that derived URL would bake THIS environment's
+ * origin into the column, and — because a dev API base is `http://…` — the next
+ * `toImageUrl` read would fail its `https://`-only check and return `null`,
+ * blanking the image. So collapse our OWN resolved URLs back to the bare key
+ * before persisting, keeping the storage layer canonical (keys, not URLs) and
+ * making the round-trip idempotent.
+ *
+ * Only `<apiBaseUrl>/files/<key>` whose tail parses as one of our storage keys
+ * is rewritten. Bare keys, external `https://` URLs, and arbitrary text are
+ * returned unchanged (so `isStorageKey`/`toImageUrl`/ownership checks still see
+ * them verbatim). When the base URL is unset (e.g. a unit test that never
+ * bootstraps it) the input is returned as-is.
+ */
+export function storageKeyFromImageUrl(value: string): string {
+  if (!apiBaseUrl) {
+    return value;
+  }
+  const filesPrefix = `${apiBaseUrl}/files/`;
+  if (!value.startsWith(filesPrefix)) {
+    return value;
+  }
+  const key = value.slice(filesPrefix.length);
+  return isStorageKey(key) ? key : value;
+}

@@ -1,10 +1,11 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
 import { StorageService } from '../storage/storage.service';
 import {
   UPLOAD_KIND_SPECS,
   UPLOAD_KINDS,
   UploadKind,
 } from '../storage/upload-kinds';
+import { storageKeyOwnerId } from '../storage/storage-key';
 import { MyMediaItem } from './dto/my-media-item.dto';
 import {
   MY_MEDIA_USAGE_RESOLVER,
@@ -70,5 +71,14 @@ export class MyMediaService {
       (right.lastModified ?? '').localeCompare(left.lastModified ?? ''),
     );
     return items;
+  }
+
+  async deleteMine(userId: string, key: string): Promise<void> {
+    // storageKeyOwnerId returns null for any malformed/unknown key, so this one
+    // check covers both "not a valid key" and "not yours".
+    if (storageKeyOwnerId(key) !== userId) {
+      throw new ForbiddenException('That upload is not yours to delete.');
+    }
+    await this.storage.deleteObjectByReference(key);
   }
 }

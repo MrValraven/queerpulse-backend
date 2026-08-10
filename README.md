@@ -23,7 +23,7 @@ chat (socket.io), and Mux-backed video ("cinema").
 
 ## Prerequisites
 
-- **Node.js** `>= 20.11`
+- **Node.js** `>= 22.11`
 - **pnpm** `>= 9` (this repo pins `pnpm@9.15.0` via `packageManager`; run
   `corepack enable` to have the right version selected automatically)
 - **PostgreSQL** `>= 14` (16 recommended)

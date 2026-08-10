@@ -132,6 +132,20 @@ export class AdminMediaService {
     return { key, contentType, contentLength };
   }
 
+  /**
+   * Permanently delete one stored object. `assertKnownKey` first, so a
+   * malformed/unknown key 404s with the same don't-leak posture as `head`
+   * rather than reaching the storage SDK. Deletes the RAW bucket object only —
+   * this console deliberately does not reverse-look-up and clear DB columns that
+   * still reference the key (a still-referencing avatar/listing image simply
+   * stops loading), matching its raw-bucket / orphan-cleanup purpose. The UI
+   * warns the admin of exactly that before confirming.
+   */
+  async delete(key: string): Promise<void> {
+    this.assertKnownKey(key);
+    await this.storage.deleteObjectByKey(key);
+  }
+
   /** One batched profile lookup for every distinct owner id on this page. */
   private async resolveUploaders(
     keys: string[],

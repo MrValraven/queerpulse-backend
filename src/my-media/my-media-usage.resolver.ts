@@ -10,9 +10,17 @@ import { Listing } from '../listings/entities/listing.entity';
 
 export const MY_MEDIA_USAGE_RESOLVER = 'MY_MEDIA_USAGE_RESOLVER';
 
+/**
+ * Stable, language-neutral slug for WHERE an uploaded key is still referenced.
+ * The frontend translates it (`settings:uploads.usedAs.<slug>`) — the backend
+ * deliberately never returns human prose, so the "in use" warning localises.
+ */
+export type MyMediaUsage =
+  'profile-photo' | 'showcase' | 'story-cover' | 'event' | 'group' | 'listing';
+
 export interface MyMediaUsageResolver {
-  /** Maps each in-use key -> a short human label; absent keys are not in use. */
-  resolve(userId: string, keys: string[]): Promise<Map<string, string>>;
+  /** Maps each in-use key -> a usage slug; absent keys are not in use. */
+  resolve(userId: string, keys: string[]): Promise<Map<string, MyMediaUsage>>;
 }
 
 // A stored reference may be the raw storage key (`avatars/<id>/x.jpg`) or a
@@ -50,26 +58,31 @@ export class MyMediaUsageResolverImpl implements MyMediaUsageResolver {
     @InjectRepository(Listing) private readonly listings: Repository<Listing>,
   ) {}
 
-  async resolve(userId: string, keys: string[]): Promise<Map<string, string>> {
+  async resolve(
+    userId: string,
+    keys: string[],
+  ): Promise<Map<string, MyMediaUsage>> {
     const candidateKeys = new Set(keys.map(toBareKey));
-    const used = new Map<string, string>();
+    const used = new Map<string, MyMediaUsage>();
     if (candidateKeys.size === 0) return used;
 
-    const mark = (storedValue: string | null | undefined, label: string) => {
+    const mark = (
+      storedValue: string | null | undefined,
+      usage: MyMediaUsage,
+    ) => {
       if (!storedValue) return;
       const bareKey = toBareKey(storedValue);
       if (candidateKeys.has(bareKey) && !used.has(bareKey))
-        used.set(bareKey, label);
+        used.set(bareKey, usage);
     };
 
     // avatar — the caller's own profile row.
     const profile = await this.profiles.findOne({ where: { userId } });
-    mark(profile?.avatarUrl, 'Your current profile photo');
+    mark(profile?.avatarUrl, 'profile-photo');
 
     // work-image — the caller's portfolio/work items.
     const workItems = await this.workItems.find({ where: { userId } });
-    for (const workItem of workItems)
-      mark(workItem.imageUrl, 'On your profile / showcase');
+    for (const workItem of workItems) mark(workItem.imageUrl, 'showcase');
 
     // story-cover — MagazineIssue has no owner column, so scope by matching
     // directly on the caller's own story-cover candidate keys (both the bare
@@ -85,22 +98,21 @@ export class MyMediaUsageResolverImpl implements MyMediaUsageResolver {
       const issues = await this.issues.find({
         where: { coverUrl: In(storedForms) },
       });
-      for (const issue of issues) mark(issue.coverUrl, 'A story cover');
+      for (const issue of issues) mark(issue.coverUrl, 'story-cover');
     }
 
     // gathering-photo — event photos the caller uploaded.
     const eventPhotos = await this.eventPhotos.find({
       where: { uploaderId: userId },
     });
-    for (const eventPhoto of eventPhotos)
-      mark(eventPhoto.storageKey, 'On an event you host');
+    for (const eventPhoto of eventPhotos) mark(eventPhoto.storageKey, 'event');
 
     // group-avatar — group conversations the caller created.
     const conversations = await this.conversations.find({
       where: { createdBy: userId },
     });
     for (const conversation of conversations) {
-      mark(conversation.avatarUrl, 'A group chat photo');
+      mark(conversation.avatarUrl, 'group');
     }
 
     // listing-photo — the caller's listings. `Listing.photos` is a flat
@@ -112,8 +124,7 @@ export class MyMediaUsageResolverImpl implements MyMediaUsageResolver {
     for (const listing of listings) {
       const photoValues = Object.values(listing.photos ?? {});
       for (const photoValue of photoValues) {
-        if (typeof photoValue === 'string')
-          mark(photoValue, 'On a business listing');
+        if (typeof photoValue === 'string') mark(photoValue, 'listing');
       }
     }
 

@@ -1,7 +1,15 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiCookieAuth,
   ApiForbiddenResponse,
+  ApiNoContentResponse,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
@@ -14,6 +22,7 @@ import { UserRole } from '../users/entities/user.entity';
 import { AdminMediaService } from './admin-media.service';
 import { AdminMediaListQueryDto } from './dto/admin-media-list-query.dto';
 import { AdminMediaHeadQueryDto } from './dto/admin-media-head-query.dto';
+import { AdminMediaDeleteQueryDto } from './dto/admin-media-delete-query.dto';
 
 /**
  * Read-only admin media console (security tooling): enumerate raw bucket
@@ -48,5 +57,15 @@ export class AdminMediaController {
   @Get('head')
   head(@Query() query: AdminMediaHeadQueryDto) {
     return this.adminMedia.head(query.key);
+  }
+
+  @ApiOperation({
+    summary: 'Permanently delete one stored object from the bucket.',
+  })
+  @ApiNoContentResponse({ description: 'The object was deleted.' })
+  @Delete()
+  @HttpCode(204)
+  delete(@Query() query: AdminMediaDeleteQueryDto): Promise<void> {
+    return this.adminMedia.delete(query.key);
   }
 }

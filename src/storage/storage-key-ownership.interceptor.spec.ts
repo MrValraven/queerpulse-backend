@@ -4,6 +4,10 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { of } from 'rxjs';
+import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+} from '../common/image-url';
 import { StorageKeyOwnershipInterceptor } from './storage-key-ownership.interceptor';
 
 const OWN_USER_ID = '11111111-2222-3333-4444-555555555555';
@@ -224,6 +228,70 @@ describe('StorageKeyOwnershipInterceptor', () => {
     interceptor.intercept(ctx, nextHandler()).subscribe((value) => {
       expect(value).toBe(RESULT);
       done();
+    });
+  });
+
+  describe('normalizing our own resolved image URLs', () => {
+    const BASE = 'http://localhost:3000';
+
+    beforeEach(() => setImageUrlBase(BASE));
+    afterEach(() => resetImageUrlBaseForTesting());
+
+    it('rewrites our own resolved URL back to the bare key, in place, and passes', (done) => {
+      const body = { avatarUrl: `${BASE}/files/${OWN_KEY}` };
+      const ctx = httpContext('PATCH', body, { userId: OWN_USER_ID });
+      interceptor.intercept(ctx, nextHandler()).subscribe((value) => {
+        expect(value).toBe(RESULT);
+        // The derived URL never reaches the service/DB — it is collapsed to the
+        // canonical storage key so the round-trip stays idempotent.
+        expect(body.avatarUrl).toBe(OWN_KEY);
+        done();
+      });
+    });
+
+    it("normalizes a co-owner's resolved URL without a 403 (server-issued, trusted)", (done) => {
+      // The API only mints `/files/<key>` for a viewer already authorised to see
+      // the image; echoing one back is not the "reference a bare key you were
+      // never shown" attack, so it is normalized and NOT ownership-checked.
+      const body = { coverUrl: `${BASE}/files/${OTHER_USER_KEY}` };
+      const ctx = httpContext('PATCH', body, { userId: OWN_USER_ID });
+      interceptor.intercept(ctx, nextHandler()).subscribe((value) => {
+        expect(value).toBe(RESULT);
+        expect(body.coverUrl).toBe(OTHER_USER_KEY);
+        done();
+      });
+    });
+
+    it('still rejects a BARE foreign key even when a base URL is set', () => {
+      const ctx = httpContext(
+        'PATCH',
+        { avatarUrl: OTHER_USER_KEY },
+        { userId: OWN_USER_ID },
+      );
+      expect(() => interceptor.intercept(ctx, nextHandler())).toThrow(
+        ForbiddenException,
+      );
+    });
+
+    it('rewrites resolved URLs nested in an array (collection full-replace)', (done) => {
+      const body = { items: [{ imageUrl: `${BASE}/files/${OWN_KEY}` }] };
+      const ctx = httpContext('PUT', body, { userId: OWN_USER_ID });
+      interceptor.intercept(ctx, nextHandler()).subscribe((value) => {
+        expect(value).toBe(RESULT);
+        expect(body.items[0].imageUrl).toBe(OWN_KEY);
+        done();
+      });
+    });
+
+    it('leaves an external https:// URL untouched', (done) => {
+      const external = 'https://images.unsplash.com/photo.jpg';
+      const body = { avatarUrl: external };
+      const ctx = httpContext('PATCH', body, { userId: OWN_USER_ID });
+      interceptor.intercept(ctx, nextHandler()).subscribe((value) => {
+        expect(value).toBe(RESULT);
+        expect(body.avatarUrl).toBe(external);
+        done();
+      });
     });
   });
 });
