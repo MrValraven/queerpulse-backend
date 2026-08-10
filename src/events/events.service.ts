@@ -790,24 +790,30 @@ export class EventsService {
     event: Event,
     viewerId: string,
   ): Promise<EventDetail> {
-    const goingCount = await this.rsvps.count({
-      where: { eventId: event.id, status: RsvpStatus.Going },
-    });
-    const waitlistCount = await this.rsvps.count({
-      where: { eventId: event.id, status: RsvpStatus.Waitlisted },
-    });
-    const myRsvp = await this.rsvps.findOne({
-      where: { eventId: event.id, userId: viewerId },
-    });
-    const cohostRows = await this.cohosts.find({
-      where: { eventId: event.id },
-    });
+    // First wave: these five lookups are all independent of one another — only
+    // `profilesByUserIds` below depends on `cohostRows`'s ids, so it waits for
+    // its own second wave instead of chaining behind every other await.
+    const [goingCount, waitlistCount, myRsvp, cohostRows, isBookmarked] =
+      await Promise.all([
+        this.rsvps.count({
+          where: { eventId: event.id, status: RsvpStatus.Going },
+        }),
+        this.rsvps.count({
+          where: { eventId: event.id, status: RsvpStatus.Waitlisted },
+        }),
+        this.rsvps.findOne({
+          where: { eventId: event.id, userId: viewerId },
+        }),
+        this.cohosts.find({
+          where: { eventId: event.id },
+        }),
+        this.bookmarks.isBookmarked(viewerId, event.id),
+      ]);
     const organizerIds = [event.hostId, ...cohostRows.map((c) => c.userId)];
     const profiles = await this.profilesByUserIds(organizerIds);
     const isOrganizer =
       event.hostId === viewerId ||
       cohostRows.some((c) => c.userId === viewerId);
-    const isBookmarked = await this.bookmarks.isBookmarked(viewerId, event.id);
 
     const summary = toEventSummary(
       event,

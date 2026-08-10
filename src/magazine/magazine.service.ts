@@ -62,7 +62,19 @@ export class MagazineService {
   ) {}
 
   async listIssues(): Promise<IssueResponse[]> {
-    const rows = await this.issues.find({ order: { number: 'DESC' } });
+    // Project only what `toIssueResponse` reads — the full row also carries
+    // the `runOrder`/`digest`/`coverlines` jsonb (issue-production data),
+    // none of which this public read ever maps.
+    const rows = await this.issues.find({
+      select: {
+        number: true,
+        title: true,
+        dek: true,
+        publishedOn: true,
+        coverUrl: true,
+      },
+      order: { number: 'DESC' },
+    });
     return rows.map(toIssueResponse);
   }
 
@@ -80,6 +92,23 @@ export class MagazineService {
     const page = normalizePage(query.page);
     const qb = this.articles
       .createQueryBuilder('article')
+      // Project only what `toArticleListItem` (via `toListItems`) reads, plus
+      // `authorId`/`issueId` (needed to build the batched author/issue
+      // lookups below) and `createdAt` (the ORDER BY tiebreaker). The full
+      // row also carries the block-editor `blocks` jsonb, legacy `body` text,
+      // and `contentNotes` — none of which this list ever maps.
+      .select([
+        'article.id',
+        'article.slug',
+        'article.title',
+        'article.dek',
+        'article.tags',
+        'article.readMinutes',
+        'article.publishedAt',
+        'article.authorId',
+        'article.issueId',
+        'article.createdAt',
+      ])
       // Published only: `published_at` set and not in the future. Unpublished
       // (NULL) rows drop out because `NULL <= :now` is unknown, not true —
       // mirrors `ResourcesService.list` / `ContentPagesService.listBySection`.
@@ -126,6 +155,9 @@ export class MagazineService {
     const pattern = `%${escapeLikeTerm(term)}%`;
     const rows = await this.articles
       .createQueryBuilder('article')
+      // `toArticleSearchRow` reads only slug/title/dek — no author/issue
+      // hydration and no `blocks`/`body`/`contentNotes`.
+      .select(['article.slug', 'article.title', 'article.dek'])
       .where('article.published_at <= :now', { now: new Date() })
       .andWhere(
         '(article.title ILIKE :pattern OR article.dek ILIKE :pattern)',

@@ -136,21 +136,18 @@ export class AdminOverviewService {
       now.getTime() - MEMBER_GROWTH_WEEK_COUNT * WEEK_MS,
     );
 
+    // 14 independent queries, run in 3 waves of at most 5 concurrent queries
+    // (mirroring `SearchService.MAX_CONCURRENT_QUERIES`) rather than one
+    // 14-way `Promise.all`, which would queue against `DATABASE_POOL_MAX`
+    // (default 10) on its own and starve every other concurrent request.
+    // None of these queries depend on one another, so the wave boundaries
+    // below are purely about pool pressure, not sequencing.
     const [
       activeMembersCount,
       verifiedMembersCount,
       netNewThisMonthCount,
       profilesForMemberGrowth,
       openReportRows,
-      reportRowsForReportsByType,
-      recentReportsForFeed,
-      reportResolutions,
-      pendingJoinRequestsCount,
-      openAppealsCount,
-      recentProfilesForFeed,
-      recentVouchesForFeed,
-      recentCommunityMembersForFeed,
-      recentJoinRequestsForFeed,
     ] = await Promise.all([
       this.usersService.countActiveMembers(),
       this.profiles.count({ where: { verified: true } }),
@@ -168,6 +165,15 @@ export class AdminOverviewService {
         select: ['severity', 'createdAt'],
         order: { createdAt: 'ASC' },
       }),
+    ]);
+
+    const [
+      reportRowsForReportsByType,
+      recentReportsForFeed,
+      reportResolutions,
+      pendingJoinRequestsCount,
+      openAppealsCount,
+    ] = await Promise.all([
       this.reports.find({
         where: { createdAt: MoreThanOrEqual(reportsByTypeWindowStart) },
         select: ['reasonCode', 'createdAt'],
@@ -182,6 +188,14 @@ export class AdminOverviewService {
         where: { status: JoinRequestStatus.Pending },
       }),
       this.appeals.count({ where: { status: AppealStatus.Awaiting } }),
+    ]);
+
+    const [
+      recentProfilesForFeed,
+      recentVouchesForFeed,
+      recentCommunityMembersForFeed,
+      recentJoinRequestsForFeed,
+    ] = await Promise.all([
       this.profiles.find({
         select: ['userId', 'firstName', 'lastName', 'joinedAt'],
         order: { joinedAt: 'DESC' },

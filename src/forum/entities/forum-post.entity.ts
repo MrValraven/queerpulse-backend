@@ -56,7 +56,13 @@ export class ForumPost {
   @Column({ type: 'boolean', default: false })
   isOp!: boolean;
 
-  @CreateDateColumn({ type: 'timestamptz' })
+  // Millisecond precision (not Postgres's microsecond default): matches the
+  // resolution of the JS `Date` cursor `ForumPostsService.paginateOldestFirst`
+  // builds from this column, so the raw column can be ordered/filtered on
+  // directly instead of through a non-indexable `date_trunc(...)` wrapper —
+  // see `1787600000000-NarrowForumPostCreatedAtPrecision.ts` and
+  // `common/cursor-pagination.ts`.
+  @CreateDateColumn({ type: 'timestamptz', precision: 3 })
   createdAt!: Date;
 
   @Column({ type: 'timestamptz', nullable: true })

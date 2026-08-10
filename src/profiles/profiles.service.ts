@@ -857,20 +857,12 @@ export class ProfilesService {
         qb.orderBy('p.firstName', 'ASC').addOrderBy('p.lastName', 'ASC');
         break;
       case MemberSort.MostVouched:
-        // Correlated count of vouches received; ties fall back to name order.
-        // The count is added as an aliased select and ordered by that alias
-        // rather than being passed to `orderBy` as a raw subquery: this query
-        // paginates over a join, and on that path TypeORM rewrites everything
-        // into a DISTINCT-id subquery, re-parsing each ORDER BY term as
-        // `alias.column`. A raw subquery contains dots, so it gets mistaken for
-        // an alias ("alias was not found. Maybe you forgot to join it?"). A
-        // dot-free alias sidesteps the parser.
-        qb.addSelect(
-          '(SELECT COUNT(*) FROM vouches vc WHERE vc.vouchee_id = p.user_id AND vc.withdrawn_at IS NULL)',
-          'received_vouch_count',
-        )
-          .orderBy('received_vouch_count', 'DESC')
-          .addOrderBy('p.firstName', 'ASC');
+        // Reads the denormalized `profiles.vouch_count` column instead of a
+        // correlated `COUNT(*) FROM vouches` subquery evaluated per candidate
+        // row — see AddProfileVouchCount1787600100000. `VouchService` keeps
+        // this column in sync on every vouch create/reactivate/withdraw.
+        // Ties fall back to name order.
+        qb.orderBy('p.vouchCount', 'DESC').addOrderBy('p.firstName', 'ASC');
         break;
       case MemberSort.ClosestMutuals: {
         // Rank by how many of the viewer's own accepted connections each

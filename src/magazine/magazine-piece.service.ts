@@ -598,7 +598,12 @@ export class MagazinePieceService {
 
   async deskSummary(): Promise<DeskSummary> {
     const [pieces, events] = await Promise.all([
-      this.pieces.find(),
+      // Unbounded over the whole `magazine_piece` table — project down to
+      // what `toDeskSummary` (plus the `editorId` grouping just below) reads:
+      // `stage` and `editorId` only. The full row also carries the jsonb
+      // `brief`/`care` fields, neither of which a stage/editor-load rollup
+      // ever touches.
+      this.pieces.find({ select: { stage: true, editorId: true } }),
       this.pieceEvents.find({
         order: { createdAt: 'DESC' },
         take: RECENT_ACTIVITY_LIMIT,

@@ -6,8 +6,8 @@ import {
   Notification,
   NotificationType,
 } from '../notifications/entities/notification.entity';
-import { NOTIFICATION_CREATED } from '../notifications/notification.events';
-import type { NotificationCreatedEvent } from '../notifications/notification.events';
+import { NOTIFICATION_BATCH_CREATED } from '../notifications/notification.events';
+import type { NotificationBatchCreatedEvent } from '../notifications/notification.events';
 import { actorIdOf } from '../notifications/notification-response';
 import { NotificationPreferenceCategory } from '../notifications/notification-preferences';
 import { NotificationPreferencesService } from '../notifications/notification-preferences.service';
@@ -17,10 +17,16 @@ import { PushService } from './push.service';
 
 /**
  * Turns persisted in-app notifications into phone pushes for a curated WHITELIST
- * of types. `NOTIFICATION_CREATED` fires once per recipient per persisted row
- * (`NotificationsService.create`/`createForRecipients`), carrying
- * `{ userId, notification }`, so a single listener covers almost every new push
- * type without touching the emitting services.
+ * of types. `NOTIFICATION_BATCH_CREATED` fires once per WRITE — one recipient
+ * (`NotificationsService.create`) or a whole fan-out
+ * (`NotificationsService.createForRecipients`) alike — carrying
+ * `{ userIds, type, payload, actorId, notification }`, a single representative
+ * row plus the full recipient list, so a single listener covers almost every
+ * new push type without touching the emitting services AND without re-running
+ * the category gate / actor lookup / send once per recipient (that per-row
+ * cost is exactly what `NOTIFICATION_CREATED` — a different event, consumed by
+ * the chat gateway for the live socket feed — would produce if this listener
+ * used it instead; see `notification.events.ts`).
  *
  * The set of pushed types is a whitelist, NEVER a blocklist — everything not
  * named in the switch is silently ignored. Two exclusions are load-bearing:
@@ -46,33 +52,33 @@ export class PushNotificationListener {
     private readonly notificationPreferences: NotificationPreferencesService,
   ) {}
 
-  @OnEvent(NOTIFICATION_CREATED)
-  async handleNotificationCreated(
-    event: NotificationCreatedEvent,
+  @OnEvent(NOTIFICATION_BATCH_CREATED)
+  async handleNotificationBatchCreated(
+    event: NotificationBatchCreatedEvent,
   ): Promise<void> {
     try {
-      const { userId, notification } = event;
+      const { userIds, notification } = event;
       switch (notification.type) {
         case NotificationType.ConnectionRequest:
         case NotificationType.ConnectionAccepted:
-          await this.pushConnection(userId, notification);
+          await this.pushConnection(userIds, notification);
           return;
         case NotificationType.Mention:
-          await this.pushMention(userId, notification);
+          await this.pushMention(userIds, notification);
           return;
         case NotificationType.ForumReply:
         case NotificationType.ForumThreadReply:
-          await this.pushForumReply(userId, notification);
+          await this.pushForumReply(userIds, notification);
           return;
         case NotificationType.VouchReceived:
-          await this.pushVouch(userId, notification);
+          await this.pushVouch(userIds, notification);
           return;
         case NotificationType.SafeSpaceVouch:
-          await this.pushSafeSpaceVouch(userId, notification);
+          await this.pushSafeSpaceVouch(userIds, notification);
           return;
         case NotificationType.EventUpdated:
         case NotificationType.EventCancelled:
-          await this.pushEvent(userId, notification);
+          await this.pushEvent(userIds, notification);
           return;
         // Whitelist: every other type — CRITICALLY `NewMessage` and
         // `EventReminder`, which already push elsewhere — falls through here and
@@ -89,24 +95,21 @@ export class PushNotificationListener {
   // --- Per-type handlers ----------------------------------------------------
 
   private async pushConnection(
-    userId: string,
+    userIds: string[],
     notification: Notification,
   ): Promise<void> {
-    if (
-      !(await this.categoryEnabled(
-        userId,
-        NotificationPreferenceCategory.Connections,
-      ))
-    ) {
-      return;
-    }
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Connections,
+    );
+    if (recipientUserIds.length === 0) return;
     const actor = await this.resolveActor(notification);
     const name = this.displayName(actor);
     const isRequest = notification.type === NotificationType.ConnectionRequest;
     // Deep-link to the actor's profile; fall back to the connections list when
     // the actor can no longer be resolved (never a broken/empty link).
     const url = actor ? `/members/${actor.slug}` : '/account/connections';
-    await this.pushService.sendToUsers([userId], {
+    await this.pushService.sendToUsers(recipientUserIds, {
       title: isRequest ? 'New connection request' : 'Connection accepted',
       body: isRequest
         ? `${name} wants to connect with you.`
@@ -128,20 +131,17 @@ export class PushNotificationListener {
   }
 
   private async pushMention(
-    userId: string,
+    userIds: string[],
     notification: Notification,
   ): Promise<void> {
-    if (
-      !(await this.categoryEnabled(
-        userId,
-        NotificationPreferenceCategory.Mentions,
-      ))
-    ) {
-      return;
-    }
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Mentions,
+    );
+    if (recipientUserIds.length === 0) return;
     const actor = await this.resolveActor(notification);
     const name = this.displayName(actor);
-    await this.pushService.sendToUsers([userId], {
+    await this.pushService.sendToUsers(recipientUserIds, {
       title: 'You were mentioned',
       body: `${name} mentioned you.`,
       tag: `notification:${notification.id}`,
@@ -157,20 +157,17 @@ export class PushNotificationListener {
   }
 
   private async pushForumReply(
-    userId: string,
+    userIds: string[],
     notification: Notification,
   ): Promise<void> {
-    if (
-      !(await this.categoryEnabled(
-        userId,
-        NotificationPreferenceCategory.CommunityReplies,
-      ))
-    ) {
-      return;
-    }
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.CommunityReplies,
+    );
+    if (recipientUserIds.length === 0) return;
     const actor = await this.resolveActor(notification);
     const name = this.displayName(actor);
-    await this.pushService.sendToUsers([userId], {
+    await this.pushService.sendToUsers(recipientUserIds, {
       title: 'New reply',
       body: `${name} replied to you.`,
       tag: `notification:${notification.id}`,
@@ -186,22 +183,19 @@ export class PushNotificationListener {
   }
 
   private async pushVouch(
-    userId: string,
+    userIds: string[],
     notification: Notification,
   ): Promise<void> {
-    if (
-      !(await this.categoryEnabled(
-        userId,
-        NotificationPreferenceCategory.Vouches,
-      ))
-    ) {
-      return;
-    }
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Vouches,
+    );
+    if (recipientUserIds.length === 0) return;
     const actor = await this.resolveActor(notification);
     const name = this.displayName(actor);
     // Deep-link to the voucher's profile; the notifications centre otherwise.
     const url = actor ? `/members/${actor.slug}` : '/notifications';
-    await this.pushService.sendToUsers([userId], {
+    await this.pushService.sendToUsers(recipientUserIds, {
       title: 'You received a vouch',
       body: `${name} vouched for you.`,
       tag: `notification:${notification.id}`,
@@ -217,17 +211,14 @@ export class PushNotificationListener {
   }
 
   private async pushSafeSpaceVouch(
-    userId: string,
+    userIds: string[],
     notification: Notification,
   ): Promise<void> {
-    if (
-      !(await this.categoryEnabled(
-        userId,
-        NotificationPreferenceCategory.Vouches,
-      ))
-    ) {
-      return;
-    }
+    const recipientUserIds = await this.pushEnabledRecipients(
+      userIds,
+      NotificationPreferenceCategory.Vouches,
+    );
+    if (recipientUserIds.length === 0) return;
     // The voucher — `null` (so `name` → "Someone") for an anonymous vouch, whose
     // emit site omits `voucherId` from the payload. The space name/slug are
     // carried on the payload by the emit site (no extra listing lookup here).
@@ -240,7 +231,7 @@ export class PushNotificationListener {
     const url = spaceSlug
       ? `/local/directory/${spaceSlug}`
       : '/local/safe-spaces';
-    await this.pushService.sendToUsers([userId], {
+    await this.pushService.sendToUsers(recipientUserIds, {
       title: 'New vouch for your safe space',
       body: `${name} vouched for ${space}.`,
       tag: `notification:${notification.id}`,
@@ -256,11 +247,12 @@ export class PushNotificationListener {
   }
 
   private async pushEvent(
-    userId: string,
+    userIds: string[],
     notification: Notification,
   ): Promise<void> {
     // Event changed/cancelled are always-on (important + infrequent, no toggle),
-    // exactly like their in-app rows — no category gate.
+    // exactly like their in-app rows — no category gate, so every recipient in
+    // the batch goes straight to `sendToUsers` with no preference query at all.
     const isCancelled = notification.type === NotificationType.EventCancelled;
     // The emitter already resolved and carried `title` + `eventSlug` in the
     // payload (see events.service.ts), so these are read from there rather than
@@ -268,7 +260,7 @@ export class PushNotificationListener {
     const title = this.payloadString(notification, 'title') ?? 'A gathering';
     const eventSlug = this.payloadString(notification, 'eventSlug');
     const url = eventSlug ? `/events/${eventSlug}` : '/events';
-    await this.pushService.sendToUsers([userId], {
+    await this.pushService.sendToUsers(userIds, {
       title: isCancelled ? 'Event cancelled' : 'Event updated',
       body: isCancelled
         ? `${title} has been cancelled.`
@@ -290,16 +282,21 @@ export class PushNotificationListener {
 
   // --- Shared helpers -------------------------------------------------------
 
-  /** Whether the recipient still wants a phone push for `category`. */
-  private async categoryEnabled(
-    userId: string,
+  /**
+   * The subset of `userIds` that still want a phone push for `category` — one
+   * batched `recipientsPushEnabled` query for the WHOLE notification-type
+   * batch, not one call per recipient (the fix for the N+1 this listener used
+   * to reintroduce on `NOTIFICATION_CREATED`'s per-recipient fan-out — see
+   * `NOTIFICATION_BATCH_CREATED`'s docstring).
+   */
+  private async pushEnabledRecipients(
+    userIds: string[],
     category: NotificationPreferenceCategory,
-  ): Promise<boolean> {
-    const enabled = await this.notificationPreferences.recipientsPushEnabled(
-      [userId],
+  ): Promise<string[]> {
+    return this.notificationPreferences.recipientsPushEnabled(
+      userIds,
       category,
     );
-    return enabled.length > 0;
   }
 
   /**

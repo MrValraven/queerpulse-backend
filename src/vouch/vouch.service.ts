@@ -145,6 +145,13 @@ export class VouchService {
           throw err;
         }
       }
+      // Keep the denormalized `profiles.vouch_count` in sync (see
+      // AddProfileVouchCount1787600100000 / `searchMembers`'s `MostVouched`
+      // sort). An atomic `vouch_count = vouch_count + 1`, not a
+      // read-then-write, so concurrent vouches for the same member can't
+      // clobber each other's increment — same transaction, same pessimistic
+      // lock on the vouchee's `User` row taken above.
+      await manager.increment(Profile, { userId: voucheeId }, 'vouchCount', 1);
       vouchCount = await manager.count(Vouch, {
         where: { voucheeId, withdrawnAt: IsNull() },
       });
@@ -184,6 +191,11 @@ export class VouchService {
     const trimmedNote = note?.trim();
     const cleanNote = trimmedNote ? trimmedNote : null;
     await manager.insert(Vouch, { voucherId, voucheeId, note: cleanNote });
+    // Same denormalized-counter upkeep as `createVouch` — see the comment
+    // there. The vouchee's `Profile` row is guaranteed to already exist in
+    // this transaction: the only caller (AuthService's signup flow) creates
+    // it earlier in the same manager, before this runs.
+    await manager.increment(Profile, { userId: voucheeId }, 'vouchCount', 1);
     return true;
   }
 
@@ -206,7 +218,23 @@ export class VouchService {
     if (!active) {
       throw new NotFoundException('No vouch to withdraw');
     }
-    await this.vouches.update({ id: active.id }, { withdrawnAt: new Date() });
+    await this.dataSource.transaction(async (manager) => {
+      await manager.update(
+        Vouch,
+        { id: active.id },
+        { withdrawnAt: new Date() },
+      );
+      // Same denormalized-counter upkeep as `createVouch`, mirrored for the
+      // withdraw direction — atomic `vouch_count = vouch_count - 1` in the
+      // same transaction as the soft-delete, so the column never drifts from
+      // the real active-vouch count.
+      await manager.decrement(
+        Profile,
+        { userId: vouchee.userId },
+        'vouchCount',
+        1,
+      );
+    });
     return { ok: true };
   }
 

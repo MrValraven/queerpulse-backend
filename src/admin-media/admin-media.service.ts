@@ -19,7 +19,25 @@ import type {
 } from './dto/admin-media.dto';
 
 const DEFAULT_LIMIT = 100;
-const MAX_LIMIT = 1000;
+// Was 1000. The shipped console (`useAdminMedia`) never sends `limit` at all
+// — it always takes `DEFAULT_LIMIT` and paginates on `continuationToken` —
+// so `MAX_LIMIT` only bounds a caller hitting this endpoint directly (e.g.
+// via Swagger). `list()` mints a fresh short-TTL presigned GET credential for
+// every returned row (`presignedUrl`, read straight off the cached list item
+// by the drawer's "copy presigned URL" action — see
+// `AdminMediaPage.tsx`'s `AdminMediaDrawer`, which has no separate per-object
+// presign fetch to fall back to). That per-row presign is local SigV4
+// signing, not a network round trip like `headObject`'s real per-click
+// `HeadObject` call, so it isn't pool/latency pressure — but it IS a live
+// bucket-read credential handed to the client for every listed row whether
+// or not the admin ever opens it. Capping the page at 200 bounds how many of
+// those credentials one request can mint, without touching the console's
+// real (100-per-page) usage. Removing per-row presigning entirely — signing
+// only the one object the admin opens, mirroring `headObject`'s "one per
+// click" shape — needs a dedicated `GET /admin/media/presign?key=` endpoint
+// plus a frontend change to call it lazily; both are out of scope for this
+// single-file change.
+const MAX_LIMIT = 200;
 
 /** The set of valid upload-kind prefixes, e.g. { avatars, work, ... }. */
 const KNOWN_PREFIXES = new Set(

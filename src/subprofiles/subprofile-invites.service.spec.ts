@@ -61,6 +61,7 @@ function makeProfile(overrides: Partial<Profile> = {}): Profile {
     lookingFor: [],
     lookingForPublic: false,
     tags: [],
+    vouchCount: 0,
     verified: false,
     privateNetwork: false,
     featuredConsent: false,

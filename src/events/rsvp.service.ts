@@ -17,6 +17,13 @@ import { EventInvite } from './entities/event-invite.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { Event, EventStatus, EventVisibility } from './entities/event.entity';
 
+// Raw row shape from the unlimited-capacity promotion UPDATE's RETURNING
+// clause — column names are the actual (snake_case) DB columns, not the
+// entity's camelCase.
+interface PromotedRsvpRow {
+  user_id: string;
+}
+
 @Injectable()
 export class RsvpService {
   constructor(
@@ -241,6 +248,13 @@ export class RsvpService {
   // Promotes waitlist heads to 'going' while seats remain (or unconditionally
   // when capacity is unlimited). No-op unless the event is published. Returns the
   // ids of every promoted member so the caller can notify them.
+  //
+  // Bulk, not per-attendee: this runs under the caller's `pessimistic_write`
+  // lock on the Event row, so every extra round trip here extends how long
+  // that lock (and every other RSVP mutation on this event) is held. The old
+  // shape did one count()+findOne()+save() per promoted attendee — for an
+  // unlimited-capacity event with a long waitlist, that walked the whole
+  // waitlist one row at a time inside the lock.
   private async promoteWaitlist(
     manager: EntityManager,
     event: Event,
@@ -249,29 +263,53 @@ export class RsvpService {
       return [];
     }
     const rsvpRepo = manager.getRepository(EventRsvp);
-    const promoted: string[] = [];
-    for (;;) {
-      if (event.capacity !== null) {
-        const goingCount = await rsvpRepo.count({
-          where: { eventId: event.id, status: RsvpStatus.Going },
-        });
-        if (goingCount >= event.capacity) {
-          break;
-        }
-      }
-      const head = await rsvpRepo.findOne({
-        where: { eventId: event.id, status: RsvpStatus.Waitlisted },
-        order: { waitlistPosition: 'ASC' },
-      });
-      if (!head) {
-        break;
-      }
-      head.status = RsvpStatus.Going;
-      head.waitlistPosition = null;
-      await rsvpRepo.save(head);
-      promoted.push(head.userId);
+
+    if (event.capacity === null) {
+      // Unlimited capacity — every waitlisted attendee is promoted, so there's
+      // no need to know the seat count or the promotion order up front: one
+      // bulk UPDATE clears the whole waitlist in a single round trip.
+      const promotionResult = await rsvpRepo
+        .createQueryBuilder()
+        .update(EventRsvp)
+        .set({ status: RsvpStatus.Going, waitlistPosition: null })
+        .where('event_id = :eventId', { eventId: event.id })
+        .andWhere('status = :waitlisted', {
+          waitlisted: RsvpStatus.Waitlisted,
+        })
+        .returning('*')
+        .execute();
+      return (promotionResult.raw as PromotedRsvpRow[]).map(
+        (row) => row.user_id,
+      );
     }
-    return promoted;
+
+    // Finite capacity — only as many seats as are actually free. One SELECT
+    // (ordered by waitlist_position, so the earliest waiters win the freed
+    // seats) picks the exact rows to promote, then one bulk UPDATE by id
+    // flips all of them at once.
+    const goingCount = await rsvpRepo.count({
+      where: { eventId: event.id, status: RsvpStatus.Going },
+    });
+    const freeSeats = event.capacity - goingCount;
+    if (freeSeats <= 0) {
+      return [];
+    }
+    const waitlistHeads = await rsvpRepo.find({
+      where: { eventId: event.id, status: RsvpStatus.Waitlisted },
+      order: { waitlistPosition: 'ASC' },
+      take: freeSeats,
+    });
+    if (!waitlistHeads.length) {
+      return [];
+    }
+    const waitlistHeadIds = waitlistHeads.map((rsvp) => rsvp.id);
+    await rsvpRepo
+      .createQueryBuilder()
+      .update(EventRsvp)
+      .set({ status: RsvpStatus.Going, waitlistPosition: null })
+      .where('id IN (:...waitlistHeadIds)', { waitlistHeadIds })
+      .execute();
+    return waitlistHeads.map((rsvp) => rsvp.userId);
   }
 
   private async persistRsvp(

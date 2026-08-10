@@ -17,6 +17,28 @@ import {
 const FETCH_TIMEOUT_MS = 5000;
 const MAX_REDIRECTS = 5;
 
+interface GeocodeResult {
+  latitude: number;
+  longitude: number;
+  placeName?: string;
+}
+
+interface CacheEntry {
+  value: GeocodeResult;
+  expiresAt: number;
+}
+
+// Bounded in-process TTL cache, mirroring `LinkPreviewService` (the sibling
+// outbound-fetch service with exactly this shape): the wizard's "Locate this
+// address" button re-resolves the same handful of popular addresses/Google
+// Maps links across many members, so caching hits AND misses turns repeat
+// lookups into a Map read instead of a re-fetch against Nominatim / Google
+// Maps. In-process + bounded rather than a DB table or Redis entry, for the
+// same reason `LinkPreviewService` gives: this is cheap, re-derivable, public
+// metadata — not something worth a migration or new infra for.
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const CACHE_MAX_ENTRIES = 500;
+
 // OpenStreetMap Nominatim — a keyless public forward-geocoder for the wizard's
 // "Locate this address" button (item #1). The wizard only needs a single
 // best-match pin; when Nominatim can't place the text this returns 422 and the
@@ -43,6 +65,11 @@ function inCoordinateRange(latitude: number, longitude: number): boolean {
 
 @Injectable()
 export class GeocodeService {
+  // Keys are prefixed (`address:` / `link:`) so an address query string and a
+  // Google Maps URL can never collide in the same Map, even though both are
+  // ultimately just strings.
+  private readonly cache = new Map<string, CacheEntry>();
+
   /**
    * Free-text address → coordinates (item #1, `POST /geocode/address`). Reuses
    * the shared SSRF guard (`assertPublicUrl` — the same helper the link-preview
@@ -60,6 +87,12 @@ export class GeocodeService {
     if (!query) {
       throw new UnprocessableEntityException('Enter an address to locate.');
     }
+
+    // Case-insensitive cache key: "123 Main St" and "123 main st" are the
+    // same lookup as far as Nominatim is concerned.
+    const cacheKey = `address:${query.toLowerCase()}`;
+    const cached = this.readCache(cacheKey);
+    if (cached) return cached;
 
     const url = new URL(NOMINATIM_SEARCH_URL);
     url.searchParams.set('q', query);
@@ -136,9 +169,11 @@ export class GeocodeService {
     }
 
     const placeName = first.display_name?.trim() || undefined;
-    return placeName
+    const result = placeName
       ? { latitude, longitude, placeName }
       : { latitude, longitude };
+    this.writeCache(cacheKey, result);
+    return result;
   }
 
   async resolveLink(
@@ -148,9 +183,19 @@ export class GeocodeService {
       throw new BadRequestException('Only Google Maps links are supported.');
     }
 
+    // Keyed on the exact (already-validated) input URL — a shortened
+    // `maps.app.goo.gl` link resolved once doesn't need its redirect chain
+    // re-walked every time the same link is pasted again.
+    const cacheKey = `link:${url}`;
+    const cached = this.readCache(cacheKey);
+    if (cached) return cached;
+
     // A full URL may already carry coordinates — no network needed.
     const direct = extractCoordsFromUrl(url);
-    if (direct) return direct;
+    if (direct) {
+      this.writeCache(cacheKey, direct);
+      return direct;
+    }
 
     // Manual redirect loop: every hop's host is validated against the
     // allowlist BEFORE it is fetched, so a crafted redirect chain can never
@@ -205,7 +250,10 @@ export class GeocodeService {
 
         currentUrl = nextUrl;
         const redirectCoords = extractCoordsFromUrl(currentUrl);
-        if (redirectCoords) return redirectCoords;
+        if (redirectCoords) {
+          this.writeCache(cacheKey, redirectCoords);
+          return redirectCoords;
+        }
         continue;
       }
 
@@ -215,11 +263,33 @@ export class GeocodeService {
           "Couldn't read coordinates from that link.",
         );
       }
+      this.writeCache(cacheKey, coords);
       return coords;
     }
 
     throw new UnprocessableEntityException(
       "Couldn't read coordinates from that link.",
     );
+  }
+
+  private readCache(cacheKey: string): GeocodeResult | null {
+    const entry = this.cache.get(cacheKey);
+    if (!entry) return null;
+    if (entry.expiresAt <= Date.now()) {
+      this.cache.delete(cacheKey);
+      return null;
+    }
+    return entry.value;
+  }
+
+  private writeCache(cacheKey: string, value: GeocodeResult): void {
+    // Cheap bound: when full, evict the oldest insertion (Map preserves order).
+    if (this.cache.size >= CACHE_MAX_ENTRIES) {
+      for (const oldest of this.cache.keys()) {
+        this.cache.delete(oldest);
+        break;
+      }
+    }
+    this.cache.set(cacheKey, { value, expiresAt: Date.now() + CACHE_TTL_MS });
   }
 }

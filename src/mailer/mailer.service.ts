@@ -7,6 +7,16 @@ import {
   renderTemplate,
 } from './mail-templates';
 
+// Outbound-call budget for the SMTP transport, matching the rest of the
+// codebase's server-initiated network calls (geocode uses 5000ms, web push
+// uses 10000ms): nodemailer's own defaults are 2 minutes to connect and 10
+// minutes per socket operation, which is long enough that a slow/unreachable
+// SMTP host would tie up a request handler (newsletter/inquiries/listing-draft
+// sends all await `MailerService.send()` inline) for minutes instead of
+// failing fast.
+const SMTP_CONNECTION_TIMEOUT_MS = 8000;
+const SMTP_SOCKET_TIMEOUT_MS = 8000;
+
 /**
  * The one transactional mailer for the platform. Transport is pluggable and
  * env-gated:
@@ -38,7 +48,7 @@ export class MailerService {
     const host = this.config.get<string>('mail.host');
 
     if (smtpUrl) {
-      this.transporter = createTransport(smtpUrl);
+      this.transporter = createTransport(this.withTimeouts(smtpUrl));
       this.deliveringForReal = true;
     } else if (host) {
       this.transporter = createTransport({
@@ -46,6 +56,8 @@ export class MailerService {
         port: this.config.get<number>('mail.port') ?? 587,
         secure: this.config.get<boolean>('mail.secure') ?? false,
         auth: this.smtpAuth(),
+        connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+        socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
       });
       this.deliveringForReal = true;
     } else {
@@ -65,6 +77,29 @@ export class MailerService {
     const user = this.config.get<string>('mail.user');
     const pass = this.config.get<string>('mail.password');
     return user && pass ? { user, pass } : undefined;
+  }
+
+  /**
+   * Appends `connectionTimeout`/`socketTimeout` as query params to an SMTP
+   * connection string. Nodemailer's `createTransport(url)` branch parses the
+   * whole options object from the URL itself (`shared.parseConnectionUrl`),
+   * so a second positional options argument would be silently discarded —
+   * the timeouts have to travel as query params on the URL to take effect.
+   * A value already present in `smtpUrl` (an operator override) is left
+   * alone rather than clobbered.
+   */
+  private withTimeouts(smtpUrl: string): string {
+    const url = new URL(smtpUrl);
+    if (!url.searchParams.has('connectionTimeout')) {
+      url.searchParams.set(
+        'connectionTimeout',
+        String(SMTP_CONNECTION_TIMEOUT_MS),
+      );
+    }
+    if (!url.searchParams.has('socketTimeout')) {
+      url.searchParams.set('socketTimeout', String(SMTP_SOCKET_TIMEOUT_MS));
+    }
+    return url.toString();
   }
 
   /**

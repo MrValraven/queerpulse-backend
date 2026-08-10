@@ -24,7 +24,13 @@ export class Vouch {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
-  @Index('IDX_vouches_voucher_id')
+  // No standalone index here on purpose: `UQ_vouches_voucher_vouchee` below
+  // is a composite unique index on (voucherId, voucheeId), and its leading
+  // column already serves any query filtering on voucherId alone (Postgres
+  // "Multicolumn Indexes" — a leading-column equality constraint narrows the
+  // scan the same way a plain single-column index would). A standalone
+  // IDX_vouches_voucher_id previously duplicated that coverage — dropped via
+  // DropRedundantVouchVoucherIndex1787600300000.
   @Column({ type: 'uuid' })
   voucherId!: string;
 

@@ -7,11 +7,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository, SelectQueryBuilder } from 'typeorm';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
-import {
-  CursorPage,
-  decodeCursor,
-  encodeCursor,
-} from '../common/cursor-pagination';
+import { CursorPage, cursorPaginate } from '../common/cursor-pagination';
 import { MemberLookup } from '../common/member-ref';
 import {
   ContentModerationService,
@@ -74,12 +70,18 @@ export class ForumPostsService {
   private static readonly SUBJECT_TYPES = ['post', 'reply'];
 
   // GET /forum/threads/:slug/posts?cursor= — OP + replies, oldest-first.
-  // `cursorPaginate` (src/common/cursor-pagination.ts) is hard-wired to a
-  // newest-first `(createdAt, id) DESC` keyset, which doesn't fit this
-  // endpoint's contract ("OP is the first post, oldest-first" — see
-  // forum.api.ts). `paginateOldestFirst` below reuses the same
-  // `encodeCursor`/`decodeCursor` primitives (so the opaque cursor format is
-  // identical) but walks `(createdAt, id) ASC` instead.
+  // `cursorPaginate`'s default keyset is hard-wired to a newest-first
+  // `(createdAt, id) DESC` ordering, which doesn't fit this endpoint's
+  // contract ("OP is the first post, oldest-first" — see forum.api.ts).
+  // `paginateOldestFirst` below still goes through `cursorPaginate`, but via
+  // its alternate-keyset path (`CursorKeyset`) so it can swap in an ASC
+  // direction on the raw `created_at` column. `ForumPost.createdAt` is
+  // `timestamptz(3)` (see
+  // `1787600000000-NarrowForumPostCreatedAtPrecision.ts`), so the raw column
+  // already matches the millisecond-resolution cursor and needs no
+  // `date_trunc(...)` wrapper — ordering/filtering rides
+  // `IDX_forum_post_thread_id_created_at_id` directly instead of forcing a
+  // Sort on every page.
   async listPosts(
     threadSlug: string,
     user: CurrentUserData,
@@ -493,34 +495,18 @@ export class ForumPostsService {
     nextCursor: string | null;
     hasMore: boolean;
   }> {
-    // Mirror `cursorPaginate`'s microsecond-vs-millisecond fix: `created_at` is
-    // microsecond-precision `timestamptz`, but the cursor is a ms-resolution JS
-    // `Date`. Comparing the ms cursor against the raw µs column would silently
-    // drop a same-millisecond, nonzero-microsecond row at the page boundary.
-    // Truncate the column to milliseconds in BOTH the ORDER BY and the WHERE
-    // tuple so both sides match the cursor's resolution (see cursor-pagination.ts).
-    const createdAtExpr = `date_trunc('milliseconds', "${alias}"."created_at")`;
-
-    qb.orderBy(createdAtExpr, 'ASC').addOrderBy(`${alias}.id`, 'ASC');
-
-    const decoded = cursor ? decodeCursor(cursor) : null;
-    if (decoded) {
-      qb.andWhere(
-        `(${createdAtExpr}, ${alias}.id) > (:cursorCreatedAt, :cursorId)`,
-        { cursorCreatedAt: decoded.createdAt, cursorId: decoded.id },
-      );
-    }
-
-    const rows = await qb.take(limit + 1).getMany();
-    const hasMore = rows.length > limit;
-    const page = hasMore ? rows.slice(0, limit) : rows;
-    const lastRow = page[page.length - 1];
-
-    return {
-      rows: page,
-      nextCursor: hasMore && lastRow ? encodeCursor(lastRow) : null,
-      hasMore,
-    };
+    // `ForumPost.createdAt` is `timestamptz(3)`, matching the millisecond
+    // resolution of the JS `Date` cursor `cursorPaginate` builds — so the
+    // leading column can compare on the raw `created_at` value with no
+    // `date_trunc(...)` wrapper (see `CursorKeyset`'s precision contract and
+    // `1787600000000-NarrowForumPostCreatedAtPrecision.ts`). `id` stays the
+    // ASC tie-breaker, keeping the ordering total.
+    return cursorPaginate(qb, cursor, limit, alias, false, {
+      columnExpr: `"${alias}"."created_at"`,
+      direction: 'ASC',
+      kind: 'date',
+      getValue: (row) => row.createdAt,
+    });
   }
 
   // Batched mapping for a page of posts: one `IN`-query each for authors and

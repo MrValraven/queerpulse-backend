@@ -29,6 +29,14 @@ import {
 
 const PER_TYPE_LIMIT = 6;
 const DEFAULT_TOTAL_LIMIT = 30;
+// One global-search request fans out into up to 11 independent per-type
+// queries. Firing all of them via a single `Promise.all` queues the pool
+// against itself: `DATABASE_POOL_MAX` defaults to 10 connections, so an
+// 11-query search request alone can exhaust the pool, starving every other
+// concurrent request on the same connection. Waves of at most this many
+// concurrent queries keep one search request from claiming more than half
+// the pool, while still running well ahead of doing all 11 sequentially.
+const MAX_CONCURRENT_QUERIES = 5;
 // Fixed display order; the frontend groups by type anyway.
 const TYPE_ORDER: SearchResultType[] = [
   SearchResultType.Member,
@@ -72,77 +80,100 @@ export class SearchService {
 
     const wants = (candidate: SearchResultType) => !type || type === candidate;
 
+    // Each entry is a THUNK (not a started promise) so `runInWaves` controls
+    // exactly when a query starts — building the array eagerly with started
+    // promises would fire all 11 queries immediately regardless of batching.
+    // The `= []` defaults satisfy `noUncheckedIndexedAccess` (destructuring a
+    // plain array's element is `SearchResultDTO[] | undefined` otherwise);
+    // they're unreachable in practice since `runInWaves` always returns
+    // exactly one result per input thunk.
     const [
-      members,
-      communities,
-      events,
-      forum,
-      businesses,
-      magazine,
-      jobs,
-      housing,
-      resources,
-      workshops,
-      subprofiles,
-    ] = await Promise.all([
-      wants(SearchResultType.Member)
-        ? this.profiles
-            .searchMembers({ query }, viewerUserId)
-            .then((page) =>
-              page.items.slice(0, PER_TYPE_LIMIT).map(memberToResult),
-            )
-        : Promise.resolve<SearchResultDTO[]>([]),
-      wants(SearchResultType.Community)
-        ? this.communities
-            .searchByText(viewerUserId, query, PER_TYPE_LIMIT)
-            .then((rows) => rows.map(communityToResult))
-        : Promise.resolve<SearchResultDTO[]>([]),
-      wants(SearchResultType.Event)
-        ? this.events
-            .searchByText(viewerUserId, query, PER_TYPE_LIMIT)
-            .then((rows) => rows.map(eventToResult))
-        : Promise.resolve<SearchResultDTO[]>([]),
-      wants(SearchResultType.Forum)
-        ? this.forumThreads
-            .searchByText(viewerUserId, query, PER_TYPE_LIMIT)
-            .then((rows) => rows.map(forumToResult))
-        : Promise.resolve<SearchResultDTO[]>([]),
-      wants(SearchResultType.Business)
-        ? this.directory
-            .listDirectory({ q: query })
-            .then((rows) => rows.slice(0, PER_TYPE_LIMIT).map(businessToResult))
-        : Promise.resolve<SearchResultDTO[]>([]),
-      wants(SearchResultType.Magazine)
-        ? this.magazine
-            .searchByText(query, PER_TYPE_LIMIT)
-            .then((rows) => rows.map(magazineToResult))
-        : Promise.resolve<SearchResultDTO[]>([]),
-      wants(SearchResultType.Job)
-        ? this.jobs
-            .searchByText(query, PER_TYPE_LIMIT)
-            .then((rows) => rows.map(jobToResult))
-        : Promise.resolve<SearchResultDTO[]>([]),
-      wants(SearchResultType.Housing)
-        ? this.housing
-            .searchByText(query, PER_TYPE_LIMIT)
-            .then((rows) => rows.map(housingToResult))
-        : Promise.resolve<SearchResultDTO[]>([]),
-      wants(SearchResultType.Resource)
-        ? this.resources
-            .searchByText(query, PER_TYPE_LIMIT)
-            .then((rows) => rows.map(resourceToResult))
-        : Promise.resolve<SearchResultDTO[]>([]),
-      wants(SearchResultType.Workshop)
-        ? this.workshops
-            .searchByText(viewerUserId, query, PER_TYPE_LIMIT)
-            .then((rows) => rows.map(workshopToResult))
-        : Promise.resolve<SearchResultDTO[]>([]),
-      wants(SearchResultType.Subprofile)
-        ? this.subprofiles
-            .searchByText(viewerUserId, query, PER_TYPE_LIMIT)
-            .then((rows) => rows.map(subprofileToResult))
-        : Promise.resolve<SearchResultDTO[]>([]),
-    ]);
+      members = [],
+      communities = [],
+      events = [],
+      forum = [],
+      businesses = [],
+      magazine = [],
+      jobs = [],
+      housing = [],
+      resources = [],
+      workshops = [],
+      subprofiles = [],
+    ] = await this.runInWaves<SearchResultDTO[]>(
+      [
+        () =>
+          wants(SearchResultType.Member)
+            ? this.profiles
+                .searchMembers({ query }, viewerUserId)
+                .then((page) =>
+                  page.items.slice(0, PER_TYPE_LIMIT).map(memberToResult),
+                )
+            : Promise.resolve<SearchResultDTO[]>([]),
+        () =>
+          wants(SearchResultType.Community)
+            ? this.communities
+                .searchByText(viewerUserId, query, PER_TYPE_LIMIT)
+                .then((rows) => rows.map(communityToResult))
+            : Promise.resolve<SearchResultDTO[]>([]),
+        () =>
+          wants(SearchResultType.Event)
+            ? this.events
+                .searchByText(viewerUserId, query, PER_TYPE_LIMIT)
+                .then((rows) => rows.map(eventToResult))
+            : Promise.resolve<SearchResultDTO[]>([]),
+        () =>
+          wants(SearchResultType.Forum)
+            ? this.forumThreads
+                .searchByText(viewerUserId, query, PER_TYPE_LIMIT)
+                .then((rows) => rows.map(forumToResult))
+            : Promise.resolve<SearchResultDTO[]>([]),
+        () =>
+          wants(SearchResultType.Business)
+            ? this.directory
+                .listDirectory({ q: query })
+                .then((rows) =>
+                  rows.slice(0, PER_TYPE_LIMIT).map(businessToResult),
+                )
+            : Promise.resolve<SearchResultDTO[]>([]),
+        () =>
+          wants(SearchResultType.Magazine)
+            ? this.magazine
+                .searchByText(query, PER_TYPE_LIMIT)
+                .then((rows) => rows.map(magazineToResult))
+            : Promise.resolve<SearchResultDTO[]>([]),
+        () =>
+          wants(SearchResultType.Job)
+            ? this.jobs
+                .searchByText(query, PER_TYPE_LIMIT)
+                .then((rows) => rows.map(jobToResult))
+            : Promise.resolve<SearchResultDTO[]>([]),
+        () =>
+          wants(SearchResultType.Housing)
+            ? this.housing
+                .searchByText(query, PER_TYPE_LIMIT)
+                .then((rows) => rows.map(housingToResult))
+            : Promise.resolve<SearchResultDTO[]>([]),
+        () =>
+          wants(SearchResultType.Resource)
+            ? this.resources
+                .searchByText(query, PER_TYPE_LIMIT)
+                .then((rows) => rows.map(resourceToResult))
+            : Promise.resolve<SearchResultDTO[]>([]),
+        () =>
+          wants(SearchResultType.Workshop)
+            ? this.workshops
+                .searchByText(viewerUserId, query, PER_TYPE_LIMIT)
+                .then((rows) => rows.map(workshopToResult))
+            : Promise.resolve<SearchResultDTO[]>([]),
+        () =>
+          wants(SearchResultType.Subprofile)
+            ? this.subprofiles
+                .searchByText(viewerUserId, query, PER_TYPE_LIMIT)
+                .then((rows) => rows.map(subprofileToResult))
+            : Promise.resolve<SearchResultDTO[]>([]),
+      ],
+      MAX_CONCURRENT_QUERIES,
+    );
 
     const byType: Record<SearchResultType, SearchResultDTO[]> = {
       [SearchResultType.Member]: members,
@@ -161,5 +192,32 @@ export class SearchService {
       (resultType) => byType[resultType],
     ).slice(0, totalLimit);
     return { query, results };
+  }
+
+  /**
+   * Runs `queryThunks` in sequential waves of at most `maxConcurrentQueries`
+   * concurrent queries, preserving the input order in the returned array —
+   * unlike a plain `Promise.all(queryThunks.map((thunk) => thunk()))`, which
+   * starts every thunk in the same tick regardless of how many there are.
+   * (Every call site here passes thunks that all resolve to the same
+   * `SearchResultDTO[]` type, so a single type parameter — rather than a
+   * tuple-preserving one — is all that's needed.)
+   */
+  private async runInWaves<QueryResult>(
+    queryThunks: Array<() => Promise<QueryResult>>,
+    maxConcurrentQueries: number,
+  ): Promise<QueryResult[]> {
+    const results: QueryResult[] = [];
+    for (
+      let waveStartIndex = 0;
+      waveStartIndex < queryThunks.length;
+      waveStartIndex += maxConcurrentQueries
+    ) {
+      const wave = queryThunks
+        .slice(waveStartIndex, waveStartIndex + maxConcurrentQueries)
+        .map((queryThunk) => queryThunk());
+      results.push(...(await Promise.all(wave)));
+    }
+    return results;
   }
 }

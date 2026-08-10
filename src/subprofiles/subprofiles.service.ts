@@ -1351,6 +1351,21 @@ export class SubprofilesService {
   ): Promise<{ items: SubprofileCardView[] }> {
     const qb = this.subprofiles
       .createQueryBuilder('sp')
+      // Project only what `toCardDTO` (plus the id used to key the batched
+      // social-count/tag/follower lookups below) actually reads — this list
+      // is capped at DIRECTORY_RESULT_CAP rows but was still hydrating full
+      // rows, including `bio`, `coverUrl`, the CTA fields, and the 16KB
+      // `skinData` jsonb blob, on every request.
+      .select([
+        'sp.id',
+        'sp.handle',
+        'sp.kind',
+        'sp.displayName',
+        'sp.avatarUrl',
+        'sp.tagline',
+        'sp.accent',
+        'sp.availability',
+      ])
       .where('sp.linkVisibility = :linked', {
         linked: SubprofileLinkVisibility.Unlinked,
       })

@@ -8,7 +8,9 @@ import { Profile } from '../users/entities/profile.entity';
 import { Notification, NotificationType } from './entities/notification.entity';
 import { NotificationPreferencesService } from './notification-preferences.service';
 import {
+  NOTIFICATION_BATCH_CREATED,
   NOTIFICATION_CREATED,
+  NotificationBatchCreatedEvent,
   NotificationCreatedEvent,
 } from './notification.events';
 import {
@@ -76,6 +78,7 @@ export class NotificationsService {
       this.notifications.create({ userId, type, payload }),
     );
     this.announce(saved);
+    this.announceBatch([userId], type, payload, actorId ?? null, saved);
     return saved;
   }
 
@@ -114,6 +117,21 @@ export class NotificationsService {
     );
     for (const notification of saved) {
       this.announce(notification);
+    }
+    // One batch announcement for the whole write, alongside the per-row
+    // `announce()` loop above — see `NOTIFICATION_BATCH_CREATED`'s docstring
+    // for why these are two different events with two different listeners.
+    // `saved[0]` is the batch's shared representative row; `recipients.length`
+    // was already checked non-empty above, so `saved` is never empty either.
+    const [representative] = saved;
+    if (representative) {
+      this.announceBatch(
+        recipients,
+        type,
+        payload,
+        actorId ?? null,
+        representative,
+      );
     }
     return saved.map((notification) => notification.userId);
   }
@@ -279,5 +297,31 @@ export class NotificationsService {
       notification,
     };
     this.eventEmitter.emit(NOTIFICATION_CREATED, event);
+  }
+
+  /**
+   * Announce one notification-type WRITE (as opposed to `announce()` above,
+   * which announces one persisted ROW). `PushNotificationListener` consumes
+   * only this event: one batch, however many recipients it holds, becomes one
+   * category-preference query, one shared-actor lookup, and one
+   * `pushService.sendToUsers(allRecipientIds)` call — instead of doing all
+   * three per recipient, which is what looping `announce()` alone produced
+   * for a many-recipient fan-out (e.g. an event update pushed to every RSVP).
+   */
+  private announceBatch(
+    userIds: string[],
+    type: NotificationType,
+    payload: Record<string, unknown>,
+    actorId: string | null,
+    representative: Notification,
+  ): void {
+    const event: NotificationBatchCreatedEvent = {
+      userIds,
+      type,
+      payload,
+      actorId,
+      notification: representative,
+    };
+    this.eventEmitter.emit(NOTIFICATION_BATCH_CREATED, event);
   }
 }

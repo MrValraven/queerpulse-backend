@@ -2,7 +2,7 @@ import {
   Notification,
   NotificationType,
 } from '../notifications/entities/notification.entity';
-import { NotificationCreatedEvent } from '../notifications/notification.events';
+import { NotificationBatchCreatedEvent } from '../notifications/notification.events';
 import { PushNotificationListener } from './push-notification.listener';
 import { PushPayload } from './push.service';
 
@@ -23,7 +23,7 @@ function makeNotification(
 }
 
 function build(opts: {
-  // Which categories are DISABLED for the recipient (empty = everything on).
+  // Which categories are DISABLED for the recipients (empty = everything on).
   pushDisabledCategories?: string[];
   // The actor profile `resolveActor` finds (undefined = no matching profile).
   actorProfile?: {
@@ -38,8 +38,9 @@ function build(opts: {
     findOne: jest.fn().mockResolvedValue(opts.actorProfile ?? null),
   };
   const push = { sendToUsers: jest.fn().mockResolvedValue(undefined) };
-  // Echo back the input userIds unless the asked-for category is disabled — in
-  // which case return [] (nobody wants the push), matching the real service.
+  // Echoes back whichever of the input userIds are still enabled — in the
+  // real service this is one batched `IN (...)` query for the whole list, not
+  // one call per recipient (that's exactly the N+1 this listener now avoids).
   const notificationPreferences = {
     recipientsPushEnabled: jest
       .fn()
@@ -57,8 +58,17 @@ function build(opts: {
   return { listener, push, notificationPreferences, profilesRepo };
 }
 
-function emit(notification: Notification): NotificationCreatedEvent {
-  return { userId: 'recipient-1', notification };
+function emit(
+  notification: Notification,
+  userIds: string[] = ['recipient-1'],
+): NotificationBatchCreatedEvent {
+  return {
+    userIds,
+    type: notification.type,
+    payload: notification.payload,
+    actorId: null,
+    notification,
+  };
 }
 
 const ACTOR = {
@@ -74,7 +84,7 @@ describe('PushNotificationListener', () => {
     const { listener, push, notificationPreferences } = build({
       actorProfile: ACTOR,
     });
-    await listener.handleNotificationCreated(
+    await listener.handleNotificationBatchCreated(
       emit(
         makeNotification(NotificationType.ConnectionRequest, {
           connectionId: 'c1',
@@ -113,7 +123,7 @@ describe('PushNotificationListener', () => {
       actorProfile: ACTOR,
       pushDisabledCategories: ['connections'],
     });
-    await listener.handleNotificationCreated(
+    await listener.handleNotificationBatchCreated(
       emit(
         makeNotification(NotificationType.ConnectionRequest, {
           fromUserId: 'actor-1',
@@ -127,7 +137,7 @@ describe('PushNotificationListener', () => {
     const { listener, push, notificationPreferences } = build({
       actorProfile: ACTOR,
     });
-    await listener.handleNotificationCreated(
+    await listener.handleNotificationBatchCreated(
       emit(
         makeNotification(NotificationType.Mention, {
           actorId: 'actor-1',
@@ -154,7 +164,7 @@ describe('PushNotificationListener', () => {
       actorProfile: ACTOR,
       pushDisabledCategories: ['mentions'],
     });
-    await listener.handleNotificationCreated(
+    await listener.handleNotificationBatchCreated(
       emit(
         makeNotification(NotificationType.Mention, {
           actorId: 'actor-1',
@@ -170,7 +180,7 @@ describe('PushNotificationListener', () => {
     const { listener, push, notificationPreferences } = build({
       actorProfile: { ...ACTOR, slug: 'voucher-x' },
     });
-    await listener.handleNotificationCreated(
+    await listener.handleNotificationBatchCreated(
       emit(
         makeNotification(NotificationType.VouchReceived, {
           voucherId: 'actor-1',
@@ -194,7 +204,7 @@ describe('PushNotificationListener', () => {
     const { listener, push, notificationPreferences } = build({
       actorProfile: { ...ACTOR, slug: 'voucher-x' },
     });
-    await listener.handleNotificationCreated(
+    await listener.handleNotificationBatchCreated(
       emit(
         makeNotification(NotificationType.SafeSpaceVouch, {
           spaceId: 'space-1',
@@ -232,7 +242,7 @@ describe('PushNotificationListener', () => {
       actorProfile: ACTOR,
       pushDisabledCategories: ['vouches'],
     });
-    await listener.handleNotificationCreated(
+    await listener.handleNotificationBatchCreated(
       emit(
         makeNotification(NotificationType.SafeSpaceVouch, {
           spaceName: 'Casa Aberta',
@@ -246,7 +256,7 @@ describe('PushNotificationListener', () => {
 
   it('renders an anonymous SafeSpaceVouch as "Someone" (no voucherId in payload)', async () => {
     const { listener, push } = build({ actorProfile: ACTOR });
-    await listener.handleNotificationCreated(
+    await listener.handleNotificationBatchCreated(
       emit(
         makeNotification(NotificationType.SafeSpaceVouch, {
           spaceName: 'Casa Aberta',
@@ -269,7 +279,7 @@ describe('PushNotificationListener', () => {
 
   it('pushes an EventCancelled with NO category gate (always-on) and the event slug/title', async () => {
     const { listener, push, notificationPreferences } = build({});
-    await listener.handleNotificationCreated(
+    await listener.handleNotificationBatchCreated(
       emit(
         makeNotification(NotificationType.EventCancelled, {
           eventId: 'e1',
@@ -305,7 +315,7 @@ describe('PushNotificationListener', () => {
         avatarUrl: 'avatars/11111111-1111-1111-1111-111111111111/22222222.jpg',
       },
     });
-    await listener.handleNotificationCreated(
+    await listener.handleNotificationBatchCreated(
       emit(
         makeNotification(NotificationType.ConnectionAccepted, {
           byUserId: 'actor-1',
@@ -323,7 +333,7 @@ describe('PushNotificationListener', () => {
   // handling them here would double-send. They must produce NO push.
   it('does NOT push a NewMessage (already pushed by push.listener.ts)', async () => {
     const { listener, push, notificationPreferences } = build({});
-    await listener.handleNotificationCreated(
+    await listener.handleNotificationBatchCreated(
       emit(
         makeNotification(NotificationType.NewMessage, {
           conversationId: 'conv-1',
@@ -338,7 +348,7 @@ describe('PushNotificationListener', () => {
 
   it('does NOT push an EventReminder (already pushed by event-reminders.service.ts)', async () => {
     const { listener, push, notificationPreferences } = build({});
-    await listener.handleNotificationCreated(
+    await listener.handleNotificationBatchCreated(
       emit(
         makeNotification(NotificationType.EventReminder, {
           eventId: 'e1',
@@ -356,7 +366,7 @@ describe('PushNotificationListener', () => {
     const { listener, push } = build({ actorProfile: ACTOR });
     push.sendToUsers.mockRejectedValueOnce(new Error('boom'));
     await expect(
-      listener.handleNotificationCreated(
+      listener.handleNotificationBatchCreated(
         emit(
           makeNotification(NotificationType.ConnectionRequest, {
             fromUserId: 'actor-1',
@@ -364,5 +374,57 @@ describe('PushNotificationListener', () => {
         ),
       ),
     ).resolves.toBeUndefined();
+  });
+
+  // The B11 fix: a many-recipient fan-out (e.g. an event update fanned to
+  // every RSVP + invite) must collapse to ONE preference query, ONE actor
+  // lookup, and ONE `sendToUsers` call — not one of each per recipient.
+  it('batches a many-recipient fan-out into one preference query, one actor lookup, and one sendToUsers call', async () => {
+    const { listener, push, notificationPreferences, profilesRepo } = build({
+      actorProfile: ACTOR,
+    });
+    const recipientUserIds = ['recipient-1', 'recipient-2', 'recipient-3'];
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.Mention, {
+          actorId: 'actor-1',
+          source: 'forum',
+          threadSlug: 'trans-joy',
+        }),
+        recipientUserIds,
+      ),
+    );
+    expect(notificationPreferences.recipientsPushEnabled).toHaveBeenCalledTimes(
+      1,
+    );
+    expect(notificationPreferences.recipientsPushEnabled).toHaveBeenCalledWith(
+      recipientUserIds,
+      'mentions',
+    );
+    expect(profilesRepo.findOne).toHaveBeenCalledTimes(1);
+    expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+    const [userIds] = push.sendToUsers.mock.calls[0] as [string[], PushPayload];
+    expect(userIds).toEqual(recipientUserIds);
+  });
+
+  it('an always-on EventUpdated fan-out sends one push to every recipient with no preference query', async () => {
+    const { listener, push, notificationPreferences } = build({});
+    const recipientUserIds = ['recipient-1', 'recipient-2', 'recipient-3'];
+    await listener.handleNotificationBatchCreated(
+      emit(
+        makeNotification(NotificationType.EventUpdated, {
+          eventId: 'e1',
+          eventSlug: 'trivia-night',
+          title: 'Trivia Night',
+        }),
+        recipientUserIds,
+      ),
+    );
+    expect(
+      notificationPreferences.recipientsPushEnabled,
+    ).not.toHaveBeenCalled();
+    expect(push.sendToUsers).toHaveBeenCalledTimes(1);
+    const [userIds] = push.sendToUsers.mock.calls[0] as [string[], PushPayload];
+    expect(userIds).toEqual(recipientUserIds);
   });
 });

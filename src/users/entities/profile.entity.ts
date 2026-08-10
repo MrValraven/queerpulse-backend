@@ -2,6 +2,7 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Index,
   JoinColumn,
   OneToOne,
   PrimaryColumn,
@@ -29,6 +30,10 @@ export class Profile {
   @Column({ type: 'varchar', unique: true })
   slug!: string;
 
+  // Indexed for AdminMembersService.list's default roster sort
+  // (`.orderBy('profile.firstName', 'ASC')`) — see
+  // AddAdminMemberIndexes1787600200000.
+  @Index('IDX_profiles_first_name')
   @Column({ type: 'varchar' })
   firstName!: string;
 
@@ -93,6 +98,16 @@ export class Profile {
   @Column({ type: 'text', array: true, default: '{}' })
   tags!: string[];
 
+  // Denormalized count of active (non-withdrawn) vouches this member has
+  // RECEIVED — kept in sync by VouchService on every vouch create/reactivate/
+  // withdraw (atomic `vouch_count = vouch_count ± 1` inside the same
+  // transaction as the vouch write; see AddProfileVouchCount1787600100000 for
+  // the backfill). Exists so `searchMembers`'s `MostVouched` sort can `ORDER
+  // BY` this column directly instead of a correlated `COUNT(*) FROM vouches`
+  // subquery evaluated per candidate row.
+  @Column({ type: 'integer', default: 0 })
+  vouchCount!: number;
+
   @Column({ type: 'boolean', default: false })
   verified!: boolean;
 
@@ -127,6 +142,10 @@ export class Profile {
   @Column({ type: 'text', nullable: true })
   now!: string | null;
 
+  // Indexed for AdminMembersService.list's `filter === 'new'` window
+  // (`.andWhere('profile.joinedAt >= :since', ...)`) — see
+  // AddAdminMemberIndexes1787600200000.
+  @Index('IDX_profiles_joined_at')
   @Column({ type: 'timestamptz', default: () => 'now()' })
   joinedAt!: Date;
 

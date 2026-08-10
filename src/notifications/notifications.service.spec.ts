@@ -7,7 +7,10 @@ import { Mute } from '../social/entities/mute.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { Notification, NotificationType } from './entities/notification.entity';
 import { NotificationPreferencesService } from './notification-preferences.service';
-import { NOTIFICATION_CREATED } from './notification.events';
+import {
+  NOTIFICATION_BATCH_CREATED,
+  NOTIFICATION_CREATED,
+} from './notification.events';
 import { NotificationsService } from './notifications.service';
 
 describe('NotificationsService', () => {
@@ -95,6 +98,29 @@ describe('NotificationsService', () => {
       });
     });
 
+    it('also fires ONE NOTIFICATION_BATCH_CREATED per write, for the push listener', async () => {
+      repo.save.mockResolvedValue({
+        id: 'n1',
+        userId: 'u1',
+        type: NotificationType.VouchReceived,
+        payload: { voucherId: 'u2' },
+        read: false,
+      });
+      await service.create(
+        'u1',
+        NotificationType.VouchReceived,
+        { voucherId: 'u2' },
+        'u2',
+      );
+      expect(emit).toHaveBeenCalledWith(NOTIFICATION_BATCH_CREATED, {
+        userIds: ['u1'],
+        type: NotificationType.VouchReceived,
+        payload: { voucherId: 'u2' },
+        actorId: 'u2',
+        notification: expect.objectContaining({ id: 'n1' }) as unknown,
+      });
+    });
+
     it('announces only after the write, never before', async () => {
       const order: string[] = [];
       repo.save.mockImplementation(() => {
@@ -103,7 +129,9 @@ describe('NotificationsService', () => {
       });
       emit.mockImplementation(() => order.push('emit'));
       await service.create('u1', NotificationType.PromotedToMember);
-      expect(order).toEqual(['save', 'emit']);
+      // One NOTIFICATION_CREATED (socket) + one NOTIFICATION_BATCH_CREATED
+      // (push) — both only after the save.
+      expect(order).toEqual(['save', 'emit', 'emit']);
     });
 
     it('announces once per recipient with that recipient as the target', async () => {
@@ -116,7 +144,6 @@ describe('NotificationsService', () => {
         NotificationType.NewMessage,
         { conversationId: 'c1' },
       );
-      expect(emit).toHaveBeenCalledTimes(2);
       expect(emit).toHaveBeenCalledWith(NOTIFICATION_CREATED, {
         userId: 'u1',
         notification: expect.objectContaining({ id: 'n1' }) as unknown,
@@ -124,6 +151,35 @@ describe('NotificationsService', () => {
       expect(emit).toHaveBeenCalledWith(NOTIFICATION_CREATED, {
         userId: 'u2',
         notification: expect.objectContaining({ id: 'n2' }) as unknown,
+      });
+    });
+
+    it('fires exactly ONE NOTIFICATION_BATCH_CREATED for a whole fan-out, carrying every recipient — the fix for the push N+1', async () => {
+      repo.save.mockResolvedValue([
+        { id: 'n1', userId: 'u1' },
+        { id: 'n2', userId: 'u2' },
+        { id: 'n3', userId: 'u3' },
+      ]);
+      await service.createForRecipients(
+        ['u1', 'u2', 'u3'],
+        NotificationType.EventUpdated,
+        { title: 'Trivia Night', eventSlug: 'trivia-night' },
+        'organizer-1',
+      );
+      // 3 per-row NOTIFICATION_CREATED (socket) + exactly 1
+      // NOTIFICATION_BATCH_CREATED (push) — not 3.
+      expect(emit).toHaveBeenCalledTimes(4);
+      const batchCalls = emit.mock.calls.filter(
+        (call: [string, unknown]) => call[0] === NOTIFICATION_BATCH_CREATED,
+      ) as [string, unknown][];
+      expect(batchCalls).toHaveLength(1);
+      const [, batchEventPayload] = batchCalls[0] as [string, unknown];
+      expect(batchEventPayload).toEqual({
+        userIds: ['u1', 'u2', 'u3'],
+        type: NotificationType.EventUpdated,
+        payload: { title: 'Trivia Night', eventSlug: 'trivia-night' },
+        actorId: 'organizer-1',
+        notification: expect.objectContaining({ id: 'n1' }) as unknown,
       });
     });
   });
@@ -199,7 +255,9 @@ describe('NotificationsService', () => {
       expect(repo.create).toHaveBeenCalledWith(
         expect.objectContaining({ userId: 'u2' }),
       );
-      expect(emit).toHaveBeenCalledTimes(1);
+      // One per-row NOTIFICATION_CREATED (socket) + one NOTIFICATION_BATCH_CREATED
+      // (push) for the single surviving recipient.
+      expect(emit).toHaveBeenCalledTimes(2);
     });
 
     it('drops a fan-out recipient who has muted the actor', async () => {
@@ -219,7 +277,9 @@ describe('NotificationsService', () => {
       expect(repo.create).toHaveBeenCalledWith(
         expect.objectContaining({ userId: 'u2' }),
       );
-      expect(emit).toHaveBeenCalledTimes(1);
+      // One per-row NOTIFICATION_CREATED (socket) + one NOTIFICATION_BATCH_CREATED
+      // (push) for the single surviving recipient.
+      expect(emit).toHaveBeenCalledTimes(2);
     });
 
     it('skips the write entirely when every recipient is filtered out', async () => {
@@ -276,7 +336,9 @@ describe('NotificationsService', () => {
       expect(repo.create).toHaveBeenCalledWith(
         expect.objectContaining({ userId: 'u2' }),
       );
-      expect(emit).toHaveBeenCalledTimes(1);
+      // One per-row NOTIFICATION_CREATED (socket) + one NOTIFICATION_BATCH_CREATED
+      // (push) for the single surviving recipient.
+      expect(emit).toHaveBeenCalledTimes(2);
     });
   });
 

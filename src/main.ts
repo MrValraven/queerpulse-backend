@@ -44,6 +44,16 @@ async function bootstrap() {
   //    emitted on secure requests, which is the correct behavior.
   //  - referrerPolicy: `no-referrer` — a JSON API never needs to leak the
   //    requesting URL to a third party, so send no Referer at all.
+  //  - crossOriginResourcePolicy: `same-site` — helmet's default is
+  //    `same-origin`, which blocks the SPA (queerpulse.com) from embedding
+  //    `/files/*` images served from the API's own subdomain
+  //    (api.queerpulse.com) with `ERR_BLOCKED_BY_RESPONSE.NotSameOrigin`,
+  //    since those are same-SITE but cross-ORIGIN. `GET /files/*`
+  //    (files.controller.ts) is built for same-site embedding — the SameSite=Lax
+  //    session cookie already requires it — so `same-site` matches that posture
+  //    exactly: same-registrable-domain embedding works, genuinely cross-site
+  //    embedding stays blocked. Server-side link unfurlers are unaffected (CORP
+  //    is a browser-only subresource protection).
   // CORS is configured separately below; helmet does not touch it.
   app.use(cookieParser());
   app.use(
@@ -54,6 +64,7 @@ async function bootstrap() {
         preload: true,
       },
       referrerPolicy: { policy: 'no-referrer' },
+      crossOriginResourcePolicy: { policy: 'same-site' },
     }),
   );
 
