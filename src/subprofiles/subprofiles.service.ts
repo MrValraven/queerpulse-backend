@@ -20,6 +20,7 @@ import { ContentModerationService } from '../content-moderation/content-moderati
 import { normalizeHandle } from '../common/handles';
 import { escapeLikeTerm } from '../common/like-escape';
 import { toImageUrl } from '../common/image-url';
+import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import {
   AccessTier,
   Community,
@@ -31,8 +32,11 @@ import {
 } from '../events/entities/event.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { HandlesService } from '../handles/handles.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
+import { UserStatus } from '../users/entities/user.entity';
 import { CreateSubprofileDTO } from './dto/create-subprofile.dto';
 import { ListDirectoryQuery } from './dto/list-directory.query';
 import { SubprofileItemInputDTO } from './dto/replace-items.dto';
@@ -47,6 +51,8 @@ import {
 import {
   SubprofileItem,
   SubprofileSection,
+  type GigState,
+  type WorkState,
 } from './entities/subprofile-item.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
@@ -69,7 +75,9 @@ import {
   AffiliationView,
   CollaboratorView,
   EndorserView,
+  restrictedAccessBody,
   SubprofileCardView,
+  SubprofileOwnerRef,
   SubprofilePublicView,
   SubprofileSearchRow,
   SubprofileView,
@@ -85,6 +93,26 @@ import { MemberView, toMemberView } from './subprofile-invite-response';
 // unbounded catalogue can never pull every published-unlinked-open persona
 // (plus its per-row social-count / tag fan-out) into one response.
 const DIRECTORY_RESULT_CAP = 5000;
+
+// Hard cap on the serialized size of an owner-supplied jsonb payload
+// (`structured` per item, `skinData` on the persona) — Personas redesign
+// Phase 0. These two columns are schema-less past the DTO's `@IsObject()`
+// shape check, so a size ceiling must exist before they can be persisted
+// (design plan Task 6 Step 3).
+const MAX_JSONB_BYTES = 16 * 1024;
+
+// A visitor with no session has no block/endorsement/follow/membership rows.
+// This fixed, never-issued uuid stands in for "no viewer" in the batched
+// per-viewer lookups below (`isMember`, `blockFilter.*`, `viewerEndorsedFor`,
+// `viewerFollowingFor`) — all of which take a plain `viewerId: string` and
+// treat a missing/undefined id as "match nothing" would be wrong for (TypeORM
+// silently drops an `undefined` where-clause value rather than matching
+// nothing). It never collides with a real `users.id` (a v4 uuid), so every
+// one of those lookups correctly comes back empty/false for an anonymous
+// visitor (Personas redesign Phase 1b: the public persona read now allows
+// anonymous callers so a signed-out visitor can get a `members_only` signal
+// instead of a blanket 401).
+const ANONYMOUS_VIEWER_ID = '00000000-0000-0000-0000-000000000000';
 
 @Injectable()
 export class SubprofilesService {
@@ -112,6 +140,9 @@ export class SubprofilesService {
     private readonly handles: HandlesService,
     private readonly endorsementsService: SubprofileEndorsementsService,
     private readonly followersService: SubprofileFollowersService,
+    // `replaceSection` emits `subprofile_credit` when a save newly credits a
+    // member's @handle (Personas discovery Phase 5, Moment 6).
+    private readonly notifications: NotificationsService,
     // Read-only: a `hide_content`/`remove_content` takedown on a `subprofile`
     // subject (keyed by the persona slug — what the frontend report control
     // sends) withholds the persona from every public read below.
@@ -125,6 +156,25 @@ export class SubprofilesService {
   // takedown withholds it entirely. Owner-facing reads (`listMine`/`getOwned`)
   // don't re-check this state, so the owner still sees + manages their persona.
   private static readonly SUBJECT_TYPE = 'subprofile';
+
+  // Rejects an owner-supplied jsonb payload (`structured`/`skinData`) whose
+  // serialized size exceeds `MAX_JSONB_BYTES`. `undefined`/`null` are
+  // "nothing to persist" and always pass. Checked before either write path
+  // touches the database, so an oversized payload never reaches a save.
+  private assertJsonbSize(value: unknown, label: string): void {
+    if (value === undefined || value === null) {
+      return;
+    }
+    const serialized = JSON.stringify(value);
+    if (
+      serialized !== undefined &&
+      Buffer.byteLength(serialized, 'utf8') > MAX_JSONB_BYTES
+    ) {
+      throw new BadRequestException(
+        `${label} must be at most ${MAX_JSONB_BYTES / 1024} KB`,
+      );
+    }
+  }
 
   // NOT EXISTS predicate dropping any persona under a `subprofile` takedown
   // (hidden OR removed) from a persona query builder (alias `sp`), in-query so
@@ -184,6 +234,10 @@ export class SubprofilesService {
     const socialLinksById = await this.loadSocialLinksFor(subprofileIds);
     const endorsementCountsById =
       await this.endorsementsService.loadEndorsementCountsFor(subprofileIds);
+    // Co-owner headcount for every persona in the list, in ONE grouped query
+    // (Personas redesign Phase 2 dashboard plan Decision §5) — NOT a per-row
+    // query per persona.
+    const memberCountsById = await this.loadMemberCountsFor(subprofileIds);
     // Owner viewing their own personas: resolve ALL items' collaborator
     // handles across every subprofile in ONE batched call, shared by every
     // mapper invocation below (no per-persona resolution).
@@ -200,6 +254,7 @@ export class SubprofilesService {
         0,
         [],
         collaboratorsByHandle,
+        memberCountsById.get(sp.id) ?? 1,
       ),
     );
   }
@@ -338,7 +393,9 @@ export class SubprofilesService {
       }
       throw err;
     }
-    return toSubprofileDTO(sp, []);
+    // The creator is the persona's only member the instant it's created (see
+    // the transaction just above) — memberCount is 1, no query needed.
+    return toSubprofileDTO(sp, [], [], 0, 0, [], new Map(), 1);
   }
 
   async update(
@@ -374,6 +431,7 @@ export class SubprofilesService {
         `Unknown availability: ${rest.availability}`,
       );
     }
+    this.assertJsonbSize(rest.skinData, 'skinData');
 
     Object.assign(sp, rest);
 
@@ -469,6 +527,11 @@ export class SubprofilesService {
     if (incomingFeaturedCount > 1) {
       throw new BadRequestException('Only one item can be featured');
     }
+    // Personas redesign Phase 0: bound each item's `structured` jsonb before
+    // anything is written (design plan Task 6 Step 3).
+    for (const it of items) {
+      this.assertJsonbSize(it.structured, 'structured');
+    }
 
     // Collaboration credits: normalize + dedup each item's handle list and
     // cap it, then resolve every handle in the WHOLE section payload in ONE
@@ -502,6 +565,54 @@ export class SubprofilesService {
       }
     }
 
+    // `subprofile_credit` diff (Personas discovery Phase 5, Decision §3):
+    // `replaceSection` deletes-and-recreates ONE section per save with no
+    // stable item ids across saves, so a naive "notify anyone credited on
+    // this save" hook would re-fire on every unrelated edit to a section
+    // that still happens to list the same collaborator. Instead: snapshot
+    // the PERSONA-WIDE (every section, not just this one) resolved-member
+    // collaborator set BEFORE this write, compare it to the persona-wide set
+    // AFTER, and only notify handles that are newly present. Scoping the
+    // diff to the whole persona (not just this section) matters: a handle
+    // already credited in an untouched OTHER section must never look "new"
+    // just because this section's payload happens to add it too.
+    const existingItems = await this.items.find({
+      where: { subprofileId: id },
+    });
+    const existingHandlesResolved = await this.resolveHandles(
+      existingItems.flatMap((item) => item.collaborators ?? []),
+      sp.userId,
+    );
+    const beforeMemberHandles = new Set(
+      [...existingHandlesResolved.entries()]
+        .filter(([, view]) => view.type === 'member')
+        .map(([handle]) => handle),
+    );
+    // AFTER = this section's newly-resolved handles (`collaboratorsByHandle`,
+    // already computed above for validation) UNION every OTHER section's
+    // existing handles — whose resolution already lives in
+    // `existingHandlesResolved`, so no extra `resolveHandles` call is needed.
+    const afterMemberHandles = new Set(
+      existingItems
+        .filter((item) => item.section !== sectionEnum)
+        .flatMap((item) => item.collaborators ?? [])
+        .filter(
+          (handle) => existingHandlesResolved.get(handle)?.type === 'member',
+        ),
+    );
+    for (const [handle, view] of collaboratorsByHandle) {
+      if (view.type === 'member') {
+        afterMemberHandles.add(handle);
+      }
+    }
+    // Every handle here is necessarily one of THIS section's incoming
+    // handles: any handle already credited in an untouched other section was
+    // already folded into `beforeMemberHandles` above, so it can never
+    // survive this subtraction.
+    const newlyCreditedHandles = [...afterMemberHandles].filter(
+      (handle) => !beforeMemberHandles.has(handle),
+    );
+
     await this.dataSource.transaction(async (manager) => {
       await manager.delete(SubprofileItem, {
         subprofileId: id,
@@ -525,6 +636,16 @@ export class SubprofilesService {
               ? false
               : (it.isFeatured ?? false),
           position: index,
+          // Personas redesign Phase 0 skin fields (design plan "Shared Contract").
+          venue: it.venue ?? null,
+          doors: it.doors ?? null,
+          ticketUrl: it.ticketUrl ?? null,
+          gigState: (it.gigState as GigState | undefined) ?? null,
+          medium: it.medium ?? null,
+          dimensions: it.dimensions ?? null,
+          edition: it.edition ?? null,
+          workState: (it.workState as WorkState | undefined) ?? null,
+          structured: it.structured ?? null,
         }),
       );
       if (rows.length) {
@@ -553,7 +674,116 @@ export class SubprofilesService {
       }
     });
 
+    if (newlyCreditedHandles.length) {
+      // Best-effort, post-commit: the section save already succeeded, and a
+      // notification failure must never roll it back or fail the request
+      // (mirrors `ModerationService.notifyModerationOutcome`).
+      try {
+        await this.emitSubprofileCreditNotifications(
+          sp,
+          id,
+          newlyCreditedHandles,
+          items,
+          normalizedCollaboratorsByItemIndex,
+        );
+      } catch {
+        // Intentionally ignored — the section save already committed.
+      }
+    }
+
     return this.ownerDTO(sp);
+  }
+
+  // Notifies each newly-credited handle's member (Personas discovery Phase 5,
+  // Moment 6), excluding: handles that don't resolve to a real member's
+  // userId, and the persona's own owner/co-owners (crediting yourself/a
+  // fellow co-owner never notifies). Block/mute is honoured via
+  // `notifications.create`'s `actorId` filter, passing the crediting
+  // persona's owner — the same safety gate every other member-driven
+  // notification in this codebase uses.
+  private async emitSubprofileCreditNotifications(
+    sp: Subprofile,
+    subprofileId: string,
+    newlyCreditedHandles: string[],
+    items: SubprofileItemInputDTO[],
+    normalizedCollaboratorsByItemIndex: string[][],
+  ): Promise<void> {
+    const memberUserIdByHandle =
+      await this.resolveMemberUserIdsByHandle(newlyCreditedHandles);
+    if (!memberUserIdByHandle.size) return;
+    const ownerAndCoOwnerIds = new Set(
+      (
+        await this.members.find({
+          where: { subprofileId },
+          select: { userId: true },
+        })
+      ).map((member) => member.userId),
+    );
+    const deepLink = await this.buildPersonaDeepLink(sp);
+    for (const handle of newlyCreditedHandles) {
+      const memberUserId = memberUserIdByHandle.get(handle);
+      if (!memberUserId || ownerAndCoOwnerIds.has(memberUserId)) {
+        continue; // unresolvable, or crediting yourself/a fellow co-owner
+      }
+      const creditingItem = items.find((_, index) =>
+        normalizedCollaboratorsByItemIndex[index]?.includes(handle),
+      );
+      const itemTitle = creditingItem ? creditingItem.title : sp.displayName;
+      await this.notifications.create(
+        memberUserId,
+        NotificationType.SubprofileCredit,
+        {
+          subprofileName: sp.displayName,
+          subprofileSlugOrHandle: sp.handle ?? sp.slug,
+          itemTitle,
+          deepLink,
+        },
+        sp.userId,
+      );
+    }
+  }
+
+  // Resolves ONLY the member-owned handles among `handleNames` to their
+  // `userId` (never a persona handle's owner) — a separate, narrow query from
+  // `resolveHandles` on purpose: `CollaboratorView` (the client-facing shape
+  // `resolveHandles` returns) never carries a `userId`, and it must not start
+  // to, so a persona's public item payload can never leak one. Unfiltered by
+  // block/mute — callers that need that filtering already got it from
+  // `resolveHandles` before landing here (a handle only reaches this method
+  // once it is already known to be a genuinely NEW, resolved-member credit).
+  private async resolveMemberUserIdsByHandle(
+    handleNames: string[],
+  ): Promise<Map<string, string>> {
+    const userIdByHandle = new Map<string, string>();
+    if (!handleNames.length) return userIdByHandle;
+    const handleRows = await this.handleRegistry.find({
+      where: { name: In(handleNames), ownerKind: HandleOwnerKind.Profile },
+    });
+    for (const row of handleRows) {
+      if (row.userId) {
+        userIdByHandle.set(row.name, row.userId);
+      }
+    }
+    return userIdByHandle;
+  }
+
+  // The persona's own page, for a `subprofile_credit` notification's
+  // deep link. Unlinked + published (a claimed global handle) → its
+  // standalone `/p/:handle` page. Otherwise (linked, or unlinked but not yet
+  // published) → the nested `/members/:ownerSlug/:slug` shape, resolving the
+  // owner's profile slug once — a persona credited before it's ever
+  // published is an edge case the link degrades gracefully for rather than
+  // 500ing, at the cost of not being a live route until the owner publishes.
+  private async buildPersonaDeepLink(sp: Subprofile): Promise<string> {
+    if (sp.linkVisibility === SubprofileLinkVisibility.Unlinked && sp.handle) {
+      return `/p/${sp.handle}`;
+    }
+    const ownerProfile = await this.profiles.findOne({
+      where: { userId: sp.userId },
+    });
+    return ownerProfile
+      ? `/members/${ownerProfile.slug}/${sp.slug}`
+      : '/account/subprofiles';
   }
 
   async replaceSocialLinks(
@@ -756,12 +986,26 @@ export class SubprofilesService {
       });
     }
 
+    // Single-persona co-owner headcount, shared by both return paths below
+    // (Personas redesign Phase 2 dashboard plan Decision §5).
+    const memberCount =
+      (await this.loadMemberCountsFor([sp.id])).get(sp.id) ?? 1;
+
     if (!unlinked) {
       // Linked personas render nested and never carry a global handle.
       sp.handle = null;
       sp.status = SubprofileStatus.Published;
       await this.saveSubprofile(sp);
-      return toSubprofileDTO(sp, items, socialLinkRows);
+      return toSubprofileDTO(
+        sp,
+        items,
+        socialLinkRows,
+        0,
+        0,
+        [],
+        new Map(),
+        memberCount,
+      );
     }
 
     // Unlinked: claim the validated handle in the global registry AND flip to
@@ -799,7 +1043,16 @@ export class SubprofilesService {
       throw err;
     }
     sp.status = SubprofileStatus.Published;
-    return toSubprofileDTO(sp, items, socialLinkRows);
+    return toSubprofileDTO(
+      sp,
+      items,
+      socialLinkRows,
+      0,
+      0,
+      [],
+      new Map(),
+      memberCount,
+    );
   }
 
   async unpublish(userId: string, id: string): Promise<SubprofileView> {
@@ -867,6 +1120,11 @@ export class SubprofilesService {
             id: In(memberIds),
             linkVisibility: SubprofileLinkVisibility.Linked,
             status: SubprofileStatus.Published,
+            // A removed persona is withheld from this bulk read too (only
+            // owner-facing reads like `listMine`/`getOwned` skip this — see
+            // `buildPublicView`'s single-item "removed" gate for the signal a
+            // direct fetch returns instead).
+            removedAt: IsNull(),
           },
           order: { position: 'ASC', createdAt: 'ASC' },
         })
@@ -931,38 +1189,122 @@ export class SubprofilesService {
     );
   }
 
-  // Unlinked + published persona reachable by its global handle. Owner-stripped.
+  // Unlinked persona reachable by its global handle (owner-stripped, unless
+  // the viewer IS the owner/a co-owner). `viewer` is `undefined` for an
+  // anonymous caller — the by-handle route now allows signed-out visitors so
+  // an anonymous visitor on a `network` persona gets `members_only` rather
+  // than a blanket 401 (design plan Phase 1b Task 1). Status/visibility are no
+  // longer pre-filtered in the query — `buildPublicView` below decides,
+  // per the Shared Contract rule order, whether this viewer may see it at all.
   async getByHandle(
     handle: string,
-    viewerId: string,
+    viewer: CurrentUserData | undefined,
   ): Promise<SubprofilePublicView> {
     const sp = await this.subprofiles.findOne({
       where: {
         handle,
         linkVisibility: SubprofileLinkVisibility.Unlinked,
-        status: SubprofileStatus.Published,
-        // Only Open personas are publicly reachable — `network`/`private` are
-        // never served here (404, not a distinct "restricted" signal), matching
-        // `directory` / `listPublicHandles`.
-        visibility: SubprofileVisibility.Open,
       },
     });
     if (!sp) {
       throw new NotFoundException('Subprofile not found');
     }
-    // A moderator takedown (hidden OR removed) withholds the persona as a 404 —
-    // the withhold-entirely behaviour the directory/search reads share.
-    const moderation = await this.contentModeration.stateFor(
-      SubprofilesService.SUBJECT_TYPE,
-      sp.slug,
-    );
-    if (moderation.hidden || moderation.removed) {
+    // no owner ref → owner identity never leaks for an unlinked persona.
+    return this.buildPublicView(sp, viewer, undefined);
+  }
+
+  // Single linked + published persona nested under a member's profile, by its
+  // per-owner slug — the nested-linked counterpart to `getByHandle`. A single
+  // fetch (rather than the bulk `listForProfile` list) is what lets this one
+  // persona carry its own distinguishable restricted-state signal. Same
+  // owner-sees-everything + Shared Contract rule order as `getByHandle`.
+  async getBySlugForProfile(
+    ownerSlug: string,
+    subslug: string,
+    viewer: CurrentUserData | undefined,
+  ): Promise<SubprofilePublicView> {
+    const profile = await this.profiles.findOne({
+      where: { slug: ownerSlug },
+    });
+    if (!profile) {
+      throw new NotFoundException('Profile not found');
+    }
+    const sp = await this.subprofiles.findOne({
+      where: {
+        slug: subslug,
+        userId: profile.userId,
+        linkVisibility: SubprofileLinkVisibility.Linked,
+      },
+    });
+    if (!sp) {
       throw new NotFoundException('Subprofile not found');
     }
-    // Never surface the persona of someone the viewer has blocked (either way).
-    if (await this.blockFilter.isBlockedEitherWay(viewerId, sp.userId)) {
-      throw new NotFoundException('Subprofile not found');
+    const owner: SubprofileOwnerRef = {
+      slug: profile.slug,
+      name: `${profile.firstName} ${profile.lastName}`.trim(),
+    };
+    return this.buildPublicView(sp, viewer, owner);
+  }
+
+  // Shared by `getByHandle` and `getBySlugForProfile`: resolves whether
+  // `viewer` may see `sp` at all (per the Shared Contract rule order — design
+  // plan Phase 1b Task 1), then assembles the full public DTO. Owner/co-owner
+  // sees the persona regardless of status/visibility (including a draft —
+  // `SubprofilePublicView.status` then reads `"draft"`, driving the frontend's
+  // draft banner); everyone else is gated in order: `removedAt` set → 403
+  // `removed`; not published → 404 (an unpublished draft is invisible to a
+  // non-owner, never a distinct restricted state); `private` → 403 `private`;
+  // `network` and the viewer isn't an authenticated active member → 403
+  // `members_only`; else the full DTO.
+  private async buildPublicView(
+    sp: Subprofile,
+    viewer: CurrentUserData | undefined,
+    ownerRef: SubprofileOwnerRef | undefined,
+  ): Promise<SubprofilePublicView> {
+    const isOwner = viewer ? await this.isMember(viewer.userId, sp.id) : false;
+
+    if (!isOwner) {
+      if (sp.removedAt) {
+        throw new ForbiddenException(restrictedAccessBody('removed'));
+      }
+      if (sp.status !== SubprofileStatus.Published) {
+        throw new NotFoundException('Subprofile not found');
+      }
+      if (sp.visibility === SubprofileVisibility.Private) {
+        throw new ForbiddenException(restrictedAccessBody('private'));
+      }
+      if (
+        sp.visibility === SubprofileVisibility.Network &&
+        viewer?.status !== UserStatus.Active
+      ) {
+        throw new ForbiddenException(restrictedAccessBody('members_only'));
+      }
+      // Pre-existing moderator-takedown withhold — a SEPARATE mechanism from
+      // `removedAt` above (see the migration's comment / Non-goals): a
+      // hidden/removed `content_moderation` row still 404s for non-owners,
+      // the same withhold-entirely behaviour the directory/search reads
+      // share. Owner-facing reads don't re-check this state (mirrors
+      // `listMine`/`getOwned`), so the owner still sees + manages their
+      // persona even under a takedown.
+      const moderation = await this.contentModeration.stateFor(
+        SubprofilesService.SUBJECT_TYPE,
+        sp.slug,
+      );
+      if (moderation.hidden || moderation.removed) {
+        throw new NotFoundException('Subprofile not found');
+      }
+      // Never surface the persona of someone the viewer has blocked (either
+      // way). Skipped entirely for an anonymous viewer — there is no account
+      // to have blocked anyone.
+      if (
+        viewer &&
+        (await this.blockFilter.isBlockedEitherWay(viewer.userId, sp.userId))
+      ) {
+        throw new NotFoundException('Subprofile not found');
+      }
     }
+
+    const viewerId = viewer?.userId ?? ANONYMOUS_VIEWER_ID;
     const items = await this.items.find({ where: { subprofileId: sp.id } });
     const socialLinkRows = await this.socialLinks.find({
       where: { subprofileId: sp.id },
@@ -987,15 +1329,10 @@ export class SubprofilesService {
       viewerId,
       items,
     );
-    const viewerIsMember =
-      (await this.members.count({
-        where: { subprofileId: sp.id, userId: viewerId },
-      })) > 0;
-    // no owner → owner fields omitted
     return toPublicDTO(
       sp,
       items,
-      undefined,
+      ownerRef,
       socialLinkRows,
       endorsementCount,
       viewerEndorsed,
@@ -1003,7 +1340,7 @@ export class SubprofilesService {
       viewerFollowing,
       affiliations,
       collaboratorsByHandle,
-      viewerIsMember,
+      isOwner,
     );
   }
 
@@ -1023,7 +1360,10 @@ export class SubprofilesService {
       .andWhere('sp.visibility = :open', {
         open: SubprofileVisibility.Open,
       })
-      .andWhere('sp.handle IS NOT NULL');
+      .andWhere('sp.handle IS NOT NULL')
+      // A removed persona is withheld from the directory too (Personas
+      // redesign Phase 1b) — only owner-facing reads skip this check.
+      .andWhere('sp.removedAt IS NULL');
 
     // Hide personas of members blocked either way (design spec §4). The raw
     // column reference must match the DB's snake_case name (SnakeNamingStrategy).
@@ -1049,12 +1389,19 @@ export class SubprofilesService {
       rows.map((row) => row.id),
     );
     const tagsById = await this.loadContentTagsFor(rows.map((row) => row.id));
+    // Personas redesign Phase 4 (design plan Decision §3): ONE grouped query
+    // over `subprofile_followers` for the whole page — never per-card.
+    const followerCountsById =
+      await this.followersService.loadFollowerCountsFor(
+        rows.map((row) => row.id),
+      );
     return {
       items: rows.map((row) =>
         toCardDTO(
           row,
           socialCountsById.get(row.id) ?? 0,
           tagsById.get(row.id) ?? [],
+          followerCountsById.get(row.id) ?? 0,
         ),
       ),
     };
@@ -1082,6 +1429,9 @@ export class SubprofilesService {
         open: SubprofileVisibility.Open,
       })
       .andWhere('sp.handle IS NOT NULL')
+      // A removed persona is withheld from search too (mirrors `directory`;
+      // Personas redesign Phase 1b).
+      .andWhere('sp.removedAt IS NULL')
       .andWhere(
         '(sp.displayName ILIKE :pattern OR sp.tagline ILIKE :pattern)',
         {
@@ -1115,6 +1465,9 @@ export class SubprofilesService {
         status: SubprofileStatus.Published,
         visibility: SubprofileVisibility.Open,
         handle: Not(IsNull()),
+        // A removed persona is withheld from the sitemap/prerender set too
+        // (Personas redesign Phase 1b).
+        removedAt: IsNull(),
       },
       // `slug` is selected purely so the takedown filter below can key on it —
       // it is not emitted in the sitemap payload.
@@ -1408,15 +1761,18 @@ export class SubprofilesService {
         handleRow.subprofileId
       ) {
         const persona = subprofileById.get(handleRow.subprofileId);
-        // Creditable ONLY when published + unlinked + not private: a linked
-        // persona is nested under its owner (not creditable — see the phase
-        // note), a draft doesn't exist publicly yet, and a private persona
-        // isn't meant to be namelinked from someone else's page.
+        // Creditable ONLY when published + unlinked + not private + not
+        // removed: a linked persona is nested under its owner (not
+        // creditable — see the phase note), a draft doesn't exist publicly
+        // yet, a private persona isn't meant to be namelinked from someone
+        // else's page, and a removed persona is withheld like every other
+        // public read (Personas redesign Phase 1b).
         if (
           !persona ||
           persona.status !== SubprofileStatus.Published ||
           persona.linkVisibility !== SubprofileLinkVisibility.Unlinked ||
           persona.visibility === SubprofileVisibility.Private ||
+          persona.removedAt ||
           blockedOwnerIds.has(persona.userId)
         ) {
           continue;
@@ -1472,6 +1828,11 @@ export class SubprofilesService {
       sp.userId,
       items,
     );
+    // Single-persona co-owner headcount — cheap enough to include on every
+    // owner-facing read for consistency (Personas redesign Phase 2 dashboard
+    // plan Decision §5), same shape as the batched `listMine` path above.
+    const memberCount =
+      (await this.loadMemberCountsFor([sp.id])).get(sp.id) ?? 1;
     return toSubprofileDTO(
       sp,
       items,
@@ -1480,6 +1841,7 @@ export class SubprofilesService {
       followerCount,
       affiliations,
       collaboratorsByHandle,
+      memberCount,
     );
   }
 
@@ -1502,6 +1864,29 @@ export class SubprofilesService {
       }
     }
     return byId;
+  }
+
+  // Batches a per-subprofile co-owner COUNT into ONE query (Personas redesign
+  // Phase 2 dashboard plan Decision §5) — mirrors
+  // `SubprofileEndorsementsService.loadEndorsementCountsFor`'s
+  // find-then-tally shape rather than a raw `GROUP BY`, so it stays consistent
+  // with every other batched count in this service. The creator is always
+  // given a `subprofile_members` row in the same transaction as the persona
+  // itself (see `create()`), so every real persona has at least one row here
+  // — callers still default a missing map entry to 1 defensively.
+  private async loadMemberCountsFor(
+    subprofileIds: string[],
+  ): Promise<Map<string, number>> {
+    const counts = new Map<string, number>();
+    if (!subprofileIds.length) return counts;
+    const rows = await this.members.find({
+      where: { subprofileId: In(subprofileIds) },
+      select: { subprofileId: true },
+    });
+    for (const row of rows) {
+      counts.set(row.subprofileId, (counts.get(row.subprofileId) ?? 0) + 1);
+    }
+    return counts;
   }
 
   // Batches the social-link rows for many subprofiles into ONE query (mirrors

@@ -17,7 +17,7 @@ function collectionRow(overrides: Partial<Collection> = {}): Collection {
     createdAt: now,
     updatedAt: now,
     ...overrides,
-  } as Collection;
+  };
 }
 
 function itemRow(overrides: Partial<CollectionItem> = {}): CollectionItem {
@@ -43,7 +43,7 @@ function savedRow(overrides: Partial<SavedItem> = {}): SavedItem {
     readTime: null,
     createdAt: now,
     ...overrides,
-  } as SavedItem;
+  };
 }
 
 // Grouped-count query builder stub for `countItemsByCollection`.
@@ -115,7 +115,7 @@ describe('CollectionsService', () => {
       const { service, collections } = build();
       collections.save.mockResolvedValue(collectionRow({ name: 'New' }));
 
-      const result = await service.create('owner-1', { name: 'New' } as never);
+      const result = await service.create('owner-1', { name: 'New' });
 
       expect(collections.create).toHaveBeenCalledWith(
         expect.objectContaining({ ownerId: 'owner-1', name: 'New' }),
@@ -125,12 +125,12 @@ describe('CollectionsService', () => {
   });
 
   describe('owner-scoping (mustOwn)', () => {
-    it('rename 404s when the collection is not the caller\'s', async () => {
+    it("rename 404s when the collection is not the caller's", async () => {
       const { service, collections } = build();
       collections.findOne.mockResolvedValue(null); // user B cannot load user A's row
 
       await expect(
-        service.rename('other-user', 'col-1', { name: 'x' } as never),
+        service.rename('other-user', 'col-1', { name: 'x' }),
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(collections.findOne).toHaveBeenCalledWith({
         where: { id: 'col-1', ownerId: 'other-user' },
@@ -141,9 +141,9 @@ describe('CollectionsService', () => {
       const { service, collections } = build();
       collections.findOne.mockResolvedValue(null);
 
-      await expect(service.getOne('other-user', 'col-1')).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(
+        service.getOne('other-user', 'col-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
 
     it('addItem 404s for a non-owner before any write', async () => {
@@ -161,12 +161,14 @@ describe('CollectionsService', () => {
     it('applies provided fields and returns the fresh count', async () => {
       const { service, collections, collectionItems } = build();
       collections.findOne.mockResolvedValue(collectionRow());
-      collections.save.mockImplementation((value: Collection) => Promise.resolve(value));
+      collections.save.mockImplementation((value: Collection) =>
+        Promise.resolve(value),
+      );
       collectionItems.count.mockResolvedValue(5);
 
       const result = await service.rename('owner-1', 'col-1', {
         name: 'Renamed',
-      } as never);
+      });
 
       expect(collections.save).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'Renamed' }),
@@ -206,7 +208,9 @@ describe('CollectionsService', () => {
         itemRow({ subjectId: 'orphaned-slug' }),
       ]);
       // Only the first item still has a saved snapshot.
-      savedItems.find.mockResolvedValue([savedRow({ subjectId: 'coming-out-guide' })]);
+      savedItems.find.mockResolvedValue([
+        savedRow({ subjectId: 'coming-out-guide' }),
+      ]);
 
       const detail = await service.getOne('owner-1', 'col-1');
 

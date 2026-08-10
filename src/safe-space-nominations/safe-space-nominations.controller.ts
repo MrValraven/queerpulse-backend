@@ -56,7 +56,9 @@ export class AdminSafeSpaceNominationsController {
   constructor(private readonly nominations: SafeSpaceNominationsService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List submitted safe-space nominations (paginated)' })
+  @ApiOperation({
+    summary: 'List submitted safe-space nominations (paginated)',
+  })
   @ApiOkResponse({ description: 'A page of nominations, newest first.' })
   list(@Query() page: PaginationQuery) {
     return this.nominations.listForAdmin(page);

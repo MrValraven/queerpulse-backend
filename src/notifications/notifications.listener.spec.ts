@@ -90,11 +90,15 @@ describe('NotificationsListener', () => {
   // below pass no actor: nobody is behind them to filter on, so they must
   // always be delivered.
   it('notifies a member promoted off the event waitlist, with no actor', async () => {
-    await listener.onWaitlistPromoted({ eventId: 'e1', userId: 'u2' });
+    await listener.onWaitlistPromoted({
+      eventId: 'e1',
+      eventSlug: 'e1-slug',
+      userId: 'u2',
+    });
     expect(notifications.create).toHaveBeenCalledWith(
       'u2',
       NotificationType.WaitlistPromoted,
-      expect.objectContaining({ eventId: 'e1' }),
+      expect.objectContaining({ eventId: 'e1', eventSlug: 'e1-slug' }),
     );
     expect(notifications.create.mock.calls[0]).toHaveLength(3);
   });

@@ -16,7 +16,10 @@ type QueryBuilderStub = Record<string, jest.Mock>;
 /** Fluent builder covering both the paginated browse (`getManyAndCount`) and
  *  the capped search (`getMany`) terminals. */
 function makeBuilder(
-  terminals: { getManyAndCount?: [unknown[], number]; getMany?: unknown[] } = {},
+  terminals: {
+    getManyAndCount?: [unknown[], number];
+    getMany?: unknown[];
+  } = {},
 ): QueryBuilderStub {
   const builder: QueryBuilderStub = {};
   for (const method of ['where', 'andWhere', 'orderBy', 'skip', 'take']) {
@@ -53,7 +56,7 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
-  } as unknown as HousingListing;
+  };
 }
 
 describe('HousingDirectoryService', () => {
@@ -69,9 +72,7 @@ describe('HousingDirectoryService', () => {
     };
     profiles = { find: jest.fn().mockResolvedValue([]) };
     contentModeration = {
-      stateFor: jest
-        .fn()
-        .mockResolvedValue({ hidden: false, removed: false }),
+      stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -102,7 +103,7 @@ describe('HousingDirectoryService', () => {
         priceMax: 900,
         lgbtqFriendly: true,
         availableBy: '2026-03-01',
-      } as never);
+      });
 
       expect(builder.where).toHaveBeenCalledWith('l.status = :live', {
         live: HousingListingStatus.Live,
@@ -112,9 +113,12 @@ describe('HousingDirectoryService', () => {
       expect(builder.andWhere).toHaveBeenCalledWith('l.type = :type', {
         type: HousingListingType.Room,
       });
-      expect(builder.andWhere).toHaveBeenCalledWith('l.rent_euros >= :priceMin', {
-        priceMin: 300,
-      });
+      expect(builder.andWhere).toHaveBeenCalledWith(
+        'l.rent_euros >= :priceMin',
+        {
+          priceMin: 300,
+        },
+      );
       expect(builder.andWhere).toHaveBeenCalledWith('l.lgbtq_friendly = true');
       expect(result).toMatchObject({ total: 1, page: 1, pageSize: 20 });
       expect(result.items).toHaveLength(1);
@@ -125,7 +129,7 @@ describe('HousingDirectoryService', () => {
         makeBuilder({ getManyAndCount: [[], 0] }),
       );
 
-      const result = await service.browse({} as never);
+      const result = await service.browse({});
 
       expect(result.items).toEqual([]);
       expect(profiles.find).not.toHaveBeenCalled();
@@ -141,7 +145,12 @@ describe('HousingDirectoryService', () => {
 
       expect(builder.take).toHaveBeenCalledWith(5);
       expect(rows).toEqual([
-        { slug: 'sunny-room', title: 'Sunny room', city: 'Lisbon', area: 'Arroios' },
+        {
+          slug: 'sunny-room',
+          title: 'Sunny room',
+          city: 'Lisbon',
+          area: 'Arroios',
+        },
       ]);
     });
   });

@@ -5,7 +5,7 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "preDeployCommand": ["npm run migration:run:prod"],
+    "preDeployCommand": ["npm run migration:run:prod && npm run storage:cors"],
     "healthcheckPath": "/health/live",
     "healthcheckTimeout": 60,
     "restartPolicyType": "ON_FAILURE"

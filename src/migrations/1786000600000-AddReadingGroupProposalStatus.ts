@@ -25,9 +25,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN — authored for review only, per the task's instructions.
  */
-export class AddReadingGroupProposalStatus1786000600000
-  implements MigrationInterface
-{
+export class AddReadingGroupProposalStatus1786000600000 implements MigrationInterface {
   name = 'AddReadingGroupProposalStatus1786000600000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
@@ -68,8 +66,6 @@ export class AddReadingGroupProposalStatus1786000600000
     await queryRunner.query(
       `ALTER TABLE "reading_group_proposal" DROP COLUMN "status"`,
     );
-    await queryRunner.query(
-      `DROP TYPE "reading_group_proposal_status_enum"`,
-    );
+    await queryRunner.query(`DROP TYPE "reading_group_proposal_status_enum"`);
   }
 }

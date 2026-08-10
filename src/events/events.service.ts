@@ -23,17 +23,25 @@ import { AttendeeStatusFilter } from './dto/list-attendees.query';
 import {
   AttendeesPageDTO,
   EventDetail,
+  EventLineupDTO,
   EventSummary,
   toAttendeeView,
   toEventSummary,
+  toLineupEntryView,
   toOrganizerView,
 } from './event-response';
 import { EventBookmarksService } from './event-bookmarks.service';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
+import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { Event, EventStatus, EventVisibility } from './entities/event.entity';
 import { RsvpService } from './rsvp.service';
+
+export interface LineupEntryInput {
+  memberSlug: string;
+  role: string;
+}
 
 export interface CreateEventInput {
   title: string;
@@ -57,6 +65,11 @@ export type EventListFilter =
 
 const PAGE_SIZE = 20;
 
+// Generous cap on a single "who performed" lineup — mirrors
+// `ReplaceAffiliationsDTO`'s `ArrayMaxSize` shape (validated again here so a
+// caller can't route around the DTO cap by calling the service directly).
+const MAX_LINEUP_ENTRIES = 50;
+
 // Postgres unique-violation SQLSTATE. TypeORM surfaces it either directly on the
 // QueryFailedError or on the wrapped driverError depending on the path.
 // null capacity means unlimited. "Increased" = strictly more seats than before:
@@ -79,6 +92,8 @@ export class EventsService {
     @InjectRepository(EventRsvp) private readonly rsvps: Repository<EventRsvp>,
     @InjectRepository(EventInvite)
     private readonly invites: Repository<EventInvite>,
+    @InjectRepository(EventLineupEntry)
+    private readonly lineupEntries: Repository<EventLineupEntry>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly usersService: UsersService,
     private readonly rsvpService: RsvpService,
@@ -245,10 +260,7 @@ export class EventsService {
     ) {
       materialChanges.push('location');
     }
-    if (
-      materialChanges.length > 0 &&
-      saved.status === EventStatus.Published
-    ) {
+    if (materialChanges.length > 0 && saved.status === EventStatus.Published) {
       await this.notifyEventUpdated(saved, userId, materialChanges);
     }
 
@@ -292,6 +304,9 @@ export class EventsService {
       NotificationType.EventUpdated,
       {
         eventId: event.id,
+        // Carried so the MyEvents "What's changed" panel can deep-link the row
+        // to the event card (the client keys events by slug, not uuid).
+        eventSlug: event.slug,
         title: event.title,
         startAt: event.startAt.toISOString(),
         changes,
@@ -321,6 +336,8 @@ export class EventsService {
       NotificationType.EventCancelled,
       {
         eventId: saved.id,
+        // Carried so the MyEvents panel can deep-link the row (client keys by slug).
+        eventSlug: saved.slug,
         title: saved.title,
         startAt: saved.startAt.toISOString(),
       },
@@ -355,7 +372,10 @@ export class EventsService {
         .innerJoin(EventRsvp, 'r', 'r.event_id = e.id')
         .where('r.user_id = :userId', { userId })
         .andWhere('r.status = :status', { status })
-        .orderBy('e.start_at', 'ASC')
+        // Property path (`startAt`), not the DB column: with the join + skip/take
+        // this goes through TypeORM's distinct-id pagination pass, which resolves
+        // ORDER BY via `findColumnWithPropertyPath` and throws on a raw column.
+        .orderBy('e.startAt', 'ASC')
         .skip(skip)
         .take(PAGE_SIZE)
         .getMany();
@@ -369,7 +389,8 @@ export class EventsService {
           statuses: [RsvpStatus.Going, RsvpStatus.Maybe, RsvpStatus.Waitlisted],
         })
         .andWhere('e.start_at < :now', { now })
-        .orderBy('e.start_at', 'DESC')
+        // Property path (`startAt`) — see the join+pagination note above.
+        .orderBy('e.startAt', 'DESC')
         .skip(skip)
         .take(PAGE_SIZE)
         .getMany();
@@ -478,6 +499,95 @@ export class EventsService {
       });
     }
     return { ok: true };
+  }
+
+  /**
+   * Host/co-host-only replace-all of an event's lineup ("who performed").
+   * Mirrors `SubprofilesService.replaceAffiliations`'s shape: resolve +
+   * validate every target BEFORE writing anything (batched, one `IN` query,
+   * not a `findOne` per entry), then delete-and-recreate inside one
+   * transaction so a caller never observes a partially-replaced lineup.
+   * Duplicate `memberSlug`s in the same call collapse to one row (last role
+   * wins) rather than tripping the `UNIQUE(event_id, user_id)` constraint.
+   */
+  async replaceLineup(
+    slug: string,
+    actorId: string,
+    entries: LineupEntryInput[],
+  ): Promise<EventLineupDTO> {
+    const event = await this.loadEventOr404(slug);
+    await this.assertOrganizer(event.id, actorId);
+
+    if (entries.length > MAX_LINEUP_ENTRIES) {
+      throw new BadRequestException(
+        `A lineup can have at most ${MAX_LINEUP_ENTRIES} entries`,
+      );
+    }
+
+    const memberSlugs = [...new Set(entries.map((entry) => entry.memberSlug))];
+    const profiles = memberSlugs.length
+      ? await this.profiles.find({ where: { slug: In(memberSlugs) } })
+      : [];
+    const profileBySlug = new Map(profiles.map((p) => [p.slug, p]));
+
+    for (const entry of entries) {
+      if (!profileBySlug.has(entry.memberSlug)) {
+        throw new NotFoundException(`Member not found: ${entry.memberSlug}`);
+      }
+    }
+
+    const rowsByUserId = new Map<string, { userId: string; role: string }>();
+    for (const entry of entries) {
+      const profile = profileBySlug.get(entry.memberSlug);
+      if (!profile) continue; // unreachable — validated above
+      rowsByUserId.set(profile.userId, {
+        userId: profile.userId,
+        role: entry.role,
+      });
+    }
+
+    await this.lineupEntries.manager.transaction(async (manager) => {
+      await manager.delete(EventLineupEntry, { eventId: event.id });
+      const rows = [...rowsByUserId.values()].map((row) =>
+        manager.create(EventLineupEntry, {
+          eventId: event.id,
+          userId: row.userId,
+          role: row.role,
+        }),
+      );
+      if (rows.length) {
+        await manager.save(rows);
+      }
+    });
+
+    return this.buildLineupDTO(event.id, actorId);
+  }
+
+  // Same visibility gate as `attendees` — a draft/invite-only/taken-down
+  // event 404s for a non-organizer viewer rather than leaking its lineup.
+  async getLineup(slug: string, viewerId: string): Promise<EventLineupDTO> {
+    const event = await this.loadEventOr404(slug);
+    await this.assertCanView(event, viewerId);
+    return this.buildLineupDTO(event.id, viewerId);
+  }
+
+  private async buildLineupDTO(
+    eventId: string,
+    viewerId: string,
+  ): Promise<EventLineupDTO> {
+    const rows = await this.lineupEntries.find({
+      where: { eventId },
+      order: { createdAt: 'ASC' },
+    });
+    const profiles = await this.profilesByUserIds(rows.map((r) => r.userId));
+    const entries = rows
+      .map((row) => toLineupEntryView(row, profiles.get(row.userId)))
+      .filter((view): view is NonNullable<typeof view> => view !== null);
+    const viewerRow = rows.find((row) => row.userId === viewerId);
+    const viewerEntry = viewerRow
+      ? toLineupEntryView(viewerRow, profiles.get(viewerRow.userId))
+      : null;
+    return { entries, viewerEntry };
   }
 
   /**

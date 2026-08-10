@@ -136,7 +136,7 @@ export class RsvpService {
       };
     });
 
-    this.emitPromotions(outcome.eventId, outcome.promoted);
+    this.emitPromotions(outcome.eventId, outcome.eventSlug, outcome.promoted);
     // After commit (a mid-transaction emit would survive a rollback): tell the
     // host someone RSVPed. Fire-and-forget on the same bus as the waitlist
     // promotions above; the listener writes + pushes the notification.
@@ -179,11 +179,11 @@ export class RsvpService {
       const promoted = wasGoing
         ? await this.promoteWaitlist(manager, event)
         : [];
-      return { eventId: event.id, promoted };
+      return { eventId: event.id, eventSlug: event.slug, promoted };
     });
 
     if (result) {
-      this.emitPromotions(result.eventId, result.promoted);
+      this.emitPromotions(result.eventId, result.eventSlug, result.promoted);
     }
     return { ok: true };
   }
@@ -201,10 +201,12 @@ export class RsvpService {
         return null;
       }
       const promoted = await this.promoteWaitlist(manager, event);
-      return promoted.length ? { eventId: event.id, promoted } : null;
+      return promoted.length
+        ? { eventId: event.id, eventSlug: event.slug, promoted }
+        : null;
     });
     if (result) {
-      this.emitPromotions(result.eventId, result.promoted);
+      this.emitPromotions(result.eventId, result.eventSlug, result.promoted);
     }
   }
 
@@ -295,10 +297,15 @@ export class RsvpService {
     }
   }
 
-  private emitPromotions(eventId: string, userIds: string[]): void {
+  private emitPromotions(
+    eventId: string,
+    eventSlug: string,
+    userIds: string[],
+  ): void {
     for (const userId of userIds) {
       this.eventEmitter.emit(EVENT_WAITLIST_PROMOTED, {
         eventId,
+        eventSlug,
         userId,
       } satisfies EventWaitlistPromotedEvent);
     }

@@ -15,9 +15,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
-export class CreateIntakeSubmissions1786001400000
-  implements MigrationInterface
-{
+export class CreateIntakeSubmissions1786001400000 implements MigrationInterface {
   name = 'CreateIntakeSubmissions1786001400000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
@@ -50,12 +48,8 @@ export class CreateIntakeSubmissions1786001400000
     await queryRunner.query(
       `ALTER TABLE "intake_submissions" DROP CONSTRAINT "FK_intake_submissions_submitter_id"`,
     );
-    await queryRunner.query(
-      `DROP INDEX "IDX_intake_submissions_status"`,
-    );
-    await queryRunner.query(
-      `DROP INDEX "IDX_intake_submissions_submitter_id"`,
-    );
+    await queryRunner.query(`DROP INDEX "IDX_intake_submissions_status"`);
+    await queryRunner.query(`DROP INDEX "IDX_intake_submissions_submitter_id"`);
     await queryRunner.query(`DROP INDEX "IDX_intake_submissions_kind"`);
     await queryRunner.query(`DROP TABLE "intake_submissions"`);
   }

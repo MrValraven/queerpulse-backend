@@ -5,6 +5,7 @@ import { Between, In, IsNull, Repository } from 'typeorm';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PushService } from '../push/push.service';
+import { isStorageKey } from '../storage/storage-key';
 import {
   DEFAULT_REMINDER_LEAD_MINUTES,
   MemberEventReminderPreferences,
@@ -186,11 +187,34 @@ export class EventRemindersService {
   // for every reminded attendee, instead of the one-`find`-per-user cost of
   // calling `sendToUser` inside a `userIds.map(...)` loop.
   private async pushReminders(event: Event, userIds: string[]): Promise<void> {
+    // Event cover as the notification's large image — but ONLY when it is an
+    // absolute public https URL a browser can fetch unauthenticated. A
+    // storage-key cover resolves to our auth-gated `GET /files/*` route, which a
+    // push client cannot fetch, so we omit `image` entirely (conditional spread
+    // below) rather than send a URL that would render as a broken image.
+    const rawCover = event.coverImageUrl;
+    const cover =
+      rawCover && !isStorageKey(rawCover) && rawCover.startsWith('https://')
+        ? rawCover
+        : undefined;
     await this.push.sendToUsers(userIds, {
       title: event.title,
       body: 'Starting soon — tap to see the details.',
       tag: `event-reminder-${event.id}`,
       data: { url: `/events/${event.slug}` },
+      // English fallback stays above; the SW localizes the body via this key
+      // (push:event.reminder.body in queerpulse/src/pushMessages.ts) when it
+      // knows the recipient's language. The title is always the event's own
+      // title, which is never localized.
+      l10n: { bodyKey: 'push:event.reminder.body' },
+      // Omit `image` (not send `undefined`) when there is no public cover.
+      ...(cover ? { image: cover } : {}),
+      actions: [{ action: 'view', title: 'Details' }],
+      requireInteraction: true,
+      vibrate: [100, 50, 100],
+      // The event's own start time, not delivery time — "starting soon" reads
+      // correctly against when the gathering actually begins.
+      timestamp: event.startAt.getTime(),
     });
   }
 }

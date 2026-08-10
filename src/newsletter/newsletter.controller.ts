@@ -38,13 +38,13 @@ export class NewsletterController {
   @Throttle({ default: { limit: 5, ttl: seconds(60) } })
   @HttpCode(HttpStatus.OK)
   @Post('subscribe')
-  subscribe(
-    @Body() dto: SubscribeNewsletterDto,
-  ): Promise<SubscribeResultDto> {
+  subscribe(@Body() dto: SubscribeNewsletterDto): Promise<SubscribeResultDto> {
     return this.newsletter.subscribe(dto.email);
   }
 
-  @ApiOperation({ summary: 'Confirm a newsletter subscription via emailed token.' })
+  @ApiOperation({
+    summary: 'Confirm a newsletter subscription via emailed token.',
+  })
   @ApiOkResponse({ description: 'The address is now confirmed.' })
   @Public()
   // Version-neutral so the link baked into the confirmation email

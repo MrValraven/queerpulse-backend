@@ -8,9 +8,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `GET /governance/overview` surfaces as a "last published" line, and the admin
  * `POST /governance/admin/publish` sets.
  */
-export class AddGovernanceOverviewPublishedAt1786000700000
-  implements MigrationInterface
-{
+export class AddGovernanceOverviewPublishedAt1786000700000 implements MigrationInterface {
   name = 'AddGovernanceOverviewPublishedAt1786000700000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

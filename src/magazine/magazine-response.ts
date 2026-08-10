@@ -1,5 +1,8 @@
 import { toImageUrl } from '../common/image-url';
-import { MagazineArticle } from './entities/magazine-article.entity';
+import {
+  ArticleBlock,
+  MagazineArticle,
+} from './entities/magazine-article.entity';
 import { MagazineAuthor } from './entities/magazine-author.entity';
 import { DeckSlide, MagazineDeck } from './entities/magazine-deck.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
@@ -48,6 +51,14 @@ export interface ArticleListItem {
 
 export interface ArticleResponse extends ArticleListItem {
   body: string;
+  /**
+   * Block-based article body (Phase 3 / spec §7.3). Empty when the article
+   * predates the block editor — the reader falls back to `body` in that case.
+   */
+  blocks: ArticleBlock[];
+  standfirst: string;
+  kicker: string;
+  section: string;
 }
 
 export interface StorySubmissionResponse {
@@ -111,6 +122,10 @@ export function toArticleResponse(
   return {
     ...toArticleListItem(article, author, issueNumber),
     body: article.body,
+    blocks: article.blocks,
+    standfirst: article.standfirst,
+    kicker: article.kicker,
+    section: article.section,
   };
 }
 

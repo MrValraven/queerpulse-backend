@@ -61,6 +61,10 @@ function build(opts: {
   blocked?: string[];
   muters?: string[];
   pushDisabled?: string[];
+  // Raw stored avatar for the sender's profile (undefined = no avatar). An
+  // absolute https URL is a public avatar; a storage key resolves to our
+  // auth-gated `/files/*` route and must NOT become the push icon.
+  senderAvatarUrl?: string;
 }) {
   const conversationsRepo = {
     findOne: jest.fn().mockResolvedValue({
@@ -78,6 +82,7 @@ function build(opts: {
       firstName: 'Alex',
       lastName: 'Doe',
       slug: 'alex',
+      avatarUrl: opts.senderAvatarUrl ?? null,
     }),
   };
   const presence = {
@@ -143,6 +148,20 @@ it('pushes to an offline recipient with the sender name + preview', async () => 
   expect(payload.title).toBe('Alex Doe');
   expect(payload.body).toBe('hey there');
   expect(payload.data.url).toBe('/messages?c=conv-1');
+});
+
+it("sets timestamp to the message's own createdAt (not delivery time)", async () => {
+  const { listener, push } = build({
+    participants: [
+      { userId: 'sender-1', muted: false },
+      { userId: 'recipient-1', muted: false },
+    ],
+    online: [],
+  });
+  const createdAt = new Date('2026-01-15T12:00:00.000Z');
+  await listener.handleMessageCreated(makeEvent({ createdAt }));
+  const [, payload] = push.sendToUsers.mock.calls[0] as [string[], PushPayload];
+  expect(payload.timestamp).toBe(createdAt.getTime());
 });
 
 it('skips a recipient who is online', async () => {
@@ -224,6 +243,64 @@ it('never pushes to a recipient who turned the New message push category off', a
     'new_messages',
   );
   expect(push.sendToUsers).not.toHaveBeenCalled();
+});
+
+it('sends a rich DM push: avatar icon, view action, renotify, vibrate', async () => {
+  const { listener, push } = build({
+    participants: [
+      { userId: 'sender-1', muted: false },
+      { userId: 'recipient-1', muted: false },
+    ],
+    online: [],
+    // An absolute public https avatar (e.g. a Google-OAuth avatar) — fetchable
+    // by a push client, so it becomes the notification icon.
+    senderAvatarUrl: 'https://lh3.googleusercontent.com/a/alex.png',
+  });
+  await listener.handleMessageCreated(makeEvent());
+  const [, payload] = push.sendToUsers.mock.calls[0] as [string[], PushPayload];
+  expect(payload).toMatchObject({
+    title: 'Alex Doe',
+    icon: 'https://lh3.googleusercontent.com/a/alex.png',
+    actions: [{ action: 'view', title: 'View' }],
+    renotify: true,
+    vibrate: [80, 40, 80],
+    data: { conversationId: 'conv-1', url: '/messages?c=conv-1' },
+  });
+  expect(payload.icon).toMatch(/^https:\/\//);
+});
+
+it('omits icon when the sender has no avatar', async () => {
+  const { listener, push } = build({
+    participants: [
+      { userId: 'sender-1', muted: false },
+      { userId: 'recipient-1', muted: false },
+    ],
+    online: [],
+    // No avatar stored — nothing safe to show, so `icon` must be absent entirely
+    // (not present-and-undefined), while the other rich fields still ship.
+  });
+  await listener.handleMessageCreated(makeEvent());
+  const [, payload] = push.sendToUsers.mock.calls[0] as [string[], PushPayload];
+  expect(payload).not.toHaveProperty('icon');
+  expect(payload.actions).toEqual([{ action: 'view', title: 'View' }]);
+});
+
+it('omits icon for a storage-key avatar (our /files/* route, not a direct public URL)', async () => {
+  const { listener, push } = build({
+    participants: [
+      { userId: 'sender-1', muted: false },
+      { userId: 'recipient-1', muted: false },
+    ],
+    online: [],
+    // A storage key resolves through `toImageUrl` to our own `GET /files/*`
+    // redirect route, not a direct absolute-https asset — we send only the
+    // latter, so a storage-key avatar must never become the icon.
+    senderAvatarUrl:
+      'avatars/11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222.jpg',
+  });
+  await listener.handleMessageCreated(makeEvent());
+  const [, payload] = push.sendToUsers.mock.calls[0] as [string[], PushPayload];
+  expect(payload).not.toHaveProperty('icon');
 });
 
 it('never pushes for an official (non-DM) conversation', async () => {

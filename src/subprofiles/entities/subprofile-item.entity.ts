@@ -6,6 +6,26 @@ import {
   PrimaryGeneratedColumn,
 } from 'typeorm';
 
+// Shared skin-field types (Personas redesign Phase 0). Kept in lockstep with
+// the frontend mirror in `subprofiles.api.ts` (design plan "Shared Contract").
+export type GigState = 'sold_out' | 'cancelled' | 'guest';
+export type WorkState = 'shipped' | 'archived' | 'in_progress';
+export interface MenuDish {
+  title: string;
+  note?: string | null;
+  marks?: string[] | null;
+}
+export interface MenuCourse {
+  n: string;
+  name: string;
+  dishes: MenuDish[];
+}
+/** Nested per-item data that doesn't fit flat columns (subprofile_items.structured). */
+export interface ItemStructured {
+  courses?: MenuCourse[] | null;
+  snippet?: string[] | null;
+}
+
 // Union of every kind's content sections plus the universal `links` section.
 // Kept in lockstep with `KIND_SECTIONS` in `../subprofile-kinds.ts`.
 export enum SubprofileSection {
@@ -109,6 +129,37 @@ export class SubprofileItem {
 
   @Column({ type: 'int', default: 0 })
   position!: number;
+
+  // --- Personas redesign Phase 0: skin-specific flat scalars + nested jsonb --
+  // (design plan "Shared Contract"). Only populated for sections/kinds the
+  // relevant skin cares about; null everywhere else.
+
+  @Column({ type: 'varchar', length: 200, nullable: true })
+  venue!: string | null;
+
+  @Column({ type: 'varchar', length: 40, nullable: true })
+  doors!: string | null;
+
+  @Column({ type: 'varchar', length: 1000, nullable: true })
+  ticketUrl!: string | null;
+
+  @Column({ type: 'varchar', length: 20, nullable: true })
+  gigState!: GigState | null;
+
+  @Column({ type: 'varchar', length: 120, nullable: true })
+  medium!: string | null;
+
+  @Column({ type: 'varchar', length: 80, nullable: true })
+  dimensions!: string | null;
+
+  @Column({ type: 'varchar', length: 80, nullable: true })
+  edition!: string | null;
+
+  @Column({ type: 'varchar', length: 20, nullable: true })
+  workState!: WorkState | null;
+
+  @Column({ type: 'jsonb', nullable: true })
+  structured!: ItemStructured | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

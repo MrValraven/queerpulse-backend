@@ -13,6 +13,9 @@ export interface EventInvitedEvent {
 
 export interface EventWaitlistPromotedEvent {
   eventId: string;
+  // Carried so the WaitlistPromoted notification can deep-link straight to the
+  // event page / MyEvents card (the client keys events by slug, not uuid).
+  eventSlug: string;
   userId: string;
 }
 

@@ -7,6 +7,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Put,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -21,6 +22,7 @@ import { CreateEventDto } from './dto/create-event.dto';
 import { InviteEventDto } from './dto/invite-event.dto';
 import { ListAttendeesQuery } from './dto/list-attendees.query';
 import { ListEventsQuery } from './dto/list-events.query';
+import { PutLineupDto } from './dto/put-lineup.dto';
 import { RespondEventInviteDto } from './dto/respond-event-invite.dto';
 import { RsvpDto } from './dto/rsvp.dto';
 import { UpdateEventDto } from './dto/update-event.dto';
@@ -244,6 +246,39 @@ export class EventsController {
     @Body() dto: InviteEventDto,
   ) {
     return this.eventInvitesService.createInvites(slug, user.userId, dto.slugs);
+  }
+
+  @Put(':slug/lineup')
+  @ApiOperation({
+    summary:
+      'Replace an event\'s lineup ("who performed") — host/co-host only.',
+  })
+  @ApiOkResponse({ description: 'The replaced lineup.' })
+  @ApiForbiddenResponse({
+    description: 'Only the host or a co-host can do that.',
+  })
+  @ApiNotFoundResponse({
+    description: 'No event with that slug, or a member slug was not found.',
+  })
+  putLineup(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: PutLineupDto,
+  ) {
+    return this.eventsService.replaceLineup(slug, user.userId, dto.entries);
+  }
+
+  @Get(':slug/lineup')
+  @ApiOperation({
+    summary:
+      "Get an event's lineup, plus the caller's own entry if they're on it.",
+  })
+  @ApiOkResponse({ description: "The lineup and the viewer's own entry." })
+  @ApiNotFoundResponse({
+    description: 'No event with that slug, or not visible to you.',
+  })
+  getLineup(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
+    return this.eventsService.getLineup(slug, user.userId);
   }
 }
 

@@ -25,10 +25,7 @@ import { AdminCommunityModeratorsService } from './admin-community-moderators.se
     ]),
     ReportsModule,
   ],
-  controllers: [
-    AdminCommunitiesController,
-    AdminCommunityModeratorsController,
-  ],
+  controllers: [AdminCommunitiesController, AdminCommunityModeratorsController],
   providers: [AdminCommunitiesService, AdminCommunityModeratorsService],
 })
 export class AdminCommunitiesModule {}

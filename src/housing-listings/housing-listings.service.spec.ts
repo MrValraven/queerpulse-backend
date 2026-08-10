@@ -18,7 +18,10 @@ import { HousingListingsService } from './housing-listings.service';
 type RepoMock = Record<string, jest.Mock>;
 type QueryBuilderStub = Record<string, jest.Mock>;
 
-function makePaginatedBuilder(rows: unknown[], total: number): QueryBuilderStub {
+function makePaginatedBuilder(
+  rows: unknown[],
+  total: number,
+): QueryBuilderStub {
   const builder: QueryBuilderStub = {};
   for (const method of ['where', 'orderBy', 'skip', 'take']) {
     builder[method] = jest.fn().mockReturnValue(builder);
@@ -51,7 +54,7 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
-  } as unknown as HousingListing;
+  };
 }
 
 const CREATE_DTO = {
@@ -150,9 +153,9 @@ describe('HousingListingsService', () => {
     it('403s when the caller is not the owner', async () => {
       listings.findOne.mockResolvedValue(makeListing({ ownerId: 'owner-1' }));
 
-      await expect(service.getByRef('QPH-2026-0001', 'intruder')).rejects.toThrow(
-        ForbiddenException,
-      );
+      await expect(
+        service.getByRef('QPH-2026-0001', 'intruder'),
+      ).rejects.toThrow(ForbiddenException);
     });
 
     it('returns the DTO for the owning caller', async () => {
@@ -194,9 +197,9 @@ describe('HousingListingsService', () => {
     it('403s a non-owner', async () => {
       listings.findOne.mockResolvedValue(makeListing({ ownerId: 'owner-1' }));
 
-      await expect(
-        service.remove('QPH-2026-0001', 'intruder'),
-      ).rejects.toThrow(ForbiddenException);
+      await expect(service.remove('QPH-2026-0001', 'intruder')).rejects.toThrow(
+        ForbiddenException,
+      );
       expect(listings.remove).not.toHaveBeenCalled();
     });
 
@@ -215,7 +218,7 @@ describe('HousingListingsService', () => {
       listings.findOne.mockResolvedValue(null);
 
       await expect(
-        service.createEnquiry('QPH-x', 'sender', { body: 'hi' } as never),
+        service.createEnquiry('QPH-x', 'sender', { body: 'hi' }),
       ).rejects.toThrow(NotFoundException);
       expect(listings.findOne).toHaveBeenCalledWith({
         where: { ref: 'QPH-x', status: HousingListingStatus.Live },
@@ -226,7 +229,9 @@ describe('HousingListingsService', () => {
       listings.findOne.mockResolvedValue(makeListing({ ownerId: 'owner-1' }));
 
       await expect(
-        service.createEnquiry('QPH-2026-0001', 'owner-1', { body: 'hi' } as never),
+        service.createEnquiry('QPH-2026-0001', 'owner-1', {
+          body: 'hi',
+        }),
       ).rejects.toThrow(BadRequestException);
       expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
     });
@@ -234,11 +239,9 @@ describe('HousingListingsService', () => {
     it('delivers the enquiry to the lister and returns the conversation id', async () => {
       listings.findOne.mockResolvedValue(makeListing({ ownerId: 'owner-1' }));
 
-      const result = await service.createEnquiry(
-        'QPH-2026-0001',
-        'sender',
-        { body: 'Is it still available?' } as never,
-      );
+      const result = await service.createEnquiry('QPH-2026-0001', 'sender', {
+        body: 'Is it still available?',
+      });
 
       expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
         'sender',

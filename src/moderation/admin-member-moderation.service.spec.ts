@@ -18,7 +18,10 @@ function profileRow(overrides: Partial<Profile> = {}): Profile {
 }
 
 function build() {
-  const profiles = { findOne: jest.fn(), save: jest.fn().mockResolvedValue(undefined) };
+  const profiles = {
+    findOne: jest.fn(),
+    save: jest.fn().mockResolvedValue(undefined),
+  };
   const enforcement = { restrictMember: jest.fn() };
   const audit = { writeAuditLog: jest.fn().mockResolvedValue(undefined) };
   const notifications = { create: jest.fn().mockResolvedValue(undefined) };
@@ -58,14 +61,22 @@ describe('AdminMemberModerationService', () => {
           verifiedAt: expect.any(Date),
         }),
       );
-      expect(audit.writeAuditLog).toHaveBeenCalledWith(null, 'admin-1', 'member_verified');
+      expect(audit.writeAuditLog).toHaveBeenCalledWith(
+        null,
+        'admin-1',
+        'member_verified',
+      );
       expect(result.verified).toBe(true);
     });
 
     it('is idempotent — an already-verified member is not re-stamped or re-audited', async () => {
       const { service, profiles, audit } = build();
       profiles.findOne.mockResolvedValue(
-        profileRow({ verified: true, verifiedAt: now, verifiedBy: 'earlier-admin' }),
+        profileRow({
+          verified: true,
+          verifiedAt: now,
+          verifiedBy: 'earlier-admin',
+        }),
       );
 
       const result = await service.verifyMember('admin-1', 'member-1');
@@ -101,7 +112,10 @@ describe('AdminMemberModerationService', () => {
       expect(notifications.create).toHaveBeenCalledWith(
         'member-1',
         NotificationType.ModerationOutcome,
-        expect.objectContaining({ action: 'suspend', expiresAt: suspendedUntil.toISOString() }),
+        expect.objectContaining({
+          action: 'suspend',
+          expiresAt: suspendedUntil.toISOString(),
+        }),
       );
       expect(result).toEqual({
         id: 'member-1',
@@ -151,7 +165,9 @@ describe('AdminMemberModerationService', () => {
     it('propagates a guardrail Forbidden (self/house/staff) and never revokes or notifies', async () => {
       const { service, enforcement, auth, notifications } = build();
       enforcement.restrictMember.mockRejectedValue(
-        new ForbiddenException('Moderation actions cannot target staff accounts.'),
+        new ForbiddenException(
+          'Moderation actions cannot target staff accounts.',
+        ),
       );
 
       await expect(
@@ -178,7 +194,10 @@ describe('AdminMemberModerationService', () => {
           reasonCode: 'x',
           note: 'y',
         } as never),
-      ).resolves.toMatchObject({ id: 'member-1', status: UserStatus.Suspended });
+      ).resolves.toMatchObject({
+        id: 'member-1',
+        status: UserStatus.Suspended,
+      });
     });
 
     it('does not self-notify when the actor is the restricted user', async () => {

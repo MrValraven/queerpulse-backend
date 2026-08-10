@@ -90,7 +90,10 @@ describe('HousingService', () => {
       providers: [
         HousingService,
         { provide: getRepositoryToken(HousingCoop), useValue: coops },
-        { provide: getRepositoryToken(CoopJoinRequest), useValue: joinRequests },
+        {
+          provide: getRepositoryToken(CoopJoinRequest),
+          useValue: joinRequests,
+        },
       ],
     }).compile();
 
@@ -109,7 +112,10 @@ describe('HousingService', () => {
       });
       expect(result).toHaveLength(1);
       // DTO drops createdAt/updatedAt/joinRequests — assert the mapped shape.
-      expect(result[0]).toMatchObject({ slug: 'rainbow-commons', published: true });
+      expect(result[0]).toMatchObject({
+        slug: 'rainbow-commons',
+        published: true,
+      });
       expect(result[0]).not.toHaveProperty('createdAt');
     });
   });
@@ -119,7 +125,11 @@ describe('HousingService', () => {
       coops.findOne.mockResolvedValue(null);
 
       await expect(
-        service.createJoinRequest('ghost', { name: 'Sam', householdSize: '2' }, 'user-1'),
+        service.createJoinRequest(
+          'ghost',
+          { name: 'Sam', householdSize: '2' },
+          'user-1',
+        ),
       ).rejects.toThrow(NotFoundException);
       expect(joinRequests.save).not.toHaveBeenCalled();
     });
@@ -167,7 +177,13 @@ describe('HousingService', () => {
   });
 
   describe('createCoop', () => {
-    const dto = { slug: 'new-coop', name: 'New Coop', city: 'Porto', area: 'Bonfim', description: 'x' } as never;
+    const dto = {
+      slug: 'new-coop',
+      name: 'New Coop',
+      city: 'Porto',
+      area: 'Bonfim',
+      description: 'x',
+    } as never;
 
     it('rejects a slug already taken (pre-check) with a 409', async () => {
       coops.findOne.mockResolvedValue(makeCoop());

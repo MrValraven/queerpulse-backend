@@ -33,7 +33,10 @@ export class UserStaffRole {
   @Column('varchar')
   role!: string;
 
-  @Column('uuid', { nullable: true })
+  // Explicit column name: the applied migration created `granted_by` (with the
+  // ON DELETE SET NULL FK on that column). Without this, SnakeNamingStrategy
+  // would map `grantedById` to a non-existent `granted_by_id` column.
+  @Column('uuid', { name: 'granted_by', nullable: true })
   grantedById!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })

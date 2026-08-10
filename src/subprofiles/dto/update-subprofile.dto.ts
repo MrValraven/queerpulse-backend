@@ -2,6 +2,7 @@ import {
   IsEnum,
   IsIn,
   IsInt,
+  IsObject,
   IsOptional,
   IsString,
   MaxLength,
@@ -11,6 +12,7 @@ import { IsImageReference } from '../../common/validators/is-image-reference.dec
 import {
   SubprofileLinkVisibility,
   SubprofileVisibility,
+  type SkinData,
 } from '../entities/subprofile.entity';
 import {
   ACCENT_KEYS,
@@ -56,4 +58,9 @@ export class UpdateSubprofileDTO {
   @IsOptional() @IsString() @MaxLength(MAX_CTA_LABEL) ctaLabel?: string | null;
 
   @IsOptional() @IsString() @MaxLength(1000) ctaUrl?: string | null;
+
+  // Personas redesign Phase 0 (design plan "Shared Contract"). Shape-checked
+  // here with a 16 KB serialized-size cap enforced in
+  // `SubprofilesService.assertJsonbSize` before persisting.
+  @IsOptional() @IsObject() skinData?: SkinData;
 }

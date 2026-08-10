@@ -128,7 +128,9 @@ function collectStrings(rows: Notification[], key: string): string[] {
     ...new Set(
       rows
         .map((row) => row.payload?.[key])
-        .filter((value): value is string => typeof value === 'string' && !!value),
+        .filter(
+          (value): value is string => typeof value === 'string' && !!value,
+        ),
     ),
   ];
 }

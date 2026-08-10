@@ -81,7 +81,12 @@ export class AdminReadingGroupProposalsService {
     adminUserId: string,
     note?: string,
   ): Promise<AdminReadingGroupProposalDTO> {
-    return this.decide(id, ReadingGroupProposalStatus.Approved, adminUserId, note);
+    return this.decide(
+      id,
+      ReadingGroupProposalStatus.Approved,
+      adminUserId,
+      note,
+    );
   }
 
   /** Decline a proposal — record it as rejected, with the who/when and note. */
@@ -90,7 +95,12 @@ export class AdminReadingGroupProposalsService {
     adminUserId: string,
     note?: string,
   ): Promise<AdminReadingGroupProposalDTO> {
-    return this.decide(id, ReadingGroupProposalStatus.Declined, adminUserId, note);
+    return this.decide(
+      id,
+      ReadingGroupProposalStatus.Declined,
+      adminUserId,
+      note,
+    );
   }
 
   /** Archive a proposal — filed away without an accept/reject verdict. */
@@ -99,7 +109,12 @@ export class AdminReadingGroupProposalsService {
     adminUserId: string,
     note?: string,
   ): Promise<AdminReadingGroupProposalDTO> {
-    return this.decide(id, ReadingGroupProposalStatus.Archived, adminUserId, note);
+    return this.decide(
+      id,
+      ReadingGroupProposalStatus.Archived,
+      adminUserId,
+      note,
+    );
   }
 
   /**

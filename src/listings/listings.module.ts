@@ -14,6 +14,7 @@ import { ListingModerationEvent } from './entities/listing-moderation-event.enti
 import { ListingQuestion } from './entities/listing-question.entity';
 import { ListingReview } from './entities/listing-review.entity';
 import { Listing } from './entities/listing.entity';
+import { SafeSpaceMemberVouch } from '../safe-space-vouches/entities/safe-space-vouch.entity';
 import { ReportsModule } from '../reports/reports.module';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
 import { ListingsController } from './listings.controller';
@@ -36,6 +37,10 @@ import { ListingsService } from './listings.service';
       ListingQuestion,
       Event,
       SavedItem,
+      // Read-only here: `DirectoryService` merges member-written safe-space
+      // vouches into the safe-space detail DTO. Writes live in
+      // `SafeSpaceVouchesModule`.
+      SafeSpaceMemberVouch,
     ]),
     UsersModule,
     // MessagingModule exports MessagingService — delivers a moderator's

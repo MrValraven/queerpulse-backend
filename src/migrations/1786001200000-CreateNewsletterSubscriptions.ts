@@ -13,9 +13,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
-export class CreateNewsletterSubscriptions1786001200000
-  implements MigrationInterface
-{
+export class CreateNewsletterSubscriptions1786001200000 implements MigrationInterface {
   name = 'CreateNewsletterSubscriptions1786001200000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

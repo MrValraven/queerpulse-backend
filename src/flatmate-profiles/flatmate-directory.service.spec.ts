@@ -29,7 +29,9 @@ function makeBuilder(terminals: {
   return builder;
 }
 
-function makeFlatmate(overrides: Partial<FlatmateProfile> = {}): FlatmateProfile {
+function makeFlatmate(
+  overrides: Partial<FlatmateProfile> = {},
+): FlatmateProfile {
   return {
     id: 'fm-1',
     ownerId: 'owner-x',
@@ -45,7 +47,7 @@ function makeFlatmate(overrides: Partial<FlatmateProfile> = {}): FlatmateProfile
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
-  } as unknown as FlatmateProfile;
+  };
 }
 
 describe('FlatmateDirectoryService', () => {
@@ -85,7 +87,7 @@ describe('FlatmateDirectoryService', () => {
         makeBuilder({ getManyAndCount: [[makeFlatmate()], 1] }),
       );
 
-      const result = await service.browse('viewer-1', {} as never);
+      const result = await service.browse('viewer-1', {});
 
       expect(result).toMatchObject({ total: 1, page: 1, pageSize: 20 });
       expect(result.items[0]?.matchScore).toBeNull();
@@ -121,7 +123,7 @@ describe('FlatmateDirectoryService', () => {
         makeBuilder({ getMany: [sameType, opposite], getCount: 2 }),
       );
 
-      const result = await service.browse('viewer-1', {} as never);
+      const result = await service.browse('viewer-1', {});
 
       expect(result.total).toBe(2);
       // Scored opposite-type candidate comes first; unscored same-type follows.
@@ -145,9 +147,9 @@ describe('FlatmateDirectoryService', () => {
       flatmates.findOne.mockResolvedValue(makeFlatmate({ ownerId: 'owner-x' }));
       blockFilter.isBlockedEitherWay.mockResolvedValue(true);
 
-      await expect(
-        service.detail('viewer-1', 'sam-flatmate'),
-      ).rejects.toThrow(NotFoundException);
+      await expect(service.detail('viewer-1', 'sam-flatmate')).rejects.toThrow(
+        NotFoundException,
+      );
     });
 
     it('computes a match score against an opposite-type viewer', async () => {
@@ -174,7 +176,9 @@ describe('FlatmateDirectoryService', () => {
     });
 
     it('leaves matchScore null when the viewer looks at their own profile', async () => {
-      flatmates.findOne.mockResolvedValue(makeFlatmate({ ownerId: 'viewer-1' }));
+      flatmates.findOne.mockResolvedValue(
+        makeFlatmate({ ownerId: 'viewer-1' }),
+      );
       blockFilter.isBlockedEitherWay.mockResolvedValue(false);
 
       const result = await service.detail('viewer-1', 'sam-flatmate');

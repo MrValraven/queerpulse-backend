@@ -32,7 +32,9 @@ function build() {
   return { service, states };
 }
 
-function moderationRow(overrides: Partial<ContentModeration>): ContentModeration {
+function moderationRow(
+  overrides: Partial<ContentModeration>,
+): ContentModeration {
   return {
     subjectType: 'post',
     subjectId: 'p1',
@@ -126,11 +128,22 @@ describe('ContentModerationService', () => {
     it('takes the strongest state per subject id (removed beats hidden)', async () => {
       const { service, states } = build();
       states.find.mockResolvedValue([
-        moderationRow({ subjectId: 'p1', hiddenAt: new Date(), removedAt: null }),
-        moderationRow({ subjectId: 'p1', hiddenAt: new Date(), removedAt: new Date() }),
+        moderationRow({
+          subjectId: 'p1',
+          hiddenAt: new Date(),
+          removedAt: null,
+        }),
+        moderationRow({
+          subjectId: 'p1',
+          hiddenAt: new Date(),
+          removedAt: new Date(),
+        }),
       ]);
 
-      const result = await service.statesForAnyType(['post', 'reply'], ['p1', 'p1']);
+      const result = await service.statesForAnyType(
+        ['post', 'reply'],
+        ['p1', 'p1'],
+      );
 
       expect(result.get('p1')).toEqual({ hidden: true, removed: true });
     });
@@ -139,7 +152,9 @@ describe('ContentModerationService', () => {
   describe('revert', () => {
     it('deletes the state row via the caller manager', async () => {
       const { service } = build();
-      const manager = { delete: jest.fn().mockResolvedValue(undefined) } as unknown as EntityManager;
+      const manager = {
+        delete: jest.fn().mockResolvedValue(undefined),
+      } as unknown as EntityManager;
 
       await service.revert(manager, 'post', 'p1');
 
@@ -162,7 +177,9 @@ describe('ContentModerationService', () => {
         .mock.calls[0];
       expect(sql).toContain('NOT EXISTS');
       expect(sql).toContain('"p"."id"::text');
-      expect(params).toEqual({ moderationFilterSubjectTypes: ['post', 'reply'] });
+      expect(params).toEqual({
+        moderationFilterSubjectTypes: ['post', 'reply'],
+      });
     });
   });
 });

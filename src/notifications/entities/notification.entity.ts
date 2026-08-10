@@ -54,6 +54,32 @@ export enum NotificationType {
   // `EventCancelled`: a schedule/venue change is need-to-know. See migration
   // `AddEventUpdatedNotificationType1786001600000`.
   EventUpdated = 'event_updated',
+  // Sent to a member the FIRST time a persona's `replaceSection` save newly
+  // credits their @handle as a collaborator (Personas discovery Phase 5,
+  // Moment 6). `replaceSection` deletes-and-recreates a section on every
+  // save with no stable item ids, so the emit site diffs the persona's WHOLE
+  // collaborator set (across every section) before vs. after the save and
+  // only fires for handles that are genuinely new — resaving with the same
+  // collaborators never re-fires. No preference toggle (like
+  // `ModerationOutcome`/`EventUpdated`), but block/mute IS honoured via the
+  // crediting persona's owner as the `actorId` on `notifications.create`.
+  // See migration `AddSubprofileCreditNotificationType1786700100000`.
+  SubprofileCredit = 'subprofile_credit',
+  // Sent to the OTHER party (editor → writer, or writer → editor) when
+  // someone posts to a magazine piece's editor↔writer message thread
+  // (Magazine Desk Phase 7, Task F1). Carries an actor (`authorId`) so
+  // block/mute filtering applies like any member-driven type. See migration
+  // `AddMagazinePieceMessageNotificationType1787300100000`.
+  MagazinePieceMessage = 'magazine_piece_message',
+  // Sent to a safe space's listing OWNER when a member vouches for their space
+  // (`SafeSpaceVouchesService.createVouch`) — before this, a safe-space vouch
+  // notified no one. Carries the voucher (`voucherId`) as the actor so
+  // block/mute filtering applies like any member-driven type; the id is OMITTED
+  // from the payload for an ANONYMOUS vouch so the bell/push never names them,
+  // while the block/mute gate still fires via the `actorId` argument. Push is
+  // gated on the `Vouches` category. See migration
+  // `AddSafeSpaceVouchNotificationType1787500000000`.
+  SafeSpaceVouch = 'safe_space_vouch',
 }
 
 @Entity('notifications')

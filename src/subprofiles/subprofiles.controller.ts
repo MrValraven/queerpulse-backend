@@ -19,6 +19,7 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { Public } from '../auth/decorators/public.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { CreateSubprofileDTO } from './dto/create-subprofile.dto';
 import { EndorseDTO } from './dto/endorse.dto';
 import { InviteCollaboratorDTO } from './dto/invite-collaborator.dto';
@@ -79,23 +80,34 @@ export class SubprofilesController {
     return this.subprofilesService.directory(query, user.userId);
   }
 
+  // Public, best-effort auth: `@Public()` lifts the global mandatory JWT guard
+  // and `OptionalJwtAuthGuard` attaches `req.user` when a valid session cookie
+  // is present, but never rejects an anonymous caller (mirrors
+  // `IntakesController`'s `POST /intakes/:kind`). Needed so a signed-out
+  // visitor on a `network` persona gets `403 { restrictedState: "members_only" }`
+  // instead of a blanket 401 — the owner-only/private protections aren't
+  // weakened, `SubprofilesService.buildPublicView` still gates every
+  // non-owner viewer (Personas redesign Phase 1b Task 1).
+  @Public()
+  @UseGuards(OptionalJwtAuthGuard)
   @Get('by-handle/:handle')
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({
-    summary: 'Get a published subprofile by its handle (public view)',
+    summary: 'Get a subprofile by its handle (public view)',
   })
   @ApiOkResponse({ description: 'The subprofile’s public view.' })
-  @ApiNotFoundResponse({
-    description: 'No published subprofile with that handle.',
+  @ApiForbiddenResponse({
+    description:
+      'Restricted — response body is `{ restrictedState: "private" | "members_only" | "removed" }`.',
   })
-  @ApiUnauthorizedResponse({
-    description: 'Not an authenticated active member.',
+  @ApiNotFoundResponse({
+    description:
+      'No subprofile with that handle, or an unpublished draft viewed by a non-owner.',
   })
   getByHandle(
-    @CurrentUser() user: CurrentUserData,
+    @CurrentUser() user: CurrentUserData | undefined,
     @Param('handle') handle: string,
   ) {
-    return this.subprofilesService.getByHandle(handle, user.userId);
+    return this.subprofilesService.getByHandle(handle, user);
   }
 
   // Public, unauthenticated: every crawlable persona handle, for the sitemap
@@ -568,5 +580,35 @@ export class ProfileSubprofilesController {
     @Param('slug') slug: string,
   ) {
     return this.subprofilesService.listForProfile(slug, user.userId);
+  }
+
+  // Single linked+published persona nested under a member's profile, by its
+  // per-owner slug — the nested-linked counterpart to `SubprofilesController
+  // .getByHandle` (design plan Phase 1b Task 1: a single fetch is what lets
+  // this one persona carry its own `restrictedState` signal, which the bulk
+  // list above cannot). Same public, best-effort-auth treatment as
+  // `by-handle/:handle` — see that route's comment.
+  @Public()
+  @UseGuards(OptionalJwtAuthGuard)
+  @Get(':slug/subprofiles/:subslug')
+  @ApiOperation({
+    summary:
+      'Get one linked subprofile nested under a member’s profile (public view)',
+  })
+  @ApiOkResponse({ description: 'The subprofile’s public view.' })
+  @ApiForbiddenResponse({
+    description:
+      'Restricted — response body is `{ restrictedState: "private" | "members_only" | "removed" }`.',
+  })
+  @ApiNotFoundResponse({
+    description:
+      'No such member/persona, or an unpublished draft viewed by a non-owner.',
+  })
+  getBySlug(
+    @CurrentUser() user: CurrentUserData | undefined,
+    @Param('slug') slug: string,
+    @Param('subslug') subslug: string,
+  ) {
+    return this.subprofilesService.getBySlugForProfile(slug, subslug, user);
   }
 }

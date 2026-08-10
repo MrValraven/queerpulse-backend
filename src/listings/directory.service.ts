@@ -7,6 +7,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import {
   Brackets,
   In,
+  IsNull,
   MoreThanOrEqual,
   Not,
   Repository,
@@ -25,6 +26,10 @@ import {
 import { Event, EventStatus } from '../events/entities/event.entity';
 import { SavedItem, SavedKind } from '../saved/entities/saved-item.entity';
 import { Profile } from '../users/entities/profile.entity';
+import {
+  SafeSpaceMemberVouch,
+  safeSpaceVouchByline,
+} from '../safe-space-vouches/entities/safe-space-vouch.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreateReviewDto } from './dto/create-review.dto';
@@ -34,6 +39,7 @@ import {
   Listing,
   ListingStatus,
   SafeSpaceStatus,
+  type SafeSpaceVouch,
 } from './entities/listing.entity';
 import {
   AnySafeSpaceDetailDTO,
@@ -73,6 +79,8 @@ export class DirectoryService {
     @InjectRepository(Event) private readonly events: Repository<Event>,
     @InjectRepository(SavedItem)
     private readonly savedItems: Repository<SavedItem>,
+    @InjectRepository(SafeSpaceMemberVouch)
+    private readonly memberVouches: Repository<SafeSpaceMemberVouch>,
     private readonly contentModeration: ContentModerationService,
     private readonly notifications: NotificationsService,
   ) {}
@@ -294,6 +302,7 @@ export class DirectoryService {
     });
     const reviewAuthors = await this.resolveReviewAuthors(reviews);
     const ownerSlug = await this.resolveOwnerSlug(listing);
+    const memberVouches = await this.loadSafeSpaceMemberVouches(listing.id);
     return toDirectoryDetail(
       listing,
       reviews,
@@ -301,6 +310,7 @@ export class DirectoryService {
       savedCount,
       reviewAuthors,
       ownerSlug,
+      memberVouches,
     );
   }
 
@@ -354,6 +364,57 @@ export class DirectoryService {
         { slug: profile.slug, avatarUrl: profile.avatarUrl },
       ]),
     );
+  }
+
+  /**
+   * The active member-written vouches for a space, resolved to the raw
+   * `SafeSpaceVouch` display shape so `toDirectoryDetail`/`toSafeSpaceDetail`
+   * can merge them alongside the moderator-curated jsonb vouches. Anonymous
+   * rows never resolve a profile — the voucher's identity is shielded to a
+   * generic name, matching the member-vouch module's anonymity guarantee. The
+   * `note` is the vouch text; `byline` derives from the relationship;
+   * `when` is a stable "Mon YYYY" label from the created date.
+   */
+  private async loadSafeSpaceMemberVouches(
+    listingId: string,
+  ): Promise<SafeSpaceVouch[]> {
+    const rows = await this.memberVouches.find({
+      where: { listingId, withdrawnAt: IsNull() },
+      order: { createdAt: 'DESC' },
+    });
+    if (rows.length === 0) return [];
+    const namedVoucherIds = [
+      ...new Set(
+        rows.filter((row) => !row.anonymous).map((row) => row.voucherId),
+      ),
+    ];
+    const profiles = namedVoucherIds.length
+      ? await this.profiles.find({
+          where: { userId: In(namedVoucherIds) },
+          select: { userId: true, firstName: true, lastName: true },
+        })
+      : [];
+    const profilesByUserId = new Map(
+      profiles.map((profile) => [profile.userId, profile]),
+    );
+    const shieldedName = 'A QueerPulse member';
+    return rows.map((row) => {
+      const profile = row.anonymous
+        ? undefined
+        : profilesByUserId.get(row.voucherId);
+      const resolvedName = profile
+        ? `${profile.firstName} ${profile.lastName}`.trim()
+        : '';
+      return {
+        name: resolvedName || shieldedName,
+        byline: safeSpaceVouchByline(row.relationship),
+        text: row.note ?? '',
+        when: row.createdAt.toLocaleDateString('en-US', {
+          month: 'short',
+          year: 'numeric',
+        }),
+      };
+    });
   }
 
   /** Paginated reviews for one live listing. */
@@ -552,7 +613,8 @@ export class DirectoryService {
       take: DEFAULT_LIST_LIMIT,
     });
     const reviews = await this.dropModeratedReviews(allReviews);
-    return toSafeSpaceDetail(listing, reviews);
+    const memberVouches = await this.loadSafeSpaceMemberVouches(listing.id);
+    return toSafeSpaceDetail(listing, reviews, memberVouches);
   }
 
   private async loadLiveOr404(slug: string): Promise<Listing> {

@@ -3,12 +3,15 @@ import {
   ArrayMaxSize,
   IsArray,
   IsBoolean,
+  IsIn,
+  IsObject,
   IsOptional,
   IsString,
   MaxLength,
   ValidateNested,
 } from 'class-validator';
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
+import type { ItemStructured } from '../entities/subprofile-item.entity';
 import { MAX_ITEMS_PER_SECTION } from '../subprofile-validation';
 
 // One item of a section. `section` comes from the URL, not the body (C4).
@@ -42,6 +45,53 @@ export class SubprofileItemInputDTO {
   @IsString({ each: true })
   @MaxLength(60, { each: true })
   collaborators?: string[];
+
+  // --- Personas redesign Phase 0 skin fields (design plan "Shared Contract") -
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  venue?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  doors?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  ticketUrl?: string;
+
+  @IsOptional()
+  @IsIn(['sold_out', 'cancelled', 'guest'])
+  gigState?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  medium?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  dimensions?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  edition?: string;
+
+  @IsOptional()
+  @IsIn(['shipped', 'archived', 'in_progress'])
+  workState?: string;
+
+  // Shape-checked here (`@IsObject()`) with a 16 KB serialized-size cap
+  // enforced in `SubprofilesService.assertJsonbSize` before persisting — full
+  // nested class-validation of `courses`/`snippet` is out of scope for Phase 0
+  // (documented limitation; design plan Task 6 Step 1).
+  @IsOptional()
+  @IsObject()
+  structured?: ItemStructured;
 }
 
 export class ReplaceItemsDTO {

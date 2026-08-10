@@ -95,7 +95,9 @@ export class GovernanceController {
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)
   @ApiOperation({ summary: 'Publish the current governance overview snapshot' })
-  @ApiOkResponse({ description: 'The timestamp the snapshot was published at.' })
+  @ApiOkResponse({
+    description: 'The timestamp the snapshot was published at.',
+  })
   @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
   @ApiNotFoundResponse({ description: 'No governance overview is configured.' })
   publish() {

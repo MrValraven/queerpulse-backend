@@ -127,7 +127,7 @@ export class NotificationsListener {
     await this.notifications.create(
       e.userId,
       NotificationType.WaitlistPromoted,
-      { eventId: e.eventId },
+      { eventId: e.eventId, eventSlug: e.eventSlug },
     );
   }
 

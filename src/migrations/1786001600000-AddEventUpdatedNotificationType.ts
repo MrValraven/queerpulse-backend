@@ -24,9 +24,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
-export class AddEventUpdatedNotificationType1786001600000
-  implements MigrationInterface
-{
+export class AddEventUpdatedNotificationType1786001600000 implements MigrationInterface {
   name = 'AddEventUpdatedNotificationType1786001600000';
 
   transaction = false as const;

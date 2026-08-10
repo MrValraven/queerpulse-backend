@@ -19,6 +19,35 @@ export interface PushPayload {
   // carries one. `conversationId` is DM-specific and optional — event reminders
   // and other non-DM pushes omit it.
   data: { url: string; conversationId?: string };
+  // Optional presentation fields — the service worker validates each; iOS ignores
+  // icon/image/actions/vibrate/requireInteraction/silent and shows title + body.
+  // Field names MUST match the frontend `DirectMessagePush` validator exactly.
+  icon?: string;
+  image?: string;
+  actions?: { action: string; title: string }[];
+  renotify?: boolean;
+  vibrate?: number[];
+  requireInteraction?: boolean;
+  silent?: boolean;
+  // Optional localization hint. The backend stays language-neutral — `title`/
+  // `body` above are always the English fallback a sender must still set. The
+  // service worker resolves `titleKey`/`bodyKey` against its bundled EN/PT
+  // catalog (queerpulse/src/pushMessages.ts) in the recipient's language,
+  // interpolating `params`, and falls back to plain title/body otherwise
+  // (also what iOS renders, since it never runs the SW's push-handler JS).
+  // Field shape MUST match the frontend `DirectMessagePush.l10n` exactly
+  // (lockstep contract) or the SW validator drops it silently.
+  l10n?: {
+    titleKey?: string;
+    bodyKey?: string;
+    params?: Record<string, string>;
+  };
+  // Optional epoch-ms event time (message `createdAt` / event start /
+  // notification `createdAt`) — NOT delivery time. The service worker passes
+  // this to `showNotification` so a queued/delayed push still shows the true
+  // moment the underlying event happened. Field shape MUST match the frontend
+  // `DirectMessagePush.timestamp` exactly (lockstep contract).
+  timestamp?: number;
 }
 
 interface WebPushError {

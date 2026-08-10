@@ -17,7 +17,7 @@ function mentionRow(
     read: false,
     createdAt: now,
     payload,
-  } as unknown as Notification;
+  };
 }
 
 function build() {
@@ -49,7 +49,10 @@ describe('MentionsInboxService', () => {
       const result = await service.list('me', { page: 2 });
 
       const findArgs = notifications.find.mock.calls[0][0];
-      expect(findArgs.where).toEqual({ userId: 'me', type: NotificationType.Mention });
+      expect(findArgs.where).toEqual({
+        userId: 'me',
+        type: NotificationType.Mention,
+      });
       expect(findArgs.order).toEqual({ createdAt: 'DESC', id: 'DESC' });
       expect(findArgs.skip).toBe(20); // (page 2 - 1) * PAGE_SIZE
       expect(findArgs.take).toBe(20);
@@ -79,7 +82,8 @@ describe('MentionsInboxService', () => {
     });
 
     it('enriches actors/threads/communities in one batched query each', async () => {
-      const { service, notifications, profiles, threads, communities } = build();
+      const { service, notifications, profiles, threads, communities } =
+        build();
       notifications.find.mockResolvedValue([
         mentionRow('n1', {
           actorId: 'actor-1',
@@ -93,7 +97,13 @@ describe('MentionsInboxService', () => {
         }),
       ]);
       profiles.find.mockResolvedValue([
-        { userId: 'actor-1', slug: 'ada', firstName: 'Ada', lastName: 'L', avatarUrl: null },
+        {
+          userId: 'actor-1',
+          slug: 'ada',
+          firstName: 'Ada',
+          lastName: 'L',
+          avatarUrl: null,
+        },
       ]);
       threads.find.mockResolvedValue([{ slug: 'welcome', title: 'Welcome' }]);
       communities.find.mockResolvedValue([{ slug: 'pride', name: 'Pride' }]);
@@ -109,7 +119,8 @@ describe('MentionsInboxService', () => {
     });
 
     it('skips enrichment queries entirely when the page has no such refs', async () => {
-      const { service, notifications, profiles, threads, communities } = build();
+      const { service, notifications, profiles, threads, communities } =
+        build();
       notifications.find.mockResolvedValue([mentionRow('n1', {})]);
 
       await service.list('me', {});

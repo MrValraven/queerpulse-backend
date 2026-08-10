@@ -11,7 +11,9 @@ import { FlatmateProfilesService } from './flatmate-profiles.service';
 
 type RepoMock = Record<string, jest.Mock>;
 
-function makeFlatmate(overrides: Partial<FlatmateProfile> = {}): FlatmateProfile {
+function makeFlatmate(
+  overrides: Partial<FlatmateProfile> = {},
+): FlatmateProfile {
   return {
     id: 'fm-1',
     ownerId: 'owner-1',
@@ -27,7 +29,7 @@ function makeFlatmate(overrides: Partial<FlatmateProfile> = {}): FlatmateProfile
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
-  } as unknown as FlatmateProfile;
+  };
 }
 
 const UPSERT_DTO = {
@@ -143,7 +145,7 @@ describe('FlatmateProfilesService', () => {
       flatmates.findOne.mockResolvedValue(null);
 
       await expect(
-        service.sayHello('ghost', 'sender', { body: 'hi' } as never),
+        service.sayHello('ghost', 'sender', { body: 'hi' }),
       ).rejects.toThrow(NotFoundException);
     });
 
@@ -151,7 +153,7 @@ describe('FlatmateProfilesService', () => {
       flatmates.findOne.mockResolvedValue(makeFlatmate({ ownerId: 'owner-1' }));
 
       await expect(
-        service.sayHello('sam-flatmate', 'owner-1', { body: 'hi' } as never),
+        service.sayHello('sam-flatmate', 'owner-1', { body: 'hi' }),
       ).rejects.toThrow(BadRequestException);
       expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
     });
@@ -159,7 +161,9 @@ describe('FlatmateProfilesService', () => {
     it('falls back to the default greeting when the body is blank', async () => {
       flatmates.findOne.mockResolvedValue(makeFlatmate({ ownerId: 'owner-1' }));
 
-      await service.sayHello('sam-flatmate', 'sender', { body: '   ' } as never);
+      await service.sayHello('sam-flatmate', 'sender', {
+        body: '   ',
+      });
 
       expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
         'sender',
@@ -173,7 +177,7 @@ describe('FlatmateProfilesService', () => {
 
       const result = await service.sayHello('sam-flatmate', 'sender', {
         body: 'Hey, still looking?',
-      } as never);
+      });
 
       expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
         'sender',

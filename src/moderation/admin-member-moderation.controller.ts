@@ -58,7 +58,8 @@ export class AdminMemberModerationController {
   }
 
   @ApiOperation({
-    summary: 'Restrict a member platform-wide (suspend, or ban if no duration).',
+    summary:
+      'Restrict a member platform-wide (suspend, or ban if no duration).',
   })
   @ApiOkResponse({ description: "The member's resulting status + expiry." })
   @ApiBadRequestResponse({ description: 'Malformed body or duration.' })

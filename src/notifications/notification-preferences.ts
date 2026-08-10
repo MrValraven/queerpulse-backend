@@ -23,6 +23,10 @@ export enum NotificationPreferenceCategory {
   Connections = 'connections',
   /** "Reply to a thread I'm in" — forum/community replies. */
   CommunityReplies = 'community_replies',
+  /** "Mentions" — someone @-mentioned you in a post or discussion. */
+  Mentions = 'mentions',
+  /** "Vouches" — someone vouched for you. */
+  Vouches = 'vouches',
 }
 
 /** Every category, in the order the settings pane lists them. */
@@ -65,6 +69,11 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
     NotificationPreferenceCategory.CommunityReplies,
   [NotificationType.CommunityReply]:
     NotificationPreferenceCategory.CommunityReplies,
+  [NotificationType.Mention]: NotificationPreferenceCategory.Mentions,
+  [NotificationType.VouchReceived]: NotificationPreferenceCategory.Vouches,
+  // A safe-space vouch is a vouch — same member-facing "Vouches" toggle governs
+  // both channels (the push listener is where this gate actually bites).
+  [NotificationType.SafeSpaceVouch]: NotificationPreferenceCategory.Vouches,
 };
 
 /** The category a type belongs to, or `null` when it has no member switch. */

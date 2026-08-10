@@ -7,29 +7,36 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource, In } from 'typeorm';
+import { DataSource, In, IsNull } from 'typeorm';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { Community } from '../communities/entities/community.entity';
 import { Event } from '../events/entities/event.entity';
-import { Handle } from '../handles/entities/handle.entity';
+import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { HandlesService } from '../handles/handles.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
-import { Profile } from '../users/entities/profile.entity';
+import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
+import { UserStatus } from '../users/entities/user.entity';
+import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import {
   Subprofile,
   SubprofileKind,
   SubprofileLinkVisibility,
   SubprofileStatus,
   SubprofileVisibility,
+  type SkinData,
 } from './entities/subprofile.entity';
 import {
   SubprofileItem,
   SubprofileSection,
+  type ItemStructured,
 } from './entities/subprofile-item.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import { isSectionAllowed } from './subprofile-kinds';
-import { toPublicDTO } from './subprofile-response';
+import { toCardDTO, toPublicDTO, toSubprofileDTO } from './subprofile-response';
 import {
   BLOCKED_TERMS,
   MIN_BIO,
@@ -63,6 +70,8 @@ function makeSubprofile(overrides: Partial<Subprofile> = {}): Subprofile {
     visibility: SubprofileVisibility.Open,
     status: SubprofileStatus.Draft,
     position: 0,
+    skinData: null,
+    removedAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
@@ -85,6 +94,15 @@ function makeItem(overrides: Partial<SubprofileItem> = {}): SubprofileItem {
     isFeatured: false,
     collaborators: [],
     position: 0,
+    venue: null,
+    doors: null,
+    ticketUrl: null,
+    gigState: null,
+    medium: null,
+    dimensions: null,
+    edition: null,
+    workState: null,
+    structured: null,
     createdAt: new Date(),
     ...overrides,
   };
@@ -107,6 +125,54 @@ function makeSocialLink(
   };
 }
 
+// A minimal registered-username `handles` row, for `subprofile_credit`
+// collaboration-credit tests (`resolveHandles` / `resolveMemberUserIdsByHandle`).
+function makeHandleRow(overrides: Partial<Handle> = {}): Handle {
+  return {
+    name: 'alice',
+    ownerKind: HandleOwnerKind.Profile,
+    userId: 'user-2',
+    user: undefined as never,
+    subprofileId: null,
+    subprofile: null,
+    createdAt: new Date(),
+    ...overrides,
+  };
+}
+
+// A minimal member `profiles` row backing a `handles` row above.
+function makeProfile(overrides: Partial<Profile> = {}): Profile {
+  return {
+    userId: 'user-2',
+    user: undefined as never,
+    slug: 'alice',
+    firstName: 'Alice',
+    lastName: 'A',
+    pronouns: null,
+    tagline: null,
+    bio: null,
+    location: null,
+    avatarUrl: null,
+    visibility: ProfileVisibility.Open,
+    openTo: [],
+    identities: [],
+    discoverableIdentities: [],
+    lookingFor: [],
+    lookingForPublic: false,
+    tags: [],
+    verified: false,
+    verifiedAt: null,
+    verifiedBy: null,
+    privateNetwork: false,
+    featuredConsent: false,
+    now: null,
+    joinedAt: new Date(),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...overrides,
+  };
+}
+
 // A subprofile that passes every unlinked publish requirement.
 function completeUnlinked(overrides: Partial<Subprofile> = {}): Subprofile {
   return makeSubprofile({
@@ -114,6 +180,52 @@ function completeUnlinked(overrides: Partial<Subprofile> = {}): Subprofile {
     avatarUrl: 'https://cdn/a.png',
     bio: 'x'.repeat(MIN_BIO),
     ...overrides,
+  });
+}
+
+// Stubs the fluent `createQueryBuilder` chain `directory()` builds: every
+// chained method returns the builder itself, and `getMany` resolves the
+// given rows (mirrors the `admin-communities.service.spec.ts` qb-stub
+// pattern — no real TypeORM query builder is constructed).
+type DirectoryQueryBuilderStub = Record<string, jest.Mock>;
+function makeDirectoryQueryBuilderStub(
+  rows: Subprofile[],
+): DirectoryQueryBuilderStub {
+  const queryBuilder: DirectoryQueryBuilderStub = {};
+  for (const chainedMethod of ['where', 'andWhere', 'orderBy', 'take']) {
+    queryBuilder[chainedMethod] = jest.fn().mockReturnValue(queryBuilder);
+  }
+  queryBuilder.getMany = jest.fn().mockResolvedValue(rows);
+  return queryBuilder;
+}
+
+function makeViewer(overrides: Partial<CurrentUserData> = {}): CurrentUserData {
+  return {
+    userId: 'viewer-1',
+    email: 'viewer@example.com',
+    status: UserStatus.Active,
+    role: 'member',
+    ...overrides,
+  };
+}
+
+// Awaits `promise`, asserts it rejected with a `ForbiddenException`, and
+// asserts its serialised body (via the public `getResponse()` API — not an
+// internal field) is EXACTLY `{ restrictedState }` — the Shared Contract's
+// 403 body shape (design plan Phase 1b Task 1).
+async function expectRestricted(
+  promise: Promise<unknown>,
+  restrictedState: 'private' | 'members_only' | 'removed',
+): Promise<void> {
+  let caught: unknown;
+  try {
+    await promise;
+  } catch (err) {
+    caught = err;
+  }
+  expect(caught).toBeInstanceOf(ForbiddenException);
+  expect((caught as ForbiddenException).getResponse()).toEqual({
+    restrictedState,
   });
 }
 
@@ -370,6 +482,27 @@ describe('toPublicDTO', () => {
   });
 });
 
+// --- toCardDTO ---------------------------------------------------------------
+
+// Personas redesign Phase 4 (design plan Task 1 Decision §3): the directory
+// card mapper accepts a batched `followerCount` (default 0, mirrors
+// `socialCount`/`tags`) rather than deriving it itself.
+describe('toCardDTO', () => {
+  it('defaults followerCount to 0 when not supplied', () => {
+    const sp = makeSubprofile({ handle: 'nightform' });
+    const card = toCardDTO(sp);
+    expect(card.followerCount).toBe(0);
+  });
+
+  it('carries the batched followerCount through onto the card', () => {
+    const sp = makeSubprofile({ handle: 'nightform' });
+    const card = toCardDTO(sp, 3, ['ambient'], 12);
+    expect(card.followerCount).toBe(12);
+    expect(card.socialCount).toBe(3);
+    expect(card.tags).toEqual(['ambient']);
+  });
+});
+
 // --- service (mocked repositories) ------------------------------------------
 
 describe('SubprofilesService', () => {
@@ -393,7 +526,9 @@ describe('SubprofilesService', () => {
     count: jest.Mock;
     delete: jest.Mock;
   };
-  let profiles: { findOne: jest.Mock };
+  let profiles: { findOne: jest.Mock; find: jest.Mock };
+  let handleRegistry: { find: jest.Mock };
+  let notifications: { create: jest.Mock };
   let manager: {
     findOne: jest.Mock;
     count: jest.Mock;
@@ -406,6 +541,14 @@ describe('SubprofilesService', () => {
   let blockFilter: {
     isBlockedEitherWay: jest.Mock;
     excludeBlocked: jest.Mock;
+    blockedUserIds: jest.Mock;
+  };
+  let contentModeration: { stateFor: jest.Mock };
+  let followersService: {
+    follow: jest.Mock;
+    unfollow: jest.Mock;
+    loadFollowerCountsFor: jest.Mock;
+    viewerFollowingFor: jest.Mock;
   };
 
   beforeEach(async () => {
@@ -450,7 +593,22 @@ describe('SubprofilesService', () => {
       count: jest.fn().mockResolvedValue(2),
       delete: jest.fn().mockResolvedValue(undefined),
     };
-    profiles = { findOne: jest.fn().mockResolvedValue(null) };
+    profiles = {
+      findOne: jest.fn().mockResolvedValue(null),
+      // Only reached by `resolveHandles` when `handleRegistry.find` returns at
+      // least one `ownerKind: 'profile'` row — every pre-existing test leaves
+      // `handleRegistry` at its `[]` default, so this stays unexercised for
+      // them; the `subprofile_credit` tests below override it.
+      find: jest.fn().mockResolvedValue([]),
+    };
+    // Backs `resolveHandles`'s handle→profile/persona lookups AND
+    // `resolveMemberUserIdsByHandle`'s narrower handle→userId lookup.
+    // Defaults to "no handles registered" so every pre-existing test (none of
+    // which exercise collaboration credits) is unaffected.
+    handleRegistry = { find: jest.fn().mockResolvedValue([]) };
+    // Backs `NotificationsService` — `replaceSection`'s `subprofile_credit`
+    // emit (Personas discovery Phase 5, Moment 6).
+    notifications = { create: jest.fn().mockResolvedValue(null) };
     manager = {
       // Backs `leave()`'s locked transaction: the persona-row lock (dispatched
       // on the `Subprofile` entity class, mirrors
@@ -488,6 +646,23 @@ describe('SubprofilesService', () => {
     blockFilter = {
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
       excludeBlocked: jest.fn(),
+      // Only reached by `resolveHandles` when `handleRegistry.find` returns at
+      // least one row — see the `profiles.find` comment above.
+      blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
+    };
+    // Defaults to "fully visible" (no takedown row) so every pre-existing
+    // test is unaffected; the `getByHandle`/`getBySlugForProfile` describe
+    // blocks below override per-case.
+    contentModeration = {
+      stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
+    };
+    followersService = {
+      follow: jest.fn(),
+      unfollow: jest.fn(),
+      loadFollowerCountsFor: jest
+        .fn()
+        .mockResolvedValue(new Map<string, number>()),
+      viewerFollowingFor: jest.fn().mockResolvedValue(new Set<string>()),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -513,12 +688,11 @@ describe('SubprofilesService', () => {
           provide: getRepositoryToken(Community),
           useValue: { find: jest.fn().mockResolvedValue([]) },
         },
-        {
-          provide: getRepositoryToken(Handle),
-          useValue: { find: jest.fn().mockResolvedValue([]) },
-        },
+        { provide: getRepositoryToken(Handle), useValue: handleRegistry },
         { provide: DataSource, useValue: dataSource },
         { provide: BlockFilterService, useValue: blockFilter },
+        { provide: ContentModerationService, useValue: contentModeration },
+        { provide: NotificationsService, useValue: notifications },
         {
           provide: HandlesService,
           useValue: {
@@ -541,14 +715,7 @@ describe('SubprofilesService', () => {
         },
         {
           provide: SubprofileFollowersService,
-          useValue: {
-            follow: jest.fn(),
-            unfollow: jest.fn(),
-            loadFollowerCountsFor: jest
-              .fn()
-              .mockResolvedValue(new Map<string, number>()),
-            viewerFollowingFor: jest.fn().mockResolvedValue(new Set<string>()),
-          },
+          useValue: followersService,
         },
       ],
     }).compile();
@@ -739,6 +906,58 @@ describe('SubprofilesService', () => {
       expect(subprofiles.find).not.toHaveBeenCalled();
       expect(result).toEqual([]);
     });
+
+    // Personas redesign Phase 2 dashboard plan Task 4 / Decision §5:
+    // `memberCount` on the owner list DTO, populated via ONE grouped count
+    // over `subprofile_members` — never a per-persona query. `members.find`
+    // is called twice total in `listMine`: once for the caller's own
+    // memberships (`where: { userId }`), once for the grouped co-owner count
+    // (`where: { subprofileId: In(ids) }`) — the mock below branches on that
+    // shape to serve each call its own rows.
+    it('reports memberCount 1 for a solo persona (creator-only)', async () => {
+      members.find.mockImplementation(
+        (options: { where: { userId?: string } }) => {
+          if (options.where.userId) {
+            return Promise.resolve([
+              { subprofileId: 'sp-solo', userId: 'user-1' },
+            ]);
+          }
+          return Promise.resolve([{ subprofileId: 'sp-solo' }]);
+        },
+      );
+      subprofiles.find.mockResolvedValue([
+        makeSubprofile({ id: 'sp-solo', userId: 'user-1' }),
+      ]);
+      const result = await service.listMine('user-1');
+      expect(result.find((view) => view.id === 'sp-solo')?.memberCount).toBe(1);
+    });
+
+    it('reports the true co-owner headcount for a co-owned persona, via ONE grouped query', async () => {
+      members.find.mockImplementation(
+        (options: { where: { userId?: string } }) => {
+          if (options.where.userId) {
+            return Promise.resolve([
+              { subprofileId: 'sp-co-owned', userId: 'user-1' },
+            ]);
+          }
+          return Promise.resolve([
+            { subprofileId: 'sp-co-owned', userId: 'user-1' },
+            { subprofileId: 'sp-co-owned', userId: 'co-owner-2' },
+            { subprofileId: 'sp-co-owned', userId: 'co-owner-3' },
+          ]);
+        },
+      );
+      subprofiles.find.mockResolvedValue([
+        makeSubprofile({ id: 'sp-co-owned', userId: 'user-1' }),
+      ]);
+      const result = await service.listMine('user-1');
+      expect(
+        result.find((view) => view.id === 'sp-co-owned')?.memberCount,
+      ).toBe(3);
+      // Exactly two `members.find` calls total for the whole list — NOT one
+      // grouped-count call per persona (no N+1).
+      expect(members.find).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('listForProfile', () => {
@@ -771,6 +990,7 @@ describe('SubprofilesService', () => {
           id: In(['sp-co-owned']),
           linkVisibility: SubprofileLinkVisibility.Linked,
           status: SubprofileStatus.Published,
+          removedAt: IsNull(),
         },
         order: { position: 'ASC', createdAt: 'ASC' },
       });
@@ -788,6 +1008,292 @@ describe('SubprofilesService', () => {
       const result = await service.listForProfile('viewed-member', 'viewer-id');
       expect(subprofiles.find).not.toHaveBeenCalled();
       expect(result).toEqual([]);
+    });
+  });
+
+  // Personas redesign Phase 4 (design plan Task 1 Decision §3): the
+  // directory card surfaces `followerCount`, sourced from ONE grouped query
+  // over the whole page's ids (never a per-card query).
+  describe('directory', () => {
+    it('populates each card’s followerCount from a single batched loadFollowerCountsFor call', async () => {
+      const rows = [
+        completeUnlinked({
+          id: 'sp-a',
+          handle: 'nightform',
+          status: SubprofileStatus.Published,
+        }),
+        completeUnlinked({
+          id: 'sp-b',
+          handle: 'starlet',
+          displayName: 'Starlet',
+          status: SubprofileStatus.Published,
+        }),
+      ];
+      subprofiles.createQueryBuilder.mockReturnValue(
+        makeDirectoryQueryBuilderStub(rows),
+      );
+      followersService.loadFollowerCountsFor.mockResolvedValue(
+        new Map([
+          ['sp-a', 12],
+          ['sp-b', 0],
+        ]),
+      );
+
+      const result = await service.directory({}, 'viewer-1');
+
+      // ONE grouped call over every id on the page — not one call per card.
+      expect(followersService.loadFollowerCountsFor).toHaveBeenCalledTimes(1);
+      expect(followersService.loadFollowerCountsFor).toHaveBeenCalledWith([
+        'sp-a',
+        'sp-b',
+      ]);
+      expect(
+        result.items.find((card) => card.handle === 'nightform')?.followerCount,
+      ).toBe(12);
+      expect(
+        result.items.find((card) => card.handle === 'starlet')?.followerCount,
+      ).toBe(0);
+    });
+
+    it('defaults followerCount to 0 for a persona missing from the batched map', async () => {
+      const rows = [
+        completeUnlinked({
+          id: 'sp-c',
+          handle: 'unfollowed',
+          status: SubprofileStatus.Published,
+        }),
+      ];
+      subprofiles.createQueryBuilder.mockReturnValue(
+        makeDirectoryQueryBuilderStub(rows),
+      );
+      followersService.loadFollowerCountsFor.mockResolvedValue(
+        new Map<string, number>(),
+      );
+
+      const result = await service.directory({}, 'viewer-1');
+
+      expect(result.items[0]?.followerCount).toBe(0);
+    });
+  });
+
+  // Personas redesign Phase 1b Task 1 (Shared Contract rule order): owner sees
+  // any status/visibility; else removedAt -> 403 removed; not published -> 404;
+  // private -> 403 private; network + not an authenticated active member ->
+  // 403 members_only; else 200.
+  describe('getByHandle', () => {
+    it('404s when no subprofile matches the handle', async () => {
+      subprofiles.findOne.mockResolvedValue(null);
+      await expect(
+        service.getByHandle('missing', makeViewer()),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('queries by handle + unlinked only — status/visibility are no longer pre-filtered', async () => {
+      subprofiles.findOne.mockResolvedValue(null);
+      await service
+        .getByHandle('nightform', makeViewer())
+        .catch(() => undefined);
+      expect(subprofiles.findOne).toHaveBeenCalledWith({
+        where: {
+          handle: 'nightform',
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+        },
+      });
+    });
+
+    it('returns the full DTO (status: draft) to the owner viewing their own unpublished draft', async () => {
+      const sp = makeSubprofile({
+        handle: 'nightform',
+        status: SubprofileStatus.Draft,
+        visibility: SubprofileVisibility.Private,
+      });
+      subprofiles.findOne.mockResolvedValue(sp);
+      members.findOne.mockResolvedValue({ id: 'member-1' }); // owner/co-owner
+      const dto = await service.getByHandle('nightform', makeViewer());
+      expect(dto.status).toBe(SubprofileStatus.Draft);
+    });
+
+    it('404s a non-owner viewing an unpublished draft (not a distinct restricted state)', async () => {
+      const sp = makeSubprofile({
+        handle: 'nightform',
+        status: SubprofileStatus.Draft,
+      });
+      subprofiles.findOne.mockResolvedValue(sp);
+      members.findOne.mockResolvedValue(null); // not a member
+      await expect(
+        service.getByHandle('nightform', makeViewer()),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('403s "removed" for a removed persona, ahead of the status check', async () => {
+      const sp = makeSubprofile({
+        handle: 'nightform',
+        status: SubprofileStatus.Draft,
+        removedAt: new Date(),
+      });
+      subprofiles.findOne.mockResolvedValue(sp);
+      members.findOne.mockResolvedValue(null);
+      await expectRestricted(
+        service.getByHandle('nightform', makeViewer()),
+        'removed',
+      );
+    });
+
+    it('403s "removed" even for an owner-eligible handle once removed (non-owner viewer)', async () => {
+      const sp = makeSubprofile({
+        handle: 'nightform',
+        status: SubprofileStatus.Published,
+        visibility: SubprofileVisibility.Open,
+        removedAt: new Date(),
+      });
+      subprofiles.findOne.mockResolvedValue(sp);
+      members.findOne.mockResolvedValue(null);
+      await expectRestricted(
+        service.getByHandle('nightform', undefined),
+        'removed',
+      );
+    });
+
+    it('403s "private" for a visitor on a published private persona', async () => {
+      const sp = makeSubprofile({
+        handle: 'nightform',
+        status: SubprofileStatus.Published,
+        visibility: SubprofileVisibility.Private,
+      });
+      subprofiles.findOne.mockResolvedValue(sp);
+      members.findOne.mockResolvedValue(null);
+      await expectRestricted(
+        service.getByHandle('nightform', makeViewer()),
+        'private',
+      );
+    });
+
+    it('403s "private" for an anonymous (signed-out) visitor on a published private persona', async () => {
+      const sp = makeSubprofile({
+        handle: 'nightform',
+        status: SubprofileStatus.Published,
+        visibility: SubprofileVisibility.Private,
+      });
+      subprofiles.findOne.mockResolvedValue(sp);
+      members.findOne.mockResolvedValue(null);
+      await expectRestricted(
+        service.getByHandle('nightform', undefined),
+        'private',
+      );
+    });
+
+    it('403s "members_only" for an anonymous (signed-out) visitor on a network persona', async () => {
+      const sp = makeSubprofile({
+        handle: 'nightform',
+        status: SubprofileStatus.Published,
+        visibility: SubprofileVisibility.Network,
+      });
+      subprofiles.findOne.mockResolvedValue(sp);
+      members.findOne.mockResolvedValue(null);
+      await expectRestricted(
+        service.getByHandle('nightform', undefined),
+        'members_only',
+      );
+    });
+
+    it('returns 200 to an authenticated active member on a network persona', async () => {
+      const sp = makeSubprofile({
+        handle: 'nightform',
+        status: SubprofileStatus.Published,
+        visibility: SubprofileVisibility.Network,
+      });
+      subprofiles.findOne.mockResolvedValue(sp);
+      members.findOne.mockResolvedValue(null); // not owner, but active member
+      const dto = await service.getByHandle('nightform', makeViewer());
+      expect(dto.status).toBe(SubprofileStatus.Published);
+    });
+
+    it('403s "members_only" for a logged-in but non-active (suspended) viewer on a network persona', async () => {
+      // A suspended viewer is treated the same as anonymous for `network` —
+      // members_only, never a silent 200.
+      const sp = makeSubprofile({
+        handle: 'nightform',
+        status: SubprofileStatus.Published,
+        visibility: SubprofileVisibility.Network,
+      });
+      subprofiles.findOne.mockResolvedValue(sp);
+      members.findOne.mockResolvedValue(null);
+      await expectRestricted(
+        service.getByHandle(
+          'nightform',
+          makeViewer({ status: UserStatus.Suspended }),
+        ),
+        'members_only',
+      );
+    });
+  });
+
+  describe('getBySlugForProfile', () => {
+    it('404s when no profile matches the owner slug', async () => {
+      profiles.findOne.mockResolvedValue(null);
+      await expect(
+        service.getBySlugForProfile('missing', 'sub', makeViewer()),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('404s when the owner has no such linked persona', async () => {
+      profiles.findOne.mockResolvedValue({
+        slug: 'diogo',
+        userId: 'owner-1',
+        firstName: 'Diogo',
+        lastName: 'Reis',
+      });
+      subprofiles.findOne.mockResolvedValue(null);
+      await expect(
+        service.getBySlugForProfile('diogo', 'missing-sub', makeViewer()),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('returns the full DTO (status: draft) + owner fields to the owner viewing their own draft', async () => {
+      profiles.findOne.mockResolvedValue({
+        slug: 'diogo',
+        userId: 'owner-1',
+        firstName: 'Diogo',
+        lastName: 'Reis',
+      });
+      const sp = makeSubprofile({
+        userId: 'owner-1',
+        slug: 'nightform',
+        linkVisibility: SubprofileLinkVisibility.Linked,
+        status: SubprofileStatus.Draft,
+      });
+      subprofiles.findOne.mockResolvedValue(sp);
+      members.findOne.mockResolvedValue({ id: 'member-1' });
+      const dto = await service.getBySlugForProfile(
+        'diogo',
+        'nightform',
+        makeViewer(),
+      );
+      expect(dto.status).toBe(SubprofileStatus.Draft);
+      expect(dto.ownerSlug).toBe('diogo');
+      expect(dto.ownerName).toBe('Diogo Reis');
+    });
+
+    it('403s "private" for a visitor on a published private linked persona', async () => {
+      profiles.findOne.mockResolvedValue({
+        slug: 'diogo',
+        userId: 'owner-1',
+        firstName: 'Diogo',
+        lastName: 'Reis',
+      });
+      const sp = makeSubprofile({
+        userId: 'owner-1',
+        slug: 'nightform',
+        linkVisibility: SubprofileLinkVisibility.Linked,
+        status: SubprofileStatus.Published,
+        visibility: SubprofileVisibility.Private,
+      });
+      subprofiles.findOne.mockResolvedValue(sp);
+      members.findOne.mockResolvedValue(null);
+      await expectRestricted(
+        service.getBySlugForProfile('diogo', 'nightform', makeViewer()),
+        'private',
+      );
     });
   });
 
@@ -836,6 +1342,168 @@ describe('SubprofilesService', () => {
       });
       const savedRows = (manager.save.mock.calls[0] as [SubprofileItem[]])[0];
       expect(savedRows.map((row) => row.position)).toEqual([0, 1]);
+    });
+
+    // Personas redesign Phase 0 round-trip (design plan Task 7 Step 4): the
+    // new flat scalars survive the section-replace write path.
+    it('persists the Phase 0 skin scalars on a gig item (venue/doors/ticketUrl/gigState)', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ kind: SubprofileKind.Musician }),
+      );
+      await service.replaceSection('user-1', 'sp-1', 'gigs', [
+        {
+          title: 'Live at The Grotto',
+          venue: 'The Grotto',
+          doors: '8pm',
+          ticketUrl: 'https://tickets.example/grotto',
+          gigState: 'sold_out',
+        },
+      ]);
+      const savedRows = (manager.save.mock.calls[0] as [SubprofileItem[]])[0];
+      expect(savedRows[0]!.venue).toBe('The Grotto');
+      expect(savedRows[0]!.doors).toBe('8pm');
+      expect(savedRows[0]!.ticketUrl).toBe('https://tickets.example/grotto');
+      expect(savedRows[0]!.gigState).toBe('sold_out');
+    });
+
+    // Personas redesign Phase 0 round-trip: nested `structured.courses`
+    // survives the write path unchanged.
+    it('persists a menus item carrying structured.courses', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ kind: SubprofileKind.Chef }),
+      );
+      const structured: ItemStructured = {
+        courses: [
+          {
+            n: 'I',
+            name: 'Starters',
+            dishes: [{ title: 'Soup', note: null, marks: ['v'] }],
+          },
+        ],
+      };
+      await service.replaceSection('user-1', 'sp-1', 'menus', [
+        { title: 'Tasting menu', structured },
+      ]);
+      const savedRows = (manager.save.mock.calls[0] as [SubprofileItem[]])[0];
+      expect(savedRows[0]!.structured).toEqual(structured);
+    });
+
+    it('rejects a structured payload over the 16 KB jsonb cap', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ kind: SubprofileKind.Chef }),
+      );
+      const oversizedStructured: ItemStructured = {
+        snippet: [Array.from({ length: 20_000 }, () => 'x').join('')],
+      };
+      await expect(
+        service.replaceSection('user-1', 'sp-1', 'menus', [
+          { title: 'Tasting menu', structured: oversizedStructured },
+        ]),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    // Personas discovery Phase 5, Moment 6 (Decision §3): `replaceSection`
+    // deletes-and-recreates a section with no stable item ids across saves,
+    // so the emit must diff the PERSONA-WIDE resolved-member collaborator
+    // set before vs. after the save, not just "does this save's payload
+    // contain your handle." Written but UNRUN per this task's hard rules.
+    describe('subprofile_credit notification', () => {
+      it('emits exactly one subprofile_credit when a save newly credits a member handle', async () => {
+        const sp = makeSubprofile({
+          id: 'sp-1',
+          userId: 'user-1',
+          displayName: 'Nightform',
+          slug: 'nightform',
+          handle: 'nightform',
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+        });
+        subprofiles.findOne.mockResolvedValue(sp);
+        // No prior items anywhere on the persona — @alice is a brand new credit.
+        items.find.mockResolvedValue([]);
+        members.find.mockResolvedValue([{ userId: 'user-1' }]); // owner only
+        handleRegistry.find.mockResolvedValue([
+          makeHandleRow({ name: 'alice', userId: 'user-2' }),
+        ]);
+        profiles.find.mockResolvedValue([
+          makeProfile({ userId: 'user-2', slug: 'alice' }),
+        ]);
+
+        await service.replaceSection('user-1', 'sp-1', 'projects', [
+          { title: 'Collab track', collaborators: ['alice'] },
+        ]);
+
+        expect(notifications.create).toHaveBeenCalledTimes(1);
+        expect(notifications.create).toHaveBeenCalledWith(
+          'user-2',
+          NotificationType.SubprofileCredit,
+          {
+            subprofileName: 'Nightform',
+            subprofileSlugOrHandle: 'nightform',
+            itemTitle: 'Collab track',
+            deepLink: '/p/nightform',
+          },
+          'user-1',
+        );
+      });
+
+      it('does not re-fire when re-saving a section with the same collaborators', async () => {
+        const sp = makeSubprofile({
+          id: 'sp-1',
+          userId: 'user-1',
+          displayName: 'Nightform',
+          slug: 'nightform',
+          handle: 'nightform',
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+        });
+        subprofiles.findOne.mockResolvedValue(sp);
+        // This SAME section already credits @alice before this save.
+        items.find.mockResolvedValue([
+          makeItem({
+            section: SubprofileSection.Projects,
+            collaborators: ['alice'],
+          }),
+        ]);
+        members.find.mockResolvedValue([{ userId: 'user-1' }]);
+        handleRegistry.find.mockResolvedValue([
+          makeHandleRow({ name: 'alice', userId: 'user-2' }),
+        ]);
+        profiles.find.mockResolvedValue([
+          makeProfile({ userId: 'user-2', slug: 'alice' }),
+        ]);
+
+        await service.replaceSection('user-1', 'sp-1', 'projects', [
+          { title: 'Collab track', collaborators: ['alice'] },
+        ]);
+
+        expect(notifications.create).not.toHaveBeenCalled();
+      });
+
+      it('does not notify when the "credit" resolves to the persona owner (self)', async () => {
+        const sp = makeSubprofile({
+          id: 'sp-1',
+          userId: 'user-1',
+          displayName: 'Nightform',
+          slug: 'nightform',
+          handle: 'nightform',
+          linkVisibility: SubprofileLinkVisibility.Unlinked,
+        });
+        subprofiles.findOne.mockResolvedValue(sp);
+        items.find.mockResolvedValue([]);
+        members.find.mockResolvedValue([{ userId: 'user-1' }]); // the owner IS a member
+        // The credited handle's registered owner is the persona's own owner.
+        handleRegistry.find.mockResolvedValue([
+          makeHandleRow({ name: 'nightowner', userId: 'user-1' }),
+        ]);
+        profiles.find.mockResolvedValue([
+          makeProfile({ userId: 'user-1', slug: 'nightowner' }),
+        ]);
+
+        await service.replaceSection('user-1', 'sp-1', 'projects', [
+          { title: 'Solo track', collaborators: ['nightowner'] },
+        ]);
+
+        expect(notifications.create).not.toHaveBeenCalled();
+      });
     });
   });
 
@@ -900,6 +1568,77 @@ describe('SubprofilesService', () => {
       });
       const saved = (subprofiles.save.mock.calls[0] as [Subprofile])[0];
       expect(saved.status).toBe(SubprofileStatus.Draft);
+    });
+
+    // Personas redesign Phase 0 round-trip (design plan Task 7 Step 4):
+    // `skinData.booker` survives the PATCH write path.
+    it('persists skinData.booker', async () => {
+      const sp = makeSubprofile();
+      subprofiles.findOne.mockResolvedValue(sp);
+      const skinData: SkinData = {
+        booker: {
+          fee: '$800–1200',
+          rider: 'DI box, monitor wedge',
+          press: 'press@example.com',
+          contact: 'booking@example.com',
+        },
+      };
+      await service.update('user-1', 'sp-1', { skinData });
+      const saved = (subprofiles.save.mock.calls[0] as [Subprofile])[0];
+      expect(saved.skinData).toEqual(skinData);
+    });
+
+    it('rejects a skinData payload over the 16 KB jsonb cap', async () => {
+      const sp = makeSubprofile();
+      subprofiles.findOne.mockResolvedValue(sp);
+      const oversizedSkinData: SkinData = {
+        colophon: Array.from({ length: 20_000 }, () => 'x').join(''),
+      };
+      await expect(
+        service.update('user-1', 'sp-1', { skinData: oversizedSkinData }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  // Personas redesign Phase 0 round-trip (design plan Task 7 Step 4): the new
+  // fields, once on the entity, surface unchanged through the owner AND
+  // public mappers — the same `SubprofileItem`/`Subprofile` shape the write
+  // paths above persist.
+  describe('Personas redesign Phase 0 mapper round-trip', () => {
+    it('surfaces the new item scalars + structured through toSubprofileDTO and toPublicDTO', () => {
+      const structured: ItemStructured = {
+        courses: [{ n: 'I', name: 'Starters', dishes: [{ title: 'Soup' }] }],
+      };
+      const item = makeItem({
+        section: SubprofileSection.Gigs,
+        venue: 'The Grotto',
+        doors: '8pm',
+        ticketUrl: 'https://tickets.example/grotto',
+        gigState: 'sold_out',
+        structured,
+      });
+      const sp = makeSubprofile({
+        skinData: {
+          booker: {
+            fee: '$800',
+            rider: 'DI box',
+            press: 'p@e.com',
+            contact: 'b@e.com',
+          },
+        },
+      });
+
+      const ownerDto = toSubprofileDTO(sp, [item]);
+      expect(ownerDto.items[0]!.venue).toBe('The Grotto');
+      expect(ownerDto.items[0]!.gigState).toBe('sold_out');
+      expect(ownerDto.items[0]!.structured).toEqual(structured);
+      expect(ownerDto.skinData).toEqual(sp.skinData);
+
+      const publicDto = toPublicDTO(sp, [item]);
+      expect(publicDto.items[0]!.venue).toBe('The Grotto');
+      expect(publicDto.items[0]!.gigState).toBe('sold_out');
+      expect(publicDto.items[0]!.structured).toEqual(structured);
+      expect(publicDto.skinData).toEqual(sp.skinData);
     });
   });
 });

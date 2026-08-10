@@ -9,10 +9,14 @@ import {
   SubprofileLinkVisibility,
   SubprofileStatus,
   SubprofileVisibility,
+  type SkinData,
 } from './entities/subprofile.entity';
 import {
   SubprofileItem,
   SubprofileSection,
+  type GigState,
+  type ItemStructured,
+  type WorkState,
 } from './entities/subprofile-item.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 
@@ -28,6 +32,16 @@ export interface SubprofileItemView {
   tags: string[];
   isFeatured: boolean;
   collaborators: CollaboratorView[];
+  // Personas redesign Phase 0 (design plan "Shared Contract").
+  venue: string | null;
+  doors: string | null;
+  ticketUrl: string | null;
+  gigState: GigState | null;
+  medium: string | null;
+  dimensions: string | null;
+  edition: string | null;
+  workState: WorkState | null;
+  structured: ItemStructured | null;
 }
 
 // Resolved collaboration credit — exposed for BOTH linked and unlinked
@@ -87,6 +101,34 @@ export interface SubprofileView {
   endorsementCount: number;
   followerCount: number;
   affiliations: AffiliationView[];
+  // Personas redesign Phase 0 (design plan "Shared Contract").
+  skinData?: SkinData | null;
+  // Personas redesign Phase 2 (dashboard plan Decision §5): the persona's
+  // true co-owner headcount (creator + every invited/accepted co-owner), so
+  // the owner dashboard's `SideCard` can show a "co-owned by N" badge without
+  // an N+1 `listMembers` fetch per card. The creator always holds a
+  // `subprofile_members` row from the moment the persona is created (see
+  // `SubprofilesService.create`), so this is never less than 1.
+  memberCount: number;
+}
+
+// Personas redesign Phase 1b (design plan Task 1 Shared Contract): the signal
+// a restricted (403) public persona read returns, mirrored verbatim by the
+// frontend. `removed` reflects the persona's own `removedAt` — nothing sets
+// that column yet (the admin takedown action is a separate, later feature;
+// see the migration's DO-NOT-RUN comment).
+export type RestrictedState = 'private' | 'members_only' | 'removed';
+
+export interface RestrictedAccessBody {
+  restrictedState: RestrictedState;
+}
+
+// Builds the exact 403 response body the Shared Contract requires — pass
+// straight to `new ForbiddenException(...)` so Nest serialises it verbatim.
+export function restrictedAccessBody(
+  state: RestrictedState,
+): RestrictedAccessBody {
+  return { restrictedState: state };
 }
 
 // Public view — owner identity is stripped when the persona is `unlinked`.
@@ -105,6 +147,12 @@ export interface SubprofilePublicView {
   ctaLabel: string | null;
   ctaUrl: string | null;
   linkVisibility: SubprofileLinkVisibility;
+  // Personas redesign Phase 1b: present so an owner/co-owner viewing their own
+  // unpublished persona through the public read can tell it's a draft (drives
+  // the frontend's `SubprofileDraftBanner`). For every non-owner viewer this
+  // is always `published` — `resolvePublicAccess` 404s anything else before a
+  // DTO is ever built for them.
+  status: SubprofileStatus;
   items: SubprofileItemView[];
   socialLinks: SocialLinkView[];
   endorsementCount: number;
@@ -119,6 +167,10 @@ export interface SubprofilePublicView {
   // nested persona even when viewing a co-owner's profile, without an N+1
   // members fetch per card.
   viewerIsMember: boolean;
+  // Personas redesign Phase 0 (design plan "Shared Contract"). Display data —
+  // present on the public view for BOTH linked and unlinked personas (not
+  // identifying).
+  skinData?: SkinData | null;
 }
 
 // Directory / list card.
@@ -132,6 +184,10 @@ export interface SubprofileCardView {
   availability: string | null;
   socialCount: number;
   tags: string[];
+  // Personas redesign Phase 4 (design plan Decision §3): batched from
+  // `SubprofileFollowersService.loadFollowerCountsFor` in the directory list
+  // path (ONE grouped query, never per-card) — mirrors `socialCount`/`tags`.
+  followerCount: number;
 }
 
 export interface SubprofileOwnerRef {
@@ -158,6 +214,15 @@ function toItemView(
     collaborators: (item.collaborators ?? [])
       .map((handle) => collaboratorsByHandle.get(handle))
       .filter((view): view is CollaboratorView => Boolean(view)),
+    venue: item.venue ?? null,
+    doors: item.doors ?? null,
+    ticketUrl: item.ticketUrl ?? null,
+    gigState: item.gigState ?? null,
+    medium: item.medium ?? null,
+    dimensions: item.dimensions ?? null,
+    edition: item.edition ?? null,
+    workState: item.workState ?? null,
+    structured: item.structured ?? null,
   };
 }
 
@@ -190,6 +255,7 @@ export function toSubprofileDTO(
   followerCount = 0,
   affiliations: AffiliationView[] = [],
   collaboratorsByHandle: Map<string, CollaboratorView> = new Map(),
+  memberCount = 1,
 ): SubprofileView {
   return {
     id: subprofile.id,
@@ -216,6 +282,8 @@ export function toSubprofileDTO(
     endorsementCount,
     followerCount,
     affiliations,
+    skinData: subprofile.skinData ?? null,
+    memberCount,
   };
 }
 
@@ -250,6 +318,7 @@ export function toPublicDTO(
     ctaLabel: subprofile.ctaLabel,
     ctaUrl: subprofile.ctaUrl,
     linkVisibility: subprofile.linkVisibility,
+    status: subprofile.status,
     items: sortItems(items).map((item) =>
       toItemView(item, collaboratorsByHandle),
     ),
@@ -265,6 +334,7 @@ export function toPublicDTO(
     viewerFollowing,
     affiliations,
     viewerIsMember,
+    skinData: subprofile.skinData ?? null,
   };
   // Owner identity is exposed ONLY for linked personas — never leak the tie for
   // an unlinked (pseudonymous) persona (design spec §4).
@@ -303,6 +373,7 @@ export function toCardDTO(
   subprofile: Subprofile,
   socialCount = 0,
   tags: string[] = [],
+  followerCount = 0,
 ): SubprofileCardView {
   return {
     handle: subprofile.handle ?? '',
@@ -314,5 +385,6 @@ export function toCardDTO(
     availability: subprofile.availability,
     socialCount,
     tags,
+    followerCount,
   };
 }

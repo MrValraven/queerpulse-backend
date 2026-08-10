@@ -13,6 +13,7 @@ import { EventReminderPreferencesController } from './event-reminder-preferences
 import { EventBookmark } from './entities/event-bookmark.entity';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
+import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventPhoto } from './entities/event-photo.entity';
 import { EventRsvp } from './entities/event-rsvp.entity';
 import { Event } from './entities/event.entity';
@@ -32,6 +33,7 @@ import { RsvpService } from './rsvp.service';
       EventCohost,
       EventRsvp,
       EventInvite,
+      EventLineupEntry,
       EventPhoto,
       EventBookmark,
       MemberEventReminderPreferences,

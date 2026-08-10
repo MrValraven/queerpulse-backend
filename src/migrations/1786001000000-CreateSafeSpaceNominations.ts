@@ -13,9 +13,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
-export class CreateSafeSpaceNominations1786001000000
-  implements MigrationInterface
-{
+export class CreateSafeSpaceNominations1786001000000 implements MigrationInterface {
   name = 'CreateSafeSpaceNominations1786001000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
@@ -48,9 +46,7 @@ export class CreateSafeSpaceNominations1786001000000
     await queryRunner.query(
       `ALTER TABLE "safe_space_nominations" DROP CONSTRAINT "FK_safe_space_nominations_nominator_id"`,
     );
-    await queryRunner.query(
-      `DROP INDEX "IDX_safe_space_nominations_status"`,
-    );
+    await queryRunner.query(`DROP INDEX "IDX_safe_space_nominations_status"`);
     await queryRunner.query(
       `DROP INDEX "IDX_safe_space_nominations_nominator_id"`,
     );

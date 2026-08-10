@@ -126,13 +126,16 @@ differently from the server it is migrating for.
 
 Uploads (avatars, work images, story covers, gathering photos) go to a
 [Railway Bucket](https://docs.railway.com/reference/buckets) — S3-compatible
-object storage, kept **private** (no public URL). Linking a Bucket to this
-service in the Railway dashboard auto-injects all five variables below; set
-them by hand only for local development.
+object storage, kept **private** (no public URL). Railway Buckets are backed by
+**Tigris** (endpoint host `*.t3.storageapi.dev`, keys prefixed `tid_`/`tsec_`):
+"Railway Bucket" is the dashboard resource, Tigris is the storage underneath,
+and the app talks plain S3 to it either way. Linking a Bucket to this service in
+the Railway dashboard auto-injects all five variables below; set them by hand
+only for local development.
 
 | Variable | Notes |
 | --- | --- |
-| `AWS_ENDPOINT_URL` | e.g. `https://storage.railway.app` |
+| `AWS_ENDPOINT_URL` | e.g. `https://t3.storageapi.dev` (Tigris) |
 | `AWS_DEFAULT_REGION` | Railway's buckets are region `auto` — do not guess a different region |
 | `AWS_S3_BUCKET_NAME` | bucket name |
 | `AWS_ACCESS_KEY_ID` | |
@@ -141,6 +144,16 @@ them by hand only for local development.
 These five are **required when `NODE_ENV=production`** — boot fails without
 all of them rather than letting every upload route fail at runtime on a server
 that reports itself healthy.
+
+Because the browser `PUT`s directly to the presigned upload URL, the bucket
+needs a **CORS policy** allowing `FRONTEND_URL`'s origins — otherwise uploads
+fail the preflight with *"No 'Access-Control-Allow-Origin' header"*. That policy
+is applied by `npm run storage:cors` (`scripts/set-bucket-cors.mjs`), which reads
+its allowed origins from `FRONTEND_URL` and is wired into the Railway deploy's
+`preDeployCommand` (`railway.json`) so it runs idempotently on every deploy. It
+is set on the bucket via the S3 API, **not** in the Railway/Tigris dashboard. To
+apply it out-of-band, run it with the service's env injected:
+`railway run npm run storage:cors`.
 
 Images are never served from a public bucket URL. The client uploads via a
 presigned `PUT`, then sends the object's storage `key` back on the normal

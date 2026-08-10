@@ -17,8 +17,7 @@ export interface SafeSpaceNominationResponse {
 }
 
 /** Admin list row — the client shape plus who submitted it. */
-export interface AdminSafeSpaceNominationResponse
-  extends SafeSpaceNominationResponse {
+export interface AdminSafeSpaceNominationResponse extends SafeSpaceNominationResponse {
   nominatorId: string;
 }
 

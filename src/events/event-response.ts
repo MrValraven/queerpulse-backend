@@ -2,6 +2,7 @@ import { toImageUrl } from '../common/image-url';
 import { Paginated } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
 import { Event } from './entities/event.entity';
+import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 
 export interface EventOrganizerView {
@@ -59,6 +60,37 @@ export interface AttendeeView {
  */
 export interface AttendeesPageDTO extends Paginated<AttendeeView> {
   capacity: number | null;
+}
+
+// `GET/PUT /events/:slug/lineup` — the "who performed" credit list (Personas
+// Phase 5, Moment 5). `name` mirrors `EndorserView`'s shape (a single
+// display string, not `firstName`/`lastName`), since the lineup is a public
+// credit list, not an organizer-management view.
+export interface EventLineupEntryView {
+  slug: string;
+  name: string;
+  avatarUrl: string | null;
+  role: string;
+}
+
+// `viewerEntry` is the caller's own row (or null) — lets the FE cheaply ask
+// "am I on the bill, and what role" without scanning `entries`.
+export interface EventLineupDTO {
+  entries: EventLineupEntryView[];
+  viewerEntry: EventLineupEntryView | null;
+}
+
+export function toLineupEntryView(
+  entry: EventLineupEntry,
+  profile: Profile | undefined,
+): EventLineupEntryView | null {
+  if (!profile) return null;
+  return {
+    slug: profile.slug,
+    name: `${profile.firstName} ${profile.lastName}`.trim(),
+    avatarUrl: toImageUrl(profile.avatarUrl),
+    role: entry.role,
+  };
 }
 
 export function toOrganizerView(

@@ -1,5 +1,8 @@
 import { lookup } from 'node:dns/promises';
-import { Agent as HttpsAgent, type AgentOptions as HttpsAgentOptions } from 'node:https';
+import {
+  Agent as HttpsAgent,
+  type AgentOptions as HttpsAgentOptions,
+} from 'node:https';
 import { isIP, type LookupFunction } from 'node:net';
 import { Agent as UndiciAgent } from 'undici';
 
@@ -126,7 +129,9 @@ export interface ValidatedTarget {
  *  resolve-vs-connect TOCTOU window). Exported so other outbound-request paths
  *  (e.g. web-push delivery, which POSTs to a member-supplied endpoint) can reuse
  *  the same guard AND the same pin. */
-export async function assertPublicUrl(rawUrl: string): Promise<ValidatedTarget> {
+export async function assertPublicUrl(
+  rawUrl: string,
+): Promise<ValidatedTarget> {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);

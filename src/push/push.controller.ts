@@ -58,4 +58,28 @@ export class PushController {
     await this.pushService.removeSubscription(user.userId, dto.endpoint);
     return { ok: true };
   }
+
+  // Lets a member fire a single push to their own devices to confirm the whole
+  // chain works (permission + subscription + delivery). Throttled like the
+  // other push routes so it can't be used to spam a device.
+  @ApiOperation({ summary: 'Send the caller a test push notification' })
+  @ApiCreatedResponse({
+    description: 'The test push was sent (`{ ok: true }`).',
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
+  @Post('test')
+  async test(@CurrentUser() user: CurrentUserData): Promise<{ ok: true }> {
+    await this.pushService.sendToUser(user.userId, {
+      title: 'Test notification',
+      body: 'This is a test — your notifications are working.',
+      tag: 'push-test',
+      data: { url: '/account/settings' },
+      // English strings above are the fallback (iOS, and when the SW lacks the
+      // key); the service worker localizes from these keys when it can.
+      l10n: { titleKey: 'push:test.title', bodyKey: 'push:test.body' },
+    });
+    return { ok: true };
+  }
 }

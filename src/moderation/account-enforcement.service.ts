@@ -246,7 +246,9 @@ export class AccountEnforcementService {
     // Requiring exactly one of these shapes means a missing or malformed
     // duration can never quietly become a permanent ban.
     if (dto.action === 'suspend' && !dto.duration) {
-      throw new BadRequestException('A time-boxed restriction requires a duration.');
+      throw new BadRequestException(
+        'A time-boxed restriction requires a duration.',
+      );
     }
     if (dto.action === 'ban' && dto.duration) {
       throw new BadRequestException(

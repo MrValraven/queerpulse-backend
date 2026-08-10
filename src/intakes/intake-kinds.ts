@@ -40,9 +40,12 @@ export type IntakeStatus = 'new' | 'reviewed';
  * stay public), and its `submitterId` is captured best-effort when the caller
  * happens to be signed in.
  */
-export const MEMBER_ONLY_INTAKE_KINDS: ReadonlySet<IntakeKind> = new Set<IntakeKind>(
-  ['incubator_cohort', 'incubator_mentor', 'incubator_session'],
-);
+export const MEMBER_ONLY_INTAKE_KINDS: ReadonlySet<IntakeKind> =
+  new Set<IntakeKind>([
+    'incubator_cohort',
+    'incubator_mentor',
+    'incubator_session',
+  ]);
 
 export function isIntakeKind(value: string): value is IntakeKind {
   return (INTAKE_KINDS as readonly string[]).includes(value);

@@ -14,6 +14,7 @@ import { requireAuthorSummary } from '../messaging/message-response';
 import { NotificationPreferenceCategory } from '../notifications/notification-preferences';
 import { NotificationPreferencesService } from '../notifications/notification-preferences.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { isStorageKey } from '../storage/storage-key';
 import { Profile } from '../users/entities/profile.entity';
 import { PushService } from './push.service';
 
@@ -115,6 +116,20 @@ export class PushMessageListener {
       const senderName = requireAuthorSummary(senderProfile).displayName;
       const body = preview(message.body);
 
+      // Sender avatar as the notification icon — but ONLY when it is an absolute
+      // public https URL a browser can fetch without our session cookie
+      // (Google-OAuth / seeded avatars are stored as such absolute URLs). A
+      // storage-key avatar resolves to our auth-gated `GET /files/*` route, which
+      // a push client cannot fetch, so we omit `icon` entirely (conditional
+      // spread below) rather than send a URL that would render as a broken image.
+      const rawSenderAvatar = senderProfile?.avatarUrl;
+      const senderAvatar =
+        rawSenderAvatar &&
+        !isStorageKey(rawSenderAvatar) &&
+        rawSenderAvatar.startsWith('https://')
+          ? rawSenderAvatar
+          : undefined;
+
       // One subscription lookup for every deliverable participant instead of
       // one per participant — `sendToUsers` batches the `find` with `IN (...)`.
       await this.pushService.sendToUsers(
@@ -124,6 +139,16 @@ export class PushMessageListener {
           body,
           tag: conversationId,
           data: { conversationId, url: `/messages?c=${conversationId}` },
+          // Omit `icon` (not send `undefined`) when there is no public avatar.
+          ...(senderAvatar ? { icon: senderAvatar } : {}),
+          actions: [{ action: 'view', title: 'View' }],
+          renotify: true,
+          vibrate: [80, 40, 80],
+          // The message's own send time, not delivery time — lets the SW show
+          // the true moment it was sent even if the push was queued/delayed,
+          // and (SP5) sorts correctly if it's later folded into a coalesced
+          // "N new messages" notification.
+          timestamp: message.createdAt.getTime(),
         },
       );
     } catch (error) {

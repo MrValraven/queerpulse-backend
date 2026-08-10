@@ -490,6 +490,11 @@ export function toDirectoryDetail(
   /** The owner's resolved public profile slug (directory service looks it up
    * from `ownerId`), or `null` when the owner isn't linked/public. */
   ownerSlug: string | null = null,
+  /** Normalized member-written safe-space vouches (from the
+   * `safe_space_member_vouches` table), already resolved to the raw
+   * `SafeSpaceVouch` shape by `DirectoryService`. Merged AFTER the curated
+   * jsonb vouches so both surface on the detail page. */
+  memberVouches: SafeSpaceVouch[] = [],
 ): DirectoryDetailDTO {
   const tint = tintForSlug(listing.slug);
   return {
@@ -561,7 +566,7 @@ export function toDirectoryDetail(
     safeSpaceReVerifiedAt: listing.safeSpaceReVerifiedAt ?? null,
     safeSpaceSub: listing.safeSpaceSub || null,
     safeSpacePromises: listing.safeSpacePromises,
-    safeSpaceVouches: listing.safeSpaceVouches,
+    safeSpaceVouches: [...listing.safeSpaceVouches, ...memberVouches],
     safeSpaceRemoval: listing.safeSpaceRemoval,
   };
 }
@@ -750,6 +755,9 @@ export function toRemovedSpaceCard(listing: Listing): RemovedSpaceCardDTO {
 export function toSafeSpaceDetail(
   listing: Listing,
   reviews: ListingReview[],
+  /** Normalized member-written vouches (raw `SafeSpaceVouch` shape), merged
+   * AFTER the curated jsonb vouches so both surface on the hub detail page. */
+  memberVouches: SafeSpaceVouch[] = [],
 ): SafeSpaceDetailDTO {
   const card = toSafeSpaceCard(listing, reviews);
   const glance: { label: string; value: string; accent?: boolean }[] = [
@@ -774,7 +782,7 @@ export function toSafeSpaceDetail(
       accent: index % 2 === 1,
     })),
     promises: listing.safeSpacePromises,
-    vouches: listing.safeSpaceVouches.map((vouch) => ({
+    vouches: [...listing.safeSpaceVouches, ...memberVouches].map((vouch) => ({
       initials: initialsForName(vouch.name),
       name: vouch.name,
       tint: tintForSlug(vouch.name),

@@ -622,16 +622,22 @@ export class ListingsService {
     qb: SelectQueryBuilder<Listing>,
     sort: ListingQueueSort | undefined,
   ): void {
+    // Entity property paths (`createdAt`), not raw DB columns: when `?q=` is
+    // present `buildQueueSearchQuery` adds a submitter `leftJoin`, and `paginate`
+    // (skip/take) then routes this through TypeORM's distinct-id pagination pass,
+    // which resolves ORDER BY via `findColumnWithPropertyPath` and throws
+    // `undefined.databaseName` on a raw column name. (`l.name` already resolves —
+    // its property name equals its column name.)
     switch (sort) {
       case 'oldest':
-        qb.orderBy('l.created_at', 'ASC');
+        qb.orderBy('l.createdAt', 'ASC');
         break;
       case 'name':
         qb.orderBy('l.name', 'ASC');
         break;
       case 'newest':
       default:
-        qb.orderBy('l.created_at', 'DESC');
+        qb.orderBy('l.createdAt', 'DESC');
     }
   }
 

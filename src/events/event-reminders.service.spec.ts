@@ -2,7 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
-import { PushService } from '../push/push.service';
+import { PushPayload, PushService } from '../push/push.service';
 import { EventRsvp } from './entities/event-rsvp.entity';
 import { MemberEventReminderPreferences } from './entities/member-event-reminder-preferences.entity';
 import { Event } from './entities/event.entity';
@@ -153,5 +153,90 @@ describe('EventRemindersService', () => {
     await service.sendDueReminders();
     expect(notifications.createForRecipients).not.toHaveBeenCalled();
     expect(events.update).not.toHaveBeenCalled();
+  });
+
+  // Drives one due attendee through the sweep so `pushReminders` runs with a
+  // real reminded-user list, then asserts the rich push payload it built.
+  function primeOneDueReminder(event: Record<string, unknown>): void {
+    events.find.mockResolvedValue([event]);
+    rsvps.find.mockResolvedValue([{ id: 'r1', userId: 'u1' }]);
+    claimQueryBuilder.execute.mockResolvedValue({
+      raw: [{ id: 'r1', user_id: 'u1' }],
+    });
+  }
+
+  it('sends a rich reminder push: cover image, details action, requireInteraction, vibrate', async () => {
+    const startAt = new Date();
+    primeOneDueReminder({
+      id: 'e1',
+      slug: 'pride-picnic',
+      title: 'Pride Picnic',
+      startAt,
+      reminderSentAt: null,
+      // An absolute public https cover — fetchable by a push client, so it
+      // becomes the notification image.
+      coverImageUrl: 'https://images.example.com/pride-picnic.jpg',
+    });
+
+    await service.sendDueReminders();
+
+    expect(push.sendToUsers).toHaveBeenCalledWith(
+      ['u1'],
+      expect.objectContaining({
+        title: 'Pride Picnic',
+        image: 'https://images.example.com/pride-picnic.jpg',
+        actions: [{ action: 'view', title: 'Details' }],
+        requireInteraction: true,
+        vibrate: [100, 50, 100],
+        data: { url: '/events/pride-picnic' },
+        l10n: { bodyKey: 'push:event.reminder.body' },
+        // The event's own start time, not delivery time.
+        timestamp: startAt.getTime(),
+      }),
+    );
+  });
+
+  it('omits image when the event has no cover', async () => {
+    primeOneDueReminder({
+      id: 'e2',
+      slug: 'book-club',
+      title: 'Book Club',
+      startAt: new Date(),
+      reminderSentAt: null,
+      coverImageUrl: null,
+    });
+
+    await service.sendDueReminders();
+
+    const [, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(payload).not.toHaveProperty('image');
+    // The non-image rich fields still ship.
+    expect(payload.actions).toEqual([{ action: 'view', title: 'Details' }]);
+    expect(payload.requireInteraction).toBe(true);
+  });
+
+  it('omits image for a storage-key cover (our /files/* route, not a direct public URL)', async () => {
+    primeOneDueReminder({
+      id: 'e3',
+      slug: 'mixer',
+      title: 'Mixer',
+      startAt: new Date(),
+      reminderSentAt: null,
+      // A storage key resolves through `toImageUrl` to our own `GET /files/*`
+      // redirect route, not a direct absolute-https asset — never the image.
+      coverImageUrl:
+        'listing-photos/11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222.jpg',
+    });
+
+    await service.sendDueReminders();
+
+    const [, payload] = push.sendToUsers.mock.calls[0] as [
+      string[],
+      PushPayload,
+    ];
+    expect(payload).not.toHaveProperty('image');
   });
 });

@@ -105,8 +105,13 @@ export class MagazineService {
       );
     }
 
-    qb.orderBy('article.published_at', 'DESC', 'NULLS LAST').addOrderBy(
-      'article.created_at',
+    // Property paths (`publishedAt`/`createdAt`), not raw DB columns: when the
+    // `?author=` byline join above is present, `paginate` (skip/take) sends this
+    // through TypeORM's distinct-id pagination pass, which resolves ORDER BY via
+    // `findColumnWithPropertyPath` and throws `undefined.databaseName` on a raw
+    // column name.
+    qb.orderBy('article.publishedAt', 'DESC', 'NULLS LAST').addOrderBy(
+      'article.createdAt',
       'DESC',
     );
 

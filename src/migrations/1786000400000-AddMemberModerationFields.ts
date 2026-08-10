@@ -22,9 +22,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * (`users.status = 'suspended'` + `users.suspended_until`) and the immutable
  * `mod_audit_logs` trail — it needs NO new columns, so none are added here.
  */
-export class AddMemberModerationFields1786000400000
-  implements MigrationInterface
-{
+export class AddMemberModerationFields1786000400000 implements MigrationInterface {
   name = 'AddMemberModerationFields1786000400000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

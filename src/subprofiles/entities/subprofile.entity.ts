@@ -48,6 +48,33 @@ export enum SubprofileStatus {
   Published = 'published',
 }
 
+// Persona-level skin blocks (Personas redesign Phase 0, design plan "Shared
+// Contract"). Kept in lockstep with the frontend mirror in
+// `subprofiles.api.ts`. Only the keys relevant to the persona's derived skin
+// (a pure function of `kind` — never stored) are populated.
+export interface SkinData {
+  booker?: {
+    fee: string;
+    rider: string;
+    press: string;
+    contact: string;
+  } | null;
+  excerpt?: { from: string; lines: string[] } | null;
+  colophon?: string | null;
+  menuMeta?: { no: string; when: string; practical: string[] } | null;
+  practical?: {
+    fee: string;
+    sliding: string;
+    length: string;
+    languages: string;
+    mode: string;
+    next: string;
+  } | null;
+  firstSession?: { title: string; body: string }[] | null;
+  access?: string[] | null;
+  referrals?: { name: string; note: string }[] | null;
+}
+
 @Entity('subprofiles')
 @Index('IDX_subprofiles_directory', ['kind', 'status', 'visibility'])
 @Index('UQ_subprofiles_user_slug', ['userId', 'slug'], { unique: true })
@@ -136,6 +163,20 @@ export class Subprofile {
   // Ordering under the main profile.
   @Column({ type: 'int', default: 0 })
   position!: number;
+
+  // Personas redesign Phase 0: persona-level skin display blocks (see
+  // `SkinData` above). Display data only — present on the public view too.
+  @Column({ type: 'jsonb', nullable: true })
+  skinData!: SkinData | null;
+
+  // Personas redesign Phase 1b: set = this persona is withheld from every
+  // non-owner public read as `403 { restrictedState: "removed" }` (see
+  // `SubprofilesService`'s `resolvePublicAccess`/`buildPublicView`). Nothing
+  // sets this column yet — the admin takedown action that would is a separate,
+  // later moderation-console feature (Phase 1b's Non-goals); for now it is
+  // DB-settable only.
+  @Column({ type: 'timestamptz', nullable: true })
+  removedAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

@@ -14,7 +14,7 @@ function insertQbStub() {
 // Chainable select-builder stub for `listSaved`.
 function selectQbStub(rows: unknown[]) {
   const qb: Record<string, jest.Mock> = {};
-  for (const method of ['innerJoin', 'where', 'orderBy', 'skip', 'take']) {
+  for (const method of ['innerJoin', 'where', 'orderBy', 'offset', 'limit']) {
     qb[method] = jest.fn().mockReturnValue(qb);
   }
   qb.getMany = jest.fn().mockResolvedValue(rows);
@@ -33,7 +33,10 @@ function build() {
     createQueryBuilder: jest.fn(),
     findOne: jest.fn(),
   };
-  const service = new EventBookmarksService(bookmarks as never, events as never);
+  const service = new EventBookmarksService(
+    bookmarks as never,
+    events as never,
+  );
   return { service, bookmarks, events, insertQb };
 }
 
@@ -61,7 +64,7 @@ describe('EventBookmarksService', () => {
   });
 
   describe('removeBookmark', () => {
-    it('deletes the caller\'s bookmark and reports bookmarked:false', async () => {
+    it("deletes the caller's bookmark and reports bookmarked:false", async () => {
       const { service, events, bookmarks } = build();
       events.findOne.mockResolvedValue({ id: 'event-1' });
 
@@ -79,7 +82,9 @@ describe('EventBookmarksService', () => {
       events.findOne.mockResolvedValue({ id: 'event-1' });
       bookmarks.delete.mockResolvedValue({ affected: 0 });
 
-      await expect(service.removeBookmark('me', 'pride-picnic')).resolves.toEqual({
+      await expect(
+        service.removeBookmark('me', 'pride-picnic'),
+      ).resolves.toEqual({
         bookmarked: false,
       });
     });
@@ -88,14 +93,14 @@ describe('EventBookmarksService', () => {
       const { service, events } = build();
       events.findOne.mockResolvedValue(null);
 
-      await expect(service.removeBookmark('me', 'ghost')).rejects.toBeInstanceOf(
-        NotFoundException,
-      );
+      await expect(
+        service.removeBookmark('me', 'ghost'),
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 
   describe('listSaved', () => {
-    it('joins bookmarks to events, newest-saved first, bounded by skip/take', async () => {
+    it('joins bookmarks to events, newest-saved first, bounded by offset/limit', async () => {
       const { service, events } = build();
       const qb = selectQbStub([{ id: 'event-1' }]);
       events.createQueryBuilder.mockReturnValue(qb);
@@ -104,8 +109,8 @@ describe('EventBookmarksService', () => {
 
       expect(qb.innerJoin).toHaveBeenCalled();
       expect(qb.orderBy).toHaveBeenCalledWith('b.created_at', 'DESC');
-      expect(qb.skip).toHaveBeenCalledWith(0);
-      expect(qb.take).toHaveBeenCalledWith(20);
+      expect(qb.offset).toHaveBeenCalledWith(0);
+      expect(qb.limit).toHaveBeenCalledWith(20);
       expect(result).toEqual([{ id: 'event-1' }]);
     });
   });
@@ -114,7 +119,9 @@ describe('EventBookmarksService', () => {
     it('short-circuits an empty id list without querying', async () => {
       const { service, bookmarks } = build();
 
-      await expect(service.bookmarkedEventIds('me', [])).resolves.toEqual(new Set());
+      await expect(service.bookmarkedEventIds('me', [])).resolves.toEqual(
+        new Set(),
+      );
       expect(bookmarks.find).not.toHaveBeenCalled();
     });
 

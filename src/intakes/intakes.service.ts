@@ -10,10 +10,7 @@ import { UserStatus } from '../users/entities/user.entity';
 import { Paginated, normalizePage, paginate } from '../common/pagination';
 import { ListIntakesQuery } from './dto/list-intakes.query';
 import { IntakeSubmission } from './entities/intake-submission.entity';
-import {
-  MEMBER_ONLY_INTAKE_KINDS,
-  isIntakeKind,
-} from './intake-kinds';
+import { MEMBER_ONLY_INTAKE_KINDS, isIntakeKind } from './intake-kinds';
 import {
   IntakeAckDTO,
   IntakeSubmissionDTO,

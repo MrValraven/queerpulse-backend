@@ -305,7 +305,12 @@ export class MessagesService {
       )
       // No `.withDeleted()`: the @DeleteDateColumn default filter drops
       // soft-deleted rows, so tombstoned bodies are never returned.
-      .orderBy('m.created_at', 'DESC')
+      // Property path (`createdAt`), not the raw column: the participation
+      // `innerJoin` above + `.take()` engages TypeORM's distinct-id pagination
+      // pass, which resolves ORDER BY via `findColumnWithPropertyPath` and
+      // throws `undefined.databaseName` on a raw DB column name. (Sibling
+      // `message-annotations` sidesteps the same trap with `.limit()`.)
+      .orderBy('m.createdAt', 'DESC')
       .addOrderBy('m.id', 'DESC')
       .take(cappedLimit)
       .getMany();

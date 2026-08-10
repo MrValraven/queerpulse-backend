@@ -9,6 +9,7 @@ import {
   DeleteObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
@@ -36,6 +37,16 @@ export interface PresignedUpload {
   key: string;
   /** Seconds until `uploadUrl` expires. */
   expiresIn: number;
+}
+
+/** One object as returned by an admin bucket listing (metadata only). */
+export interface StoredObject {
+  /** Full storage key, e.g. `avatars/<userId>/<uuid>.jpg`. */
+  key: string;
+  /** Object size in bytes (0 when the listing omits it). */
+  size: number;
+  /** ISO timestamp of the object's last modification, or null when absent. */
+  lastModified: string | null;
 }
 
 @Injectable()
@@ -206,6 +217,72 @@ export class StorageService {
       deletedCount += await this.deleteObjectsByKey(client, bucket, keys);
     }
     return deletedCount;
+  }
+
+  /**
+   * ONE page of raw bucket objects for the admin media console (audit tooling).
+   * Unlike the private `listObjectKeys` sweep used by account erasure, this does
+   * NOT follow pagination internally — it returns a single `ListObjectsV2` page
+   * plus the continuation token, so the admin UI can page on demand. `prefix` is
+   * validated to a known upload-kind prefix by the caller (`AdminMediaService`);
+   * an absent prefix lists the whole user-upload space, which is intended here.
+   */
+  async listObjects(params: {
+    prefix?: string;
+    continuationToken?: string;
+    maxKeys: number;
+  }): Promise<{
+    objects: StoredObject[];
+    nextContinuationToken: string | null;
+  }> {
+    const { prefix, continuationToken, maxKeys } = params;
+    const response = await this.storageClient().send(
+      new ListObjectsV2Command({
+        Bucket: this.requireConfig('storage.bucket'),
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+        MaxKeys: maxKeys,
+      }),
+    );
+    const objects: StoredObject[] = (response.Contents ?? [])
+      .filter(
+        (object): object is typeof object & { Key: string } =>
+          typeof object.Key === 'string',
+      )
+      .map((object) => ({
+        key: object.Key,
+        size: object.Size ?? 0,
+        lastModified: object.LastModified
+          ? object.LastModified.toISOString()
+          : null,
+      }));
+    return {
+      objects,
+      nextContinuationToken: response.IsTruncated
+        ? (response.NextContinuationToken ?? null)
+        : null,
+    };
+  }
+
+  /**
+   * The object's REAL content type + length straight from storage metadata,
+   * for the admin console's on-demand content-type-spoofing check (a `.png`
+   * key whose stored `Content-Type` is actually `text/html`). One `HeadObject`
+   * per click — never run across a whole listing.
+   */
+  async headObject(
+    key: string,
+  ): Promise<{ contentType: string | null; contentLength: number | null }> {
+    const response = await this.storageClient().send(
+      new HeadObjectCommand({
+        Bucket: this.requireConfig('storage.bucket'),
+        Key: key,
+      }),
+    );
+    return {
+      contentType: response.ContentType ?? null,
+      contentLength: response.ContentLength ?? null,
+    };
   }
 
   // Every key under a prefix, following `ListObjectsV2` pagination to the end so

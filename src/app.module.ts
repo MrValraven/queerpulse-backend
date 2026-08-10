@@ -43,11 +43,13 @@ import { CultureModule } from './culture/culture.module';
 import { GovernanceModule } from './governance/governance.module';
 import { RoadmapModule } from './roadmap/roadmap.module';
 import { LandingModule } from './landing/landing.module';
+import { PressKitModule } from './press-kit/press-kit.module';
 import { AdminCommunitiesModule } from './admin-communities/admin-communities.module';
 import { AdminMembersModule } from './admin-members/admin-members.module';
 import { AdminInvitesModule } from './admin-invites/admin-invites.module';
 import { AdminTrustNetworkModule } from './admin-trust-network/admin-trust-network.module';
 import { AdminOverviewModule } from './admin-overview/admin-overview.module';
+import { AdminMediaModule } from './admin-media/admin-media.module';
 import { AdminBotsModule } from './admin-bots/admin-bots.module';
 import { AdminHousingModule } from './admin-housing/admin-housing.module';
 import { PlatformStaffModule } from './platform-staff/platform-staff.module';
@@ -71,11 +73,13 @@ import { ContentModerationModule } from './content-moderation/content-moderation
 import { ModerationModule } from './moderation/moderation.module';
 import { AccountModule } from './account/account.module';
 import { ConsentModule } from './consent/consent.module';
+import { NudgesModule } from './nudges/nudges.module';
 import { SavedModule } from './saved/saved.module';
 import { CollectionsModule } from './collections/collections.module';
 import { TopicsModule } from './topics/topics.module';
 import { NewsletterModule } from './newsletter/newsletter.module';
 import { SafeSpaceNominationsModule } from './safe-space-nominations/safe-space-nominations.module';
+import { SafeSpaceVouchesModule } from './safe-space-vouches/safe-space-vouches.module';
 import { InquiriesModule } from './inquiries/inquiries.module';
 import { IntakesModule } from './intakes/intakes.module';
 import { PreferencesModule } from './preferences/preferences.module';
@@ -205,6 +209,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     HandlesModule,
     VouchModule,
     SafeSpaceNominationsModule,
+    SafeSpaceVouchesModule,
     ConnectionsModule,
     MessagingModule,
     LinkPreviewModule,
@@ -231,6 +236,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     ModerationModule,
     AccountModule,
     ConsentModule,
+    NudgesModule,
     SavedModule,
     CollectionsModule,
     IntakesModule,
@@ -261,11 +267,13 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     ReadingGroupProposalsModule,
     ChangemakersModule,
     LandingModule,
+    PressKitModule,
     AdminCommunitiesModule,
     AdminMembersModule,
     AdminInvitesModule,
     AdminTrustNetworkModule,
     AdminOverviewModule,
+    AdminMediaModule,
     AdminBotsModule,
     AdminHousingModule,
     PlatformStaffModule,

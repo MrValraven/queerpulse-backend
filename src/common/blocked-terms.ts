@@ -69,7 +69,9 @@ const BLOCKED_TERMS_PATTERN: RegExp = BLOCKED_TERMS.length
  * whole word (case-insensitive). Accepts several fragments so a caller can pass
  * e.g. a display name, bio, and handle in one call without pre-joining.
  */
-export function textHasBlockedTerm(...fragments: (string | null | undefined)[]): boolean {
+export function textHasBlockedTerm(
+  ...fragments: (string | null | undefined)[]
+): boolean {
   const haystack = fragments.filter(Boolean).join(' ');
   return BLOCKED_TERMS_PATTERN.test(haystack);
 }

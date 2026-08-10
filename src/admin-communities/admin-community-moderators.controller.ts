@@ -47,9 +47,7 @@ import { AddModeratorDto } from './dto/add-moderator.dto';
 @ApiNotFoundResponse({ description: 'Community or member not found.' })
 @Controller('admin/communities/:slug/moderators')
 export class AdminCommunityModeratorsController {
-  constructor(
-    private readonly moderators: AdminCommunityModeratorsService,
-  ) {}
+  constructor(private readonly moderators: AdminCommunityModeratorsService) {}
 
   @ApiOperation({ summary: "List a community's moderators." })
   @ApiOkResponse({ description: 'The community moderators, oldest first.' })

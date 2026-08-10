@@ -58,14 +58,28 @@ export class EventBookmarksService {
    * fetch events".
    */
   listSaved(userId: string, skip: number, take: number): Promise<Event[]> {
-    return this.events
-      .createQueryBuilder('e')
-      .innerJoin(EventBookmark, 'b', 'b.event_id = e.id')
-      .where('b.user_id = :userId', { userId })
-      .orderBy('b.created_at', 'DESC')
-      .skip(skip)
-      .take(take)
-      .getMany();
+    return (
+      this.events
+        .createQueryBuilder('e')
+        .innerJoin(EventBookmark, 'b', 'b.event_id = e.id')
+        .where('b.user_id = :userId', { userId })
+        // Order by the bookmark's own timestamp — "most-recently-saved first".
+        // Raw column (`b.created_at`), resolved directly in the main query's SQL;
+        // no distinct-pass property-path translation is involved (see below).
+        .orderBy('b.created_at', 'DESC')
+        // `.offset()/.limit()` (raw SQL LIMIT/OFFSET), NOT `.skip()/.take()`.
+        // `.skip()/.take()` with a join triggers TypeORM's distinct-id pagination
+        // pass, whose subquery selects only the MAIN entity's columns — so an
+        // ORDER BY on the JOINED alias's column (`b.created_at`) becomes an
+        // unresolved `distinctAlias.b_created_at` and Postgres throws
+        // "column ... does not exist". The distinct pass exists to dedupe rows a
+        // join can fan out; here it can't — `UQ_event_bookmarks (user_id,
+        // event_id)` makes this join strictly one bookmark row per event — so
+        // plain LIMIT/OFFSET is both correct and lets the ORDER BY resolve.
+        .offset(skip)
+        .limit(take)
+        .getMany()
+    );
   }
 
   /**

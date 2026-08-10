@@ -14,7 +14,10 @@ import { LandlordsService } from './landlords.service';
 type RepoMock = Record<string, jest.Mock>;
 type QueryBuilderStub = Record<string, jest.Mock>;
 
-function makePaginatedBuilder(rows: unknown[], total: number): QueryBuilderStub {
+function makePaginatedBuilder(
+  rows: unknown[],
+  total: number,
+): QueryBuilderStub {
   const builder: QueryBuilderStub = {};
   for (const method of ['where', 'andWhere', 'orderBy', 'skip', 'take']) {
     builder[method] = jest.fn().mockReturnValue(builder);
@@ -41,7 +44,7 @@ function makeLandlord(overrides: Partial<Landlord> = {}): Landlord {
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
-  } as unknown as Landlord;
+  };
 }
 
 function makeRec(
@@ -55,7 +58,7 @@ function makeRec(
     text: 'Great!',
     createdAt: new Date('2026-01-02T00:00:00.000Z'),
     ...overrides,
-  } as unknown as LandlordRecommendation;
+  };
 }
 
 function uniqueViolation(): Error & { code: string } {
@@ -124,7 +127,7 @@ describe('LandlordsService', () => {
         makeRec({ id: 'rec-2', stars: 3 }),
       ]);
 
-      const result = await service.browse({ page: 1 } as never);
+      const result = await service.browse({ page: 1 });
 
       expect(builder.where).toHaveBeenCalledWith('l.status = :live', {
         live: LandlordStatus.Live,
@@ -136,7 +139,7 @@ describe('LandlordsService', () => {
       const builder = makePaginatedBuilder([], 0);
       landlords.createQueryBuilder.mockReturnValue(builder);
 
-      await service.browse({ hood: 'Arroios' } as never);
+      await service.browse({ hood: 'Arroios' });
 
       expect(builder.andWhere).toHaveBeenCalledWith(
         'LOWER(l.hood) = LOWER(:hood)',
@@ -168,10 +171,14 @@ describe('LandlordsService', () => {
     it('creates a member-suggested landlord in Review status attributed to the user', async () => {
       landlords.exists.mockResolvedValue(false);
       landlords.save.mockImplementation((row: unknown) =>
-        Promise.resolve(makeLandlord({ ...(row as object), id: 'landlord-new' })),
+        Promise.resolve(
+          makeLandlord({ ...(row as object), id: 'landlord-new' }),
+        ),
       );
 
-      const result = await service.suggest('user-1', { name: 'New One' } as never);
+      const result = await service.suggest('user-1', {
+        name: 'New One',
+      });
 
       expect(landlords.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -188,7 +195,10 @@ describe('LandlordsService', () => {
       landlords.findOne.mockResolvedValue(null);
 
       await expect(
-        service.recommend('ghost', 'author-1', { stars: 5, text: 'x' } as never),
+        service.recommend('ghost', 'author-1', {
+          stars: 5,
+          text: 'x',
+        }),
       ).rejects.toThrow(NotFoundException);
     });
 
@@ -202,7 +212,7 @@ describe('LandlordsService', () => {
       const result = await service.recommend('friendly-landlord', 'author-1', {
         stars: 5,
         text: 'Wonderful',
-      } as never);
+      });
 
       expect(recommendations.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -225,7 +235,7 @@ describe('LandlordsService', () => {
       const result = await service.recommend('friendly-landlord', 'author-1', {
         stars: 4,
         text: 'Better now',
-      } as never);
+      });
 
       expect(recommendations.create).not.toHaveBeenCalled();
       expect(recommendations.save).toHaveBeenCalledWith(
@@ -246,7 +256,7 @@ describe('LandlordsService', () => {
       const result = await service.recommend('friendly-landlord', 'author-1', {
         stars: 5,
         text: 'raced',
-      } as never);
+      });
 
       expect(result.stars).toBe(5);
     });
@@ -257,7 +267,7 @@ describe('LandlordsService', () => {
       landlords.findOne.mockResolvedValue(null);
 
       await expect(
-        service.createIntroRequest('ghost', 'user-1', { name: 'Sam' } as never),
+        service.createIntroRequest('ghost', 'user-1', { name: 'Sam' }),
       ).rejects.toThrow(NotFoundException);
     });
 
@@ -271,7 +281,7 @@ describe('LandlordsService', () => {
       const result = await service.createIntroRequest(
         'friendly-landlord',
         'user-1',
-        { name: 'Sam', note: 'hi' } as never,
+        { name: 'Sam', note: 'hi' },
       );
 
       expect(introRequests.create).toHaveBeenCalledWith(
@@ -291,7 +301,7 @@ describe('LandlordsService', () => {
         Promise.resolve(makeLandlord({ ...(row as object) })),
       );
 
-      await service.adminCreate({ name: 'Studio Owner' } as never);
+      await service.adminCreate({ name: 'Studio Owner' });
 
       expect(landlords.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -305,9 +315,9 @@ describe('LandlordsService', () => {
       landlords.exists.mockResolvedValue(false);
       landlords.save.mockRejectedValue(uniqueViolation());
 
-      await expect(
-        service.adminCreate({ name: 'Clash' } as never),
-      ).rejects.toThrow(ConflictException);
+      await expect(service.adminCreate({ name: 'Clash' })).rejects.toThrow(
+        ConflictException,
+      );
     });
   });
 
@@ -382,9 +392,7 @@ describe('LandlordsService', () => {
     it('returns an empty list when the filter slug matches no landlord', async () => {
       landlords.findOne.mockResolvedValue(null);
 
-      await expect(
-        service.listIntroRequests('ghost'),
-      ).resolves.toEqual([]);
+      await expect(service.listIntroRequests('ghost')).resolves.toEqual([]);
       expect(introRequests.find).not.toHaveBeenCalled();
     });
 
@@ -415,9 +423,9 @@ describe('LandlordsService', () => {
     it('404s an unknown request', async () => {
       introRequests.findOne.mockResolvedValue(null);
 
-      await expect(
-        service.triageIntroRequest('x', 'accepted'),
-      ).rejects.toThrow(NotFoundException);
+      await expect(service.triageIntroRequest('x', 'accepted')).rejects.toThrow(
+        NotFoundException,
+      );
     });
 
     it('accepts a request and re-embeds the landlord in the DTO', async () => {
@@ -429,7 +437,7 @@ describe('LandlordsService', () => {
         contactEmail: null,
         status: LandlordIntroRequestStatus.Pending,
         createdAt: new Date(),
-      } as LandlordIntroRequest);
+      });
       introRequests.save.mockImplementation((row: unknown) =>
         Promise.resolve(row),
       );
@@ -438,7 +446,9 @@ describe('LandlordsService', () => {
       const result = await service.triageIntroRequest('intro-1', 'accepted');
 
       expect(introRequests.save).toHaveBeenCalledWith(
-        expect.objectContaining({ status: LandlordIntroRequestStatus.Accepted }),
+        expect.objectContaining({
+          status: LandlordIntroRequestStatus.Accepted,
+        }),
       );
       expect(result.landlordSlug).toBe('friendly-landlord');
     });
@@ -452,7 +462,7 @@ describe('LandlordsService', () => {
         contactEmail: null,
         status: LandlordIntroRequestStatus.Pending,
         createdAt: new Date(),
-      } as LandlordIntroRequest);
+      });
       introRequests.save.mockImplementation((row: unknown) =>
         Promise.resolve(row),
       );
@@ -461,7 +471,9 @@ describe('LandlordsService', () => {
       await service.triageIntroRequest('intro-2', 'declined');
 
       expect(introRequests.save).toHaveBeenCalledWith(
-        expect.objectContaining({ status: LandlordIntroRequestStatus.Declined }),
+        expect.objectContaining({
+          status: LandlordIntroRequestStatus.Declined,
+        }),
       );
     });
   });

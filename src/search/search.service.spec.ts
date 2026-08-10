@@ -6,7 +6,9 @@ import { SearchResultType } from './dto/search.query';
 // only the one method `SearchService` calls on it. The real `*ToResult` mappers
 // run against the rows these fakes return.
 function build() {
-  const profiles = { searchMembers: jest.fn().mockResolvedValue({ items: [] }) };
+  const profiles = {
+    searchMembers: jest.fn().mockResolvedValue({ items: [] }),
+  };
   const directory = { listDirectory: jest.fn().mockResolvedValue([]) };
   const communities = { searchByText: jest.fn().mockResolvedValue([]) };
   const events = { searchByText: jest.fn().mockResolvedValue([]) };
@@ -68,7 +70,12 @@ describe('SearchService.search', () => {
   it('short-circuits an empty/whitespace query without touching any resource', async () => {
     const bag = build();
 
-    const result = await bag.service.search('viewer-1', '   ', undefined, undefined);
+    const result = await bag.service.search(
+      'viewer-1',
+      '   ',
+      undefined,
+      undefined,
+    );
 
     expect(result).toEqual({ query: '', results: [] });
     expect(bag.profiles.searchMembers).not.toHaveBeenCalled();
@@ -123,7 +130,12 @@ describe('SearchService.search', () => {
       communityCard('c1'),
     ]);
 
-    const result = await bag.service.search('viewer-1', 'pride', undefined, undefined);
+    const result = await bag.service.search(
+      'viewer-1',
+      'pride',
+      undefined,
+      undefined,
+    );
 
     expect(result.results).toHaveLength(8);
     const types = result.results.map((row) => row.type);

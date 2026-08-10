@@ -93,6 +93,8 @@ function makeSubprofile(overrides: Partial<Subprofile> = {}): Subprofile {
     visibility: SubprofileVisibility.Open,
     status: SubprofileStatus.Draft,
     position: 0,
+    skinData: null,
+    removedAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,

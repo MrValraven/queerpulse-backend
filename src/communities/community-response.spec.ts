@@ -121,7 +121,13 @@ describe('toCommunityPost / toCommunityReply permission flags', () => {
   it('tombstoned post hides body/author and offers restore to owner/mod', () => {
     const dto = toCommunityPost(
       makePost({ deletedAt: new Date() }),
-      { slug: 'a', firstName: 'A', lastName: 'B', pronouns: null, avatarUrl: null },
+      {
+        slug: 'a',
+        firstName: 'A',
+        lastName: 'B',
+        pronouns: null,
+        avatarUrl: null,
+      },
       EMPTY_REACTIONS,
       [],
       0,

@@ -211,7 +211,10 @@ export class RoadmapController {
   @Delete('admin/items/:id')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)
-  deleteItem(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
+  deleteItem(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     return this.adminService.deleteItem(id, this.toActor(user));
   }
 
@@ -250,7 +253,10 @@ export class RoadmapController {
   @Post('admin/items/:id/duplicate')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)
-  duplicateItem(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
+  duplicateItem(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     return this.adminService.duplicateItem(id, this.toActor(user));
   }
 
@@ -340,7 +346,10 @@ export class RoadmapController {
   @Delete('admin/ideas/:id')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)
-  deleteIdea(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
+  deleteIdea(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     return this.adminService.deleteIdea(id, this.toActor(user));
   }
 
@@ -357,7 +366,10 @@ export class RoadmapController {
   @Post('admin/ideas/:id/promote')
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)
-  promoteIdea(@CurrentUser() user: CurrentUserData, @Param('id', ParseUUIDPipe) id: string) {
+  promoteIdea(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     return this.adminService.promoteIdea(id, this.toActor(user));
   }
 

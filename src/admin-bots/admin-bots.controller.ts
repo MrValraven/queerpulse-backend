@@ -101,7 +101,10 @@ export class AdminBotsController {
   @ApiBadRequestResponse({ description: 'Malformed request body.' })
   @ApiNotFoundResponse({ description: 'System account not found.' })
   @Put(':userId/work')
-  replaceBotWork(@Param('userId', ParseUUIDPipe) userId: string, @Body() dto: ReplaceWorkDto) {
+  replaceBotWork(
+    @Param('userId', ParseUUIDPipe) userId: string,
+    @Body() dto: ReplaceWorkDto,
+  ) {
     return this.adminBots.replaceBotWork(userId, dto);
   }
 
