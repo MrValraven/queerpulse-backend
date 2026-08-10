@@ -6,6 +6,7 @@ import {
   Res,
   UnauthorizedException,
   UseGuards,
+  VERSION_NEUTRAL,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -56,7 +57,12 @@ const PUBLIC_IMAGE_MAX_AGE_SECONDS = PRESIGN_EXPIRY_SECONDS - 60;
 // so this route stays reachable while `PlatformLockdownGuard` is active.
 @LockdownExempt()
 @ApiTags('Files')
-@Controller('files')
+// Version-neutral: the URLs that reach this route are built as bare
+// `${API_URL}/files/<key>` (see `common/image-url.ts` `toImageUrl`) and rendered
+// as raw `<img src>`, which never pass through the `/v1`-injecting API client.
+// Without this opt-out, global URI versioning (`main.ts`) would only expose the
+// route at `/v1/files/*` and every image would 404.
+@Controller({ path: 'files', version: VERSION_NEUTRAL })
 export class FilesController {
   constructor(
     private readonly storage: StorageService,
