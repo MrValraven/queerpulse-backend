@@ -34,9 +34,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * expression in this codebase's convention (see `1785700500000` and
  * `1785700100000`'s comments) — migration-only here too, no entity change.
  */
-export class AddConnectionsStatusRespondedAtIndexes1787600400000
-  implements MigrationInterface
-{
+export class AddConnectionsStatusRespondedAtIndexes1787600400000 implements MigrationInterface {
   name = 'AddConnectionsStatusRespondedAtIndexes1787600400000';
 
   // Runs outside a transaction for `CREATE INDEX CONCURRENTLY`; requires

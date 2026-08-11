@@ -71,6 +71,9 @@ export interface CommunityDetailDTO extends CommunityCardDTO {
   rosterVisible: boolean;
   features: string[];
   rules: string[];
+  // Resolved (`toImageUrl`) cover-image URL, or null when the community has no
+  // cover. The owner's edit form seeds its `ImageUploadField` from this.
+  coverImageUrl: string | null;
   owner: MemberRef | null;
   createdAt: string;
   // True once an owner has archived the community. Only ever reaches an
@@ -120,6 +123,7 @@ export function toCommunityDetail(
     rosterVisible: c.rosterVisible,
     features: c.features,
     rules: c.rules,
+    coverImageUrl: toImageUrl(c.coverImageUrl),
     owner,
     createdAt: c.createdAt.toISOString(),
     archived: c.archivedAt != null,

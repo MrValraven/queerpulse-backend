@@ -2,18 +2,26 @@ import { Test } from '@nestjs/testing';
 import { ForbiddenException } from '@nestjs/common';
 import { MyMediaService } from './my-media.service';
 import { StorageService } from '../storage/storage.service';
+import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
+import { MediaReference } from '../media-references/media-reference.types';
 
 describe('MyMediaService.listMine', () => {
   const userId = '11111111-1111-1111-1111-111111111111';
 
-  function makeService(listObjects: jest.Mock) {
+  function makeService(
+    listObjects: jest.Mock,
+    resolveReferences: jest.Mock = jest.fn().mockResolvedValue({
+      references: new Map<string, MediaReference[]>(),
+      degraded: false,
+    }),
+  ) {
     return Test.createTestingModule({
       providers: [
         MyMediaService,
         { provide: StorageService, useValue: { listObjects } },
         {
-          provide: 'MY_MEDIA_USAGE_RESOLVER',
-          useValue: { resolve: jest.fn().mockResolvedValue(new Map()) },
+          provide: MediaReferenceResolver,
+          useValue: { resolve: resolveReferences },
         },
       ],
     }).compile();
@@ -50,14 +58,83 @@ describe('MyMediaService.listMine', () => {
     const moduleRef = await makeService(listObjects);
     const service = moduleRef.get(MyMediaService);
 
-    const items = await service.listMine(userId);
+    const { items, degraded } = await service.listMine(userId);
 
     expect(items.map((item) => item.key)).toEqual([
       `listing-photos/${userId}/b.jpg`,
       `avatars/${userId}/a.jpg`,
     ]);
-    expect(items[0].fileUrl).toBe(`/files/listing-photos/${userId}/b.jpg`);
-    expect(items[0].inUse).toBe(false);
+    expect(items[0]!.fileUrl).toBe(`/files/listing-photos/${userId}/b.jpg`);
+    expect(items[0]!.references).toEqual([]);
+    expect(degraded).toBe(false);
+  });
+
+  it('surfaces the resolver degraded flag so callers can suppress safe-to-delete', async () => {
+    const listObjects = jest.fn().mockImplementation(({ prefix }) => {
+      if (prefix === `avatars/${userId}/`) {
+        return Promise.resolve({
+          objects: [
+            {
+              key: `avatars/${userId}/a.jpg`,
+              size: 10,
+              lastModified: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+          nextContinuationToken: null,
+        });
+      }
+      return Promise.resolve({ objects: [], nextContinuationToken: null });
+    });
+    const resolveReferences = jest.fn().mockResolvedValue({
+      references: new Map<string, MediaReference[]>(),
+      degraded: true,
+    });
+    const moduleRef = await makeService(listObjects, resolveReferences);
+    const service = moduleRef.get(MyMediaService);
+
+    const { items, degraded } = await service.listMine(userId);
+
+    expect(degraded).toBe(true);
+    // The item still lists no references — degraded means that "empty" is
+    // unverified, not confirmed-orphan.
+    expect(items[0]!.references).toEqual([]);
+  });
+
+  it('attaches every resolved reference to its matching item', async () => {
+    const listObjects = jest.fn().mockImplementation(({ prefix }) => {
+      if (prefix === `avatars/${userId}/`) {
+        return Promise.resolve({
+          objects: [
+            {
+              key: `avatars/${userId}/a.jpg`,
+              size: 10,
+              lastModified: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+          nextContinuationToken: null,
+        });
+      }
+      return Promise.resolve({ objects: [], nextContinuationToken: null });
+    });
+    const reference: MediaReference = {
+      type: 'profile-photo',
+      entityId: userId,
+      label: 'Jamie Doe',
+      slug: 'jamie-doe',
+    };
+    const resolveReferences = jest.fn().mockResolvedValue({
+      references: new Map<string, MediaReference[]>([
+        [`avatars/${userId}/a.jpg`, [reference]],
+      ]),
+      degraded: false,
+    });
+    const moduleRef = await makeService(listObjects, resolveReferences);
+    const service = moduleRef.get(MyMediaService);
+
+    const { items } = await service.listMine(userId);
+
+    expect(resolveReferences).toHaveBeenCalledWith([`avatars/${userId}/a.jpg`]);
+    expect(items[0]!.references).toEqual([reference]);
   });
 
   it('follows the S3 continuation token within a kind', async () => {
@@ -95,7 +172,7 @@ describe('MyMediaService.listMine', () => {
     const moduleRef = await makeService(listObjects);
     const service = moduleRef.get(MyMediaService);
 
-    const items = await service.listMine(userId);
+    const { items } = await service.listMine(userId);
 
     expect(items.map((item) => item.key)).toEqual([
       `avatars/${userId}/p1.jpg`,
@@ -117,7 +194,7 @@ describe('MyMediaService.deleteMine', () => {
           useValue: { listObjects: jest.fn(), deleteObjectByReference },
         },
         {
-          provide: 'MY_MEDIA_USAGE_RESOLVER',
+          provide: MediaReferenceResolver,
           useValue: { resolve: jest.fn() },
         },
       ],

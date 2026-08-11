@@ -43,8 +43,6 @@ export class AddProfileVouchCount1787600100000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(
-      `ALTER TABLE "profiles" DROP COLUMN "vouch_count"`,
-    );
+    await queryRunner.query(`ALTER TABLE "profiles" DROP COLUMN "vouch_count"`);
   }
 }

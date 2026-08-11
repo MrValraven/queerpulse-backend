@@ -48,6 +48,7 @@ function makeCommunity(overrides: Partial<Community> = {}): Community {
     rosterVisible: true,
     features: [],
     rules: [],
+    coverImageUrl: null,
     ownerId: 'user-owner',
     ref: 'CMT-0001',
     createdAt: new Date('2025-01-01T00:00:00.000Z'),

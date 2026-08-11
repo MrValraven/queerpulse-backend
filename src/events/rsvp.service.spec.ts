@@ -38,9 +38,7 @@ describe('RsvpService', () => {
       'andWhere',
       'returning',
     ]) {
-      rsvpQueryBuilder[method] = jest
-        .fn()
-        .mockReturnValue(rsvpQueryBuilder);
+      rsvpQueryBuilder[method] = jest.fn().mockReturnValue(rsvpQueryBuilder);
     }
     // MAX(waitlist_position) probe → no one waitlisted yet.
     rsvpQueryBuilder.getRawOne = jest.fn().mockResolvedValue({ max: 0 });

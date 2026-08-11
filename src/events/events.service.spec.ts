@@ -96,7 +96,9 @@ describe('EventsService', () => {
     contentModeration = {
       stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
     };
-    membership = { assertMemberBySlug: jest.fn().mockResolvedValue('community-1') };
+    membership = {
+      assertMemberBySlug: jest.fn().mockResolvedValue('community-1'),
+    };
     bookmarks = {
       isBookmarked: jest.fn().mockResolvedValue(false),
       bookmarkedEventIds: jest.fn().mockResolvedValue(new Set<string>()),

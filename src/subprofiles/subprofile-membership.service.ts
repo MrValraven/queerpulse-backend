@@ -65,7 +65,10 @@ export class SubprofileMembershipService {
   // Public membership gate (404/403) for other services (e.g.
   // `SubprofileInvitesService`) that need the same check `getOwned` already
   // does, without exposing the private `isMember` boolean helper itself.
-  async assertMember(userId: string, subprofileId: string): Promise<Subprofile> {
+  async assertMember(
+    userId: string,
+    subprofileId: string,
+  ): Promise<Subprofile> {
     return this.getOwned(userId, subprofileId);
   }
 

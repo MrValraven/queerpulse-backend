@@ -46,7 +46,9 @@ export function isSafeUrlValue(value: unknown, allowHandle = false): boolean {
     .toLowerCase();
   if (URL_SCHEME_PATTERN.test(normalized)) {
     // Carries a scheme — accept only the two safe ones.
-    return ALLOWED_SCHEME_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+    return ALLOWED_SCHEME_PREFIXES.some((prefix) =>
+      normalized.startsWith(prefix),
+    );
   }
   // No scheme: a bare handle/host is fine for social fields, refused for the
   // strict link fields.

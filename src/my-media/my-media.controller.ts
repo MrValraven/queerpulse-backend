@@ -32,8 +32,7 @@ export class MyMediaController {
   @ApiOkResponse({ description: 'The caller-uploaded objects, newest first.' })
   @Get()
   async list(@CurrentUser() user: CurrentUserData) {
-    const items = await this.myMedia.listMine(user.userId);
-    return { items };
+    return await this.myMedia.listMine(user.userId);
   }
 
   @ApiOperation({ summary: 'Delete one image the current member uploaded.' })

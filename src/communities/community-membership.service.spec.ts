@@ -30,6 +30,7 @@ describe('CommunityMembershipService', () => {
     rosterVisible: true,
     features: [],
     rules: [],
+    coverImageUrl: null,
     ownerId: 'owner-1',
     ref: 'QP-C-0001',
     createdAt: new Date('2026-01-01T00:00:00.000Z'),

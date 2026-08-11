@@ -149,7 +149,9 @@ describe('ProfilesService.getBySlug visibility', () => {
         {
           // No takedown by default; `assertNotTakenDown` sees an empty map.
           provide: ContentModerationService,
-          useValue: { statesForAnyType: jest.fn().mockResolvedValue(new Map()) },
+          useValue: {
+            statesForAnyType: jest.fn().mockResolvedValue(new Map()),
+          },
         },
       ],
     }).compile();
@@ -574,7 +576,9 @@ describe('ProfilesService replace-list endpoints', () => {
         },
         {
           provide: ContentModerationService,
-          useValue: { statesForAnyType: jest.fn().mockResolvedValue(new Map()) },
+          useValue: {
+            statesForAnyType: jest.fn().mockResolvedValue(new Map()),
+          },
         },
       ],
     }).compile();

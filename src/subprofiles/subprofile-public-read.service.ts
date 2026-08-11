@@ -1,4 +1,8 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Not, Repository, SelectQueryBuilder } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
@@ -113,7 +117,9 @@ export class SubprofilePublicReadService {
   // the capped result stays consistent. Mirrors
   // `DirectoryService.excludeModeratedListings`. `content_moderation.subject_id`
   // is varchar and `sp.slug` is varchar, so no cast is needed.
-  private excludeModeratedSubprofiles(qb: SelectQueryBuilder<Subprofile>): void {
+  private excludeModeratedSubprofiles(
+    qb: SelectQueryBuilder<Subprofile>,
+  ): void {
     qb.andWhere(
       `NOT EXISTS (
         SELECT 1 FROM "content_moderation" "cm"

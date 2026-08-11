@@ -8,6 +8,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { toImageUrl } from '../common/image-url';
 import { escapeLikeTerm } from '../common/like-escape';
 import {
   AccessTier,
@@ -31,6 +32,7 @@ import {
   AdminEligibleEntityDTO,
   AdminLandingFeatureDTO,
   AdminTargetSummary,
+  LandingCommunityFaceDTO,
   LandingFeaturesResponseDTO,
   LandingHiddenReason,
   toAdminEligibleEntityDTO,
@@ -39,6 +41,10 @@ import {
   toLandingCommunityFeatureDTO,
   toLandingMemberFeatureDTO,
 } from './landing-response';
+
+/** How many roster avatars a featured-community card shows before collapsing
+ *  the rest into a "+N" count. Matches the demo card's face strip. */
+const LANDING_COMMUNITY_FACE_LIMIT = 5;
 
 /** Cap on `listEligible` results. This backs an admin type-ahead picker (the
  *  admin types a search term to narrow down), not a paginated list, so a
@@ -124,22 +130,26 @@ function memberSummary(profile: Profile): AdminTargetSummary {
   return {
     slug: profile.slug,
     name: `${profile.firstName} ${profile.lastName}`,
-    avatarUrl: profile.avatarUrl,
+    avatarUrl: toImageUrl(profile.avatarUrl),
   };
 }
 
 function communitySummary(community: Community): AdminTargetSummary {
-  // Community has no avatar/image column (verified on the entity) — the
-  // admin UI falls back to its own placeholder, same as everywhere else a
-  // community is rendered without a member's profile photo.
-  return { slug: community.slug, name: community.name, avatarUrl: null };
+  // Communities now carry an optional cover image; surface it (resolved) so the
+  // admin picker shows the same thumbnail the public card will. Null cover →
+  // the admin UI falls back to its own placeholder, as before.
+  return {
+    slug: community.slug,
+    name: community.name,
+    avatarUrl: toImageUrl(community.coverImageUrl),
+  };
 }
 
 function changemakerSummary(changemaker: Changemaker): AdminTargetSummary {
   return {
     slug: changemaker.slug,
     name: changemaker.name,
-    avatarUrl: changemaker.imageUrl,
+    avatarUrl: toImageUrl(changemaker.imageUrl),
   };
 }
 
@@ -205,6 +215,7 @@ export class LandingService {
       communitiesById,
       changemakersById,
       memberCountsByCommunityId,
+      rosterFacesByCommunityId,
     ] = await Promise.all([
       this.getProfilesByIds(memberFeatures.map((feature) => feature.targetId)),
       this.getCommunitiesByIds(communityTargetIds),
@@ -212,7 +223,17 @@ export class LandingService {
         changemakerFeatures.map((feature) => feature.targetId),
       ),
       this.getCommunityMemberCounts(communityTargetIds),
+      this.getCommunityRosterFaces(communityTargetIds),
     ]);
+
+    // The featured communities' owners, resolved in one query. `ownerId` is a
+    // `User.id`, which is exactly the key `getProfilesByIds` maps on
+    // (`Profile.userId`). Depends on `communitiesById`, so it can't join the
+    // batch wave above — but it's a single extra round trip for the whole
+    // section, not one per community.
+    const ownerProfilesByUserId = await this.getProfilesByIds(
+      [...communitiesById.values()].map((community) => community.ownerId),
+    );
 
     const members = memberFeatures.flatMap((feature) => {
       const profile = profilesById.get(feature.targetId);
@@ -223,11 +244,18 @@ export class LandingService {
     const communities = communityFeatures.flatMap((feature) => {
       const community = communitiesById.get(feature.targetId);
       if (!community || !isCommunityEligible(community)) return [];
+      // A community that hides its roster leaks no member faces on the public
+      // card — it leans on the count alone.
+      const faces = community.rosterVisible
+        ? (rosterFacesByCommunityId.get(community.id) ?? [])
+        : [];
       return [
         toLandingCommunityFeatureDTO(
           feature,
           community,
           memberCountsByCommunityId.get(community.id) ?? 0,
+          ownerProfilesByUserId.get(community.ownerId) ?? null,
+          faces,
         ),
       ];
     });
@@ -656,6 +684,61 @@ export class LandingService {
       .groupBy('member.community_id')
       .getRawMany<{ communityId: string; count: string }>();
     return new Map(rows.map((row) => [row.communityId, Number(row.count)]));
+  }
+
+  /**
+   * The first N members (by join date) of each community, joined to their
+   * profile, as public roster faces for the featured-community cards. One
+   * query for the whole section: a `ROW_NUMBER() OVER (PARTITION BY
+   * community_id ...)` window ranks each community's members independently, and
+   * the outer filter keeps only the top N per community — so a 5000-member
+   * community ships 5 rows here, not 5000. Ordered by `joined_at ASC` so the
+   * owner and longest-standing members lead the strip. Roster-visibility gating
+   * is applied by the caller (`getPublicFeatures`), not here.
+   */
+  private async getCommunityRosterFaces(
+    communityIds: string[],
+  ): Promise<Map<string, LandingCommunityFaceDTO[]>> {
+    if (!communityIds.length) return new Map();
+    const rows = await this.dataSource.query<
+      {
+        communityId: string;
+        firstName: string;
+        lastName: string;
+        avatarUrl: string | null;
+      }[]
+    >(
+      `SELECT ranked.community_id AS "communityId",
+              ranked.first_name AS "firstName",
+              ranked.last_name AS "lastName",
+              ranked.avatar_url AS "avatarUrl"
+         FROM (
+           SELECT m.community_id,
+                  p.first_name,
+                  p.last_name,
+                  p.avatar_url,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY m.community_id ORDER BY m.joined_at ASC
+                  ) AS rn
+             FROM community_members m
+             JOIN profiles p ON p.user_id = m.user_id
+            WHERE m.community_id = ANY($1::uuid[])
+         ) ranked
+        WHERE ranked.rn <= $2
+        ORDER BY ranked.community_id, ranked.rn`,
+      [communityIds, LANDING_COMMUNITY_FACE_LIMIT],
+    );
+
+    const facesByCommunity = new Map<string, LandingCommunityFaceDTO[]>();
+    for (const row of rows) {
+      const faces = facesByCommunity.get(row.communityId) ?? [];
+      faces.push({
+        name: `${row.firstName} ${row.lastName}`,
+        avatarUrl: toImageUrl(row.avatarUrl),
+      });
+      facesByCommunity.set(row.communityId, faces);
+    }
+    return facesByCommunity;
   }
 
   /** Single-target resolution used by `createFeature`/`updateFeature`, where

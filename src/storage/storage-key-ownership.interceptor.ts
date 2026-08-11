@@ -82,7 +82,11 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
       // own resolved URLs are left untouched.
       this.inspectString(body, requesterUserId);
     } else if (typeof body === 'object') {
-      this.normalizeAndAssert(body as BodyContainer, requesterUserId, new Set());
+      this.normalizeAndAssert(
+        body as BodyContainer,
+        requesterUserId,
+        new Set(),
+      );
     }
 
     return next.handle();

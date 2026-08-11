@@ -38,7 +38,8 @@ export class CsrfController {
   })
   issue(@Res({ passthrough: true }) res: Response): { csrfToken: string } {
     const token = randomBytes(32).toString('hex');
-    const isProduction = this.config.get<string>('app.nodeEnv') === 'production';
+    const isProduction =
+      this.config.get<string>('app.nodeEnv') === 'production';
     // In production the `__Host-` prefix hardens this against cookie fixation
     // (see csrf-cookie.ts). The prefix's own rules — Secure, Path=/, host-only —
     // are exactly the attributes we already set, so the name switch is the only

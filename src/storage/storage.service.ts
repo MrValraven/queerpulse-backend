@@ -241,6 +241,37 @@ export class StorageService {
   }
 
   /**
+   * Every stored object owned by one member, across ALL upload kinds, for the
+   * admin media console's "filter by uploader" view. Fans out one prefix sweep
+   * per kind (`<prefix>/<userId>/`) — the SAME per-kind fan-out `deleteUserObjects`
+   * uses, since a member's keys are spread across kind prefixes and S3 prefixes
+   * are left-anchored (there is no single prefix that spans kinds). Follows
+   * pagination to the end within each kind so a member with more than one page
+   * of a given kind is fully enumerated; the total across kinds is bounded (a
+   * member has at most a handful of avatars/covers plus their gallery/listing
+   * photos), so unlike the paginated `listObjects` this returns them all at once
+   * and the console renders a single page with no continuation token.
+   */
+  async listUserObjects(userId: string): Promise<StoredObject[]> {
+    const bucket = this.requireConfig('storage.bucket');
+    const client = this.storageClient();
+    const prefixes = new Set(
+      Object.values(UPLOAD_KIND_SPECS).map((spec) => spec.prefix),
+    );
+    const objects: StoredObject[] = [];
+    for (const prefix of prefixes) {
+      objects.push(
+        ...(await this.listStoredObjects(
+          client,
+          bucket,
+          `${prefix}/${userId}/`,
+        )),
+      );
+    }
+    return objects;
+  }
+
+  /**
    * ONE page of raw bucket objects for the admin media console (audit tooling).
    * Unlike the private `listObjectKeys` sweep used by account erasure, this does
    * NOT follow pagination internally — it returns a single `ListObjectsV2` page
@@ -333,6 +364,44 @@ export class StorageService {
         : undefined;
     } while (continuationToken);
     return keys;
+  }
+
+  // Every object under a prefix (key + size + lastModified), following
+  // `ListObjectsV2` pagination to the end — the metadata-carrying sibling of
+  // `listObjectKeys` (which returns keys only for the delete sweep). Used by
+  // `listUserObjects` so the admin console gets the same size/date columns it
+  // shows for the paginated `listObjects` path.
+  private async listStoredObjects(
+    client: S3Client,
+    bucket: string,
+    prefix: string,
+  ): Promise<StoredObject[]> {
+    const objects: StoredObject[] = [];
+    let continuationToken: string | undefined;
+    do {
+      const response = await client.send(
+        new ListObjectsV2Command({
+          Bucket: bucket,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        }),
+      );
+      for (const object of response.Contents ?? []) {
+        if (object.Key) {
+          objects.push({
+            key: object.Key,
+            size: object.Size ?? 0,
+            lastModified: object.LastModified
+              ? object.LastModified.toISOString()
+              : null,
+          });
+        }
+      }
+      continuationToken = response.IsTruncated
+        ? response.NextContinuationToken
+        : undefined;
+    } while (continuationToken);
+    return objects;
   }
 
   // Deletes keys in `DeleteObjects`-sized batches, returning how many actually

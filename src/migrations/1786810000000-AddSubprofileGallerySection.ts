@@ -16,9 +16,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `down()` is a documented no-op: Postgres has no `ALTER TYPE ... DROP VALUE`,
  * and the added value is harmless if left in place once no rows reference it.
  */
-export class AddSubprofileGallerySection1786810000000
-  implements MigrationInterface
-{
+export class AddSubprofileGallerySection1786810000000 implements MigrationInterface {
   name = 'AddSubprofileGallerySection1786810000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

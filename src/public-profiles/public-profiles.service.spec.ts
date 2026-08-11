@@ -196,7 +196,9 @@ describe('PublicProfilesService', () => {
           // fail-closed gate as the others (asserted via the indistinguishable
           // 404 body), so the mapper never runs on a taken-down profile.
           provide: ContentModerationService,
-          useValue: { statesForAnyType: jest.fn().mockResolvedValue(new Map()) },
+          useValue: {
+            statesForAnyType: jest.fn().mockResolvedValue(new Map()),
+          },
         },
       ],
     }).compile();

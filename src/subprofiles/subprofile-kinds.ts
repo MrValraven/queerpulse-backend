@@ -113,7 +113,8 @@ export type SubprofileKind =
   | 'teacher'
   | 'facilitator'
   | 'tutor'
-  | 'lecturer';
+  | 'lecturer'
+  | 'pole_dancer';
 
 // section enum values (union across all kinds + the universal 'links')
 export type SubprofileSection =
@@ -344,6 +345,7 @@ export const KIND_SECTIONS: Record<SubprofileKind, SubprofileSection[]> = {
   facilitator: ['workshops', 'clients'],
   tutor: ['subjects', 'courses'],
   lecturer: ['courses', 'papers'],
+  pole_dancer: ['performances', 'classes', 'reel', 'workshops'],
 };
 
 // helpers (both repos)

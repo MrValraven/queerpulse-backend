@@ -1033,7 +1033,13 @@ export class MagazinePieceService {
       0,
     );
 
-    return { id: issue.id, number: issue.number, theme: issue.theme, filled, slots };
+    return {
+      id: issue.id,
+      number: issue.number,
+      theme: issue.theme,
+      filled,
+      slots,
+    };
   }
 
   /**

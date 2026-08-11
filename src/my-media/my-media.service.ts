@@ -1,4 +1,4 @@
-import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { StorageService } from '../storage/storage.service';
 import {
   UPLOAD_KIND_SPECS,
@@ -6,11 +6,8 @@ import {
   UploadKind,
 } from '../storage/upload-kinds';
 import { storageKeyOwnerId } from '../storage/storage-key';
-import { MyMediaItem } from './dto/my-media-item.dto';
-import {
-  MY_MEDIA_USAGE_RESOLVER,
-  MyMediaUsageResolver,
-} from './my-media-usage.resolver';
+import { MyMediaItem, MyMediaListResponse } from './dto/my-media-item.dto';
+import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
 
 const MAX_KEYS_PER_PAGE = 1000;
 
@@ -18,11 +15,10 @@ const MAX_KEYS_PER_PAGE = 1000;
 export class MyMediaService {
   constructor(
     private readonly storage: StorageService,
-    @Inject(MY_MEDIA_USAGE_RESOLVER)
-    private readonly usage: MyMediaUsageResolver,
+    private readonly references: MediaReferenceResolver,
   ) {}
 
-  async listMine(userId: string): Promise<MyMediaItem[]> {
+  async listMine(userId: string): Promise<MyMediaListResponse> {
     const listed: {
       key: string;
       kind: UploadKind;
@@ -51,10 +47,8 @@ export class MyMediaService {
       } while (continuationToken);
     }
 
-    const usageByKey = await this.usage.resolve(
-      userId,
-      listed.map((entry) => entry.key),
-    );
+    const { references: referencesByKey, degraded } =
+      await this.references.resolve(listed.map((entry) => entry.key));
 
     const items: MyMediaItem[] = listed.map((entry) => ({
       key: entry.key,
@@ -62,15 +56,14 @@ export class MyMediaService {
       size: entry.size,
       lastModified: entry.lastModified,
       fileUrl: `/files/${entry.key}`,
-      inUse: usageByKey.has(entry.key),
-      usedAs: usageByKey.get(entry.key) ?? null,
+      references: referencesByKey.get(entry.key) ?? [],
     }));
 
     // Newest first; objects with no lastModified sort last.
     items.sort((left, right) =>
       (right.lastModified ?? '').localeCompare(left.lastModified ?? ''),
     );
-    return items;
+    return { items, degraded };
   }
 
   async deleteMine(userId: string, key: string): Promise<void> {

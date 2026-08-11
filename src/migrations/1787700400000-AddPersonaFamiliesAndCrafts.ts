@@ -186,9 +186,7 @@ const NEW_SECTIONS = [
   'subjects',
 ];
 
-export class AddPersonaFamiliesAndCrafts1787700400000
-  implements MigrationInterface
-{
+export class AddPersonaFamiliesAndCrafts1787700400000 implements MigrationInterface {
   name = 'AddPersonaFamiliesAndCrafts1787700400000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

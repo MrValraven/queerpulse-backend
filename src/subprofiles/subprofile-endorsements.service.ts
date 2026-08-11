@@ -173,7 +173,10 @@ export class SubprofileEndorsementsService {
     // `count` stays the viewer's full visible total; the returned list is the
     // requested page. Both `page` and `limit` are clamped so a hostile/omitted
     // value can never exceed `ENDORSERS_LIST_CAP` per page.
-    const safeLimit = Math.min(Math.max(limit ?? ENDORSERS_LIST_CAP, 1), ENDORSERS_LIST_CAP);
+    const safeLimit = Math.min(
+      Math.max(limit ?? ENDORSERS_LIST_CAP, 1),
+      ENDORSERS_LIST_CAP,
+    );
     const safePage = Math.max(page ?? 1, 1);
 
     // In-query block filtering (mirrors `directory()`) so `LIMIT` counts only

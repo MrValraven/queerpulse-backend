@@ -35,9 +35,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * project's default shared migration transaction like any other DDL change
  * (Postgres has no concurrent `ALTER COLUMN TYPE`).
  */
-export class NarrowForumPostCreatedAtPrecision1787600000000
-  implements MigrationInterface
-{
+export class NarrowForumPostCreatedAtPrecision1787600000000 implements MigrationInterface {
   name = 'NarrowForumPostCreatedAtPrecision1787600000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

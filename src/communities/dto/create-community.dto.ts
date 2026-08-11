@@ -9,6 +9,7 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
+import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 import { AccessTier, CommunityType } from '../entities/community.entity';
 
 /**
@@ -46,6 +47,12 @@ export class CreateCommunityDto {
   rules!: string[];
 
   @IsString() @MinLength(1) @MaxLength(200) tagline!: string;
+
+  // Optional cover image. A storage key from the `community-cover` upload kind,
+  // an absolute `https://` URL, or `''`/`null` to clear it. `@IsImageReference`
+  // (not `@IsUrl`) rejects `javascript:`/`data:`/`http:`; the global
+  // StorageKeyOwnershipInterceptor enforces the key was uploaded by the caller.
+  @IsOptional() @IsImageReference() coverImageUrl?: string | null;
 
   // Desired slug; `CommunitiesService.createWithUniqueRef` slugifies +
   // de-dupes it. Ignored entirely on PATCH (see `UpdateCommunityDto`).

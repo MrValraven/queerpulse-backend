@@ -23,6 +23,7 @@ import { AdminMediaService } from './admin-media.service';
 import { AdminMediaListQueryDto } from './dto/admin-media-list-query.dto';
 import { AdminMediaHeadQueryDto } from './dto/admin-media-head-query.dto';
 import { AdminMediaDeleteQueryDto } from './dto/admin-media-delete-query.dto';
+import { AdminMediaUploadersQueryDto } from './dto/admin-media-uploaders-query.dto';
 
 /**
  * Read-only admin media console (security tooling): enumerate raw bucket
@@ -47,7 +48,19 @@ export class AdminMediaController {
       prefix: query.prefix,
       continuationToken: query.continuationToken,
       limit: query.limit,
+      uploaderId: query.uploaderId,
     });
+  }
+
+  @ApiOperation({
+    summary: 'Search members to filter the media console by uploader.',
+  })
+  @ApiOkResponse({
+    description: 'Matching members (id, name, handle, avatar).',
+  })
+  @Get('uploaders')
+  searchUploaders(@Query() query: AdminMediaUploadersQueryDto) {
+    return this.adminMedia.searchUploaders(query.q);
   }
 
   @ApiOperation({

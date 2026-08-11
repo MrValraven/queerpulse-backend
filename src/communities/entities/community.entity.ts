@@ -67,6 +67,16 @@ export class Community {
   @Column({ type: 'text', array: true, default: '{}' })
   rules!: string[];
 
+  // Optional cover image for the community, surfaced on the public homepage
+  // featured-community card and the community's own detail page. Stores a raw
+  // storage key (uploaded via the `community-cover` upload kind) or an absolute
+  // `https://` URL, resolved to a fetchable `/files/*` URL through `toImageUrl`
+  // at the response boundary — never the resolved URL itself. Nullable (no
+  // cover by default); the paired UNAPPLIED migration is
+  // `1787700500000-AddCommunityCoverImageUrl`.
+  @Column({ type: 'varchar', nullable: true })
+  coverImageUrl!: string | null;
+
   @Index('IDX_communities_owner_id')
   @Column({ type: 'uuid' })
   ownerId!: string;

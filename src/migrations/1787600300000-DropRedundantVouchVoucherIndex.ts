@@ -29,18 +29,14 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * (`CONCURRENTLY`), so a revert never takes a write lock on `vouches`
  * either.
  */
-export class DropRedundantVouchVoucherIndex1787600300000
-  implements MigrationInterface
-{
+export class DropRedundantVouchVoucherIndex1787600300000 implements MigrationInterface {
   name = 'DropRedundantVouchVoucherIndex1787600300000';
 
   // Runs outside a transaction for `CONCURRENTLY`.
   transaction = false as const;
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(
-      `DROP INDEX CONCURRENTLY "IDX_vouches_voucher_id"`,
-    );
+    await queryRunner.query(`DROP INDEX CONCURRENTLY "IDX_vouches_voucher_id"`);
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {

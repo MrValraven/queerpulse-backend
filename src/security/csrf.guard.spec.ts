@@ -6,7 +6,11 @@ import { SKIP_CSRF_KEY } from './skip-csrf.decorator';
 
 /** A ConfigService stub whose only key that matters here is `app.nodeEnv`. */
 function configFor(nodeEnv: string): { get: jest.Mock } {
-  return { get: jest.fn((key: string) => (key === 'app.nodeEnv' ? nodeEnv : undefined)) };
+  return {
+    get: jest.fn((key: string) =>
+      key === 'app.nodeEnv' ? nodeEnv : undefined,
+    ),
+  };
 }
 
 function httpContext(

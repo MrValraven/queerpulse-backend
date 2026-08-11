@@ -5,7 +5,10 @@ import {
 } from 'class-validator';
 import { isSafeUrlValue } from '../../common/validators/is-safe-url.decorator';
 import type { ItemStructured } from '../entities/subprofile-item.entity';
-import { KNOWN_PLATFORM_KEYS, MAX_SOCIAL_LINKS } from '../subprofile-validation';
+import {
+  KNOWN_PLATFORM_KEYS,
+  MAX_SOCIAL_LINKS,
+} from '../subprofile-validation';
 
 // `structured` is otherwise a bare `@IsObject()` blob (courses/snippet are a
 // documented Phase-0 no-validate limitation), but its nested `links[]` array is

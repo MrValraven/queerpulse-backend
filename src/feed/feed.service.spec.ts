@@ -116,6 +116,7 @@ const baseCommunity = (overrides: Partial<Community> = {}): Community => ({
   rosterVisible: true,
   features: [],
   rules: [],
+  coverImageUrl: null,
   ownerId: 'owner-1',
   ref: 'ref-1',
   createdAt: t('2026-01-01T00:00:00.000Z'),

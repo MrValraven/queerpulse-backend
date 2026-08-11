@@ -23,7 +23,8 @@ import { Observable } from 'rxjs';
 // Guards run before interceptors (see `app.module.ts` and
 // `storage-key-ownership.interceptor.ts`), so `req.user` — populated by the
 // route's `OptionalJwtAuthGuard` — is already resolved here.
-const ANONYMOUS_CACHE_CONTROL = 'public, s-maxage=60, stale-while-revalidate=300';
+const ANONYMOUS_CACHE_CONTROL =
+  'public, s-maxage=60, stale-while-revalidate=300';
 const AUTHENTICATED_CACHE_CONTROL = 'private, no-store';
 
 @Injectable()

@@ -27,9 +27,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
-export class AddSubprofileMemberRemovedNotificationType1787700100000
-  implements MigrationInterface
-{
+export class AddSubprofileMemberRemovedNotificationType1787700100000 implements MigrationInterface {
   name = 'AddSubprofileMemberRemovedNotificationType1787700100000';
 
   transaction = false as const;

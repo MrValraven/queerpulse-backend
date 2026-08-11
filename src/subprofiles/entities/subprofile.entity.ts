@@ -121,6 +121,8 @@ export enum SubprofileKind {
   Facilitator = 'facilitator',
   Tutor = 'tutor',
   Lecturer = 'lecturer',
+  // stage (performer + teacher)
+  PoleDancer = 'pole_dancer',
 }
 
 export enum SubprofileLinkVisibility {
@@ -182,17 +184,42 @@ export interface SkinData {
   /** Chart skin: the "what a reading is not" boundary list. */
   ethics?: string[] | null;
   /** Chair skin: the price/booking band shown after the bio. */
-  chair?: { rate: string; walkins: string; where: string; quiet: string } | null;
+  chair?: {
+    rate: string;
+    walkins: string;
+    where: string;
+    quiet: string;
+  } | null;
   /** Chair skin: the "before you sit down" list at the foot. */
   beforeYouSit?: string[] | null;
   /** Runway skin: the credits dl at the foot (press / stockists / made / direct). */
-  credits?: { press: string; stockists: string; made: string; contact: string } | null;
+  credits?: {
+    press: string;
+    stockists: string;
+    made: string;
+    contact: string;
+  } | null;
   /** Gallery skin: the "now on view" band in the hero. */
-  onView?: { title: string; artist: string; dates: string; room: string } | null;
+  onView?: {
+    title: string;
+    artist: string;
+    dates: string;
+    room: string;
+  } | null;
   /** Gallery skin: the "visiting" dl at the foot (hours / address / access / admission). */
-  visit?: { hours: string; address: string; access: string; admission: string } | null;
+  visit?: {
+    hours: string;
+    address: string;
+    access: string;
+    admission: string;
+  } | null;
   /** Record (history) skin: "the record itself" dl + a gaps note at the foot. */
-  record?: { held: string; access: string; consent: string; gaps: string } | null;
+  record?: {
+    held: string;
+    access: string;
+    consent: string;
+    gaps: string;
+  } | null;
   /** Poster (collective) skin: the "next" action band in the hero. */
   nextAction?: { what: string; when: string; where: string } | null;
   /** Poster (collective) skin: the "how we work" ordered principles list at the foot. */

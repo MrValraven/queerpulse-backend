@@ -42,9 +42,7 @@ export class AddAdminMemberIndexes1787600200000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(
-      `DROP INDEX CONCURRENTLY "IDX_profiles_joined_at"`,
-    );
+    await queryRunner.query(`DROP INDEX CONCURRENTLY "IDX_profiles_joined_at"`);
     await queryRunner.query(
       `DROP INDEX CONCURRENTLY "IDX_profiles_first_name"`,
     );

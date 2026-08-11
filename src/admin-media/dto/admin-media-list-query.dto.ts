@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsInt, IsOptional, IsString, IsUUID, Max, Min } from 'class-validator';
 
 // Admin `GET /admin/media` query — validated here rather than left to the
 // service's own `Math.min(Math.max(...))` clamping (mirrors `AuditQueryDto`'s
@@ -22,4 +22,13 @@ export class AdminMediaListQueryDto {
   @Min(1)
   @Max(1000)
   limit?: number;
+
+  // The "filter by uploader" view: list every object owned by this member
+  // across all kinds. Validated as a UUID so a malformed value 400s at the
+  // boundary rather than reaching an S3 `Prefix` of `<kind>//` (which would
+  // silently list nothing) — and never as a path segment that could smuggle a
+  // `/` into the prefix.
+  @IsOptional()
+  @IsUUID()
+  uploaderId?: string;
 }

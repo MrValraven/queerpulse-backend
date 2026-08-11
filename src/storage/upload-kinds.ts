@@ -9,7 +9,8 @@ export type UploadKind =
   | 'story-cover'
   | 'gathering-photo'
   | 'group-avatar'
-  | 'listing-photo';
+  | 'listing-photo'
+  | 'community-cover';
 
 export interface UploadKindSpec {
   /** Storage-key prefix the object is namespaced under (then `/<userId>/<uuid>.<ext>`). */
@@ -72,6 +73,22 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
   'listing-photo': {
     prefix: 'listing-photos',
     maxBytes: 5 * MB,
+    requiresSession: false,
+  },
+  // A community's cover image, shown on the public (logged-out) homepage
+  // featured-community card and the community detail page. `requiresSession:
+  // false` for the SAME reason as avatars/listing-photos: the landing feed and
+  // community pages are reachable while signed out, and responses resolve this
+  // key through `toImageUrl` into `GET /files/*` — gating it would blank the
+  // cover for every logged-out visitor and shared-link unfurler. 10 MB matches
+  // the full-bleed `story-cover` cap (covers are wide heroes, not thumbnails).
+  // Ownership of the SET action is unchanged: the key embeds the uploader's
+  // user id, the global StorageKeyOwnershipInterceptor rejects a PATCH that
+  // references someone else's key, and `CommunitiesService.update` re-checks
+  // the caller is the owner/mod before persisting it.
+  'community-cover': {
+    prefix: 'community-covers',
+    maxBytes: 10 * MB,
     requiresSession: false,
   },
 };

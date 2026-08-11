@@ -76,6 +76,7 @@ export interface CreateCommunityInput {
   features: string[];
   rules: string[];
   tagline: string;
+  coverImageUrl?: string | null; // storage key / https URL / '' to clear
   handle: string; // desired slug
   stewards?: string[]; // member slugs -> seeded as 'mod'
   invites?: string[]; // member slugs -> accepted for forward-compat, not persisted (see `seedExtraRoster`)
@@ -214,6 +215,7 @@ export class CommunitiesService {
               rosterVisible: dto.rosterVisible,
               features: dto.features,
               rules: dto.rules,
+              coverImageUrl: dto.coverImageUrl ?? null,
               ownerId,
               ref,
             }),
@@ -411,6 +413,11 @@ export class CommunitiesService {
         : {}),
       ...(dto.features !== undefined ? { features: dto.features } : {}),
       ...(dto.rules !== undefined ? { rules: dto.rules } : {}),
+      // '' from the client (cleared field) normalizes to NULL so an empty
+      // cover reads back as "no cover", not an empty string.
+      ...(dto.coverImageUrl !== undefined
+        ? { coverImageUrl: dto.coverImageUrl || null }
+        : {}),
     });
 
     const saved = await this.communities.save(community);

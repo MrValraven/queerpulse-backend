@@ -6,17 +6,30 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { Profile } from '../users/entities/profile.entity';
-import { StorageService } from '../storage/storage.service';
+import { UserStatus } from '../users/entities/user.entity';
+import { StorageService, StoredObject } from '../storage/storage.service';
 import { UPLOAD_KIND_SPECS } from '../storage/upload-kinds';
 import { IMAGE_UPLOAD_TYPES } from '../storage/upload-content-types';
 import { parseStorageKey, storageKeyOwnerId } from '../storage/storage-key';
+import { toImageUrl } from '../common/image-url';
+import { escapeLikeTerm } from '../common/like-escape';
+import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
 import type {
   AdminMediaHeadResponse,
   AdminMediaListQuery,
   AdminMediaListResponse,
   AdminMediaObjectDTO,
   AdminMediaUploaderDTO,
+  AdminMediaUploaderSearchResultDTO,
 } from './dto/admin-media.dto';
+
+/** A search term shorter than this returns no uploader results — a one- or
+ *  two-character `ILIKE '%x%'` would match almost everyone. */
+const MIN_UPLOADER_SEARCH_LENGTH = 2;
+
+/** Cap on uploader typeahead rows — the picker is a "find this person" jump,
+ *  not a browsable roster. */
+const UPLOADER_SEARCH_LIMIT = 20;
 
 const DEFAULT_LIMIT = 100;
 // Was 1000. The shipped console (`useAdminMedia`) never sends `limit` at all
@@ -61,6 +74,7 @@ export class AdminMediaService {
     private readonly storage: StorageService,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
+    private readonly references: MediaReferenceResolver,
   ) {}
 
   /** Resolve a kind name to its storage prefix (with trailing slash), or
@@ -86,25 +100,18 @@ export class AdminMediaService {
   }
 
   async list(query: AdminMediaListQuery): Promise<AdminMediaListResponse> {
-    const prefix = this.resolvePrefix(query.prefix);
-    // Defense-in-depth: `AdminMediaListQueryDto` + the global `ValidationPipe`
-    // already reject a non-numeric/out-of-range `limit` at the controller
-    // boundary, but this clamp does not trust that alone — an unfinite value
-    // (NaN, ±Infinity) falls back to `DEFAULT_LIMIT` rather than propagating
-    // into `MaxKeys` and reaching the S3 SDK as an uncaught 500.
-    const requestedLimit = Number.isFinite(query.limit)
-      ? (query.limit as number)
-      : DEFAULT_LIMIT;
-    const maxKeys = Math.min(Math.max(requestedLimit, 1), MAX_LIMIT);
-    const { objects, nextContinuationToken } = await this.storage.listObjects({
-      prefix,
-      continuationToken: query.continuationToken,
-      maxKeys,
-    });
+    // The "filter by uploader" view overrides kind + pagination: a member's
+    // uploads span every kind prefix and are a bounded set, so they come back
+    // in one page (no continuation token) sourced from a per-kind fan-out.
+    const { objects, nextContinuationToken } = query.uploaderId
+      ? await this.listByUploader(query.uploaderId)
+      : await this.listByPrefixPage(query);
 
     const uploaderById = await this.resolveUploaders(
       objects.map((object) => object.key),
     );
+    const { references: referencesByKey, degraded } =
+      await this.references.resolve(objects.map((object) => object.key));
 
     const mapped: AdminMediaObjectDTO[] = await Promise.all(
       objects.map(async (object) => {
@@ -119,11 +126,96 @@ export class AdminMediaService {
           fileUrl: `/files/${object.key}`,
           presignedUrl: await this.storage.createPresignedDownload(object.key),
           uploader: uploaderId ? (uploaderById.get(uploaderId) ?? null) : null,
+          references: referencesByKey.get(object.key) ?? [],
         };
       }),
     );
 
-    return { objects: mapped, nextContinuationToken };
+    return { objects: mapped, nextContinuationToken, degraded };
+  }
+
+  /** One `ListObjectsV2` page for the kind-tab / all-kinds browse, paginated on
+   *  the S3 continuation token — the console's original list path. */
+  private async listByPrefixPage(query: AdminMediaListQuery): Promise<{
+    objects: StoredObject[];
+    nextContinuationToken: string | null;
+  }> {
+    const prefix = this.resolvePrefix(query.prefix);
+    // Defense-in-depth: `AdminMediaListQueryDto` + the global `ValidationPipe`
+    // already reject a non-numeric/out-of-range `limit` at the controller
+    // boundary, but this clamp does not trust that alone — an unfinite value
+    // (NaN, ±Infinity) falls back to `DEFAULT_LIMIT` rather than propagating
+    // into `MaxKeys` and reaching the S3 SDK as an uncaught 500.
+    const requestedLimit = Number.isFinite(query.limit)
+      ? (query.limit as number)
+      : DEFAULT_LIMIT;
+    const maxKeys = Math.min(Math.max(requestedLimit, 1), MAX_LIMIT);
+    return this.storage.listObjects({
+      prefix,
+      continuationToken: query.continuationToken,
+      maxKeys,
+    });
+  }
+
+  /** Every object owned by one member, across all kinds, newest-first — the
+   *  "filter by uploader" view. One page, no continuation token (the set is
+   *  bounded). Sorted by `lastModified` descending with nulls last, since the
+   *  per-kind fan-out returns each kind's objects concatenated, not interleaved
+   *  by date. */
+  private async listByUploader(uploaderId: string): Promise<{
+    objects: StoredObject[];
+    nextContinuationToken: string | null;
+  }> {
+    const objects = await this.storage.listUserObjects(uploaderId);
+    objects.sort((first, second) => {
+      const firstTime = first.lastModified ? Date.parse(first.lastModified) : 0;
+      const secondTime = second.lastModified
+        ? Date.parse(second.lastModified)
+        : 0;
+      return secondTime - firstTime;
+    });
+    return { objects, nextContinuationToken: null };
+  }
+
+  /**
+   * Typeahead behind the console's "filter by uploader" search box. ILIKE over
+   * `firstName`/`lastName`/`slug` (the same match shape as the landing
+   * eligible-member search), joined to an ACTIVE user so deactivated/erased
+   * accounts don't surface, ordered by first name and capped. Returns `[]` for a
+   * term under `MIN_UPLOADER_SEARCH_LENGTH` rather than matching almost everyone.
+   *
+   * Deliberately does NOT restrict to members who actually have uploads —
+   * verifying that would mean a bucket sweep per candidate. A picked member with
+   * no objects simply yields an empty grid, which the UI states plainly.
+   */
+  async searchUploaders(
+    term: string | undefined,
+  ): Promise<AdminMediaUploaderSearchResultDTO[]> {
+    const trimmed = (term ?? '').trim();
+    if (trimmed.length < MIN_UPLOADER_SEARCH_LENGTH) {
+      return [];
+    }
+    const pattern = `%${escapeLikeTerm(trimmed)}%`;
+    const rows = await this.profiles
+      .createQueryBuilder('profile')
+      .innerJoin('profile.user', 'user', 'user.status = :active', {
+        active: UserStatus.Active,
+      })
+      .where(
+        '(profile.firstName ILIKE :pattern OR profile.lastName ILIKE :pattern OR profile.slug ILIKE :pattern)',
+        { pattern },
+      )
+      .orderBy('profile.firstName', 'ASC')
+      .addOrderBy('profile.lastName', 'ASC')
+      .take(UPLOADER_SEARCH_LIMIT)
+      .getMany();
+
+    return rows.map((row) => ({
+      id: row.userId,
+      displayName: `${row.firstName} ${row.lastName}`.trim(),
+      handle: row.slug,
+      avatarUrl: toImageUrl(row.avatarUrl),
+    }));
   }
 
   async head(key: string): Promise<AdminMediaHeadResponse> {

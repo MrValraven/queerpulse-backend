@@ -1,9 +1,9 @@
 import { UploadKind } from '../../storage/upload-kinds';
-import { MyMediaUsage } from '../my-media-usage.resolver';
+import { MediaReference } from '../../media-references/media-reference.types';
 
-/** One object the caller uploaded, as returned by GET /me/media. `inUse` is a
- *  BEST-EFFORT advisory flag (see MyMediaUsageResolver), never authoritative.
- *  `usedAs` is a language-neutral slug the frontend translates — never prose. */
+/** One object the caller uploaded, as returned by GET /me/media. `references`
+ *  lists every place this upload is still referenced, resolved by the shared
+ *  `MediaReferenceResolver` — empty means safe to delete. */
 export interface MyMediaItem {
   key: string;
   kind: UploadKind;
@@ -11,10 +11,13 @@ export interface MyMediaItem {
   lastModified: string | null;
   /** Served through the API: `/files/<key>`. */
   fileUrl: string;
-  inUse: boolean;
-  usedAs: MyMediaUsage | null;
+  /** Every place this upload is still referenced. Empty = safe to delete. */
+  references: MediaReference[];
 }
 
 export interface MyMediaListResponse {
   items: MyMediaItem[];
+  /** True when some reference checks failed; treat 'not referenced' as
+   *  unverified rather than a green light to delete. */
+  degraded: boolean;
 }
