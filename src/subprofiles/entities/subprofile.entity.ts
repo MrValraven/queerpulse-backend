@@ -29,6 +29,98 @@ export enum SubprofileKind {
   Therapist = 'therapist',
   Astrologer = 'astrologer',
   Generic = 'generic',
+  // Persona families + crafts expansion (migration
+  // `AddPersonaFamiliesAndCrafts1787700400000`). Purely additive — 75 new kinds
+  // across the existing families plus the six new families (chair, runway,
+  // gallery, history, collective, classroom). Kept in lockstep with the FE
+  // mirror in `subprofiles.api.ts` and `../subprofile-kinds.ts`.
+  // stage
+  Comedian = 'comedian',
+  Vocalist = 'vocalist',
+  Burlesque = 'burlesque',
+  Circus = 'circus',
+  SpokenWord = 'spoken_word',
+  Host = 'host',
+  Voguer = 'voguer',
+  // studio
+  Illustrator = 'illustrator',
+  TattooArtist = 'tattoo_artist',
+  Animator = 'animator',
+  ComicArtist = 'comic_artist',
+  GameDesigner = 'game_designer',
+  Artist3d = 'artist_3d',
+  Printmaker = 'printmaker',
+  // page
+  Journalist = 'journalist',
+  Poet = 'poet',
+  Editor = 'editor',
+  Screenwriter = 'screenwriter',
+  Translator = 'translator',
+  Zinester = 'zinester',
+  Academic = 'academic',
+  // workshop
+  Ceramicist = 'ceramicist',
+  Jeweler = 'jeweler',
+  TextileArtist = 'textile_artist',
+  Woodworker = 'woodworker',
+  Florist = 'florist',
+  DataScientist = 'data_scientist',
+  // practice
+  Coach = 'coach',
+  Bodyworker = 'bodyworker',
+  YogaTeacher = 'yoga_teacher',
+  Nutritionist = 'nutritionist',
+  Doula = 'doula',
+  PersonalTrainer = 'personal_trainer',
+  SexEducator = 'sex_educator',
+  PeerSupport = 'peer_support',
+  // table
+  Baker = 'baker',
+  Barista = 'barista',
+  Brewer = 'brewer',
+  Sommelier = 'sommelier',
+  Caterer = 'caterer',
+  // chair (new family)
+  HairStylist = 'hair_stylist',
+  Barber = 'barber',
+  MakeupArtist = 'makeup_artist',
+  NailArtist = 'nail_artist',
+  Esthetician = 'esthetician',
+  Piercer = 'piercer',
+  // runway (new family)
+  FashionDesigner = 'fashion_designer',
+  Stylist = 'stylist',
+  Model = 'model',
+  CostumeDesigner = 'costume_designer',
+  // gallery (new family)
+  Curator = 'curator',
+  Gallerist = 'gallerist',
+  ArtDealer = 'art_dealer',
+  Archivist = 'archivist',
+  Conservator = 'conservator',
+  Registrar = 'registrar',
+  ExhibitionDesigner = 'exhibition_designer',
+  ArtCritic = 'art_critic',
+  Docent = 'docent',
+  Preparator = 'preparator',
+  // history (new family — display name "Record")
+  Historian = 'historian',
+  ArtHistorian = 'art_historian',
+  OralHistorian = 'oral_historian',
+  Genealogist = 'genealogist',
+  Heritage = 'heritage',
+  ArchivalResearcher = 'archival_researcher',
+  MemoryKeeper = 'memory_keeper',
+  // collective (new family — display name "Poster")
+  Organizer = 'organizer',
+  Activist = 'activist',
+  EventProducer = 'event_producer',
+  Promoter = 'promoter',
+  // classroom (new family)
+  Teacher = 'teacher',
+  Facilitator = 'facilitator',
+  Tutor = 'tutor',
+  Lecturer = 'lecturer',
 }
 
 export enum SubprofileLinkVisibility {
@@ -89,6 +181,32 @@ export interface SkinData {
   } | null;
   /** Chart skin: the "what a reading is not" boundary list. */
   ethics?: string[] | null;
+  /** Chair skin: the price/booking band shown after the bio. */
+  chair?: { rate: string; walkins: string; where: string; quiet: string } | null;
+  /** Chair skin: the "before you sit down" list at the foot. */
+  beforeYouSit?: string[] | null;
+  /** Runway skin: the credits dl at the foot (press / stockists / made / direct). */
+  credits?: { press: string; stockists: string; made: string; contact: string } | null;
+  /** Gallery skin: the "now on view" band in the hero. */
+  onView?: { title: string; artist: string; dates: string; room: string } | null;
+  /** Gallery skin: the "visiting" dl at the foot (hours / address / access / admission). */
+  visit?: { hours: string; address: string; access: string; admission: string } | null;
+  /** Record (history) skin: "the record itself" dl + a gaps note at the foot. */
+  record?: { held: string; access: string; consent: string; gaps: string } | null;
+  /** Poster (collective) skin: the "next" action band in the hero. */
+  nextAction?: { what: string; when: string; where: string } | null;
+  /** Poster (collective) skin: the "how we work" ordered principles list at the foot. */
+  principles?: string[] | null;
+  /** Classroom skin: the fees dl after the bio (cost / materials / where / extras + note). */
+  fees?: {
+    cost: string;
+    materials: string;
+    where: string;
+    extras: string;
+    note?: string | null;
+  } | null;
+  /** Classroom skin: the "what you leave with" promises list at the foot. */
+  promises?: string[] | null;
 }
 
 @Entity('subprofiles')
