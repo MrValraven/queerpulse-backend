@@ -80,10 +80,11 @@ export const KIND_SECTIONS: Record<SubprofileKind, SubprofileSection[]> = {
 };
 
 // helpers (both repos)
+// Appends the universal 'gallery' section. ('links' is a retired section — the
+// enum value stays as a harmless tombstone but it is no longer produced here.)
 export const sectionsForKind = (k: SubprofileKind): SubprofileSection[] => [
   ...KIND_SECTIONS[k],
   'gallery',
-  'links',
 ];
 export const isSectionAllowed = (
   k: SubprofileKind,

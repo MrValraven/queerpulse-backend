@@ -73,7 +73,11 @@ export class SubprofileEndorsementsService {
     // endorse (not on every repeat tap).
     let justActivated = false;
     if (existing && existing.withdrawnAt === null) {
-      // Already active — idempotent no-op.
+      // Already active — this is a note EDIT, not a fresh endorse: update the
+      // note in place and DON'T set `justActivated` (no new SUBPROFILE_ENDORSED
+      // event fires for a note edit). Idempotent when the note is unchanged —
+      // re-writing the same value is a harmless no-op.
+      await this.endorsements.update({ id: existing.id }, { note: cleanNote });
     } else if (existing) {
       // Withdrawn → reactivate in place (keeps id/createdAt). Conditional on
       // the row still being withdrawn so two concurrent re-endorses can't both
@@ -171,6 +175,26 @@ export class SubprofileEndorsementsService {
       };
     });
     return { count, endorsers };
+  }
+
+  // The viewer's own endorsement standing + note for one persona — backs the
+  // lazy prefill the endorse-with-note modal fetches when it opens in edit
+  // mode. Reuses `resolveEndorsablePersona` so a blocked/unreachable persona
+  // 404s exactly like `endorse`/`withdrawEndorsement` do. `viewerEndorsed` is
+  // true only when an ACTIVE (non-withdrawn) row exists; `note` is that row's
+  // note (or null), so a withdrawn row reads as "not endorsed, no note".
+  async getViewerEndorsement(
+    viewerId: string,
+    id: string,
+  ): Promise<{ viewerEndorsed: boolean; note: string | null }> {
+    await this.resolveEndorsablePersona(viewerId, id);
+    const active = await this.endorsements.findOne({
+      where: { subprofileId: id, endorserId: viewerId, withdrawnAt: IsNull() },
+    });
+    return {
+      viewerEndorsed: active !== null,
+      note: active?.note ?? null,
+    };
   }
 
   // Batches the active-endorsement COUNT for many personas into ONE query

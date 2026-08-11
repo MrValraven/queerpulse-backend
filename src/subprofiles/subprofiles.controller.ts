@@ -521,6 +521,30 @@ export class SubprofilesController {
     return this.subprofilesService.listEndorsers(user.userId, id);
   }
 
+  // The literal two-segment 'endorsement/mine' tail never collides with the
+  // ':id/endorse' / ':id/endorsements' routes above (distinct path shapes) —
+  // it backs the endorse-with-note modal's lazy prefill when it opens in edit
+  // mode, returning ONLY the current viewer's own standing + note.
+  @UseGuards(ActiveMemberGuard)
+  @Get(':id/endorsement/mine')
+  @ApiOperation({
+    summary: 'Get the current member’s own endorsement of a subprofile',
+  })
+  @ApiOkResponse({
+    description:
+      'The viewer’s endorsement standing: `{ viewerEndorsed: boolean; note: string | null }`.',
+  })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  getMyEndorsement(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.subprofilesService.getViewerEndorsement(user.userId, id);
+  }
+
   // --- followers — sit after the endorsement routes, before the class ends;
   //     same reason those do: ':id' above must not shadow these literals. ---
 

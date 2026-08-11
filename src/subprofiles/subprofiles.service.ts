@@ -1561,6 +1561,13 @@ export class SubprofilesService {
     return this.endorsementsService.listEndorsers(viewerId, id);
   }
 
+  getViewerEndorsement(
+    viewerId: string,
+    id: string,
+  ): Promise<{ viewerEndorsed: boolean; note: string | null }> {
+    return this.endorsementsService.getViewerEndorsement(viewerId, id);
+  }
+
   // ---- followers -------------------------------------------------------------
   //
   // Follower behaviour lives in `SubprofileFollowersService`; these stay on the

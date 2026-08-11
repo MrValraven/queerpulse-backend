@@ -319,17 +319,22 @@ describe('validatePublish', () => {
 // --- isSectionAllowed guard -------------------------------------------------
 
 describe('isSectionAllowed', () => {
-  it('accepts a section that belongs to the kind and the universal links', () => {
+  it('accepts a section that belongs to the kind', () => {
     expect(isSectionAllowed('developer', 'projects')).toBe(true);
-    expect(isSectionAllowed('developer', 'links')).toBe(true);
+  });
+
+  // `links` is a retired section — the enum value survives as a tombstone but
+  // `sectionsForKind` no longer produces it, so it is no longer allowed.
+  it('rejects the retired links section', () => {
+    expect(isSectionAllowed('developer', 'links')).toBe(false);
   });
 
   it('rejects a section from another kind', () => {
     expect(isSectionAllowed('developer', 'discography')).toBe(false);
   });
 
-  // The universal `gallery` section (added by `sectionsForKind` just before
-  // `links`) must be allowed for every persona kind, not just some of them.
+  // The universal `gallery` section (appended by `sectionsForKind`) must be
+  // allowed for every persona kind, not just some of them.
   it('accepts the universal gallery section for every kind', () => {
     for (const kind of Object.values(SubprofileKind)) {
       expect(isSectionAllowed(kind, SubprofileSection.Gallery)).toBe(true);

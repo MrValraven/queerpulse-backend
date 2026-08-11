@@ -53,6 +53,10 @@ export enum SubprofileStatus {
 // `subprofiles.api.ts`. Only the keys relevant to the persona's derived skin
 // (a pure function of `kind` — never stored) are populated.
 export interface SkinData {
+  /** Owner display preference: when true, the cover banner fades into the page
+   *  background at its bottom edge instead of ending on a hard seam. Rendered
+   *  by the frontend (`.pp[data-cover-bleed]`); the backend only stores it. */
+  coverBleed?: boolean;
   booker?: {
     fee: string;
     rider: string;

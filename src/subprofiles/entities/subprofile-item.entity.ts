@@ -24,6 +24,9 @@ export interface MenuCourse {
 export interface ItemStructured {
   courses?: MenuCourse[] | null;
   snippet?: string[] | null;
+  // Per-item social links stored in the `structured` jsonb blob (no dedicated
+  // column). Shape mirrors the persona-level SubprofileSocialLink.
+  links?: { platform: string; urlOrHandle: string }[] | null;
 }
 
 // Union of every kind's content sections plus the universal `links` section.
