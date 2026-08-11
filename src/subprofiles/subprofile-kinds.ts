@@ -23,6 +23,7 @@ export type SubprofileKind =
   | 'chef'
   | 'mixologist'
   | 'therapist'
+  | 'astrologer'
   | 'generic';
 
 // section enum values (union across all kinds + the universal 'links')
@@ -54,6 +55,8 @@ export type SubprofileSection =
   | 'cocktails' // mixologist
   | 'specialisms'
   | 'credentials' // therapist
+  | 'charts'
+  | 'sky' // astrologer
   | 'showcase' // generic
   | 'gallery' // every kind
   | 'links'; // every kind
@@ -76,6 +79,7 @@ export const KIND_SECTIONS: Record<SubprofileKind, SubprofileSection[]> = {
   chef: ['menus', 'residencies'],
   mixologist: ['cocktails', 'residencies'],
   therapist: ['specialisms', 'credentials'],
+  astrologer: ['charts', 'sky'],
   generic: ['showcase'],
 };
 

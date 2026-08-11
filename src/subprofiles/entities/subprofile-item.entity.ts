@@ -76,6 +76,9 @@ export enum SubprofileSection {
   // therapist
   Specialisms = 'specialisms',
   Credentials = 'credentials',
+  // astrologer
+  Charts = 'charts',
+  Sky = 'sky',
   // generic
   Showcase = 'showcase',
   // every kind

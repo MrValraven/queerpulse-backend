@@ -27,6 +27,7 @@ export enum SubprofileKind {
   Chef = 'chef',
   Mixologist = 'mixologist',
   Therapist = 'therapist',
+  Astrologer = 'astrologer',
   Generic = 'generic',
 }
 
@@ -77,6 +78,17 @@ export interface SkinData {
   firstSession?: { title: string; body: string }[] | null;
   access?: string[] | null;
   referrals?: { name: string; note: string }[] | null;
+  /** Chart skin (astrologer): the live sky band shown in the hero. */
+  sky?: { moon: string; phase: string; note: string } | null;
+  /** Chart skin: what the astrologer needs from a querent before a reading. */
+  birthData?: {
+    date: string;
+    time: string;
+    place: string;
+    note: string;
+  } | null;
+  /** Chart skin: the "what a reading is not" boundary list. */
+  ethics?: string[] | null;
 }
 
 @Entity('subprofiles')
