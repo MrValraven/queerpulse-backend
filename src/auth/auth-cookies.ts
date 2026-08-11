@@ -83,7 +83,16 @@ export function clearOAuthStateCookie(
  * Clear the CSRF double-submit cookie. It is set host-only (no domain) with
  * `path: '/'` by CsrfController, so we clear it with a matching path and no
  * domain regardless of the auth-cookie domain.
+ *
+ * We clear BOTH names because the production cookie carries the `__Host-` prefix
+ * (see security/csrf-cookie.ts) while dev — and any session predating the prefix
+ * — uses the bare `csrf_token`. The `__Host-` deletion must itself satisfy the
+ * prefix rules (Secure + Path=/ + no Domain) or the browser rejects it; over
+ * plain-HTTP dev that Set-Cookie is simply ignored, which is harmless since dev
+ * never sets the `__Host-` variant. Clearing a cookie that isn't present is a
+ * no-op, so issuing both is always safe.
  */
 export function clearCsrfCookie(res: Response): void {
   res.clearCookie('csrf_token', { path: '/' });
+  res.clearCookie('__Host-csrf_token', { path: '/', secure: true });
 }

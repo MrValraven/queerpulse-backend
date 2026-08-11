@@ -15,6 +15,10 @@ export interface LandingMemberFeatureDTO {
   tagline: string | null;
   avatarUrl: string | null;
   quote: string;
+  /** The member's own public profile tags — the same set shown on their card
+   *  and in directory search, surfaced here so the homepage spotlight can
+   *  mirror the richer profile-preview layout without any extra curation. */
+  tags: string[];
 }
 
 export interface LandingCommunityFeatureDTO {
@@ -95,6 +99,7 @@ export function toLandingMemberFeatureDTO(
     tagline: profile.tagline,
     avatarUrl: profile.avatarUrl,
     quote: copy.quote,
+    tags: profile.tags,
   };
 }
 

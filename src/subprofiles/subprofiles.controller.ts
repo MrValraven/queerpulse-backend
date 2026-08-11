@@ -11,6 +11,7 @@ import {
   Put,
   Query,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
 import { Throttle, seconds } from '@nestjs/throttler';
 import {
@@ -20,9 +21,11 @@ import {
 import { Public } from '../auth/decorators/public.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
+import { AnonymousPublicCacheInterceptor } from './anonymous-public-cache.interceptor';
 import { CreateSubprofileDTO } from './dto/create-subprofile.dto';
 import { EndorseDTO } from './dto/endorse.dto';
 import { InviteCollaboratorDTO } from './dto/invite-collaborator.dto';
+import { ListAudienceQuery } from './dto/list-audience.query';
 import { ListDirectoryQuery } from './dto/list-directory.query';
 import { ReplaceAffiliationsDTO } from './dto/replace-affiliations.dto';
 import { ReplaceItemsDTO } from './dto/replace-items.dto';
@@ -44,8 +47,15 @@ import {
   ApiUnprocessableEntityResponse,
 } from '@nestjs/swagger';
 
+// `ActiveMemberGuard` is bound at the CLASS level so no handler can silently
+// miss it — previously `GET mine` and `GET :id` were only JWT-protected and
+// skipped the active-member check. The genuinely public routes
+// (`by-handle/:handle`, `public-handles`) carry `@Public()`, which this guard
+// steps aside for (see `ActiveMemberGuard`), and re-attach best-effort auth via
+// `OptionalJwtAuthGuard` where they need an optional `req.user`.
 @ApiTags('Subprofiles')
 @ApiCookieAuth()
+@UseGuards(ActiveMemberGuard)
 @Controller('subprofiles')
 export class SubprofilesController {
   constructor(
@@ -67,7 +77,6 @@ export class SubprofilesController {
   }
 
   @Get('directory')
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Browse the public subprofile directory' })
   @ApiOkResponse({ description: 'Directory cards matching the query.' })
   @ApiUnauthorizedResponse({
@@ -81,15 +90,20 @@ export class SubprofilesController {
   }
 
   // Public, best-effort auth: `@Public()` lifts the global mandatory JWT guard
-  // and `OptionalJwtAuthGuard` attaches `req.user` when a valid session cookie
-  // is present, but never rejects an anonymous caller (mirrors
+  // (and the class-level `ActiveMemberGuard` steps aside for it too) and
+  // `OptionalJwtAuthGuard` attaches `req.user` when a valid session cookie is
+  // present, but never rejects an anonymous caller (mirrors
   // `IntakesController`'s `POST /intakes/:kind`). Needed so a signed-out
   // visitor on a `network` persona gets `403 { restrictedState: "members_only" }`
   // instead of a blanket 401 — the owner-only/private protections aren't
   // weakened, `SubprofilesService.buildPublicView` still gates every
-  // non-owner viewer (Personas redesign Phase 1b Task 1).
+  // non-owner viewer (Personas redesign Phase 1b Task 1). The response's
+  // `Cache-Control` is CDN-cacheable ONLY for the anonymous, viewer-independent
+  // view (see `AnonymousPublicCacheInterceptor`).
   @Public()
   @UseGuards(OptionalJwtAuthGuard)
+  @UseInterceptors(AnonymousPublicCacheInterceptor)
+  @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Get('by-handle/:handle')
   @ApiOperation({
     summary: 'Get a subprofile by its handle (public view)',
@@ -111,10 +125,9 @@ export class SubprofilesController {
   }
 
   // Public, unauthenticated: every crawlable persona handle, for the sitemap
-  // generator + the Playwright prerenderer (no class guard on this
-  // controller, so `@Public()` alone is enough to bypass the global JWT
-  // guard — mirrors `DirectoryController` in `listings/directory.controller.ts`).
-  // Same response for every anonymous caller, so it also carries a positive
+  // generator + the Playwright prerenderer. `@Public()` bypasses the global JWT
+  // guard and the class-level `ActiveMemberGuard` steps aside for it. Same
+  // response for every anonymous caller, so it also carries a positive
   // `Cache-Control` — see AUDIT-2026-07-30.md §I "No CDN cache headers on
   // public GETs" / `caching-and-cost.md`.
   @Public()
@@ -134,7 +147,6 @@ export class SubprofilesController {
   //     sit above ':id' below (else ':id' would capture 'invites'). ---------
 
   @Get('invites/mine')
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'List co-owner invites sent to the current member' })
   @ApiOkResponse({ description: 'The member’s pending co-owner invites.' })
   @ApiUnauthorizedResponse({
@@ -145,7 +157,6 @@ export class SubprofilesController {
   }
 
   @Post('invites/:inviteId/accept')
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Accept a co-owner invite' })
   @ApiCreatedResponse({ description: '`{ ok: true }` once accepted.' })
   @ApiNotFoundResponse({
@@ -165,7 +176,6 @@ export class SubprofilesController {
   }
 
   @Post('invites/:inviteId/decline')
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Decline a co-owner invite' })
   @ApiCreatedResponse({ description: '`{ ok: true }` once declined.' })
   @ApiNotFoundResponse({
@@ -184,7 +194,6 @@ export class SubprofilesController {
   }
 
   @Post()
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Create a subprofile' })
   @ApiCreatedResponse({
     description: 'The newly created subprofile (owner-facing view).',
@@ -217,7 +226,6 @@ export class SubprofilesController {
   }
 
   @Patch(':id')
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Update a subprofile’s core fields' })
   @ApiOkResponse({ description: 'The updated subprofile (owner-facing view).' })
   @ApiBadRequestResponse({
@@ -238,7 +246,6 @@ export class SubprofilesController {
   }
 
   @Put(':id/sections/:section')
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Replace all items in one section of a subprofile' })
   @ApiOkResponse({ description: 'The updated subprofile (owner-facing view).' })
   @ApiBadRequestResponse({
@@ -264,7 +271,6 @@ export class SubprofilesController {
   }
 
   @Put(':id/social-links')
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Replace a subprofile’s social links' })
   @ApiOkResponse({ description: 'The updated subprofile (owner-facing view).' })
   @ApiBadRequestResponse({ description: 'Invalid social links.' })
@@ -286,7 +292,6 @@ export class SubprofilesController {
   }
 
   @Put(':id/affiliations')
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({
     summary: 'Replace a subprofile’s event/community affiliations',
   })
@@ -310,7 +315,6 @@ export class SubprofilesController {
   }
 
   @Post(':id/publish')
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Publish a subprofile' })
   @ApiCreatedResponse({
     description: 'The published subprofile (owner-facing view).',
@@ -332,7 +336,6 @@ export class SubprofilesController {
   }
 
   @Post(':id/unpublish')
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Unpublish a subprofile back to draft' })
   @ApiCreatedResponse({
     description: 'The unpublished subprofile (owner-facing view).',
@@ -350,7 +353,6 @@ export class SubprofilesController {
   }
 
   @Delete(':id')
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Delete a subprofile' })
   @ApiOkResponse({ description: '`{ ok: true }` once deleted.' })
   @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })
@@ -370,7 +372,6 @@ export class SubprofilesController {
   //     anything not already matched), but before the endorsement routes. ---
 
   @Get(':id/members')
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'List the co-owners of a subprofile' })
   @ApiOkResponse({ description: 'The persona co-owners.' })
   @ApiForbiddenResponse({ description: 'You are not a co-owner.' })
@@ -386,7 +387,6 @@ export class SubprofilesController {
   }
 
   @Delete(':id/members/me')
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Leave a subprofile you co-own' })
   @ApiOkResponse({ description: '`{ ok: true }` once you have left.' })
   @ApiForbiddenResponse({ description: 'You are not a co-owner.' })
@@ -405,8 +405,37 @@ export class SubprofilesController {
     return { ok: true };
   }
 
+  // Creator-only: remove another co-owner from the persona (Task 4). Declared
+  // AFTER `:id/members/me` so the literal `me` is never captured by this
+  // `:slug` param route. The creator cannot remove themself here — self-leave
+  // is `:id/members/me` above, and the last owner must delete the persona.
+  @Delete(':id/members/:slug')
+  @ApiOperation({
+    summary: 'Remove a co-owner from a subprofile (creator only)',
+  })
+  @ApiOkResponse({ description: '`{ ok: true }` once removed.' })
+  @ApiForbiddenResponse({
+    description: 'Only the persona creator can remove co-owners.',
+  })
+  @ApiBadRequestResponse({
+    description: 'You cannot remove yourself — delete the persona instead.',
+  })
+  @ApiNotFoundResponse({
+    description: 'No subprofile with that id, or no such co-owner.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  async removeMember(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('slug') slug: string,
+  ): Promise<{ ok: true }> {
+    await this.subprofilesService.removeMember(user.userId, id, slug);
+    return { ok: true };
+  }
+
   @Post(':id/invites')
-  @UseGuards(ActiveMemberGuard)
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @ApiOperation({ summary: 'Invite a member to co-own a subprofile' })
   @ApiCreatedResponse({ description: 'The newly created pending invite.' })
@@ -434,7 +463,6 @@ export class SubprofilesController {
   }
 
   @Get(':id/invites')
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'List a subprofile’s pending co-owner invites' })
   @ApiOkResponse({ description: 'The pending co-owner invites.' })
   @ApiForbiddenResponse({ description: 'You are not a co-owner.' })
@@ -450,7 +478,6 @@ export class SubprofilesController {
   }
 
   @Delete(':id/invites/:inviteId')
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Revoke a pending co-owner invite' })
   @ApiOkResponse({ description: '`{ ok: true }` once revoked.' })
   @ApiForbiddenResponse({ description: 'You are not a co-owner.' })
@@ -471,7 +498,6 @@ export class SubprofilesController {
   // --- endorsements — sit below every literal route above; ':id' captures
   //     anything not already matched, so these must stay last. -------------
 
-  @UseGuards(ActiveMemberGuard)
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Post(':id/endorse')
   @ApiOperation({ summary: 'Endorse a subprofile (optionally with a note)' })
@@ -491,7 +517,6 @@ export class SubprofilesController {
     return this.subprofilesService.endorse(user.userId, id, dto.note);
   }
 
-  @UseGuards(ActiveMemberGuard)
   @Delete(':id/endorse')
   @ApiOperation({ summary: 'Withdraw your endorsement of a subprofile' })
   @ApiOkResponse({ description: 'The updated endorsement standing.' })
@@ -506,7 +531,6 @@ export class SubprofilesController {
     return this.subprofilesService.withdrawEndorsement(user.userId, id);
   }
 
-  @UseGuards(ActiveMemberGuard)
   @Get(':id/endorsements')
   @ApiOperation({ summary: 'List a subprofile’s endorsers' })
   @ApiOkResponse({ description: 'The endorsers of the subprofile.' })
@@ -517,15 +541,20 @@ export class SubprofilesController {
   listEndorsers(
     @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: ListAudienceQuery,
   ) {
-    return this.subprofilesService.listEndorsers(user.userId, id);
+    return this.subprofilesService.listEndorsers(
+      user.userId,
+      id,
+      query.page,
+      query.limit,
+    );
   }
 
   // The literal two-segment 'endorsement/mine' tail never collides with the
   // ':id/endorse' / ':id/endorsements' routes above (distinct path shapes) —
   // it backs the endorse-with-note modal's lazy prefill when it opens in edit
   // mode, returning ONLY the current viewer's own standing + note.
-  @UseGuards(ActiveMemberGuard)
   @Get(':id/endorsement/mine')
   @ApiOperation({
     summary: 'Get the current member’s own endorsement of a subprofile',
@@ -548,7 +577,6 @@ export class SubprofilesController {
   // --- followers — sit after the endorsement routes, before the class ends;
   //     same reason those do: ':id' above must not shadow these literals. ---
 
-  @UseGuards(ActiveMemberGuard)
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Post(':id/follow')
   @ApiOperation({ summary: 'Follow a subprofile' })
@@ -565,7 +593,6 @@ export class SubprofilesController {
     return this.subprofilesService.follow(user.userId, id);
   }
 
-  @UseGuards(ActiveMemberGuard)
   @Delete(':id/follow')
   @ApiOperation({ summary: 'Unfollow a subprofile' })
   @ApiOkResponse({ description: 'The updated follow standing.' })
@@ -579,6 +606,31 @@ export class SubprofilesController {
   ) {
     return this.subprofilesService.unfollow(user.userId, id);
   }
+
+  // Owner-only: lists WHO follows a persona. Following is anonymous to the
+  // public (count only), so this 403s every non-co-owner — identities are
+  // never exposed to non-owners. The literal ':id/followers' tail sits below
+  // the bare ':id' routes for the same reason the endorsement/follow routes do.
+  @Get(':id/followers')
+  @ApiOperation({ summary: 'List a subprofile’s followers (co-owners only)' })
+  @ApiOkResponse({ description: 'The followers of the subprofile.' })
+  @ApiForbiddenResponse({ description: 'Not a co-owner of the subprofile.' })
+  @ApiNotFoundResponse({ description: 'No subprofile with that id.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  listFollowers(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: ListAudienceQuery,
+  ) {
+    return this.subprofilesService.listFollowers(
+      user.userId,
+      id,
+      query.page,
+      query.limit,
+    );
+  }
 }
 
 // The `GET /profiles/:slug/subprofiles` route belongs to the subprofiles
@@ -587,12 +639,12 @@ export class SubprofilesController {
 // `profiles.controller.ts` co-locates `MembersController`.
 @ApiTags('Subprofiles')
 @ApiCookieAuth()
+@UseGuards(ActiveMemberGuard)
 @Controller('profiles')
 export class ProfileSubprofilesController {
   constructor(private readonly subprofilesService: SubprofilesService) {}
 
   @Get(':slug/subprofiles')
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'List a member’s linked, published subprofiles' })
   @ApiOkResponse({ description: 'The member’s public subprofiles.' })
   @ApiNotFoundResponse({ description: 'No member with that slug.' })
@@ -611,9 +663,13 @@ export class ProfileSubprofilesController {
   // .getByHandle` (design plan Phase 1b Task 1: a single fetch is what lets
   // this one persona carry its own `restrictedState` signal, which the bulk
   // list above cannot). Same public, best-effort-auth treatment as
-  // `by-handle/:handle` — see that route's comment.
+  // `by-handle/:handle` — `@Public()` (which the class-level `ActiveMemberGuard`
+  // steps aside for) + `OptionalJwtAuthGuard`, and the anonymous-only
+  // `Cache-Control` interceptor.
   @Public()
   @UseGuards(OptionalJwtAuthGuard)
+  @UseInterceptors(AnonymousPublicCacheInterceptor)
+  @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Get(':slug/subprofiles/:subslug')
   @ApiOperation({
     summary:

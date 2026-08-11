@@ -42,6 +42,21 @@ export enum NotificationType {
   // `AddSubprofileInviteNotificationTypes1785800500000`).
   SubprofileInvite = 'subprofile_invite',
   SubprofileCoOwnerJoined = 'subprofile_co_owner_joined',
+  // Sent to a persona's co-owners when its CREATOR deletes it, so they learn
+  // the shared persona is gone (the creator who deleted it is excluded). No
+  // preference toggle (like `ModerationOutcome`) — the persona no longer
+  // exists, so this is need-to-know; block/mute still applies via the deleting
+  // creator as the `actorId`. See migration
+  // `AddSubprofileDeletedNotificationType1787700000000`.
+  SubprofileDeleted = 'subprofile_deleted',
+  // Sent to a co-owner when the persona's CREATOR removes them from it
+  // (`SubprofilesService.removeMember`), so they learn they no longer co-own
+  // the shared persona (a creator kick previously notified no one). Like
+  // `SubprofileDeleted` it carries the persona name in its payload and no
+  // preference toggle — need-to-know — while block/mute still applies via the
+  // removing creator as the `actorId`. See migration
+  // `AddSubprofileMemberRemovedNotificationType1787700100000`.
+  SubprofileMemberRemoved = 'subprofile_member_removed',
   // Sent to the member a moderation action lands on (warn/suspend/ban) so they
   // learn the outcome and why — the exact gap the audit named. Delivered with
   // no actor and no preference toggle: a moderation outcome is the platform's

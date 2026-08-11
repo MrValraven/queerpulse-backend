@@ -22,14 +22,18 @@ import {
 } from '../membership/membership.events';
 import { SubprofileMember } from '../subprofiles/entities/subprofile-member.entity';
 import {
+  SUBPROFILE_DELETED,
   SUBPROFILE_ENDORSED,
   SUBPROFILE_FOLLOWED,
   SUBPROFILE_INVITE_ACCEPTED,
   SUBPROFILE_INVITED,
+  SUBPROFILE_MEMBER_REMOVED,
+  SubprofileDeletedEvent,
   SubprofileEndorsedEvent,
   SubprofileFollowedEvent,
   SubprofileInviteAcceptedEvent,
   SubprofileInvitedEvent,
+  SubprofileMemberRemovedEvent,
 } from '../subprofiles/subprofile.events';
 import { USER_PROMOTED, UserPromotedEvent } from '../users/user.events';
 import { VOUCH_CREATED, VouchCreatedEvent } from '../vouch/vouch.events';
@@ -212,6 +216,39 @@ export class NotificationsListener {
       NotificationType.SubprofileCoOwnerJoined,
       { subprofileId: e.subprofileId, joinedUserId: e.joinedUserId },
       e.joinedUserId,
+    );
+  }
+
+  // A persona's creator deleted it — tell every co-owner (the creator is
+  // already excluded from `coOwnerIds` at the emit site). The persona row is
+  // gone, so the payload carries its name for display; block/mute still applies
+  // via the deleting creator as the actor.
+  @OnEvent(SUBPROFILE_DELETED)
+  async onSubprofileDeleted(e: SubprofileDeletedEvent): Promise<void> {
+    if (!e.coOwnerIds.length) {
+      return;
+    }
+    await this.notifications.createForRecipients(
+      e.coOwnerIds,
+      NotificationType.SubprofileDeleted,
+      { subprofileName: e.displayName },
+      e.deletedByUserId,
+    );
+  }
+
+  // A persona's creator removed a co-owner — tell that one member. Mirrors
+  // `onSubprofileDeleted`: the persona still exists but is no longer theirs, so
+  // the payload carries its name for display and the removing creator is the
+  // actor (`removedByUserId`) so block/mute filtering applies.
+  @OnEvent(SUBPROFILE_MEMBER_REMOVED)
+  async onSubprofileMemberRemoved(
+    e: SubprofileMemberRemovedEvent,
+  ): Promise<void> {
+    await this.notifications.createForRecipients(
+      [e.removedUserId],
+      NotificationType.SubprofileMemberRemoved,
+      { subprofileName: e.displayName },
+      e.removedByUserId,
     );
   }
 }

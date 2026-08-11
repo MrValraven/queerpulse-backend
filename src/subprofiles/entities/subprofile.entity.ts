@@ -81,6 +81,17 @@ export interface SkinData {
 
 @Entity('subprofiles')
 @Index('IDX_subprofiles_directory', ['kind', 'status', 'visibility'])
+// Directory/search hot path: `directory()`/`searchByText()` filter on
+// (linkVisibility, status, visibility) with `handle IS NOT NULL` +
+// `removed_at IS NULL`, then order by `display_name`. A partial composite index
+// over exactly that predicate + sort key serves the equality filters and the
+// ordered scan without touching draft/nested/removed rows. See migration
+// `AddSubprofileDirectoryBrowseIndex1787700200000`.
+@Index(
+  'IDX_subprofiles_directory_browse',
+  ['linkVisibility', 'status', 'visibility', 'displayName'],
+  { where: '"handle" IS NOT NULL AND "removed_at" IS NULL' },
+)
 @Index('UQ_subprofiles_user_slug', ['userId', 'slug'], { unique: true })
 export class Subprofile {
   @PrimaryGeneratedColumn('uuid')
@@ -105,10 +116,17 @@ export class Subprofile {
   @Column({ type: 'varchar' })
   slug!: string;
 
-  // Globally unique when set; the `/p/<handle>` handle for unlinked+published.
+  // Globally unique when set AND published; the `/p/<handle>` handle for
+  // unlinked+published personas. The partial predicate is scoped to
+  // `status = 'published'` so a DRAFT can hold a desired handle without
+  // reserving it against the global namespace — two drafts may name the same
+  // handle, and only the FIRST to publish claims it (publish-time
+  // `HandlesService.isTaken`/`rename` still enforces global uniqueness across
+  // published personas + main usernames). See migration
+  // `NarrowSubprofileHandleUniqueIndexToPublished1787700100000`.
   @Index('UQ_subprofiles_handle', {
     unique: true,
-    where: '"handle" IS NOT NULL',
+    where: `"handle" IS NOT NULL AND "status" = 'published'`,
   })
   @Column({ type: 'varchar', nullable: true })
   handle!: string | null;

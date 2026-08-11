@@ -556,6 +556,7 @@ describe('SubprofilesService', () => {
     create: jest.Mock;
     save: jest.Mock;
     update: jest.Mock;
+    query: jest.Mock;
   };
   let dataSource: { transaction: jest.Mock };
   let blockFilter: {
@@ -651,6 +652,9 @@ describe('SubprofilesService', () => {
         ),
       save: jest.fn().mockResolvedValue(undefined),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
+      // Backs `create()`'s per-user advisory lock
+      // (`pg_advisory_xact_lock`) taken at the top of its transaction.
+      query: jest.fn().mockResolvedValue(undefined),
     };
     dataSource = {
       transaction: jest
@@ -777,14 +781,20 @@ describe('SubprofilesService', () => {
     });
 
     it('rejects creating beyond MAX_SUBPROFILES', async () => {
-      subprofiles.count.mockResolvedValue(12);
+      // The cap check now runs INSIDE the transaction (under the per-user
+      // advisory lock) and counts via `manager.count`, not the plain
+      // `subprofiles.count` repo mock — a full persona count trips it.
+      manager.count.mockResolvedValueOnce(12);
       await expect(
         service.create('user-1', {
           kind: SubprofileKind.Generic,
           displayName: 'Overflow',
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
-      expect(dataSource.transaction).not.toHaveBeenCalled();
+      // The advisory lock is taken before the count, and the cap breach is
+      // surfaced as a BadRequestException (never mistranslated to a 409).
+      expect(manager.query).toHaveBeenCalled();
+      expect(manager.save).not.toHaveBeenCalled();
     });
 
     it('inserts the creator as the first subprofile_members row, in the same transaction as the subprofile save', async () => {

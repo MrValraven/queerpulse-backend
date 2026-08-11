@@ -5,6 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { Response } from 'express';
 import { Public } from '../auth/decorators/public.decorator';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
+import { csrfCookieName } from './csrf-cookie';
 
 // Outlive the 30d refresh token, so the CSRF cookie is never the reason a
 // still-authenticated session starts failing. Previously this was a session
@@ -37,9 +38,15 @@ export class CsrfController {
   })
   issue(@Res({ passthrough: true }) res: Response): { csrfToken: string } {
     const token = randomBytes(32).toString('hex');
-    res.cookie('csrf_token', token, {
+    const isProduction = this.config.get<string>('app.nodeEnv') === 'production';
+    // In production the `__Host-` prefix hardens this against cookie fixation
+    // (see csrf-cookie.ts). The prefix's own rules — Secure, Path=/, host-only —
+    // are exactly the attributes we already set, so the name switch is the only
+    // change: `secure` is already tied to production, `path` is '/', and we
+    // never attach a Domain.
+    res.cookie(csrfCookieName(this.config.get<string>('app.nodeEnv')), token, {
       httpOnly: false, // the SPA must read it to echo in the X-CSRF-Token header
-      secure: this.config.get<string>('app.nodeEnv') === 'production',
+      secure: isProduction,
       sameSite: 'lax',
       path: '/',
       maxAge: CSRF_MAX_AGE,

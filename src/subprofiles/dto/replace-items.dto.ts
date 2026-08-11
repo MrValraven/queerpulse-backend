@@ -11,8 +11,10 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
+import { IsSafeUrl } from '../../common/validators/is-safe-url.decorator';
 import type { ItemStructured } from '../entities/subprofile-item.entity';
 import { MAX_ITEMS_PER_SECTION } from '../subprofile-validation';
+import { IsSafeStructuredLinks } from './is-safe-structured-links.decorator';
 
 // One item of a section. `section` comes from the URL, not the body (C4).
 export class SubprofileItemInputDTO {
@@ -22,7 +24,7 @@ export class SubprofileItemInputDTO {
 
   @IsOptional() @IsString() @MaxLength(5000) description?: string;
 
-  @IsOptional() @IsString() @MaxLength(1000) url?: string;
+  @IsOptional() @IsString() @MaxLength(1000) @IsSafeUrl() url?: string;
 
   @IsOptional() @IsImageReference() imageUrl?: string;
 
@@ -60,6 +62,7 @@ export class SubprofileItemInputDTO {
   @IsOptional()
   @IsString()
   @MaxLength(1000)
+  @IsSafeUrl()
   ticketUrl?: string;
 
   @IsOptional()
@@ -88,9 +91,13 @@ export class SubprofileItemInputDTO {
   // Shape-checked here (`@IsObject()`) with a 16 KB serialized-size cap
   // enforced in `SubprofilesService.assertJsonbSize` before persisting — full
   // nested class-validation of `courses`/`snippet` is out of scope for Phase 0
-  // (documented limitation; design plan Task 6 Step 1).
+  // (documented limitation; design plan Task 6 Step 1). The nested `links[]`
+  // array IS validated (`@IsSafeStructuredLinks`) — it renders as `<a href>`,
+  // so its `urlOrHandle` must pass the same safe-url allowlist as a top-level
+  // social link (closes a stored-XSS bypass).
   @IsOptional()
   @IsObject()
+  @IsSafeStructuredLinks()
   structured?: ItemStructured;
 }
 

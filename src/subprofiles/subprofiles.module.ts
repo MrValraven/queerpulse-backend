@@ -20,9 +20,12 @@ import {
   ProfileSubprofilesController,
   SubprofilesController,
 } from './subprofiles.controller';
+import { SubprofileCreditsService } from './subprofile-credits.service';
 import { SubprofileEndorsementsService } from './subprofile-endorsements.service';
 import { SubprofileFollowersService } from './subprofile-followers.service';
 import { SubprofileInvitesService } from './subprofile-invites.service';
+import { SubprofileMembershipService } from './subprofile-membership.service';
+import { SubprofilePublicReadService } from './subprofile-public-read.service';
 import { SubprofilesService } from './subprofiles.service';
 
 @Module({
@@ -62,6 +65,9 @@ import { SubprofilesService } from './subprofiles.service';
   controllers: [SubprofilesController, ProfileSubprofilesController],
   providers: [
     SubprofilesService,
+    SubprofileMembershipService,
+    SubprofileCreditsService,
+    SubprofilePublicReadService,
     SubprofileEndorsementsService,
     SubprofileFollowersService,
     SubprofileInvitesService,

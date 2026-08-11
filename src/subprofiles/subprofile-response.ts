@@ -66,6 +66,15 @@ export interface EndorserView {
   note: string | null;
 }
 
+// Owner-only follower row — GET /subprofiles/:id/followers, visible ONLY to a
+// co-owner of the persona (the endpoint 403s every non-owner). Unlike
+// `EndorserView` there is no `note` field: following carries no note.
+export interface FollowerView {
+  slug: string;
+  name: string;
+  avatarUrl: string | null;
+}
+
 // Resolved event/community link — exposed for BOTH linked and unlinked
 // personas (persona → entity, not owner; anonymity-safe).
 export interface AffiliationView {

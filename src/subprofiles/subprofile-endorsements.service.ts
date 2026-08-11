@@ -11,6 +11,7 @@ import { toImageUrl } from '../common/image-url';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { SubprofileEndorsement } from './entities/subprofile-endorsement.entity';
+import { SubprofileMember } from './entities/subprofile-member.entity';
 import {
   Subprofile,
   SubprofileStatus,
@@ -22,9 +23,9 @@ import {
   SubprofileEndorsedEvent,
 } from './subprofile.events';
 
-// Endorser lists are capped, newest-first — mirrors the vouch page-size
-// convention but fixed (not caller-tunable) since the endorse UI shows a
-// single avatar cluster, not a paginated page.
+// Endorser pages are capped at 50 rows, newest-first. The owner-facing list is
+// now pageable (optional `page`/`limit`), but a single page never exceeds this
+// cap.
 const ENDORSERS_LIST_CAP = 50;
 
 // Owns the endorse / withdraw / list-endorsers behaviour plus the batched
@@ -41,6 +42,12 @@ export class SubprofileEndorsementsService {
     private readonly subprofiles: Repository<Subprofile>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
+    // Read-only: `listEndorsers`'s owner/co-owner visibility gate — a member
+    // row means the viewer may see the endorser list of even a draft/private
+    // persona they own (injected directly to avoid a circular DI back through
+    // the facade, like `SubprofileFollowersService` does).
+    @InjectRepository(SubprofileMember)
+    private readonly members: Repository<SubprofileMember>,
     private readonly blockFilter: BlockFilterService,
     private readonly eventEmitter: EventEmitter2,
   ) {}
@@ -145,7 +152,30 @@ export class SubprofileEndorsementsService {
   async listEndorsers(
     viewerId: string,
     id: string,
+    page?: number,
+    limit?: number,
   ): Promise<{ count: number; endorsers: EndorserView[] }> {
+    // Persona-visibility gate (Task 1): the endorser list — including each
+    // endorser's free-text note — must never be enumerable by anyone holding
+    // only the persona's UUID. A co-owner (any `subprofile_members` row) may
+    // see it regardless of status/visibility (their own draft/private persona);
+    // everyone else is held to the SAME public-endorsable gate `endorse`/
+    // `follow` funnel through — published, Open, and not blocked either way —
+    // which 404s a draft/network/private/removed/blocked persona.
+    const isMember = await this.members.findOne({
+      where: { subprofileId: id, userId: viewerId },
+      select: { id: true },
+    });
+    if (!isMember) {
+      await this.resolveEndorsablePersona(viewerId, id);
+    }
+
+    // `count` stays the viewer's full visible total; the returned list is the
+    // requested page. Both `page` and `limit` are clamped so a hostile/omitted
+    // value can never exceed `ENDORSERS_LIST_CAP` per page.
+    const safeLimit = Math.min(Math.max(limit ?? ENDORSERS_LIST_CAP, 1), ENDORSERS_LIST_CAP);
+    const safePage = Math.max(page ?? 1, 1);
+
     // In-query block filtering (mirrors `directory()`) so `LIMIT` counts only
     // visible rows and `count` reflects the viewer's actually-visible total,
     // not the raw active tally.
@@ -157,7 +187,10 @@ export class SubprofileEndorsementsService {
     qb.orderBy('se.createdAt', 'DESC');
 
     const count = await qb.getCount();
-    const rows = await qb.take(ENDORSERS_LIST_CAP).getMany();
+    const rows = await qb
+      .skip((safePage - 1) * safeLimit)
+      .take(safeLimit)
+      .getMany();
 
     const endorserProfiles = await this.profiles.find({
       where: { userId: In(rows.map((row) => row.endorserId)) },
@@ -204,12 +237,18 @@ export class SubprofileEndorsementsService {
   async loadEndorsementCountsFor(ids: string[]): Promise<Map<string, number>> {
     const counts = new Map<string, number>();
     if (!ids.length) return counts;
-    const rows = await this.endorsements.find({
-      where: { subprofileId: In(ids), withdrawnAt: IsNull() },
-      select: { subprofileId: true },
-    });
-    for (const row of rows)
-      counts.set(row.subprofileId, (counts.get(row.subprofileId) ?? 0) + 1);
+    // Grouped SQL COUNT of active (non-withdrawn) endorsements — one row per
+    // persona out of Postgres, rather than pulling every endorsement row into
+    // the app to tally.
+    const rows = await this.endorsements
+      .createQueryBuilder('endorsement')
+      .select('endorsement.subprofileId', 'subprofileId')
+      .addSelect('COUNT(*)', 'count')
+      .where('endorsement.subprofileId IN (:...ids)', { ids })
+      .andWhere('endorsement.withdrawnAt IS NULL')
+      .groupBy('endorsement.subprofileId')
+      .getRawMany<{ subprofileId: string; count: string }>();
+    for (const row of rows) counts.set(row.subprofileId, Number(row.count));
     return counts;
   }
 

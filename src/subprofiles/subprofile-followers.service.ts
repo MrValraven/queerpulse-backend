@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -7,17 +8,26 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { toImageUrl } from '../common/image-url';
 import { BlockFilterService } from '../social/block-filter.service';
+import { Profile } from '../users/entities/profile.entity';
 import { SubprofileFollower } from './entities/subprofile-follower.entity';
+import { SubprofileMember } from './entities/subprofile-member.entity';
 import {
   Subprofile,
   SubprofileStatus,
   SubprofileVisibility,
 } from './entities/subprofile.entity';
+import { FollowerView } from './subprofile-response';
 import {
   SUBPROFILE_FOLLOWED,
   SubprofileFollowedEvent,
 } from './subprofile.events';
+
+// Follower pages are capped at 50 rows, newest-first — mirrors
+// `ENDORSERS_LIST_CAP`. The owner-facing list is now pageable (optional
+// `page`/`limit`), but a single page never exceeds this cap.
+const FOLLOWERS_LIST_CAP = 50;
 
 // Owns the follow / unfollow behaviour plus the batched count/viewer-state
 // derivations the persona read paths consume. Extracted from
@@ -31,6 +41,10 @@ export class SubprofileFollowersService {
     private readonly followers: Repository<SubprofileFollower>,
     @InjectRepository(Subprofile)
     private readonly subprofiles: Repository<Subprofile>,
+    @InjectRepository(Profile)
+    private readonly profiles: Repository<Profile>,
+    @InjectRepository(SubprofileMember)
+    private readonly members: Repository<SubprofileMember>,
     private readonly blockFilter: BlockFilterService,
     private readonly eventEmitter: EventEmitter2,
   ) {}
@@ -87,18 +101,80 @@ export class SubprofileFollowersService {
     return { followerCount, viewerFollowing: false };
   }
 
+  // Owner-only: lists WHO follows a persona. Following is anonymous to the
+  // public (count only), so this is gated to co-owners — the viewer must hold a
+  // `subprofile_members` row for this persona (mirrors `SubprofilesService`'s
+  // private `isMember`); every non-owner gets a 403 and NEVER an identity. The
+  // repo is injected directly rather than delegating back to
+  // `SubprofilesService` to avoid a circular DI. Otherwise mirrors
+  // `listEndorsers`: in-query block filtering so `LIMIT` and `count` reflect
+  // only the viewer's visible rows, newest-first, capped.
+  async listFollowers(
+    viewerId: string,
+    id: string,
+    page?: number,
+    limit?: number,
+  ): Promise<{ count: number; followers: FollowerView[] }> {
+    const membership = await this.members.findOne({
+      where: { subprofileId: id, userId: viewerId },
+      select: { id: true },
+    });
+    if (!membership) {
+      throw new ForbiddenException('Not your subprofile');
+    }
+
+    // `count` stays the viewer's full visible total; the returned list is the
+    // requested page. Both `page` and `limit` are clamped so a hostile/omitted
+    // value can never exceed `FOLLOWERS_LIST_CAP` per page.
+    const safeLimit = Math.min(Math.max(limit ?? FOLLOWERS_LIST_CAP, 1), FOLLOWERS_LIST_CAP);
+    const safePage = Math.max(page ?? 1, 1);
+
+    const qb = this.followers
+      .createQueryBuilder('sf')
+      .where('sf.subprofileId = :id', { id });
+    this.blockFilter.excludeBlocked(qb, viewerId, '"sf"."follower_id"');
+    qb.orderBy('sf.createdAt', 'DESC');
+
+    const count = await qb.getCount();
+    const rows = await qb
+      .skip((safePage - 1) * safeLimit)
+      .take(safeLimit)
+      .getMany();
+
+    const followerProfiles = await this.profiles.find({
+      where: { userId: In(rows.map((row) => row.followerId)) },
+    });
+    const profileByUserId = new Map(
+      followerProfiles.map((profile) => [profile.userId, profile]),
+    );
+    const followers = rows.map((row) => {
+      const profile = profileByUserId.get(row.followerId);
+      return {
+        slug: profile?.slug ?? '',
+        name: `${profile?.firstName ?? ''} ${profile?.lastName ?? ''}`.trim(),
+        avatarUrl: toImageUrl(profile?.avatarUrl),
+      };
+    });
+    return { count, followers };
+  }
+
   // Batches the follower COUNT for many personas into ONE query (mirrors
   // `loadEndorsementCountsFor`) — there is no `withdrawnAt`: every row in
   // `subprofile_followers` is active, so this counts rows directly.
   async loadFollowerCountsFor(ids: string[]): Promise<Map<string, number>> {
     const counts = new Map<string, number>();
     if (!ids.length) return counts;
-    const rows = await this.followers.find({
-      where: { subprofileId: In(ids) },
-      select: { subprofileId: true },
-    });
-    for (const row of rows)
-      counts.set(row.subprofileId, (counts.get(row.subprofileId) ?? 0) + 1);
+    // Grouped SQL COUNT — one row per persona out of Postgres, rather than
+    // pulling every follower row into the app to tally. There is no
+    // `withdrawnAt`: every `subprofile_followers` row is active.
+    const rows = await this.followers
+      .createQueryBuilder('follower')
+      .select('follower.subprofileId', 'subprofileId')
+      .addSelect('COUNT(*)', 'count')
+      .where('follower.subprofileId IN (:...ids)', { ids })
+      .groupBy('follower.subprofileId')
+      .getRawMany<{ subprofileId: string; count: string }>();
+    for (const row of rows) counts.set(row.subprofileId, Number(row.count));
     return counts;
   }
 
