@@ -26,6 +26,11 @@ export const MIN_CONTENT_ITEMS = 3; // items in sections other than `links`
 export const MAX_SUBPROFILES = 12; // per user
 export const MAX_ITEMS_PER_SECTION = 100;
 
+// The universal `gallery` section (every kind, added just before `links` by
+// `sectionsForKind`) is capped much tighter than a generic content section —
+// it's a photo strip, not a portfolio list.
+export const MAX_GALLERY_PHOTOS = 6;
+
 // A persona can have at most this many co-owners (creator + invited members).
 export const MAX_SUBPROFILE_CO_OWNERS = 5;
 

@@ -327,6 +327,14 @@ describe('isSectionAllowed', () => {
   it('rejects a section from another kind', () => {
     expect(isSectionAllowed('developer', 'discography')).toBe(false);
   });
+
+  // The universal `gallery` section (added by `sectionsForKind` just before
+  // `links`) must be allowed for every persona kind, not just some of them.
+  it('accepts the universal gallery section for every kind', () => {
+    for (const kind of Object.values(SubprofileKind)) {
+      expect(isSectionAllowed(kind, SubprofileSection.Gallery)).toBe(true);
+    }
+  });
 });
 
 // --- toPublicDTO owner strip ------------------------------------------------
@@ -1337,6 +1345,33 @@ describe('SubprofilesService', () => {
       await expect(
         service.replaceSection('user-1', 'sp-1', 'projects', tooMany),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    // The universal `gallery` section is a photo strip, capped far tighter
+    // than the generic MAX_ITEMS_PER_SECTION limit above (design plan: "up
+    // to 6 photos").
+    it('rejects a 7th gallery photo', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ kind: SubprofileKind.Developer }),
+      );
+      const sevenPhotos = Array.from({ length: 7 }, (_, index) => ({
+        title: `Photo ${index}`,
+      }));
+      await expect(
+        service.replaceSection('user-1', 'sp-1', 'gallery', sevenPhotos),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('accepts exactly 6 gallery photos', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ kind: SubprofileKind.Developer }),
+      );
+      const sixPhotos = Array.from({ length: 6 }, (_, index) => ({
+        title: `Photo ${index}`,
+      }));
+      await expect(
+        service.replaceSection('user-1', 'sp-1', 'gallery', sixPhotos),
+      ).resolves.toBeDefined();
     });
 
     it('replaces items within a section (delete + insert with position)', async () => {

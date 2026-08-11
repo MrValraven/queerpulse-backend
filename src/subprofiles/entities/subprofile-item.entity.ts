@@ -76,6 +76,7 @@ export enum SubprofileSection {
   // generic
   Showcase = 'showcase',
   // every kind
+  Gallery = 'gallery',
   Links = 'links',
 }
 

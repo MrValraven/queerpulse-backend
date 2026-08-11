@@ -55,6 +55,7 @@ export type SubprofileSection =
   | 'specialisms'
   | 'credentials' // therapist
   | 'showcase' // generic
+  | 'gallery' // every kind
   | 'links'; // every kind
 
 // kind -> ordered content sections (excludes the universal 'links')
@@ -81,6 +82,7 @@ export const KIND_SECTIONS: Record<SubprofileKind, SubprofileSection[]> = {
 // helpers (both repos)
 export const sectionsForKind = (k: SubprofileKind): SubprofileSection[] => [
   ...KIND_SECTIONS[k],
+  'gallery',
   'links',
 ];
 export const isSectionAllowed = (

@@ -1,5 +1,13 @@
-import { PartialType } from '@nestjs/mapped-types';
-import { IsBoolean, IsIn, IsInt, IsOptional, IsString } from 'class-validator';
+import { OmitType, PartialType } from '@nestjs/mapped-types';
+import {
+  IsBoolean,
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsString,
+  IsUUID,
+  ValidateIf,
+} from 'class-validator';
 
 import { PieceStage } from '../entities/magazine-piece.entity';
 import { CreatePieceDto } from './create-piece.dto';
@@ -23,12 +31,32 @@ const PIECE_STAGES: PieceStage[] = [
  * `piece-jsonb.validation.ts`, called by the service before `save()`
  * (mirrors the `CreateDeckDto.slides` idiom).
  */
-export class UpdatePieceDto extends PartialType(CreatePieceDto) {
+// `issueId` is omitted from the partial base and re-declared below so it can
+// be widened to `string | null` (detach → standalone). Re-widening an
+// inherited property in place is a TS override error (TS2416: the derived
+// property type must be assignable to the base's `string`), so the field is
+// dropped from the base and added fresh here instead.
+export class UpdatePieceDto extends PartialType(
+  OmitType(CreatePieceDto, ['issueId'] as const),
+) {
   @IsOptional() @IsIn(PIECE_STAGES) stage?: PieceStage;
 
   @IsOptional() brief?: unknown;
 
   @IsOptional() care?: unknown;
+
+  /**
+   * Overrides the inherited `CreatePieceDto.issueId` (`@IsOptional()
+   * @IsUUID()`, which rejects `null`) so a piece can be detached back to a
+   * standalone highlight by sending `issueId: null`. `ValidateIf` skips the
+   * `@IsUUID()` check for an explicit `null`, so both a UUID and `null`
+   * validate; the update path then writes `{ issueId: null }` (the entity
+   * column is nullable).
+   */
+  @IsOptional()
+  @ValidateIf((updatePiece: UpdatePieceDto) => updatePiece.issueId !== null)
+  @IsUUID()
+  issueId?: string | null;
 
   @IsOptional() @IsInt() orderIndex?: number;
 

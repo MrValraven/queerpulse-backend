@@ -65,6 +65,7 @@ import {
   isValidAffiliation,
   MAX_AFFILIATIONS,
   MAX_COLLABORATORS_PER_ITEM,
+  MAX_GALLERY_PHOTOS,
   MAX_ITEMS_PER_SECTION,
   MAX_SUBPROFILES,
   slugifyDisplayName,
@@ -383,15 +384,10 @@ export class SubprofilesService {
         );
       });
     } catch (err) {
-      if (isUniqueViolation(err)) {
-        // Duplicate slug (per owner) or handle (global) — surface as 409 so
-        // the client re-picks (design spec §7). Mirrors `saveSubprofile`'s
-        // translation; inlined here (rather than delegating to
-        // `saveSubprofile`) because this write must share ONE transaction
-        // with the membership insert above.
-        throw new ConflictException('slug or handle already in use');
-      }
-      throw err;
+      // Mirrors `saveSubprofile`'s translation; the write is inlined here
+      // (rather than delegating to `saveSubprofile`) because it must share ONE
+      // transaction with the membership insert above.
+      this.throwConflictOnUniqueViolation(err);
     }
     // The creator is the persona's only member the instant it's created (see
     // the transaction just above) — memberCount is 1, no query needed.
@@ -432,6 +428,34 @@ export class SubprofilesService {
       );
     }
     this.assertJsonbSize(rest.skinData, 'skinData');
+
+    // A slug is the persona's address — it can never be blank. Trim it and
+    // reject an empty one up front rather than writing "" into the per-owner
+    // unique index.
+    if (rest.slug !== undefined) {
+      const trimmedSlug = rest.slug.trim();
+      if (trimmedSlug.length === 0) {
+        throw new BadRequestException('slug cannot be empty');
+      }
+      rest.slug = trimmedSlug;
+    }
+
+    // "No handle" is NULL, never "". The handle unique index is PARTIAL
+    // (`WHERE handle IS NOT NULL`), so NULL is exempt but an empty string is
+    // indexed and must be globally unique — which means two of an owner's
+    // personas both saving "" collide on the global namespace even though
+    // neither actually claims a handle. Normalize a blank handle to NULL so the
+    // DB only ever sees a real handle or NULL. (`delete` keeps the subsequent
+    // `Object.assign` from overwriting the NULL we set here.)
+    if (rest.handle !== undefined) {
+      const trimmedHandle = rest.handle?.trim() ?? '';
+      if (trimmedHandle.length === 0) {
+        delete rest.handle;
+        sp.handle = null;
+      } else {
+        rest.handle = trimmedHandle;
+      }
+    }
 
     Object.assign(sp, rest);
 
@@ -486,10 +510,7 @@ export class SubprofilesService {
           await m.save(sp);
         });
       } catch (err) {
-        if (isUniqueViolation(err)) {
-          throw new ConflictException('slug or handle already in use');
-        }
-        throw err;
+        this.throwConflictOnUniqueViolation(err);
       }
     } else {
       await this.saveSubprofile(sp);
@@ -519,6 +540,19 @@ export class SubprofilesService {
     if (items.length > MAX_ITEMS_PER_SECTION) {
       throw new BadRequestException(
         `A section can have at most ${MAX_ITEMS_PER_SECTION} items`,
+      );
+    }
+    // The universal `gallery` section is a photo strip, capped far tighter
+    // than the generic per-section limit above — a save that would leave
+    // more than MAX_GALLERY_PHOTOS items in `gallery` is rejected outright
+    // (this endpoint replaces one section's items at a time, so `items` here
+    // IS the full incoming gallery group whenever `sectionEnum` is gallery).
+    if (
+      sectionEnum === SubprofileSection.Gallery &&
+      items.length > MAX_GALLERY_PHOTOS
+    ) {
+      throw new BadRequestException(
+        `The gallery can have at most ${MAX_GALLERY_PHOTOS} photos`,
       );
     }
     // At most one featured item may arrive in a single section payload. Checked
@@ -2003,12 +2037,26 @@ export class SubprofilesService {
     try {
       await this.subprofiles.save(sp);
     } catch (err) {
-      if (isUniqueViolation(err)) {
-        // Duplicate slug (per owner) or handle (global) — surface as 409 so the
-        // client re-picks (design spec §7).
-        throw new ConflictException('slug or handle already in use');
-      }
-      throw err;
+      this.throwConflictOnUniqueViolation(err);
     }
+  }
+
+  /**
+   * Translate a Postgres unique violation into a 409 that names WHICH namespace
+   * collided — the per-owner slug or the global handle — so the client can point
+   * the user at the right field. Any non-unique-violation error is re-thrown
+   * unchanged. Never returns (design spec §7: the client re-picks).
+   */
+  private throwConflictOnUniqueViolation(err: unknown): never {
+    if (isUniqueViolation(err, 'UQ_subprofiles_user_slug')) {
+      throw new ConflictException('slug already in use');
+    }
+    if (isUniqueViolation(err, 'UQ_subprofiles_handle')) {
+      throw new ConflictException('handle already in use');
+    }
+    if (isUniqueViolation(err)) {
+      throw new ConflictException('slug or handle already in use');
+    }
+    throw err;
   }
 }

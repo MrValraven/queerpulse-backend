@@ -1256,6 +1256,7 @@ describe('MagazinePieceService', () => {
         where: { issueId: 'issue-1' },
       });
       expect(result).toEqual({
+        id: 'issue-1',
         number: '07',
         theme: 'Chosen family',
         filled: 3,

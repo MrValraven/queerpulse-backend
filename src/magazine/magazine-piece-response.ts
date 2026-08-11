@@ -695,6 +695,7 @@ export function toMagazineEditor(
  * not a magic constant, so it moves if section targets ever change.
  */
 export interface CurrentIssueSummary {
+  id: string;
   number: string;
   theme: string;
   filled: number;
