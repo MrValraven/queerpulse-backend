@@ -54,6 +54,7 @@ import { MyMediaModule } from './my-media/my-media.module';
 import { AdminBotsModule } from './admin-bots/admin-bots.module';
 import { AdminHousingModule } from './admin-housing/admin-housing.module';
 import { PlatformStaffModule } from './platform-staff/platform-staff.module';
+import { PublicEligibilityModule } from './public-eligibility/public-eligibility.module';
 import { PushModule } from './push/push.module';
 import { EventsModule } from './events/events.module';
 import { JobsModule } from './jobs/jobs.module';
@@ -279,6 +280,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     AdminBotsModule,
     AdminHousingModule,
     PlatformStaffModule,
+    PublicEligibilityModule,
   ],
   providers: [
     // Guards run in registration order. Throttle first (cheapest, and it must

@@ -73,6 +73,8 @@ import { SubprofilesService } from './subprofiles.service';
     SubprofileInvitesService,
   ],
   // Exported for the cross-entity SearchModule (standalone-persona search).
-  exports: [SubprofilesService],
+  // `SubprofileEndorsementsService` is also exported: `PublicEligibilityModule`
+  // reads endorsement counts for the caller's public-profile eligibility signals.
+  exports: [SubprofilesService, SubprofileEndorsementsService],
 })
 export class SubprofilesModule {}
