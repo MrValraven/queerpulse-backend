@@ -406,6 +406,45 @@ describe('FeedService', () => {
       );
     });
 
+    // Fix round 2 (Task B): the `communities` tab's membership EXISTS check
+    // above already proves the viewer is on that exact community's roster,
+    // so a `community`-visibility gathering under it is provably theirs to
+    // see — widen the base visibility set to admit it on this tab only.
+    it('widens the gathering visibility set to include `community` on the "communities" tab', async () => {
+      const qb = qbStub([]);
+      events.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getFeed('viewer-1', 'communities', undefined);
+
+      expect(qb.where).toHaveBeenCalledWith('e.status = :status', {
+        status: EventStatus.Published,
+      });
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        'e.visibility IN (:...visibilities)',
+        {
+          visibilities: [
+            EventVisibility.Public,
+            EventVisibility.Members,
+            EventVisibility.Community,
+          ],
+        },
+      );
+    });
+
+    it('keeps the gathering visibility set to public/members ONLY on other tabs (e.g. "gatherings")', async () => {
+      const qb = qbStub([]);
+      events.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getFeed('viewer-1', 'gatherings', undefined);
+
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        'e.visibility IN (:...visibilities)',
+        {
+          visibilities: [EventVisibility.Public, EventVisibility.Members],
+        },
+      );
+    });
+
     it('does NOT apply the membership predicate to the gathering source on other tabs (e.g. "gatherings")', async () => {
       const qb = qbStub([]);
       events.createQueryBuilder.mockReturnValue(qb);

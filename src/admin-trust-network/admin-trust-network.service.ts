@@ -137,7 +137,7 @@ export class AdminTrustNetworkService {
         mutual,
         withdrawn: vouch.withdrawnAt !== null,
         createdAt: vouch.createdAt.toISOString(),
-        relationship: vouch.relationship,
+        relationship: vouch.relationships?.[0] ?? null,
         note: vouch.note,
         anonymous: vouch.anonymous,
         kind,

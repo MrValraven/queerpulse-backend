@@ -5,6 +5,8 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  ParseUUIDPipe,
+  Patch,
   Post,
   Query,
   UseGuards,
@@ -15,6 +17,7 @@ import {
   ApiCookieAuth,
   ApiCreatedResponse,
   ApiForbiddenResponse,
+  ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
@@ -32,6 +35,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { CreateIntakeDto } from './dto/create-intake.dto';
 import { ListIntakesQuery } from './dto/list-intakes.query';
+import { UpdateIntakeStatusDto } from './dto/update-intake-status.dto';
 import { IntakesService } from './intakes.service';
 
 /**
@@ -84,5 +88,27 @@ export class IntakesController {
   @ApiForbiddenResponse({ description: 'Requires the admin role.' })
   list(@Query() query: ListIntakesQuery) {
     return this.intakes.list(query);
+  }
+
+  @UseGuards(ActiveMemberGuard, RolesGuard)
+  @Roles(UserRole.Admin)
+  @ApiCookieAuth('access_token')
+  @Patch(':id')
+  @ApiOperation({
+    summary: 'Move a submission through triage (admin).',
+    description:
+      'Used by the governance-concern dashboard to mark a concern as ' +
+      'reviewing / resolved / dismissed.',
+  })
+  @ApiOkResponse({ description: 'The updated submission.' })
+  @ApiBadRequestResponse({ description: 'An invalid target status.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Requires the admin role.' })
+  @ApiNotFoundResponse({ description: 'No submission with that id.' })
+  updateStatus(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() body: UpdateIntakeStatusDto,
+  ) {
+    return this.intakes.updateStatus(id, body.status);
   }
 }

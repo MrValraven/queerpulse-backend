@@ -7,12 +7,17 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  IsUrl,
+  Max,
   MaxLength,
   Min,
   MinLength,
 } from 'class-validator';
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
-import { HousingListingType } from '../entities/housing-listing.entity';
+import {
+  HousingListerKind,
+  HousingListingType,
+} from '../entities/housing-listing.entity';
 
 /** PATCH /housing-listings/:ref body — every field optional; only the present
  * fields are applied (see `HousingListingsService.applyUpdate`). */
@@ -23,8 +28,15 @@ export class UpdateHousingListingDto {
   @IsOptional() @IsString() @MinLength(1) @MaxLength(120) city?: string;
   @IsOptional() @IsString() @MaxLength(120) area?: string;
   @IsOptional() @IsInt() @Min(0) rentEuros?: number;
+  @IsOptional() @IsInt() @Min(0) @Max(20) bedrooms?: number;
   @IsOptional() @IsBoolean() billsIncluded?: boolean;
   @IsOptional() @IsBoolean() lgbtqFriendly?: boolean;
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(300)
+  accessibilityInfo?: string;
+  @IsOptional() @IsEnum(HousingListerKind) listerKind?: HousingListerKind;
   @IsOptional() @IsDateString() availableFrom?: string;
   @IsOptional() @IsInt() @Min(0) minStayMonths?: number;
   @IsOptional() @IsString() @MaxLength(4000) description?: string;
@@ -48,4 +60,9 @@ export class UpdateHousingListingDto {
   @ArrayMaxSize(8)
   @IsImageReference({ each: true })
   gallery?: string[];
+
+  @IsOptional()
+  @IsUrl({ protocols: ['https'], require_protocol: true })
+  @MaxLength(500)
+  virtualTourUrl?: string;
 }

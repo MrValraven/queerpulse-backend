@@ -1,11 +1,15 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { Profile } from '../users/entities/profile.entity';
+import { VerificationLevel } from '../verification/verification-level';
+import { VerificationService } from '../verification/verification.service';
 import {
   FlatmateProfile,
   FlatmateProfileType,
+  IdentityVisibility,
 } from './entities/flatmate-profile.entity';
 import { FlatmateProfilesService } from './flatmate-profiles.service';
 
@@ -26,6 +30,12 @@ function makeFlatmate(
     flexibleTiming: true,
     about: 'Quiet, tidy.',
     lifestyleTags: ['nonsmoker'],
+    genderIdentity: null,
+    safeSpaceNeeds: null,
+    householdNorms: null,
+    identityHousehold: null,
+    identityVisibility: IdentityVisibility.Matches,
+    specialCategoryConsentAt: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
@@ -42,6 +52,12 @@ describe('FlatmateProfilesService', () => {
   let flatmates: RepoMock;
   let profiles: RepoMock;
   let messaging: { deliverEnquiry: jest.Mock };
+  let verification: {
+    requireLevel: jest.Mock;
+    levelForUser: jest.Mock;
+    levelsForUsers: jest.Mock;
+  };
+  let affirmingPledge: { requireAccepted: jest.Mock };
 
   beforeEach(async () => {
     flatmates = {
@@ -55,6 +71,14 @@ describe('FlatmateProfilesService', () => {
     messaging = {
       deliverEnquiry: jest.fn().mockResolvedValue({ conversationId: 'conv-1' }),
     };
+    verification = {
+      requireLevel: jest.fn().mockResolvedValue(undefined),
+      levelForUser: jest.fn().mockResolvedValue(VerificationLevel.Email),
+      levelsForUsers: jest.fn().mockResolvedValue(new Map()),
+    };
+    affirmingPledge = {
+      requireAccepted: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -62,6 +86,8 @@ describe('FlatmateProfilesService', () => {
         { provide: getRepositoryToken(FlatmateProfile), useValue: flatmates },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: MessagingService, useValue: messaging },
+        { provide: VerificationService, useValue: verification },
+        { provide: AffirmingPledgeService, useValue: affirmingPledge },
       ],
     }).compile();
 
@@ -184,7 +210,69 @@ describe('FlatmateProfilesService', () => {
         'owner-1',
         'Hey, still looking?',
       );
-      expect(result).toEqual({ conversationId: 'conv-1' });
+      expect(result).toEqual({
+        conversationId: 'conv-1',
+        pronounsShared: false,
+      });
+    });
+
+    it('appends the sender pronouns when they opt in AND have consent', async () => {
+      // First lookup resolves the target (by slug); the pronoun pre-share then
+      // loads the SENDER's own profile (by ownerId).
+      flatmates.findOne.mockImplementation(
+        ({ where }: { where: Record<string, unknown> }) =>
+          Promise.resolve(
+            where.slug === 'sam-flatmate'
+              ? makeFlatmate({ ownerId: 'owner-1', slug: 'sam-flatmate' })
+              : makeFlatmate({
+                  ownerId: 'sender',
+                  slug: 'sender-flatmate',
+                  pronouns: 'she/her',
+                  specialCategoryConsentAt: new Date(),
+                }),
+          ),
+      );
+
+      const result = await service.sayHello('sam-flatmate', 'sender', {
+        body: 'Hi there',
+        sharePronouns: true,
+      });
+
+      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
+        'sender',
+        'owner-1',
+        expect.stringContaining('she/her'),
+      );
+      expect(result.pronounsShared).toBe(true);
+    });
+
+    it('never shares pronouns without stored consent, even when opted in', async () => {
+      flatmates.findOne.mockImplementation(
+        ({ where }: { where: Record<string, unknown> }) =>
+          Promise.resolve(
+            where.slug === 'sam-flatmate'
+              ? makeFlatmate({ ownerId: 'owner-1', slug: 'sam-flatmate' })
+              : makeFlatmate({
+                  ownerId: 'sender',
+                  slug: 'sender-flatmate',
+                  pronouns: 'she/her',
+                  // No consent on record → the gate withholds the pronoun.
+                  specialCategoryConsentAt: null,
+                }),
+          ),
+      );
+
+      const result = await service.sayHello('sam-flatmate', 'sender', {
+        body: 'Hi there',
+        sharePronouns: true,
+      });
+
+      expect(messaging.deliverEnquiry).toHaveBeenCalledWith(
+        'sender',
+        'owner-1',
+        'Hi there',
+      );
+      expect(result.pronounsShared).toBe(false);
     });
   });
 });

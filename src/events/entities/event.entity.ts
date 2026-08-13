@@ -11,6 +11,18 @@ export enum EventVisibility {
   Public = 'public',
   Members = 'members',
   InviteOnly = 'invite_only',
+  // --- gathering audience scope (2026-08-13 design) -------------------------
+  // Strict 1st-degree: host + host's accepted connections. See
+  // `EventsService.assertCanView` and the browse/search queries.
+  Network = 'network',
+  // 2nd-degree: the `Network` condition OR a mutual connection between viewer
+  // and host. Deliberately excluded from open browse/search (link-only
+  // discovery) — see `EventsService.list`/`searchByText`.
+  ExtendedNetwork = 'extended_network',
+  // Members of the event's own community (`Event.communityId`). Mutually
+  // exclusive with the network tiers at the wizard level; the service layer
+  // rejects `Community` visibility when no community is set.
+  Community = 'community',
 }
 
 export enum EventStatus {
@@ -21,6 +33,13 @@ export enum EventStatus {
 
 @Entity('events')
 @Index('IDX_events_status_start_at', ['status', 'startAt'])
+// Scoped to `public`/`members` only. The three scoped tiers added for
+// gathering audience scope (network/extended_network/community) fall outside
+// this partial index by design: `network`/`community` browse hits are served
+// via the OR-in `host_id`/`community_id` predicates in `EventsService.list`
+// (not this feed-cursor index), and `extended_network` is link-only and never
+// reaches the browse feed at all (see the 2026-08-13 design doc, decision 2b).
+// Revisit only if a measurement shows a regression — not changed here.
 @Index('IDX_events_feed_created_at_id', ['createdAt', 'id'], {
   where: `"status" = 'published' AND "visibility" IN ('public', 'members')`,
 })

@@ -10,7 +10,7 @@ import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
 import { normalizePage, paginate } from '../common/pagination';
 import { randomBytes } from 'node:crypto';
-import { In, Not, Repository, SelectQueryBuilder } from 'typeorm';
+import { In, Repository, SelectQueryBuilder } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -30,6 +30,7 @@ import {
   toLineupEntryView,
   toOrganizerView,
 } from './event-response';
+import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBookmarksService } from './event-bookmarks.service';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
@@ -56,7 +57,11 @@ export interface CreateEventInput {
   visibility?: EventVisibility;
   status?: EventStatus.Draft | EventStatus.Published;
   coverImageUrl?: string;
-  communitySlug?: string;
+  // `null`/`''` (update only — `create()` treats them the same as absent,
+  // since there's no existing community to detach from) explicitly clears
+  // `communityId`; a non-empty slug resolves/authorizes it; absent (the
+  // `Partial` in `UpdateEventInput` below) leaves it unchanged on update.
+  communitySlug?: string | null;
 }
 
 export type UpdateEventInput = Partial<CreateEventInput>;
@@ -102,6 +107,13 @@ export class EventsService {
     private readonly contentModeration: ContentModerationService,
     private readonly membership: CommunityMembershipService,
     private readonly bookmarks: EventBookmarksService,
+    // Note: `ConnectionsService` itself is NOT injected here — every call
+    // this service used to make into it (`allAcceptedConnectionUserIds` for
+    // the browse/search predicate, `areConnected`/`mutualCountsByUserIds` for
+    // the per-event gate) now goes through `audienceGate` below, which owns
+    // both (fix round 2 moved `scopedVisibilityWhere` there so
+    // `EventBookmarksService` could reuse it too — see its class doc).
+    private readonly audienceGate: EventAudienceGateService,
   ) {}
 
   // Events are reported (and taken down) under the `event` taxonomy code, keyed
@@ -137,6 +149,12 @@ export class EventsService {
         hostId,
       );
     }
+    const visibility = dto.visibility ?? EventVisibility.Public;
+    if (visibility === EventVisibility.Community && !communityId) {
+      throw new BadRequestException(
+        'Community-only gatherings require a community',
+      );
+    }
 
     const event = this.events.create({
       hostId,
@@ -150,7 +168,7 @@ export class EventsService {
       isOnline: dto.isOnline ?? false,
       onlineUrl: dto.onlineUrl ?? null,
       capacity: dto.capacity ?? null,
-      visibility: dto.visibility ?? EventVisibility.Public,
+      visibility,
       status: dto.status ?? EventStatus.Published,
       coverImageUrl: dto.coverImageUrl ?? null,
       communityId,
@@ -178,6 +196,40 @@ export class EventsService {
     // any provided status is a reopen attempt and must be rejected.
     if (event.status === EventStatus.Cancelled && dto.status !== undefined) {
       throw new ConflictException('A cancelled event cannot be reopened');
+    }
+
+    // Resolve the EFFECTIVE community for this patch. `communitySlug`
+    // (fix round 2 — was create()-only before) mirrors `create()`'s handling
+    // exactly:
+    //   - absent from the DTO -> leave `event.communityId` unchanged.
+    //   - `null` or `''` -> explicit detach (`communityId = null`).
+    //   - a non-empty slug -> resolve via `assertMemberBySlug`, THE SAME
+    //     authorization `create()` uses (resolve slug -> community, 404 if
+    //     missing/archived, 403 if the caller isn't on its roster) — not a
+    //     weaker re-check. Authorized against `userId`, the acting
+    //     organizer already asserted above (host or co-host), mirroring
+    //     `create()`'s "the actor must themselves be on the target
+    //     community's roster" rule.
+    let communityId = event.communityId;
+    if (dto.communitySlug !== undefined) {
+      communityId =
+        dto.communitySlug === null || dto.communitySlug === ''
+          ? null
+          : await this.membership.assertMemberBySlug(dto.communitySlug, userId);
+    }
+
+    // Community-only gatherings require a community — checked against the
+    // EFFECTIVE post-patch community (just resolved above) and the EFFECTIVE
+    // post-patch visibility, not just what's in this DTO. Covers both
+    // directions: switching visibility to `community` with no community
+    // resolved, AND detaching the community while visibility is still
+    // `community` (frontend is expected to reset scope when detaching, but
+    // the backend stays authoritative either way).
+    const nextVisibility = dto.visibility ?? event.visibility;
+    if (nextVisibility === EventVisibility.Community && !communityId) {
+      throw new BadRequestException(
+        'Community-only gatherings require a community',
+      );
     }
 
     const oldStartAt = event.startAt;
@@ -220,6 +272,7 @@ export class EventsService {
       ...(dto.coverImageUrl !== undefined
         ? { coverImageUrl: dto.coverImageUrl ?? null }
         : {}),
+      ...(dto.communitySlug !== undefined ? { communityId } : {}),
     });
 
     // Pushing the start later makes an already-sent reminder premature — re-arm
@@ -401,15 +454,18 @@ export class EventsService {
       // the `event_bookmarks` entity landed — see BE-3.)
       events = await this.bookmarks.listSaved(userId, skip, PAGE_SIZE);
     } else {
-      // 'upcoming' — published, future, public/members (invite_only surfaces
-      // via going/hosting/invited contexts, not the general browse).
+      // 'upcoming' — published, future, public/members, plus network/community
+      // gatherings the viewer's own gate admits (invite_only still surfaces
+      // only via going/hosting/invited contexts, not the general browse; see
+      // `EventAudienceGateService.scopedVisibilityWhere` for why
+      // extended_network stays excluded too).
+      const { clause: visibilityClause, params: visibilityParams } =
+        await this.audienceGate.scopedVisibilityWhere(userId);
       const upcomingQb = this.events
         .createQueryBuilder('e')
         .where('e.status = :status', { status: EventStatus.Published })
         .andWhere('e.start_at >= :now', { now })
-        .andWhere('e.visibility IN (:...vis)', {
-          vis: [EventVisibility.Public, EventVisibility.Members],
-        });
+        .andWhere(visibilityClause, visibilityParams);
       this.excludeModeratedEvents(upcomingQb);
       events = await upcomingQb
         .orderBy('e.start_at', 'ASC')
@@ -422,21 +478,21 @@ export class EventsService {
   }
 
   // Cross-entity global search (SearchService) — mirrors the 'upcoming'
-  // branch's visibility (published, public/members) but drops the
-  // `start_at >= now` restriction so past matches still surface. ILIKE over
-  // title / venue / description.
+  // branch's visibility (public/members, plus the viewer's own network/
+  // community gatherings) but drops the `start_at >= now` restriction so past
+  // matches still surface. ILIKE over title / venue / description.
   async searchByText(
     userId: string,
     term: string,
     limit: number,
   ): Promise<EventSummary[]> {
     const pattern = `%${escapeLikeTerm(term)}%`;
+    const { clause: visibilityClause, params: visibilityParams } =
+      await this.audienceGate.scopedVisibilityWhere(userId);
     const searchQb = this.events
       .createQueryBuilder('e')
       .where('e.status = :status', { status: EventStatus.Published })
-      .andWhere('e.visibility IN (:...vis)', {
-        vis: [EventVisibility.Public, EventVisibility.Members],
-      })
+      .andWhere(visibilityClause, visibilityParams)
       .andWhere(
         '(e.title ILIKE :pattern OR e.venue ILIKE :pattern OR e.description ILIKE :pattern)',
         { pattern },
@@ -701,25 +757,11 @@ export class EventsService {
       }
       return isOrganizer;
     }
-    // Invite-only events (including their join URL) are visible only to
-    // organizers, invited members, and anyone who has already RSVP'd.
-    if (event.visibility === EventVisibility.InviteOnly && !isOrganizer) {
-      const [invited, rsvped] = await Promise.all([
-        this.invites.exists({
-          where: { eventId: event.id, inviteeId: viewerId },
-        }),
-        this.rsvps.exists({
-          where: {
-            eventId: event.id,
-            userId: viewerId,
-            status: Not(RsvpStatus.Cancelled),
-          },
-        }),
-      ]);
-      if (!invited && !rsvped) {
-        throw new NotFoundException('Event not found');
-      }
-    }
+    // Every scoped-visibility tier (invite_only, network, extended_network,
+    // community) shares ONE gate with the RSVP write path — see
+    // `EventAudienceGateService`'s class doc for why this used to be (and
+    // must not again become) two places that can drift.
+    await this.audienceGate.assertViewable(event, viewerId, isOrganizer);
     return isOrganizer;
   }
 
@@ -790,25 +832,38 @@ export class EventsService {
     event: Event,
     viewerId: string,
   ): Promise<EventDetail> {
-    // First wave: these five lookups are all independent of one another — only
+    // First wave: these six lookups are all independent of one another — only
     // `profilesByUserIds` below depends on `cohostRows`'s ids, so it waits for
     // its own second wave instead of chaining behind every other await.
-    const [goingCount, waitlistCount, myRsvp, cohostRows, isBookmarked] =
-      await Promise.all([
-        this.rsvps.count({
-          where: { eventId: event.id, status: RsvpStatus.Going },
-        }),
-        this.rsvps.count({
-          where: { eventId: event.id, status: RsvpStatus.Waitlisted },
-        }),
-        this.rsvps.findOne({
-          where: { eventId: event.id, userId: viewerId },
-        }),
-        this.cohosts.find({
-          where: { eventId: event.id },
-        }),
-        this.bookmarks.isBookmarked(viewerId, event.id),
-      ]);
+    // `communitySlug` is a single-event lookup (this method builds one
+    // event's detail, never a list page), so riding along here costs nothing
+    // extra on the hot list/browse path — see `EventSummary.communityId` vs.
+    // `EventDetail.communitySlug`'s doc comments for why the split.
+    const [
+      goingCount,
+      waitlistCount,
+      myRsvp,
+      cohostRows,
+      isBookmarked,
+      communitySlug,
+    ] = await Promise.all([
+      this.rsvps.count({
+        where: { eventId: event.id, status: RsvpStatus.Going },
+      }),
+      this.rsvps.count({
+        where: { eventId: event.id, status: RsvpStatus.Waitlisted },
+      }),
+      this.rsvps.findOne({
+        where: { eventId: event.id, userId: viewerId },
+      }),
+      this.cohosts.find({
+        where: { eventId: event.id },
+      }),
+      this.bookmarks.isBookmarked(viewerId, event.id),
+      event.communityId
+        ? this.membership.slugById(event.communityId)
+        : Promise.resolve(null),
+    ]);
     const organizerIds = [event.hostId, ...cohostRows.map((c) => c.userId)];
     const profiles = await this.profilesByUserIds(organizerIds);
     const isOrganizer =
@@ -825,6 +880,7 @@ export class EventsService {
       ...summary,
       description: event.description,
       onlineUrl: event.onlineUrl,
+      communitySlug,
       host: toOrganizerView(profiles.get(event.hostId)),
       cohosts: cohostRows
         .map((c) => toOrganizerView(profiles.get(c.userId)))

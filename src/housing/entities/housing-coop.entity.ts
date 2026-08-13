@@ -98,6 +98,15 @@ export class HousingCoop {
   @Column({ type: 'boolean', default: false })
   published!: boolean;
 
+  /**
+   * Operator-identity-verified marker. Research: co-living renters want to know
+   * the operator behind a household is a verified, accountable identity. Set by
+   * an admin/steward (there is no self-serve operator KYC in-platform yet — see
+   * the follow-up on reusing `member_verifications`).
+   */
+  @Column({ type: 'boolean', default: false })
+  operatorVerified!: boolean;
+
   @OneToMany(() => CoopJoinRequest, (request) => request.coop)
   joinRequests!: CoopJoinRequest[];
 

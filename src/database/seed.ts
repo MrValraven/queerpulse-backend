@@ -1341,7 +1341,7 @@ async function seedVouches(
         voucherId,
         voucheeId,
         note: null,
-        relationship: edge.relationship ?? null,
+        relationships: edge.relationship ? [edge.relationship] : null,
         anonymous: edge.anonymous ?? false,
       }),
     );

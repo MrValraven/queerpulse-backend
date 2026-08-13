@@ -48,6 +48,12 @@ export interface ModReportDetail {
   // deliberately absent from every member-facing/report-list DTO. Present only
   // when the report actually carries one.
   contactEmail?: string;
+  // The report's raw `evidence` jsonb array (P0.9) — client-supplied entries
+  // plus any server-authoritative snapshot (`message-snapshot`,
+  // `housing-snapshot`). MODERATOR-ONLY: surfaced on the drawer so a reviewer
+  // sees the reported listing/message exactly as it was at filing time, even
+  // after a later edit or takedown. Present only when the report carries any.
+  evidence?: unknown[];
 }
 
 // Mirrors `ModReportDTO` (`moderation.api.ts:24-40`).

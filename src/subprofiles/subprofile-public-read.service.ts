@@ -440,17 +440,20 @@ export class SubprofilePublicReadService {
         'sp.tagline',
         'sp.accent',
         'sp.availability',
+        // Inc2 Task A: the directory now includes linked personas too, so the
+        // card needs to route them to `/members/:ownerSlug/:slug` — `slug` +
+        // `linkVisibility` feed `toCardDTO`, `userId` keys the batched
+        // owner-slug lookup below.
+        'sp.slug',
+        'sp.linkVisibility',
+        'sp.userId',
       ])
-      .where('sp.linkVisibility = :linked', {
-        linked: SubprofileLinkVisibility.Unlinked,
-      })
-      .andWhere('sp.status = :published', {
+      .where('sp.status = :published', {
         published: SubprofileStatus.Published,
       })
       .andWhere('sp.visibility = :open', {
         open: SubprofileVisibility.Open,
       })
-      .andWhere('sp.handle IS NOT NULL')
       // A removed persona is withheld from the directory too (Personas
       // redesign Phase 1b) — only owner-facing reads skip this check.
       .andWhere('sp.removedAt IS NULL');
@@ -495,14 +498,36 @@ export class SubprofilePublicReadService {
       .limit(limit);
     const rows = await qb.getMany();
     const rowIds = rows.map((row) => row.id);
-    // The three per-page fan-out reads are mutually independent — batched into
+    // Inc2 Task A: the directory now includes linked rows, so resolve the
+    // owner's profile slug for those — ONE grouped query over the page's
+    // linked userIds (never per-card), mirroring the socialCount/tags/
+    // followerCount batches below. Skipped entirely when the page has no
+    // linked rows.
+    const linkedUserIds = [
+      ...new Set(
+        rows
+          .filter((row) => row.linkVisibility === SubprofileLinkVisibility.Linked)
+          .map((row) => row.userId),
+      ),
+    ];
+    // The four per-page fan-out reads are mutually independent — batched into
     // one round trip. Each is ONE grouped query over the page's ids, never
     // per-card (Personas redesign Phase 4, design plan Decision §3).
-    const [socialCountsById, tagsById, followerCountsById] = await Promise.all([
-      this.loadSocialCountsFor(rowIds),
-      this.loadContentTagsFor(rowIds),
-      this.followersService.loadFollowerCountsFor(rowIds),
-    ]);
+    const [socialCountsById, tagsById, followerCountsById, ownerProfiles] =
+      await Promise.all([
+        this.loadSocialCountsFor(rowIds),
+        this.loadContentTagsFor(rowIds),
+        this.followersService.loadFollowerCountsFor(rowIds),
+        linkedUserIds.length > 0
+          ? this.profiles.find({
+              where: { userId: In(linkedUserIds) },
+              select: ['userId', 'slug'],
+            })
+          : Promise.resolve([]),
+      ]);
+    const ownerSlugByUserId = new Map(
+      ownerProfiles.map((profile) => [profile.userId, profile.slug]),
+    );
     return {
       items: rows.map((row) =>
         toCardDTO(
@@ -510,6 +535,7 @@ export class SubprofilePublicReadService {
           socialCountsById.get(row.id) ?? 0,
           tagsById.get(row.id) ?? [],
           followerCountsById.get(row.id) ?? 0,
+          ownerSlugByUserId.get(row.userId) ?? null,
         ),
       ),
       total,

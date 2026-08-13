@@ -197,6 +197,16 @@ export interface SubprofileCardView {
   // `SubprofileFollowersService.loadFollowerCountsFor` in the directory list
   // path (ONE grouped query, never per-card) — mirrors `socialCount`/`tags`.
   followerCount: number;
+  // Inc2 Task A: `directory()` now returns BOTH linked and unlinked personas
+  // (all kinds), so the card needs enough to route a linked persona to
+  // `/members/:ownerSlug/:slug` (unlinked rows still route by `handle`).
+  linkVisibility: SubprofileLinkVisibility;
+  // The owner member's profile slug — LINKED rows only, else null. Mirrors
+  // `toPublicDTO`'s linked-only `ownerSlug` rule: never expose the owner tie
+  // for an unlinked (pseudonymous) persona.
+  ownerSlug: string | null;
+  // The persona's per-owner slug (for the `/members/:ownerSlug/:slug` route).
+  slug: string;
 }
 
 export interface SubprofileOwnerRef {
@@ -383,6 +393,7 @@ export function toCardDTO(
   socialCount = 0,
   tags: string[] = [],
   followerCount = 0,
+  ownerSlug: string | null = null,
 ): SubprofileCardView {
   return {
     handle: subprofile.handle ?? '',
@@ -395,5 +406,14 @@ export function toCardDTO(
     socialCount,
     tags,
     followerCount,
+    linkVisibility: subprofile.linkVisibility,
+    slug: subprofile.slug,
+    // Owner identity is exposed ONLY for linked personas — mirrors
+    // `toPublicDTO`'s linked-only rule (never leak the tie for an unlinked
+    // persona, even if a caller passed a non-null `ownerSlug` by mistake).
+    ownerSlug:
+      subprofile.linkVisibility === SubprofileLinkVisibility.Linked
+        ? ownerSlug
+        : null,
   };
 }

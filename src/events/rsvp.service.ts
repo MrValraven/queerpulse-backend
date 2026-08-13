@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -12,10 +11,10 @@ import {
   EventRsvpedEvent,
   EventWaitlistPromotedEvent,
 } from './event.events';
+import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventCohost } from './entities/event-cohost.entity';
-import { EventInvite } from './entities/event-invite.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
-import { Event, EventStatus, EventVisibility } from './entities/event.entity';
+import { Event, EventStatus } from './entities/event.entity';
 
 // Raw row shape from the unlimited-capacity promotion UPDATE's RETURNING
 // clause — column names are the actual (snake_case) DB columns, not the
@@ -29,6 +28,7 @@ export class RsvpService {
   constructor(
     private readonly dataSource: DataSource,
     private readonly eventEmitter: EventEmitter2,
+    private readonly audienceGate: EventAudienceGateService,
   ) {}
 
   async rsvp(
@@ -219,30 +219,32 @@ export class RsvpService {
 
   // --- internals ---
 
-  // Invite-only events accept RSVPs only from organizers and invited members.
+  // Enforces the SAME gathering-audience-scope gate `EventsService
+  // .assertCanView` applies to reads — see `EventAudienceGateService`'s class
+  // doc. Fixed 2026-08-13 (fix round 1): before this, ONLY `invite_only` was
+  // special-cased here and the event was loaded with no visibility check at
+  // all, so a member with a guessable slug could RSVP into a
+  // `network`/`extended_network`/`community` gathering they could not even
+  // view. `isOrganizer` is computed the same way it always was for the prior
+  // invite-only-only check (host, or a co-host row — via `manager`, so it
+  // reads through the SAME transaction/lock as the event row this call is
+  // gating) and handed to the shared gate, which then evaluates the tier
+  // predicate itself (via its own injected `ConnectionsService`/
+  // `CommunityMembershipService`/`EventInvite`/`EventRsvp` — deliberately NOT
+  // `manager`-scoped, since these are read-only membership checks with no
+  // write-race to guard against, unlike the capacity/waitlist logic this
+  // transaction's `pessimistic_write` lock actually protects).
   private async assertMayRsvp(
     manager: EntityManager,
     event: Event,
     userId: string,
   ): Promise<void> {
-    if (event.visibility !== EventVisibility.InviteOnly) {
-      return;
-    }
-    if (event.hostId === userId) {
-      return;
-    }
-    const isCohost = await manager.exists(EventCohost, {
-      where: { eventId: event.id, userId },
-    });
-    if (isCohost) {
-      return;
-    }
-    const invited = await manager.exists(EventInvite, {
-      where: { eventId: event.id, inviteeId: userId },
-    });
-    if (!invited) {
-      throw new ForbiddenException('This event is invite-only');
-    }
+    const isOrganizer =
+      event.hostId === userId ||
+      (await manager.exists(EventCohost, {
+        where: { eventId: event.id, userId },
+      }));
+    await this.audienceGate.assertViewable(event, userId, isOrganizer);
   }
 
   // Promotes waitlist heads to 'going' while seats remain (or unconditionally

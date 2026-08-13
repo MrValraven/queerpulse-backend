@@ -11,14 +11,23 @@ import {
   CoopJoinRequest,
   JoinRequestStatus,
 } from './entities/coop-join-request.entity';
+import {
+  CoopRelocationRequest,
+  RelocationRequestStatus,
+} from './entities/coop-relocation-request.entity';
+import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import { HousingCoop } from './entities/housing-coop.entity';
 import { CreateCoopDto } from './dto/create-coop.dto';
 import { UpdateCoopDto } from './dto/update-coop.dto';
 import { CreateJoinRequestDto } from './dto/create-join-request.dto';
+import { CreateRelocationRequestDto } from './dto/create-relocation-request.dto';
+import { ResolveRelocationRequestDto } from './dto/resolve-relocation-request.dto';
 import {
   AdminJoinRequestDTO,
+  AdminRelocationRequestDTO,
   HousingCoopDTO,
   toAdminJoinRequestDTO,
+  toAdminRelocationRequestDTO,
   toHousingCoopDTO,
 } from './housing-coop-response';
 
@@ -32,6 +41,9 @@ export class HousingService {
     private readonly coops: Repository<HousingCoop>,
     @InjectRepository(CoopJoinRequest)
     private readonly joinRequests: Repository<CoopJoinRequest>,
+    @InjectRepository(CoopRelocationRequest)
+    private readonly relocationRequests: Repository<CoopRelocationRequest>,
+    private readonly affirmingPledge: AffirmingPledgeService,
   ) {}
 
   async listPublished(): Promise<HousingCoopDTO[]> {
@@ -54,6 +66,11 @@ export class HousingService {
   ): Promise<{ id: string }> {
     const coop = await this.coops.findOne({ where: { slug, published: true } });
     if (!coop) throw new NotFoundException('Co-op not found');
+    // Baseline gate: a signed-in member asking to join commits to the affirming
+    // pledge. Anonymous applicants (userId null — the public co-op page
+    // deliberately collects a `name` so a non-member can ask to be let in) are
+    // NOT gated: the pledge is a member commitment, captured when they join.
+    if (userId) await this.affirmingPledge.requireAccepted(userId);
     const saved = await this.joinRequests.save(
       this.joinRequests.create({
         coopId: coop.id,
@@ -147,5 +164,61 @@ export class HousingService {
       relations: { coop: true },
     });
     return toAdminJoinRequestDTO(updated!);
+  }
+
+  // --- Co-living conflict-resolution / relocation flow (P3.2) ---
+
+  async createRelocationRequest(
+    slug: string,
+    dto: CreateRelocationRequestDto,
+    userId: string | null,
+  ): Promise<{ id: string }> {
+    const coop = await this.coops.findOne({ where: { slug, published: true } });
+    if (!coop) throw new NotFoundException('Co-op not found');
+    const saved = await this.relocationRequests.save(
+      this.relocationRequests.create({
+        coopId: coop.id,
+        name: dto.name,
+        situation: dto.situation,
+        userId,
+        status: RelocationRequestStatus.Open,
+      }),
+    );
+    return { id: saved.id };
+  }
+
+  async listRelocationRequests(
+    coopSlug?: string,
+  ): Promise<AdminRelocationRequestDTO[]> {
+    const query = this.relocationRequests
+      .createQueryBuilder('request')
+      .leftJoinAndSelect('request.coop', 'coop')
+      .orderBy('request.createdAt', 'DESC')
+      .take(DEFAULT_LIST_LIMIT);
+    if (coopSlug) query.where('coop.slug = :coopSlug', { coopSlug });
+    const requests = await query.getMany();
+    return requests.map(toAdminRelocationRequestDTO);
+  }
+
+  async resolveRelocationRequest(
+    id: string,
+    dto: ResolveRelocationRequestDto,
+    resolvedByUserId: string,
+  ): Promise<AdminRelocationRequestDTO> {
+    const request = await this.relocationRequests.findOne({ where: { id } });
+    if (!request) throw new NotFoundException('Relocation request not found');
+    request.status =
+      dto.action === 'resolved'
+        ? RelocationRequestStatus.Resolved
+        : RelocationRequestStatus.Dismissed;
+    request.outcome = dto.action === 'resolved' ? (dto.outcome ?? null) : null;
+    request.resolvedByUserId = resolvedByUserId;
+    request.resolvedAt = new Date();
+    await this.relocationRequests.save(request);
+    const updated = await this.relocationRequests.findOne({
+      where: { id },
+      relations: { coop: true },
+    });
+    return toAdminRelocationRequestDTO(updated!);
   }
 }

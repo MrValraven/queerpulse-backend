@@ -85,4 +85,9 @@ export class CreateCoopDto {
   @IsOptional()
   @IsBoolean()
   published?: boolean;
+
+  // Operator-identity-verified marker — admin/steward-set (see entity).
+  @IsOptional()
+  @IsBoolean()
+  operatorVerified?: boolean;
 }

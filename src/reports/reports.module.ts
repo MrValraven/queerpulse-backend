@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { Message } from '../messaging/entities/message.entity';
 import { Report } from './entities/report.entity';
 import { ReportsController } from './reports.controller';
@@ -15,6 +16,9 @@ import { ReportsService } from './reports.service';
       // imports `ReportsModule`. TypeORM allows the same entity's repository
       // to be registered in more than one module (see `AccountModule`).
       Message,
+      // Read-only: backs the housing-listing evidence snapshot in
+      // `ReportsService` (P0.9). Same cross-module `forFeature` reuse.
+      HousingListing,
     ]),
   ],
   controllers: [ReportsController],

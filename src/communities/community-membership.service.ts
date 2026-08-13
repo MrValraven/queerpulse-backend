@@ -47,4 +47,48 @@ export class CommunityMembershipService {
     }
     return community.id;
   }
+
+  /**
+   * Plain boolean roster check by community id (no slug resolution, no throw)
+   * — backs `EventVisibility.Community`'s tier check
+   * (`EventAudienceGateService.assertViewable`, shared by
+   * `EventsService.assertCanView` and `RsvpService`'s RSVP gate), which
+   * already has the event's `communityId` and just needs "is this viewer on
+   * the roster?".
+   */
+  async isMember(communityId: string, userId: string): Promise<boolean> {
+    return this.members.exists({ where: { communityId, userId } });
+  }
+
+  /**
+   * Every community id the given user is on the roster of — backs the
+   * `community` OR-in predicate on the gatherings browse/search queries
+   * (`EventsService.list`/`searchByText`), computed once per request via the
+   * indexed `IDX_community_members_user_id` lookup.
+   */
+  async communityIdsForUser(userId: string): Promise<string[]> {
+    const memberships = await this.members.find({
+      where: { userId },
+      select: { communityId: true },
+    });
+    return memberships.map((membership) => membership.communityId);
+  }
+
+  /**
+   * Resolve a community id straight to its slug — a plain display lookup, no
+   * roster/archived check. Backs `EventDetail.communitySlug`
+   * (`EventsService.buildDetail`): the edit UI needs the slug (not just the
+   * id already on `EventSummary`/`EventDetail` as `communityId`) to offer the
+   * `community` audience-scope tier for an event that already has one.
+   * Returns `null` for an unknown id (shouldn't happen for a real
+   * `event.communityId`, but this is a display convenience, not a guard, so
+   * it fails soft rather than throwing).
+   */
+  async slugById(communityId: string): Promise<string | null> {
+    const community = await this.communities.findOne({
+      where: { id: communityId },
+      select: { slug: true },
+    });
+    return community?.slug ?? null;
+  }
 }

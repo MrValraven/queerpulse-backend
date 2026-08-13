@@ -152,6 +152,23 @@ export class User {
   @Column({ type: 'varchar', length: 32, nullable: true })
   guidelinesVersion!: string | null;
 
+  /**
+   * When the member accepted the LGBTQ+ affirming housing pledge — the mandatory
+   * universal baseline every housing write/contact action gates on (see
+   * `AffirmingPledgeService`). Stamped ONCE, the first time they accept, and
+   * never overwritten. NULL means no acceptance is on record: the member can
+   * still browse housing freely, but any gated action returns a typed
+   * `AFFIRMING_PLEDGE_REQUIRED` 403 until they accept.
+   *
+   * Deliberately NOT backfilled (like `guidelinesAcceptedAt`, unlike
+   * `onboardedAt`): accepting the pledge is a specific, legally-meaningful act,
+   * so a manufactured timestamp would be a lie. Existing members are prompted to
+   * accept the first time they post or reach out — browsing is never blocked.
+   * See `AddAffirmingPledge1787900500000`.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  affirmingPledgeAcceptedAt!: Date | null;
+
   // Per-user override for the monthly invite quota. NULL means "use the global
   // default" (app.inviteMonthlyQuota, itself defaulting to 5). Set directly in
   // the database to grant a member a higher (or lower) allowance.

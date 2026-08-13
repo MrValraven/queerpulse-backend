@@ -14,9 +14,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `Community` (`communities/entities/community.entity.ts`) so entity metadata
  * and schema stay in sync for any future `migration:generate` diff.
  */
-export class AddCommunityCoverImageUrl1787700500000
-  implements MigrationInterface
-{
+export class AddCommunityCoverImageUrl1787700500000 implements MigrationInterface {
   name = 'AddCommunityCoverImageUrl1787700500000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

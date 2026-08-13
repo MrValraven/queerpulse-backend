@@ -126,7 +126,9 @@ describe('MediaReferenceResolver', () => {
     const dataSource = createMockDataSource([]);
     const resolver = new MediaReferenceResolver(dataSource);
 
-    const { references } = await resolver.resolve(['uploads/nobody/orphan.jpg']);
+    const { references } = await resolver.resolve([
+      'uploads/nobody/orphan.jpg',
+    ]);
 
     expect(references.has('uploads/nobody/orphan.jpg')).toBe(false);
   });

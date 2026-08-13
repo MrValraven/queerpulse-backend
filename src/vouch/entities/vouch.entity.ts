@@ -41,13 +41,17 @@ export class Vouch {
   @Column({ type: 'text', nullable: true })
   note!: string | null;
 
+  // The ways the voucher knows this member — one or more of the relationship
+  // enum values. Nullable because the signup auto-vouch and legacy rows carry
+  // no relationship; a member-initiated vouch always sends at least one.
   @Column({
     type: 'enum',
     enum: VOUCH_RELATIONSHIPS,
     enumName: 'vouches_relationship_enum',
+    array: true,
     nullable: true,
   })
-  relationship!: VouchRelationship | null;
+  relationships!: VouchRelationship[] | null;
 
   @Column({ type: 'boolean', default: false })
   anonymous!: boolean;

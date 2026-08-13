@@ -1,12 +1,14 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import { POSTGRES_UNIQUE_VIOLATION } from '../common/db-errors';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import {
   CoopJoinRequest,
   JoinRequestStatus,
 } from './entities/coop-join-request.entity';
+import { CoopRelocationRequest } from './entities/coop-relocation-request.entity';
 import {
   CoopCtaKind,
   HousingCoop,
@@ -55,6 +57,7 @@ function makeCoop(overrides: Partial<HousingCoop> = {}): HousingCoop {
     ctaKind: CoopCtaKind.Join,
     faces: [],
     published: true,
+    operatorVerified: false,
     ...overrides,
   } as unknown as HousingCoop;
 }
@@ -70,6 +73,8 @@ describe('HousingService', () => {
   let service: HousingService;
   let coops: RepoMock;
   let joinRequests: RepoMock;
+  let relocationRequests: RepoMock;
+  let affirmingPledge: { requireAccepted: jest.Mock };
 
   beforeEach(async () => {
     coops = {
@@ -85,6 +90,15 @@ describe('HousingService', () => {
       save: jest.fn((row: unknown) => Promise.resolve(row)),
       createQueryBuilder: jest.fn(() => makeQueryBuilderStub()),
     };
+    relocationRequests = {
+      findOne: jest.fn().mockResolvedValue(null),
+      create: jest.fn((row: unknown) => row),
+      save: jest.fn((row: unknown) => Promise.resolve(row)),
+      createQueryBuilder: jest.fn(() => makeQueryBuilderStub()),
+    };
+    affirmingPledge = {
+      requireAccepted: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -94,6 +108,11 @@ describe('HousingService', () => {
           provide: getRepositoryToken(CoopJoinRequest),
           useValue: joinRequests,
         },
+        {
+          provide: getRepositoryToken(CoopRelocationRequest),
+          useValue: relocationRequests,
+        },
+        { provide: AffirmingPledgeService, useValue: affirmingPledge },
       ],
     }).compile();
 

@@ -5,6 +5,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, Repository } from 'typeorm';
@@ -18,17 +19,29 @@ import {
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MessagingService } from '../messaging/messaging.service';
 import { Profile } from '../users/entities/profile.entity';
+import { VerificationLevel } from '../verification/verification-level';
+import { VerificationService } from '../verification/verification.service';
+import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import { CreateHousingEnquiryDto } from './dto/create-housing-enquiry.dto';
 import { CreateHousingListingDto } from './dto/create-housing-listing.dto';
 import { UpdateHousingListingDto } from './dto/update-housing-listing.dto';
 import {
+  HousingListerKind,
   HousingListing,
   HousingListingStatus,
 } from './entities/housing-listing.entity';
 import {
+  AdminHousingListingDTO,
   HousingListingDTO,
+  toAdminHousingListingDTO,
   toHousingListingDTO,
 } from './housing-listing-response';
+import { assessHousingRisk, HousingRiskAssessment } from './housing-risk';
+import { deriveListingVerified } from './housing-verified';
+import {
+  HOUSING_LISTING_WENT_LIVE,
+  HousingListingWentLiveEvent,
+} from './housing-listing.events';
 
 // Postgres unique-violation SQLSTATE. Mirrors the file-local helper each
 // service (`ListingsService`, `CompaniesService`) keeps by convention.
@@ -45,12 +58,17 @@ function applyUpdate(
     ...(dto.city !== undefined ? { city: dto.city } : {}),
     ...(dto.area !== undefined ? { area: dto.area } : {}),
     ...(dto.rentEuros !== undefined ? { rentEuros: dto.rentEuros } : {}),
+    ...(dto.bedrooms !== undefined ? { bedrooms: dto.bedrooms } : {}),
     ...(dto.billsIncluded !== undefined
       ? { billsIncluded: dto.billsIncluded }
       : {}),
     ...(dto.lgbtqFriendly !== undefined
       ? { lgbtqFriendly: dto.lgbtqFriendly }
       : {}),
+    ...(dto.accessibilityInfo !== undefined
+      ? { accessibilityInfo: dto.accessibilityInfo }
+      : {}),
+    ...(dto.listerKind !== undefined ? { listerKind: dto.listerKind } : {}),
     ...(dto.availableFrom !== undefined
       ? { availableFrom: dto.availableFrom }
       : {}),
@@ -61,6 +79,9 @@ function applyUpdate(
     ...(dto.features !== undefined ? { features: dto.features } : {}),
     ...(dto.idealFor !== undefined ? { idealFor: dto.idealFor } : {}),
     ...(dto.gallery !== undefined ? { gallery: dto.gallery } : {}),
+    ...(dto.virtualTourUrl !== undefined
+      ? { virtualTourUrl: dto.virtualTourUrl }
+      : {}),
   });
 }
 
@@ -82,14 +103,28 @@ export class HousingListingsService {
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly dataSource: DataSource,
     private readonly messaging: MessagingService,
+    private readonly verification: VerificationService,
+    private readonly affirmingPledge: AffirmingPledgeService,
+    // Fire-and-forget domain events (global EventEmitter2). Used to announce a
+    // listing going live so the saved-search alerts listener can match + notify.
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   async create(
     ownerId: string,
     dto: CreateHousingListingDto,
   ): Promise<HousingListingDTO> {
+    // Baseline gate: posting a home means committing to the LGBTQ+ affirming
+    // pledge (throws a typed AFFIRMING_PLEDGE_REQUIRED 403 until accepted).
+    await this.affirmingPledge.requireAccepted(ownerId);
+    // Step-up gate: posting a publicly-browsable listing needs at least a
+    // phone-verified account (throws a typed VERIFICATION_REQUIRED 403).
+    await this.verification.requireLevel(ownerId, VerificationLevel.Phone);
+    // The lister's real assurance level is a risk signal — fetch it once so the
+    // deterministic score reflects who is posting, not just the text.
+    const level = await this.verification.levelForUser(ownerId);
     const ref = await this.nextRef();
-    const saved = await this.createWithUniqueSlug(ownerId, ref, dto);
+    const saved = await this.createWithUniqueSlug(ownerId, ref, dto, level);
     return this.buildDTO(saved);
   }
 
@@ -120,6 +155,13 @@ export class HousingListingsService {
     const listing = await this.loadOr404(ref);
     this.assertOwner(listing, userId);
     applyUpdate(listing, dto);
+    // Re-score on every edit — a listing that was clean can be edited to add
+    // off-platform payment language or an implausible rent, and the queue must
+    // reflect its current content, not what it looked like at create time.
+    const level = await this.verification.levelForUser(listing.ownerId);
+    const assessment = this.riskForListing(listing, level);
+    listing.riskScore = assessment.score;
+    listing.riskReasons = assessment.reasons;
     const saved = await this.listings.save(listing);
     return this.buildDTO(saved);
   }
@@ -146,16 +188,22 @@ export class HousingListingsService {
         'You cannot send an enquiry on your own listing',
       );
     }
+    // Baseline gate: reaching out about a home requires the affirming pledge.
+    await this.affirmingPledge.requireAccepted(fromUserId);
+    // Step-up gate: reaching out about a home needs a phone-verified account.
+    await this.verification.requireLevel(fromUserId, VerificationLevel.Phone);
     return this.messaging.deliverEnquiry(fromUserId, listing.ownerId, dto.body);
   }
 
-  /** Moderator/admin: every listing incl. non-live, newest first. */
-  async listAllForAdmin(): Promise<HousingListingDTO[]> {
+  /** Moderator/admin: every listing incl. non-live, RISKIEST first (P0.6), then
+   * newest — so the human review queue leads with the listings most likely to
+   * be a scam/discrimination/off-platform problem, reasons attached. */
+  async listAllForAdmin(): Promise<AdminHousingListingDTO[]> {
     const rows = await this.listings.find({
-      order: { createdAt: 'DESC' },
+      order: { riskScore: 'DESC', createdAt: 'DESC' },
       take: DEFAULT_LIST_LIMIT,
     });
-    return this.mapRows(rows);
+    return this.mapRowsForAdmin(rows);
   }
 
   /** Moderator/admin only — any status is directly settable. */
@@ -164,8 +212,22 @@ export class HousingListingsService {
     status: HousingListingStatus,
   ): Promise<HousingListingDTO> {
     const listing = await this.loadOr404(ref);
+    const wasLive = listing.status === HousingListingStatus.Live;
     listing.status = status;
     const saved = await this.listings.save(listing);
+    // A listing transitioning INTO live (a new listing clearing review, or a
+    // re-approval) is the moment saved-search alerts fire. Compute the verified
+    // state once here — it needs the lister's assurance level — and hand it to
+    // the alerts listener so it never re-derives per saved search.
+    if (!wasLive && saved.status === HousingListingStatus.Live) {
+      const level = await this.verification.levelForUser(saved.ownerId);
+      const listingVerified = deriveListingVerified(saved, level).verified;
+      const event: HousingListingWentLiveEvent = {
+        listing: saved,
+        listingVerified,
+      };
+      this.eventEmitter.emit(HOUSING_LISTING_WENT_LIVE, event);
+    }
     return this.buildDTO(saved);
   }
 
@@ -198,17 +260,71 @@ export class HousingListingsService {
 
   private async mapRows(rows: HousingListing[]): Promise<HousingListingDTO[]> {
     if (!rows.length) return [];
-    const refs = await new MemberLookup(this.profiles).byUserIds(
-      rows.map((r) => r.ownerId),
+    const ownerIds = rows.map((r) => r.ownerId);
+    const refs = await new MemberLookup(this.profiles).byUserIds(ownerIds);
+    const levels = await this.verification.levelsForUsers(ownerIds);
+    // Owner-facing (`listMine`) + moderator (`listAllForAdmin`) reads: the exact
+    // point + address are theirs to see, so map with `precise: true`.
+    return rows.map((r) =>
+      toHousingListingDTO(
+        r,
+        refs.get(r.ownerId) ?? null,
+        levels.get(r.ownerId) ?? VerificationLevel.Email,
+        true,
+      ),
     );
-    return rows.map((r) => toHousingListingDTO(r, refs.get(r.ownerId) ?? null));
+  }
+
+  /** Admin rows: same hydration as `mapRows`, but through the admin mapper so
+   * `riskScore`/`riskReasons` ride along for the risk-sorted queue. */
+  private async mapRowsForAdmin(
+    rows: HousingListing[],
+  ): Promise<AdminHousingListingDTO[]> {
+    if (!rows.length) return [];
+    const ownerIds = rows.map((row) => row.ownerId);
+    const refs = await new MemberLookup(this.profiles).byUserIds(ownerIds);
+    const levels = await this.verification.levelsForUsers(ownerIds);
+    return rows.map((row) =>
+      toAdminHousingListingDTO(
+        row,
+        refs.get(row.ownerId) ?? null,
+        levels.get(row.ownerId) ?? VerificationLevel.Email,
+      ),
+    );
+  }
+
+  /** Builds the deterministic risk assessment from a listing entity's current
+   * fields plus the lister's assurance level (see `housing-risk.ts`). */
+  private riskForListing(
+    listing: HousingListing,
+    level: VerificationLevel,
+  ): HousingRiskAssessment {
+    return assessHousingRisk({
+      type: listing.type,
+      title: listing.title,
+      blurb: listing.blurb,
+      description: listing.description,
+      rentEuros: listing.rentEuros,
+      accessibilityInfo: listing.accessibilityInfo,
+      gallery: listing.gallery,
+      features: listing.features,
+      listerVerificationLevel: level,
+    });
   }
 
   private async buildDTO(listing: HousingListing): Promise<HousingListingDTO> {
     const refs = await new MemberLookup(this.profiles).byUserIds([
       listing.ownerId,
     ]);
-    return toHousingListingDTO(listing, refs.get(listing.ownerId) ?? null);
+    const level = await this.verification.levelForUser(listing.ownerId);
+    // Every caller of `buildDTO` is owner- or moderator-gated (create / getByRef
+    // / setStatus), so the precise location is always disclosable here.
+    return toHousingListingDTO(
+      listing,
+      refs.get(listing.ownerId) ?? null,
+      level,
+      true,
+    );
   }
 
   /** `QPH-<year>-<4-digit seq>`, backed by the `housing_listings_ref_seq`
@@ -230,7 +346,22 @@ export class HousingListingsService {
     ownerId: string,
     ref: string,
     dto: CreateHousingListingDto,
+    level: VerificationLevel,
   ): Promise<HousingListing> {
+    // Score deterministically from the submission + who's posting. High-risk
+    // listings still land in `review` (as every listing does) — the score sorts
+    // the human queue and keeps a risky listing from ever auto-publishing.
+    const assessment = assessHousingRisk({
+      type: dto.type,
+      title: dto.title,
+      blurb: dto.blurb ?? '',
+      description: dto.description ?? '',
+      rentEuros: dto.rentEuros,
+      accessibilityInfo: dto.accessibilityInfo,
+      gallery: dto.gallery ?? [],
+      features: dto.features ?? [],
+      listerVerificationLevel: level,
+    });
     const MAX_ATTEMPTS = 5;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const slug = await allocateUniqueSlug(slugify(dto.title, 'home'), (s) =>
@@ -249,14 +380,20 @@ export class HousingListingsService {
             city: dto.city,
             area: dto.area ?? '',
             rentEuros: dto.rentEuros,
+            bedrooms: dto.bedrooms ?? null,
             billsIncluded: dto.billsIncluded ?? false,
             lgbtqFriendly: dto.lgbtqFriendly ?? false,
+            accessibilityInfo: dto.accessibilityInfo,
+            listerKind: dto.listerKind ?? HousingListerKind.Member,
             availableFrom: dto.availableFrom ?? null,
             minStayMonths: dto.minStayMonths ?? null,
             description: dto.description ?? '',
             features: dto.features ?? [],
             idealFor: dto.idealFor ?? [],
             gallery: dto.gallery ?? [],
+            virtualTourUrl: dto.virtualTourUrl ?? null,
+            riskScore: assessment.score,
+            riskReasons: assessment.reasons,
           }),
         );
       } catch (err) {

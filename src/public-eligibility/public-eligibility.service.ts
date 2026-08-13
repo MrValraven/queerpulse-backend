@@ -5,11 +5,18 @@ import { Profile } from '../users/entities/profile.entity';
 import { MagazinePiece } from '../magazine/entities/magazine-piece.entity';
 import { MagazineArticle } from '../magazine/entities/magazine-article.entity';
 import { MagazineDeck } from '../magazine/entities/magazine-deck.entity';
-import { Event, EventStatus, EventVisibility } from '../events/entities/event.entity';
+import {
+  Event,
+  EventStatus,
+  EventVisibility,
+} from '../events/entities/event.entity';
 import { EventCohost } from '../events/entities/event-cohost.entity';
 import { EventRsvp, RsvpStatus } from '../events/entities/event-rsvp.entity';
 import { Workshop } from '../workshops/entities/workshop.entity';
-import { Subprofile, SubprofileStatus } from '../subprofiles/entities/subprofile.entity';
+import {
+  Subprofile,
+  SubprofileStatus,
+} from '../subprofiles/entities/subprofile.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
@@ -32,15 +39,22 @@ const MEMBER_SUBJECT_TYPE = 'member';
 export class PublicEligibilityService {
   constructor(
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
-    @InjectRepository(MagazinePiece) private readonly pieces: Repository<MagazinePiece>,
+    @InjectRepository(MagazinePiece)
+    private readonly pieces: Repository<MagazinePiece>,
     @InjectRepository(Event) private readonly events: Repository<Event>,
-    @InjectRepository(EventCohost) private readonly cohosts: Repository<EventCohost>,
+    @InjectRepository(EventCohost)
+    private readonly cohosts: Repository<EventCohost>,
     @InjectRepository(EventRsvp) private readonly rsvps: Repository<EventRsvp>,
-    @InjectRepository(Workshop) private readonly workshops: Repository<Workshop>,
-    @InjectRepository(Subprofile) private readonly subprofiles: Repository<Subprofile>,
-    @InjectRepository(ForumThread) private readonly forumThreads: Repository<ForumThread>,
-    @InjectRepository(ForumPost) private readonly forumPosts: Repository<ForumPost>,
-    @InjectRepository(CommunityPost) private readonly communityPosts: Repository<CommunityPost>,
+    @InjectRepository(Workshop)
+    private readonly workshops: Repository<Workshop>,
+    @InjectRepository(Subprofile)
+    private readonly subprofiles: Repository<Subprofile>,
+    @InjectRepository(ForumThread)
+    private readonly forumThreads: Repository<ForumThread>,
+    @InjectRepository(ForumPost)
+    private readonly forumPosts: Repository<ForumPost>,
+    @InjectRepository(CommunityPost)
+    private readonly communityPosts: Repository<CommunityPost>,
     @InjectRepository(CommunityPostReply)
     private readonly communityReplies: Repository<CommunityPostReply>,
     private readonly connections: ConnectionsService,
@@ -48,7 +62,9 @@ export class PublicEligibilityService {
     private readonly contentModeration: ContentModerationService,
   ) {}
 
-  async getSignals(user: CurrentUserData): Promise<PublicEligibilitySignalsDto> {
+  async getSignals(
+    user: CurrentUserData,
+  ): Promise<PublicEligibilitySignalsDto> {
     const userId = user.userId;
     const now = new Date();
 
@@ -56,7 +72,9 @@ export class PublicEligibilityService {
     const tenureDays = profile
       ? Math.max(
           0,
-          Math.floor((now.getTime() - new Date(profile.joinedAt).getTime()) / MS_PER_DAY),
+          Math.floor(
+            (now.getTime() - new Date(profile.joinedAt).getTime()) / MS_PER_DAY,
+          ),
         )
       : 0;
 
@@ -80,9 +98,15 @@ export class PublicEligibilityService {
       this.connections.counts(userId),
       this.attendedEventCount(userId, now),
       this.forumThreads.count({ where: { authorId: userId } }),
-      this.forumPosts.count({ where: { authorId: userId, deletedAt: IsNull() } }),
-      this.communityPosts.count({ where: { authorId: userId, deletedAt: IsNull() } }),
-      this.communityReplies.count({ where: { authorId: userId, deletedAt: IsNull() } }),
+      this.forumPosts.count({
+        where: { authorId: userId, deletedAt: IsNull() },
+      }),
+      this.communityPosts.count({
+        where: { authorId: userId, deletedAt: IsNull() },
+      }),
+      this.communityReplies.count({
+        where: { authorId: userId, deletedAt: IsNull() },
+      }),
       this.contentModeration.statesForAnyType(
         [MEMBER_SUBJECT_TYPE],
         profile ? [profile.slug, userId] : [userId],
@@ -107,7 +131,11 @@ export class PublicEligibilityService {
       endorsementCount,
       connectionCount: connectionCounts.all,
       eventsAttended,
-      communityPosts: forumThreadCount + forumPostCount + communityPostCount + communityReplyCount,
+      communityPosts:
+        forumThreadCount +
+        forumPostCount +
+        communityPostCount +
+        communityReplyCount,
       lastActiveDaysAgo: 0,
       standingOk,
     });
@@ -119,7 +147,9 @@ export class PublicEligibilityService {
       .leftJoin(MagazineArticle, 'article', 'article.id = piece.articleId')
       .leftJoin(MagazineDeck, 'deck', 'deck.id = piece.deckId')
       .where('piece.writerId = :userId', { userId })
-      .andWhere('(article.publishedAt IS NOT NULL OR deck.publishedAt IS NOT NULL)')
+      .andWhere(
+        '(article.publishedAt IS NOT NULL OR deck.publishedAt IS NOT NULL)',
+      )
       .select('COALESCE(article.publishedAt, deck.publishedAt)', 'publishedAt')
       .orderBy('COALESCE(article.publishedAt, deck.publishedAt)', 'DESC')
       .limit(RESULT_CAP)
@@ -128,16 +158,22 @@ export class PublicEligibilityService {
   }
 
   private async hostedOpenEventTimestamps(userId: string): Promise<string[]> {
-    const cohosted = await this.cohosts.find({ where: { userId }, select: ['eventId'] });
+    const cohosted = await this.cohosts.find({
+      where: { userId },
+      select: ['eventId'],
+    });
     const cohostIds = cohosted.map((row) => row.eventId);
     const rows = await this.events
       .createQueryBuilder('event')
       .where('event.status = :status', { status: EventStatus.Published })
-      .andWhere('event.visibility = :visibility', { visibility: EventVisibility.Public })
+      .andWhere('event.visibility = :visibility', {
+        visibility: EventVisibility.Public,
+      })
       .andWhere(
         new Brackets((qb) => {
           qb.where('event.hostId = :userId', { userId });
-          if (cohostIds.length) qb.orWhere('event.id IN (:...cohostIds)', { cohostIds });
+          if (cohostIds.length)
+            qb.orWhere('event.id IN (:...cohostIds)', { cohostIds });
         }),
       )
       .orderBy('event.startAt', 'DESC')
@@ -148,7 +184,11 @@ export class PublicEligibilityService {
 
   private async publishedSubprofileIds(userId: string): Promise<string[]> {
     const rows = await this.subprofiles.find({
-      where: { userId, status: SubprofileStatus.Published, removedAt: IsNull() },
+      where: {
+        userId,
+        status: SubprofileStatus.Published,
+        removedAt: IsNull(),
+      },
       select: ['id'],
     });
     return rows.map((row) => row.id);
@@ -156,7 +196,8 @@ export class PublicEligibilityService {
 
   private async endorsementTotal(subprofileIds: string[]): Promise<number> {
     if (!subprofileIds.length) return 0;
-    const counts = await this.endorsements.loadEndorsementCountsFor(subprofileIds);
+    const counts =
+      await this.endorsements.loadEndorsementCountsFor(subprofileIds);
     return [...counts.values()].reduce((sum, count) => sum + count, 0);
   }
 

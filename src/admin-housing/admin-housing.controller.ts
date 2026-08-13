@@ -15,11 +15,16 @@ import {
 import { Roles } from '../auth/decorators/roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { HousingService } from '../housing/housing.service';
 import { CreateCoopDto } from '../housing/dto/create-coop.dto';
 import { UpdateCoopDto } from '../housing/dto/update-coop.dto';
 import { TriageJoinRequestDto } from '../housing/dto/triage-join-request.dto';
+import { ResolveRelocationRequestDto } from '../housing/dto/resolve-relocation-request.dto';
 import {
   ApiBadRequestResponse,
   ApiConflictResponse,
@@ -102,5 +107,33 @@ export class AdminHousingController {
     @Body() dto: TriageJoinRequestDto,
   ) {
     return this.housing.triageJoinRequest(id, dto.action);
+  }
+
+  // Operator-identity-verified marker: set through the existing PATCH coops/:id
+  // (`UpdateCoopDto.operatorVerified`) — no dedicated route needed.
+
+  @ApiOperation({
+    summary:
+      'List co-op relocation / conflict-resolution requests, optionally by co-op slug.',
+  })
+  @ApiOkResponse({ description: 'The relocation requests.' })
+  @Get('relocation-requests')
+  listRelocationRequests(@Query('coop') coopSlug?: string) {
+    return this.housing.listRelocationRequests(coopSlug);
+  }
+
+  @ApiOperation({
+    summary: 'Resolve (log outcome) or dismiss a relocation request.',
+  })
+  @ApiOkResponse({ description: 'The updated relocation request.' })
+  @ApiBadRequestResponse({ description: 'Malformed request body or id.' })
+  @ApiNotFoundResponse({ description: 'Relocation request not found.' })
+  @Patch('relocation-requests/:id')
+  resolveRelocationRequest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ResolveRelocationRequestDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.housing.resolveRelocationRequest(id, dto, user.userId);
   }
 }

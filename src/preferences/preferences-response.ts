@@ -9,6 +9,8 @@ export interface WorkPreferencesDTO {
   outAtWork: OutAtWork;
   transSupport: string[];
   safeOnly: boolean;
+  skills: string[];
+  focusAreas: string[];
 }
 
 export interface PublicProfileDTO {
@@ -22,6 +24,8 @@ export function toWorkPreferencesDTO(
     outAtWork: row.outAtWork,
     transSupport: row.transSupport,
     safeOnly: row.safeOnly,
+    skills: row.skills,
+    focusAreas: row.focusAreas,
   };
 }
 

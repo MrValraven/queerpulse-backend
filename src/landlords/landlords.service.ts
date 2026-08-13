@@ -15,6 +15,9 @@ import {
 } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { Profile } from '../users/entities/profile.entity';
+import { VerificationLevel } from '../verification/verification-level';
+import { VerificationService } from '../verification/verification.service';
+import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import { CreateIntroRequestDto } from './dto/create-intro-request.dto';
 import { CreateLandlordDto } from './dto/create-landlord.dto';
 import { CreateRecommendationDto } from './dto/create-recommendation.dto';
@@ -69,7 +72,17 @@ export class LandlordsService {
     @InjectRepository(LandlordIntroRequest)
     private readonly introRequests: Repository<LandlordIntroRequest>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    private readonly verification: VerificationService,
+    private readonly affirmingPledge: AffirmingPledgeService,
   ) {}
+
+  /** Batched recommendation-author verification levels (honest badge). Missing
+   * ids resolve to the email floor. */
+  private async recLevels(
+    authorUserIds: string[],
+  ): Promise<Map<string, VerificationLevel>> {
+    return this.verification.levelsForUsers(authorUserIds);
+  }
 
   // --- member ops ---
 
@@ -108,8 +121,13 @@ export class LandlordsService {
     const members = await new MemberLookup(this.profiles).byUserIds(
       recs.map((rec) => rec.authorUserId),
     );
+    const levels = await this.recLevels(recs.map((rec) => rec.authorUserId));
     const recDTOs: RecommendationDTO[] = recs.map((rec) =>
-      toRecommendationDTO(rec, members.get(rec.authorUserId) ?? null),
+      toRecommendationDTO(
+        rec,
+        members.get(rec.authorUserId) ?? null,
+        levels.get(rec.authorUserId) ?? VerificationLevel.Email,
+      ),
     );
     return toLandlordDetailDTO(
       landlord,
@@ -122,6 +140,8 @@ export class LandlordsService {
     userId: string,
     dto: CreateLandlordDto,
   ): Promise<LandlordDetailDTO> {
+    // Baseline gate: suggesting a landlord requires the affirming pledge.
+    await this.affirmingPledge.requireAccepted(userId);
     const saved = await this.createWithUniqueSlug(
       dto,
       LandlordStatus.Review,
@@ -171,7 +191,8 @@ export class LandlordsService {
     const members = await new MemberLookup(this.profiles).byUserIds([
       authorUserId,
     ]);
-    return toRecommendationDTO(saved, members.get(authorUserId) ?? null);
+    const level = await this.verification.levelForUser(authorUserId);
+    return toRecommendationDTO(saved, members.get(authorUserId) ?? null, level);
   }
 
   async createIntroRequest(
@@ -179,6 +200,10 @@ export class LandlordsService {
     userId: string,
     dto: CreateIntroRequestDto,
   ): Promise<{ id: string; status: string }> {
+    // Baseline gate: requesting an intro requires the affirming pledge.
+    await this.affirmingPledge.requireAccepted(userId);
+    // Step-up gate: asking for a landlord intro needs a phone-verified account.
+    await this.verification.requireLevel(userId, VerificationLevel.Phone);
     const landlord = await this.loadLiveOr404(slug);
     const saved = await this.introRequests.save(
       this.introRequests.create({
@@ -315,8 +340,13 @@ export class LandlordsService {
     const members = await new MemberLookup(this.profiles).byUserIds(
       recs.map((rec) => rec.authorUserId),
     );
+    const levels = await this.recLevels(recs.map((rec) => rec.authorUserId));
     const recDTOs = recs.map((rec) =>
-      toRecommendationDTO(rec, members.get(rec.authorUserId) ?? null),
+      toRecommendationDTO(
+        rec,
+        members.get(rec.authorUserId) ?? null,
+        levels.get(rec.authorUserId) ?? VerificationLevel.Email,
+      ),
     );
     return toLandlordDetailDTO(
       landlord,

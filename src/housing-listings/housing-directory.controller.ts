@@ -1,4 +1,8 @@
 import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { BrowseHousingListingsQuery } from './dto/browse-housing-listings.query';
@@ -38,7 +42,9 @@ export class HousingDirectoryController {
   @ApiOperation({ summary: 'Get a single live housing listing by slug' })
   @ApiOkResponse({ description: 'The housing listing.' })
   @ApiNotFoundResponse({ description: 'Housing listing not found.' })
-  detail(@Param('slug') slug: string) {
-    return this.service.detail(slug);
+  detail(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
+    // viewerId drives the address-privacy gate: the exact point/address are
+    // returned only to the owner or a mutually-connected member.
+    return this.service.detail(slug, user.userId);
   }
 }

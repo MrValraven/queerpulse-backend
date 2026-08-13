@@ -64,4 +64,22 @@ export class ConversationParticipant {
 
   @Column({ type: 'boolean', default: false })
   muted!: boolean;
+
+  /**
+   * When this participant PINNED the conversation to the top of their own inbox.
+   * A per-participant preference (like `muted`), stored as a timestamp — not a
+   * boolean — so pins sort deterministically (most-recently-pinned first) and it
+   * matches the other watermark columns above. NULL = not pinned. Capped at 3
+   * pinned conversations per user, enforced in `ConversationsService.setPinned`.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  pinnedAt!: Date | null;
+
+  /**
+   * When this participant FAVORITED the conversation. A per-participant
+   * preference (like `muted`), stored as a timestamp for the same reasons as
+   * `pinnedAt`. NULL = not favorited.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  favoritedAt!: Date | null;
 }

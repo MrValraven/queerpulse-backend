@@ -3,10 +3,13 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
+import { VerificationLevel } from '../verification/verification-level';
+import { VerificationService } from '../verification/verification.service';
 import { FlatmateDirectoryService } from './flatmate-directory.service';
 import {
   FlatmateProfile,
   FlatmateProfileType,
+  IdentityVisibility,
 } from './entities/flatmate-profile.entity';
 
 type RepoMock = Record<string, jest.Mock>;
@@ -44,6 +47,12 @@ function makeFlatmate(
     flexibleTiming: true,
     about: '',
     lifestyleTags: ['nonsmoker'],
+    genderIdentity: null,
+    safeSpaceNeeds: null,
+    householdNorms: null,
+    identityHousehold: null,
+    identityVisibility: IdentityVisibility.Matches,
+    specialCategoryConsentAt: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
@@ -55,6 +64,7 @@ describe('FlatmateDirectoryService', () => {
   let flatmates: RepoMock;
   let profiles: RepoMock;
   let blockFilter: { isBlockedEitherWay: jest.Mock; excludeHidden: jest.Mock };
+  let verification: { levelForUser: jest.Mock; levelsForUsers: jest.Mock };
 
   beforeEach(async () => {
     flatmates = {
@@ -67,6 +77,10 @@ describe('FlatmateDirectoryService', () => {
       // In-query severance is a no-op in unit tests (just mutates the builder).
       excludeHidden: jest.fn(),
     };
+    verification = {
+      levelForUser: jest.fn().mockResolvedValue(VerificationLevel.Email),
+      levelsForUsers: jest.fn().mockResolvedValue(new Map()),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -74,6 +88,7 @@ describe('FlatmateDirectoryService', () => {
         { provide: getRepositoryToken(FlatmateProfile), useValue: flatmates },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: BlockFilterService, useValue: blockFilter },
+        { provide: VerificationService, useValue: verification },
       ],
     }).compile();
 

@@ -3,11 +3,15 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { Profile } from '../users/entities/profile.entity';
+import { VerificationLevel } from '../verification/verification-level';
+import { VerificationService } from '../verification/verification.service';
 import {
   HousingListing,
   HousingListingStatus,
@@ -51,6 +55,9 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     features: [],
     idealFor: [],
     gallery: [],
+    latitude: null,
+    longitude: null,
+    addressLine: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
@@ -70,6 +77,13 @@ describe('HousingListingsService', () => {
   let profiles: RepoMock;
   let dataSource: { query: jest.Mock };
   let messaging: { deliverEnquiry: jest.Mock };
+  let verification: {
+    requireLevel: jest.Mock;
+    levelForUser: jest.Mock;
+    levelsForUsers: jest.Mock;
+  };
+  let affirmingPledge: { requireAccepted: jest.Mock };
+  let eventEmitter: { emit: jest.Mock };
 
   beforeEach(async () => {
     listings = {
@@ -89,6 +103,15 @@ describe('HousingListingsService', () => {
     messaging = {
       deliverEnquiry: jest.fn().mockResolvedValue({ conversationId: 'conv-1' }),
     };
+    verification = {
+      requireLevel: jest.fn().mockResolvedValue(undefined),
+      levelForUser: jest.fn().mockResolvedValue(VerificationLevel.Email),
+      levelsForUsers: jest.fn().mockResolvedValue(new Map()),
+    };
+    affirmingPledge = {
+      requireAccepted: jest.fn().mockResolvedValue(undefined),
+    };
+    eventEmitter = { emit: jest.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -97,6 +120,9 @@ describe('HousingListingsService', () => {
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: DataSource, useValue: dataSource },
         { provide: MessagingService, useValue: messaging },
+        { provide: VerificationService, useValue: verification },
+        { provide: AffirmingPledgeService, useValue: affirmingPledge },
+        { provide: EventEmitter2, useValue: eventEmitter },
       ],
     }).compile();
 

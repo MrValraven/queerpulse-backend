@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   NotFoundException,
@@ -12,6 +13,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersService } from '../users/users.service';
+import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBookmarksService } from './event-bookmarks.service';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
@@ -39,11 +41,30 @@ describe('EventsService', () => {
   let blockFilter: { excludeBlocked: jest.Mock };
   let profiles: { find: jest.Mock };
   let contentModeration: { stateFor: jest.Mock };
-  let membership: { assertMemberBySlug: jest.Mock };
+  let membership: {
+    assertMemberBySlug: jest.Mock;
+    isMember: jest.Mock;
+    communityIdsForUser: jest.Mock;
+    slugById: jest.Mock;
+  };
   let bookmarks: {
     isBookmarked: jest.Mock;
     bookmarkedEventIds: jest.Mock;
     listSaved: jest.Mock;
+  };
+  // `EventsService` no longer injects `ConnectionsService` directly (fix
+  // round 2) — both the per-viewer tier decision (`assertViewable`) and the
+  // browse/search list predicate (`scopedVisibilityWhere`) now live on this
+  // one shared, separately-injected gate service. `assertViewable` defaults
+  // to "always admit" (the invite_only tests below override it to exercise
+  // `EventsService`'s OWN responsibility — propagating whatever the gate
+  // decides — not re-derive the gate's own tier logic).
+  // `scopedVisibilityWhere` defaults to the unscoped "public/members only"
+  // clause; no test here exercises `list`/`searchByText`'s scoped branches
+  // (that's this file's pre-existing gap, unchanged by this round).
+  let audienceGate: {
+    assertViewable: jest.Mock;
+    scopedVisibilityWhere: jest.Mock;
   };
 
   // A chainable query-builder stub for `attendees`' paginated RSVP query
@@ -98,11 +119,21 @@ describe('EventsService', () => {
     };
     membership = {
       assertMemberBySlug: jest.fn().mockResolvedValue('community-1'),
+      isMember: jest.fn().mockResolvedValue(false),
+      communityIdsForUser: jest.fn().mockResolvedValue([]),
+      slugById: jest.fn().mockResolvedValue(null),
     };
     bookmarks = {
       isBookmarked: jest.fn().mockResolvedValue(false),
       bookmarkedEventIds: jest.fn().mockResolvedValue(new Set<string>()),
       listSaved: jest.fn().mockResolvedValue([]),
+    };
+    audienceGate = {
+      assertViewable: jest.fn().mockResolvedValue(undefined),
+      scopedVisibilityWhere: jest.fn().mockResolvedValue({
+        clause: 'e.visibility IN (:...vis)',
+        params: { vis: [EventVisibility.Public, EventVisibility.Members] },
+      }),
     };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -123,6 +154,7 @@ describe('EventsService', () => {
         { provide: ContentModerationService, useValue: contentModeration },
         { provide: CommunityMembershipService, useValue: membership },
         { provide: EventBookmarksService, useValue: bookmarks },
+        { provide: EventAudienceGateService, useValue: audienceGate },
       ],
     }).compile();
     service = module.get(EventsService);
@@ -258,6 +290,13 @@ describe('EventsService', () => {
     expect(detail.isOrganizer).toBe(true);
   });
 
+  // The invite_only ALLOW/DENY decision itself now lives in
+  // `EventAudienceGateService` (fix round 1's shared gate — also used by
+  // `RsvpService`'s RSVP path). `EventsService`'s own responsibility is
+  // narrower: run the moderation/draft checks, then propagate whatever the
+  // gate decides — which is what these two tests exercise, driving the
+  // mocked gate directly instead of the (no-longer-consulted-here)
+  // `invites`/`rsvps` repos.
   it('getBySlug hides an invite_only event from a stranger (404)', async () => {
     events.findOne.mockResolvedValue({
       id: 'e1',
@@ -267,10 +306,16 @@ describe('EventsService', () => {
       visibility: EventVisibility.InviteOnly,
     });
     cohosts.exists.mockResolvedValue(false);
-    invites.exists.mockResolvedValue(false);
-    rsvps.exists.mockResolvedValue(false);
+    audienceGate.assertViewable.mockRejectedValue(
+      new NotFoundException('Event not found'),
+    );
     await expect(service.getBySlug('io', 'stranger')).rejects.toBeInstanceOf(
       NotFoundException,
+    );
+    expect(audienceGate.assertViewable).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'e1' }),
+      'stranger',
+      false,
     );
   });
 
@@ -283,9 +328,14 @@ describe('EventsService', () => {
       visibility: EventVisibility.InviteOnly,
     });
     cohosts.exists.mockResolvedValue(false);
-    invites.exists.mockResolvedValue(true);
+    audienceGate.assertViewable.mockResolvedValue(undefined);
     const detail = await service.getBySlug('io', 'invited-user');
     expect(detail.slug).toBe('io');
+    expect(audienceGate.assertViewable).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'e1' }),
+      'invited-user',
+      false,
+    );
   });
 
   it('update rejects reopening a cancelled event (409)', async () => {
@@ -331,6 +381,84 @@ describe('EventsService', () => {
     });
     await service.update('x', 'u1', { capacity: 2 });
     expect(rsvpService.reconcileWaitlist).not.toHaveBeenCalled();
+  });
+
+  // Fix round 2 (Task C): `update()` can now resolve/detach a community via
+  // `communitySlug`, mirroring `create()`'s handling exactly — same
+  // authorization check (`assertMemberBySlug`), applied to the acting
+  // organizer (`userId`) rather than always `hostId`.
+  describe('update communitySlug handling', () => {
+    const baseEvent = () => ({
+      id: 'e1',
+      slug: 'x',
+      hostId: 'u1',
+      status: EventStatus.Published,
+      visibility: EventVisibility.Public,
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
+      capacity: null,
+      communityId: null,
+    });
+
+    it('resolves a non-empty communitySlug via the SAME authorization create() uses', async () => {
+      events.findOne.mockResolvedValue(baseEvent());
+      membership.assertMemberBySlug.mockResolvedValue('community-9');
+      const detail = await service.update('x', 'u1', {
+        communitySlug: 'queer-devs',
+      });
+      expect(membership.assertMemberBySlug).toHaveBeenCalledWith(
+        'queer-devs',
+        'u1',
+      );
+      expect(detail.communityId).toBe('community-9');
+    });
+
+    it('detaches the community when communitySlug is explicitly null', async () => {
+      events.findOne.mockResolvedValue({
+        ...baseEvent(),
+        communityId: 'community-9',
+      });
+      const detail = await service.update('x', 'u1', { communitySlug: null });
+      expect(membership.assertMemberBySlug).not.toHaveBeenCalled();
+      expect(detail.communityId).toBeNull();
+    });
+
+    it('detaches the community when communitySlug is an empty string', async () => {
+      events.findOne.mockResolvedValue({
+        ...baseEvent(),
+        communityId: 'community-9',
+      });
+      const detail = await service.update('x', 'u1', { communitySlug: '' });
+      expect(detail.communityId).toBeNull();
+    });
+
+    it('leaves communityId unchanged when communitySlug is absent from the patch', async () => {
+      events.findOne.mockResolvedValue({
+        ...baseEvent(),
+        communityId: 'community-9',
+      });
+      const detail = await service.update('x', 'u1', { capacity: 3 });
+      expect(membership.assertMemberBySlug).not.toHaveBeenCalled();
+      expect(detail.communityId).toBe('community-9');
+    });
+
+    it('400s when detaching the community while visibility stays community', async () => {
+      events.findOne.mockResolvedValue({
+        ...baseEvent(),
+        visibility: EventVisibility.Community,
+        communityId: 'community-9',
+      });
+      await expect(
+        service.update('x', 'u1', { communitySlug: null }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('400s when switching visibility to community with no resolved community', async () => {
+      events.findOne.mockResolvedValue(baseEvent()); // communityId: null
+      await expect(
+        service.update('x', 'u1', { visibility: EventVisibility.Community }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
   });
 
   it('cancel notifies going/maybe/waitlisted RSVPs, excluding the organizer', async () => {

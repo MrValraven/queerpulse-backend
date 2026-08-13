@@ -144,7 +144,7 @@ function makeVouch(overrides: Partial<Vouch> = {}): Vouch {
     voucherId: 'user-a',
     voucheeId: 'user-b',
     note: null,
-    relationship: 'friends',
+    relationships: ['friends'],
     anonymous: false,
     withdrawnAt: null,
     createdAt: new Date('2026-02-01T00:00:00.000Z'),

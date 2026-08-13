@@ -765,6 +765,8 @@ export class GroupsService {
       members,
       isOfficial: false,
       muted: callerRow?.muted ?? false,
+      pinnedAt: callerRow?.pinnedAt?.toISOString() ?? null,
+      favorite: callerRow?.favoritedAt != null,
       hasLeft: callerRow?.leftAt != null,
       ...this.core.groupCapabilities(
         callerRow?.role,

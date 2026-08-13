@@ -303,13 +303,30 @@ export class FeedService {
         // published (not draft/cancelled) and not invite-only (an
         // invite-only event's existence shouldn't leak to non-invitees via
         // the feed — that would need a per-viewer invite check this
-        // aggregation doesn't do).
+        // aggregation doesn't do). The general feed's set is exactly
+        // public/members — unchanged. The `communities` tab (membershipScoped
+        // below) ALSO admits `community`-visibility gatherings: fix round 2
+        // (Task B) — the membership EXISTS check right below already proves
+        // the viewer is on that exact community's roster, so a `community`
+        // -visibility event hosted under it is provably theirs to see; it was
+        // simply never in the base visibility set for this case to widen.
+        // `network`/`extended_network`/`invite_only` are deliberately NOT
+        // added here — those aren't "provably visible because of THIS
+        // community membership" the way `community` is; they need the real
+        // per-event/per-viewer connection or invite check
+        // (`EventAudienceGateService`), which this read-time aggregation
+        // doesn't run (same reasoning invite_only was already excluded for).
+        const visibilities = membershipScoped
+          ? [
+              EventVisibility.Public,
+              EventVisibility.Members,
+              EventVisibility.Community,
+            ]
+          : [EventVisibility.Public, EventVisibility.Members];
         const qb = this.events
           .createQueryBuilder('e')
           .where('e.status = :status', { status: EventStatus.Published })
-          .andWhere('e.visibility IN (:...visibilities)', {
-            visibilities: [EventVisibility.Public, EventVisibility.Members],
-          });
+          .andWhere('e.visibility IN (:...visibilities)', { visibilities });
         if (membershipScoped) {
           // `communities` tab (Task 6): restrict to gatherings hosted by
           // communities the viewer belongs to.
@@ -321,11 +338,20 @@ export class FeedService {
           );
         }
         // `true`: `Event.createdAt` is migrated to `timestamptz(3)` (see
-        // `1785001400000-NarrowCursorCreatedAtPrecision.ts`), so this
-        // `status`+`visibility` filter can be served by the partial index
-        // `IDX_events_feed_created_at_id`
-        // (`1785001500000-AddFeedCursorIndexes.ts`), which was built to
-        // match this exact predicate.
+        // `1785001400000-NarrowCursorCreatedAtPrecision.ts`), so the general
+        // feed's `status`+`visibility` filter (public/members) can be served
+        // by the partial index `IDX_events_feed_created_at_id`
+        // (`1785001500000-AddFeedCursorIndexes.ts`), which was built to match
+        // that exact predicate. The `membershipScoped` branch's WIDENED set
+        // (adds `community`) no longer matches the index's own
+        // `visibility IN ('public','members')` predicate — a query admitting
+        // `community` rows is no longer a subset of what the index covers, so
+        // Postgres can't use it for this branch (fix round 2, Task B: noted,
+        // not fixed here — the `communities` tab is a much smaller
+        // per-viewer slice than the open feed, and the query still has
+        // `e.community_id IS NOT NULL AND EXISTS(...)` plus
+        // `IDX_events_community_id` to fall back on; revisit only if a
+        // measurement shows this tab is actually slow).
         const { rows } = await cursorPaginate(qb, cursor, limit, 'e', true);
         return rows.map((row) => ({
           id: row.id,

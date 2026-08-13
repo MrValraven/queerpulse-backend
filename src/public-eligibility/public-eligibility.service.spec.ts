@@ -40,7 +40,12 @@ function qbStub(result: { count?: number; many?: unknown[]; raw?: unknown[] }) {
   return queryBuilder;
 }
 
-const user = { userId: 'u1', email: 'a@b.c', status: UserStatus.Active, role: 'member' } as any;
+const user = {
+  userId: 'u1',
+  email: 'a@b.c',
+  status: UserStatus.Active,
+  role: 'member',
+} as any;
 
 describe('PublicEligibilityService', () => {
   async function build(overrides: Provider[] = []) {
@@ -62,12 +67,17 @@ describe('PublicEligibilityService', () => {
     const moduleRef = await Test.createTestingModule({
       providers: [
         PublicEligibilityService,
-        { provide: getRepositoryToken(Profile), useValue: repoMock({ findOne: async () => profile }) },
+        {
+          provide: getRepositoryToken(Profile),
+          useValue: repoMock({ findOne: async () => profile }),
+        },
         {
           provide: getRepositoryToken(MagazinePiece),
           useValue: repoMock({
             createQueryBuilder: () =>
-              qbStub({ raw: [{ publishedAt: new Date('2026-07-01T00:00:00Z') }] }),
+              qbStub({
+                raw: [{ publishedAt: new Date('2026-07-01T00:00:00Z') }],
+              }),
           }),
         },
         {
@@ -77,23 +87,64 @@ describe('PublicEligibilityService', () => {
               qbStub({ many: [{ startAt: new Date('2026-06-01T00:00:00Z') }] }),
           }),
         },
-        { provide: getRepositoryToken(EventCohost), useValue: repoMock({ find: async () => [] }) },
-        { provide: getRepositoryToken(EventRsvp), useValue: repoMock({ createQueryBuilder: () => qbStub({ count: 4 }) }) },
-        { provide: getRepositoryToken(Workshop), useValue: repoMock({ count: async () => 1 }) },
+        {
+          provide: getRepositoryToken(EventCohost),
+          useValue: repoMock({ find: async () => [] }),
+        },
+        {
+          provide: getRepositoryToken(EventRsvp),
+          useValue: repoMock({
+            createQueryBuilder: () => qbStub({ count: 4 }),
+          }),
+        },
+        {
+          provide: getRepositoryToken(Workshop),
+          useValue: repoMock({ count: async () => 1 }),
+        },
         {
           provide: getRepositoryToken(Subprofile),
-          useValue: repoMock({ find: async () => [{ id: 's1' }, { id: 's2' }] }),
+          useValue: repoMock({
+            find: async () => [{ id: 's1' }, { id: 's2' }],
+          }),
         },
-        { provide: getRepositoryToken(ForumThread), useValue: repoMock({ count: async () => 2 }) },
-        { provide: getRepositoryToken(ForumPost), useValue: repoMock({ count: async () => 3 }) },
-        { provide: getRepositoryToken(CommunityPost), useValue: repoMock({ count: async () => 1 }) },
-        { provide: getRepositoryToken(CommunityPostReply), useValue: repoMock({ count: async () => 0 }) },
-        { provide: ConnectionsService, useValue: { counts: async () => ({ all: 12, incoming: 0, outgoing: 0, vouched: 0 }) } },
+        {
+          provide: getRepositoryToken(ForumThread),
+          useValue: repoMock({ count: async () => 2 }),
+        },
+        {
+          provide: getRepositoryToken(ForumPost),
+          useValue: repoMock({ count: async () => 3 }),
+        },
+        {
+          provide: getRepositoryToken(CommunityPost),
+          useValue: repoMock({ count: async () => 1 }),
+        },
+        {
+          provide: getRepositoryToken(CommunityPostReply),
+          useValue: repoMock({ count: async () => 0 }),
+        },
+        {
+          provide: ConnectionsService,
+          useValue: {
+            counts: async () => ({
+              all: 12,
+              incoming: 0,
+              outgoing: 0,
+              vouched: 0,
+            }),
+          },
+        },
         {
           provide: SubprofileEndorsementsService,
-          useValue: { loadEndorsementCountsFor: async (ids: string[]) => new Map(ids.map((id) => [id, 2])) },
+          useValue: {
+            loadEndorsementCountsFor: async (ids: string[]) =>
+              new Map(ids.map((id) => [id, 2])),
+          },
         },
-        { provide: ContentModerationService, useValue: { statesForAnyType: async () => new Map() } },
+        {
+          provide: ContentModerationService,
+          useValue: { statesForAnyType: async () => new Map() },
+        },
         ...overrides,
       ],
     }).compile();
@@ -123,10 +174,14 @@ describe('PublicEligibilityService', () => {
     // queries moderation state keyed by [profile.slug, userId], so a hidden
     // state under the slug is what a real takedown on this member looks like.
     const blockingContentModeration = {
-      statesForAnyType: async () => new Map([['ada', { hidden: true, removed: false }]]),
+      statesForAnyType: async () =>
+        new Map([['ada', { hidden: true, removed: false }]]),
     };
     const service = await build([
-      { provide: ContentModerationService, useValue: blockingContentModeration },
+      {
+        provide: ContentModerationService,
+        useValue: blockingContentModeration,
+      },
     ]);
     const dto = await service.getSignals(user);
     expect(dto.standingOk).toBe(false);
@@ -134,7 +189,10 @@ describe('PublicEligibilityService', () => {
 
   it('standingOk is false when the account is not Active', async () => {
     const service = await build();
-    const dto = await service.getSignals({ ...user, status: UserStatus.Deactivated });
+    const dto = await service.getSignals({
+      ...user,
+      status: UserStatus.Deactivated,
+    });
     expect(dto.standingOk).toBe(false);
   });
 
@@ -147,7 +205,11 @@ describe('PublicEligibilityService', () => {
     // flows unchanged into `hostedOpenEvents`.
     const cohostedEventRepo = {
       provide: getRepositoryToken(EventCohost),
-      useValue: { count: async () => 0, find: async () => [{ eventId: 'e-cohosted' }], findOne: async () => null },
+      useValue: {
+        count: async () => 0,
+        find: async () => [{ eventId: 'e-cohosted' }],
+        findOne: async () => null,
+      },
     };
     const cohostedEventQuery = {
       provide: getRepositoryToken(Event),

@@ -1,16 +1,21 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, SelectQueryBuilder } from 'typeorm';
+import { ConnectionsService } from '../connections/connections.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { escapeLikeTerm } from '../common/like-escape';
 import { MemberLookup } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
+import { VerificationLevel } from '../verification/verification-level';
+import { VerificationService } from '../verification/verification.service';
+import { HousingViewingsService } from '../housing-viewings/housing-viewings.service';
 import { BrowseHousingListingsQuery } from './dto/browse-housing-listings.query';
 import {
   HousingListing,
   HousingListingStatus,
 } from './entities/housing-listing.entity';
+import { VERIFIED_LISTING_MAX_RISK } from './housing-verified';
 import {
   HousingListingDTO,
   HousingSearchRow,
@@ -33,6 +38,16 @@ export class HousingDirectoryService {
     // subject (keyed by the listing slug — what the frontend report modal
     // sends) withholds the listing from every public read below.
     private readonly contentModeration: ContentModerationService,
+    private readonly verification: VerificationService,
+    // ADDRESS PRIVACY: the exact point + address are disclosed on the detail
+    // read only to the owner or a mutually-connected member. `areConnected` is
+    // the platform's canonical "these two trust each other" signal. (See
+    // `detail` for why this stands in for "accepted enquirer" today.)
+    private readonly connections: ConnectionsService,
+    // Accepted-viewing address unlock (P2.3): an enquirer whose viewing request
+    // the lister ACCEPTED is treated as trusted enough to see the exact address,
+    // fulfilling the map slice's documented follow-up.
+    private readonly viewings: HousingViewingsService,
   ) {}
 
   // A housing listing is reported (and taken down) under the `housing` subject
@@ -73,7 +88,20 @@ export class HousingDirectoryService {
       qb.andWhere('l.type = :type', { type: query.type });
     }
     if (query.city) {
+      // LOWER(city) matches the functional index added in the filter migration.
       qb.andWhere('LOWER(l.city) = LOWER(:city)', { city: query.city });
+    }
+    if (query.area) {
+      // Same case-insensitive equality as city, backed by LOWER(area) index.
+      qb.andWhere('LOWER(l.area) = LOWER(:area)', { area: query.area });
+    }
+    if (query.areas?.length) {
+      // Neighbourhood multi-select: OR across the chosen areas, still backed by
+      // the LOWER(area) functional index. Independent of the legacy single
+      // `area` above (the UI sends only `areas`).
+      qb.andWhere('LOWER(l.area) = ANY(:areas)', {
+        areas: query.areas.map((area) => area.toLowerCase()),
+      });
     }
     if (query.priceMin !== undefined) {
       qb.andWhere('l.rent_euros >= :priceMin', { priceMin: query.priceMin });
@@ -81,8 +109,33 @@ export class HousingDirectoryService {
     if (query.priceMax !== undefined) {
       qb.andWhere('l.rent_euros <= :priceMax', { priceMax: query.priceMax });
     }
-    if (query.lgbtqFriendly) {
-      qb.andWhere('l.lgbtq_friendly = true');
+    if (query.bedroomsMin !== undefined) {
+      // A listing with no bedroom count set can't satisfy a minimum-beds filter.
+      qb.andWhere('l.bedrooms >= :bedroomsMin', {
+        bedroomsMin: query.bedroomsMin,
+      });
+    }
+    if (query.billsIncluded) {
+      qb.andWhere('l.bills_included = true');
+    }
+    if (query.hasAccessibilityInfo) {
+      qb.andWhere("l.accessibility_info <> ''");
+    }
+    if (query.verifiedOnly) {
+      // The public "verified listing" derivation, expressed in-query: status is
+      // already `live` above, so verified reduces to a low pre-publish risk
+      // score AND an id-verified lister. Kept in lockstep with
+      // `deriveListingVerified` (housing-verified.ts).
+      qb.andWhere('l.risk_score < :maxRisk', {
+        maxRisk: VERIFIED_LISTING_MAX_RISK,
+      }).andWhere(
+        `EXISTS (
+          SELECT 1 FROM "member_verifications" "mv"
+          WHERE "mv"."user_id" = l.owner_id
+            AND "mv"."level" = :idVerifiedLevel
+        )`,
+        { idVerifiedLevel: VerificationLevel.IdVerified },
+      );
     }
     if (query.availableBy) {
       // A listing with no move-in date is treated as available anytime.
@@ -97,11 +150,15 @@ export class HousingDirectoryService {
 
     return paginate(qb, page, async (rows) => {
       if (!rows.length) return [];
-      const refs = await new MemberLookup(this.profiles).byUserIds(
-        rows.map((r) => r.ownerId),
-      );
+      const ownerIds = rows.map((r) => r.ownerId);
+      const refs = await new MemberLookup(this.profiles).byUserIds(ownerIds);
+      const levels = await this.verification.levelsForUsers(ownerIds);
       return rows.map((r) =>
-        toHousingListingDTO(r, refs.get(r.ownerId) ?? null),
+        toHousingListingDTO(
+          r,
+          refs.get(r.ownerId) ?? null,
+          levels.get(r.ownerId) ?? VerificationLevel.Email,
+        ),
       );
     });
   }
@@ -126,7 +183,13 @@ export class HousingDirectoryService {
     return rows.map(toHousingSearchRow);
   }
 
-  async detail(slug: string): Promise<HousingListingDTO> {
+  /**
+   * Public detail read. `viewerId` gates ADDRESS PRIVACY: the exact point +
+   * full address are attached only when the viewer owns the listing or is a
+   * mutually-connected member — everyone else gets the approximate
+   * neighbourhood pin. See `precise` note below on the connection signal.
+   */
+  async detail(slug: string, viewerId: string): Promise<HousingListingDTO> {
     const listing = await this.listings.findOne({
       where: { slug, status: HousingListingStatus.Live },
     });
@@ -145,6 +208,25 @@ export class HousingDirectoryService {
     const refs = await new MemberLookup(this.profiles).byUserIds([
       listing.ownerId,
     ]);
-    return toHousingListingDTO(listing, refs.get(listing.ownerId) ?? null);
+    const level = await this.verification.levelForUser(listing.ownerId);
+
+    // Precise-vs-area gate. The exact point + address are disclosed to (a) the
+    // owner, (b) a mutually-connected member (the platform's canonical
+    // trust signal), OR (c) an enquirer whose VIEWING request the lister
+    // ACCEPTED — the explicit "lister let this enquirer in" state that the map
+    // slice flagged as the production refinement, now realised via
+    // housing_viewings. A cold enquiry still deliberately creates no connection,
+    // so an unanswered enquiry never unlocks the address.
+    const precise =
+      listing.ownerId === viewerId ||
+      (await this.connections.areConnected(viewerId, listing.ownerId)) ||
+      (await this.viewings.hasUnlockedViewing(listing.id, viewerId));
+
+    return toHousingListingDTO(
+      listing,
+      refs.get(listing.ownerId) ?? null,
+      level,
+      precise,
+    );
   }
 }

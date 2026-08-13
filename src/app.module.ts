@@ -92,9 +92,15 @@ import { AffiliationModule } from './affiliation/affiliation.module';
 import { ForumModule } from './forum/forum.module';
 import { FeedModule } from './feed/feed.module';
 import { HousingModule } from './housing/housing.module';
+import { HousingGroupsModule } from './housing-groups/housing-groups.module';
 import { HousingListingsModule } from './housing-listings/housing-listings.module';
+import { HousingViewingsModule } from './housing-viewings/housing-viewings.module';
+import { HousingReviewsModule } from './housing-reviews/housing-reviews.module';
+import { HousingSavedSearchesModule } from './housing-saved-searches/housing-saved-searches.module';
 import { FlatmateProfilesModule } from './flatmate-profiles/flatmate-profiles.module';
 import { LandlordsModule } from './landlords/landlords.module';
+import { VerificationModule } from './verification/verification.module';
+import { AffirmingPledgeModule } from './affirming-pledge/affirming-pledge.module';
 import { ListingsModule } from './listings/listings.module';
 import { SearchModule } from './search/search.module';
 import { GeocodeModule } from './geocode/geocode.module';
@@ -256,9 +262,15 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     SearchModule,
     GeocodeModule,
     HousingModule,
+    HousingGroupsModule,
     HousingListingsModule,
+    HousingViewingsModule,
+    HousingReviewsModule,
+    HousingSavedSearchesModule,
     FlatmateProfilesModule,
     LandlordsModule,
+    VerificationModule,
+    AffirmingPledgeModule,
     MagazineModule,
     ResourcesModule,
     TopicsModule,

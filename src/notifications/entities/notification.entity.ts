@@ -95,6 +95,22 @@ export enum NotificationType {
   // gated on the `Vouches` category. See migration
   // `AddSafeSpaceVouchNotificationType1787500000000`.
   SafeSpaceVouch = 'safe_space_vouch',
+  // Sent to a member when a NEW housing listing goes live that matches one of
+  // their saved searches with alerts on (Wave B3 P2.5,
+  // `HousingSavedSearchAlertsListener`). System-driven — no actor and no
+  // preference toggle (the saved search's `alertsEnabled` flag IS the member's
+  // consent); the payload carries the listing slug/title/area for the bell,
+  // push, and deep link. See migration
+  // `AddHousingListingMatchNotificationType1788300200000`.
+  HousingListingMatch = 'housing_listing_match',
+  // Sent to the submitter of a governance concern when an admin moves it to a
+  // terminal outcome (resolved/dismissed) on the /admin/concerns dashboard, so
+  // the "you'll get an update when it's resolved" promise is kept. System-driven
+  // — no actor and no preference toggle: it's the platform's word on a concern
+  // they raised. A logged-out submitter is emailed instead (no account to
+  // notify). Payload carries `{ source: 'concern', status, category? }` for the
+  // bell copy. See migration `AddConcernUpdateNotificationType1788600000000`.
+  ConcernUpdate = 'concern_update',
 }
 
 @Entity('notifications')

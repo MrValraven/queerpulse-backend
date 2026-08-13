@@ -25,15 +25,34 @@ export interface EventSummary {
   status: string;
   capacity: number | null;
   goingCount: number;
+  // Whether the event is at capacity — `capacity !== null && goingCount >=
+  // capacity`. Unlimited-capacity events (`capacity === null`) are never full.
+  // Derived here so the FE's RSVP control can flip to "Join the waitlist"
+  // without recomputing the rule client-side.
+  isFull: boolean;
   myRsvpStatus: RsvpStatus | null;
   // Whether the viewer has bookmarked ("saved") this event. Computed in batch
   // (one IN-query per page — see `EventsService.summarize`), never per-row.
   isBookmarked: boolean;
+  // The event's own community, or null if it isn't filed to one. Plain column
+  // on `Event` already loaded by every query that touches an event row — no
+  // extra join, so it's cheap enough to carry on every summary/card, not just
+  // the detail view (unlike `communitySlug` below, which DOES need a join and
+  // is detail-only — see `EventDetail`).
+  communityId: string | null;
 }
 
 export interface EventDetail extends EventSummary {
   description: string;
   onlineUrl: string | null;
+  // The event's own community slug (or null) — resolved from `communityId`
+  // via one extra lookup in `EventsService.buildDetail` (a single-event
+  // fetch, not a hot list query), so the edit UI can offer the `community`
+  // audience-scope tier for an event that already has a community without a
+  // second round trip. Deliberately NOT added to `EventSummary`/browse-list
+  // rows: doing so would require a join (or an extra batched lookup) on every
+  // row of a hot browse/search page for a field only the edit flow needs.
+  communitySlug: string | null;
   host: EventOrganizerView | null;
   cohosts: EventOrganizerView[];
   isOrganizer: boolean;
@@ -124,8 +143,10 @@ export function toEventSummary(
     status: e.status,
     capacity: e.capacity,
     goingCount,
+    isFull: e.capacity !== null && goingCount >= e.capacity,
     myRsvpStatus: myRsvp ? myRsvp.status : null,
     isBookmarked,
+    communityId: e.communityId,
   };
 }
 

@@ -435,7 +435,7 @@ export class ConversationsController {
     description:
       'Not a participant, or not owner/admin for a group info change.',
   })
-  update(
+  async update(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,
     @Body() dto: UpdateConversationDto,
@@ -446,10 +446,36 @@ export class ConversationsController {
         avatarUrl: dto.avatarUrl,
       });
     }
-    if (dto.muted === undefined) {
+    // Per-caller preferences: mute, pin, favorite. A single PATCH may carry one
+    // or more; each provided field is applied (and awaited) in turn — so a
+    // pin-cap ConflictException from setPinned propagates as a real 409 rather
+    // than a floating rejection. Nothing provided -> 400.
+    if (
+      dto.muted === undefined &&
+      dto.pinned === undefined &&
+      dto.favorite === undefined
+    ) {
       throw new BadRequestException('Nothing to update');
     }
-    return this.messagingService.setMuted(id, user.userId, dto.muted);
+    let result: { ok: true } = { ok: true };
+    if (dto.muted !== undefined) {
+      result = await this.messagingService.setMuted(id, user.userId, dto.muted);
+    }
+    if (dto.pinned !== undefined) {
+      result = await this.messagingService.setPinned(
+        id,
+        user.userId,
+        dto.pinned,
+      );
+    }
+    if (dto.favorite !== undefined) {
+      result = await this.messagingService.setFavorite(
+        id,
+        user.userId,
+        dto.favorite,
+      );
+    }
+    return result;
   }
 
   @Throttle({ default: { limit: 60, ttl: seconds(60) } })

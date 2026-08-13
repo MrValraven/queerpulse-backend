@@ -306,6 +306,12 @@ export interface ConversationResponse {
   // present where a participant row was already loaded (i.e. the list path).
   isOfficial?: boolean;
   muted?: boolean;
+  // `pinnedAt`/`favorite` are this caller's per-conversation preferences (like
+  // `muted`), present only where a participant row was loaded (the list path).
+  // `pinnedAt` is the ISO instant the caller pinned the thread (null = unpinned;
+  // most-recent first sorts pins); `favorite` is whether the caller favorited it.
+  pinnedAt?: string | null;
+  favorite?: boolean;
   /** For a group: whether THIS caller has left it (`left_at` set). A left member
    *  keeps read access to history but the composer is severed. Absent/false for
    *  DMs and active group members. */

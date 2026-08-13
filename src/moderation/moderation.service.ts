@@ -962,6 +962,11 @@ export class ModerationService {
         },
       ],
       ...listingEnrichment,
+      // Surface the raw evidence array (P0.9) so a moderator sees client-attached
+      // evidence AND the server snapshot (message/housing) on the drawer.
+      ...(report.evidence && report.evidence.length
+        ? { evidence: report.evidence }
+        : {}),
     };
   }
 

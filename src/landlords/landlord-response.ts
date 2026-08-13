@@ -1,5 +1,6 @@
 import { toImageUrl } from '../common/image-url';
 import { MemberRef } from '../common/member-ref';
+import { VerificationLevel } from '../verification/verification-level';
 import { LandlordIntroRequest } from './entities/landlord-intro-request.entity';
 import { LandlordRecommendation } from './entities/landlord-recommendation.entity';
 import { Landlord, LandlordStat } from './entities/landlord.entity';
@@ -78,6 +79,10 @@ export interface RecommendationDTO {
   initials: string;
   tint: LandlordTint;
   member: MemberRef | null;
+  /** The recommending MEMBER's real verification level — an honest badge on the
+   * recommendation. The landlord themselves is NOT a platform member and never
+   * verified with us, so no landlord-level badge is claimed anywhere. */
+  verificationLevel: VerificationLevel;
   stars: number;
   text: string;
   createdAt: string;
@@ -86,6 +91,7 @@ export interface RecommendationDTO {
 export function toRecommendationDTO(
   rec: LandlordRecommendation,
   member: MemberRef | null,
+  verificationLevel: VerificationLevel,
 ): RecommendationDTO {
   const name = memberName(member);
   return {
@@ -93,6 +99,7 @@ export function toRecommendationDTO(
     initials: initialsForName(name),
     tint: tintForKey(rec.authorUserId),
     member,
+    verificationLevel,
     stars: rec.stars,
     text: rec.text,
     createdAt: rec.createdAt.toISOString(),

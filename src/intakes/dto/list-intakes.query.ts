@@ -1,6 +1,11 @@
 import { Type } from 'class-transformer';
 import { IsIn, IsInt, IsOptional, Min } from 'class-validator';
-import { INTAKE_KINDS, IntakeKind, IntakeStatus } from '../intake-kinds';
+import {
+  INTAKE_KINDS,
+  INTAKE_STATUSES,
+  IntakeKind,
+  IntakeStatus,
+} from '../intake-kinds';
 
 /** `GET /intakes?kind=&status=&page=` — the admin triage list. */
 export class ListIntakesQuery {
@@ -9,7 +14,7 @@ export class ListIntakesQuery {
   kind?: IntakeKind;
 
   @IsOptional()
-  @IsIn(['new', 'reviewed'])
+  @IsIn(INTAKE_STATUSES)
   status?: IntakeStatus;
 
   @IsOptional()

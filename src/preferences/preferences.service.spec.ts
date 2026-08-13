@@ -21,6 +21,8 @@ describe('PreferencesService', () => {
       outAtWork: OutAtWork.Out,
       transSupport: ['chosen-name'],
       safeOnly: false,
+      skills: ['branding'],
+      focusAreas: ['coming-out'],
       publicProfileEnabled: true,
       updatedAt: now,
       ...overrides,
@@ -55,6 +57,8 @@ describe('PreferencesService', () => {
         outAtWork: OutAtWork.Verified,
         transSupport: [],
         safeOnly: true,
+        skills: [],
+        focusAreas: [],
       });
     });
 
@@ -75,6 +79,8 @@ describe('PreferencesService', () => {
         outAtWork: OutAtWork.Out,
         transSupport: ['chosen-name'],
         safeOnly: false,
+        skills: ['branding'],
+        focusAreas: ['coming-out'],
       });
     });
 
@@ -98,6 +104,8 @@ describe('PreferencesService', () => {
         outAtWork: OutAtWork.Private,
         transSupport: ['hide-legal'],
         safeOnly: true,
+        skills: ['product'],
+        focusAreas: ['mental-health'],
       });
 
       expect(repo.save).toHaveBeenCalledWith(
@@ -106,12 +114,16 @@ describe('PreferencesService', () => {
           outAtWork: OutAtWork.Private,
           transSupport: ['hide-legal'],
           safeOnly: true,
+          skills: ['product'],
+          focusAreas: ['mental-health'],
         }),
       );
       expect(result).toEqual({
         outAtWork: OutAtWork.Private,
         transSupport: ['hide-legal'],
         safeOnly: true,
+        skills: ['product'],
+        focusAreas: ['mental-health'],
       });
     });
 
@@ -124,6 +136,8 @@ describe('PreferencesService', () => {
         outAtWork: OutAtWork.Out,
         transSupport: [],
         safeOnly: true,
+        skills: [],
+        focusAreas: [],
       });
 
       expect(repo.save).toHaveBeenCalledWith(
@@ -139,6 +153,8 @@ describe('PreferencesService', () => {
         outAtWork: OutAtWork.Private,
         transSupport: [],
         safeOnly: true,
+        skills: [],
+        focusAreas: [],
       });
 
       expect(repo.save).toHaveBeenCalledWith(
@@ -148,16 +164,24 @@ describe('PreferencesService', () => {
 
     it('replaces the whole selection rather than merging it', async () => {
       repo.findOne.mockResolvedValue(
-        row({ transSupport: ['chosen-name', 'hide-legal'] }),
+        row({
+          transSupport: ['chosen-name', 'hide-legal'],
+          skills: ['branding', 'backend'],
+          focusAreas: ['coming-out', 'mental-health'],
+        }),
       );
 
       const result = await service.updateWorkPreferences('u1', {
         outAtWork: OutAtWork.Out,
         transSupport: ['transition-friendly'],
         safeOnly: true,
+        skills: ['product'],
+        focusAreas: ['career-direction'],
       });
 
       expect(result.transSupport).toEqual(['transition-friendly']);
+      expect(result.skills).toEqual(['product']);
+      expect(result.focusAreas).toEqual(['career-direction']);
     });
 
     it('clears the selection when given an empty list', async () => {
@@ -167,9 +191,13 @@ describe('PreferencesService', () => {
         outAtWork: OutAtWork.Out,
         transSupport: [],
         safeOnly: true,
+        skills: [],
+        focusAreas: [],
       });
 
       expect(result.transSupport).toEqual([]);
+      expect(result.skills).toEqual([]);
+      expect(result.focusAreas).toEqual([]);
     });
 
     it('de-duplicates the selection, keeping the member’s order', async () => {
@@ -179,9 +207,13 @@ describe('PreferencesService', () => {
         outAtWork: OutAtWork.Out,
         transSupport: ['hide-legal', 'chosen-name', 'hide-legal'],
         safeOnly: true,
+        skills: ['product', 'branding', 'product'],
+        focusAreas: ['mental-health', 'coming-out', 'mental-health'],
       });
 
       expect(result.transSupport).toEqual(['hide-legal', 'chosen-name']);
+      expect(result.skills).toEqual(['product', 'branding']);
+      expect(result.focusAreas).toEqual(['mental-health', 'coming-out']);
     });
   });
 

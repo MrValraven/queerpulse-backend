@@ -8,7 +8,10 @@
  */
 
 export type MailTemplateKey =
-  'listing_draft_resume_link' | 'newsletter_confirm' | 'ops_inquiry_received';
+  | 'listing_draft_resume_link'
+  | 'newsletter_confirm'
+  | 'ops_inquiry_received'
+  | 'concern_update';
 
 /** The params each template key requires. */
 export interface MailTemplateParams {
@@ -24,6 +27,11 @@ export interface MailTemplateParams {
     /** Organisation name (partner form only). */
     orgName?: string;
     body: string;
+  };
+  /** Sent to a LOGGED-OUT submitter when their governance concern reaches a
+   *  terminal outcome (a signed-in member gets an in-app notification instead). */
+  concern_update: {
+    status: 'resolved' | 'dismissed';
   };
 }
 
@@ -110,6 +118,28 @@ export function renderTemplate<K extends MailTemplateKey>(
             : '') +
           (subject ? `<p><b>Topic:</b> ${escapeHtml(subject)}</p>` : '') +
           `<p style="white-space:pre-wrap">${escapeHtml(body)}</p>`,
+      };
+    }
+    case 'concern_update': {
+      const { status } = params as MailTemplateParams['concern_update'];
+      const outcome =
+        status === 'resolved'
+          ? "We've looked into it and marked it resolved."
+          : "We've reviewed it and closed it without further action.";
+      return {
+        subject: 'An update on the concern you raised',
+        text:
+          `Thanks for raising a concern with QueerPulse.\n\n` +
+          `${outcome}\n\n` +
+          `If you have more to add, you can reply to this email or submit ` +
+          `another concern from the governance page. Thank you for helping ` +
+          `keep the community safe.`,
+        html:
+          `<p>Thanks for raising a concern with QueerPulse.</p>` +
+          `<p>${escapeHtml(outcome)}</p>` +
+          `<p>If you have more to add, you can reply to this email or submit ` +
+          `another concern from the governance page. Thank you for helping ` +
+          `keep the community safe.</p>`,
       };
     }
     default: {

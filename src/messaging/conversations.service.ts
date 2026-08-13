@@ -1,12 +1,13 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Not, Repository } from 'typeorm';
+import { In, IsNull, Not, Repository } from 'typeorm';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { toImageUrl } from '../common/image-url';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -128,6 +129,20 @@ export class ConversationsService {
       userId,
     );
 
+    // A block severs a 1:1 DM either direction (mirrors `canSendMessage`'s
+    // send-time gate and `createConversation`'s create-time gate). History
+    // stays intact server-side for moderation — this only stops surfacing the
+    // thread in the caller's own inbox, matching the client's own
+    // `isBlocked`-based filter (`useMessagesController.ts` "DM severance")
+    // so a hard reload / live-mode fetch can't show a thread the FE would
+    // otherwise hide, and a stale unread count from before the block can't
+    // linger on a thread the member can no longer open. Batched (one query
+    // regardless of inbox size), not per-conversation.
+    const blockedCounterparts = await this.blockFilter.blockedUserIds(
+      userId,
+      others.map((o) => o.userId),
+    );
+
     const summaries: ConversationResponse[] = [];
     for (const part of myParts) {
       const convo = convoById.get(part.conversationId);
@@ -136,6 +151,13 @@ export class ConversationsService {
       }
       const isGroup = convo.kind === ConversationKind.Group;
       const convoOthers = othersByConvo.get(convo.id) ?? [];
+      if (
+        !isGroup &&
+        !convo.isOfficial &&
+        convoOthers.some((o) => blockedCounterparts.has(o.userId))
+      ) {
+        continue;
+      }
       let otherParticipant: AuthorSummary | null = null;
       // 1:1 thread: the single counterpart. Official/welcome AND group threads
       // have no single "other participant" — the client shows the org identity
@@ -195,6 +217,8 @@ export class ConversationsService {
         members,
         isOfficial: convo.isOfficial,
         muted: part.muted,
+        pinnedAt: part.pinnedAt?.toISOString() ?? null,
+        favorite: part.favoritedAt != null,
         hasLeft: isGroup ? part.leftAt != null : false,
         ...(isGroup
           ? this.core.groupCapabilities(part.role, part.leftAt != null)
@@ -305,6 +329,55 @@ export class ConversationsService {
   ): Promise<{ ok: true }> {
     const part = await this.core.requireParticipant(conversationId, userId);
     part.muted = muted;
+    await this.participants.save(part);
+    return { ok: true };
+  }
+
+  /** Maximum conversations one user may pin at once. Enforced server-side in
+   *  `setPinned`; the client mirrors it but is never trusted. */
+  private static readonly MAX_PINNED_CONVERSATIONS = 3;
+
+  /**
+   * Pin/unpin a conversation for THIS caller only (mirrors `setMuted`), stamping
+   * `pinnedAt` with the app clock (NULL = unpinned). Pinning is capped at
+   * `MAX_PINNED_CONVERSATIONS` per user: if the caller already has that many
+   * OTHER pinned conversations, a 409 `ConflictException` is thrown. Unpinning is
+   * always allowed, and re-pinning an already-pinned thread just re-stamps it.
+   */
+  async setPinned(
+    conversationId: string,
+    userId: string,
+    pinned: boolean,
+  ): Promise<{ ok: true }> {
+    const part = await this.core.requireParticipant(conversationId, userId);
+    if (pinned && part.pinnedAt == null) {
+      const otherPinnedCount = await this.participants.count({
+        where: {
+          userId,
+          pinnedAt: Not(IsNull()),
+          conversationId: Not(conversationId),
+        },
+      });
+      if (otherPinnedCount >= ConversationsService.MAX_PINNED_CONVERSATIONS) {
+        throw new ConflictException('You can pin up to 3 chats.');
+      }
+    }
+    part.pinnedAt = pinned ? new Date() : null;
+    await this.participants.save(part);
+    return { ok: true };
+  }
+
+  /**
+   * Favorite/unfavorite a conversation for THIS caller only (mirrors `setMuted`),
+   * stamping `favoritedAt` with the app clock (NULL = not favorited). No cap.
+   */
+  async setFavorite(
+    conversationId: string,
+    userId: string,
+    favorite: boolean,
+  ): Promise<{ ok: true }> {
+    const part = await this.core.requireParticipant(conversationId, userId);
+    part.favoritedAt = favorite ? new Date() : null;
     await this.participants.save(part);
     return { ok: true };
   }

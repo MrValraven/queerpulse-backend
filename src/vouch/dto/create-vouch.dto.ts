@@ -1,4 +1,7 @@
 import {
+  ArrayMaxSize,
+  ArrayNotEmpty,
+  IsArray,
   IsBoolean,
   IsIn,
   IsOptional,
@@ -16,9 +19,15 @@ export class CreateVouchDto {
   @MaxLength(1000)
   note?: string;
 
+  // The ways the voucher knows the member — one or more. Optional at the wire
+  // level (kept lenient for compatibility), but when present it must be a
+  // non-empty array of known relationship values, bounded by the enum size.
   @IsOptional()
-  @IsIn(VOUCH_RELATIONSHIPS)
-  relationship?: VouchRelationship;
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayMaxSize(VOUCH_RELATIONSHIPS.length)
+  @IsIn(VOUCH_RELATIONSHIPS, { each: true })
+  relationships?: VouchRelationship[];
 
   @IsOptional()
   @IsBoolean()

@@ -129,8 +129,10 @@ export class EventsController {
     description: 'The resolved RSVP status and waitlist position.',
   })
   @ApiBadRequestResponse({ description: 'The event is not open for RSVPs.' })
-  @ApiForbiddenResponse({ description: 'This event is invite-only.' })
-  @ApiNotFoundResponse({ description: 'No event with that slug.' })
+  @ApiNotFoundResponse({
+    description:
+      'No event with that slug, or its audience scope does not include you.',
+  })
   rsvp(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,

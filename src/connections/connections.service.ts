@@ -612,6 +612,32 @@ export class ConnectionsService {
   }
 
   /**
+   * Every accepted-connection counterpart id for `userId` — deliberately NOT
+   * capped at `DEFAULT_LIST_LIMIT`, unlike `getAcceptedConnectionUserIds`
+   * (whose cap is fine for the UI lists it backs, e.g. "Say hello" -> "Message"
+   * button state). This backs an internal SQL predicate instead of a rendered
+   * list: `EventsService.scopedVisibilityWhere`'s browse/search OR-in on
+   * `host_id` for `network`-visibility gatherings. Truncating that id-set
+   * would silently make a viewer's own 201st+ connection's `network`-only
+   * gathering invisible in browse/search — a real UX bug for a privacy
+   * feature (someone's own connection can't find their gathering), even
+   * though the per-event gate (`areConnected`, an uncapped pair check) never
+   * had this problem. Id-only select — the caller needs ids, not full rows.
+   */
+  async allAcceptedConnectionUserIds(userId: string): Promise<string[]> {
+    const rows = await this.connections.find({
+      where: [
+        { requesterId: userId, status: ConnectionStatus.Accepted },
+        { addresseeId: userId, status: ConnectionStatus.Accepted },
+      ],
+      select: { requesterId: true, addresseeId: true },
+    });
+    return rows.map((c) =>
+      c.requesterId === userId ? c.addresseeId : c.requesterId,
+    );
+  }
+
+  /**
    * The slugs of the viewer's accepted connections — the minimal signal the
    * client needs to flip a member's "Say hello" button to "Message". Mirrors
    * `getAcceptedConnectionUserIds`, resolving each counterpart user-id to its
@@ -739,8 +765,19 @@ export class ConnectionsService {
    * the page's neighbourhood, not the viewer's total connection degree, so the
    * viewer's full accepted set is never loaded. The direct viewer↔other edge is
    * excluded for free — the viewer is never a member of their own connection set.
+   *
+   * PUBLIC (like `acceptedConnectionsAmong`) because `EventAudienceGateService`
+   * (events feature) reuses this "any mutual connection?" computation to back
+   * `EventVisibility.ExtendedNetwork`'s 2nd-degree gate. This is a
+   * GENERALIZATION of `resolveRequestGate`'s profile-`network` graph test
+   * above, not the same test: that gate checks whether ONE NAMED introducer
+   * is connected to both parties; this one checks whether ANY mutual
+   * connection exists at all. Same underlying accepted-connections graph and
+   * the same query shape (edges touching the other side, then intersected
+   * against the viewer's own connections), reused rather than re-derived —
+   * but a different question is being asked.
    */
-  private async mutualCountsByUserIds(
+  async mutualCountsByUserIds(
     viewerUserId: string,
     otherIds: string[],
   ): Promise<Map<string, number>> {

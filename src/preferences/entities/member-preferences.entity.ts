@@ -56,6 +56,16 @@ export class MemberPreferences {
   @Column({ type: 'boolean', default: DEFAULT_SAFE_ONLY })
   safeOnly!: boolean;
 
+  // Skills the member offers in the skills exchange. Closed-set option ids (see
+  // `work-skills.ts`). `text[]` with a `{}` default, matching `transSupport`.
+  @Column({ type: 'text', array: true, default: '{}' })
+  skills!: string[];
+
+  // Focus areas the member wants mentor support with. Closed-set option ids
+  // (see `focus-areas.ts`). `text[]` with a `{}` default.
+  @Column({ type: 'text', array: true, default: '{}' })
+  focusAreas!: string[];
+
   // --- Public-profile visibility (GET/PUT /me/public-profile) ---------------
 
   /**

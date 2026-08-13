@@ -24,6 +24,8 @@ export type ReasonCode =
   | 'venue_accessibility'
   | 'housing_unsafe'
   | 'housing_scam'
+  | 'not_affirming'
+  | 'off_platform'
   // System-filed listing-domain codes (NOT member-selectable — deliberately
   // absent from `REASON_CODES` / `SUBJECT_REASONS`, so `GET /reports/reasons`
   // never offers them and `POST /reports`'s `@IsIn(REASON_CODES)` rejects them).
@@ -52,6 +54,8 @@ export const REASON_CODES: readonly ReasonCode[] = [
   'venue_accessibility',
   'housing_unsafe',
   'housing_scam',
+  'not_affirming',
+  'off_platform',
   'other',
 ];
 
@@ -77,6 +81,8 @@ const REASON_LABELS: Record<ReasonCode, string> = {
   venue_accessibility: 'An accessibility problem',
   housing_unsafe: 'Unsafe, discriminatory, or misrepresented housing',
   housing_scam: 'Scam or fake listing',
+  not_affirming: 'Not LGBTQ+ affirming — broke the community pledge',
+  off_platform: 'Asked to pay or move off-platform',
   // System-filed listing codes (see the `ReasonCode` union comment) — labelled
   // so any code→label lookup is total, but never surfaced as a report option.
   listing_dispute: 'Dispute or claim of a business listing',
@@ -137,20 +143,24 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
   ],
   [ReportSubjectType.Community]: ['hate_speech', 'spam', 'other'],
   [ReportSubjectType.Housing]: [
-    'housing_unsafe',
-    'harassment',
-    'discrimination',
     'housing_scam',
+    'housing_unsafe',
+    'not_affirming',
+    'discrimination',
+    'off_platform',
+    'harassment',
     'other',
   ],
   [ReportSubjectType.Flatmate]: [
     'harassment',
+    'not_affirming',
     'discrimination',
     'impersonation',
     'unwanted_contact',
     'other',
   ],
   [ReportSubjectType.Landlord]: [
+    'not_affirming',
     'discrimination',
     'harassment',
     'impersonation',

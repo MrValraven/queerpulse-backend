@@ -55,7 +55,7 @@ export class VouchController {
   ) {
     return this.vouchService.createVouch(user.userId, slug, {
       note: dto.note,
-      relationship: dto.relationship,
+      relationships: dto.relationships,
       anonymous: dto.anonymous,
     });
   }

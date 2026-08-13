@@ -1,8 +1,12 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ConnectionsModule } from '../connections/connections.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
+import { HousingViewingsModule } from '../housing-viewings/housing-viewings.module';
 import { MessagingModule } from '../messaging/messaging.module';
 import { UsersModule } from '../users/users.module';
+import { VerificationModule } from '../verification/verification.module';
+import { AffirmingPledgeModule } from '../affirming-pledge/affirming-pledge.module';
 import { AdminHousingListingsController } from './admin-housing-listings.controller';
 import { HousingDirectoryController } from './housing-directory.controller';
 import { HousingDirectoryService } from './housing-directory.service';
@@ -20,6 +24,17 @@ import { HousingListing } from './entities/housing-listing.entity';
     // Read-only: public housing browse/detail/search withhold a
     // moderator-taken-down listing (keyed by slug), mirroring the directory.
     ContentModerationModule,
+    // Step-up gating (create/enquiry) + honest lister badge hydration.
+    VerificationModule,
+    // The mandatory LGBTQ+ affirming pledge gate (create/enquiry).
+    AffirmingPledgeModule,
+    // Exports ConnectionsService — the address-privacy gate on the public detail
+    // read discloses the exact point/address only to the owner or a connected
+    // member (`areConnected`).
+    ConnectionsModule,
+    // Exports HousingViewingsService — the address-privacy gate ALSO unlocks the
+    // exact point/address to an enquirer with a lister-accepted viewing.
+    HousingViewingsModule,
   ],
   controllers: [
     HousingListingsController,

@@ -83,6 +83,26 @@ export class MessagingService {
     return this.conversationsService.setMuted(conversationId, userId, muted);
   }
 
+  setPinned(
+    conversationId: string,
+    userId: string,
+    pinned: boolean,
+  ): Promise<{ ok: true }> {
+    return this.conversationsService.setPinned(conversationId, userId, pinned);
+  }
+
+  setFavorite(
+    conversationId: string,
+    userId: string,
+    favorite: boolean,
+  ): Promise<{ ok: true }> {
+    return this.conversationsService.setFavorite(
+      conversationId,
+      userId,
+      favorite,
+    );
+  }
+
   isParticipant(conversationId: string, userId: string): Promise<boolean> {
     return this.conversationsService.isParticipant(conversationId, userId);
   }

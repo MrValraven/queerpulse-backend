@@ -4,14 +4,20 @@ import { Repository, SelectQueryBuilder } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { normalizePage, PAGE_SIZE, Paginated } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
+import { VerificationLevel } from '../verification/verification-level';
+import { VerificationService } from '../verification/verification.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { BrowseFlatmateProfilesQuery } from './dto/browse-flatmate-profiles.query';
-import { FlatmateProfile } from './entities/flatmate-profile.entity';
 import {
+  FlatmateProfile,
+  FlatmateProfileType,
+} from './entities/flatmate-profile.entity';
+import {
+  canRevealIdentity,
   FlatmateProfileDTO,
   toFlatmateProfileDTO,
 } from './flatmate-profile-response';
-import { scoreMatch } from './flatmate-match';
+import { MatchResult, scoreMatch } from './flatmate-match';
 
 // Match ranking is computed in-memory (a JS score can't be an ORDER BY), so the
 // ranked path bounds how many candidates it pulls. Ample for launch scale; the
@@ -31,6 +37,7 @@ export class FlatmateDirectoryService {
     private readonly flatmates: Repository<FlatmateProfile>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly blockFilter: BlockFilterService,
+    private readonly verification: VerificationService,
   ) {}
 
   async browse(
@@ -48,9 +55,12 @@ export class FlatmateDirectoryService {
         .skip((page - 1) * PAGE_SIZE)
         .take(PAGE_SIZE)
         .getManyAndCount();
+      // No viewer profile → `matches` visibility can never resolve, so only
+      // `public`/`members` profiles reveal their identity fields here.
       const items = await this.mapRows(
         rows,
         rows.map(() => null),
+        null,
       );
       return { items, total, page, pageSize: PAGE_SIZE };
     }
@@ -58,15 +68,26 @@ export class FlatmateDirectoryService {
     // Ranked path: pull a bounded set, score opposite-type candidates, sort
     // (opposite-type by score desc; same-type after, newest-first), paginate.
     const candidates = await qb.take(MATCH_CANDIDATE_CAP).getMany();
-    const scored = candidates.map((row) => ({
-      row,
-      score: row.type !== viewer.type ? scoreMatch(viewer, row) : null,
-    }));
+    const scored = candidates.map((row) => {
+      if (row.type === viewer.type) return { row, match: null };
+      // Score with THIS viewer's permission to see the candidate's identity, so
+      // the engine redacts special-category reason specifics it may not reveal.
+      const revealCandidateIdentity = canRevealIdentity(row, {
+        isOwner: false,
+        viewerProfileType: viewer.type,
+      });
+      return {
+        row,
+        match: scoreMatch(viewer, row, { revealCandidateIdentity }),
+      };
+    });
     scored.sort((a, b) => {
-      if (a.score === null && b.score === null) return 0;
-      if (a.score === null) return 1;
-      if (b.score === null) return -1;
-      return b.score - a.score;
+      const left = a.match?.score ?? null;
+      const right = b.match?.score ?? null;
+      if (left === null && right === null) return 0;
+      if (left === null) return 1;
+      if (right === null) return -1;
+      return right - left;
     });
     // Only the top MATCH_CANDIDATE_CAP candidates are ranked, but `total`
     // must reflect the full filtered count, not the capped/scored set — recount
@@ -75,8 +96,9 @@ export class FlatmateDirectoryService {
     const start = (page - 1) * PAGE_SIZE;
     const pageSlice = scored.slice(start, start + PAGE_SIZE);
     const items = await this.mapRows(
-      pageSlice.map((s) => s.row),
-      pageSlice.map((s) => s.score),
+      pageSlice.map((scoredRow) => scoredRow.row),
+      pageSlice.map((scoredRow) => scoredRow.match),
+      viewer.type,
     );
     return { items, total, page, pageSize: PAGE_SIZE };
   }
@@ -92,22 +114,32 @@ export class FlatmateDirectoryService {
     if (await this.blockFilter.isBlockedEitherWay(viewerId, profile.ownerId)) {
       throw new NotFoundException('Flatmate profile not found');
     }
-    let matchScore: number | null = null;
-    if (profile.ownerId !== viewerId) {
+    const isOwner = profile.ownerId === viewerId;
+    let match: MatchResult | null = null;
+    let viewerProfileType: FlatmateProfileType | null = null;
+    if (!isOwner) {
       const viewer = await this.flatmates.findOne({
         where: { ownerId: viewerId },
       });
+      viewerProfileType = viewer?.type ?? null;
       if (viewer && viewer.type !== profile.type) {
-        matchScore = scoreMatch(viewer, profile);
+        const revealCandidateIdentity = canRevealIdentity(profile, {
+          isOwner: false,
+          viewerProfileType,
+        });
+        match = scoreMatch(viewer, profile, { revealCandidateIdentity });
       }
     }
     const refs = await new MemberLookup(this.profiles).byUserIds([
       profile.ownerId,
     ]);
+    const level = await this.verification.levelForUser(profile.ownerId);
     return toFlatmateProfileDTO(
       profile,
       refs.get(profile.ownerId) ?? null,
-      matchScore,
+      match,
+      { isOwner, viewerProfileType },
+      level,
     );
   }
 
@@ -154,17 +186,25 @@ export class FlatmateDirectoryService {
 
   private async mapRows(
     rows: FlatmateProfile[],
-    scores: (number | null)[],
+    matches: (MatchResult | null)[],
+    viewerProfileType: FlatmateProfileType | null,
   ): Promise<FlatmateProfileDTO[]> {
     if (!rows.length) return [];
-    const refs = await new MemberLookup(this.profiles).byUserIds(
-      rows.map((r) => r.ownerId),
-    );
+    const ownerIds = rows.map((row) => row.ownerId);
+    const refs = await new MemberLookup(this.profiles).byUserIds(ownerIds);
+    const levels = await this.verification.levelsForUsers(ownerIds);
+    // Browse always excludes the viewer's own profile, so `isOwner` is false
+    // for every row here; identity gating rests on consent + visibility.
     return rows.map((row, index) =>
       toFlatmateProfileDTO(
         row,
         refs.get(row.ownerId) ?? null,
-        scores[index] ?? null,
+        matches[index] ?? null,
+        {
+          isOwner: false,
+          viewerProfileType,
+        },
+        levels.get(row.ownerId) ?? VerificationLevel.Email,
       ),
     );
   }

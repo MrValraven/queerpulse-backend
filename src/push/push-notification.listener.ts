@@ -80,6 +80,9 @@ export class PushNotificationListener {
         case NotificationType.EventCancelled:
           await this.pushEvent(userIds, notification);
           return;
+        case NotificationType.HousingListingMatch:
+          await this.pushHousingMatch(userIds, notification);
+          return;
         // Whitelist: every other type — CRITICALLY `NewMessage` and
         // `EventReminder`, which already push elsewhere — falls through here and
         // produces no push. Do NOT add them; doing so double-sends.
@@ -275,6 +278,36 @@ export class PushNotificationListener {
           ? 'push:event.cancelled.body'
           : 'push:event.updated.body',
         params: { event: title },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  private async pushHousingMatch(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    // Always-on (no category gate): the member's saved-search `alertsEnabled`
+    // flag is the consent that produced this notification at all, so every
+    // recipient in the batch goes straight to `sendToUsers` — mirroring how
+    // `pushEvent` treats its always-on types.
+    const title = this.payloadString(notification, 'title') ?? 'A new home';
+    const area = this.payloadString(notification, 'area');
+    const slug = this.payloadString(notification, 'slug');
+    const url = slug ? `/housing/${slug}` : '/housing';
+    await this.pushService.sendToUsers(userIds, {
+      title: 'A home matches your search',
+      body: area
+        ? `${title} in ${area} matches a search you saved.`
+        : `${title} matches a search you saved.`,
+      tag: `notification:${notification.id}`,
+      data: { url },
+      l10n: {
+        titleKey: 'push:housing.match.title',
+        bodyKey: area
+          ? 'push:housing.match.body'
+          : 'push:housing.match.bodyNoArea',
+        params: { title, area: area ?? '' },
       },
       timestamp: notification.createdAt.getTime(),
     });

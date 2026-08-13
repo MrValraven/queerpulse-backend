@@ -166,14 +166,14 @@ describe('VouchService', () => {
     });
   });
 
-  describe('createVouch relationship + anonymous', () => {
-    it('persists relationship and anonymous on insert', async () => {
+  describe('createVouch relationships + anonymous', () => {
+    it('persists relationships and anonymous on insert', async () => {
       profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'target' });
       vouches.findOne.mockResolvedValue(null); // no existing row
       manager.count.mockResolvedValue(1);
       await service.createVouch('u1', 'target', {
         note: 'we shipped together',
-        relationship: 'collaborated',
+        relationships: ['collaborated', 'friends'],
         anonymous: true,
       });
       expect(manager.insert).toHaveBeenCalledWith(
@@ -182,9 +182,22 @@ describe('VouchService', () => {
           voucherId: 'u1',
           voucheeId: 'u2',
           note: 'we shipped together',
-          relationship: 'collaborated',
+          relationships: ['collaborated', 'friends'],
           anonymous: true,
         }),
+      );
+    });
+
+    it('de-dupes relationships and drops unknown values', async () => {
+      profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'target' });
+      vouches.findOne.mockResolvedValue(null);
+      manager.count.mockResolvedValue(1);
+      await service.createVouch('u1', 'target', {
+        relationships: ['friends', 'friends', 'nonsense' as never, 'group'],
+      });
+      expect(manager.insert).toHaveBeenCalledWith(
+        Vouch,
+        expect.objectContaining({ relationships: ['friends', 'group'] }),
       );
     });
 
@@ -197,7 +210,9 @@ describe('VouchService', () => {
         withdrawnAt: new Date('2026-01-01'),
       });
       manager.count.mockResolvedValue(3);
-      await service.createVouch('u1', 'target', { relationship: 'friends' });
+      await service.createVouch('u1', 'target', {
+        relationships: ['friends'],
+      });
       // The re-vouch/un-withdraw path updates the row via the transaction's
       // EntityManager (not the `vouches` repository), so it commits or rolls
       // back atomically with the pessimistic-lock read and the count below.
@@ -206,7 +221,7 @@ describe('VouchService', () => {
         { id: 'v9' },
         expect.objectContaining({
           withdrawnAt: null,
-          relationship: 'friends',
+          relationships: ['friends'],
         }),
       );
       expect(manager.insert).not.toHaveBeenCalled();

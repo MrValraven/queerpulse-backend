@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CommunityMembershipModule } from '../communities/community-membership.module';
+import { ConnectionsModule } from '../connections/connections.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PushModule } from '../push/push.module';
@@ -18,6 +19,7 @@ import { EventPhoto } from './entities/event-photo.entity';
 import { EventRsvp } from './entities/event-rsvp.entity';
 import { Event } from './entities/event.entity';
 import { MemberEventReminderPreferences } from './entities/member-event-reminder-preferences.entity';
+import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBookmarksService } from './event-bookmarks.service';
 import { EventInvitesService } from './event-invites.service';
 import { EventPhotosService } from './event-photos.service';
@@ -60,6 +62,13 @@ import { RsvpService } from './rsvp.service';
     // resolves to the caller's own roster membership before the event is
     // attached to that community. Read-only module; closes no cycle.
     CommunityMembershipModule,
+    // `ConnectionsService` — backs the `network`/`extended_network` audience
+    // scope: `assertCanView`'s connections/mutual-connection gate and the
+    // browse/search queries' viewer-connection-ids OR-in predicate.
+    // `ConnectionsModule` -> {`UsersModule`, `SocialModule`, `VouchModule`},
+    // none of which import `EventsModule`, so this closes no cycle (no
+    // `forwardRef` needed).
+    ConnectionsModule,
   ],
   controllers: [
     EventsController,
@@ -75,6 +84,13 @@ import { RsvpService } from './rsvp.service';
     EventRemindersService,
     EventReminderPreferencesService,
     EventPhotosService,
+    // Shared audience-scope tier check `EventsService.assertCanView` (reads)
+    // and `RsvpService` (writes) both call — a leaf provider (depends only on
+    // `ConnectionsService`/`CommunityMembershipService` and its own
+    // `EventInvite`/`EventRsvp` repos), so injecting it into BOTH avoids the
+    // circular dependency a direct `RsvpService` -> `EventsService` edge
+    // would create (`EventsService` already injects `RsvpService`).
+    EventAudienceGateService,
   ],
   exports: [EventsService],
 })

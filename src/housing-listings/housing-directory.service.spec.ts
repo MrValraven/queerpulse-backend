@@ -1,8 +1,12 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { ConnectionsService } from '../connections/connections.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { HousingViewingsService } from '../housing-viewings/housing-viewings.service';
 import { Profile } from '../users/entities/profile.entity';
+import { VerificationLevel } from '../verification/verification-level';
+import { VerificationService } from '../verification/verification.service';
 import { HousingDirectoryService } from './housing-directory.service';
 import {
   HousingListing,
@@ -53,6 +57,9 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     features: [],
     idealFor: [],
     gallery: [],
+    latitude: null,
+    longitude: null,
+    addressLine: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
@@ -64,6 +71,9 @@ describe('HousingDirectoryService', () => {
   let listings: RepoMock;
   let profiles: RepoMock;
   let contentModeration: { stateFor: jest.Mock };
+  let verification: { levelForUser: jest.Mock; levelsForUsers: jest.Mock };
+  let connections: { areConnected: jest.Mock };
+  let viewings: { hasUnlockedViewing: jest.Mock };
 
   beforeEach(async () => {
     listings = {
@@ -74,6 +84,14 @@ describe('HousingDirectoryService', () => {
     contentModeration = {
       stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
     };
+    verification = {
+      levelForUser: jest.fn().mockResolvedValue(VerificationLevel.Email),
+      levelsForUsers: jest.fn().mockResolvedValue(new Map()),
+    };
+    // Default: viewer is NOT connected to the lister → area-only (privacy gate).
+    connections = { areConnected: jest.fn().mockResolvedValue(false) };
+    // Default: no accepted viewing → no address unlock via the viewing path.
+    viewings = { hasUnlockedViewing: jest.fn().mockResolvedValue(false) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -84,6 +102,9 @@ describe('HousingDirectoryService', () => {
           provide: ContentModerationService,
           useValue: contentModeration,
         },
+        { provide: VerificationService, useValue: verification },
+        { provide: ConnectionsService, useValue: connections },
+        { provide: HousingViewingsService, useValue: viewings },
       ],
     }).compile();
 
@@ -101,7 +122,6 @@ describe('HousingDirectoryService', () => {
         city: 'Lisbon',
         priceMin: 300,
         priceMax: 900,
-        lgbtqFriendly: true,
         availableBy: '2026-03-01',
       });
 
@@ -119,9 +139,22 @@ describe('HousingDirectoryService', () => {
           priceMin: 300,
         },
       );
-      expect(builder.andWhere).toHaveBeenCalledWith('l.lgbtq_friendly = true');
       expect(result).toMatchObject({ total: 1, page: 1, pageSize: 20 });
       expect(result.items).toHaveLength(1);
+    });
+
+    it('filters by multiple neighbourhoods (areas IN, case-insensitive)', async () => {
+      const builder = makeBuilder({ getManyAndCount: [[], 0] });
+      listings.createQueryBuilder.mockReturnValue(builder);
+
+      await service.browse({
+        areas: ['Arroios', 'Chiado'],
+      });
+
+      expect(builder.andWhere).toHaveBeenCalledWith(
+        'LOWER(l.area) = ANY(:areas)',
+        { areas: ['arroios', 'chiado'] },
+      );
     });
 
     it('returns an empty envelope without hydrating listers when no rows match', async () => {
@@ -159,7 +192,9 @@ describe('HousingDirectoryService', () => {
     it('404s when there is no live listing for the slug', async () => {
       listings.findOne.mockResolvedValue(null);
 
-      await expect(service.detail('ghost')).rejects.toThrow(NotFoundException);
+      await expect(service.detail('ghost', 'viewer-1')).rejects.toThrow(
+        NotFoundException,
+      );
     });
 
     it('404s a live listing that is under a moderator takedown (hidden or removed)', async () => {
@@ -169,7 +204,7 @@ describe('HousingDirectoryService', () => {
         removed: false,
       });
 
-      await expect(service.detail('sunny-room')).rejects.toThrow(
+      await expect(service.detail('sunny-room', 'viewer-1')).rejects.toThrow(
         NotFoundException,
       );
     });
@@ -181,10 +216,54 @@ describe('HousingDirectoryService', () => {
         removed: false,
       });
 
-      const result = await service.detail('sunny-room');
+      const result = await service.detail('sunny-room', 'viewer-1');
 
       expect(result.slug).toBe('sunny-room');
       expect(result.lister).toBeNull();
+    });
+
+    it('withholds the exact point/address from an unconnected viewer (area only)', async () => {
+      listings.findOne.mockResolvedValue(
+        makeListing({
+          latitude: 38.7169,
+          longitude: -9.1487,
+          addressLine: 'Rua Secreta 1',
+        }),
+      );
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: false,
+        removed: false,
+      });
+      connections.areConnected.mockResolvedValue(false);
+
+      const result = await service.detail('sunny-room', 'stranger-1');
+
+      expect(result.locationPrecision).toBe('area');
+      expect(result.preciseLatitude).toBeNull();
+      expect(result.addressLine).toBeNull();
+      // The approximate neighbourhood pin is still provided (Arroios centroid).
+      expect(result.approxLatitude).not.toBeNull();
+    });
+
+    it('discloses the exact point/address to a connected viewer', async () => {
+      listings.findOne.mockResolvedValue(
+        makeListing({
+          latitude: 38.7169,
+          longitude: -9.1487,
+          addressLine: 'Rua Secreta 1',
+        }),
+      );
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: false,
+        removed: false,
+      });
+      connections.areConnected.mockResolvedValue(true);
+
+      const result = await service.detail('sunny-room', 'friend-1');
+
+      expect(result.locationPrecision).toBe('exact');
+      expect(result.preciseLatitude).toBe(38.7169);
+      expect(result.addressLine).toBe('Rua Secreta 1');
     });
   });
 });

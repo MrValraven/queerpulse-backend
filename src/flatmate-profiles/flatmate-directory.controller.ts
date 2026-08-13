@@ -1,4 +1,12 @@
-import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import {
   CurrentUser,
   CurrentUserData,
@@ -6,9 +14,13 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { BrowseFlatmateProfilesQuery } from './dto/browse-flatmate-profiles.query';
+import { DecideFlatmateDto } from './dto/decide-flatmate.dto';
 import { FlatmateDirectoryService } from './flatmate-directory.service';
+import { FlatmateLikesService } from './flatmate-likes.service';
 import {
+  ApiBadRequestResponse,
   ApiCookieAuth,
+  ApiCreatedResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
@@ -27,7 +39,10 @@ import {
 })
 @Controller('flatmate-directory')
 export class FlatmateDirectoryController {
-  constructor(private readonly service: FlatmateDirectoryService) {}
+  constructor(
+    private readonly service: FlatmateDirectoryService,
+    private readonly likes: FlatmateLikesService,
+  ) {}
 
   @Get()
   @ApiOperation({
@@ -43,6 +58,23 @@ export class FlatmateDirectoryController {
     @Query() query: BrowseFlatmateProfilesQuery,
   ) {
     return this.service.browse(user.userId, query);
+  }
+
+  @Post(':slug/decide')
+  @ApiOperation({
+    summary: 'Record a like/pass on a profile from the discovery deck',
+  })
+  @ApiCreatedResponse({
+    description: 'Decision recorded; `matched` is true on a mutual like.',
+  })
+  @ApiBadRequestResponse({ description: 'You cannot like your own profile.' })
+  @ApiNotFoundResponse({ description: 'Flatmate profile not found.' })
+  decide(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: DecideFlatmateDto,
+  ) {
+    return this.likes.decide(user.userId, slug, dto.decision);
   }
 
   @Get(':slug')

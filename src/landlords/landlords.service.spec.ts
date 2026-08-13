@@ -1,8 +1,11 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import { POSTGRES_UNIQUE_VIOLATION } from '../common/db-errors';
 import { Profile } from '../users/entities/profile.entity';
+import { VerificationLevel } from '../verification/verification-level';
+import { VerificationService } from '../verification/verification.service';
 import {
   LandlordIntroRequest,
   LandlordIntroRequestStatus,
@@ -73,6 +76,12 @@ describe('LandlordsService', () => {
   let recommendations: RepoMock;
   let introRequests: RepoMock;
   let profiles: RepoMock;
+  let verification: {
+    requireLevel: jest.Mock;
+    levelForUser: jest.Mock;
+    levelsForUsers: jest.Mock;
+  };
+  let affirmingPledge: { requireAccepted: jest.Mock };
 
   beforeEach(async () => {
     landlords = {
@@ -98,6 +107,14 @@ describe('LandlordsService', () => {
       save: jest.fn((row: unknown) => Promise.resolve(row)),
     };
     profiles = { find: jest.fn().mockResolvedValue([]) };
+    verification = {
+      requireLevel: jest.fn().mockResolvedValue(undefined),
+      levelForUser: jest.fn().mockResolvedValue(VerificationLevel.Email),
+      levelsForUsers: jest.fn().mockResolvedValue(new Map()),
+    };
+    affirmingPledge = {
+      requireAccepted: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -112,6 +129,8 @@ describe('LandlordsService', () => {
           useValue: introRequests,
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        { provide: VerificationService, useValue: verification },
+        { provide: AffirmingPledgeService, useValue: affirmingPledge },
       ],
     }).compile();
 

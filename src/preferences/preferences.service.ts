@@ -16,6 +16,8 @@ import {
   toWorkPreferencesDTO,
 } from './preferences-response';
 import { normalizeTransSupport } from './trans-support';
+import { normalizeWorkSkills } from './work-skills';
+import { normalizeFocusAreas } from './focus-areas';
 
 @Injectable()
 export class PreferencesService {
@@ -35,6 +37,8 @@ export class PreferencesService {
     row.outAtWork = DEFAULT_OUT_AT_WORK;
     row.transSupport = [];
     row.safeOnly = DEFAULT_SAFE_ONLY;
+    row.skills = [];
+    row.focusAreas = [];
     row.publicProfileEnabled = DEFAULT_PUBLIC_PROFILE_ENABLED;
     return row;
   }
@@ -63,6 +67,8 @@ export class PreferencesService {
     row.outAtWork = dto.outAtWork;
     row.transSupport = normalizeTransSupport(dto.transSupport);
     row.safeOnly = dto.safeOnly;
+    row.skills = normalizeWorkSkills(dto.skills);
+    row.focusAreas = normalizeFocusAreas(dto.focusAreas);
 
     return toWorkPreferencesDTO(await this.preferences.save(row));
   }

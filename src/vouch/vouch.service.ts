@@ -11,11 +11,37 @@ import { DataSource, EntityManager, In, IsNull, Repository } from 'typeorm';
 import { toImageUrl } from '../common/image-url';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
-import { Vouch, type VouchRelationship } from './entities/vouch.entity';
+import {
+  Vouch,
+  VOUCH_RELATIONSHIPS,
+  type VouchRelationship,
+} from './entities/vouch.entity';
 import { VOUCH_CREATED, VouchCreatedEvent } from './vouch.events';
 
 // Bounds an otherwise-unbounded list read; callers may narrow with limit/offset.
 const DEFAULT_PAGE_SIZE = 20;
+
+const VOUCH_RELATIONSHIP_SET = new Set<VouchRelationship>(VOUCH_RELATIONSHIPS);
+
+/**
+ * Canonicalize the caller-supplied "ways you know them": keep only known enum
+ * values, drop duplicates (preserving first-seen order), and collapse an empty
+ * result to null — the "no relationship recorded" state the column started with.
+ */
+function normalizeRelationships(
+  input: VouchRelationship[] | null | undefined,
+): VouchRelationship[] | null {
+  if (!input?.length) {
+    return null;
+  }
+  const seen = new Set<VouchRelationship>();
+  for (const value of input) {
+    if (VOUCH_RELATIONSHIP_SET.has(value)) {
+      seen.add(value);
+    }
+  }
+  return seen.size ? [...seen] : null;
+}
 
 export interface PageParams {
   limit?: number;
@@ -73,7 +99,7 @@ export class VouchService {
     voucheeSlug: string,
     input?: {
       note?: string;
-      relationship?: VouchRelationship | null;
+      relationships?: VouchRelationship[] | null;
       anonymous?: boolean;
     },
   ): Promise<{ vouchCount: number }> {
@@ -91,7 +117,9 @@ export class VouchService {
     // Empty/whitespace-only notes are stored as null, not "".
     const trimmedNote = input?.note?.trim();
     const cleanNote = trimmedNote ? trimmedNote : null;
-    const relationship = input?.relationship ?? null;
+    // De-dupe (preserving order) and drop anything not in the enum. An empty
+    // result stores as null — the "no relationship given" state, same as before.
+    const relationships = normalizeRelationships(input?.relationships);
     const anonymous = input?.anonymous ?? false;
 
     // One row per (voucher, vouchee) ever. If a withdrawn row exists, re-vouching
@@ -123,7 +151,7 @@ export class VouchService {
         await manager.update(
           Vouch,
           { id: existing.id },
-          { withdrawnAt: null, note: cleanNote, relationship, anonymous },
+          { withdrawnAt: null, note: cleanNote, relationships, anonymous },
         );
       } else {
         try {
@@ -131,7 +159,7 @@ export class VouchService {
             voucherId,
             voucheeId,
             note: cleanNote,
-            relationship,
+            relationships,
             anonymous,
           });
         } catch (err) {

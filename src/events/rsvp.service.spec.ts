@@ -1,7 +1,8 @@
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { DataSource } from 'typeorm';
+import { EventAudienceGateService } from './event-audience-gate.service';
 import { RsvpStatus } from './entities/event-rsvp.entity';
 import { EventStatus, EventVisibility } from './entities/event.entity';
 import { RsvpService } from './rsvp.service';
@@ -10,6 +11,11 @@ describe('RsvpService', () => {
   let service: RsvpService;
   let managerFindOne: jest.Mock;
   let managerExists: jest.Mock;
+  // `assertMayRsvp` now delegates the actual audience-scope tier decision to
+  // the shared gate (see `EventAudienceGateService`) — defaults to "allow"
+  // (matches every non-invite_only fixture below, none of which set
+  // `visibility`); the two invite-only tests override this per-case.
+  let audienceGate: { assertViewable: jest.Mock };
   let rsvpRepo: {
     count: jest.Mock;
     findOne: jest.Mock;
@@ -55,6 +61,9 @@ describe('RsvpService', () => {
       createQueryBuilder: jest.fn(() => rsvpQueryBuilder),
     };
     emitter = { emit: jest.fn() };
+    audienceGate = {
+      assertViewable: jest.fn().mockResolvedValue(undefined),
+    };
     const manager = {
       getRepository: () => rsvpRepo,
       findOne: managerFindOne,
@@ -71,6 +80,7 @@ describe('RsvpService', () => {
         RsvpService,
         { provide: DataSource, useValue: dataSource },
         { provide: EventEmitter2, useValue: emitter },
+        { provide: EventAudienceGateService, useValue: audienceGate },
       ],
     }).compile();
     service = module.get(RsvpService);
@@ -250,7 +260,13 @@ describe('RsvpService', () => {
     expect(emitter.emit).toHaveBeenCalledTimes(2);
   });
 
-  it('blocks an RSVP to an invite-only event from a non-invitee', async () => {
+  // Both tests below cover `RsvpService`'s OWN responsibility post-fix-round-1:
+  // computing `isOrganizer` (host id, or a co-host row via `manager` — the
+  // transaction-scoped check that predates the shared gate) and handing it to
+  // `EventAudienceGateService.assertViewable`, then propagating whatever it
+  // does. The tier decision itself (invited vs. not) is `EventAudienceGateService`'s
+  // own unit-tested responsibility, not re-tested here — these mock it.
+  it('blocks an RSVP the shared audience gate rejects (e.g. invite-only, not invited)', async () => {
     managerFindOne.mockResolvedValue({
       id: 'e1',
       status: EventStatus.Published,
@@ -258,13 +274,23 @@ describe('RsvpService', () => {
       hostId: 'host',
       capacity: null,
     });
-    managerExists.mockResolvedValue(false); // not a co-host, not invited
+    managerExists.mockResolvedValue(false); // not a co-host
+    // Same exception shape `assertCanView` uses — existence is never leaked,
+    // regardless of which tier rejected the viewer.
+    audienceGate.assertViewable.mockRejectedValue(
+      new NotFoundException('Event not found'),
+    );
     await expect(service.rsvp('e', 'stranger', 'going')).rejects.toBeInstanceOf(
-      ForbiddenException,
+      NotFoundException,
+    );
+    expect(audienceGate.assertViewable).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'e1' }),
+      'stranger',
+      false, // not the host, not a co-host
     );
   });
 
-  it('allows an invited member to RSVP to an invite-only event', async () => {
+  it('allows an RSVP the shared audience gate admits (e.g. an invited member)', async () => {
     managerFindOne.mockResolvedValue({
       id: 'e1',
       status: EventStatus.Published,
@@ -272,10 +298,33 @@ describe('RsvpService', () => {
       hostId: 'host',
       capacity: null,
     });
-    managerExists
-      .mockResolvedValueOnce(false) // co-host check
-      .mockResolvedValueOnce(true); // invite check
+    managerExists.mockResolvedValue(false); // not a co-host
+    audienceGate.assertViewable.mockResolvedValue(undefined); // gate admits (e.g. invited)
     const result = await service.rsvp('e', 'invited', 'going');
     expect(result.status).toBe(RsvpStatus.Going);
+    expect(audienceGate.assertViewable).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'e1' }),
+      'invited',
+      false,
+    );
+  });
+
+  it("computes isOrganizer=true for the host without asking the gate to check any tier's membership", async () => {
+    managerFindOne.mockResolvedValue({
+      id: 'e1',
+      status: EventStatus.Published,
+      visibility: EventVisibility.Network,
+      hostId: 'host',
+      capacity: null,
+    });
+    const result = await service.rsvp('e', 'host', 'going');
+    expect(result.status).toBe(RsvpStatus.Going);
+    // The host never needs a co-host lookup — `isOrganizer` short-circuits on
+    // `event.hostId === userId` before `manager.exists` would even matter.
+    expect(audienceGate.assertViewable).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'e1' }),
+      'host',
+      true,
+    );
   });
 });

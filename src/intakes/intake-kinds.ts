@@ -15,6 +15,9 @@
  *  - `incubator_cohort`  → economy/IncubatorModals · CohortApplyModal
  *  - `incubator_mentor`  → economy/IncubatorModals · MentorSignupModal
  *  - `incubator_session` → economy/IncubatorModals · RequestSessionModal
+ *  - `governance_concern`→ governance/GovernanceSections · RaiseSection
+ *                          (the public "Submit a concern" form; staff triage it
+ *                          on the /admin/concerns dashboard)
  */
 export const INTAKE_KINDS = [
   'grant',
@@ -24,12 +27,39 @@ export const INTAKE_KINDS = [
   'incubator_cohort',
   'incubator_mentor',
   'incubator_session',
+  'governance_concern',
 ] as const;
 
 export type IntakeKind = (typeof INTAKE_KINDS)[number];
 
-/** Ops triage state. New rows land as `new`; staff flip them to `reviewed`. */
-export type IntakeStatus = 'new' | 'reviewed';
+/**
+ * Ops triage states. New rows land as `new`. The generic intake forms flip to
+ * `reviewed` once handled; the governance-concern dashboard uses the richer
+ * `reviewing`/`resolved`/`dismissed` worklist (a concern is confidential and
+ * gets an outcome, not just a "seen" flag). All are plain varchar values — no
+ * enum migration is needed to widen this set (see the entity note).
+ */
+export const INTAKE_STATUSES = [
+  'new',
+  'reviewed',
+  'reviewing',
+  'resolved',
+  'dismissed',
+] as const;
+
+export type IntakeStatus = (typeof INTAKE_STATUSES)[number];
+
+/**
+ * The triage states an admin can move a concern into from the dashboard. `new`
+ * is the initial state a row is created in, never a target of a manual update.
+ */
+export const CONCERN_TRIAGE_STATUSES = [
+  'reviewing',
+  'resolved',
+  'dismissed',
+] as const;
+
+export type ConcernTriageStatus = (typeof CONCERN_TRIAGE_STATUSES)[number];
 
 /**
  * Kinds that require an authenticated member. These are reached only from the
