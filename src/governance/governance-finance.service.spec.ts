@@ -1,8 +1,14 @@
 import { NotFoundException } from '@nestjs/common';
+import { DataSource } from 'typeorm';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { Profile } from '../users/entities/profile.entity';
 import { GovernanceFinanceService } from './governance-finance.service';
-import { GovernanceFinanceReport } from './entities/governance-finance-report.entity';
+import { GovernanceFinanceChange } from './entities/governance-finance-change.entity';
+import {
+  FinanceMetricSource,
+  GovernanceFinanceReport,
+} from './entities/governance-finance-report.entity';
 import { governanceFinanceReportSeed } from './governance-finance.seed';
 
 function makeReport(
@@ -23,6 +29,13 @@ function makeReport(
     mrr: null,
     sustainerCount: null,
     solidarityRate: null,
+    mrrSource: FinanceMetricSource.Seeded,
+    sustainerCountSource: FinanceMetricSource.Seeded,
+    solidarityRateSource: FinanceMetricSource.Seeded,
+    incomeTotalSource: FinanceMetricSource.Seeded,
+    expenseTotalSource: FinanceMetricSource.Seeded,
+    metricsEditedBy: null,
+    metricsEditedAt: null,
     publishedAt: governanceFinanceReportSeed.publishedAt,
     createdAt: governanceFinanceReportSeed.publishedAt,
     updatedAt: governanceFinanceReportSeed.publishedAt,
@@ -42,6 +55,18 @@ describe('GovernanceFinanceService', () => {
         {
           provide: getRepositoryToken(GovernanceFinanceReport),
           useValue: repo,
+        },
+        {
+          provide: getRepositoryToken(GovernanceFinanceChange),
+          useValue: { find: jest.fn() },
+        },
+        {
+          provide: getRepositoryToken(Profile),
+          useValue: { find: jest.fn() },
+        },
+        {
+          provide: DataSource,
+          useValue: { transaction: jest.fn() },
         },
       ],
     }).compile();

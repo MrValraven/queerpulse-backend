@@ -46,6 +46,8 @@ function makeCommunity(overrides: Partial<Community> = {}): Community {
     tagline: 'Softly, together.',
     accessTier: AccessTier.Request,
     rosterVisible: true,
+    requiresSecondVouch: false,
+    autoFreezeOnReports: false,
     features: [],
     rules: [],
     coverImageUrl: null,
@@ -54,6 +56,7 @@ function makeCommunity(overrides: Partial<Community> = {}): Community {
     createdAt: new Date('2025-01-01T00:00:00.000Z'),
     updatedAt: new Date('2025-01-01T00:00:00.000Z'),
     archivedAt: null,
+    frozenAt: null,
     ...overrides,
   };
 }

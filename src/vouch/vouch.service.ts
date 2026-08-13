@@ -360,6 +360,27 @@ export class VouchService {
   }
 
   /**
+   * Whether ANY of `voucherIds` currently holds an active (non-withdrawn) vouch
+   * for `voucheeId`. Powers community second-vouch gating: a community that
+   * requires a vouch to join admits an applicant only when a current member has
+   * vouched for them platform-wide. Empty `voucherIds` (e.g. a community with no
+   * roster) is trivially `false` — nobody can have vouched.
+   */
+  async hasActiveVouchFrom(
+    voucherIds: string[],
+    voucheeId: string,
+  ): Promise<boolean> {
+    if (!voucherIds.length) return false;
+    return this.vouches.exists({
+      where: {
+        voucherId: In(voucherIds),
+        voucheeId,
+        withdrawnAt: IsNull(),
+      },
+    });
+  }
+
+  /**
    * The active vouches between `viewerUserId` and each of `otherIds`, split by
    * direction. One query loads every vouch in either direction across the set —
    * the same read the connections vouch badge used to run against the `Vouch`

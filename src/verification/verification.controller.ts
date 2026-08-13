@@ -4,6 +4,8 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Param,
+  ParseUUIDPipe,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -25,7 +27,13 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { SkipCsrf } from '../security/skip-csrf.decorator';
 import { IdentityCallbackDto } from './dto/identity-callback.dto';
 import { StartPhoneVerificationDto } from './dto/start-phone-verification.dto';
+import { SubmitVerificationRequestDto } from './dto/submit-verification-request.dto';
 import { VerifyPhoneDto } from './dto/verify-phone.dto';
+import {
+  toVerificationRequestDTO,
+  VerificationRequestDTO,
+  VerificationStatusWithRequestDTO,
+} from './verification-response';
 import { VerificationService } from './verification.service';
 
 /**
@@ -43,12 +51,58 @@ export class VerificationController {
 
   @Get('me')
   @ApiOperation({ summary: "The current member's verification standing" })
-  @ApiOkResponse({ description: 'The verification status.' })
+  @ApiOkResponse({
+    description: 'The verification status, plus the latest request (if any).',
+  })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
-  getMine(@CurrentUser() user: CurrentUserData) {
-    return this.service.getStatus(user.userId);
+  async getMine(
+    @CurrentUser() user: CurrentUserData,
+  ): Promise<VerificationStatusWithRequestDTO> {
+    const [status, latestRequest] = await Promise.all([
+      this.service.getStatus(user.userId),
+      this.service.latestRequestFor(user.userId),
+    ]);
+    return {
+      ...status,
+      latestRequest: latestRequest
+        ? toVerificationRequestDTO(latestRequest)
+        : null,
+    };
+  }
+
+  @Post('requests')
+  @ApiOperation({ summary: 'Submit a new manual verification request' })
+  @ApiCreatedResponse({ description: 'The created request.' })
+  async submitRequest(
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: SubmitVerificationRequestDto,
+  ): Promise<VerificationRequestDTO> {
+    const request = await this.service.submitRequest(user.userId, dto);
+    return toVerificationRequestDTO(request);
+  }
+
+  @Post('requests/:id/withdraw')
+  @ApiOperation({ summary: 'Withdraw your own open verification request' })
+  @ApiOkResponse({ description: 'The withdrawn request.' })
+  async withdrawRequest(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<VerificationRequestDTO> {
+    const request = await this.service.withdrawRequest(user.userId, id);
+    return toVerificationRequestDTO(request);
+  }
+
+  @Post('requests/:id/appeal')
+  @ApiOperation({ summary: 'Appeal a rejected verification request (once)' })
+  @ApiOkResponse({ description: 'The appealed request.' })
+  async appealRequest(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<VerificationRequestDTO> {
+    const request = await this.service.appealRequest(user.userId, id);
+    return toVerificationRequestDTO(request);
   }
 
   @Post('phone/start')

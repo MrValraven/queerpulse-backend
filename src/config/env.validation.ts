@@ -199,6 +199,15 @@ export class EnvironmentVariables {
   @IsEmail()
   GENESIS_EMAIL?: string;
 
+  // Verification Phase 2 dormant-seam gate (see VerificationService's
+  // `automatedElevationEnabled`). Only the exact string `true` turns the OLD
+  // instant-raise-on-verify behavior back on; absent/anything else keeps
+  // Phase 2's manual-first default, where phone/id_verified are reached only
+  // through an approved review request.
+  @IsOptional()
+  @IsString()
+  VERIFICATION_AUTOMATED_ELEVATION?: string;
+
   // Bearer token guarding GET /metrics (see MetricsTokenGuard). Optional in
   // every environment: leave it unset to let Railway scrape /metrics over its
   // private network, or set it (min 16 chars) to require a bearer token.

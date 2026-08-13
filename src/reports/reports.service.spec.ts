@@ -1,6 +1,8 @@
 import { ForbiddenException } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { Message } from '../messaging/entities/message.entity';
 import {
   Report,
@@ -42,6 +44,11 @@ describe('ReportsService', () => {
         ReportsService,
         { provide: getRepositoryToken(Report), useValue: reports },
         { provide: getRepositoryToken(Message), useValue: messages },
+        {
+          provide: getRepositoryToken(HousingListing),
+          useValue: { findOne: jest.fn().mockResolvedValue(null) },
+        },
+        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
       ],
     }).compile();
     service = module.get(ReportsService);

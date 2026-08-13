@@ -114,6 +114,8 @@ const baseCommunity = (overrides: Partial<Community> = {}): Community => ({
   tagline: 'tagline',
   accessTier: AccessTier.Public,
   rosterVisible: true,
+  requiresSecondVouch: false,
+  autoFreezeOnReports: false,
   features: [],
   rules: [],
   coverImageUrl: null,
@@ -122,6 +124,7 @@ const baseCommunity = (overrides: Partial<Community> = {}): Community => ({
   createdAt: t('2026-01-01T00:00:00.000Z'),
   updatedAt: t('2026-01-01T00:00:00.000Z'),
   archivedAt: null,
+  frozenAt: null,
   ...overrides,
 });
 

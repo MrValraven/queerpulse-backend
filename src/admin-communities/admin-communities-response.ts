@@ -85,6 +85,16 @@ export interface AdminCommunityDetailDTO extends AdminCommunityCardDTO {
   description: string;
   foundedAt: string;
   visibility: Visibility;
+  /** Whether joining requires a second existing member's vouch. Stored intent
+   *  only for now — see the entity's `requiresSecondVouch` note; not yet
+   *  enforced in the join flow. */
+  requiresSecondVouch: boolean;
+  /** Whether the community auto-freezes when open reports pile up. */
+  autoFreezeOnReports: boolean;
+  /** True while the community is currently frozen (auto-frozen pending report
+   *  review). Read-only here — staff lift a freeze from the community's own mod
+   *  panel; the admin surface just shows the state. */
+  frozen: boolean;
   resolvedPercentage: number;
   moderators: AdminCommunityModeratorDTO[];
   scopedQueue: AdminCommunityQueueItemDTO[];
@@ -301,6 +311,9 @@ export function toAdminCommunityDetail(
     description: community.purpose,
     foundedAt: community.createdAt.toISOString(),
     visibility: VISIBILITY_BY_ACCESS_TIER[community.accessTier],
+    requiresSecondVouch: community.requiresSecondVouch,
+    autoFreezeOnReports: community.autoFreezeOnReports,
+    frozen: community.frozenAt != null,
     resolvedPercentage,
     moderators,
     scopedQueue,

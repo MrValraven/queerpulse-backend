@@ -81,6 +81,11 @@ export interface CommunityDetailDTO extends CommunityCardDTO {
   // detail — so the mod panel can show the archived state instead of pretending
   // the community is still live.
   archived: boolean;
+  // True while the community is auto-frozen pending report review. Unlike
+  // `archived`, a frozen community stays visible to everyone, so this reaches
+  // all viewers — the hub shows a "frozen, under review" banner, and its
+  // owner/mods get the unfreeze control.
+  frozen: boolean;
   myJoinRequestStatus: JoinRequestStatus | null;
   // A moderator takedown. Only ever surfaced to an owner/mod — outsiders get a
   // 404 for a moderated community, never this detail — so they know why the
@@ -127,6 +132,7 @@ export function toCommunityDetail(
     owner,
     createdAt: c.createdAt.toISOString(),
     archived: c.archivedAt != null,
+    frozen: c.frozenAt != null,
     myJoinRequestStatus,
     moderationRemoved: moderation?.removed ?? false,
     moderationHidden: moderation?.hidden ?? false,

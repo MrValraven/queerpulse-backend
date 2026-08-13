@@ -17,6 +17,19 @@ export interface FinanceStat {
   up: boolean;
 }
 
+/**
+ * Where a finance figure came from, so the admin Finances tab can flag which
+ * numbers are trustworthy and which are placeholders:
+ *  - `seeded`   — inserted by the quarterly seed and never verified by a human.
+ *  - `manual`   — an admin typed this value (see `metricsEditedBy`/`At`).
+ *  - `computed` — derived from other figures, not directly editable (surplus).
+ */
+export enum FinanceMetricSource {
+  Seeded = 'seeded',
+  Manual = 'manual',
+  Computed = 'computed',
+}
+
 export interface FinanceLineItem {
   name: string;
   period: string;
@@ -40,6 +53,9 @@ export interface FinanceLine {
   width: number;
   items: FinanceLineItem[];
   total: FinanceLineTotal;
+  /** Provenance of this ledger row's `amount`. Absent on seeded rows written
+   *  before provenance tracking existed — read as {@link FinanceMetricSource.Seeded}. */
+  source?: FinanceMetricSource;
 }
 
 /** One "how event finances work" bullet, e.g. `["Hosts keep 100% of ticket
@@ -174,6 +190,68 @@ export class GovernanceFinanceReport {
     transformer: numericTransformer,
   })
   solidarityRate!: number | null;
+
+  // Per-metric provenance for the five editable scalars above. One shared
+  // Postgres enum type backs all five columns (they share the same three
+  // states). `surplus` has no column: it is always derived from
+  // `income_total - expense_total`, so its provenance is a constant `computed`
+  // reported by the DTO, never stored. Default `seeded` so every existing
+  // (seed-inserted) row is honestly labelled until an admin edits it.
+  @Column({
+    type: 'enum',
+    enum: FinanceMetricSource,
+    enumName: 'governance_finance_report_source_enum',
+    name: 'mrr_source',
+    default: FinanceMetricSource.Seeded,
+  })
+  mrrSource!: FinanceMetricSource;
+
+  @Column({
+    type: 'enum',
+    enum: FinanceMetricSource,
+    enumName: 'governance_finance_report_source_enum',
+    name: 'sustainer_count_source',
+    default: FinanceMetricSource.Seeded,
+  })
+  sustainerCountSource!: FinanceMetricSource;
+
+  @Column({
+    type: 'enum',
+    enum: FinanceMetricSource,
+    enumName: 'governance_finance_report_source_enum',
+    name: 'solidarity_rate_source',
+    default: FinanceMetricSource.Seeded,
+  })
+  solidarityRateSource!: FinanceMetricSource;
+
+  @Column({
+    type: 'enum',
+    enum: FinanceMetricSource,
+    enumName: 'governance_finance_report_source_enum',
+    name: 'income_total_source',
+    default: FinanceMetricSource.Seeded,
+  })
+  incomeTotalSource!: FinanceMetricSource;
+
+  @Column({
+    type: 'enum',
+    enum: FinanceMetricSource,
+    enumName: 'governance_finance_report_source_enum',
+    name: 'expense_total_source',
+    default: FinanceMetricSource.Seeded,
+  })
+  expenseTotalSource!: FinanceMetricSource;
+
+  // Who last edited any metric on this report, and when. `ON DELETE SET NULL`
+  // (added in the migration, like `platform_settings.updated_by`) so the
+  // pointer survives erasure of the editor's account. The precise per-field
+  // trail lives in `governance_finance_changes`; this is only the badge's
+  // "last edited by X on <date>".
+  @Column({ type: 'uuid', name: 'metrics_edited_by', nullable: true })
+  metricsEditedBy!: string | null;
+
+  @Column({ type: 'timestamptz', name: 'metrics_edited_at', nullable: true })
+  metricsEditedAt!: Date | null;
 
   @Index('IDX_governance_finance_report_published_at')
   @Column({ type: 'timestamptz', name: 'published_at' })

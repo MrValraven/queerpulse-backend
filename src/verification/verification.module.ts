@@ -1,8 +1,11 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { UsersModule } from '../users/users.module';
 import { AdminVerificationController } from './admin-verification.controller';
 import { MemberVerification } from './entities/member-verification.entity';
+import { VerificationEvent } from './entities/verification-event.entity';
+import { VerificationRequest } from './entities/verification-request.entity';
 import { DevPhoneVerificationProvider } from './providers/dev-phone-verification.provider';
 import { IDENTITY_VERIFICATION_PROVIDER } from './providers/identity-verification.provider';
 import { PHONE_VERIFICATION_PROVIDER } from './providers/phone-verification.provider';
@@ -21,9 +24,14 @@ import { VerificationService } from './verification.service';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([MemberVerification]),
-    // UsersModule exports the Profile repository (member-ref hydration).
+    TypeOrmModule.forFeature([MemberVerification, VerificationEvent, VerificationRequest]),
+    // UsersModule exports the Profile repository (member-ref hydration) and
+    // the User repository (`computeSignals`'s `accountAgeDays`, off
+    // `users.created_at`).
     UsersModule,
+    // Notifies the member when an admin overrides/downgrades their level
+    // (Task 4 of the audit-trail phase — see NotificationsService).
+    NotificationsModule,
   ],
   controllers: [VerificationController, AdminVerificationController],
   providers: [

@@ -7,13 +7,13 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, In, IsNull } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { Community } from '../communities/entities/community.entity';
 import { Event } from '../events/entities/event.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { HandlesService } from '../handles/handles.service';
-import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
@@ -32,6 +32,7 @@ import {
   SubprofileSection,
   type ItemStructured,
 } from './entities/subprofile-item.entity';
+import { SubprofileItemRevision } from './entities/subprofile-item-revision.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
@@ -45,7 +46,10 @@ import {
 } from './subprofile-validation';
 import { SubprofileEndorsementsService } from './subprofile-endorsements.service';
 import { SubprofileFollowersService } from './subprofile-followers.service';
-import { SubprofilesService } from './subprofiles.service';
+import { SubprofileMembershipService } from './subprofile-membership.service';
+import { SubprofileCreditsService } from './subprofile-credits.service';
+import { SubprofilePublicReadService } from './subprofile-public-read.service';
+import { editableSnapshot, SubprofilesService } from './subprofiles.service';
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -182,28 +186,6 @@ function completeUnlinked(overrides: Partial<Subprofile> = {}): Subprofile {
     bio: 'x'.repeat(MIN_BIO),
     ...overrides,
   });
-}
-
-// Stubs the fluent `createQueryBuilder` chain `directory()` builds: every
-// chained method returns the builder itself, and `getMany` resolves the
-// given rows (mirrors the `admin-communities.service.spec.ts` qb-stub
-// pattern — no real TypeORM query builder is constructed).
-type DirectoryQueryBuilderStub = Record<string, jest.Mock>;
-function makeDirectoryQueryBuilderStub(
-  rows: Subprofile[],
-): DirectoryQueryBuilderStub {
-  const queryBuilder: DirectoryQueryBuilderStub = {};
-  for (const chainedMethod of [
-    'select',
-    'where',
-    'andWhere',
-    'orderBy',
-    'take',
-  ]) {
-    queryBuilder[chainedMethod] = jest.fn().mockReturnValue(queryBuilder);
-  }
-  queryBuilder.getMany = jest.fn().mockResolvedValue(rows);
-  return queryBuilder;
 }
 
 function makeViewer(overrides: Partial<CurrentUserData> = {}): CurrentUserData {
@@ -538,6 +520,11 @@ describe('SubprofilesService', () => {
     createQueryBuilder: jest.Mock;
   };
   let items: { find: jest.Mock };
+  // Protect Your Work (revision history). `replaceSection` never touches this
+  // repo directly (its writes go through the transaction `manager`, see the
+  // constructor comment on `SubprofilesService`); this backs the plain reads
+  // a future list/get endpoint (Task 8) will add.
+  let itemRevisions: { find: jest.Mock; findOne: jest.Mock };
   let members: {
     findOne: jest.Mock;
     find: jest.Mock;
@@ -551,8 +538,10 @@ describe('SubprofilesService', () => {
   let notifications: { create: jest.Mock };
   let manager: {
     findOne: jest.Mock;
+    find: jest.Mock;
     count: jest.Mock;
     delete: jest.Mock;
+    remove: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
     update: jest.Mock;
@@ -571,6 +560,48 @@ describe('SubprofilesService', () => {
     loadFollowerCountsFor: jest.Mock;
     viewerFollowingFor: jest.Mock;
   };
+  // The four dependencies the service constructor gained when
+  // SubprofileMembershipService / SubprofileCreditsService /
+  // SubprofilePublicReadService were extracted from this service, plus
+  // EventEmitter2. Each mock below reimplements just enough of the real
+  // service's logic against the SAME subprofiles/members/manager/dataSource
+  // mocks the rest of this file already drives, so every pre-existing test
+  // that configures those shared mocks keeps exercising the same observable
+  // behavior it did before the extraction.
+  let membership: {
+    isMember: jest.Mock;
+    getOwned: jest.Mock;
+    assertMember: jest.Mock;
+    listMembers: jest.Mock;
+    leave: jest.Mock;
+    removeMember: jest.Mock;
+    loadMemberCountsFor: jest.Mock;
+  };
+  // `credits` is a plain jest mock, not a reimplementation of
+  // `SubprofileCreditsService`'s real diff/self-exclusion/dedup logic — that
+  // logic is exercised for real in `subprofile-credits.service.spec.ts`.
+  // `computeNewlyCreditedHandles` defaults to `[]` here so every pre-existing
+  // test (none of which cares about the credit-notification branch) is
+  // unaffected; the "subprofile_credit notification" describe block below
+  // overrides it per-case to test THIS file's own responsibility: delegation.
+  let credits: {
+    computeNewlyCreditedHandles: jest.Mock;
+    emitSubprofileCreditNotifications: jest.Mock;
+  };
+  let publicRead: {
+    resolveHandles: jest.Mock;
+    resolveCollaboratorsFor: jest.Mock;
+    loadItemsFor: jest.Mock;
+    loadSocialLinksFor: jest.Mock;
+    resolveAffiliationsFor: jest.Mock;
+    listForProfile: jest.Mock;
+    getByHandle: jest.Mock;
+    getBySlugForProfile: jest.Mock;
+    directory: jest.Mock;
+    searchByText: jest.Mock;
+    listPublicHandles: jest.Mock;
+  };
+  let eventEmitter: { emit: jest.Mock };
 
   beforeEach(async () => {
     subprofiles = {
@@ -593,6 +624,14 @@ describe('SubprofilesService', () => {
       createQueryBuilder: jest.fn(),
     };
     items = { find: jest.fn().mockResolvedValue([]) };
+    itemRevisions = {
+      find: jest.fn().mockResolvedValue([]),
+      // Protect Your Work (revision history), Task 8: backs `getRevision`'s
+      // single-row lookup. Defaults to "not found" so every pre-existing
+      // test (none of which touch this) is unaffected; the Task 8 describe
+      // block below overrides per-case.
+      findOne: jest.fn().mockResolvedValue(null),
+    };
     // Defaults to "is a member" so every pre-existing `getOwned`-backed test
     // (which never touched membership) keeps passing unchanged; tests that
     // care about the membership gate itself override this per-case.
@@ -641,8 +680,15 @@ describe('SubprofilesService', () => {
         if (entity === Subprofile) return Promise.resolve(makeSubprofile());
         return Promise.resolve(null);
       }),
+      // `replaceSection`'s revision pruning (`recordItemRevision`) re-reads
+      // `subprofile_item_revisions` for the item it just wrote a snapshot
+      // for. Defaults to "none yet" so every pre-existing test (none of
+      // which touch revisions) is unaffected; the revision-history tests
+      // below override this per-case.
+      find: jest.fn().mockResolvedValue([]),
       count: jest.fn().mockResolvedValue(2),
       delete: jest.fn().mockResolvedValue(undefined),
+      remove: jest.fn().mockResolvedValue(undefined),
       create: jest
         .fn()
         .mockImplementation(
@@ -693,11 +739,310 @@ describe('SubprofilesService', () => {
       viewerFollowingFor: jest.fn().mockResolvedValue(new Set<string>()),
     };
 
+    membership = {
+      isMember: jest.fn().mockImplementation(
+        async (userId: string, subprofileId: string) => {
+          const row = await members.findOne({
+            where: { subprofileId, userId },
+            select: { id: true },
+          });
+          return row !== null;
+        },
+      ),
+      getOwned: jest.fn(),
+      assertMember: jest.fn(),
+      listMembers: jest.fn().mockResolvedValue([]),
+      leave: jest.fn(),
+      removeMember: jest.fn().mockResolvedValue(undefined),
+      // Mirrors SubprofileMembershipService.loadMemberCountsFor's contract
+      // (a grouped tally keyed by subprofileId) via members.find rather than
+      // its real createQueryBuilder call, since the shared `members` mock
+      // only implements the repository-style methods this file already uses.
+      loadMemberCountsFor: jest.fn().mockImplementation(
+        async (subprofileIds: string[]) => {
+          const counts = new Map<string, number>();
+          if (!subprofileIds.length) return counts;
+          const rows: { subprofileId: string }[] = await members.find({
+            where: { subprofileId: In(subprofileIds) },
+          });
+          for (const row of rows) {
+            counts.set(
+              row.subprofileId,
+              (counts.get(row.subprofileId) ?? 0) + 1,
+            );
+          }
+          return counts;
+        },
+      ),
+    };
+    // getOwned/assertMember/leave reference `membership` by closure, so they
+    // are wired up after the object literal exists rather than inline in it.
+    membership.getOwned.mockImplementation(
+      async (userId: string, id: string) => {
+        const sp = await subprofiles.findOne({ where: { id } });
+        if (!sp) {
+          throw new NotFoundException('Subprofile not found');
+        }
+        if (!(await membership.isMember(userId, id))) {
+          throw new ForbiddenException('Not your subprofile');
+        }
+        return sp;
+      },
+    );
+    membership.assertMember.mockImplementation(
+      (userId: string, id: string) => membership.getOwned(userId, id),
+    );
+    membership.leave.mockImplementation(async (userId: string, id: string) => {
+      await membership.getOwned(userId, id);
+      await dataSource.transaction(async (m: typeof manager) => {
+        await m.findOne(Subprofile, {
+          where: { id },
+          lock: { mode: 'pessimistic_write' },
+        });
+        const count = await m.count(SubprofileMember, {
+          where: { subprofileId: id },
+        });
+        if (count <= 1) {
+          throw new ConflictException(
+            'You are the only owner. Delete the persona instead of leaving.',
+          );
+        }
+        await m.delete(SubprofileMember, { subprofileId: id, userId });
+      });
+    });
+
+    // computeNewlyCreditedHandles defaults to empty, so replaceSection's
+    // best-effort notification branch stays closed for every test except the
+    // "subprofile_credit notification" describe block below, which overrides
+    // it per-case (`mockResolvedValueOnce`) to exercise the delegation.
+    credits = {
+      computeNewlyCreditedHandles: jest.fn().mockResolvedValue([]),
+      emitSubprofileCreditNotifications: jest.fn().mockResolvedValue(undefined),
+    };
+
+    // Shared Contract gate (removed -> private -> members_only -> ok),
+    // reused by both getByHandle and getBySlugForProfile below. Mirrors
+    // SubprofilePublicReadService.buildPublicView against this file's own
+    // membership/contentModeration/blockFilter mocks.
+    const buildPublicView = async (
+      sp: Subprofile,
+      viewer: CurrentUserData | undefined,
+      ownerRef: { slug: string; name: string } | undefined,
+    ) => {
+      const isOwner = viewer
+        ? await membership.isMember(viewer.userId, sp.id)
+        : false;
+      if (!isOwner) {
+        if (sp.removedAt) {
+          throw new ForbiddenException({ restrictedState: 'removed' });
+        }
+        if (sp.status !== SubprofileStatus.Published) {
+          throw new NotFoundException('Subprofile not found');
+        }
+        if (sp.visibility === SubprofileVisibility.Private) {
+          throw new ForbiddenException({ restrictedState: 'private' });
+        }
+        if (
+          sp.visibility === SubprofileVisibility.Network &&
+          viewer?.status !== UserStatus.Active
+        ) {
+          throw new ForbiddenException({ restrictedState: 'members_only' });
+        }
+        const moderation = await contentModeration.stateFor(
+          'subprofile',
+          sp.slug,
+        );
+        if (moderation.hidden || moderation.removed) {
+          throw new NotFoundException('Subprofile not found');
+        }
+        if (
+          viewer &&
+          (await blockFilter.isBlockedEitherWay(viewer.userId, sp.userId))
+        ) {
+          throw new NotFoundException('Subprofile not found');
+        }
+      }
+      return toPublicDTO(
+        sp,
+        [],
+        ownerRef,
+        [],
+        0,
+        false,
+        0,
+        false,
+        [],
+        new Map(),
+        isOwner,
+      );
+    };
+
+    publicRead = {
+      // Backs replaceSection's collaborator validation. Mirrors
+      // SubprofilePublicReadService.resolveHandles for the member-owned-handle
+      // path only (the persona-handle path isn't exercised by any test here).
+      resolveHandles: jest.fn().mockImplementation(
+        async (handleNames: string[], viewerId: string) => {
+          const collaboratorByHandle = new Map<
+            string,
+            { handle: string; type: string; name: string; avatarUrl: string | null; slug: string | null }
+          >();
+          const uniqueHandles = [...new Set(handleNames)];
+          if (!uniqueHandles.length) return collaboratorByHandle;
+          const handleRows: Handle[] = await handleRegistry.find({
+            where: { name: In(uniqueHandles) },
+          });
+          if (!handleRows.length) return collaboratorByHandle;
+          const profileUserIds = [
+            ...new Set(
+              handleRows
+                .filter(
+                  (row) =>
+                    row.ownerKind === HandleOwnerKind.Profile && row.userId,
+                )
+                .map((row) => row.userId as string),
+            ),
+          ];
+          const profileRows: Profile[] = profileUserIds.length
+            ? await profiles.find({ where: { userId: In(profileUserIds) } })
+            : [];
+          const profileByUserId = new Map(
+            profileRows.map((profile) => [profile.userId, profile]),
+          );
+          const blockedOwnerIds: Set<string> = await blockFilter.blockedUserIds(
+            viewerId,
+            profileRows.map((profile) => profile.userId),
+          );
+          for (const row of handleRows) {
+            if (row.ownerKind === HandleOwnerKind.Profile && row.userId) {
+              const profile = profileByUserId.get(row.userId);
+              if (!profile || blockedOwnerIds.has(profile.userId)) {
+                continue;
+              }
+              collaboratorByHandle.set(row.name, {
+                handle: row.name,
+                type: 'member',
+                name: `${profile.firstName} ${profile.lastName}`.trim(),
+                avatarUrl: profile.avatarUrl,
+                slug: profile.slug,
+              });
+            }
+          }
+          return collaboratorByHandle;
+        },
+      ),
+      resolveCollaboratorsFor: jest.fn().mockResolvedValue(new Map()),
+      loadItemsFor: jest.fn().mockResolvedValue(new Map()),
+      loadSocialLinksFor: jest.fn().mockResolvedValue(new Map()),
+      resolveAffiliationsFor: jest.fn().mockResolvedValue(new Map()),
+      listForProfile: jest.fn().mockImplementation(
+        async (ownerSlug: string, viewerId: string) => {
+          const profile = await profiles.findOne({
+            where: { slug: ownerSlug },
+          });
+          if (!profile) {
+            throw new NotFoundException('Profile not found');
+          }
+          if (
+            await blockFilter.isBlockedEitherWay(viewerId, profile.userId)
+          ) {
+            return [];
+          }
+          const memberRows: { subprofileId: string }[] = await members.find({
+            where: { userId: profile.userId },
+            select: { subprofileId: true },
+          });
+          const memberIds = memberRows.map((row) => row.subprofileId);
+          const linkedSps: Subprofile[] = memberIds.length
+            ? await subprofiles.find({
+                where: {
+                  id: In(memberIds),
+                  linkVisibility: SubprofileLinkVisibility.Linked,
+                  status: SubprofileStatus.Published,
+                  removedAt: IsNull(),
+                },
+                order: { position: 'ASC', createdAt: 'ASC' },
+              })
+            : [];
+          const owner = {
+            slug: profile.slug,
+            name: `${profile.firstName} ${profile.lastName}`.trim(),
+          };
+          return linkedSps.map((sp) => toPublicDTO(sp, [], owner));
+        },
+      ),
+      getByHandle: jest.fn().mockImplementation(
+        async (handle: string, viewer: CurrentUserData | undefined) => {
+          const sp = await subprofiles.findOne({
+            where: {
+              handle,
+              linkVisibility: SubprofileLinkVisibility.Unlinked,
+            },
+          });
+          if (!sp) {
+            throw new NotFoundException('Subprofile not found');
+          }
+          return buildPublicView(sp, viewer, undefined);
+        },
+      ),
+      getBySlugForProfile: jest.fn().mockImplementation(
+        async (
+          ownerSlug: string,
+          subslug: string,
+          viewer: CurrentUserData | undefined,
+        ) => {
+          const profile = await profiles.findOne({
+            where: { slug: ownerSlug },
+          });
+          if (!profile) {
+            throw new NotFoundException('Profile not found');
+          }
+          const sp = await subprofiles.findOne({
+            where: {
+              slug: subslug,
+              userId: profile.userId,
+              linkVisibility: SubprofileLinkVisibility.Linked,
+            },
+          });
+          if (!sp) {
+            throw new NotFoundException('Subprofile not found');
+          }
+          const owner = {
+            slug: profile.slug,
+            name: `${profile.firstName} ${profile.lastName}`.trim(),
+          };
+          return buildPublicView(sp, viewer, owner);
+        },
+      ),
+      // `SubprofilesService.directory` is a pure one-line delegation to
+      // `this.publicRead.directory(query, viewerId)` (subprofiles.service.ts)
+      // — it owns no pagination/filter/batch logic of its own. A faithful
+      // mock of the real `SubprofilePublicReadService.directory()` (offset
+      // paging, moderated-takedown exclusion, LIKE-escaped text search, the
+      // follower/social/tags/ownerSlug batches) belongs in, and now lives in,
+      // `subprofile-public-read.service.spec.ts` against the REAL service.
+      // Reimplementing that logic here would only test the reimplementation,
+      // not production, so this stays a plain default; the `directory`
+      // describe block below overrides it per-case with a static fixture and
+      // asserts delegation only.
+      directory: jest
+        .fn()
+        .mockResolvedValue({ items: [], total: 0, page: 1, limit: 20 }),
+      searchByText: jest.fn().mockResolvedValue([]),
+      listPublicHandles: jest.fn().mockResolvedValue({ items: [] }),
+    };
+
+    eventEmitter = { emit: jest.fn() };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         SubprofilesService,
         { provide: getRepositoryToken(Subprofile), useValue: subprofiles },
         { provide: getRepositoryToken(SubprofileItem), useValue: items },
+        {
+          provide: getRepositoryToken(SubprofileItemRevision),
+          useValue: itemRevisions,
+        },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         {
           provide: getRepositoryToken(SubprofileSocialLink),
@@ -745,6 +1090,10 @@ describe('SubprofilesService', () => {
           provide: SubprofileFollowersService,
           useValue: followersService,
         },
+        { provide: SubprofileMembershipService, useValue: membership },
+        { provide: SubprofileCreditsService, useValue: credits },
+        { provide: SubprofilePublicReadService, useValue: publicRead },
+        { provide: EventEmitter2, useValue: eventEmitter },
       ],
     }).compile();
     service = module.get(SubprofilesService);
@@ -1045,68 +1394,49 @@ describe('SubprofilesService', () => {
     });
   });
 
-  // Personas redesign Phase 4 (design plan Task 1 Decision §3): the
-  // directory card surfaces `followerCount`, sourced from ONE grouped query
-  // over the whole page's ids (never a per-card query).
+  // `SubprofilesService.directory` (subprofiles.service.ts:1354-1364) owns NO
+  // pagination/filter/batch logic of its own — it is a pure one-line
+  // delegation: `return this.publicRead.directory(query, viewerId)`. So this
+  // layer's only real behavior is passing its arguments through and handing
+  // back whatever `publicRead.directory` resolves to, unchanged. The actual
+  // offset-paging, moderated-takedown exclusion, LIKE-escaped text search,
+  // and follower/social/tags/ownerSlug batching are `SubprofilePublicReadService
+  // .directory()`'s own logic, exercised against the REAL implementation in
+  // `subprofile-public-read.service.spec.ts`.
   describe('directory', () => {
-    it('populates each card’s followerCount from a single batched loadFollowerCountsFor call', async () => {
-      const rows = [
-        completeUnlinked({
-          id: 'sp-a',
-          handle: 'nightform',
-          status: SubprofileStatus.Published,
-        }),
-        completeUnlinked({
-          id: 'sp-b',
-          handle: 'starlet',
-          displayName: 'Starlet',
-          status: SubprofileStatus.Published,
-        }),
-      ];
-      subprofiles.createQueryBuilder.mockReturnValue(
-        makeDirectoryQueryBuilderStub(rows),
-      );
-      followersService.loadFollowerCountsFor.mockResolvedValue(
-        new Map([
-          ['sp-a', 12],
-          ['sp-b', 0],
-        ]),
-      );
+    it('delegates straight through to publicRead.directory with the same arguments and return value', async () => {
+      const fixtureResult = {
+        items: [
+          {
+            handle: 'nightform',
+            kind: SubprofileKind.Developer,
+            displayName: 'Nightform',
+            avatarUrl: null,
+            tagline: null,
+            accent: null,
+            availability: null,
+            socialCount: 0,
+            tags: [],
+            followerCount: 12,
+            linkVisibility: SubprofileLinkVisibility.Unlinked,
+            slug: 'nightform',
+            ownerSlug: null,
+          },
+        ],
+        total: 1,
+        page: 1,
+        limit: 40,
+      };
+      publicRead.directory.mockResolvedValue(fixtureResult);
+      const query = { kind: SubprofileKind.Developer, page: 2 };
 
-      const result = await service.directory({}, 'viewer-1');
+      const result = await service.directory(query, 'viewer-1');
 
-      // ONE grouped call over every id on the page — not one call per card.
-      expect(followersService.loadFollowerCountsFor).toHaveBeenCalledTimes(1);
-      expect(followersService.loadFollowerCountsFor).toHaveBeenCalledWith([
-        'sp-a',
-        'sp-b',
-      ]);
-      expect(
-        result.items.find((card) => card.handle === 'nightform')?.followerCount,
-      ).toBe(12);
-      expect(
-        result.items.find((card) => card.handle === 'starlet')?.followerCount,
-      ).toBe(0);
-    });
-
-    it('defaults followerCount to 0 for a persona missing from the batched map', async () => {
-      const rows = [
-        completeUnlinked({
-          id: 'sp-c',
-          handle: 'unfollowed',
-          status: SubprofileStatus.Published,
-        }),
-      ];
-      subprofiles.createQueryBuilder.mockReturnValue(
-        makeDirectoryQueryBuilderStub(rows),
-      );
-      followersService.loadFollowerCountsFor.mockResolvedValue(
-        new Map<string, number>(),
-      );
-
-      const result = await service.directory({}, 'viewer-1');
-
-      expect(result.items[0]?.followerCount).toBe(0);
+      expect(publicRead.directory).toHaveBeenCalledTimes(1);
+      expect(publicRead.directory).toHaveBeenCalledWith(query, 'viewer-1');
+      // The exact same object publicRead.directory resolved to, not a
+      // reshaped/recomputed one — this layer does no transformation.
+      expect(result).toBe(fixtureResult);
     });
   });
 
@@ -1389,20 +1719,57 @@ describe('SubprofilesService', () => {
       ).resolves.toBeDefined();
     });
 
-    it('replaces items within a section (delete + insert with position)', async () => {
+    // Protect Your Work (revision history), Task 7: `replaceSection` no
+    // longer unconditionally deletes every row in the section and recreates
+    // it (`subprofile_item_revisions.item_id` is `ON DELETE CASCADE`, so
+    // that shape would cascade away a revision the instant its item's row
+    // was replaced (see the long comment in `replaceSection` itself).
+    // Brand-new items (no existing row at that position) are still plain
+    // inserts; only rows that fall off the end of a shrinking section are
+    // actually deleted now (`manager.remove`, not `manager.delete`).
+    it('inserts brand-new items with position, without deleting the section first', async () => {
       subprofiles.findOne.mockResolvedValue(
         makeSubprofile({ kind: SubprofileKind.Developer }),
       );
+      manager.find.mockResolvedValue([]); // no existing rows in this section
       await service.replaceSection('user-1', 'sp-1', 'projects', [
         { title: 'A' },
         { title: 'B' },
       ]);
-      expect(manager.delete).toHaveBeenCalledWith(SubprofileItem, {
-        subprofileId: 'sp-1',
-        section: SubprofileSection.Projects,
-      });
+      expect(manager.delete).not.toHaveBeenCalledWith(
+        SubprofileItem,
+        expect.anything(),
+      );
+      expect(manager.remove).not.toHaveBeenCalled();
       const savedRows = (manager.save.mock.calls[0] as [SubprofileItem[]])[0];
       expect(savedRows.map((row) => row.position)).toEqual([0, 1]);
+    });
+
+    it('deletes rows that fall off the end when a section shrinks', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ kind: SubprofileKind.Developer }),
+      );
+      const keep = makeItem({
+        id: 'it-keep',
+        section: SubprofileSection.Projects,
+        title: 'Keep me',
+        position: 0,
+      });
+      const drop = makeItem({
+        id: 'it-drop',
+        section: SubprofileSection.Projects,
+        title: 'Drop me',
+        position: 1,
+      });
+      manager.find.mockImplementation((entity: unknown) =>
+        entity === SubprofileItem
+          ? Promise.resolve([keep, drop])
+          : Promise.resolve([]),
+      );
+      await service.replaceSection('user-1', 'sp-1', 'projects', [
+        { title: 'Keep me' }, // unchanged content at position 0
+      ]);
+      expect(manager.remove).toHaveBeenCalledWith([drop]);
     });
 
     // Personas redesign Phase 0 round-trip (design plan Task 7 Step 4): the
@@ -1464,12 +1831,20 @@ describe('SubprofilesService', () => {
     });
 
     // Personas discovery Phase 5, Moment 6 (Decision §3): `replaceSection`
-    // deletes-and-recreates a section with no stable item ids across saves,
-    // so the emit must diff the PERSONA-WIDE resolved-member collaborator
-    // set before vs. after the save, not just "does this save's payload
-    // contain your handle." Written but UNRUN per this task's hard rules.
-    describe('subprofile_credit notification', () => {
-      it('emits exactly one subprofile_credit when a save newly credits a member handle', async () => {
+    // diffs the PERSONA-WIDE resolved-member collaborator set before vs.
+    // after the save, then notifies newly-credited handles. That diff (the
+    // dedup/self-exclusion business logic) now lives entirely in
+    // `SubprofileCreditsService`, exercised against ITS real implementation
+    // in `subprofile-credits.service.spec.ts` (dedup, untouched-other-section,
+    // self-credit, co-owner-credit, exactly-one-per-handle). `credits` is a
+    // plain jest mock in THIS file (see its declaration above), so the tests
+    // below only assert what `SubprofilesService.replaceSection` itself is
+    // responsible for: resolving the incoming collaborators, calling
+    // `credits.computeNewlyCreditedHandles` with the right diff inputs, and
+    // delegating to `credits.emitSubprofileCreditNotifications` if and only
+    // if that diff came back non-empty.
+    describe('subprofile_credit notification (delegation to SubprofileCreditsService)', () => {
+      it('calls credits.computeNewlyCreditedHandles with the resolved incoming collaborators, and delegates to emitSubprofileCreditNotifications when it returns a newly-credited handle', async () => {
         const sp = makeSubprofile({
           id: 'sp-1',
           userId: 'user-1',
@@ -1479,35 +1854,55 @@ describe('SubprofilesService', () => {
           linkVisibility: SubprofileLinkVisibility.Unlinked,
         });
         subprofiles.findOne.mockResolvedValue(sp);
-        // No prior items anywhere on the persona — @alice is a brand new credit.
-        items.find.mockResolvedValue([]);
-        members.find.mockResolvedValue([{ userId: 'user-1' }]); // owner only
         handleRegistry.find.mockResolvedValue([
           makeHandleRow({ name: 'alice', userId: 'user-2' }),
         ]);
         profiles.find.mockResolvedValue([
           makeProfile({ userId: 'user-2', slug: 'alice' }),
         ]);
+        // Overrides this file's inert file-wide default (see its declaration
+        // above) for ONLY this test, so the emit branch genuinely fires
+        // rather than passing because the mock can never return anything else.
+        credits.computeNewlyCreditedHandles.mockResolvedValueOnce(['alice']);
 
-        await service.replaceSection('user-1', 'sp-1', 'projects', [
+        const savedItems = [
           { title: 'Collab track', collaborators: ['alice'] },
-        ]);
-
-        expect(notifications.create).toHaveBeenCalledTimes(1);
-        expect(notifications.create).toHaveBeenCalledWith(
-          'user-2',
-          NotificationType.SubprofileCredit,
-          {
-            subprofileName: 'Nightform',
-            subprofileSlugOrHandle: 'nightform',
-            itemTitle: 'Collab track',
-            deepLink: '/p/nightform',
-          },
+        ];
+        await service.replaceSection(
           'user-1',
+          'sp-1',
+          'projects',
+          savedItems,
+        );
+
+        expect(credits.computeNewlyCreditedHandles).toHaveBeenCalledWith(
+          'sp-1',
+          'user-1',
+          SubprofileSection.Projects,
+          new Map([
+            [
+              'alice',
+              {
+                handle: 'alice',
+                type: 'member',
+                name: 'Alice A',
+                avatarUrl: null,
+                slug: 'alice',
+              },
+            ],
+          ]),
+        );
+        expect(credits.emitSubprofileCreditNotifications).toHaveBeenCalledTimes(1);
+        expect(credits.emitSubprofileCreditNotifications).toHaveBeenCalledWith(
+          sp,
+          'sp-1',
+          ['alice'],
+          savedItems,
+          [['alice']],
         );
       });
 
-      it('does not re-fire when re-saving a section with the same collaborators', async () => {
+      it('skips credits.emitSubprofileCreditNotifications when computeNewlyCreditedHandles resolves no newly-credited handles (e.g. a re-save with unchanged collaborators)', async () => {
         const sp = makeSubprofile({
           id: 'sp-1',
           userId: 'user-1',
@@ -1517,29 +1912,32 @@ describe('SubprofilesService', () => {
           linkVisibility: SubprofileLinkVisibility.Unlinked,
         });
         subprofiles.findOne.mockResolvedValue(sp);
-        // This SAME section already credits @alice before this save.
-        items.find.mockResolvedValue([
-          makeItem({
-            section: SubprofileSection.Projects,
-            collaborators: ['alice'],
-          }),
-        ]);
-        members.find.mockResolvedValue([{ userId: 'user-1' }]);
         handleRegistry.find.mockResolvedValue([
           makeHandleRow({ name: 'alice', userId: 'user-2' }),
         ]);
         profiles.find.mockResolvedValue([
           makeProfile({ userId: 'user-2', slug: 'alice' }),
         ]);
+        // Left at this file's inert file-wide default ([]) — this is exactly
+        // what a dedup'd re-save looks like from SubprofilesService's own
+        // point of view: the diff came back empty, so there is nothing to
+        // notify. The dedup logic itself is covered for real in
+        // subprofile-credits.service.spec.ts.
 
         await service.replaceSection('user-1', 'sp-1', 'projects', [
           { title: 'Collab track', collaborators: ['alice'] },
         ]);
 
-        expect(notifications.create).not.toHaveBeenCalled();
+        expect(credits.computeNewlyCreditedHandles).toHaveBeenCalledWith(
+          'sp-1',
+          'user-1',
+          SubprofileSection.Projects,
+          expect.any(Map),
+        );
+        expect(credits.emitSubprofileCreditNotifications).not.toHaveBeenCalled();
       });
 
-      it('does not notify when the "credit" resolves to the persona owner (self)', async () => {
+      it('swallows an emitSubprofileCreditNotifications rejection rather than failing the save (best-effort, post-commit)', async () => {
         const sp = makeSubprofile({
           id: 'sp-1',
           userId: 'user-1',
@@ -1549,21 +1947,169 @@ describe('SubprofilesService', () => {
           linkVisibility: SubprofileLinkVisibility.Unlinked,
         });
         subprofiles.findOne.mockResolvedValue(sp);
-        items.find.mockResolvedValue([]);
-        members.find.mockResolvedValue([{ userId: 'user-1' }]); // the owner IS a member
-        // The credited handle's registered owner is the persona's own owner.
         handleRegistry.find.mockResolvedValue([
-          makeHandleRow({ name: 'nightowner', userId: 'user-1' }),
+          makeHandleRow({ name: 'alice', userId: 'user-2' }),
         ]);
         profiles.find.mockResolvedValue([
-          makeProfile({ userId: 'user-1', slug: 'nightowner' }),
+          makeProfile({ userId: 'user-2', slug: 'alice' }),
         ]);
+        credits.computeNewlyCreditedHandles.mockResolvedValueOnce(['alice']);
+        credits.emitSubprofileCreditNotifications.mockRejectedValueOnce(
+          new Error('notification fan-out failed'),
+        );
+
+        await expect(
+          service.replaceSection('user-1', 'sp-1', 'projects', [
+            { title: 'Collab track', collaborators: ['alice'] },
+          ]),
+        ).resolves.toBeDefined();
+        expect(credits.emitSubprofileCreditNotifications).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    // Protect Your Work (revision history), Task 7: `recordItemRevision`
+    // snapshots a matched existing row's PRE-save content into
+    // `subprofile_item_revisions` (via the transaction `manager`, never
+    // `itemRevisions` directly, see the constructor comment) whenever the
+    // incoming payload changes it, then prunes that item's revisions to the
+    // newest `REVISION_CAP` (30).
+    describe('revision history (Protect Your Work)', () => {
+      it('writes a revision when an existing item content changes on replace', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({ kind: SubprofileKind.Developer }),
+        );
+        const existingRow = makeItem({
+          id: 'it-1',
+          section: SubprofileSection.Projects,
+          title: 'A',
+        });
+        manager.find.mockImplementation((entity: unknown) =>
+          entity === SubprofileItem
+            ? Promise.resolve([existingRow])
+            : Promise.resolve([]),
+        );
 
         await service.replaceSection('user-1', 'sp-1', 'projects', [
-          { title: 'Solo track', collaborators: ['nightowner'] },
+          { title: 'B' },
         ]);
 
-        expect(notifications.create).not.toHaveBeenCalled();
+        const revisionCreateCall = manager.create.mock.calls.find(
+          (call) => call[0] === SubprofileItemRevision,
+        ) as [unknown, Partial<SubprofileItemRevision>] | undefined;
+        expect(revisionCreateCall).toBeDefined();
+        expect(revisionCreateCall![1].itemId).toBe('it-1');
+        expect(revisionCreateCall![1].subprofileId).toBe('sp-1');
+        expect(
+          (revisionCreateCall![1].snapshot as unknown as { title: string })
+            .title,
+        ).toBe('A');
+      });
+
+      it('does not write a revision when content is unchanged', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({ kind: SubprofileKind.Developer }),
+        );
+        const existingRow = makeItem({
+          id: 'it-1',
+          section: SubprofileSection.Projects,
+          title: 'Same title',
+        });
+        manager.find.mockImplementation((entity: unknown) =>
+          entity === SubprofileItem
+            ? Promise.resolve([existingRow])
+            : Promise.resolve([]),
+        );
+
+        await service.replaceSection('user-1', 'sp-1', 'projects', [
+          { title: 'Same title' },
+        ]);
+
+        expect(
+          manager.create.mock.calls.some(
+            (call) => call[0] === SubprofileItemRevision,
+          ),
+        ).toBe(false);
+      });
+
+      it('prunes to at most 30 revisions per item', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({ kind: SubprofileKind.Developer }),
+        );
+        const existingRow = makeItem({
+          id: 'it-1',
+          section: SubprofileSection.Projects,
+          title: 'A',
+        });
+        // Simulates 31 revision rows already existing for this item AFTER
+        // this save's own insert. The oldest one (index 0, ordered ASC by
+        // `createdAt`) must be the one pruned.
+        const oldestRevision = {
+          id: 'rev-oldest',
+          itemId: 'it-1',
+          createdAt: new Date('2020-01-01T00:00:00Z'),
+        };
+        const newerRevisions = Array.from({ length: 30 }, (_, index) => ({
+          id: `rev-${index}`,
+          itemId: 'it-1',
+          createdAt: new Date(2020, 0, index + 2),
+        }));
+        manager.find.mockImplementation((entity: unknown) => {
+          if (entity === SubprofileItem) {
+            return Promise.resolve([existingRow]);
+          }
+          if (entity === SubprofileItemRevision) {
+            return Promise.resolve([oldestRevision, ...newerRevisions]);
+          }
+          return Promise.resolve([]);
+        });
+
+        await service.replaceSection('user-1', 'sp-1', 'projects', [
+          { title: 'B' },
+        ]);
+
+        expect(manager.remove).toHaveBeenCalledWith([oldestRevision]);
+      });
+
+      // The DTO carries no `id`, so matching is positional (index in the
+      // stored list vs. index in the incoming list). A pure reorder of the
+      // SAME content is therefore a same-length payload where every slot's
+      // content differs from what used to be at that slot, purely because a
+      // different existing item now sits there. Skip-all-revisions logic
+      // must recognize this via the whole-section multiset comparison, not
+      // record a revision at every reordered slot.
+      it('records no revision when items with distinct content are purely reordered', async () => {
+        subprofiles.findOne.mockResolvedValue(
+          makeSubprofile({ kind: SubprofileKind.Developer }),
+        );
+        const alpha = makeItem({
+          id: 'it-alpha',
+          section: SubprofileSection.Projects,
+          title: 'Alpha',
+          position: 0,
+        });
+        const beta = makeItem({
+          id: 'it-beta',
+          section: SubprofileSection.Projects,
+          title: 'Beta',
+          position: 1,
+        });
+        manager.find.mockImplementation((entity: unknown) =>
+          entity === SubprofileItem
+            ? Promise.resolve([alpha, beta])
+            : Promise.resolve([]),
+        );
+
+        // Same two items, swapped: Beta now at position 0, Alpha at position 1.
+        await service.replaceSection('user-1', 'sp-1', 'projects', [
+          { title: 'Beta' },
+          { title: 'Alpha' },
+        ]);
+
+        expect(
+          manager.create.mock.calls.some(
+            (call) => call[0] === SubprofileItemRevision,
+          ),
+        ).toBe(false);
       });
     });
   });
@@ -1700,6 +2246,134 @@ describe('SubprofilesService', () => {
       expect(publicDto.items[0]!.gigState).toBe('sold_out');
       expect(publicDto.items[0]!.structured).toEqual(structured);
       expect(publicDto.skinData).toEqual(sp.skinData);
+    });
+  });
+
+  // Protect Your Work (revision history), Task 8: list/get/restore. Mirrors
+  // the `describe('getOwned', ...)` mock style directly above: the same
+  // `subprofiles.findOne` + `members.findOne` pair gates every one of these,
+  // since `listRevisions`/`getRevision`/`restoreRevision` all open with
+  // `this.getOwned(userId, subprofileId)`, the SAME 404/403 owner/co-owner
+  // check `replaceSection` uses.
+  describe('item revisions (Protect Your Work, Task 8)', () => {
+    beforeEach(() => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ id: 'sp-1', userId: 'creator-1' }),
+      );
+      members.findOne.mockResolvedValue({
+        subprofileId: 'sp-1',
+        userId: 'user-1',
+      });
+    });
+
+    it('lists revisions for an owned item, newest first', async () => {
+      const olderRevision = {
+        id: 'rev-older',
+        itemId: 'it-1',
+        subprofileId: 'sp-1',
+        section: SubprofileSection.Projects,
+        createdAt: new Date('2026-01-01T00:00:00Z'),
+        snapshot: { title: 'Old title' },
+      };
+      const newerRevision = {
+        id: 'rev-newer',
+        itemId: 'it-1',
+        subprofileId: 'sp-1',
+        section: SubprofileSection.Projects,
+        createdAt: new Date('2026-02-01T00:00:00Z'),
+        snapshot: { title: 'Newer title' },
+      };
+      // The repository is expected to be asked for DESC order; the mock
+      // simply returns them already newest-first, as Postgres would.
+      itemRevisions.find.mockResolvedValue([newerRevision, olderRevision]);
+
+      const summaries = await service.listRevisions('user-1', 'sp-1', 'it-1');
+
+      expect(itemRevisions.find).toHaveBeenCalledWith({
+        where: { itemId: 'it-1', subprofileId: 'sp-1' },
+        order: { createdAt: 'DESC' },
+      });
+      expect(summaries).toEqual([
+        {
+          id: 'rev-newer',
+          createdAt: newerRevision.createdAt.toISOString(),
+          title: 'Newer title',
+        },
+        {
+          id: 'rev-older',
+          createdAt: olderRevision.createdAt.toISOString(),
+          title: 'Old title',
+        },
+      ]);
+    });
+
+    it('rejects a non-owner with 403', async () => {
+      members.findOne.mockResolvedValue(null); // not a co-owner
+      await expect(
+        service.listRevisions('stranger-1', 'sp-1', 'it-1'),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('404s getRevision when the revision does not belong to that item/subprofile', async () => {
+      itemRevisions.findOne.mockResolvedValue(null);
+      await expect(
+        service.getRevision('user-1', 'sp-1', 'it-1', 'rev-missing'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('restores a revision non-destructively: applies the old snapshot AND keeps the pre-restore content as a new revision', async () => {
+      const currentItem = makeItem({
+        id: 'it-1',
+        subprofileId: 'sp-1',
+        title: 'B',
+      });
+      const revision = {
+        id: 'rev-1',
+        itemId: 'it-1',
+        subprofileId: 'sp-1',
+        section: SubprofileSection.Projects,
+        createdAt: new Date('2026-01-01T00:00:00Z'),
+        // Built via the same `editableSnapshot` projection the service
+        // itself writes on save, so the fixture matches what a real row
+        // looks like.
+        snapshot: editableSnapshot(makeItem({ title: 'A' })),
+      };
+      manager.findOne.mockImplementation((entity: unknown) => {
+        if (entity === SubprofileItem) return Promise.resolve(currentItem);
+        if (entity === SubprofileItemRevision)
+          return Promise.resolve(revision);
+        return Promise.resolve(null);
+      });
+
+      await service.restoreRevision('user-1', 'sp-1', 'it-1', 'rev-1');
+
+      // Non-destructive: a new revision was recorded BEFORE the overwrite,
+      // capturing the pre-restore title 'B'.
+      const revisionCreateCall = manager.create.mock.calls.find(
+        (call) => call[0] === SubprofileItemRevision,
+      ) as [unknown, Partial<SubprofileItemRevision>] | undefined;
+      expect(revisionCreateCall).toBeDefined();
+      expect(
+        (revisionCreateCall![1].snapshot as unknown as { title: string })
+          .title,
+      ).toBe('B');
+
+      // The live item now carries the restored ('A') content, and its
+      // identity/bookkeeping columns are untouched by the restore.
+      const savedItemCall = manager.save.mock.calls.find(
+        (call) => (call[0] as { id?: string }).id === 'it-1',
+      ) as [SubprofileItem] | undefined;
+      expect(savedItemCall).toBeDefined();
+      expect(savedItemCall![0].title).toBe('A');
+      expect(savedItemCall![0].id).toBe('it-1');
+      expect(savedItemCall![0].subprofileId).toBe('sp-1');
+    });
+
+    it('404s restoreRevision when the item does not exist', async () => {
+      manager.findOne.mockResolvedValue(null);
+      await expect(
+        service.restoreRevision('user-1', 'sp-1', 'missing-item', 'rev-1'),
+      ).rejects.toThrow(NotFoundException);
     });
   });
 });

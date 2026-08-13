@@ -61,6 +61,18 @@ export class Community {
   @Column({ type: 'boolean', default: true })
   rosterVisible!: boolean;
 
+  // Safety policies platform staff toggle from the admin community detail's
+  // Settings tab. Persistence is wired end to end (they save and survive a
+  // reload); enforcement — gating a join on a second vouch, auto-freezing when
+  // open reports pile up — is a deliberate follow-up, so these are stored
+  // intent only for now. Both default off; paired migration
+  // `1788900000000-AddCommunitySafetyPolicies`.
+  @Column({ type: 'boolean', default: false })
+  requiresSecondVouch!: boolean;
+
+  @Column({ type: 'boolean', default: false })
+  autoFreezeOnReports!: boolean;
+
   @Column({ type: 'text', array: true, default: '{}' })
   features!: string[];
 
@@ -104,4 +116,13 @@ export class Community {
   // `1785800600000-AddCommunityArchivedAt`.
   @Column({ type: 'timestamptz', nullable: true })
   archivedAt!: Date | null;
+
+  // Set when the community is auto-frozen because open reports piled up or an
+  // emergency report (doxxing/outing) landed, while `autoFreezeOnReports` is on.
+  // Unlike `archivedAt` (which 404s the community), a frozen community stays
+  // fully visible but blocks new joins and new posts/replies/reactions from
+  // plain members until an owner/mod lifts it. Nullable (not frozen by default);
+  // paired migration `1789000000000-AddCommunityFrozenAt`.
+  @Column({ type: 'timestamptz', nullable: true })
+  frozenAt!: Date | null;
 }

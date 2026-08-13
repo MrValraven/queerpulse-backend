@@ -2,14 +2,20 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Index,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
-import { VerificationLevel } from '../verification-level';
+import {
+  VerificationGrantedBy,
+  VerificationLevel,
+  VerificationType,
+} from '../verification-level';
 
 /**
- * A member's current identity-verification standing — exactly one row per user
- * (unique `user_id`), holding the HIGHEST level they have reached plus the
+ * A member's current identity-verification standing — exactly one row per
+ * `(user_id, type)` pair (today only `type = 'identity'`, so effectively one
+ * row per user), holding the HIGHEST level they have reached plus the
  * provenance of how they reached it.
  *
  * GDPR Art.9 note: verification of a government ID or biometric is
@@ -22,11 +28,12 @@ import { VerificationLevel } from '../verification-level';
  * `IdentityVerificationProvider` seam.
  */
 @Entity('member_verifications')
+@Index(['userId', 'type'], { unique: true })
 export class MemberVerification {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
-  @Column({ type: 'uuid', unique: true })
+  @Column({ type: 'uuid' })
   userId!: string;
 
   @Column({
@@ -57,6 +64,31 @@ export class MemberVerification {
   /** When the current level was reached. NULL on a pre-verification row. */
   @Column({ type: 'timestamptz', nullable: true })
   verifiedAt!: Date | null;
+
+  /** Which verification dimension this row covers. Only `identity` exists
+   * today; the `(user_id, type)` uniqueness leaves room for more. */
+  @Column({
+    type: 'enum',
+    enum: VerificationType,
+    enumName: 'verification_type_enum',
+    default: VerificationType.Identity,
+  })
+  type!: VerificationType;
+
+  /** Whether the current level was earned through the ordinary step-up flow
+   * or set directly by an admin override. */
+  @Column({
+    type: 'enum',
+    enum: VerificationGrantedBy,
+    enumName: 'verification_granted_by_enum',
+    default: VerificationGrantedBy.MemberEarned,
+  })
+  grantedBy!: VerificationGrantedBy;
+
+  /** The admin who last reviewed/overrode this row, if any. NULL when the
+   * level was reached entirely through the member-facing flow. */
+  @Column({ type: 'uuid', nullable: true })
+  reviewedByUserId!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

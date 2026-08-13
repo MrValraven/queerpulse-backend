@@ -145,6 +145,7 @@ export class CommunityPostsService {
   ): Promise<CommunityPostDTO> {
     const community = await this.loadCommunityOr404(slug);
     const membership = await this.assertMember(community.id, authorId);
+    this.assertNotFrozen(community, membership);
 
     const saved = await this.posts.save(
       this.posts.create({
@@ -473,6 +474,7 @@ export class CommunityPostsService {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
     const membership = await this.assertMember(community.id, userId);
+    this.assertNotFrozen(community, membership);
 
     // Idempotent per (post,user,key): `ON CONFLICT DO NOTHING` absorbs a
     // re-react (or a race between two concurrent ones) without a pre-check +
@@ -512,6 +514,7 @@ export class CommunityPostsService {
     const community = await this.loadCommunityOr404(slug);
     const post = await this.loadPostOr404(community.id, postId);
     const membership = await this.assertMember(community.id, userId);
+    this.assertNotFrozen(community, membership);
 
     const saved = await this.replies.save(
       this.replies.create({ postId: post.id, authorId: userId, text }),
@@ -786,6 +789,27 @@ export class CommunityPostsService {
       throw new ForbiddenException('Only roster members can do that');
     }
     return membership;
+  }
+
+  /**
+   * A frozen community (auto-frozen pending report review — see
+   * `Community.frozenAt`) takes no new content from plain members: new posts,
+   * replies and reactions are blocked. Owner/mods are exempt so they can still
+   * post a note and moderate. Reads and edits/deletes of existing content are
+   * unaffected — freezing halts new activity, it doesn't hide the community.
+   */
+  private assertNotFrozen(
+    community: Community,
+    membership: CommunityMember,
+  ): void {
+    if (
+      community.frozenAt != null &&
+      !CommunityPostsService.isStaffRole(membership.role)
+    ) {
+      throw new ForbiddenException(
+        'This community is frozen while moderators review recent reports',
+      );
+    }
   }
 
   // The viewer's roster role in a community, or null if they aren't a member.

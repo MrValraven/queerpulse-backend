@@ -10,7 +10,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { isUniqueViolation } from '../common/db-errors';
 import { textHasBlockedTerm } from '../common/blocked-terms';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { normalizeHandle } from '../common/handles';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import {
@@ -39,8 +39,16 @@ import {
   SubprofileItem,
   SubprofileSection,
   type GigState,
+  type ItemStructured,
   type WorkState,
 } from './entities/subprofile-item.entity';
+import { SubprofileItemRevision } from './entities/subprofile-item-revision.entity';
+import {
+  ItemRevisionDetail,
+  ItemRevisionSummary,
+  toRevisionDetail,
+  toRevisionSummary,
+} from './dto/item-revision.response';
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 import { SubprofileCreditsService } from './subprofile-credits.service';
@@ -84,6 +92,113 @@ import {
 // (design plan Task 6 Step 3).
 const MAX_JSONB_BYTES = 16 * 1024;
 
+// Protect Your Work (revision history): the maximum number of
+// `subprofile_item_revisions` rows kept per item. `recordItemRevision` prunes
+// the oldest rows past this cap every time it writes a new one.
+const REVISION_CAP = 30;
+
+// The user-authored content of a `SubprofileItem` row: every column except
+// the identity/bookkeeping ones (`id`, `subprofileId`, `position`,
+// `createdAt`) that describe WHERE or WHEN the row lives rather than WHAT it
+// says. `section` is intentionally included: it is content-shaping (the
+// section a revision belongs to matters for restore), unlike the excluded
+// four.
+export interface EditableItemContent {
+  section: SubprofileSection;
+  title: string;
+  subtitle: string | null;
+  description: string | null;
+  url: string | null;
+  imageUrl: string | null;
+  date: string | null;
+  meta: string | null;
+  tags: string[];
+  collaborators: string[];
+  isFeatured: boolean;
+  venue: string | null;
+  doors: string | null;
+  ticketUrl: string | null;
+  gigState: GigState | null;
+  medium: string | null;
+  dimensions: string | null;
+  edition: string | null;
+  workState: WorkState | null;
+  structured: ItemStructured | null;
+}
+
+// Protect Your Work (revision history), Task 7: the editable-content
+// projection of a `SubprofileItem` row, used both to detect whether a save
+// actually changed anything worth snapshotting and as the `snapshot` payload
+// written to `subprofile_item_revisions`. Builds a NEW object with a fixed
+// key order (rather than spreading `...rest` off the input) on purpose: two
+// inputs of different origin, a hydrated `SubprofileItem` entity vs. a
+// plain field literal built from an incoming DTO, are not guaranteed to
+// enumerate their own keys in the same order, and a naive equality check
+// over the raw object would falsely report "changed" on a same-content row
+// that merely serializes its keys differently. (`canonicalStringify` below
+// closes the same gap one level deeper, inside nested jsonb.) Exported for
+// Task 8 (restore), which reuses this same projection to diff/apply a
+// stored revision's `snapshot` back onto the live item.
+export function editableSnapshot(
+  item: EditableItemContent,
+): EditableItemContent {
+  return {
+    section: item.section,
+    title: item.title,
+    subtitle: item.subtitle,
+    description: item.description,
+    url: item.url,
+    imageUrl: item.imageUrl,
+    date: item.date,
+    meta: item.meta,
+    tags: item.tags,
+    collaborators: item.collaborators,
+    isFeatured: item.isFeatured,
+    venue: item.venue,
+    doors: item.doors,
+    ticketUrl: item.ticketUrl,
+    gigState: item.gigState,
+    medium: item.medium,
+    dimensions: item.dimensions,
+    edition: item.edition,
+    workState: item.workState,
+    structured: item.structured,
+  };
+}
+
+// Protect Your Work (revision history), Task 7: recursively rebuilds `value`
+// with every plain object's own keys sorted (arrays keep their original
+// order, since order is meaningful there, e.g. `structured.courses`).
+// Postgres jsonb normalizes key order on write, so a `structured` column
+// read back from the database can enumerate its keys in a different order
+// than the client's own payload did for the exact same content. A raw
+// `JSON.stringify` comparison is key-order sensitive and would treat that
+// as a content change; canonicalizing both sides first removes the false
+// positive. Exported for Task 8 (restore), which needs the same
+// content-equality notion.
+export function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => canonicalize(entry));
+  }
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const canonicalized: Record<string, unknown> = {};
+    for (const key of Object.keys(record).sort()) {
+      canonicalized[key] = canonicalize(record[key]);
+    }
+    return canonicalized;
+  }
+  return value;
+}
+
+// Protect Your Work (revision history), Task 7: `JSON.stringify` over the
+// canonicalized (key-order independent) form of `value`. Use this, not raw
+// `JSON.stringify`, for every old-vs-new editable-content equality check in
+// this file.
+export function canonicalStringify(value: unknown): string {
+  return JSON.stringify(canonicalize(value));
+}
+
 @Injectable()
 export class SubprofilesService {
   constructor(
@@ -91,6 +206,13 @@ export class SubprofilesService {
     private readonly subprofiles: Repository<Subprofile>,
     @InjectRepository(SubprofileItem)
     private readonly items: Repository<SubprofileItem>,
+    // Protect Your Work (revision history). `replaceSection`'s own writes go
+    // through the transaction `manager` (like every other repository in this
+    // transaction, see the class-level convention noted on `create()`), not
+    // this repository directly; it exists for the plain (non-transactional)
+    // reads Task 8's list/get/restore endpoints add.
+    @InjectRepository(SubprofileItemRevision)
+    private readonly itemRevisions: Repository<SubprofileItemRevision>,
     @InjectRepository(SubprofileSocialLink)
     private readonly socialLinks: Repository<SubprofileSocialLink>,
     @InjectRepository(SubprofileMember)
@@ -146,6 +268,123 @@ export class SubprofilesService {
         `${label} must be at most ${MAX_JSONB_BYTES / 1024} KB`,
       );
     }
+  }
+
+  // Protect Your Work (revision history), Task 7: snapshots `existingRow`'s
+  // CURRENT (pre-save) editable content into `subprofile_item_revisions`,
+  // then prunes that item's revisions down to `REVISION_CAP`, oldest first.
+  // Takes the transaction `manager` (never `this.itemRevisions`) so this
+  // write is part of the caller's transaction: a failed `replaceSection`
+  // rolls the revision insert back too, and no revision is ever recorded
+  // for a save that didn't actually commit.
+  private async recordItemRevision(
+    manager: EntityManager,
+    existingRow: SubprofileItem,
+  ): Promise<void> {
+    const revision = manager.create(SubprofileItemRevision, {
+      itemId: existingRow.id,
+      subprofileId: existingRow.subprofileId,
+      section: existingRow.section,
+      // `snapshot` is `Record<string, unknown>` (Task 6); `EditableItemContent`
+      // is a closed, concretely-typed shape with no index signature, so it is
+      // not directly assignable without going through `unknown` first.
+      snapshot: editableSnapshot(existingRow) as unknown as Record<
+        string,
+        unknown
+      >,
+    });
+    await manager.save(revision);
+
+    const revisionsForItem = await manager.find(SubprofileItemRevision, {
+      where: { itemId: existingRow.id },
+      order: { createdAt: 'ASC' },
+    });
+    if (revisionsForItem.length > REVISION_CAP) {
+      await manager.remove(
+        revisionsForItem.slice(0, revisionsForItem.length - REVISION_CAP),
+      );
+    }
+  }
+
+  // Protect Your Work (revision history), Task 8: list an item's saved
+  // revisions, newest first. Reuses `getOwned` (delegates to
+  // `SubprofileMembershipService.getOwned`): the SAME 404/403 owner/co-owner
+  // gate `replaceSection`, `update`, `publish`, etc. already use, so restore
+  // permissions match the rest of the item-editing surface.
+  async listRevisions(
+    userId: string,
+    subprofileId: string,
+    itemId: string,
+  ): Promise<ItemRevisionSummary[]> {
+    await this.getOwned(userId, subprofileId);
+    const revisions = await this.itemRevisions.find({
+      where: { itemId, subprofileId },
+      order: { createdAt: 'DESC' },
+    });
+    return revisions.map(toRevisionSummary);
+  }
+
+  // Protect Your Work (revision history), Task 8: fetch one revision's full
+  // snapshot. 404s both when the id is unknown and when it belongs to a
+  // different item/subprofile: the `where` clause scopes the lookup so a
+  // caller can never fetch a revision through the wrong item/subprofile pair.
+  async getRevision(
+    userId: string,
+    subprofileId: string,
+    itemId: string,
+    revisionId: string,
+  ): Promise<ItemRevisionDetail> {
+    await this.getOwned(userId, subprofileId);
+    const revision = await this.itemRevisions.findOne({
+      where: { id: revisionId, itemId, subprofileId },
+    });
+    if (!revision) {
+      throw new NotFoundException('Revision not found');
+    }
+    return toRevisionDetail(revision);
+  }
+
+  // Protect Your Work (revision history), Task 8: restores a stored
+  // revision's editable content onto the live item. Non-destructive: before
+  // the item is overwritten, its CURRENT editable content is snapshotted
+  // into a fresh revision via `recordItemRevision` (the same helper
+  // `replaceSection` uses), so the version being replaced is never lost:
+  // restoring twice in a row is just two more revisions in the list, not
+  // data loss. Both writes happen inside one transaction, so a failure
+  // partway through never leaves the pre-restore snapshot without its
+  // matching item overwrite (or vice versa).
+  async restoreRevision(
+    userId: string,
+    subprofileId: string,
+    itemId: string,
+    revisionId: string,
+  ): Promise<void> {
+    await this.getOwned(userId, subprofileId);
+    await this.dataSource.transaction(async (manager) => {
+      const item = await manager.findOne(SubprofileItem, {
+        where: { id: itemId, subprofileId },
+      });
+      if (!item) {
+        throw new NotFoundException('Item not found');
+      }
+      const revision = await manager.findOne(SubprofileItemRevision, {
+        where: { id: revisionId, itemId, subprofileId },
+      });
+      if (!revision) {
+        throw new NotFoundException('Revision not found');
+      }
+      // Snapshot the item's CURRENT (pre-restore) content first.
+      await this.recordItemRevision(manager, item);
+      // Apply ONLY the editable fields from the stored snapshot.
+      // `editableSnapshot` is the allowlist: it never reads or writes
+      // `id`/`subprofileId`/`position`/`createdAt`, so those identity and
+      // bookkeeping columns on `item` are left untouched by the restore.
+      Object.assign(
+        item,
+        editableSnapshot(revision.snapshot as unknown as EditableItemContent),
+      );
+      await manager.save(item);
+    });
   }
 
   // ---- owner reads ---------------------------------------------------------
@@ -569,12 +808,41 @@ export class SubprofilesService {
     );
 
     await this.dataSource.transaction(async (manager) => {
-      await manager.delete(SubprofileItem, {
-        subprofileId: id,
-        section: sectionEnum,
+      // Protect Your Work (revision history), Task 7: this used to be an
+      // unconditional `manager.delete(...)` of every row in the section
+      // followed by inserting `items.length` brand-new rows. That is no
+      // longer safe to do unconditionally: `subprofile_item_revisions.item_id`
+      // (Task 6) is `ON DELETE CASCADE` against `subprofile_items.id`, so a
+      // row's id must survive a save for the revisions attached to it to
+      // survive the save too. Deleting-and-recreating every row would cascade
+      // away a just-written revision within the SAME transaction (delete
+      // fires after the insert) or reject the insert outright with a foreign
+      // key violation (delete fires first, so the parent no longer exists).
+      // There is no ordering that makes the old shape work. Existing rows are
+      // now UPDATED in place (id preserved) instead; only a genuine count
+      // shrink still deletes rows, and only for the rows that fall off the
+      // end.
+      //
+      // The incoming DTO (`SubprofileItemInputDTO`) carries no `id`. This
+      // section-replace endpoint has never round-tripped one (see
+      // `SubprofileCreditsService`'s "no stable item ids across saves" note,
+      // which is exactly this same property), so there is no stronger
+      // identity to match incoming items against existing rows than pairing
+      // them up by position. A same-length reorder is therefore
+      // indistinguishable, slot by slot, from a same-length content edit,
+      // which is why the pure-reorder check just below exists: it detects a
+      // whole-section reorder (same multiset of content, different order)
+      // up front and skips per-slot revisions entirely for it, rather than
+      // recording a spurious "changed" revision at every slot the reorder
+      // touched. Giving the client a real id to send is a frontend/DTO
+      // contract change outside this task's scope.
+      const existingRows = await manager.find(SubprofileItem, {
+        where: { subprofileId: id, section: sectionEnum },
+        order: { position: 'ASC' },
       });
-      const rows = items.map((it, index) =>
-        manager.create(SubprofileItem, {
+
+      const candidateFieldsByIndex: Omit<SubprofileItem, 'id' | 'createdAt'>[] =
+        items.map((it, index) => ({
           subprofileId: id,
           section: sectionEnum,
           title: it.title,
@@ -585,7 +853,7 @@ export class SubprofilesService {
           date: it.date ?? null,
           meta: it.meta ?? null,
           tags: it.tags ?? [],
-          collaborators: normalizedCollaboratorsByItemIndex[index],
+          collaborators: normalizedCollaboratorsByItemIndex[index] ?? [],
           isFeatured:
             sectionEnum === SubprofileSection.Links
               ? false
@@ -601,11 +869,67 @@ export class SubprofilesService {
           edition: it.edition ?? null,
           workState: (it.workState as WorkState | undefined) ?? null,
           structured: it.structured ?? null,
-        }),
-      );
-      if (rows.length) {
-        await manager.save(rows);
+        }));
+
+      // Pure-reorder detection: compare the MULTISET of canonical editable
+      // content (sorted, not position-paired) on both sides. Equal multisets
+      // of equal length mean this save only shuffled existing items around,
+      // with no content actually added, removed, or edited, so no per-slot
+      // diff below is a real content change; all of them would otherwise
+      // read as "changed" purely because a different existing item now sits
+      // at that slot.
+      const existingCanonical = existingRows
+        .map((row) => canonicalStringify(editableSnapshot(row)))
+        .sort();
+      const incomingCanonical = candidateFieldsByIndex
+        .map((fields) => canonicalStringify(editableSnapshot(fields)))
+        .sort();
+      const isPureReorder =
+        existingCanonical.length === incomingCanonical.length &&
+        existingCanonical.every(
+          (value, index) => value === incomingCanonical[index],
+        );
+
+      const rowsToSave: SubprofileItem[] = [];
+      for (const [index, fields] of candidateFieldsByIndex.entries()) {
+        const existingRow = existingRows[index];
+        if (!existingRow) {
+          // Beyond the current row count for this section: a genuinely new
+          // item, nothing to snapshot against.
+          rowsToSave.push(manager.create(SubprofileItem, fields));
+          continue;
+        }
+
+        // Diff BEFORE mutating `existingRow` below: `editableSnapshot` reads
+        // straight off the still-untouched hydrated row, so this is its true
+        // pre-save content. Skipped entirely on a pure reorder (see above).
+        if (
+          !isPureReorder &&
+          canonicalStringify(editableSnapshot(existingRow)) !==
+            canonicalStringify(editableSnapshot(fields))
+        ) {
+          await this.recordItemRevision(manager, existingRow);
+        }
+        // Update in place: keeps `id` and `createdAt`, so the row's revision
+        // history (and any FK elsewhere keyed on this item id) survives the
+        // save.
+        rowsToSave.push(Object.assign(existingRow, fields));
       }
+
+      // Rows left over past the incoming count are items the client actually
+      // removed from the section. Deleting them is correct here (unlike the
+      // matched rows above), and it cascades away their revision history too,
+      // since there is no longer a live item to view or restore that history
+      // against.
+      const removedRows = existingRows.slice(candidateFieldsByIndex.length);
+      if (removedRows.length) {
+        await manager.remove(removedRows);
+      }
+
+      if (rowsToSave.length) {
+        await manager.save(rowsToSave);
+      }
+
       // If this section now holds the spotlight, clear it everywhere else so at
       // most one item across the whole persona is featured. Do NOT clear other
       // sections when the incoming section has no featured item — the spotlight

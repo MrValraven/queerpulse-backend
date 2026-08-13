@@ -122,6 +122,19 @@ export class CommunitiesController {
     return this.communitiesService.archive(slug, user.userId);
   }
 
+  @Post(':slug/unfreeze')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Lift an auto-freeze once reports are handled (owner/mod, idempotent).',
+  })
+  @ApiOkResponse({ description: 'The community detail, no longer frozen.' })
+  @ApiForbiddenResponse({ description: 'Only an owner or mod may unfreeze.' })
+  @ApiNotFoundResponse({ description: 'No community exists for this slug.' })
+  unfreeze(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
+    return this.communitiesService.unfreeze(slug, user.userId);
+  }
+
   @Post(':slug/transfer')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({

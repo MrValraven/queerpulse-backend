@@ -1,9 +1,10 @@
-import { Controller, Get, Param, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, UseGuards } from '@nestjs/common';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminCommunitiesService } from './admin-communities.service';
+import { UpdateAdminCommunitySettingsDto } from './dto/update-admin-community-settings.dto';
 import {
   ApiCookieAuth,
   ApiForbiddenResponse,
@@ -44,5 +45,16 @@ export class AdminCommunitiesController {
   @Get(':slug')
   getCommunity(@Param('slug') slug: string) {
     return this.adminCommunities.getCommunity(slug);
+  }
+
+  @ApiOperation({ summary: "Update a community's safety-policy settings." })
+  @ApiOkResponse({ description: 'The updated community detail.' })
+  @ApiNotFoundResponse({ description: 'Community not found.' })
+  @Patch(':slug')
+  updateSettings(
+    @Param('slug') slug: string,
+    @Body() dto: UpdateAdminCommunitySettingsDto,
+  ) {
+    return this.adminCommunities.updateSettings(slug, dto);
   }
 }

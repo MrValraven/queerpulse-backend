@@ -9,6 +9,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { VouchService } from '../vouch/vouch.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import {
@@ -220,6 +221,10 @@ describe('CommunitiesService', () => {
           useValue: contentModeration,
         },
         { provide: NotificationsService, useValue: notifications },
+        {
+          provide: VouchService,
+          useValue: { hasActiveVouchFrom: jest.fn().mockResolvedValue(false) },
+        },
       ],
     }).compile();
     service = module.get(CommunitiesService);

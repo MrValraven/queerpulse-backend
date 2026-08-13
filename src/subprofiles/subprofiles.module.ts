@@ -14,12 +14,14 @@ import { SubprofileEndorsement } from './entities/subprofile-endorsement.entity'
 import { SubprofileFollower } from './entities/subprofile-follower.entity';
 import { SubprofileInvite } from './entities/subprofile-invite.entity';
 import { SubprofileItem } from './entities/subprofile-item.entity';
+import { SubprofileItemRevision } from './entities/subprofile-item-revision.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 import {
   ProfileSubprofilesController,
   SubprofilesController,
 } from './subprofiles.controller';
+import { SubprofileItemRevisionsController } from './subprofile-item-revisions.controller';
 import { SubprofileCreditsService } from './subprofile-credits.service';
 import { SubprofileEndorsementsService } from './subprofile-endorsements.service';
 import { SubprofileFollowersService } from './subprofile-followers.service';
@@ -37,6 +39,7 @@ import { SubprofilesService } from './subprofiles.service';
       SubprofileFollower,
       SubprofileInvite,
       SubprofileItem,
+      SubprofileItemRevision,
       SubprofileMember,
       SubprofileSocialLink,
       Event,
@@ -62,7 +65,13 @@ import { SubprofilesService } from './subprofiles.service';
     // is one-directional and there is no cycle to break.
     NotificationsModule,
   ],
-  controllers: [SubprofilesController, ProfileSubprofilesController],
+  controllers: [
+    SubprofilesController,
+    ProfileSubprofilesController,
+    // Protect Your Work (revision history), Task 8: list/get/restore an
+    // item's saved revisions.
+    SubprofileItemRevisionsController,
+  ],
   providers: [
     SubprofilesService,
     SubprofileMembershipService,

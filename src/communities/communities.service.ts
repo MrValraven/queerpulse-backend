@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
@@ -25,6 +26,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { VouchService } from '../vouch/vouch.service';
 import {
   CommunityCardDTO,
   CommunityDetailDTO,
@@ -131,6 +133,9 @@ export class CommunitiesService {
     private readonly dataSource: DataSource,
     private readonly contentModeration: ContentModerationService,
     private readonly notifications: NotificationsService,
+    // Second-vouch join gating reads the platform vouch graph to check whether a
+    // current community member has vouched for an applicant.
+    private readonly vouch: VouchService,
   ) {}
 
   // A community is taken down under the `community` taxonomy code, keyed by its
@@ -453,6 +458,28 @@ export class CommunitiesService {
   }
 
   /**
+   * `POST /communities/:slug/unfreeze` — an owner or mod lifts an auto-freeze
+   * once they've handled the reports that triggered it. There is no manual
+   * freeze endpoint: freezing is automatic (see `CommunityAutoFreezeService`);
+   * staff only ever lift it. Idempotent — unfreezing a community that isn't
+   * frozen is a no-op 200 that just returns the current detail.
+   */
+  async unfreeze(slug: string, userId: string): Promise<CommunityDetailDTO> {
+    const community = await this.loadOr404(slug);
+    const role = await this.myRole(community.id, userId);
+    if (!CommunitiesService.isStaffRole(role)) {
+      throw new ForbiddenException(
+        'Only an owner or mod can unfreeze a community',
+      );
+    }
+    if (community.frozenAt != null) {
+      community.frozenAt = null;
+      await this.communities.save(community);
+    }
+    return this.buildDetail(community, userId, role);
+  }
+
+  /**
    * `POST /communities/:slug/transfer` — hand ownership to another member.
    *
    * Guardrails, in the order enforced below (mirrors `AdminMembersService
@@ -569,7 +596,27 @@ export class CommunitiesService {
       return { outcome: 'joined', role: RosterRole.Member, request: null };
     }
 
-    if (community.accessTier === AccessTier.Public) {
+    // A frozen community stays visible but takes no new members until an
+    // owner/mod lifts the freeze (see `Community.frozenAt`). Existing members
+    // short-circuit above, so this only blocks a genuinely new join.
+    if (community.frozenAt) {
+      throw new ForbiddenException(
+        'This community is frozen while moderators review recent reports',
+      );
+    }
+
+    // Second-vouch gate: a community that requires a vouch to join can only
+    // instant-admit an applicant a current member has vouched for. An un-vouched
+    // applicant to an otherwise-public community is routed to a reviewable
+    // request rather than silently turned away — a mod (themselves a member)
+    // can vouch, then approve. Request/invite/private tiers already create a
+    // request; the same gate is enforced again at approval in `triageJoinRequest`.
+    const instantJoinAllowed =
+      community.accessTier === AccessTier.Public &&
+      (!community.requiresSecondVouch ||
+        (await this.hasMemberVouch(community.id, userId)));
+
+    if (instantJoinAllowed) {
       // ON CONFLICT DO NOTHING absorbs a race between two concurrent joins
       // without a pre-check + 23505 — mirrors `CommunityPostsService
       // .addReaction`/`EventsService.addCohost`'s insert idiom.
@@ -583,10 +630,23 @@ export class CommunitiesService {
       return { outcome: 'joined', role: RosterRole.Member, request: null };
     }
 
-    // request | invite | private -> pending, gated by listJoinRequests /
-    // triageJoinRequest. The partial-unique index on
-    // (community_id, user_id) WHERE status='pending' is the real backstop
-    // against a double-request race; a hit surfaces here as 23505.
+    // request | invite | private, or a second-vouch-gated public join -> pending.
+    return this.createJoinRequest(community, slug, userId, dto);
+  }
+
+  /**
+   * Create a pending join request. Used by the request/invite/private tiers and
+   * by a public community whose second-vouch gate the applicant hasn't met. The
+   * partial-unique index on (community_id, user_id) WHERE status='pending' is
+   * the real backstop against a double-request race; a hit surfaces here as
+   * 23505 and converges on a 409.
+   */
+  private async createJoinRequest(
+    community: Community,
+    slug: string,
+    userId: string,
+    dto: JoinCommunityInput,
+  ): Promise<JoinResultDTO> {
     try {
       const saved = await this.joinRequests.save(
         this.joinRequests.create({
@@ -612,6 +672,26 @@ export class CommunitiesService {
       }
       throw err;
     }
+  }
+
+  /**
+   * Whether a current member of the community holds an active platform vouch for
+   * the applicant — the "second vouch" a `requiresSecondVouch` community needs
+   * before admitting someone. An empty roster (nobody to have vouched) is
+   * trivially unmet.
+   */
+  private async hasMemberVouch(
+    communityId: string,
+    applicantId: string,
+  ): Promise<boolean> {
+    const rows = await this.members.find({
+      where: { communityId },
+      select: { userId: true },
+    });
+    return this.vouch.hasActiveVouchFrom(
+      rows.map((row) => row.userId),
+      applicantId,
+    );
   }
 
   // Private + non-member -> 404, not 403, so existence isn't leaked — mirrors
@@ -705,6 +785,20 @@ export class CommunitiesService {
     }
     if (request.status !== JoinRequestStatus.Pending) {
       throw new ConflictException('Join request already resolved');
+    }
+
+    // Second-vouch gate at admission: even a mod can't approve until a current
+    // member holds a vouch for the applicant (a mod is a member, so they can
+    // vouch first, then approve). Only enforced on approve — declining is always
+    // allowed.
+    if (
+      action === 'approve' &&
+      community.requiresSecondVouch &&
+      !(await this.hasMemberVouch(community.id, request.userId))
+    ) {
+      throw new UnprocessableEntityException(
+        'This community requires a vouch from a current member before this applicant can be admitted',
+      );
     }
 
     const newStatus =

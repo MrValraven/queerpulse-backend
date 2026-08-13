@@ -111,6 +111,15 @@ export enum NotificationType {
   // notify). Payload carries `{ source: 'concern', status, category? }` for the
   // bell copy. See migration `AddConcernUpdateNotificationType1788600000000`.
   ConcernUpdate = 'concern_update',
+  // Sent to a member when an admin overrides their verification level
+  // (`VerificationService.override`, /admin/verifications) — raising,
+  // holding, or lowering it — so a change to their standing is never silent.
+  // System-driven — no actor and no preference toggle: like `ConcernUpdate`,
+  // an admin review outcome is the platform's word, always delivered.
+  // Skipped entirely when the override is a no-op (level unchanged). Payload
+  // carries `{ fromLevel, toLevel }` for the bell copy. See migration
+  // `AddVerificationUpdateNotificationType1789100100000`.
+  VerificationUpdate = 'verification_update',
 }
 
 @Entity('notifications')

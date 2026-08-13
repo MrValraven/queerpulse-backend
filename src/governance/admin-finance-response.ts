@@ -1,5 +1,7 @@
+import { MemberRef } from '../common/member-ref';
 import {
   FinanceLine,
+  FinanceMetricSource,
   GovernanceFinanceReport,
 } from './entities/governance-finance-report.entity';
 
@@ -16,6 +18,20 @@ export interface AdminFinanceHistoryPoint {
   surplus: number;
 }
 
+/**
+ * Provenance of each editable scalar, so the tab can badge which figures are
+ * trustworthy. `surplus` is always `computed` (it is derived from the two
+ * totals, never stored or edited directly).
+ */
+export interface AdminFinanceSources {
+  mrr: FinanceMetricSource;
+  sustainerCount: FinanceMetricSource;
+  solidarityRate: FinanceMetricSource;
+  incomeTotal: FinanceMetricSource;
+  expenseTotal: FinanceMetricSource;
+  surplus: FinanceMetricSource;
+}
+
 export interface AdminFinanceLatest {
   quarter: string;
   incomeTotal: number;
@@ -27,6 +43,13 @@ export interface AdminFinanceLatest {
   income: FinanceLine[];
   expense: FinanceLine[];
   publishedAt: string;
+  /** Provenance badge state for each editable scalar. */
+  sources: AdminFinanceSources;
+  /** Who last edited any metric on this report, resolved to a display ref;
+   *  null when nothing has been edited (or the editor's account is gone). */
+  editor: MemberRef | null;
+  /** When any metric was last edited (ISO); null when never edited. */
+  editedAt: string | null;
 }
 
 export interface AdminFinanceResponseDTO {
@@ -34,8 +57,18 @@ export interface AdminFinanceResponseDTO {
   history: AdminFinanceHistoryPoint[];
 }
 
+/** Fills a concrete `source` on every ledger row so the frontend never has to
+ *  treat it as optional: rows seeded before provenance tracking read `seeded`. */
+function withLineSource(lines: FinanceLine[]): FinanceLine[] {
+  return lines.map((line) => ({
+    ...line,
+    source: line.source ?? FinanceMetricSource.Seeded,
+  }));
+}
+
 export function toAdminFinanceLatest(
   report: GovernanceFinanceReport,
+  editor: MemberRef | null,
 ): AdminFinanceLatest {
   return {
     quarter: report.quarter,
@@ -45,9 +78,19 @@ export function toAdminFinanceLatest(
     mrr: report.mrr ?? 0,
     sustainerCount: report.sustainerCount ?? 0,
     solidarityRate: report.solidarityRate ?? 0,
-    income: report.income ?? [],
-    expense: report.expense ?? [],
+    income: withLineSource(report.income ?? []),
+    expense: withLineSource(report.expense ?? []),
     publishedAt: report.publishedAt.toISOString(),
+    sources: {
+      mrr: report.mrrSource,
+      sustainerCount: report.sustainerCountSource,
+      solidarityRate: report.solidarityRateSource,
+      incomeTotal: report.incomeTotalSource,
+      expenseTotal: report.expenseTotalSource,
+      surplus: FinanceMetricSource.Computed,
+    },
+    editor,
+    editedAt: report.metricsEditedAt?.toISOString() ?? null,
   };
 }
 

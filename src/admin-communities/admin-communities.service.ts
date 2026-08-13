@@ -29,6 +29,7 @@ import {
   CommunityReportTotals,
   summariseReportsByCommunity,
 } from './community-report-scope';
+import { UpdateAdminCommunitySettingsDto } from './dto/update-admin-community-settings.dto';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WEEK_MS = 7 * DAY_MS;
@@ -244,6 +245,31 @@ export class AdminCommunitiesService {
       moderators,
       this.scopedQueueFor(community, reportScope, now),
     );
+  }
+
+  /**
+   * Update a community's safety-policy settings. Only the fields present on the
+   * DTO are written, so a partial PATCH from a single toggle leaves the others
+   * untouched. Returns the freshly rebuilt admin detail (via `getCommunity`) so
+   * the caller renders from authoritative state — health/queue included —
+   * rather than a hand-patched copy.
+   */
+  async updateSettings(
+    slug: string,
+    dto: UpdateAdminCommunitySettingsDto,
+  ): Promise<AdminCommunityDetailDTO> {
+    const community = await this.communities.findOne({ where: { slug } });
+    if (!community) {
+      throw new NotFoundException('Community not found');
+    }
+    if (dto.requiresSecondVouch !== undefined) {
+      community.requiresSecondVouch = dto.requiresSecondVouch;
+    }
+    if (dto.autoFreezeOnReports !== undefined) {
+      community.autoFreezeOnReports = dto.autoFreezeOnReports;
+    }
+    await this.communities.save(community);
+    return this.getCommunity(slug);
   }
 
   /**

@@ -1,5 +1,6 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
@@ -12,6 +13,7 @@ import {
 import { reasonsFor, ReasonCode, ReasonOption } from './reason-catalogue';
 import { deriveSeverity, slaDueAtFor } from './report-severity';
 import { ReportDTO, toReportDTO } from './report-response';
+import { REPORT_CREATED, ReportCreatedEvent } from './report.events';
 
 export interface ReportEvidenceInput {
   type: 'url' | 'screenshot';
@@ -44,6 +46,11 @@ export class ReportsService {
     // `ReportsModule` (same cross-module `forFeature` pattern as `Message`).
     @InjectRepository(HousingListing)
     private readonly housing: Repository<HousingListing>,
+    // Fire-and-forget domain event on a genuinely new report — a community
+    // auto-freeze listener reacts to it. `EventEmitter2` is globally available
+    // (`EventEmitterModule.forRoot()` in the root module), so no module change
+    // is needed here.
+    private readonly events: EventEmitter2,
   ) {}
 
   async create(
@@ -121,6 +128,16 @@ export class ReportsService {
           reporterId,
         }),
       );
+      // Only a genuinely new report emits — the dedupe fast-path above returns
+      // without reaching here. Best-effort by contract (see ReportCreatedEvent);
+      // a listener throwing must not fail this filing.
+      this.events.emit(REPORT_CREATED, {
+        reportId: saved.id,
+        subjectType: saved.subjectType,
+        subjectId: saved.subjectId,
+        severity: saved.severity,
+        reasonCode: saved.reasonCode,
+      } satisfies ReportCreatedEvent);
       return toReportDTO(saved);
     } catch (error) {
       // Lost the insert race against a concurrent identical filing — the

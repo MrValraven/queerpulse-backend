@@ -21,6 +21,7 @@ import {
 import { SubprofileSocialLink } from './entities/subprofile-social-link.entity';
 
 export interface SubprofileItemView {
+  id: string;
   section: SubprofileSection;
   title: string;
   subtitle: string | null;
@@ -42,6 +43,8 @@ export interface SubprofileItemView {
   edition: string | null;
   workState: WorkState | null;
   structured: ItemStructured | null;
+  /** ISO 8601 first-published timestamp (item row creation on QueerPulse). */
+  createdAt: string;
 }
 
 // Resolved collaboration credit — exposed for BOTH linked and unlinked
@@ -214,11 +217,12 @@ export interface SubprofileOwnerRef {
   name: string;
 }
 
-function toItemView(
+export function toItemView(
   item: SubprofileItem,
   collaboratorsByHandle: Map<string, CollaboratorView> = new Map(),
 ): SubprofileItemView {
   return {
+    id: item.id,
     section: item.section,
     title: item.title,
     subtitle: item.subtitle,
@@ -242,6 +246,7 @@ function toItemView(
     edition: item.edition ?? null,
     workState: item.workState ?? null,
     structured: item.structured ?? null,
+    createdAt: item.createdAt.toISOString(),
   };
 }
 

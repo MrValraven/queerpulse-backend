@@ -61,6 +61,7 @@ function makeCommunity(overrides: Partial<Community>): Community {
     name: 'Some Community',
     accessTier: AccessTier.Public,
     archivedAt: null,
+    frozenAt: null,
     ...overrides,
   } as Community;
 }

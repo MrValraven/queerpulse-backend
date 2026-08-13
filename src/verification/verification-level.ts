@@ -39,3 +39,39 @@ export function meetsLevel(
 ): boolean {
   return levelRank(actual) >= levelRank(required);
 }
+
+/**
+ * The kind of verification a `member_verifications` row covers. Only
+ * `identity` exists today; the dimension exists so a future verification type
+ * (e.g. a business/landlord verification) can coexist per member without a
+ * schema change — see the `(user_id, type)` uniqueness in
+ * `AddVerificationAudit1789100000000`.
+ */
+export enum VerificationType {
+  Identity = 'identity',
+}
+
+/**
+ * How a member's current level was reached: earned through the ordinary
+ * step-up flow (OTP, identity provider callback) versus set directly by an
+ * admin override. Surfaced in the admin drawer so a reviewer can tell a real
+ * verification event apart from a manual grant.
+ */
+export enum VerificationGrantedBy {
+  MemberEarned = 'member_earned',
+  AdminGranted = 'admin_granted',
+}
+
+/**
+ * The append-only audit action recorded on `verification_events` for every
+ * change to a member's verification standing.
+ */
+export enum VerificationEventAction {
+  Submitted = 'submitted',
+  Approved = 'approved',
+  Rejected = 'rejected',
+  Overridden = 'overridden',
+  Downgraded = 'downgraded',
+  Appealed = 'appealed',
+  Withdrawn = 'withdrawn',
+}

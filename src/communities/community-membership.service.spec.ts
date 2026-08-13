@@ -28,6 +28,8 @@ describe('CommunityMembershipService', () => {
     tagline: 'tagline',
     accessTier: AccessTier.Public,
     rosterVisible: true,
+    requiresSecondVouch: false,
+    autoFreezeOnReports: false,
     features: [],
     rules: [],
     coverImageUrl: null,
@@ -36,6 +38,7 @@ describe('CommunityMembershipService', () => {
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     archivedAt: null,
+    frozenAt: null,
   };
 
   const MEMBERSHIP: CommunityMember = {

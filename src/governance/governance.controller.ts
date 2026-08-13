@@ -1,18 +1,26 @@
 import {
+  Body,
   Controller,
   Get,
   HttpCode,
   HttpStatus,
+  Patch,
   Post,
   Query,
   UseGuards,
 } from '@nestjs/common';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { Feature } from '../common/feature.decorator';
 import { GetGovernanceFinancesQuery } from './dto/get-governance-finances.query';
+import { ListFinanceChangesQuery } from './dto/list-finance-changes.query';
+import { UpdateAdminFinancesDto } from './dto/update-admin-finances.dto';
 import { GovernanceFinanceService } from './governance-finance.service';
 import { GovernanceOverviewService } from './governance-overview.service';
 import {
@@ -34,6 +42,8 @@ import {
 //   • `GET /governance/finances` — the quarterly financial-transparency
 //     snapshot (stats/income/expense/eventNotes) plus the reserve + partner
 //     disclosures rendered alongside it.
+const DEFAULT_FINANCE_CHANGES_LIMIT = 50;
+
 @Feature('governance')
 @ApiTags('Governance')
 @ApiCookieAuth('access_token')
@@ -83,6 +93,40 @@ export class GovernanceController {
   @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
   getAdminFinances() {
     return this.governanceFinanceService.getAdminFinances();
+  }
+
+  // Admin-only (NOT moderators, unlike the GET above): correcting the published
+  // finance figures is a higher-blast-radius action, mirroring the
+  // admin-only-write stance of `PlatformSettingsController`. State-changing, so
+  // it carries a CSRF token behind the global guard chain.
+  @Patch('admin/finances')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.Admin)
+  @ApiOperation({ summary: 'Correct editable figures on the latest report' })
+  @ApiOkResponse({
+    description: 'The updated Finances tab payload (latest + history).',
+  })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiNotFoundResponse({ description: 'No finance report exists to edit.' })
+  updateAdminFinances(
+    @Body() dto: UpdateAdminFinancesDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.governanceFinanceService.updateAdminFinances(dto, user.userId);
+  }
+
+  // Admin-only: the per-field audit trail behind the "last edited" badges.
+  @Get('admin/finances/changes')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.Admin)
+  @ApiOperation({ summary: 'List the finance figure change history' })
+  @ApiOkResponse({ description: 'The audit history, newest first.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  listFinanceChanges(@Query() query: ListFinanceChangesQuery) {
+    return this.governanceFinanceService.listChanges(
+      query.limit ?? DEFAULT_FINANCE_CHANGES_LIMIT,
+      query.offset ?? 0,
+    );
   }
 
   // Admin-only: publish the current governance snapshot (P3-7). Layered on the
