@@ -34,6 +34,15 @@ export class AdminInvitesController {
   constructor(private readonly adminInvites: AdminInvitesService) {}
 
   @ApiOperation({
+    summary: 'Every member who has sent an invite, for the sender filter.',
+  })
+  @ApiOkResponse({ description: 'Distinct inviters with their invite counts.' })
+  @Get('inviters')
+  listInviters() {
+    return this.adminInvites.listInviters();
+  }
+
+  @ApiOperation({
     summary: 'List platform-wide invites (paginated, filterable).',
   })
   @ApiOkResponse({ description: 'One page of invites.' })

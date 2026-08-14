@@ -42,7 +42,11 @@ export interface AdminInviteDTO {
   // from a lapsed-but-unswept one.
   storedStatus: InviteStatus;
   email: string | null;
+  // The inviter's personal message written at POST /invites (the "invite
+  // message"), and their "why I'm inviting you" note (the "vouch message").
+  // Both are optional free text the inviter typed; surfaced here for oversight.
   note: string | null;
+  vouch: string | null;
   // True for a member's own personal invite; false for a system-minted one
   // (join-request approval, genesis bootstrap).
   personal: boolean;
@@ -60,6 +64,17 @@ export interface AdminInvitesPageDTO {
   pageSize: number;
 }
 
+// One entry in the "filter by sender" list: every member who has minted at
+// least one invite, with how many they sent. Powers the admin invite filter's
+// dropdown so it can offer every inviter platform-wide, not only those on the
+// pages already loaded. Keyed by `slug` (what the list query filters on).
+export interface AdminInviteInviterDTO {
+  slug: string;
+  name: string;
+  avatarUrl: string | null;
+  count: number;
+}
+
 export function toAdminInviteDTO(
   invite: Invite,
   inviter: MemberRef | null,
@@ -73,6 +88,7 @@ export function toAdminInviteDTO(
     storedStatus: invite.status,
     email: invite.email ?? null,
     note: invite.note ?? null,
+    vouch: invite.vouch ?? null,
     personal: invite.personal,
     createdAt: invite.createdAt.toISOString(),
     expiresAt: invite.expiresAt ? invite.expiresAt.toISOString() : null,

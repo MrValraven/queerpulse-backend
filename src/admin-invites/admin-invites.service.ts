@@ -6,6 +6,7 @@ import { Invite, InviteStatus } from '../membership/entities/invite.entity';
 import { Profile } from '../users/entities/profile.entity';
 import {
   AdminInviteDTO,
+  AdminInviteInviterDTO,
   AdminInvitesPageDTO,
   toAdminInviteDTO,
 } from './admin-invites-response';
@@ -47,6 +48,22 @@ export class AdminInvitesService {
       inviteQueryBuilder.andWhere('invite.inviterId = :inviterId', {
         inviterId: query.inviterId,
       });
+    }
+    const inviterSlug = query.inviterSlug?.trim();
+    if (inviterSlug) {
+      // Filter by the sender's slug the admin UI holds, resolved to their
+      // userId inline. No status restriction on the join (unlike the active-only
+      // `MemberLookup.userIdForSlug`), so filtering matches exactly the rows the
+      // list shows — a suspended member's past invites still filter in.
+      inviteQueryBuilder.andWhere(
+        `invite.inviterId IN ${inviteQueryBuilder
+          .subQuery()
+          .select('profile.userId')
+          .from(Profile, 'profile')
+          .where('profile.slug = :inviterSlug')
+          .getQuery()}`,
+        { inviterSlug },
+      );
     }
     const trimmedEmail = query.email?.trim();
     if (trimmedEmail) {
@@ -90,6 +107,42 @@ export class AdminInvitesService {
     });
 
     return { items, total, page, pageSize: ADMIN_INVITES_PAGE_SIZE };
+  }
+
+  /**
+   * Every member who has minted at least one invite, with their invite count,
+   * newest lookups deduped to one row per sender and sorted by display name.
+   * Powers the admin filter's sender dropdown so it can list every inviter
+   * platform-wide (not only those on the pages already loaded). Resolved through
+   * the same batched `MemberLookup.byUserIds` the list uses — no status filter,
+   * so it matches exactly who can appear as an inviter in the rows.
+   */
+  async listInviters(): Promise<AdminInviteInviterDTO[]> {
+    const grouped = await this.invites
+      .createQueryBuilder('invite')
+      .select('invite.inviterId', 'inviterId')
+      .addSelect('COUNT(*)', 'count')
+      .groupBy('invite.inviterId')
+      .getRawMany<{ inviterId: string; count: string }>();
+    if (!grouped.length) return [];
+
+    const refsByUserId = await new MemberLookup(this.profiles).byUserIds(
+      grouped.map((row) => row.inviterId),
+    );
+
+    return grouped
+      .map((row): AdminInviteInviterDTO | null => {
+        const ref = refsByUserId.get(row.inviterId);
+        if (!ref) return null;
+        return {
+          slug: ref.slug,
+          name: `${ref.firstName} ${ref.lastName}`.trim(),
+          avatarUrl: ref.avatarUrl,
+          count: Number(row.count),
+        };
+      })
+      .filter((inviter): inviter is AdminInviteInviterDTO => inviter !== null)
+      .sort((first, second) => first.name.localeCompare(second.name));
   }
 
   /**

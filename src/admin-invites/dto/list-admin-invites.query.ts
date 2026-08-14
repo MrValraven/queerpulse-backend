@@ -42,4 +42,13 @@ export class ListAdminInvitesQuery {
   @IsOptional()
   @IsUUID()
   inviterId?: string;
+
+  // Drill into a single inviter's invites by their profile slug — the handle
+  // the admin UI has (the invite DTO carries the inviter's slug, not their
+  // userId). Resolved to the matching inviterId in the query, so it filters the
+  // whole graph server-side, not just the loaded page.
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  inviterSlug?: string;
 }
