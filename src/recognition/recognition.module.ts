@@ -1,6 +1,9 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { UsersModule } from '../users/users.module';
+import { CommunityMember } from '../communities/entities/community-member.entity';
+import { PublicEligibilityModule } from '../public-eligibility/public-eligibility.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { RecognitionAward } from './entities/recognition-award.entity';
 import { RecognitionPerkClaim } from './entities/recognition-perk-claim.entity';
 import { RecognitionStat } from './entities/recognition-stat.entity';
@@ -9,6 +12,7 @@ import {
   MyRecognitionController,
 } from './recognition.controller';
 import { RecognitionService } from './recognition.service';
+import { RecognitionAwardingService } from './recognition-awarding.service';
 
 /**
  * Recognition — badges/kudos a member has earned, level + perks (spec §3
@@ -26,10 +30,13 @@ import { RecognitionService } from './recognition.service';
       RecognitionStat,
       RecognitionAward,
       RecognitionPerkClaim,
+      CommunityMember,
     ]),
     UsersModule,
+    PublicEligibilityModule,
+    NotificationsModule,
   ],
   controllers: [MyRecognitionController, MemberRecognitionController],
-  providers: [RecognitionService],
+  providers: [RecognitionService, RecognitionAwardingService],
 })
 export class RecognitionModule {}

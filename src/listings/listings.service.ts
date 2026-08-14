@@ -17,6 +17,7 @@ import {
 } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
 import { MemberLookup, toMemberRef } from '../common/member-ref';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { StorageService } from '../storage/storage.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -67,6 +68,7 @@ import {
   SafeSpaceStatus,
 } from './entities/listing.entity';
 import {
+  listingPhotoKeys,
   ListingDTO,
   ReviewDTO,
   SimilarListingDTO,
@@ -163,10 +165,12 @@ function normalizeCreate(dto: CreateListingDto): Omit<
     tags: dto.tags ?? [],
     goodFor: dto.goodFor ?? [],
     langs: dto.langs ?? [],
-    address: dto.address ?? '',
-    geocoded: dto.geocoded ?? false,
-    latitude: dto.latitude ?? null,
-    longitude: dto.longitude ?? null,
+    // An online-only listing carries no location, whatever the client sent.
+    online: dto.online ?? false,
+    address: dto.online ? '' : (dto.address ?? ''),
+    geocoded: dto.online ? false : (dto.geocoded ?? false),
+    latitude: dto.online ? null : (dto.latitude ?? null),
+    longitude: dto.online ? null : (dto.longitude ?? null),
     hours: (dto.hours ?? {}) as Record<string, ListingDayHours>,
     hoursNote: dto.hoursNote ?? '',
     social: normalizeSocial(dto.social),
@@ -210,6 +214,7 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
     ...(dto.tags !== undefined ? { tags: dto.tags } : {}),
     ...(dto.goodFor !== undefined ? { goodFor: dto.goodFor } : {}),
     ...(dto.langs !== undefined ? { langs: dto.langs } : {}),
+    ...(dto.online !== undefined ? { online: dto.online } : {}),
     ...(dto.address !== undefined ? { address: dto.address } : {}),
     ...(dto.geocoded !== undefined ? { geocoded: dto.geocoded } : {}),
     // Persist a moved/cleared pin: applied when present (incl. explicit null to
@@ -306,6 +311,9 @@ export class ListingsService {
     // Files listing disputes + owner-notify tasks through the shared
     // report+moderation pipeline (item #13) rather than a parallel one.
     private readonly reports: ReportsService,
+    // Batched crop lookup (`MediaCropService.getMany`) for `photos`'s
+    // per-slot `photoCrops` sibling.
+    private readonly mediaCropService: MediaCropService,
   ) {}
 
   async create(ownerId: string, dto: CreateListingDto): Promise<ListingDTO> {
@@ -548,7 +556,14 @@ export class ListingsService {
       const refs = await new MemberLookup(this.profiles).byUserIds(
         rows.map((r) => r.ownerId),
       );
-      return rows.map((r) => toListingDTO(r, refs.get(r.ownerId) ?? null));
+      // ONE batched crop lookup for every row's four photo slots on the
+      // page — never a per-row query.
+      const crops = await this.mediaCropService.getMany(
+        rows.flatMap((r) => listingPhotoKeys(r.photos)),
+      );
+      return rows.map((r) =>
+        toListingDTO(r, refs.get(r.ownerId) ?? null, crops),
+      );
     });
   }
 
@@ -575,8 +590,13 @@ export class ListingsService {
         const refs = await new MemberLookup(this.profiles).byUserIds(
           rows.map((row) => row.ownerId),
         );
+        // ONE batched crop lookup for every row's four photo slots on the
+        // page — never a per-row query.
+        const crops = await this.mediaCropService.getMany(
+          rows.flatMap((row) => listingPhotoKeys(row.photos)),
+        );
         return rows.map((row) =>
-          toListingDTO(row, refs.get(row.ownerId) ?? null),
+          toListingDTO(row, refs.get(row.ownerId) ?? null, crops),
         );
       }),
       this.computeQueueCounts(trimmedSearch),
@@ -1405,10 +1425,11 @@ export class ListingsService {
   }
 
   private async buildDTO(listing: Listing): Promise<ListingDTO> {
-    const refs = await new MemberLookup(this.profiles).byUserIds([
-      listing.ownerId,
+    const [refs, crops] = await Promise.all([
+      new MemberLookup(this.profiles).byUserIds([listing.ownerId]),
+      this.mediaCropService.getMany(listingPhotoKeys(listing.photos)),
     ]);
-    return toListingDTO(listing, refs.get(listing.ownerId) ?? null);
+    return toListingDTO(listing, refs.get(listing.ownerId) ?? null, crops);
   }
 
   /** `QPL-<year>-<4-digit seq>` (e.g. `QPL-2026-0007`), matching the

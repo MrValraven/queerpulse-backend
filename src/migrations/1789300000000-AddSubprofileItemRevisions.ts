@@ -10,9 +10,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * UNAPPLIED — left for the maintainer to run.
  */
-export class AddSubprofileItemRevisions1789300000000
-  implements MigrationInterface
-{
+export class AddSubprofileItemRevisions1789300000000 implements MigrationInterface {
   name = 'AddSubprofileItemRevisions1789300000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

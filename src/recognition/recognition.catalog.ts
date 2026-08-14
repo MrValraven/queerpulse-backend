@@ -148,6 +148,15 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     lockedContext: 'Host 3 approved gatherings',
     earnedContext: 'Hosted 3 approved gatherings',
   },
+  {
+    key: 'first-steps',
+    cat: 'Milestones',
+    name: 'First Steps',
+    rarity: 'common',
+    tint: 'accent',
+    lockedContext: 'Finish your getting started checklist',
+    earnedContext: 'Completed the getting started checklist',
+  },
 ];
 
 /** XP-only footer variants a perk can carry while it's still claimable

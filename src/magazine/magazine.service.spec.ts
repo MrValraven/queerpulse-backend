@@ -5,6 +5,7 @@ import { MagazineArticle } from './entities/magazine-article.entity';
 import { MagazineAuthor } from './entities/magazine-author.entity';
 import { MagazineDeck } from './entities/magazine-deck.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { MagazineService } from './magazine.service';
 
 type QueryBuilderMock = {
@@ -92,6 +93,10 @@ describe('MagazineService', () => {
         {
           provide: getRepositoryToken(MagazineDeck),
           useValue: { find: jest.fn(), findOne: jest.fn() },
+        },
+        {
+          provide: MediaCropService,
+          useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
         },
       ],
     }).compile();

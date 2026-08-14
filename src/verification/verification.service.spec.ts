@@ -538,9 +538,9 @@ describe('VerificationService', () => {
         fakeRequest({ status: VerificationRequestStatus.Rejected }),
       );
 
-      await expect(
-        service.withdrawRequest(userId, requestId),
-      ).rejects.toThrow(/cannot move/i);
+      await expect(service.withdrawRequest(userId, requestId)).rejects.toThrow(
+        /cannot move/i,
+      );
     });
 
     it('403s when the request belongs to someone else', async () => {
@@ -548,17 +548,17 @@ describe('VerificationService', () => {
         fakeRequest({ userId: 'someone-else' }),
       );
 
-      await expect(
-        service.withdrawRequest(userId, requestId),
-      ).rejects.toThrow(/do not own/i);
+      await expect(service.withdrawRequest(userId, requestId)).rejects.toThrow(
+        /do not own/i,
+      );
     });
 
     it('404s when the request does not exist', async () => {
       requestRepo.findOne.mockResolvedValue(null);
 
-      await expect(
-        service.withdrawRequest(userId, requestId),
-      ).rejects.toThrow(/not found/i);
+      await expect(service.withdrawRequest(userId, requestId)).rejects.toThrow(
+        /not found/i,
+      );
     });
   });
 

@@ -9,6 +9,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, FindOperator, QueryFailedError } from 'typeorm';
 import { ConnectionsService } from '../connections/connections.service';
 import { encodeCursor } from '../common/cursor-pagination';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { Profile } from '../users/entities/profile.entity';
@@ -239,6 +240,10 @@ describe('MessagingService', () => {
         { provide: ConnectionsService, useValue: connections },
         { provide: BlockFilterService, useValue: blockFilter },
         { provide: UsersService, useValue: usersService },
+        {
+          provide: MediaCropService,
+          useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
+        },
       ],
     }).compile();
     service = module.get(MessagingService);

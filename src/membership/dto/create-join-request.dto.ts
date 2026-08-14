@@ -50,6 +50,19 @@ export class CreateJoinRequestDto {
   termsVersion!: string;
 
   /**
+   * The frontend entry point the applicant came through (e.g. `homepage_hero`,
+   * `skills`). A soft attribution signal for the admin queue, not identity — so
+   * it is length-capped rather than range-checked against a fixed list here: the
+   * catalogue of CTAs lives on the frontend and grows without a backend change,
+   * and an unrecognised key simply renders as "another page" in the queue. Empty
+   * or omitted for a direct visit to the request page.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  source?: string;
+
+  /**
    * Optional date of birth (`YYYY-MM-DD`). When supplied it is checked against
    * the 18+ gate and a minor is rejected with 403 `UNDER_18`. Optional because
    * the attestation checkbox — not a DOB field — is the primary gate the

@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { CommunityMembershipModule } from '../communities/community-membership.module';
 import { ConnectionsModule } from '../connections/connections.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
+import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PushModule } from '../push/push.module';
 import { SocialModule } from '../social/social.module';
@@ -69,6 +70,10 @@ import { RsvpService } from './rsvp.service';
     // none of which import `EventsModule`, so this closes no cycle (no
     // `forwardRef` needed).
     ConnectionsModule,
+    // Batched crop lookup (`MediaCropService.getMany`) for `coverImageUrl`/a
+    // gathering photo's `crop` sibling, shared by `EventsService` and
+    // `EventPhotosService`.
+    MediaCropsModule,
   ],
   controllers: [
     EventsController,

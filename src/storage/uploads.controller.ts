@@ -1,18 +1,31 @@
-import { Body, Controller, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  HttpCode,
+  HttpStatus,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import { Throttle, seconds } from '@nestjs/throttler';
 import {
   CurrentUser,
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { PresignRequestDto } from './dto/presign-request.dto';
 import { PresignUploadDto } from './dto/presign-upload.dto';
+import { SaveCropDto } from './dto/save-crop.dto';
+import { storageKeyOwnerId } from './storage-key';
 import { StorageService, PresignedUpload } from './storage.service';
 import { UserPresignThrottlerGuard } from './user-presign-throttler.guard';
 import {
   ApiBadRequestResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiNoContentResponse,
   ApiOperation,
   ApiTags,
   ApiUnauthorizedResponse,
@@ -31,7 +44,10 @@ import {
 @UseGuards(UserPresignThrottlerGuard, ActiveMemberGuard)
 @Throttle({ default: { limit: 20, ttl: seconds(60) } })
 export class UploadsController {
-  constructor(private readonly storage: StorageService) {}
+  constructor(
+    private readonly storage: StorageService,
+    private readonly mediaCropService: MediaCropService,
+  ) {}
 
   // pending-ok: avatar upload supports editing your own draft profile.
   // Legacy per-surface route — kept working for compatibility, delegates to
@@ -109,5 +125,31 @@ export class UploadsController {
       contentType: dto.contentType,
       byteSize: dto.byteSize,
     });
+  }
+
+  // Persists the reframe crop chosen for an already-uploaded image, keyed by
+  // storage key. `storageKeyOwnerId` decodes the owner embedded in the key
+  // itself (see storage-key.ts) so this can't be spoofed by passing someone
+  // else's key.
+  @Post('crop')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Save (or clear) the crop for an uploaded image' })
+  @ApiNoContentResponse({ description: 'Crop saved.' })
+  @ApiBadRequestResponse({
+    description: 'Invalid key or crop payload.',
+  })
+  @ApiForbiddenResponse({ description: 'The key does not belong to you.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  async saveCrop(
+    @CurrentUser() user: CurrentUserData,
+    @Body() body: SaveCropDto,
+  ): Promise<void> {
+    const ownerId = storageKeyOwnerId(body.key);
+    if (ownerId === null || ownerId !== user.userId) {
+      throw new ForbiddenException();
+    }
+    await this.mediaCropService.upsert(body.key, ownerId, body.crop);
   }
 }

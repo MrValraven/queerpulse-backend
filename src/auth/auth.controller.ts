@@ -47,6 +47,8 @@ import { resolvePostLoginRedirect, signInErrorUrl } from './safe-redirect';
 import { Throttle, seconds } from '@nestjs/throttler';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 import { toImageUrl } from '../common/image-url';
+import { cropFor } from '../media-crops/crop-response';
+import { MediaCropService } from '../media-crops/media-crops.service';
 
 // This controller inherits the app-wide `defaultVersion: '1'`, so its routes
 // answer at `/v1/auth/...` — which is where the SPA's versioned API client
@@ -71,6 +73,7 @@ export class AuthController {
     private readonly authService: AuthService,
     private readonly usersService: UsersService,
     private readonly config: ConfigService,
+    private readonly mediaCropService: MediaCropService,
   ) {}
 
   private cookieOpts() {
@@ -278,12 +281,18 @@ export class AuthController {
     // A suspended/banned member is locked out of every gated route, so the
     // account-suspended/banned page has no authed endpoint to call for the
     // reason — it rides on `me` (JWT-only) instead. Null for everyone else.
-    const [suspensionInfo, staffRoles] = await Promise.all([
+    const [suspensionInfo, staffRoles, avatarCrops] = await Promise.all([
       this.authService.suspensionInfoFor(user),
       // Additive functional grants (STAFF_ROLES) on top of `role` — the
       // frontend capability layer (useMyStaffRoles) reads this. Empty array
       // for a member holding none; admins are a superset resolved client-side.
       this.authService.staffRolesFor(user.id),
+      // Single-key batched lookup (mirrors every other surface's
+      // `MediaCropService.getMany` usage) — a lone GET so `me` still fires one
+      // extra query at most, never per-field.
+      this.mediaCropService.getMany(
+        user.profile?.avatarUrl ? [user.profile.avatarUrl] : [],
+      ),
     ]);
     return {
       id: user.id,
@@ -307,7 +316,11 @@ export class AuthController {
       // origin → a broken image for every uploaded photo. Google avatars are already
       // absolute `https://` URLs, so `toImageUrl` passes them through untouched.
       profile: user.profile
-        ? { ...user.profile, avatarUrl: toImageUrl(user.profile.avatarUrl) }
+        ? {
+            ...user.profile,
+            avatarUrl: toImageUrl(user.profile.avatarUrl),
+            avatarCrop: cropFor(user.profile.avatarUrl, avatarCrops),
+          }
         : null,
       staffRoles,
       // { suspendedUntil, suspension } — both null unless the member is suspended.

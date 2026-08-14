@@ -24,6 +24,7 @@ import {
   Paginated,
 } from '../common/pagination';
 import { Event, EventStatus } from '../events/entities/event.entity';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { SavedItem, SavedKind } from '../saved/entities/saved-item.entity';
 import { Profile } from '../users/entities/profile.entity';
 import {
@@ -51,6 +52,7 @@ import {
   ReviewDTO,
   SafeSpaceCardDTO,
   SafeSpaceListDTO,
+  listingPhotoKeys,
   toDirectoryCard,
   toDirectoryDetail,
   toPartnerSpace,
@@ -83,6 +85,9 @@ export class DirectoryService {
     private readonly memberVouches: Repository<SafeSpaceMemberVouch>,
     private readonly contentModeration: ContentModerationService,
     private readonly notifications: NotificationsService,
+    // Batched crop lookup (`MediaCropService.getMany`) for `photos`'s
+    // per-slot `photoCrops` sibling.
+    private readonly mediaCropService: MediaCropService,
   ) {}
 
   // A directory business is reported (and taken down) under either the
@@ -303,6 +308,9 @@ export class DirectoryService {
     const reviewAuthors = await this.resolveReviewAuthors(reviews);
     const ownerSlug = await this.resolveOwnerSlug(listing);
     const memberVouches = await this.loadSafeSpaceMemberVouches(listing.id);
+    const crops = await this.mediaCropService.getMany(
+      listingPhotoKeys(listing.photos),
+    );
     return toDirectoryDetail(
       listing,
       reviews,
@@ -311,6 +319,7 @@ export class DirectoryService {
       reviewAuthors,
       ownerSlug,
       memberVouches,
+      crops,
     );
   }
 

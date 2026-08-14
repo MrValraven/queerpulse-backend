@@ -51,5 +51,6 @@ import { PublicEligibilityService } from './public-eligibility.service';
   ],
   controllers: [PublicEligibilityController],
   providers: [PublicEligibilityService],
+  exports: [PublicEligibilityService],
 })
 export class PublicEligibilityModule {}

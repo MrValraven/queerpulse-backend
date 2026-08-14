@@ -23,6 +23,7 @@ import {
   EventVisibility,
 } from '../events/entities/event.entity';
 import { HandlesService } from '../handles/handles.service';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { CreateSubprofileDTO } from './dto/create-subprofile.dto';
 import { ListDirectoryQuery } from './dto/list-directory.query';
@@ -73,6 +74,7 @@ import {
 import {
   EndorserView,
   FollowerView,
+  imageKeysFor,
   SubprofileCardView,
   SubprofilePublicView,
   SubprofileSearchRow,
@@ -233,6 +235,9 @@ export class SubprofilesService {
     private readonly credits: SubprofileCreditsService,
     // Public/card read surface + shared batched resolvers (extracted).
     private readonly publicRead: SubprofilePublicReadService,
+    // Batched crop lookup for `avatarUrl`/`coverUrl`/item `imageUrl` — see
+    // `MediaCropService.getMany` and `../media-crops/crop-response.ts`.
+    private readonly mediaCropService: MediaCropService,
     // Emits `subprofile.deleted` so co-owners are notified when a creator
     // deletes a persona they share (Task 4). Globally available via
     // `EventEmitterModule` at the app root.
@@ -433,6 +438,11 @@ export class SubprofilesService {
       userId,
       [...itemsById.values()].flat(),
     );
+    // ONE batched crop lookup for every persona's avatar/cover + every item
+    // image in the whole list — never a per-persona/per-item query.
+    const crops = await this.mediaCropService.getMany(
+      sps.flatMap((sp) => imageKeysFor(sp, itemsById.get(sp.id) ?? [])),
+    );
     return sps.map((sp) =>
       toSubprofileDTO(
         sp,
@@ -443,6 +453,7 @@ export class SubprofilesService {
         affiliationsById.get(sp.id) ?? [],
         collaboratorsByHandle,
         memberCountsById.get(sp.id) ?? 1,
+        crops,
       ),
     );
   }
@@ -1177,6 +1188,8 @@ export class SubprofilesService {
     // (Personas redesign Phase 2 dashboard plan Decision §5).
     const memberCount =
       (await this.membership.loadMemberCountsFor([sp.id])).get(sp.id) ?? 1;
+    // Shared by both return paths below, same reasoning as `memberCount`.
+    const crops = await this.mediaCropService.getMany(imageKeysFor(sp, items));
 
     if (!unlinked) {
       // Linked personas render nested and never carry a global handle.
@@ -1192,6 +1205,7 @@ export class SubprofilesService {
         [],
         new Map(),
         memberCount,
+        crops,
       );
     }
 
@@ -1239,6 +1253,7 @@ export class SubprofilesService {
       [],
       new Map(),
       memberCount,
+      crops,
     );
   }
 
@@ -1485,6 +1500,7 @@ export class SubprofilesService {
       sp.userId,
       items,
     );
+    const crops = await this.mediaCropService.getMany(imageKeysFor(sp, items));
     return toSubprofileDTO(
       sp,
       items,
@@ -1494,6 +1510,7 @@ export class SubprofilesService {
       affiliations,
       collaboratorsByHandle,
       memberCount,
+      crops,
     );
   }
 

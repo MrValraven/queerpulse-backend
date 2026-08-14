@@ -3,6 +3,8 @@
 // drift. No DB access, no side effects — safe to unit-test directly.
 
 import { toImageUrl } from '../common/image-url';
+import type { CropRect } from '../media-crops/crop-rect';
+import { cropFor } from '../media-crops/crop-response';
 import {
   Subprofile,
   SubprofileKind,
@@ -28,6 +30,9 @@ export interface SubprofileItemView {
   description: string | null;
   url: string | null;
   imageUrl: string | null;
+  /** Crop rect for `imageUrl`, when the owner reframed it — absent (never a
+   * bare `undefined` key on the wire) for an image with no saved crop. */
+  crop?: CropRect;
   date: string | null;
   meta: string | null;
   tags: string[];
@@ -97,9 +102,13 @@ export interface SubprofileView {
   handle: string | null;
   displayName: string;
   avatarUrl: string | null;
+  /** Crop rect for `avatarUrl`, when the owner reframed it. */
+  avatarCrop?: CropRect;
   tagline: string | null;
   bio: string | null;
   coverUrl: string | null;
+  /** Crop rect for `coverUrl`, when the owner reframed it. */
+  coverCrop?: CropRect;
   accent: string | null;
   availability: string | null;
   ctaLabel: string | null;
@@ -151,9 +160,13 @@ export interface SubprofilePublicView {
   handle: string | null;
   displayName: string;
   avatarUrl: string | null;
+  /** Crop rect for `avatarUrl`, when the owner reframed it. */
+  avatarCrop?: CropRect;
   tagline: string | null;
   bio: string | null;
   coverUrl: string | null;
+  /** Crop rect for `coverUrl`, when the owner reframed it. */
+  coverCrop?: CropRect;
   accent: string | null;
   availability: string | null;
   ctaLabel: string | null;
@@ -191,6 +204,8 @@ export interface SubprofileCardView {
   kind: SubprofileKind;
   displayName: string;
   avatarUrl: string | null;
+  /** Crop rect for `avatarUrl`, when the owner reframed it. */
+  crop?: CropRect;
   tagline: string | null;
   accent: string | null;
   availability: string | null;
@@ -217,9 +232,31 @@ export interface SubprofileOwnerRef {
   name: string;
 }
 
+// The raw stored keys (or external URLs — `toBareKey`/`cropFor` treat those
+// as opaque, unmatched, keys) a persona's response DTO is about to emit an
+// image for: its own avatar/cover plus every item's image. Collect these
+// BEFORE `toImageUrl` resolves them to fetchable URLs, so
+// `MediaCropService.getMany` can batch-resolve every crop for a page (or a
+// single persona) in ONE query. Shared by `SubprofilesService` (owner reads)
+// and `SubprofilePublicReadService` (public reads).
+export function imageKeysFor(
+  subprofile: Pick<Subprofile, 'avatarUrl' | 'coverUrl'>,
+  items: Pick<SubprofileItem, 'imageUrl'>[],
+): string[] {
+  return [
+    ...(subprofile.avatarUrl ? [subprofile.avatarUrl] : []),
+    ...(subprofile.coverUrl ? [subprofile.coverUrl] : []),
+    ...items.flatMap((item) => (item.imageUrl ? [item.imageUrl] : [])),
+  ];
+}
+
 export function toItemView(
   item: SubprofileItem,
   collaboratorsByHandle: Map<string, CollaboratorView> = new Map(),
+  // Pre-loaded crop lookup (batched by the caller via `MediaCropService.getMany`)
+  // — see the module doc on `toSubprofileDTO` for why this stays a plain Map
+  // parameter rather than an async fetch inside this (deliberately sync) mapper.
+  crops: Map<string, CropRect> = new Map(),
 ): SubprofileItemView {
   return {
     id: item.id,
@@ -229,6 +266,7 @@ export function toItemView(
     description: item.description,
     url: item.url,
     imageUrl: toImageUrl(item.imageUrl),
+    crop: cropFor(item.imageUrl, crops),
     date: item.date,
     meta: item.meta,
     tags: item.tags ?? [],
@@ -280,6 +318,11 @@ export function toSubprofileDTO(
   affiliations: AffiliationView[] = [],
   collaboratorsByHandle: Map<string, CollaboratorView> = new Map(),
   memberCount = 1,
+  // Pre-loaded crop lookup for `avatarUrl`/`coverUrl`/every item `imageUrl` —
+  // the caller batches ONE `MediaCropService.getMany` for the whole page
+  // (owner list, single owner read, publish, etc.) and passes the resulting
+  // Map straight through; this mapper stays synchronous.
+  crops: Map<string, CropRect> = new Map(),
 ): SubprofileView {
   return {
     id: subprofile.id,
@@ -288,9 +331,11 @@ export function toSubprofileDTO(
     handle: subprofile.handle,
     displayName: subprofile.displayName,
     avatarUrl: toImageUrl(subprofile.avatarUrl),
+    avatarCrop: cropFor(subprofile.avatarUrl, crops),
     tagline: subprofile.tagline,
     bio: subprofile.bio,
     coverUrl: toImageUrl(subprofile.coverUrl),
+    coverCrop: cropFor(subprofile.coverUrl, crops),
     accent: subprofile.accent,
     availability: subprofile.availability,
     ctaLabel: subprofile.ctaLabel,
@@ -300,7 +345,7 @@ export function toSubprofileDTO(
     status: subprofile.status,
     position: subprofile.position,
     items: sortItems(items).map((item) =>
-      toItemView(item, collaboratorsByHandle),
+      toItemView(item, collaboratorsByHandle, crops),
     ),
     socialLinks: sortSocialLinks(socialLinks).map(toSocialLinkView),
     endorsementCount,
@@ -323,6 +368,8 @@ export function toPublicDTO(
   affiliations: AffiliationView[] = [],
   collaboratorsByHandle: Map<string, CollaboratorView> = new Map(),
   viewerIsMember = false,
+  // Pre-loaded crop lookup — see `toSubprofileDTO`'s param doc.
+  crops: Map<string, CropRect> = new Map(),
 ): SubprofilePublicView {
   const view: SubprofilePublicView = {
     id: subprofile.id,
@@ -331,12 +378,14 @@ export function toPublicDTO(
     handle: subprofile.handle,
     displayName: subprofile.displayName,
     avatarUrl: toImageUrl(subprofile.avatarUrl),
+    avatarCrop: cropFor(subprofile.avatarUrl, crops),
     tagline: subprofile.tagline,
     bio: subprofile.bio,
     // Cover/accent/availability/CTA/socialLinks are persona-owned presence
     // fields — never identifying — so they are exposed here for BOTH linked
     // and unlinked personas. Only ownerSlug/ownerName (below) stay linked-only.
     coverUrl: toImageUrl(subprofile.coverUrl),
+    coverCrop: cropFor(subprofile.coverUrl, crops),
     accent: subprofile.accent,
     availability: subprofile.availability,
     ctaLabel: subprofile.ctaLabel,
@@ -344,7 +393,7 @@ export function toPublicDTO(
     linkVisibility: subprofile.linkVisibility,
     status: subprofile.status,
     items: sortItems(items).map((item) =>
-      toItemView(item, collaboratorsByHandle),
+      toItemView(item, collaboratorsByHandle, crops),
     ),
     socialLinks: sortSocialLinks(socialLinks).map(toSocialLinkView),
     // endorsementCount/viewerEndorsed/followerCount/viewerFollowing are
@@ -399,12 +448,15 @@ export function toCardDTO(
   tags: string[] = [],
   followerCount = 0,
   ownerSlug: string | null = null,
+  // Pre-loaded crop lookup — see `toSubprofileDTO`'s param doc.
+  crops: Map<string, CropRect> = new Map(),
 ): SubprofileCardView {
   return {
     handle: subprofile.handle ?? '',
     kind: subprofile.kind,
     displayName: subprofile.displayName,
     avatarUrl: toImageUrl(subprofile.avatarUrl),
+    crop: cropFor(subprofile.avatarUrl, crops),
     tagline: subprofile.tagline,
     accent: subprofile.accent,
     availability: subprofile.availability,

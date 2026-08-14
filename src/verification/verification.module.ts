@@ -24,7 +24,11 @@ import { VerificationService } from './verification.service';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([MemberVerification, VerificationEvent, VerificationRequest]),
+    TypeOrmModule.forFeature([
+      MemberVerification,
+      VerificationEvent,
+      VerificationRequest,
+    ]),
     // UsersModule exports the Profile repository (member-ref hydration) and
     // the User repository (`computeSignals`'s `accountAgeDays`, off
     // `users.created_at`).

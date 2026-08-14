@@ -114,9 +114,7 @@ const OPEN_REQUEST_STATUSES: readonly VerificationRequestStatus[] = [
 /** The moderator action `decideRequest` accepts, mapped 1:1 to the request's
  * next status via `targetStatusForAction`. */
 export type VerificationRequestDecisionAction =
-  | 'in_review'
-  | 'approve'
-  | 'reject';
+  'in_review' | 'approve' | 'reject';
 
 /** SQL `CASE` expression mapping `member_verifications.level` to its rank on
  * the ladder (`VERIFICATION_LEVEL_ORDER`'s index) for the `sort=level` keyset
@@ -134,7 +132,10 @@ const LEVEL_RANK_CASE_EXPRESSION = `CASE "member_verification"."level" ${VERIFIC
  * to unit-test with fixed dates on both sides. */
 function wholeDaysBetween(from: Date, to: Date): number {
   const millisecondsPerDay = 24 * 60 * 60 * 1000;
-  return Math.max(0, Math.floor((to.getTime() - from.getTime()) / millisecondsPerDay));
+  return Math.max(
+    0,
+    Math.floor((to.getTime() - from.getTime()) / millisecondsPerDay),
+  );
 }
 
 /**
@@ -484,9 +485,7 @@ export class VerificationService {
    * so the controller re-loads the ref itself rather than this service
    * reaching back into the HTTP layer's response shape. */
   async getMemberRef(userId: string): Promise<MemberRef | null> {
-    const members = await new MemberLookup(this.profiles).byUserIds([
-      userId,
-    ]);
+    const members = await new MemberLookup(this.profiles).byUserIds([userId]);
     return members.get(userId) ?? null;
   }
 
@@ -1516,9 +1515,7 @@ export class VerificationService {
       throw new NotFoundException('Verification request not found');
     }
     if (request.userId !== userId) {
-      throw new ForbiddenException(
-        'You do not own this verification request',
-      );
+      throw new ForbiddenException('You do not own this verification request');
     }
     return request;
   }

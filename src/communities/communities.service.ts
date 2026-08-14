@@ -22,6 +22,7 @@ import {
   Paginated,
 } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -136,6 +137,9 @@ export class CommunitiesService {
     // Second-vouch join gating reads the platform vouch graph to check whether a
     // current community member has vouched for an applicant.
     private readonly vouch: VouchService,
+    // Batched crop lookup (`MediaCropService.getMany`) for `coverImageUrl`'s
+    // sibling `coverCrop`.
+    private readonly mediaCropService: MediaCropService,
   ) {}
 
   // A community is taken down under the `community` taxonomy code, keyed by its
@@ -1223,17 +1227,22 @@ export class CommunitiesService {
     myRole?: RosterRole | null,
     moderation?: ContentModerationState,
   ): Promise<CommunityDetailDTO> {
-    const [role, stats, ownerProfile, myJoinRequest] = await Promise.all([
-      myRole !== undefined
-        ? Promise.resolve(myRole)
-        : this.myRole(community.id, viewerId),
-      this.statsFor(community.id),
-      this.profiles.findOne({ where: { userId: community.ownerId } }),
-      this.joinRequests.findOne({
-        where: { communityId: community.id, userId: viewerId },
-        order: { createdAt: 'DESC' },
-      }),
-    ]);
+    const [role, stats, ownerProfile, myJoinRequest, crops] = await Promise.all(
+      [
+        myRole !== undefined
+          ? Promise.resolve(myRole)
+          : this.myRole(community.id, viewerId),
+        this.statsFor(community.id),
+        this.profiles.findOne({ where: { userId: community.ownerId } }),
+        this.joinRequests.findOne({
+          where: { communityId: community.id, userId: viewerId },
+          order: { createdAt: 'DESC' },
+        }),
+        this.mediaCropService.getMany(
+          community.coverImageUrl ? [community.coverImageUrl] : [],
+        ),
+      ],
+    );
     return toCommunityDetail(
       community,
       stats,
@@ -1241,6 +1250,7 @@ export class CommunitiesService {
       toMemberRef(ownerProfile),
       myJoinRequest?.status ?? null,
       moderation,
+      crops,
     );
   }
 

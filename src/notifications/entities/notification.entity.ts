@@ -120,6 +120,18 @@ export enum NotificationType {
   // carries `{ fromLevel, toLevel }` for the bell copy. See migration
   // `AddVerificationUpdateNotificationType1789100100000`.
   VerificationUpdate = 'verification_update',
+  // Sent to a member when the (forthcoming) XP/badge awarding engine credits
+  // them with enough XP to cross a level threshold. System-driven, no actor,
+  // no preference toggle: like `VerificationUpdate`, it is the platform
+  // reporting on the member's own standing. Payload carries `{ level, name }`
+  // for the bell copy. See migration
+  // `AddRecognitionNotificationTypes1789600000000`.
+  XpLevelUp = 'xp_level_up',
+  // Sent to a member when the (forthcoming) XP/badge awarding engine grants
+  // them a badge. System-driven, no actor, no preference toggle. Payload
+  // carries `{ badgeName }` for the bell copy. See migration
+  // `AddRecognitionNotificationTypes1789600000000`.
+  BadgeEarned = 'badge_earned',
 }
 
 @Entity('notifications')

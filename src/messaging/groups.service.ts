@@ -8,6 +8,8 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { toImageUrl } from '../common/image-url';
+import { cropFor } from '../media-crops/crop-response';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { ConnectionsService } from '../connections/connections.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -74,6 +76,9 @@ export class GroupsService {
     private readonly eventEmitter: EventEmitter2,
     private readonly connectionsService: ConnectionsService,
     private readonly blockFilter: BlockFilterService,
+    // Batched crop lookup (`MediaCropService.getMany`) for a group's
+    // `avatarUrl` sibling `avatarCrop`.
+    private readonly mediaCropService: MediaCropService,
   ) {}
 
   /**
@@ -738,6 +743,9 @@ export class GroupsService {
       clearedLastMessage ? [clearedLastMessage.id] : [],
       userId,
     );
+    const avatarCrops = await this.mediaCropService.getMany(
+      convo.avatarUrl ? [convo.avatarUrl] : [],
+    );
 
     return {
       id: convo.id,
@@ -761,6 +769,7 @@ export class GroupsService {
       kind: 'group',
       title: convo.title,
       avatarUrl: toImageUrl(convo.avatarUrl),
+      avatarCrop: cropFor(convo.avatarUrl, avatarCrops),
       memberCount: members.length,
       members,
       isOfficial: false,

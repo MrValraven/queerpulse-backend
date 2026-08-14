@@ -1,4 +1,6 @@
 import { toImageUrl } from '../common/image-url';
+import type { CropRect } from '../media-crops/crop-rect';
+import { cropFor } from '../media-crops/crop-response';
 import {
   ArticleBlock,
   MagazineArticle,
@@ -36,6 +38,8 @@ export interface IssueResponse {
   dek: string;
   publishedOn: string;
   coverUrl: string | null;
+  /** Crop rect for `coverUrl`, when a staff editor reframed it. */
+  crop?: CropRect;
 }
 
 export interface ArticleListItem {
@@ -87,13 +91,20 @@ export function toAuthorResponse(author: MagazineAuthor): AuthorResponse {
   };
 }
 
-export function toIssueResponse(issue: MagazineIssue): IssueResponse {
+export function toIssueResponse(
+  issue: MagazineIssue,
+  // Pre-loaded crop lookup — the caller batches ONE `MediaCropService.getMany`
+  // and passes the resulting Map straight through; this mapper stays
+  // synchronous.
+  crops: Map<string, CropRect> = new Map(),
+): IssueResponse {
   return {
     number: issue.number,
     title: issue.title,
     dek: issue.dek,
     publishedOn: issue.publishedOn,
     coverUrl: toImageUrl(issue.coverUrl),
+    crop: cropFor(issue.coverUrl, crops),
   };
 }
 

@@ -13,6 +13,7 @@ import { randomBytes } from 'node:crypto';
 import { In, Repository, SelectQueryBuilder } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -114,6 +115,9 @@ export class EventsService {
     // both (fix round 2 moved `scopedVisibilityWhere` there so
     // `EventBookmarksService` could reuse it too — see its class doc).
     private readonly audienceGate: EventAudienceGateService,
+    // Batched crop lookup (`MediaCropService.getMany`) for `coverImageUrl`'s
+    // sibling `coverCrop`.
+    private readonly mediaCropService: MediaCropService,
   ) {}
 
   // Events are reported (and taken down) under the `event` taxonomy code, keyed
@@ -817,6 +821,11 @@ export class EventsService {
       userId,
       eventIds,
     );
+    // ...and ONE batched crop lookup for every event's cover on the page —
+    // never a per-event query.
+    const crops = await this.mediaCropService.getMany(
+      events.flatMap((e) => (e.coverImageUrl ? [e.coverImageUrl] : [])),
+    );
 
     return events.map((e) =>
       toEventSummary(
@@ -824,6 +833,7 @@ export class EventsService {
         goingByEvent.get(e.id) ?? 0,
         myRsvpByEvent.get(e.id) ?? null,
         bookmarkedIds.has(e.id),
+        crops,
       ),
     );
   }
@@ -846,6 +856,7 @@ export class EventsService {
       cohostRows,
       isBookmarked,
       communitySlug,
+      crops,
     ] = await Promise.all([
       this.rsvps.count({
         where: { eventId: event.id, status: RsvpStatus.Going },
@@ -863,6 +874,9 @@ export class EventsService {
       event.communityId
         ? this.membership.slugById(event.communityId)
         : Promise.resolve(null),
+      this.mediaCropService.getMany(
+        event.coverImageUrl ? [event.coverImageUrl] : [],
+      ),
     ]);
     const organizerIds = [event.hostId, ...cohostRows.map((c) => c.userId)];
     const profiles = await this.profilesByUserIds(organizerIds);
@@ -875,6 +889,7 @@ export class EventsService {
       goingCount,
       myRsvp ?? null,
       isBookmarked,
+      crops,
     );
     return {
       ...summary,

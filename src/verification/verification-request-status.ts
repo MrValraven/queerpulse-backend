@@ -18,7 +18,10 @@ export enum VerificationRequestStatus {
 }
 
 /** Legal next-states. Empty array = terminal for the actor path. Enforced server-side. */
-export const LEGAL_TRANSITIONS: Record<VerificationRequestStatus, VerificationRequestStatus[]> = {
+export const LEGAL_TRANSITIONS: Record<
+  VerificationRequestStatus,
+  VerificationRequestStatus[]
+> = {
   [VerificationRequestStatus.Pending]: [
     VerificationRequestStatus.InReview,
     VerificationRequestStatus.Approved,

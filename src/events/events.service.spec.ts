@@ -10,6 +10,7 @@ import { CommunityMembershipService } from '../communities/community-membership.
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersService } from '../users/users.service';
@@ -155,6 +156,10 @@ describe('EventsService', () => {
         { provide: CommunityMembershipService, useValue: membership },
         { provide: EventBookmarksService, useValue: bookmarks },
         { provide: EventAudienceGateService, useValue: audienceGate },
+        {
+          provide: MediaCropService,
+          useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
+        },
       ],
     }).compile();
     service = module.get(EventsService);

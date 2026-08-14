@@ -5,6 +5,7 @@ import { CommunityMember } from '../communities/entities/community-member.entity
 import { ConnectionsModule } from '../connections/connections.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { HandlesModule } from '../handles/handles.module';
+import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { SocialModule } from '../social/social.module';
 import { StorageModule } from '../storage/storage.module';
 import { UsersModule } from '../users/users.module';
@@ -55,6 +56,9 @@ import { ProfilesService } from './profiles.service';
     // `ContentModerationService` — the member read path honours a moderator
     // `hide_content`/`remove_content` takedown on a `member` subject.
     ContentModerationModule,
+    // Batched crop lookup (`MediaCropService.getMany`) for a work item's
+    // `imageUrl` sibling `crop`.
+    MediaCropsModule,
   ],
   controllers: [
     ProfilesController,

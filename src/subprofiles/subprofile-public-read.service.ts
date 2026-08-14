@@ -19,6 +19,7 @@ import {
   EventVisibility,
 } from '../events/entities/event.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -47,6 +48,7 @@ import { SubprofileMembershipService } from './subprofile-membership.service';
 import {
   AffiliationView,
   CollaboratorView,
+  imageKeysFor,
   restrictedAccessBody,
   SubprofileCardView,
   SubprofileOwnerRef,
@@ -102,6 +104,9 @@ export class SubprofilePublicReadService {
     private readonly endorsementsService: SubprofileEndorsementsService,
     private readonly followersService: SubprofileFollowersService,
     private readonly membership: SubprofileMembershipService,
+    // Batched crop lookup for `avatarUrl`/`coverUrl`/item `imageUrl` — see
+    // `MediaCropService.getMany` and `../media-crops/crop-response.ts`.
+    private readonly mediaCropService: MediaCropService,
   ) {}
 
   // A persona is reported (and taken down) under the `subprofile` subject code,
@@ -225,6 +230,11 @@ export class SubprofilePublicReadService {
       viewerId,
       [...itemsById.values()].flat(),
     );
+    // ONE batched crop lookup for every persona's avatar/cover + every item
+    // image in the whole list — never a per-persona/per-item query.
+    const crops = await this.mediaCropService.getMany(
+      sps.flatMap((sp) => imageKeysFor(sp, itemsById.get(sp.id) ?? [])),
+    );
     const viewerMemberIds = new Set(
       viewerMemberRows.map((row) => row.subprofileId),
     );
@@ -245,6 +255,7 @@ export class SubprofilePublicReadService {
         affiliationsById.get(sp.id) ?? [],
         collaboratorsByHandle,
         viewerMemberIds.has(sp.id),
+        crops,
       ),
     );
   }
@@ -399,6 +410,7 @@ export class SubprofilePublicReadService {
       viewerId,
       items,
     );
+    const crops = await this.mediaCropService.getMany(imageKeysFor(sp, items));
     return toPublicDTO(
       sp,
       items,
@@ -411,6 +423,7 @@ export class SubprofilePublicReadService {
       affiliations,
       collaboratorsByHandle,
       isOwner,
+      crops,
     );
   }
 
@@ -506,25 +519,37 @@ export class SubprofilePublicReadService {
     const linkedUserIds = [
       ...new Set(
         rows
-          .filter((row) => row.linkVisibility === SubprofileLinkVisibility.Linked)
+          .filter(
+            (row) => row.linkVisibility === SubprofileLinkVisibility.Linked,
+          )
           .map((row) => row.userId),
       ),
     ];
     // The four per-page fan-out reads are mutually independent — batched into
     // one round trip. Each is ONE grouped query over the page's ids, never
     // per-card (Personas redesign Phase 4, design plan Decision §3).
-    const [socialCountsById, tagsById, followerCountsById, ownerProfiles] =
-      await Promise.all([
-        this.loadSocialCountsFor(rowIds),
-        this.loadContentTagsFor(rowIds),
-        this.followersService.loadFollowerCountsFor(rowIds),
-        linkedUserIds.length > 0
-          ? this.profiles.find({
-              where: { userId: In(linkedUserIds) },
-              select: ['userId', 'slug'],
-            })
-          : Promise.resolve([]),
-      ]);
+    const [
+      socialCountsById,
+      tagsById,
+      followerCountsById,
+      ownerProfiles,
+      crops,
+    ] = await Promise.all([
+      this.loadSocialCountsFor(rowIds),
+      this.loadContentTagsFor(rowIds),
+      this.followersService.loadFollowerCountsFor(rowIds),
+      linkedUserIds.length > 0
+        ? this.profiles.find({
+            where: { userId: In(linkedUserIds) },
+            select: ['userId', 'slug'],
+          })
+        : Promise.resolve([]),
+      // ONE batched crop lookup for every card's avatar on the page — never
+      // a per-card query.
+      this.mediaCropService.getMany(
+        rows.flatMap((row) => (row.avatarUrl ? [row.avatarUrl] : [])),
+      ),
+    ]);
     const ownerSlugByUserId = new Map(
       ownerProfiles.map((profile) => [profile.userId, profile.slug]),
     );
@@ -536,6 +561,7 @@ export class SubprofilePublicReadService {
           tagsById.get(row.id) ?? [],
           followerCountsById.get(row.id) ?? 0,
           ownerSlugByUserId.get(row.userId) ?? null,
+          crops,
         ),
       ),
       total,

@@ -60,6 +60,7 @@ function build(overrides: { rsvp?: unknown; photoRow?: unknown } = {}) {
   const storage = {
     createPresignedDownload: jest.fn().mockResolvedValue('https://signed/url'),
   };
+  const mediaCropService = { getMany: jest.fn().mockResolvedValue(new Map()) };
   const service = new EventPhotosService(
     photos as never,
     events as never,
@@ -67,8 +68,9 @@ function build(overrides: { rsvp?: unknown; photoRow?: unknown } = {}) {
     profiles,
     eventsService as never,
     storage as never,
+    mediaCropService as never,
   );
-  return { service, events, rsvps, photos, storage };
+  return { service, events, rsvps, photos, storage, mediaCropService };
 }
 
 describe('EventPhotosService', () => {

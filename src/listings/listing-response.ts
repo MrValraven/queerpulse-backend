@@ -1,6 +1,8 @@
 import { toImageUrl } from '../common/image-url';
 import { MemberRef } from '../common/member-ref';
 import { Event } from '../events/entities/event.entity';
+import type { CropRect } from '../media-crops/crop-rect';
+import { cropFor } from '../media-crops/crop-response';
 import {
   ListingEditSuggestion,
   ListingEditSuggestionStatus,
@@ -32,6 +34,42 @@ export interface ListingPhotoSetView {
   vibe: string | null;
 }
 
+/** Per-slot crop rects for `ListingPhotoSetView` — a sibling map, not inline
+ * on each slot, since `ListingPhotoSetView`'s fields are plain `string | null`
+ * (mirrored verbatim by the frontend `ListingDraft` contract). A slot with no
+ * saved crop is simply absent (never a bare `undefined` key on the wire). */
+export interface ListingPhotoCropSetView {
+  wide?: CropRect;
+  d1?: CropRect;
+  d2?: CropRect;
+  vibe?: CropRect;
+}
+
+/** Builds the per-slot crop lookup for a listing's four photo slots from a
+ * pre-loaded `MediaCropService.getMany` Map — the caller batches ONE lookup
+ * for the whole page/detail; this stays synchronous. */
+function toPhotoCrops(
+  photos: ListingPhotoSet,
+  crops: Map<string, CropRect>,
+): ListingPhotoCropSetView {
+  return {
+    wide: cropFor(photos.wide, crops),
+    d1: cropFor(photos.d1, crops),
+    d2: cropFor(photos.d2, crops),
+    vibe: cropFor(photos.vibe, crops),
+  };
+}
+
+/** The raw stored keys (or external URLs) a listing's four photo slots are
+ * about to emit — collected BEFORE `toImageUrl` resolves them, so
+ * `MediaCropService.getMany` can batch-resolve every crop for a page (or a
+ * single listing) in ONE query. */
+export function listingPhotoKeys(photos: ListingPhotoSet): string[] {
+  return [photos.wide, photos.d1, photos.d2, photos.vibe].filter(
+    (key): key is string => Boolean(key),
+  );
+}
+
 /**
  * `ListingDTO` — matches the frontend's `ListingDTO` in
  * `listings.api.ts` exactly: every `ListingDraft` field spread flat, plus
@@ -58,6 +96,8 @@ export interface ListingDTO {
   tags: string[];
   goodFor: string[];
   langs: string[];
+  /** Online-only business (no physical location). */
+  online: boolean;
   address: string;
   geocoded: boolean;
   latitude: number | null;
@@ -66,6 +106,8 @@ export interface ListingDTO {
   hoursNote: string;
   social: ListingSocial;
   photos: ListingPhotoSetView;
+  /** Per-slot crop rects for `photos` — see `ListingPhotoCropSetView`. */
+  photoCrops: ListingPhotoCropSetView;
   alt: ListingPhotoSet;
   rel: string;
   ownerName: string;
@@ -237,6 +279,9 @@ export interface DirectoryCardDTO {
   av: string;
   owned: boolean;
   memberFirst: string | null;
+  /** Online-only business (no physical location) — the card shows an "Online"
+   *  badge instead of a neighbourhood and never pins the map. */
+  online: boolean;
   // Map pin, when the owner placed one while listing. null ⇒ list-only (no pin).
   latitude: number | null;
   longitude: number | null;
@@ -263,6 +308,7 @@ export function toDirectoryCard(listing: Listing): DirectoryCardDTO {
     // The "run by <first>" line names the owner, so it follows their chosen
     // visibility — null for `anon`/`role` (where `owner.first` is blank).
     memberFirst: listing.linkToProfile ? owner.first || null : null,
+    online: listing.online ?? false,
     latitude: listing.latitude ?? null,
     longitude: listing.longitude ?? null,
     safeSpaceStatus: listing.safeSpaceStatus,
@@ -445,6 +491,8 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
    * per empty slot. The FE renders these as a gallery; `gallery` (alt-text
    * captions) remains the fallback for listings/demo places without photos. */
   photos: ListingPhotoSetView;
+  /** Per-slot crop rects for `photos` — see `ListingPhotoCropSetView`. */
+  photoCrops: ListingPhotoCropSetView;
   alt: ListingPhotoSet;
   /** Real per-weekday opening hours, keyed by the FE `DAYS` id (`Mon`..`Sun`).
    * The FE computes an open/closed status from this; empty → status unknown. */
@@ -495,6 +543,10 @@ export function toDirectoryDetail(
    * `SafeSpaceVouch` shape by `DirectoryService`. Merged AFTER the curated
    * jsonb vouches so both surface on the detail page. */
   memberVouches: SafeSpaceVouch[] = [],
+  // Pre-loaded crop lookup for the four `photos` slots — the caller batches
+  // ONE `MediaCropService.getMany` (see `listingPhotoKeys`) and passes the
+  // resulting Map straight through; this mapper stays synchronous.
+  crops: Map<string, CropRect> = new Map(),
 ): DirectoryDetailDTO {
   const tint = tintForSlug(listing.slug);
   return {
@@ -521,6 +573,7 @@ export function toDirectoryDetail(
       d2: toImageUrl(listing.photos.d2),
       vibe: toImageUrl(listing.photos.vibe),
     },
+    photoCrops: toPhotoCrops(listing.photos, crops),
     alt: listing.alt,
     hours: listing.hours,
     langs: listing.langs,
@@ -574,6 +627,10 @@ export function toDirectoryDetail(
 export function toListingDTO(
   listing: Listing,
   submittedBy: MemberRef | null,
+  // Pre-loaded crop lookup for the four `photos` slots — the caller batches
+  // ONE `MediaCropService.getMany` (see `listingPhotoKeys`) and passes the
+  // resulting Map straight through; this mapper stays synchronous.
+  crops: Map<string, CropRect> = new Map(),
 ): ListingDTO {
   return {
     ref: listing.ref,
@@ -596,6 +653,7 @@ export function toListingDTO(
     tags: listing.tags,
     goodFor: listing.goodFor,
     langs: listing.langs,
+    online: listing.online ?? false,
     address: listing.address,
     geocoded: listing.geocoded,
     latitude: listing.latitude ?? null,
@@ -609,6 +667,7 @@ export function toListingDTO(
       d2: toImageUrl(listing.photos.d2),
       vibe: toImageUrl(listing.photos.vibe),
     },
+    photoCrops: toPhotoCrops(listing.photos, crops),
     alt: listing.alt,
     rel: listing.rel,
     ownerName: listing.ownerName,

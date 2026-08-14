@@ -22,16 +22,14 @@ import { Collection } from '../collections/entities/collection.entity';
 import { Listing } from '../listings/entities/listing.entity';
 import { Company } from '../companies/entities/company.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
+import { FILES_PREFIX, toBareKey } from '../storage/bare-key';
 
-const FILES_PREFIX = '/files/';
-
-/** A stored reference may be the raw storage key (`avatars/<id>/x.jpg`) or a
- * `/files/<key>` URL. Normalises either form to the bare key. */
-export function toBareKey(value: string): string {
-  return value.startsWith(FILES_PREFIX)
-    ? value.slice(FILES_PREFIX.length)
-    : value;
-}
+// Re-exported so every existing importer of `toBareKey` from this module
+// (and the coverage spec) keeps working unchanged. The implementation now
+// lives in the entity-free `src/storage/bare-key.ts` so consumers that only
+// need key normalisation (e.g. `media-crops`) don't have to pull in this
+// file's ~15 entity imports.
+export { toBareKey } from '../storage/bare-key';
 
 /** Both stored forms a bare key can appear as in a column. */
 export function storedForms(bareKeys: string[]): string[] {

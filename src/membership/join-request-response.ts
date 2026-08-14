@@ -16,6 +16,7 @@ export interface JoinRequestView {
   email: string;
   city: string | null;
   message: string;
+  source: string | null;
   status: JoinRequestStatus;
   ageAttestedAt: Date;
   termsVersion: string;
@@ -46,6 +47,7 @@ export function toJoinRequestView(
     email: request.email,
     city: request.city,
     message: request.message,
+    source: request.source,
     status: request.status,
     ageAttestedAt: request.ageAttestedAt,
     termsVersion: request.termsVersion,

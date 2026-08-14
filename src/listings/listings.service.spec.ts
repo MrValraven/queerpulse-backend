@@ -6,6 +6,7 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -113,6 +114,7 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   tags: [],
   goodFor: [],
   langs: [],
+  online: false,
   address: '',
   geocoded: false,
   latitude: null,
@@ -261,6 +263,10 @@ describe('ListingsService', () => {
         // reports pipeline. `create` is only reached for friendly/suggested
         // listings, so a bare mock suffices for the existing cases.
         { provide: ReportsService, useValue: { create: jest.fn() } },
+        {
+          provide: MediaCropService,
+          useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
+        },
       ],
     }).compile();
     service = module.get(ListingsService);

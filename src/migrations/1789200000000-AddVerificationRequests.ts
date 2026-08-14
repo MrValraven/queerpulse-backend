@@ -42,9 +42,13 @@ export class AddVerificationRequests1789200000000 implements MigrationInterface 
     `);
 
     // Queue filters (status + dimension).
-    await queryRunner.query(`CREATE INDEX "IDX_verification_requests_status_type" ON "verification_requests" ("status", "type")`);
+    await queryRunner.query(
+      `CREATE INDEX "IDX_verification_requests_status_type" ON "verification_requests" ("status", "type")`,
+    );
     // Member's own request history.
-    await queryRunner.query(`CREATE INDEX "IDX_verification_requests_user" ON "verification_requests" ("user_id")`);
+    await queryRunner.query(
+      `CREATE INDEX "IDX_verification_requests_user" ON "verification_requests" ("user_id")`,
+    );
     // Partial index backing the nav badge's open-request count — only the
     // rows that are actually "in flight" need to be scanned.
     await queryRunner.query(`
@@ -56,7 +60,9 @@ export class AddVerificationRequests1789200000000 implements MigrationInterface 
   public async down(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`DROP INDEX "IDX_verification_requests_open"`);
     await queryRunner.query(`DROP INDEX "IDX_verification_requests_user"`);
-    await queryRunner.query(`DROP INDEX "IDX_verification_requests_status_type"`);
+    await queryRunner.query(
+      `DROP INDEX "IDX_verification_requests_status_type"`,
+    );
     await queryRunner.query(`DROP TABLE "verification_requests"`);
     await queryRunner.query(`DROP TYPE "verification_request_status_enum"`);
   }

@@ -126,6 +126,9 @@ export class JoinRequestsService {
       status: JoinRequestStatus.Pending,
       ageAttestedAt: new Date(),
       termsVersion: dto.termsVersion,
+      // Trimmed to null so a stray `''` from the frontend reads as "no source"
+      // rather than an empty attribution the queue would have to special-case.
+      source: dto.source?.trim() || null,
     });
     try {
       return toSubmittedJoinRequestView(await this.joinRequests.save(request));

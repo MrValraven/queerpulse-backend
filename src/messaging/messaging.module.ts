@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConnectionsModule } from '../connections/connections.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
+import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
 import { ConversationsService } from './conversations.service';
@@ -51,6 +52,9 @@ import { MessagingService } from './messaging.service';
     // `MessagingCoreService` can inject the moderation-state repository to
     // tombstone moderator-taken-down messages in thread reads.
     ContentModerationModule,
+    // Batched crop lookup (`MediaCropService.getMany`) for a group's
+    // `avatarUrl` sibling `avatarCrop`.
+    MediaCropsModule,
   ],
   controllers: [ConversationsController, MessageRequestController],
   providers: [

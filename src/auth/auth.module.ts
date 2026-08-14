@@ -7,6 +7,7 @@ import { AccountDeactivation } from '../account/entities/account-deactivation.en
 import { DeletionRequest } from '../account/entities/deletion-request.entity';
 import { EmailSuppression } from '../account/entities/email-suppression.entity';
 import { Notification } from '../notifications/entities/notification.entity';
+import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { UsersModule } from '../users/users.module';
 import { MembershipModule } from '../membership/membership.module';
 import { VouchModule } from '../vouch/vouch.module';
@@ -35,6 +36,9 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     // AuthModule — so this adds no dependency cycle.
     ConnectionsModule,
     PlatformSettingsModule,
+    // Batched crop lookup (`MediaCropService.getMany`) for `GET /auth/me`'s
+    // `profile.avatarUrl` sibling `avatarCrop`.
+    MediaCropsModule,
     PassportModule,
     // User: JwtStrategy re-reads status/role per request so bans take effect
     // immediately rather than lagging by the access-token TTL.

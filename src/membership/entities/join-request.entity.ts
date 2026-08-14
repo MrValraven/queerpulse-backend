@@ -40,6 +40,17 @@ export class JoinRequest {
   @Column({ type: 'text' })
   message!: string;
 
+  /**
+   * Which frontend entry point the applicant came through — the CTA that sent
+   * them to the invite request form (e.g. `homepage_hero`, `skills`,
+   * `sign_in`). A stable key owned by the frontend catalogue, not a URL, so the
+   * admin queue can show "came from …" without the backend knowing the route
+   * map. Nullable: legacy rows predate the column, and someone who opens the
+   * request page directly has no originating CTA.
+   */
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  source!: string | null;
+
   @Column({
     type: 'enum',
     enum: JoinRequestStatus,

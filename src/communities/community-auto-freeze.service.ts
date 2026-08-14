@@ -159,10 +159,7 @@ export class CommunityAutoFreezeService {
             where.orWhere(
               'report.subject_type IN (:...contentTypes) AND report.subject_id IN (:...contentIds)',
               {
-                contentTypes: [
-                  ReportSubjectType.Post,
-                  ReportSubjectType.Reply,
-                ],
+                contentTypes: [ReportSubjectType.Post, ReportSubjectType.Reply],
                 contentIds,
               },
             );

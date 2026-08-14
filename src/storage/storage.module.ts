@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { User } from '../users/entities/user.entity';
 import { FilesController } from './files.controller';
 import { OptionalJwtAuthGuard } from './optional-jwt-auth.guard';
@@ -12,7 +13,8 @@ import { UserPresignThrottlerGuard } from './user-presign-throttler.guard';
   // a storage key and refuse to serve a suspended/banned member's media to
   // ordinary viewers (its own `forFeature`, mirroring how other modules
   // register their own `User` copy rather than importing `UsersModule`).
-  imports: [TypeOrmModule.forFeature([User])],
+  // `MediaCropsModule` supplies `MediaCropService` for `POST /uploads/crop`.
+  imports: [TypeOrmModule.forFeature([User]), MediaCropsModule],
   controllers: [UploadsController, FilesController],
   providers: [StorageService, UserPresignThrottlerGuard, OptionalJwtAuthGuard],
   exports: [StorageService],

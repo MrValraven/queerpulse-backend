@@ -1,6 +1,7 @@
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { PresignRequestDto } from './dto/presign-request.dto';
 import { PresignUploadDto } from './dto/presign-upload.dto';
 import { StorageService, PresignedUpload } from './storage.service';
@@ -25,12 +26,19 @@ const PRESIGNED: PresignedUpload = {
 describe('UploadsController', () => {
   let controller: UploadsController;
   let storage: { presignImageUpload: jest.Mock };
+  let mediaCropService: { upsert: jest.Mock };
 
   beforeEach(() => {
     storage = {
       presignImageUpload: jest.fn().mockResolvedValue(PRESIGNED),
     };
-    controller = new UploadsController(storage as unknown as StorageService);
+    mediaCropService = {
+      upsert: jest.fn().mockResolvedValue(undefined),
+    };
+    controller = new UploadsController(
+      storage as unknown as StorageService,
+      mediaCropService as unknown as MediaCropService,
+    );
   });
 
   // The controller is a thin pass-through: it forwards the authenticated

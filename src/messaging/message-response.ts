@@ -1,4 +1,5 @@
 import { toImageUrl } from '../common/image-url';
+import type { CropRect } from '../media-crops/crop-rect';
 import { Profile } from '../users/entities/profile.entity';
 import { ConversationRole } from './entities/conversation-participant.entity';
 import {
@@ -294,6 +295,8 @@ export interface ConversationResponse {
   title: string | null;
   /** Group avatar URL (null for DMs — the counterpart's avatar is used). */
   avatarUrl: string | null;
+  /** Crop rect for `avatarUrl`, when a group admin reframed it. */
+  avatarCrop?: CropRect;
   /** Active (not-left) member count for a group; 0 for DMs. Drives the header
    *  subtitle ("5 members"). */
   memberCount: number;

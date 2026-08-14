@@ -5,6 +5,7 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RecognitionService } from './recognition.service';
+import { RecognitionAwardingService } from './recognition-awarding.service';
 import {
   ApiCookieAuth,
   ApiForbiddenResponse,
@@ -25,7 +26,10 @@ import {
 @Controller('me/recognition')
 @UseGuards(ActiveMemberGuard)
 export class MyRecognitionController {
-  constructor(private readonly recognitionService: RecognitionService) {}
+  constructor(
+    private readonly recognitionService: RecognitionService,
+    private readonly awarding: RecognitionAwardingService,
+  ) {}
 
   @ApiOperation({ summary: "Get the caller's level, badges, and perks" })
   @ApiOkResponse({
@@ -34,7 +38,15 @@ export class MyRecognitionController {
   @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
   @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
   @Get()
-  getMine(@CurrentUser() user: CurrentUserData) {
+  async getMine(@CurrentUser() user: CurrentUserData) {
+    // Recompute (throttled to once / 5 min inside the service) so the read
+    // reflects fresh XP/badges and fires level-up / badge notifications.
+    // Best-effort: a recompute failure must not blank the recognition page.
+    try {
+      await this.awarding.recompute(user);
+    } catch {
+      // swallow. fall through to whatever is already materialized
+    }
     return this.recognitionService.getForUser(user.userId, true);
   }
 }

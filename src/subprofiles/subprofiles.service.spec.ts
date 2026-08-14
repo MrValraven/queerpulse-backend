@@ -14,6 +14,7 @@ import { Community } from '../communities/entities/community.entity';
 import { Event } from '../events/entities/event.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 import { HandlesService } from '../handles/handles.service';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
@@ -740,15 +741,15 @@ describe('SubprofilesService', () => {
     };
 
     membership = {
-      isMember: jest.fn().mockImplementation(
-        async (userId: string, subprofileId: string) => {
+      isMember: jest
+        .fn()
+        .mockImplementation(async (userId: string, subprofileId: string) => {
           const row = await members.findOne({
             where: { subprofileId, userId },
             select: { id: true },
           });
           return row !== null;
-        },
-      ),
+        }),
       getOwned: jest.fn(),
       assertMember: jest.fn(),
       listMembers: jest.fn().mockResolvedValue([]),
@@ -758,8 +759,9 @@ describe('SubprofilesService', () => {
       // (a grouped tally keyed by subprofileId) via members.find rather than
       // its real createQueryBuilder call, since the shared `members` mock
       // only implements the repository-style methods this file already uses.
-      loadMemberCountsFor: jest.fn().mockImplementation(
-        async (subprofileIds: string[]) => {
+      loadMemberCountsFor: jest
+        .fn()
+        .mockImplementation(async (subprofileIds: string[]) => {
           const counts = new Map<string, number>();
           if (!subprofileIds.length) return counts;
           const rows: { subprofileId: string }[] = await members.find({
@@ -772,8 +774,7 @@ describe('SubprofilesService', () => {
             );
           }
           return counts;
-        },
-      ),
+        }),
     };
     // getOwned/assertMember/leave reference `membership` by closure, so they
     // are wired up after the object literal exists rather than inline in it.
@@ -789,8 +790,8 @@ describe('SubprofilesService', () => {
         return sp;
       },
     );
-    membership.assertMember.mockImplementation(
-      (userId: string, id: string) => membership.getOwned(userId, id),
+    membership.assertMember.mockImplementation((userId: string, id: string) =>
+      membership.getOwned(userId, id),
     );
     membership.leave.mockImplementation(async (userId: string, id: string) => {
       await membership.getOwned(userId, id);
@@ -881,11 +882,18 @@ describe('SubprofilesService', () => {
       // Backs replaceSection's collaborator validation. Mirrors
       // SubprofilePublicReadService.resolveHandles for the member-owned-handle
       // path only (the persona-handle path isn't exercised by any test here).
-      resolveHandles: jest.fn().mockImplementation(
-        async (handleNames: string[], viewerId: string) => {
+      resolveHandles: jest
+        .fn()
+        .mockImplementation(async (handleNames: string[], viewerId: string) => {
           const collaboratorByHandle = new Map<
             string,
-            { handle: string; type: string; name: string; avatarUrl: string | null; slug: string | null }
+            {
+              handle: string;
+              type: string;
+              name: string;
+              avatarUrl: string | null;
+              slug: string | null;
+            }
           >();
           const uniqueHandles = [...new Set(handleNames)];
           if (!uniqueHandles.length) return collaboratorByHandle;
@@ -929,23 +937,21 @@ describe('SubprofilesService', () => {
             }
           }
           return collaboratorByHandle;
-        },
-      ),
+        }),
       resolveCollaboratorsFor: jest.fn().mockResolvedValue(new Map()),
       loadItemsFor: jest.fn().mockResolvedValue(new Map()),
       loadSocialLinksFor: jest.fn().mockResolvedValue(new Map()),
       resolveAffiliationsFor: jest.fn().mockResolvedValue(new Map()),
-      listForProfile: jest.fn().mockImplementation(
-        async (ownerSlug: string, viewerId: string) => {
+      listForProfile: jest
+        .fn()
+        .mockImplementation(async (ownerSlug: string, viewerId: string) => {
           const profile = await profiles.findOne({
             where: { slug: ownerSlug },
           });
           if (!profile) {
             throw new NotFoundException('Profile not found');
           }
-          if (
-            await blockFilter.isBlockedEitherWay(viewerId, profile.userId)
-          ) {
+          if (await blockFilter.isBlockedEitherWay(viewerId, profile.userId)) {
             return [];
           }
           const memberRows: { subprofileId: string }[] = await members.find({
@@ -969,51 +975,54 @@ describe('SubprofilesService', () => {
             name: `${profile.firstName} ${profile.lastName}`.trim(),
           };
           return linkedSps.map((sp) => toPublicDTO(sp, [], owner));
-        },
-      ),
-      getByHandle: jest.fn().mockImplementation(
-        async (handle: string, viewer: CurrentUserData | undefined) => {
-          const sp = await subprofiles.findOne({
-            where: {
-              handle,
-              linkVisibility: SubprofileLinkVisibility.Unlinked,
-            },
-          });
-          if (!sp) {
-            throw new NotFoundException('Subprofile not found');
-          }
-          return buildPublicView(sp, viewer, undefined);
-        },
-      ),
-      getBySlugForProfile: jest.fn().mockImplementation(
-        async (
-          ownerSlug: string,
-          subslug: string,
-          viewer: CurrentUserData | undefined,
-        ) => {
-          const profile = await profiles.findOne({
-            where: { slug: ownerSlug },
-          });
-          if (!profile) {
-            throw new NotFoundException('Profile not found');
-          }
-          const sp = await subprofiles.findOne({
-            where: {
-              slug: subslug,
-              userId: profile.userId,
-              linkVisibility: SubprofileLinkVisibility.Linked,
-            },
-          });
-          if (!sp) {
-            throw new NotFoundException('Subprofile not found');
-          }
-          const owner = {
-            slug: profile.slug,
-            name: `${profile.firstName} ${profile.lastName}`.trim(),
-          };
-          return buildPublicView(sp, viewer, owner);
-        },
-      ),
+        }),
+      getByHandle: jest
+        .fn()
+        .mockImplementation(
+          async (handle: string, viewer: CurrentUserData | undefined) => {
+            const sp = await subprofiles.findOne({
+              where: {
+                handle,
+                linkVisibility: SubprofileLinkVisibility.Unlinked,
+              },
+            });
+            if (!sp) {
+              throw new NotFoundException('Subprofile not found');
+            }
+            return buildPublicView(sp, viewer, undefined);
+          },
+        ),
+      getBySlugForProfile: jest
+        .fn()
+        .mockImplementation(
+          async (
+            ownerSlug: string,
+            subslug: string,
+            viewer: CurrentUserData | undefined,
+          ) => {
+            const profile = await profiles.findOne({
+              where: { slug: ownerSlug },
+            });
+            if (!profile) {
+              throw new NotFoundException('Profile not found');
+            }
+            const sp = await subprofiles.findOne({
+              where: {
+                slug: subslug,
+                userId: profile.userId,
+                linkVisibility: SubprofileLinkVisibility.Linked,
+              },
+            });
+            if (!sp) {
+              throw new NotFoundException('Subprofile not found');
+            }
+            const owner = {
+              slug: profile.slug,
+              name: `${profile.firstName} ${profile.lastName}`.trim(),
+            };
+            return buildPublicView(sp, viewer, owner);
+          },
+        ),
       // `SubprofilesService.directory` is a pure one-line delegation to
       // `this.publicRead.directory(query, viewerId)` (subprofiles.service.ts)
       // — it owns no pagination/filter/batch logic of its own. A faithful
@@ -1094,6 +1103,10 @@ describe('SubprofilesService', () => {
         { provide: SubprofileCreditsService, useValue: credits },
         { provide: SubprofilePublicReadService, useValue: publicRead },
         { provide: EventEmitter2, useValue: eventEmitter },
+        {
+          provide: MediaCropService,
+          useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
+        },
       ],
     }).compile();
     service = module.get(SubprofilesService);
@@ -1868,12 +1881,7 @@ describe('SubprofilesService', () => {
         const savedItems = [
           { title: 'Collab track', collaborators: ['alice'] },
         ];
-        await service.replaceSection(
-          'user-1',
-          'sp-1',
-          'projects',
-          savedItems,
-        );
+        await service.replaceSection('user-1', 'sp-1', 'projects', savedItems);
 
         expect(credits.computeNewlyCreditedHandles).toHaveBeenCalledWith(
           'sp-1',
@@ -1892,7 +1900,9 @@ describe('SubprofilesService', () => {
             ],
           ]),
         );
-        expect(credits.emitSubprofileCreditNotifications).toHaveBeenCalledTimes(1);
+        expect(credits.emitSubprofileCreditNotifications).toHaveBeenCalledTimes(
+          1,
+        );
         expect(credits.emitSubprofileCreditNotifications).toHaveBeenCalledWith(
           sp,
           'sp-1',
@@ -1934,7 +1944,9 @@ describe('SubprofilesService', () => {
           SubprofileSection.Projects,
           expect.any(Map),
         );
-        expect(credits.emitSubprofileCreditNotifications).not.toHaveBeenCalled();
+        expect(
+          credits.emitSubprofileCreditNotifications,
+        ).not.toHaveBeenCalled();
       });
 
       it('swallows an emitSubprofileCreditNotifications rejection rather than failing the save (best-effort, post-commit)', async () => {
@@ -1963,7 +1975,9 @@ describe('SubprofilesService', () => {
             { title: 'Collab track', collaborators: ['alice'] },
           ]),
         ).resolves.toBeDefined();
-        expect(credits.emitSubprofileCreditNotifications).toHaveBeenCalledTimes(1);
+        expect(credits.emitSubprofileCreditNotifications).toHaveBeenCalledTimes(
+          1,
+        );
       });
     });
 
@@ -2340,8 +2354,7 @@ describe('SubprofilesService', () => {
       };
       manager.findOne.mockImplementation((entity: unknown) => {
         if (entity === SubprofileItem) return Promise.resolve(currentItem);
-        if (entity === SubprofileItemRevision)
-          return Promise.resolve(revision);
+        if (entity === SubprofileItemRevision) return Promise.resolve(revision);
         return Promise.resolve(null);
       });
 
@@ -2354,8 +2367,7 @@ describe('SubprofilesService', () => {
       ) as [unknown, Partial<SubprofileItemRevision>] | undefined;
       expect(revisionCreateCall).toBeDefined();
       expect(
-        (revisionCreateCall![1].snapshot as unknown as { title: string })
-          .title,
+        (revisionCreateCall![1].snapshot as unknown as { title: string }).title,
       ).toBe('B');
 
       // The live item now carries the restored ('A') content, and its

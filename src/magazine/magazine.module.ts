@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -72,6 +73,9 @@ import { StorySubmissionsService } from './story-submissions.service';
     // party (editor → writer, or writer → editor) whenever a piece message
     // is posted.
     NotificationsModule,
+    // Batched crop lookup (`MediaCropService.getMany`) for an issue's
+    // `coverUrl` sibling `crop`.
+    MediaCropsModule,
   ],
   controllers: [
     MagazineController,

@@ -7,6 +7,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { validateDeckSlides } from './deck-slides.validation';
 import { CreateDeckDto } from './dto/create-deck.dto';
 import { UpdateDeckDto } from './dto/update-deck.dto';
@@ -59,6 +60,9 @@ export class MagazineService {
     private readonly issues: Repository<MagazineIssue>,
     @InjectRepository(MagazineDeck)
     private readonly decks: Repository<MagazineDeck>,
+    // Batched crop lookup (`MediaCropService.getMany`) for an issue's
+    // `coverUrl` sibling `crop`.
+    private readonly mediaCropService: MediaCropService,
   ) {}
 
   async listIssues(): Promise<IssueResponse[]> {
@@ -75,7 +79,12 @@ export class MagazineService {
       },
       order: { number: 'DESC' },
     });
-    return rows.map(toIssueResponse);
+    // ONE batched crop lookup for every issue cover on the page — never a
+    // per-issue query.
+    const crops = await this.mediaCropService.getMany(
+      rows.flatMap((row) => (row.coverUrl ? [row.coverUrl] : [])),
+    );
+    return rows.map((row) => toIssueResponse(row, crops));
   }
 
   async getIssueByNumber(number: string): Promise<IssueResponse> {
@@ -83,7 +92,10 @@ export class MagazineService {
     if (!issue) {
       throw new NotFoundException('Issue not found');
     }
-    return toIssueResponse(issue);
+    const crops = await this.mediaCropService.getMany(
+      issue.coverUrl ? [issue.coverUrl] : [],
+    );
+    return toIssueResponse(issue, crops);
   }
 
   async listArticles(

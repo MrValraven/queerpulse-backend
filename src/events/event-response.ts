@@ -1,5 +1,7 @@
 import { toImageUrl } from '../common/image-url';
 import { Paginated } from '../common/pagination';
+import type { CropRect } from '../media-crops/crop-rect';
+import { cropFor } from '../media-crops/crop-response';
 import { Profile } from '../users/entities/profile.entity';
 import { Event } from './entities/event.entity';
 import { EventLineupEntry } from './entities/event-lineup-entry.entity';
@@ -21,6 +23,8 @@ export interface EventSummary {
   venue: string | null;
   isOnline: boolean;
   coverImageUrl: string | null;
+  /** Crop rect for `coverImageUrl`, when the host reframed it. */
+  coverCrop?: CropRect;
   visibility: string;
   status: string;
   capacity: number | null;
@@ -129,6 +133,10 @@ export function toEventSummary(
   goingCount: number,
   myRsvp: EventRsvp | null,
   isBookmarked: boolean,
+  // Pre-loaded crop lookup for `coverImageUrl` — the caller batches ONE
+  // `MediaCropService.getMany` and passes the resulting Map straight through;
+  // this mapper stays synchronous.
+  crops: Map<string, CropRect> = new Map(),
 ): EventSummary {
   return {
     slug: e.slug,
@@ -139,6 +147,7 @@ export function toEventSummary(
     venue: e.venue,
     isOnline: e.isOnline,
     coverImageUrl: toImageUrl(e.coverImageUrl),
+    coverCrop: cropFor(e.coverImageUrl, crops),
     visibility: e.visibility,
     status: e.status,
     capacity: e.capacity,

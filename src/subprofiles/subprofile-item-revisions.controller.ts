@@ -85,8 +85,7 @@ export class SubprofileItemRevisionsController {
 
   @Post(':subprofileId/items/:itemId/revisions/:revisionId/restore')
   @ApiOperation({
-    summary:
-      'Restore a saved revision onto a portfolio item (non-destructive)',
+    summary: 'Restore a saved revision onto a portfolio item (non-destructive)',
   })
   @ApiCreatedResponse({ description: '`{ ok: true }` once restored.' })
   @ApiForbiddenResponse({ description: 'The subprofile is not yours.' })

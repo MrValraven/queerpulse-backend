@@ -1,4 +1,6 @@
 import { toImageUrl } from '../common/image-url';
+import type { CropRect } from '../media-crops/crop-rect';
+import { cropFor } from '../media-crops/crop-response';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { directoryBlurb } from './directory-blurb';
 import { FeaturedCommunityRefView } from './featured-communities';
@@ -32,6 +34,8 @@ export interface WorkView {
   title: string;
   year: string;
   imageUrl: string | null;
+  /** Crop rect for `imageUrl`, when the owner reframed it. */
+  crop?: CropRect;
 }
 
 export interface BoardView {
@@ -194,6 +198,10 @@ export function toFullProfile(
   // The Interests preferences are private; only surface them to the owner. Any
   // other viewer of a full (open/network) profile gets empty arrays.
   isOwner = false,
+  // Pre-loaded crop lookup for `rels.work[].imageUrl` — the caller batches ONE
+  // `MediaCropService.getMany` for the whole profile read and passes the
+  // resulting Map straight through; this mapper stays synchronous.
+  crops: Map<string, CropRect> = new Map(),
 ): FullProfileResponse {
   return {
     ...toProfileCard(p, vouchCount),
@@ -221,6 +229,7 @@ export function toFullProfile(
       title: workItem.title,
       year: workItem.year,
       imageUrl: toImageUrl(workItem.imageUrl),
+      crop: cropFor(workItem.imageUrl, crops),
     })),
     board: rels.board.map((b) => ({
       kind: b.kind,

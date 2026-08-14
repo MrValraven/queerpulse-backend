@@ -12,6 +12,7 @@ import {
 import { ConnectionsService } from '../connections/connections.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { HandlesService } from '../handles/handles.service';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { StorageService } from '../storage/storage.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Community } from '../communities/entities/community.entity';
@@ -152,6 +153,10 @@ describe('ProfilesService.getBySlug visibility', () => {
           useValue: {
             statesForAnyType: jest.fn().mockResolvedValue(new Map()),
           },
+        },
+        {
+          provide: MediaCropService,
+          useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
         },
       ],
     }).compile();
@@ -579,6 +584,10 @@ describe('ProfilesService replace-list endpoints', () => {
           useValue: {
             statesForAnyType: jest.fn().mockResolvedValue(new Map()),
           },
+        },
+        {
+          provide: MediaCropService,
+          useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
         },
       ],
     }).compile();

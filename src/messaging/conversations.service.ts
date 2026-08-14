@@ -10,6 +10,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Not, Repository } from 'typeorm';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { toImageUrl } from '../common/image-url';
+import { cropFor } from '../media-crops/crop-response';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
@@ -49,6 +51,9 @@ export class ConversationsService {
     private readonly core: MessagingCoreService,
     private readonly blockFilter: BlockFilterService,
     private readonly eventEmitter: EventEmitter2,
+    // Batched crop lookup (`MediaCropService.getMany`) for a group's
+    // `avatarUrl` sibling `avatarCrop`.
+    private readonly mediaCropService: MediaCropService,
   ) {}
 
   async listConversations(userId: string): Promise<ConversationResponse[]> {
@@ -120,9 +125,18 @@ export class ConversationsService {
     // One query for the newest (non-deleted) message per conversation and one
     // grouped query for this user's unread counts — replaces the previous
     // per-conversation findOne + count (N+1).
-    const [lastByConvo, unreadByConvo] = await Promise.all([
+    // ONE batched crop lookup for every group avatar in the inbox — never a
+    // per-conversation query. DM/official threads carry no `avatarUrl`.
+    const [lastByConvo, unreadByConvo, groupAvatarCrops] = await Promise.all([
       this.core.lastMessagesByConversation(convoIds),
       this.core.unreadCountsByConversation(convoIds, userId),
+      this.mediaCropService.getMany(
+        convos.flatMap((convo) =>
+          convo.kind === ConversationKind.Group && convo.avatarUrl
+            ? [convo.avatarUrl]
+            : [],
+        ),
+      ),
     ]);
     const reactionsByMessage = await this.core.reactionSummariesByMessage(
       [...lastByConvo.values()].map((m) => m.id),
@@ -213,6 +227,9 @@ export class ConversationsService {
         kind: isGroup ? 'group' : 'direct',
         title: isGroup ? convo.title : null,
         avatarUrl: isGroup ? toImageUrl(convo.avatarUrl) : null,
+        avatarCrop: isGroup
+          ? cropFor(convo.avatarUrl, groupAvatarCrops)
+          : undefined,
         memberCount: members.length,
         members,
         isOfficial: convo.isOfficial,

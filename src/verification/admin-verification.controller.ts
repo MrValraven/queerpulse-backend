@@ -63,8 +63,7 @@ export class AdminVerificationController {
 
   @Get()
   @ApiOperation({
-    summary:
-      'List, search, and sort member verification records for review',
+    summary: 'List, search, and sort member verification records for review',
   })
   @ApiOkResponse({
     description: 'A page of verification rows plus per-level tab counts.',
@@ -176,7 +175,9 @@ export class AdminVerificationController {
   @ApiOperation({
     summary: "Override a member's verification level (manual review)",
   })
-  @ApiOkResponse({ description: 'The updated, hand-mapped verification record.' })
+  @ApiOkResponse({
+    description: 'The updated, hand-mapped verification record.',
+  })
   async override(
     @Param('userId', ParseUUIDPipe) userId: string,
     @Body() dto: OverrideVerificationDto,

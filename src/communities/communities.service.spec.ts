@@ -8,6 +8,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { VouchService } from '../vouch/vouch.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -224,6 +225,10 @@ describe('CommunitiesService', () => {
         {
           provide: VouchService,
           useValue: { hasActiveVouchFrom: jest.fn().mockResolvedValue(false) },
+        },
+        {
+          provide: MediaCropService,
+          useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
         },
       ],
     }).compile();

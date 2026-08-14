@@ -10,9 +10,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * online without `transaction = false`, matching the `AddCommunityArchivedAt`
  * precedent for adding a column to `communities`.
  */
-export class AddCommunitySafetyPolicies1788900000000
-  implements MigrationInterface
-{
+export class AddCommunitySafetyPolicies1788900000000 implements MigrationInterface {
   name = 'AddCommunitySafetyPolicies1788900000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

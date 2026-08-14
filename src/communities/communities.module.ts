@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
+import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { MentionsModule } from '../mentions/mentions.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { Report } from '../reports/entities/report.entity';
@@ -68,6 +69,9 @@ import { MeCommunitiesController } from './me-communities.controller';
     // `StorageService` — delete a post's previous image object when an author
     // replaces or clears it on edit, so the superseded upload stops orphaning.
     StorageModule,
+    // Batched crop lookup (`MediaCropService.getMany`) for `coverImageUrl`'s
+    // sibling `coverCrop`.
+    MediaCropsModule,
   ],
   controllers: [
     CommunitiesController,

@@ -8,6 +8,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { MemberLookup } from '../common/member-ref';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { Profile } from '../users/entities/profile.entity';
 import { StorageService } from '../storage/storage.service';
 import { parseStorageKey } from '../storage/storage-key';
@@ -36,6 +37,8 @@ export class EventPhotosService {
     private readonly profiles: Repository<Profile>,
     private readonly eventsService: EventsService,
     private readonly storage: StorageService,
+    // Batched crop lookup (`MediaCropService.getMany`) for a photo's `crop`.
+    private readonly mediaCropService: MediaCropService,
   ) {
     this.memberLookup = new MemberLookup(this.profiles);
   }
@@ -84,10 +87,12 @@ export class EventPhotosService {
         }),
       );
     }
+    const crops = await this.mediaCropService.getMany([saved.storageKey]);
     const [view] = await toEventPhotoViews(
       [saved],
       this.storage,
       this.memberLookup,
+      crops,
     );
     // invariant: toEventPhotoViews returns one view per input row, and exactly
     // one row (`saved`) was passed in.
@@ -109,10 +114,16 @@ export class EventPhotosService {
       // paginated, so cap it rather than let one event load unboundedly.
       take: 200,
     });
+    // ONE batched crop lookup for every photo in the gallery — never a
+    // per-photo query.
+    const crops = await this.mediaCropService.getMany(
+      rows.map((row) => row.storageKey),
+    );
     const photos = await toEventPhotoViews(
       rows,
       this.storage,
       this.memberLookup,
+      crops,
     );
     return { photos };
   }

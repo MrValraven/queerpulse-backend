@@ -1,5 +1,7 @@
 import { toImageUrl } from '../common/image-url';
 import { MemberRef } from '../common/member-ref';
+import type { CropRect } from '../media-crops/crop-rect';
+import { cropFor } from '../media-crops/crop-response';
 import {
   AccessTier,
   Community,
@@ -74,6 +76,8 @@ export interface CommunityDetailDTO extends CommunityCardDTO {
   // Resolved (`toImageUrl`) cover-image URL, or null when the community has no
   // cover. The owner's edit form seeds its `ImageUploadField` from this.
   coverImageUrl: string | null;
+  /** Crop rect for `coverImageUrl`, when the owner reframed it. */
+  coverCrop?: CropRect;
   owner: MemberRef | null;
   createdAt: string;
   // True once an owner has archived the community. Only ever reaches an
@@ -120,6 +124,10 @@ export function toCommunityDetail(
   owner: MemberRef | null,
   myJoinRequestStatus: JoinRequestStatus | null,
   moderation?: CommunityContentModeration,
+  // Pre-loaded crop lookup for `coverImageUrl` — the caller batches ONE
+  // `MediaCropService.getMany` and passes the resulting Map straight through;
+  // this mapper stays synchronous.
+  crops: Map<string, CropRect> = new Map(),
 ): CommunityDetailDTO {
   return {
     ...toCommunityCard(c, stats, myRole),
@@ -129,6 +137,7 @@ export function toCommunityDetail(
     features: c.features,
     rules: c.rules,
     coverImageUrl: toImageUrl(c.coverImageUrl),
+    coverCrop: cropFor(c.coverImageUrl, crops),
     owner,
     createdAt: c.createdAt.toISOString(),
     archived: c.archivedAt != null,

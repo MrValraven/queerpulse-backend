@@ -138,7 +138,10 @@ describe('SubprofileCreditsService', () => {
       providers: [
         SubprofileCreditsService,
         { provide: getRepositoryToken(SubprofileItem), useValue: itemsRepo },
-        { provide: getRepositoryToken(SubprofileMember), useValue: membersRepo },
+        {
+          provide: getRepositoryToken(SubprofileMember),
+          useValue: membersRepo,
+        },
         { provide: getRepositoryToken(Handle), useValue: handleRegistry },
         { provide: getRepositoryToken(Profile), useValue: profilesRepo },
         { provide: NotificationsService, useValue: notifications },
@@ -265,7 +268,10 @@ describe('SubprofileCreditsService', () => {
         makeHandleRow({ name: 'alice', userId: 'user-2' }),
       ]);
       const items: SubprofileItemInputDTO[] = [
-        { title: 'Collab track', collaborators: ['alice'] } as SubprofileItemInputDTO,
+        {
+          title: 'Collab track',
+          collaborators: ['alice'],
+        },
       ];
 
       await service.emitSubprofileCreditNotifications(
@@ -292,7 +298,9 @@ describe('SubprofileCreditsService', () => {
 
     it('emits exactly one notification PER newly-credited handle, never once for the whole batch', async () => {
       const sp = makeSubprofile();
-      membersRepo.find.mockResolvedValue([{ userId: 'user-1' } as SubprofileMember]);
+      membersRepo.find.mockResolvedValue([
+        { userId: 'user-1' } as SubprofileMember,
+      ]);
       handleRegistry.find.mockResolvedValue([
         makeHandleRow({ name: 'alice', userId: 'user-2' }),
         makeHandleRow({ name: 'bob', userId: 'user-3' }),
@@ -301,7 +309,7 @@ describe('SubprofileCreditsService', () => {
         {
           title: 'Collab track',
           collaborators: ['alice', 'bob'],
-        } as SubprofileItemInputDTO,
+        },
       ];
 
       await service.emitSubprofileCreditNotifications(
@@ -330,7 +338,9 @@ describe('SubprofileCreditsService', () => {
     it('excludes the persona owner from notification even when their own handle is in newlyCreditedHandles (self-credit)', async () => {
       const sp = makeSubprofile();
       // The owner is the persona's only member.
-      membersRepo.find.mockResolvedValue([{ userId: 'user-1' } as SubprofileMember]);
+      membersRepo.find.mockResolvedValue([
+        { userId: 'user-1' } as SubprofileMember,
+      ]);
       // The credited handle's registered owner IS the persona's own owner.
       handleRegistry.find.mockResolvedValue([
         makeHandleRow({ name: 'nightowner', userId: 'user-1' }),
@@ -339,7 +349,7 @@ describe('SubprofileCreditsService', () => {
         {
           title: 'Solo track',
           collaborators: ['nightowner'],
-        } as SubprofileItemInputDTO,
+        },
       ];
 
       await service.emitSubprofileCreditNotifications(
@@ -364,7 +374,10 @@ describe('SubprofileCreditsService', () => {
         makeHandleRow({ name: 'coowner', userId: 'co-owner-2' }),
       ]);
       const items: SubprofileItemInputDTO[] = [
-        { title: 'Team piece', collaborators: ['coowner'] } as SubprofileItemInputDTO,
+        {
+          title: 'Team piece',
+          collaborators: ['coowner'],
+        },
       ];
 
       await service.emitSubprofileCreditNotifications(
@@ -382,7 +395,10 @@ describe('SubprofileCreditsService', () => {
       const sp = makeSubprofile();
       handleRegistry.find.mockResolvedValue([]); // handle no longer registered
       const items: SubprofileItemInputDTO[] = [
-        { title: 'Collab track', collaborators: ['ghost'] } as SubprofileItemInputDTO,
+        {
+          title: 'Collab track',
+          collaborators: ['ghost'],
+        },
       ];
 
       await service.emitSubprofileCreditNotifications(

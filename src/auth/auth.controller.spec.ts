@@ -10,6 +10,7 @@ import {
   resetImageUrlBaseForTesting,
   setImageUrlBase,
 } from '../common/image-url';
+import { MediaCropService } from '../media-crops/media-crops.service';
 
 const FRONTEND = 'https://app.example.com';
 
@@ -68,12 +69,14 @@ function build(configNodeEnv = 'test', domain?: string) {
   };
   const usersService = { findByIdWithProfile: jest.fn() };
   const config = makeConfig(configNodeEnv, domain);
+  const mediaCropService = { getMany: jest.fn().mockResolvedValue(new Map()) };
   const controller = new AuthController(
     authService as unknown as AuthService,
     usersService as unknown as UsersService,
     config as unknown as ConfigService,
+    mediaCropService as unknown as MediaCropService,
   );
-  return { controller, authService, usersService, config };
+  return { controller, authService, usersService, config, mediaCropService };
 }
 
 describe('AuthController.googleCallback', () => {

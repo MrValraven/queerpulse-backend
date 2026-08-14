@@ -5,6 +5,7 @@ import { Community } from '../communities/entities/community.entity';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { Event } from '../events/entities/event.entity';
 import { Handle } from '../handles/entities/handle.entity';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { DIRECTORY_MAX_LIMIT } from './dto/list-directory.query';
@@ -197,6 +198,10 @@ describe('SubprofilePublicReadService', () => {
           provide: SubprofileMembershipService,
           useValue: { isMember: jest.fn().mockResolvedValue(false) },
         },
+        {
+          provide: MediaCropService,
+          useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
+        },
       ],
     }).compile();
 
@@ -207,7 +212,10 @@ describe('SubprofilePublicReadService', () => {
 
   describe('directory', () => {
     it('reads getCount() BEFORE paging is applied, and total comes from getCount(), not rows.length', async () => {
-      const rows = [makeSubprofile({ id: 'sp-a' }), makeSubprofile({ id: 'sp-b' })];
+      const rows = [
+        makeSubprofile({ id: 'sp-a' }),
+        makeSubprofile({ id: 'sp-b' }),
+      ];
       // getCount deliberately disagrees with rows.length (37 vs. 2) so a
       // test that passed merely because `total === rows.length` cannot
       // slip through — this proves `total` is really read off `getCount()`.

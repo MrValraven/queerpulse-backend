@@ -197,6 +197,11 @@ export class Listing {
   @Column({ type: 'text', array: true, default: '{}' })
   langs!: string[];
 
+  /** Online-only business (no physical location). When true the listing has no
+   *  address or coordinates and never appears as a map pin. */
+  @Column({ type: 'boolean', default: false })
+  online!: boolean;
+
   @Column({ type: 'text', default: '' })
   address!: string;
 

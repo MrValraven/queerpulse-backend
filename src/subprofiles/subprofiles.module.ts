@@ -5,6 +5,7 @@ import { ContentModerationModule } from '../content-moderation/content-moderatio
 import { Event } from '../events/entities/event.entity';
 import { Handle } from '../handles/entities/handle.entity';
 import { HandlesModule } from '../handles/handles.module';
+import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
@@ -57,6 +58,9 @@ import { SubprofilesService } from './subprofiles.service';
     // Read-only: public persona reads (profile-nested / by-handle / directory /
     // search / sitemap) withhold a moderator-taken-down persona (keyed by slug).
     ContentModerationModule,
+    // Batched crop lookup (`MediaCropService.getMany`) for `avatarUrl`/
+    // `coverUrl`/item `imageUrl` surfaced on every subprofile response DTO.
+    MediaCropsModule,
     // `NotificationsService` — `replaceSection` emits `subprofile_credit` when
     // a save newly credits a member's @handle (Personas discovery Phase 5,
     // Moment 6). Plain import, no `forwardRef`: `NotificationsModule`

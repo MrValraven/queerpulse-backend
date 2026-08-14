@@ -14,9 +14,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * keeps it re-run-safe. `down()` is a no-op — Postgres has no
  * `ALTER TYPE ... DROP VALUE`, and the added label is harmless if left.
  */
-export class AddVerificationUpdateNotificationType1789100100000
-  implements MigrationInterface
-{
+export class AddVerificationUpdateNotificationType1789100100000 implements MigrationInterface {
   name = 'AddVerificationUpdateNotificationType1789100100000';
 
   transaction = false as const;

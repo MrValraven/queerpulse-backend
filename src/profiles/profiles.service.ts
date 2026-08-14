@@ -16,6 +16,7 @@ import { ConnectionStatus } from '../connections/entities/connection.entity';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { escapeLikeTerm } from '../common/like-escape';
 import { HandlesService } from '../handles/handles.service';
+import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { StorageService } from '../storage/storage.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
@@ -121,6 +122,9 @@ export class ProfilesService {
     private readonly handles: HandlesService,
     private readonly storage: StorageService,
     private readonly contentModeration: ContentModerationService,
+    // Batched crop lookup (`MediaCropService.getMany`) for a work item's
+    // `imageUrl` sibling `crop`.
+    private readonly mediaCropService: MediaCropService,
   ) {}
 
   /**
@@ -230,7 +234,14 @@ export class ProfilesService {
       related,
       featuredCommunities,
     };
-    return toFullProfile(profile, rels, vouchCount, isOwner);
+    // ONE batched crop lookup for every work item's image — never a per-item
+    // query.
+    const crops = await this.mediaCropService.getMany(
+      work.flatMap((workItem) =>
+        workItem.imageUrl ? [workItem.imageUrl] : [],
+      ),
+    );
+    return toFullProfile(profile, rels, vouchCount, isOwner, crops);
   }
 
   private async loadGroups(userId: string): Promise<GroupView[]> {

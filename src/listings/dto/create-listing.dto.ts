@@ -180,8 +180,18 @@ export class CreateListingDto {
   @IsIn(LISTING_CATEGORY_SLUGS, { each: true })
   cats!: string[];
 
-  // Required for both paths.
-  @IsString() @IsNotEmpty() @MaxLength(120) hood!: string;
+  // Online-only business (no physical location). When true, address,
+  // coordinates and neighbourhood are all optional (see the `@ValidateIf`s
+  // below) and the listing is stored without a pin.
+  @IsOptional() @IsBoolean() online?: boolean;
+
+  // Required for both paths — UNLESS this is an online-only listing. When
+  // online, a neighbourhood is optional, but a supplied one is still checked.
+  @ValidateIf((dto: CreateListingDto) => !dto.online || !!dto.hood)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(120)
+  hood!: string;
   @IsOptional() @IsString() @MaxLength(120) city?: string;
   @IsOptional() @IsString() @MaxLength(60) timezone?: string;
   @IsOptional() @IsIn(['owned', 'friendly', '']) badge?: string;
@@ -231,16 +241,24 @@ export class CreateListingDto {
   @IsString({ each: true })
   langs?: string[];
 
-  // Required for both paths.
-  @IsString() @IsNotEmpty() @MaxLength(300) address!: string;
+  // Required for both paths — unless this is an online-only listing, which has
+  // no street address at all.
+  @ValidateIf((dto: CreateListingDto) => !dto.online)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(300)
+  address!: string;
   @IsOptional() @IsBoolean() geocoded?: boolean;
 
-  // Coordinates are required for both paths — the frontend always resolves a
-  // pin (geocode, a pasted Google Maps link, or a neighbourhood-centroid
-  // fallback) before submit, so a listing can never land without a location.
+  // Coordinates are required for a physical listing — the frontend always
+  // resolves a pin (geocode, a pasted Google Maps link, or a neighbourhood-
+  // centroid fallback) before submit, so a physical listing can never land
+  // without a location. An online-only listing carries no coordinates.
+  @ValidateIf((dto: CreateListingDto) => !dto.online)
   @IsLatitude()
   latitude!: number;
 
+  @ValidateIf((dto: CreateListingDto) => !dto.online)
   @IsLongitude()
   longitude!: number;
 

@@ -1,6 +1,17 @@
-import { Column, CreateDateColumn, Entity, Index, ManyToOne, PrimaryGeneratedColumn, JoinColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  ManyToOne,
+  PrimaryGeneratedColumn,
+  JoinColumn,
+} from 'typeorm';
 import { User } from '../../users/entities/user.entity';
-import { VerificationEventAction, VerificationLevel } from '../verification-level';
+import {
+  VerificationEventAction,
+  VerificationLevel,
+} from '../verification-level';
 
 /**
  * Append-only audit row: one per change to a member's verification standing

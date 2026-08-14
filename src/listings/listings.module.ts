@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { Event } from '../events/entities/event.entity';
+import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { MessagingModule } from '../messaging/messaging.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { SavedItem } from '../saved/entities/saved-item.entity';
@@ -60,6 +61,10 @@ import { ListingsService } from './listings.service';
     // creation are filed through the shared report+moderation pipeline (item
     // #13). `ReportsModule` imports only `TypeOrmModule`, so no cycle.
     ReportsModule,
+    // Batched crop lookup (`MediaCropService.getMany`) for `photos`'s
+    // per-slot `photoCrops` sibling, shared by `ListingsService` and
+    // `DirectoryService`.
+    MediaCropsModule,
   ],
   controllers: [ListingsController, DirectoryController],
   providers: [ListingsService, ListingEditSuggestionsService, DirectoryService],
