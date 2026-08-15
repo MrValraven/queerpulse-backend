@@ -52,7 +52,7 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 // see `create-job.dto.ts` -> `create-company.dto.ts`). 10 gives generous
 // headroom for legitimate shapes while still capping a hostile
 // deeply-nested body well short of blowing the call stack.
-const MAX_TRAVERSAL_DEPTH = 10;
+const MAX_TRAVERSAL_DEPTH = 15;
 
 type BodyContainer = Record<string, unknown> | unknown[];
 
