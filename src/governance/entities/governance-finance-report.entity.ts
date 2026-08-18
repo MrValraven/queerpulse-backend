@@ -56,6 +56,10 @@ export interface FinanceLine {
   /** Provenance of this ledger row's `amount`. Absent on seeded rows written
    *  before provenance tracking existed — read as {@link FinanceMetricSource.Seeded}. */
   source?: FinanceMetricSource;
+  /** Whether this row renders on the admin Finances tab. Absent means enabled
+   *  — an admin turns a row off when it doesn't apply to this org (e.g. no
+   *  partner support this quarter) rather than deleting its history. */
+  enabled?: boolean;
 }
 
 /** One "how event finances work" bullet, e.g. `["Hosts keep 100% of ticket

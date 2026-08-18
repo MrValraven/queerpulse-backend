@@ -150,6 +150,23 @@ export class RecognitionAwardingService {
     return this.recompute(user, options);
   }
 
+  /**
+   * Public, userId-only entry point for reading live signals without a full
+   * recompute — used by `RecognitionService` to build the "what you did to
+   * earn it" breakdown on every `GET /me/recognition`. See
+   * `recomputeByUserId` above for why a synthetic `CurrentUserData` is safe
+   * here.
+   */
+  async gatherSignalsForUser(userId: string): Promise<RecognitionSignals> {
+    const user: CurrentUserData = {
+      userId,
+      email: '',
+      status: UserStatus.Active,
+      role: '',
+    };
+    return this.gatherSignals(user);
+  }
+
   private async gatherSignals(
     user: CurrentUserData,
   ): Promise<RecognitionSignals> {

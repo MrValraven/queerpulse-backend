@@ -19,7 +19,25 @@ export interface RecognitionSignals {
   workProfileComplete: boolean;
 }
 
+/** Stable identifier for one XP-earning category, exposed to the frontend via
+ *  `xpBreakdown()` so it can resolve its own label/icon (I never encode
+ *  display text here — see `recognition-response.ts`'s `XpBreakdownItemDTO`). */
+export type XpSourceKey =
+  | 'profile'
+  | 'communities'
+  | 'personas'
+  | 'vouches'
+  | 'connections'
+  | 'events'
+  | 'posts'
+  | 'endorsements'
+  | 'workshops'
+  | 'tenure'
+  | 'verified'
+  | 'gettingStarted';
+
 interface SignalRule {
+  key: XpSourceKey;
   perUnit: number;
   cap: number; // maximum units counted
   units: (signals: RecognitionSignals) => number;
@@ -29,21 +47,77 @@ interface SignalRule {
 // LEVEL_LADDER_DEF span (~3700 XP = Pillar). Tune values here only.
 export const XP_RULES: SignalRule[] = [
   {
+    key: 'profile',
     perUnit: 50,
     cap: 1,
     units: (signals) => (signals.profileComplete ? 1 : 0),
   },
-  { perUnit: 40, cap: 3, units: (signals) => signals.communitiesJoined },
-  { perUnit: 40, cap: 3, units: (signals) => signals.personasPublished },
-  { perUnit: 60, cap: 10, units: (signals) => signals.vouchCount },
-  { perUnit: 25, cap: 20, units: (signals) => signals.connectionCount },
-  { perUnit: 50, cap: 12, units: (signals) => signals.eventsAttended },
-  { perUnit: 15, cap: 20, units: (signals) => signals.communityPosts },
-  { perUnit: 20, cap: 10, units: (signals) => signals.endorsementCount },
-  { perUnit: 80, cap: 5, units: (signals) => signals.workshopsTaught },
-  { perUnit: 1, cap: 365, units: (signals) => signals.tenureDays },
-  { perUnit: 50, cap: 1, units: (signals) => (signals.verified ? 1 : 0) },
-  { perUnit: 25, cap: 6, units: (signals) => signals.gettingStartedStepsDone },
+  {
+    key: 'communities',
+    perUnit: 40,
+    cap: 3,
+    units: (signals) => signals.communitiesJoined,
+  },
+  {
+    key: 'personas',
+    perUnit: 40,
+    cap: 3,
+    units: (signals) => signals.personasPublished,
+  },
+  {
+    key: 'vouches',
+    perUnit: 60,
+    cap: 10,
+    units: (signals) => signals.vouchCount,
+  },
+  {
+    key: 'connections',
+    perUnit: 25,
+    cap: 20,
+    units: (signals) => signals.connectionCount,
+  },
+  {
+    key: 'events',
+    perUnit: 50,
+    cap: 12,
+    units: (signals) => signals.eventsAttended,
+  },
+  {
+    key: 'posts',
+    perUnit: 15,
+    cap: 20,
+    units: (signals) => signals.communityPosts,
+  },
+  {
+    key: 'endorsements',
+    perUnit: 20,
+    cap: 10,
+    units: (signals) => signals.endorsementCount,
+  },
+  {
+    key: 'workshops',
+    perUnit: 80,
+    cap: 5,
+    units: (signals) => signals.workshopsTaught,
+  },
+  {
+    key: 'tenure',
+    perUnit: 1,
+    cap: 365,
+    units: (signals) => signals.tenureDays,
+  },
+  {
+    key: 'verified',
+    perUnit: 50,
+    cap: 1,
+    units: (signals) => (signals.verified ? 1 : 0),
+  },
+  {
+    key: 'gettingStarted',
+    perUnit: 25,
+    cap: 6,
+    units: (signals) => signals.gettingStartedStepsDone,
+  },
 ];
 
 export const BADGE_BONUS_BY_RARITY: Record<string, number> = {
@@ -60,6 +134,34 @@ export function scoreSignals(signals: RecognitionSignals): number {
     );
     return total + units * rule.perUnit;
   }, 0);
+}
+
+export interface XpBreakdownItem {
+  key: XpSourceKey;
+  units: number;
+  cap: number;
+  perUnit: number;
+  xp: number;
+}
+
+/** Same math as `scoreSignals`, itemized per source instead of summed — the
+ *  "what you did to earn it" list. Computed fresh from live signals, so it
+ *  can drift slightly from the stored (no-regression) total XP if a signal
+ *  ever decreases; that's an accepted, informational tradeoff. */
+export function xpBreakdown(signals: RecognitionSignals): XpBreakdownItem[] {
+  return XP_RULES.map((rule) => {
+    const units = Math.max(
+      0,
+      Math.min(rule.cap, Math.floor(rule.units(signals))),
+    );
+    return {
+      key: rule.key,
+      units,
+      cap: rule.cap,
+      perUnit: rule.perUnit,
+      xp: units * rule.perUnit,
+    };
+  });
 }
 
 export function badgeBonusXp(heldBadgeKeys: Iterable<string>): number {

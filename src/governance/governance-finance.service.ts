@@ -177,6 +177,22 @@ export class GovernanceFinanceService {
             next.note = edit.note;
             changed = true;
           }
+          if (
+            edit.enabled !== undefined &&
+            edit.enabled !== (line.enabled ?? true)
+          ) {
+            auditRows.push(
+              manager.create(GovernanceFinanceChange, {
+                actorId,
+                field: `${kind}[${index}].enabled`,
+                oldValue: String(line.enabled ?? true),
+                newValue: String(edit.enabled),
+                note: dto.note ?? null,
+              }),
+            );
+            next.enabled = edit.enabled;
+            changed = true;
+          }
           return next;
         });
       };

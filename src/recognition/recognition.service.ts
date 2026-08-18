@@ -7,6 +7,7 @@ import { RecognitionAward } from './entities/recognition-award.entity';
 import { RecognitionPerkClaim } from './entities/recognition-perk-claim.entity';
 import { RecognitionStat } from './entities/recognition-stat.entity';
 import { buildRecognition, RecognitionDTO } from './recognition-response';
+import { RecognitionAwardingService } from './recognition-awarding.service';
 
 @Injectable()
 export class RecognitionService {
@@ -19,6 +20,7 @@ export class RecognitionService {
     private readonly perkClaims: Repository<RecognitionPerkClaim>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
+    private readonly awarding: RecognitionAwardingService,
   ) {}
 
   /**
@@ -36,17 +38,21 @@ export class RecognitionService {
     userId: string,
     includePerks = true,
   ): Promise<RecognitionDTO> {
-    const [stat, earned, claimed] = await Promise.all([
+    const [stat, earned, claimed, signals] = await Promise.all([
       this.stats.findOne({ where: { userId } }),
       this.awards.find({ where: { userId }, take: DEFAULT_LIST_LIMIT }),
       includePerks
         ? this.perkClaims.find({ where: { userId }, take: DEFAULT_LIST_LIMIT })
         : Promise.resolve([]),
+      // The XP breakdown is owner-only, same as perks (I9) — skip the
+      // signal-gathering queries entirely for another member's view.
+      includePerks ? this.awarding.gatherSignalsForUser(userId) : null,
     ]);
     const dto = buildRecognition(
       stat?.xp ?? 0,
       earned.map((a) => ({ badgeKey: a.badgeKey, context: a.context })),
       claimed.map((c) => ({ perkKey: c.perkKey, claimedAt: c.claimedAt })),
+      signals,
     );
     if (!includePerks) {
       dto.perks = { availableCount: 0, groups: [], ladder: [] };

@@ -8,6 +8,11 @@ import {
   levelName,
   levelStartXp,
 } from './recognition.catalog';
+import {
+  badgeBonusXp,
+  RecognitionSignals,
+  xpBreakdown,
+} from './recognition.scoring';
 
 /**
  * Response shapes matched exactly to the frontend's
@@ -83,11 +88,24 @@ export interface PerksDTO {
   ladder: PerkLadderRowDTO[];
 }
 
+/** One "what you did to earn it" row — a signal category (e.g. `vouches`)
+ *  or the synthetic `badges` bonus row. `key` is a stable identifier the
+ *  frontend resolves to a label/icon itself (no display text crosses the
+ *  wire). Owner-only: stripped to `[]` for another member's recognition. */
+export interface XpBreakdownItemDTO {
+  key: string;
+  units: number;
+  cap: number;
+  perUnit: number;
+  xp: number;
+}
+
 export interface RecognitionDTO {
   level: LevelDTO;
   levelLadder: LevelLadderRowDTO[];
   badges: BadgesDTO;
   perks: PerksDTO;
+  xpBreakdown: XpBreakdownItemDTO[];
 }
 
 /** A single earned badge row, as read from `RecognitionAward`. */
@@ -284,10 +302,32 @@ export function buildPerks(
   return { availableCount: available.length, groups, ladder };
 }
 
+/** Itemizes live signals into `XpBreakdownItemDTO` rows, plus a synthetic
+ *  `badges` row for badge-bonus XP (no single `perUnit` — bonus varies by
+ *  rarity, so it's omitted as 0). `signals` is `null` for a non-owner view,
+ *  where the breakdown is stripped entirely (mirrors the perks I9 rule). */
+export function buildXpBreakdown(
+  signals: RecognitionSignals | null,
+  heldBadgeKeys: string[],
+): XpBreakdownItemDTO[] {
+  if (!signals) return [];
+  return [
+    ...xpBreakdown(signals),
+    {
+      key: 'badges',
+      units: heldBadgeKeys.length,
+      cap: BADGE_CATALOG.length,
+      perUnit: 0,
+      xp: badgeBonusXp(heldBadgeKeys),
+    },
+  ];
+}
+
 export function buildRecognition(
   totalXp: number,
   earned: EarnedAwardRow[],
   claimed: ClaimedPerkRow[],
+  signals: RecognitionSignals | null = null,
 ): RecognitionDTO {
   const level = computeLevel(totalXp);
   return {
@@ -295,5 +335,9 @@ export function buildRecognition(
     levelLadder: buildLevelLadder(level.level),
     badges: buildBadges(earned),
     perks: buildPerks(level.level, totalXp, claimed),
+    xpBreakdown: buildXpBreakdown(
+      signals,
+      earned.map((a) => a.badgeKey),
+    ),
   };
 }

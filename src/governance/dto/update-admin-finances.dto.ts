@@ -1,6 +1,7 @@
 import { Type } from 'class-transformer';
 import {
   IsArray,
+  IsBoolean,
   IsInt,
   IsNumber,
   IsOptional,
@@ -15,7 +16,9 @@ import {
  * One correction to a single income/expense ledger row, addressed by its
  * position in the array. `amount` is the pre-formatted display string the row
  * shows (e.g. "€1,840") — kept as a string because that is how the ledger is
- * stored and rendered; the tab does not re-derive it.
+ * stored and rendered; the tab does not re-derive it. `enabled` toggles
+ * whether the row renders on the dashboard at all — a visibility change, not
+ * a data correction, so it does not flip the row's provenance to `manual`.
  */
 export class FinanceLedgerEditDto {
   @IsInt()
@@ -31,6 +34,10 @@ export class FinanceLedgerEditDto {
   @IsString()
   @MaxLength(200)
   note?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  enabled?: boolean;
 }
 
 /**
