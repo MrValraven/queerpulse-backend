@@ -55,7 +55,9 @@ export class VolunteeringController {
   }
 
   @Get('mine')
-  @ApiOperation({ summary: 'List opportunities you posted, with applicant counts' })
+  @ApiOperation({
+    summary: 'List opportunities you posted, with applicant counts',
+  })
   @ApiOkResponse({ description: 'Opportunities you posted.' })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
@@ -177,7 +179,9 @@ export class VolunteeringController {
   @ApiConflictResponse({
     description: 'This application was already decided.',
   })
-  @ApiNotFoundResponse({ description: 'No opportunity or signup with that id.' })
+  @ApiNotFoundResponse({
+    description: 'No opportunity or signup with that id.',
+  })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })

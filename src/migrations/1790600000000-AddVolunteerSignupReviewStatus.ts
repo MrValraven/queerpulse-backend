@@ -10,9 +10,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN. Authored for review only; the maintainer runs migrations.
  */
-export class AddVolunteerSignupReviewStatus1790600000000
-  implements MigrationInterface
-{
+export class AddVolunteerSignupReviewStatus1790600000000 implements MigrationInterface {
   name = 'AddVolunteerSignupReviewStatus1790600000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

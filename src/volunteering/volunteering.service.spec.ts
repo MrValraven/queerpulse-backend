@@ -14,7 +14,7 @@ import {
   OpportunityStatus,
   VolunteerOpportunity,
 } from './entities/volunteer-opportunity.entity';
-import { VolunteerSignup } from './entities/volunteer-signup.entity';
+import { SignupStatus, VolunteerSignup } from './entities/volunteer-signup.entity';
 import { VolunteeringService } from './volunteering.service';
 
 // A chainable query-builder stub whose terminal methods resolve to empty
@@ -51,6 +51,7 @@ describe('VolunteeringService', () => {
     exists: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
+    find: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
   let team: {
@@ -109,6 +110,7 @@ describe('VolunteeringService', () => {
           ...(o as object),
         }),
       ),
+      find: jest.fn().mockResolvedValue([]),
       createQueryBuilder: jest.fn(() => qbStub()),
     };
     team = {
@@ -734,7 +736,7 @@ describe('VolunteeringService', () => {
         posterId: 'poster-1',
       });
       await expect(
-        service.decideSignup('x', 'signup-1', 'intruder', 'accepted'),
+        service.decideSignup('x', 'signup-1', 'intruder', SignupStatus.Accepted),
       ).rejects.toBeInstanceOf(ForbiddenException);
     });
 
@@ -746,7 +748,7 @@ describe('VolunteeringService', () => {
       });
       signups.findOne.mockResolvedValue(null);
       await expect(
-        service.decideSignup('x', 'nope', 'poster-1', 'accepted'),
+        service.decideSignup('x', 'nope', 'poster-1', SignupStatus.Accepted),
       ).rejects.toThrow('Signup not found');
     });
 
@@ -761,7 +763,7 @@ describe('VolunteeringService', () => {
         status: 'accepted',
       });
       await expect(
-        service.decideSignup('x', 'signup-1', 'poster-1', 'declined'),
+        service.decideSignup('x', 'signup-1', 'poster-1', SignupStatus.Declined),
       ).rejects.toBeInstanceOf(ConflictException);
     });
 
@@ -779,7 +781,7 @@ describe('VolunteeringService', () => {
       signups.createQueryBuilder.mockReturnValue(qb);
 
       await expect(
-        service.decideSignup('x', 'signup-1', 'poster-1', 'accepted'),
+        service.decideSignup('x', 'signup-1', 'poster-1', SignupStatus.Accepted),
       ).rejects.toBeInstanceOf(ConflictException);
     });
 
@@ -809,7 +811,7 @@ describe('VolunteeringService', () => {
         'x',
         'signup-1',
         'poster-1',
-        'accepted',
+        SignupStatus.Accepted,
       );
 
       expect(res.status).toBe('accepted');
@@ -845,7 +847,7 @@ describe('VolunteeringService', () => {
         },
       ]);
 
-      await service.decideSignup('x', 'signup-1', 'poster-1', 'declined');
+      await service.decideSignup('x', 'signup-1', 'poster-1', SignupStatus.Declined);
 
       expect(notificationsService.create).toHaveBeenCalledWith(
         'user-1',

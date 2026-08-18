@@ -7,7 +7,10 @@ import {
   OpportunityTask,
   VolunteerOpportunity,
 } from './entities/volunteer-opportunity.entity';
-import { SignupStatus, VolunteerSignup } from './entities/volunteer-signup.entity';
+import {
+  SignupStatus,
+  VolunteerSignup,
+} from './entities/volunteer-signup.entity';
 
 /**
  * Deliberately kept file-local rather than imported from `partners/` —

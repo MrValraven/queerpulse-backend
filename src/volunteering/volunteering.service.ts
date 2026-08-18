@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
@@ -665,7 +665,11 @@ export class VolunteeringService {
       this.team.find({ where: { opportunityId: opportunity.id } }),
       this.profiles.findOne({ where: { userId: opportunity.posterId } }),
       this.signups.exists({
-        where: { opportunityId: opportunity.id, userId: viewerId },
+        where: {
+          opportunityId: opportunity.id,
+          userId: viewerId,
+          status: In([SignupStatus.Pending, SignupStatus.Accepted]),
+        },
       }),
       this.partnerRefsForMany([opportunity.partnerId]),
       this.communityRefsForMany([opportunity.communityId]),

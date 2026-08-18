@@ -148,12 +148,12 @@ describe('HousingDirectoryService', () => {
       listings.createQueryBuilder.mockReturnValue(builder);
 
       await service.browse({
-        areas: ['Arroios', 'Chiado'],
+        areas: ['Arroios', 'Misericórdia'],
       });
 
       expect(builder.andWhere).toHaveBeenCalledWith(
         'LOWER(l.area) = ANY(:areas)',
-        { areas: ['arroios', 'chiado'] },
+        { areas: ['arroios', 'misericórdia'] },
       );
     });
 
