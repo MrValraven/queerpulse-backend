@@ -372,6 +372,7 @@ export class ListingsService {
     name: string,
     latitude?: number,
     longitude?: number,
+    excludeRef?: string,
   ): Promise<SimilarListingDTO[]> {
     const trimmedName = name.trim();
     const hasCoordinates =
@@ -389,6 +390,13 @@ export class ListingsService {
     const queryBuilder = this.listings
       .createQueryBuilder('listing')
       .where('listing.status = :status', { status: ListingStatus.Live });
+
+    // The edit wizard re-runs this dedupe check against the listing's own
+    // (unchanged) name — exclude it so it never surfaces as a duplicate of
+    // itself.
+    if (excludeRef) {
+      queryBuilder.andWhere('listing.ref != :excludeRef', { excludeRef });
+    }
 
     // ~150m expressed as a lat/lng bounding box: 0.00135° latitude ≈ 150m
     // everywhere; longitude degrees shrink with latitude, so divide by

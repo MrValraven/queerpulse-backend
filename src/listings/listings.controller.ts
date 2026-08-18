@@ -118,7 +118,12 @@ export class ListingsController {
     description: 'Not an authenticated active member.',
   })
   findSimilar(@Query() query: SimilarListingsQuery) {
-    return this.listingsService.findSimilar(query.name, query.lat, query.lng);
+    return this.listingsService.findSimilar(
+      query.name,
+      query.lat,
+      query.lng,
+      query.excludeRef,
+    );
   }
 
   // Moderator-only, same rationale as `setStatus` below. Declared before

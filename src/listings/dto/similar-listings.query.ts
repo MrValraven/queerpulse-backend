@@ -26,4 +26,11 @@ export class SimilarListingsQuery {
   @Type(() => Number)
   @IsLongitude()
   lng?: number;
+
+  /** The listing being edited, so it doesn't surface as a "duplicate" of
+   *  itself when the wizard's dedupe check re-runs against its own name. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  excludeRef?: string;
 }
