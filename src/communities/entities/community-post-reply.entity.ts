@@ -21,9 +21,13 @@ export class CommunityPostReply {
   @Column({ type: 'uuid' })
   postId!: string;
 
+  // Nullable since `FixCommunityOwnerAuthorErasureCascades1789900000000`: same
+  // rationale as `CommunityPost.authorId` — `SET NULL` instead of `CASCADE`
+  // so a reply survives its author's account erasure as a tombstone-able row
+  // instead of being hard-deleted.
   @Index('IDX_community_post_replies_author_id')
-  @Column({ type: 'uuid' })
-  authorId!: string;
+  @Column({ type: 'uuid', nullable: true })
+  authorId!: string | null;
 
   @Column({ type: 'text' })
   text!: string;

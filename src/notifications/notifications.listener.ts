@@ -9,9 +9,11 @@ import {
   ConnectionRequestedEvent,
 } from '../connections/connection.events';
 import {
+  EVENT_COHOST_INVITED,
   EVENT_INVITED,
   EVENT_RSVPED,
   EVENT_WAITLIST_PROMOTED,
+  EventCohostInvitedEvent,
   EventInvitedEvent,
   EventRsvpedEvent,
   EventWaitlistPromotedEvent,
@@ -122,6 +124,24 @@ export class NotificationsListener {
       e.inviteeId,
       NotificationType.EventInvite,
       { eventId: e.eventId, inviteId: e.inviteId, inviterId: e.inviterId },
+      e.inviterId,
+    );
+  }
+
+  // Deep-links via `payload.source === 'cohost_invite'`: its own discriminator
+  // so `sourceHrefFromPayload` (frontend) can route this to
+  // `/gatherings/:slug/co-host-invite/:inviteId`, distinct from the plain
+  // gathering page that `event`/`event_rsvp` notifications resolve to.
+  @OnEvent(EVENT_COHOST_INVITED)
+  async onEventCohostInvited(e: EventCohostInvitedEvent): Promise<void> {
+    await this.notifications.create(
+      e.inviteeId,
+      NotificationType.EventCohostInvite,
+      {
+        source: 'cohost_invite',
+        eventSlug: e.eventSlug,
+        inviteId: e.inviteId,
+      },
       e.inviterId,
     );
   }

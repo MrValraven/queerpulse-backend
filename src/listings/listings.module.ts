@@ -10,6 +10,7 @@ import { StorageModule } from '../storage/storage.module';
 import { UsersModule } from '../users/users.module';
 import { DirectoryController } from './directory.controller';
 import { DirectoryService } from './directory.service';
+import { ListingClaim } from './entities/listing-claim.entity';
 import { ListingEditSuggestion } from './entities/listing-edit-suggestion.entity';
 import { ListingModerationEvent } from './entities/listing-moderation-event.entity';
 import { ListingQuestion } from './entities/listing-question.entity';
@@ -17,6 +18,7 @@ import { ListingReview } from './entities/listing-review.entity';
 import { Listing } from './entities/listing.entity';
 import { SafeSpaceMemberVouch } from '../safe-space-vouches/entities/safe-space-vouch.entity';
 import { ReportsModule } from '../reports/reports.module';
+import { ListingClaimsService } from './listing-claims.service';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
 import { ListingsController } from './listings.controller';
 import { ListingsService } from './listings.service';
@@ -36,6 +38,9 @@ import { ListingsService } from './listings.service';
       // console overhaul's `ListingModerationEvent`/`ListingQuestion`.
       ListingModerationEvent,
       ListingQuestion,
+      // "Claim this existing listing" (member requests, moderator reviews) —
+      // its own entity/service, same reason `ListingEditSuggestion` is.
+      ListingClaim,
       Event,
       SavedItem,
       // Read-only here: `DirectoryService` merges member-written safe-space
@@ -50,8 +55,9 @@ import { ListingsService } from './listings.service';
     // `ContentModerationService` — public directory/safe-space reads honour a
     // moderator `hide_content`/`remove_content` takedown on a business listing.
     ContentModerationModule,
-    // `NotificationsService` — listing approved (submitter, in `ListingsService`)
-    // and a new review (owner, in `DirectoryService`).
+    // `NotificationsService` — listing approved (submitter, in `ListingsService`),
+    // a new review (owner, in `DirectoryService`), and a reviewed claim
+    // (claimant, in `ListingClaimsService`).
     NotificationsModule,
     // `StorageService` — delete a listing's photo objects when they are replaced
     // on edit or when the listing itself is removed, so superseded/orphaned
@@ -67,7 +73,12 @@ import { ListingsService } from './listings.service';
     MediaCropsModule,
   ],
   controllers: [ListingsController, DirectoryController],
-  providers: [ListingsService, ListingEditSuggestionsService, DirectoryService],
+  providers: [
+    ListingsService,
+    ListingEditSuggestionsService,
+    ListingClaimsService,
+    DirectoryService,
+  ],
   exports: [DirectoryService],
 })
 export class ListingsModule {}

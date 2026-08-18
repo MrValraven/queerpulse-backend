@@ -454,6 +454,31 @@ export class ForumThreadsService {
     );
   }
 
+  /**
+   * `GET /communities/:slug/pulse`'s threads lane — a community's own most
+   * recent threads, newest-first. Reuses `toThreadResponses`' batched
+   * author/OP/vote hydration (same shape the list/search views already
+   * return) rather than inventing a lighter one. This method isn't called
+   * with a specific viewer in mind (see `CommunityPulseService`, which calls
+   * it once per pulse request for any roster member), so it passes a neutral
+   * viewer — an empty `userId` can't match a real `authorId`/vote row, so
+   * `canEdit`/`myVote`/the OP moderation flags all come back as their
+   * "no permissions" defaults rather than leaking one viewer's affordances to
+   * another.
+   */
+  async listRecentByCommunity(
+    communityId: string,
+    limit = 5,
+  ): Promise<ForumThreadResponse[]> {
+    const rows = await this.threads.find({
+      where: { communityId },
+      order: { createdAt: 'DESC' },
+      take: limit,
+    });
+    if (!rows.length) return [];
+    return this.toThreadResponses(rows, '', false);
+  }
+
   // --- internals ---
 
   private async createWithUniqueSlug(

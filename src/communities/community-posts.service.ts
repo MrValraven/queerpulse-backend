@@ -16,8 +16,9 @@ import {
   CommunityPostCreatedEvent,
 } from './community.events';
 import { StorageService } from '../storage/storage.service';
-import { MemberLookup } from '../common/member-ref';
+import { MemberLookup, MemberRef } from '../common/member-ref';
 import {
+  DEFAULT_LIST_LIMIT,
   PAGE_SIZE,
   normalizePage,
   paginate,
@@ -25,6 +26,12 @@ import {
 } from '../common/pagination';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import {
+  Report,
+  ReportStatus,
+  ReportSubjectType,
+} from '../reports/entities/report.entity';
+import { ReportDTO, toReportDTO } from '../reports/report-response';
 import { Profile } from '../users/entities/profile.entity';
 import {
   CommunityPostDTO,
@@ -70,6 +77,12 @@ export type UpdatePostInput = Partial<CreatePostInput> & {
   pinned?: boolean;
 };
 
+/** Input for the flat `PATCH /community-posts/:id` alias — author-only,
+ * body/kind/image only. Deliberately omits `pinned`: pinning has no meaning
+ * without a community to pin *within* (see `CommunityPostsController`'s flat
+ * routes doc comment). */
+export type UpdateFlatPostInput = Partial<CreatePostInput>;
+
 @Injectable()
 export class CommunityPostsService {
   constructor(
@@ -89,6 +102,11 @@ export class CommunityPostsService {
     private readonly postEdits: Repository<CommunityPostEdit>,
     @InjectRepository(CommunityPostReplyEdit)
     private readonly replyEdits: Repository<CommunityPostReplyEdit>,
+    // Read-only, for `listCommunityReports`'s owner/mod queue. Same
+    // cross-module `forFeature` reuse `CommunityAutoFreezeService` already
+    // does with this entity in this same module (`Report` is registered once
+    // in `CommunitiesModule`, shared by both providers).
+    @InjectRepository(Report) private readonly reports: Repository<Report>,
     private readonly mentions: MentionNotificationService,
     private readonly contentModeration: ContentModerationService,
     private readonly storage: StorageService,
@@ -111,6 +129,21 @@ export class CommunityPostsService {
     hidden: false,
     removed: false,
   };
+
+  /**
+   * The "role" a flat (`/community-posts*`) mutation echo passes into
+   * `buildPostDTO`/`mapReply` for its own acting author. A flat/global post
+   * has no roster to hold a real `RosterRole` in, so this is a sentinel, not
+   * a claim about community membership: it exists only so
+   * `toCommunityPost`/`toCommunityReply`'s `isMember` gate doesn't blank out
+   * `canEdit`/`canDelete`/`canRestore`/`canViewHistory` for the very author
+   * who just performed the action (already verified via `assertAuthorOnly`
+   * before any of these are called). `isOwnerOrMod(Member)` is false, so no
+   * moderator-only capability can leak through this substitute — a non-author
+   * viewer of the same DTO still gets `canManage: false` regardless, since
+   * that additionally requires `isAuthor`.
+   */
+  private static readonly FLAT_VIEWER_ROLE = RosterRole.Member;
 
   async listPosts(
     slug: string,
@@ -191,75 +224,36 @@ export class CommunityPostsService {
     const membership = await this.assertMember(community.id, actorId);
 
     if (dto.pinned !== undefined) {
-      if (
-        membership.role !== RosterRole.Owner &&
-        membership.role !== RosterRole.Mod
-      ) {
+      if (!CommunityPostsService.isStaffRole(membership.role)) {
         throw new ForbiddenException('Only a moderator can pin a post');
       }
       post.pinned = dto.pinned;
     }
 
-    // Built if the body actually changes, then persisted alongside the post in
-    // one transaction below — never as a separate write, or a failure would
-    // record a "previous body" for an edit that never landed (phantom revision).
-    let pendingEdit: CommunityPostEdit | null = null;
-    // Captured only when the image is genuinely swapped/cleared, so the object
-    // the post USED to reference can be deleted after the write commits.
-    let replacedImage: string | null = null;
-    if (
-      dto.body !== undefined ||
-      dto.kind !== undefined ||
-      dto.image !== undefined
-    ) {
-      if (post.deletedAt) {
-        throw new NotFoundException('Post not found');
-      }
-      if (post.authorId !== actorId) {
-        throw new ForbiddenException('Only the author can edit this post');
-      }
-      if (dto.body !== undefined && dto.body !== post.body) {
-        pendingEdit = this.postEdits.create({
-          postId: post.id,
-          previousBody: post.body,
-          editorId: actorId,
-        });
-        post.body = dto.body;
-        post.editedAt = new Date();
-      }
-      if (dto.kind !== undefined) post.kind = dto.kind;
-      if (dto.image !== undefined) {
-        // `''`/`null` both clear the image (matches the DTO doc). Only when the
-        // value truly changes do we mark the old object for deletion.
-        const nextImage = dto.image || null;
-        if (nextImage !== post.image) {
-          replacedImage = post.image;
-          post.image = nextImage;
-        }
-      }
-    }
-
-    const saved = await this.posts.manager.transaction(async (manager) => {
-      if (pendingEdit) {
-        await manager.save(pendingEdit);
-      }
-      return manager.save(post);
-    });
-    // Delete-on-replace, post-commit + best-effort: the superseded image object
-    // is orphaned once the new value has committed. A non-key value (external
-    // URL) no-ops; a storage failure must never fail the edit.
-    if (replacedImage) {
-      try {
-        await this.storage.deleteObjectByReference(replacedImage);
-      } catch (error) {
-        this.logger.warn(
-          `Failed to delete replaced image for post ${saved.id}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
-    }
+    const saved = await this.applyPostFieldEdit(post, actorId, dto);
     return this.buildPostDTO(saved, actorId, membership.role);
+  }
+
+  /**
+   * `PATCH /community-posts/:id` — the flat alias's own update: author-only,
+   * body/kind/image only (see `UpdateFlatPostInput`'s doc comment for why
+   * `pinned` isn't part of this shape). Shares `applyPostFieldEdit` with the
+   * nested route above; the only difference is there's no community/pin
+   * authorization step here — `applyPostFieldEdit` itself enforces the
+   * author-only check on any actual field change.
+   */
+  async updateFlatPost(
+    postId: string,
+    actorId: string,
+    dto: UpdateFlatPostInput,
+  ): Promise<CommunityPostDTO> {
+    const post = await this.loadPostByIdOr404(postId);
+    const saved = await this.applyPostFieldEdit(post, actorId, dto);
+    return this.buildPostDTO(
+      saved,
+      actorId,
+      CommunityPostsService.FLAT_VIEWER_ROLE,
+    );
   }
 
   // DELETE /communities/:slug/posts/:id — soft tombstone. Author or owner/mod.
@@ -273,11 +267,23 @@ export class CommunityPostsService {
     const membership = await this.assertMember(community.id, actorId);
     this.assertAuthorOrOwnerMod(post.authorId, membership);
 
-    if (!post.deletedAt) {
-      post.deletedAt = new Date();
-      await this.posts.save(post);
-    }
-    return this.buildPostDTO(post, actorId, membership.role);
+    return this.tombstonePost(post, actorId, membership.role);
+  }
+
+  // DELETE /community-posts/:id — the flat alias's own delete: author-only
+  // (no owner/mod concept without a community). Shares `tombstonePost` with
+  // the nested route above.
+  async deleteFlatPost(
+    postId: string,
+    actorId: string,
+  ): Promise<CommunityPostDTO> {
+    const post = await this.loadPostByIdOr404(postId);
+    this.assertAuthorOnly(post.authorId, actorId);
+    return this.tombstonePost(
+      post,
+      actorId,
+      CommunityPostsService.FLAT_VIEWER_ROLE,
+    );
   }
 
   // POST /communities/:slug/posts/:id/restore — clear the tombstone.
@@ -291,11 +297,22 @@ export class CommunityPostsService {
     const membership = await this.assertMember(community.id, actorId);
     this.assertAuthorOrOwnerMod(post.authorId, membership);
 
-    if (post.deletedAt) {
-      post.deletedAt = null;
-      await this.posts.save(post);
-    }
-    return this.buildPostDTO(post, actorId, membership.role);
+    return this.restorePostCore(post, actorId, membership.role);
+  }
+
+  // POST /community-posts/:id/restore — the flat alias's own restore:
+  // author-only. Shares `restorePostCore` with the nested route above.
+  async restoreFlatPost(
+    postId: string,
+    actorId: string,
+  ): Promise<CommunityPostDTO> {
+    const post = await this.loadPostByIdOr404(postId);
+    this.assertAuthorOnly(post.authorId, actorId);
+    return this.restorePostCore(
+      post,
+      actorId,
+      CommunityPostsService.FLAT_VIEWER_ROLE,
+    );
   }
 
   // GET /communities/:slug/posts/:id/history — revisions, newest-first.
@@ -309,25 +326,19 @@ export class CommunityPostsService {
     const membership = await this.assertMember(community.id, actorId);
     this.assertAuthorOrOwnerMod(post.authorId, membership);
 
-    const rows = await this.postEdits.find({
-      where: { postId },
-      order: { createdAt: 'DESC' },
-    });
-    const editorIds = [
-      ...new Set(
-        rows.map((row) => row.editorId).filter((id): id is string => !!id),
-      ),
-    ];
-    const editors = await new MemberLookup(this.profiles).byUserIds(editorIds);
+    return this.postHistoryCore(post.id);
+  }
 
-    return {
-      revisions: rows.map((row) =>
-        toCommunityPostHistoryEntry(
-          row,
-          row.editorId ? (editors.get(row.editorId) ?? null) : null,
-        ),
-      ),
-    };
+  // GET /community-posts/:id/history — the flat alias's own history: a flat
+  // post has no owner/mod either, so this is restricted to the author, unlike
+  // the nested route's author-or-owner/mod. Shares `postHistoryCore`.
+  async listFlatPostHistory(
+    postId: string,
+    actorId: string,
+  ): Promise<CommunityPostHistoryResponse> {
+    const post = await this.loadPostByIdOr404(postId);
+    this.assertAuthorOnly(post.authorId, actorId);
+    return this.postHistoryCore(post.id);
   }
 
   // PATCH /communities/:slug/posts/:id/replies/:replyId — author-only text
@@ -345,25 +356,28 @@ export class CommunityPostsService {
     const reply = await this.loadReplyOr404(post.id, replyId);
     const membership = await this.assertMember(community.id, actorId);
 
-    if (reply.deletedAt) {
-      throw new NotFoundException('Reply not found');
-    }
-    if (reply.authorId !== actorId) {
-      throw new ForbiddenException('Only the author can edit this reply');
-    }
-    if (text !== reply.text) {
-      await this.replyEdits.save(
-        this.replyEdits.create({
-          replyId: reply.id,
-          previousText: reply.text,
-          editorId: actorId,
-        }),
-      );
-      reply.text = text;
-      reply.editedAt = new Date();
-      await this.replies.save(reply);
-    }
-    return this.mapReply(reply, actorId, membership.role);
+    const saved = await this.applyReplyTextEdit(reply, actorId, text);
+    return this.mapReply(saved, actorId, membership.role);
+  }
+
+  // PATCH /community-posts/:id/replies/:replyId — the flat alias's own reply
+  // edit: author-only (same as the nested route — edit was already
+  // author-only there too), just without the community-membership check.
+  // Shares `applyReplyTextEdit`.
+  async updateFlatReply(
+    postId: string,
+    replyId: string,
+    actorId: string,
+    text: string,
+  ): Promise<CommunityReplyDTO> {
+    const post = await this.loadPostByIdOr404(postId);
+    const reply = await this.loadReplyOr404(post.id, replyId);
+    const saved = await this.applyReplyTextEdit(reply, actorId, text);
+    return this.mapReply(
+      saved,
+      actorId,
+      CommunityPostsService.FLAT_VIEWER_ROLE,
+    );
   }
 
   // DELETE /communities/:slug/posts/:id/replies/:replyId — soft tombstone.
@@ -379,11 +393,24 @@ export class CommunityPostsService {
     const membership = await this.assertMember(community.id, actorId);
     this.assertAuthorOrOwnerMod(reply.authorId, membership);
 
-    if (!reply.deletedAt) {
-      reply.deletedAt = new Date();
-      await this.replies.save(reply);
-    }
-    return this.mapReply(reply, actorId, membership.role);
+    return this.tombstoneReply(reply, actorId, membership.role);
+  }
+
+  // DELETE /community-posts/:id/replies/:replyId — the flat alias's own
+  // reply delete: author-only. Shares `tombstoneReply`.
+  async deleteFlatReply(
+    postId: string,
+    replyId: string,
+    actorId: string,
+  ): Promise<CommunityReplyDTO> {
+    const post = await this.loadPostByIdOr404(postId);
+    const reply = await this.loadReplyOr404(post.id, replyId);
+    this.assertAuthorOnly(reply.authorId, actorId);
+    return this.tombstoneReply(
+      reply,
+      actorId,
+      CommunityPostsService.FLAT_VIEWER_ROLE,
+    );
   }
 
   // POST /communities/:slug/posts/:id/replies/:replyId/restore — clear
@@ -400,11 +427,24 @@ export class CommunityPostsService {
     const membership = await this.assertMember(community.id, actorId);
     this.assertAuthorOrOwnerMod(reply.authorId, membership);
 
-    if (reply.deletedAt) {
-      reply.deletedAt = null;
-      await this.replies.save(reply);
-    }
-    return this.mapReply(reply, actorId, membership.role);
+    return this.restoreReplyCore(reply, actorId, membership.role);
+  }
+
+  // POST /community-posts/:id/replies/:replyId/restore — the flat alias's
+  // own reply restore: author-only. Shares `restoreReplyCore`.
+  async restoreFlatReply(
+    postId: string,
+    replyId: string,
+    actorId: string,
+  ): Promise<CommunityReplyDTO> {
+    const post = await this.loadPostByIdOr404(postId);
+    const reply = await this.loadReplyOr404(post.id, replyId);
+    this.assertAuthorOnly(reply.authorId, actorId);
+    return this.restoreReplyCore(
+      reply,
+      actorId,
+      CommunityPostsService.FLAT_VIEWER_ROLE,
+    );
   }
 
   // GET /communities/:slug/posts/:id/replies/:replyId/history —
@@ -421,25 +461,83 @@ export class CommunityPostsService {
     const membership = await this.assertMember(community.id, actorId);
     this.assertAuthorOrOwnerMod(reply.authorId, membership);
 
-    const rows = await this.replyEdits.find({
-      where: { replyId },
-      order: { createdAt: 'DESC' },
-    });
-    const editorIds = [
-      ...new Set(
-        rows.map((row) => row.editorId).filter((id): id is string => !!id),
-      ),
-    ];
-    const editors = await new MemberLookup(this.profiles).byUserIds(editorIds);
+    return this.replyHistoryCore(replyId);
+  }
 
-    return {
-      revisions: rows.map((row) =>
-        toCommunityReplyHistoryEntry(
-          row,
-          row.editorId ? (editors.get(row.editorId) ?? null) : null,
-        ),
-      ),
-    };
+  // GET /community-posts/:id/replies/:replyId/history — the flat alias's own
+  // reply history: author-only (no owner/mod concept without a community).
+  // Shares `replyHistoryCore`.
+  async listFlatReplyHistory(
+    postId: string,
+    replyId: string,
+    actorId: string,
+  ): Promise<CommunityReplyHistoryResponse> {
+    const post = await this.loadPostByIdOr404(postId);
+    const reply = await this.loadReplyOr404(post.id, replyId);
+    this.assertAuthorOnly(reply.authorId, actorId);
+    return this.replyHistoryCore(replyId);
+  }
+
+  // GET /communities/:slug/reports — owner/mod-only queue of OPEN reports
+  // whose subject resolves to a post or reply IN THIS COMMUNITY. Resolution
+  // mirrors `CommunityAutoFreezeService.resolveCommunity`'s post/reply
+  // handling and `admin-communities/community-report-scope.ts`'s aggregation
+  // shape, narrowed from admin-wide to one community and from totals to the
+  // actual rows a moderator queue needs.
+  //
+  // NOTE for whoever wires the controller route: this has to live on
+  // `CommunitiesController` (`GET /communities/:slug/reports` — a route's
+  // path is always controller-prefix + method path, and this service's own
+  // `CommunityPostsController` is mounted at `/community-posts`, not
+  // `/communities`). `CommunitiesController` belongs to a parallel task in
+  // this effort, so only this service method is added here; wiring it up is
+  // a one-line addition mirroring every other community-scoped GET already on
+  // that controller:
+  //   @Get(':slug/reports')
+  //   listReports(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
+  //     return this.communityPostsService.listCommunityReports(slug, user.userId);
+  //   }
+  async listCommunityReports(
+    slug: string,
+    actorId: string,
+  ): Promise<ReportDTO[]> {
+    const community = await this.loadCommunityOr404(slug);
+    const membership = await this.assertMember(community.id, actorId);
+    if (!CommunityPostsService.isStaffRole(membership.role)) {
+      throw new ForbiddenException(
+        'Only a community owner/mod can view its reports',
+      );
+    }
+
+    const postRows = await this.posts.find({
+      where: { communityId: community.id },
+      select: { id: true },
+    });
+    const postIds = postRows.map((post) => post.id);
+    const replyIds = postIds.length
+      ? (
+          await this.replies
+            .createQueryBuilder('reply')
+            .select('reply.id', 'id')
+            .where('reply.post_id IN (:...postIds)', { postIds })
+            .getRawMany<{ id: string }>()
+        ).map((row) => row.id)
+      : [];
+    const contentIds = [...postIds, ...replyIds];
+    if (!contentIds.length) return [];
+
+    const rows = await this.reports
+      .createQueryBuilder('report')
+      .where('report.status = :open', { open: ReportStatus.Open })
+      .andWhere('report.subject_type IN (:...types)', {
+        types: [ReportSubjectType.Post, ReportSubjectType.Reply],
+      })
+      .andWhere('report.subject_id IN (:...contentIds)', { contentIds })
+      .orderBy('report.created_at', 'DESC')
+      .take(DEFAULT_LIST_LIMIT)
+      .getMany();
+
+    return rows.map(toReportDTO);
   }
 
   // Resolve a single reply's author and map it (with the actor's role) so the
@@ -450,7 +548,9 @@ export class CommunityPostsService {
     viewerRole: RosterRole | null,
   ): Promise<CommunityReplyDTO> {
     const [authors, states] = await Promise.all([
-      new MemberLookup(this.profiles).byUserIds([reply.authorId]),
+      new MemberLookup(this.profiles).byUserIds(
+        reply.authorId ? [reply.authorId] : [],
+      ),
       this.contentModeration.statesForAnyType(
         CommunityPostsService.SUBJECT_TYPES,
         [reply.id],
@@ -458,7 +558,7 @@ export class CommunityPostsService {
     ]);
     return toCommunityReply(
       reply,
-      authors.get(reply.authorId) ?? null,
+      authorRefOf(authors, reply.authorId),
       viewerId,
       viewerRole,
       states.get(reply.id) ?? CommunityPostsService.VISIBLE,
@@ -529,8 +629,9 @@ export class CommunityPostsService {
     };
     const mentioned = await this.mentions.notify(text, userId, replyPayload);
     // Tell the post's author their post got a reply — unless the reply already
-    // `@mentioned` them (they'd then get one notification, not two).
-    if (!mentioned.has(post.authorId)) {
+    // `@mentioned` them (they'd then get one notification, not two), or the
+    // post's author account was erased (`post.authorId` null — no one to tell).
+    if (post.authorId && !mentioned.has(post.authorId)) {
       await this.mentions.notifyPostReply(post.authorId, userId, replyPayload);
     }
     const authors = await new MemberLookup(this.profiles).byUserIds([userId]);
@@ -597,12 +698,12 @@ export class CommunityPostsService {
         rows.map((row) => row.id),
       );
       const authors = await new MemberLookup(this.profiles).byUserIds(
-        rows.map((row) => row.authorId),
+        nonNullIds(rows.map((row) => row.authorId)),
       );
       return rows.map((row) =>
         toCommunityReply(
           row,
-          authors.get(row.authorId) ?? null,
+          authorRefOf(authors, row.authorId),
           viewerId,
           viewerRole,
           states.get(row.id) ?? CommunityPostsService.VISIBLE,
@@ -726,7 +827,9 @@ export class CommunityPostsService {
       excerpt: text.slice(0, 140),
     };
     const mentioned = await this.mentions.notify(text, userId, replyPayload);
-    if (!mentioned.has(post.authorId)) {
+    // A `null` post.authorId (erased author) has no one to notify — see the
+    // same guard in `addReply` above.
+    if (post.authorId && !mentioned.has(post.authorId)) {
       await this.mentions.notifyPostReply(post.authorId, userId, replyPayload);
     }
     return { id: saved.id };
@@ -776,6 +879,221 @@ export class CommunityPostsService {
       throw new NotFoundException('Reply not found');
     }
     return reply;
+  }
+
+  /**
+   * Diffs and persists a post's mutable `body`/`kind`/`image` (plus whatever
+   * the caller already set directly on `post` before calling this — e.g.
+   * `pinned`, for the nested route only), in one transaction alongside its
+   * edit-history snapshot when the body actually changes. Shared by
+   * `updatePost` (nested, community-scoped) and `updateFlatPost` (flat,
+   * author-only) — the only difference between those two callers is what's
+   * authorized BEFORE reaching here (pin-authorization for the nested route;
+   * nothing extra for the flat one) and which fields the caller's DTO even
+   * offers (`UpdateFlatPostInput` has no `pinned`). The author-only check for
+   * an actual body/kind/image change is enforced HERE, identically for both
+   * callers, since editing was already author-only even on the nested route.
+   */
+  private async applyPostFieldEdit(
+    post: CommunityPost,
+    actorId: string,
+    dto: Pick<UpdatePostInput, 'body' | 'kind' | 'image'>,
+  ): Promise<CommunityPost> {
+    // Built if the body actually changes, then persisted alongside the post in
+    // one transaction below — never as a separate write, or a failure would
+    // record a "previous body" for an edit that never landed (phantom revision).
+    let pendingEdit: CommunityPostEdit | null = null;
+    // Captured only when the image is genuinely swapped/cleared, so the object
+    // the post USED to reference can be deleted after the write commits.
+    let replacedImage: string | null = null;
+    if (
+      dto.body !== undefined ||
+      dto.kind !== undefined ||
+      dto.image !== undefined
+    ) {
+      if (post.deletedAt) {
+        throw new NotFoundException('Post not found');
+      }
+      if (post.authorId !== actorId) {
+        throw new ForbiddenException('Only the author can edit this post');
+      }
+      if (dto.body !== undefined && dto.body !== post.body) {
+        pendingEdit = this.postEdits.create({
+          postId: post.id,
+          previousBody: post.body,
+          editorId: actorId,
+        });
+        post.body = dto.body;
+        post.editedAt = new Date();
+      }
+      if (dto.kind !== undefined) post.kind = dto.kind;
+      if (dto.image !== undefined) {
+        // `''`/`null` both clear the image (matches the DTO doc). Only when the
+        // value truly changes do we mark the old object for deletion.
+        const nextImage = dto.image || null;
+        if (nextImage !== post.image) {
+          replacedImage = post.image;
+          post.image = nextImage;
+        }
+      }
+    }
+
+    const saved = await this.posts.manager.transaction(async (manager) => {
+      if (pendingEdit) {
+        await manager.save(pendingEdit);
+      }
+      return manager.save(post);
+    });
+    // Delete-on-replace, post-commit + best-effort: the superseded image object
+    // is orphaned once the new value has committed. A non-key value (external
+    // URL) no-ops; a storage failure must never fail the edit.
+    if (replacedImage) {
+      try {
+        await this.storage.deleteObjectByReference(replacedImage);
+      } catch (error) {
+        this.logger.warn(
+          `Failed to delete replaced image for post ${saved.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+    return saved;
+  }
+
+  // Shared by `deletePost` (nested) and `deleteFlatPost` (flat) — the
+  // authorization check happens in each caller BEFORE this runs; this is just
+  // the idempotent tombstone + DTO echo.
+  private async tombstonePost(
+    post: CommunityPost,
+    actorId: string,
+    viewerRole: RosterRole | null,
+  ): Promise<CommunityPostDTO> {
+    if (!post.deletedAt) {
+      post.deletedAt = new Date();
+      await this.posts.save(post);
+    }
+    return this.buildPostDTO(post, actorId, viewerRole);
+  }
+
+  // Shared by `restorePost` (nested) and `restoreFlatPost` (flat).
+  private async restorePostCore(
+    post: CommunityPost,
+    actorId: string,
+    viewerRole: RosterRole | null,
+  ): Promise<CommunityPostDTO> {
+    if (post.deletedAt) {
+      post.deletedAt = null;
+      await this.posts.save(post);
+    }
+    return this.buildPostDTO(post, actorId, viewerRole);
+  }
+
+  // Shared by `listPostHistory` (nested) and `listFlatPostHistory` (flat) —
+  // both callers have already authorized the actor before calling this.
+  private async postHistoryCore(
+    postId: string,
+  ): Promise<CommunityPostHistoryResponse> {
+    const rows = await this.postEdits.find({
+      where: { postId },
+      order: { createdAt: 'DESC' },
+    });
+    const editorIds = [
+      ...new Set(
+        rows.map((row) => row.editorId).filter((id): id is string => !!id),
+      ),
+    ];
+    const editors = await new MemberLookup(this.profiles).byUserIds(editorIds);
+
+    return {
+      revisions: rows.map((row) =>
+        toCommunityPostHistoryEntry(
+          row,
+          row.editorId ? (editors.get(row.editorId) ?? null) : null,
+        ),
+      ),
+    };
+  }
+
+  // Shared by `updateReply` (nested) and `updateFlatReply` (flat) — edit was
+  // already author-only on the nested route, so this is the same check
+  // either way.
+  private async applyReplyTextEdit(
+    reply: CommunityPostReply,
+    actorId: string,
+    text: string,
+  ): Promise<CommunityPostReply> {
+    if (reply.deletedAt) {
+      throw new NotFoundException('Reply not found');
+    }
+    if (reply.authorId !== actorId) {
+      throw new ForbiddenException('Only the author can edit this reply');
+    }
+    if (text !== reply.text) {
+      await this.replyEdits.save(
+        this.replyEdits.create({
+          replyId: reply.id,
+          previousText: reply.text,
+          editorId: actorId,
+        }),
+      );
+      reply.text = text;
+      reply.editedAt = new Date();
+      await this.replies.save(reply);
+    }
+    return reply;
+  }
+
+  // Shared by `deleteReply` (nested) and `deleteFlatReply` (flat).
+  private async tombstoneReply(
+    reply: CommunityPostReply,
+    actorId: string,
+    viewerRole: RosterRole | null,
+  ): Promise<CommunityReplyDTO> {
+    if (!reply.deletedAt) {
+      reply.deletedAt = new Date();
+      await this.replies.save(reply);
+    }
+    return this.mapReply(reply, actorId, viewerRole);
+  }
+
+  // Shared by `restoreReply` (nested) and `restoreFlatReply` (flat).
+  private async restoreReplyCore(
+    reply: CommunityPostReply,
+    actorId: string,
+    viewerRole: RosterRole | null,
+  ): Promise<CommunityReplyDTO> {
+    if (reply.deletedAt) {
+      reply.deletedAt = null;
+      await this.replies.save(reply);
+    }
+    return this.mapReply(reply, actorId, viewerRole);
+  }
+
+  // Shared by `listReplyHistory` (nested) and `listFlatReplyHistory` (flat) —
+  // both callers have already authorized the actor before calling this.
+  private async replyHistoryCore(
+    replyId: string,
+  ): Promise<CommunityReplyHistoryResponse> {
+    const rows = await this.replyEdits.find({
+      where: { replyId },
+      order: { createdAt: 'DESC' },
+    });
+    const editorIds = [
+      ...new Set(
+        rows.map((row) => row.editorId).filter((id): id is string => !!id),
+      ),
+    ];
+    const editors = await new MemberLookup(this.profiles).byUserIds(editorIds);
+
+    return {
+      revisions: rows.map((row) =>
+        toCommunityReplyHistoryEntry(
+          row,
+          row.editorId ? (editors.get(row.editorId) ?? null) : null,
+        ),
+      ),
+    };
   }
 
   private async assertMember(
@@ -828,17 +1146,34 @@ export class CommunityPostsService {
   // Delete / restore / history authz: the author, or the community's owner/mod.
   // (Editing stays author-only and is checked inline, NOT here.)
   private assertAuthorOrOwnerMod(
-    authorId: string,
+    // Nullable since `FixCommunityOwnerAuthorErasureCascades1789900000000`: a
+    // `null` authorId means the original author's account was erased. It can
+    // never equal a live `membership.userId`, so `isAuthor` naturally resolves
+    // to false — an erased-author post/reply is manageable by owner/mod only,
+    // never "the author" (there isn't one to match).
+    authorId: string | null,
     membership: CommunityMember,
   ): void {
     const isAuthor = authorId === membership.userId;
-    const isOwnerMod =
-      membership.role === RosterRole.Owner ||
-      membership.role === RosterRole.Mod;
+    const isOwnerMod = CommunityPostsService.isStaffRole(membership.role);
     if (!isAuthor && !isOwnerMod) {
       throw new ForbiddenException(
         'Only the author or a community owner/mod can do that',
       );
+    }
+  }
+
+  // Flat (`/community-posts*`) delete/restore/history authz: author-only.
+  // There's no community here, so there's no owner/mod concept to fall back
+  // to — unlike `assertAuthorOrOwnerMod`'s nested-route counterpart, a
+  // non-author is rejected outright, even a platform moderator (moderator
+  // takedown of a flat post goes through `src/moderation`'s
+  // `hide_content`/`remove_content`, not this author-facing path). Same
+  // null-safe comparison as above: a `null` authorId (erased author) can
+  // never equal a live `actorId`.
+  private assertAuthorOnly(authorId: string | null, actorId: string): void {
+    if (authorId !== actorId) {
+      throw new ForbiddenException('Only the author can do that');
     }
   }
 
@@ -1075,7 +1410,10 @@ export class CommunityPostsService {
       ]);
     const replyRows = repliesByPost.get(post.id) ?? [];
 
-    const authorIds = [post.authorId, ...replyRows.map((r) => r.authorId)];
+    const authorIds = nonNullIds([
+      post.authorId,
+      ...replyRows.map((r) => r.authorId),
+    ]);
     const [authors, states] = await Promise.all([
       new MemberLookup(this.profiles).byUserIds(authorIds),
       this.moderationStatesFor(
@@ -1090,7 +1428,7 @@ export class CommunityPostsService {
     const replies = replyRows.map((r) =>
       toCommunityReply(
         r,
-        authors.get(r.authorId) ?? null,
+        authorRefOf(authors, r.authorId),
         viewerId,
         viewerRole,
         states.get(r.id) ?? CommunityPostsService.VISIBLE,
@@ -1098,7 +1436,7 @@ export class CommunityPostsService {
     );
     return toCommunityPost(
       post,
-      authors.get(post.authorId) ?? null,
+      authorRefOf(authors, post.authorId),
       reactionsByPost.get(post.id) ?? { counts: new Map(), mine: new Set() },
       replies,
       replyCountByPost.get(post.id) ?? replies.length,
@@ -1157,8 +1495,8 @@ export class CommunityPostsService {
     const repliesByPost = groupBy(replyRows, (r) => r.postId);
 
     const authorIds = new Set<string>();
-    for (const p of visiblePosts) authorIds.add(p.authorId);
-    for (const r of replyRows) authorIds.add(r.authorId);
+    for (const p of visiblePosts) if (p.authorId) authorIds.add(p.authorId);
+    for (const r of replyRows) if (r.authorId) authorIds.add(r.authorId);
     const authors = await new MemberLookup(this.profiles).byUserIds([
       ...authorIds,
     ]);
@@ -1167,7 +1505,7 @@ export class CommunityPostsService {
       const replies = (repliesByPost.get(post.id) ?? []).map((r) =>
         toCommunityReply(
           r,
-          authors.get(r.authorId) ?? null,
+          authorRefOf(authors, r.authorId),
           viewerId,
           viewerRole,
           states.get(r.id) ?? CommunityPostsService.VISIBLE,
@@ -1175,7 +1513,7 @@ export class CommunityPostsService {
       );
       return toCommunityPost(
         post,
-        authors.get(post.authorId) ?? null,
+        authorRefOf(authors, post.authorId),
         reactionsByPost.get(post.id) ?? { counts: new Map(), mine: new Set() },
         replies,
         replyCountByPost.get(post.id) ?? replies.length,
@@ -1196,4 +1534,24 @@ function groupBy<T>(rows: T[], keyOf: (row: T) => string): Map<string, T[]> {
     else map.set(key, [row]);
   }
   return map;
+}
+
+/** Filters a batch of author ids down to the ones worth resolving via
+ * `MemberLookup.byUserIds` — a `null` id (the author's account was erased,
+ * per `CommunityPost.authorId`'s doc comment) never has a profile to look up,
+ * so it's dropped here rather than passed through. */
+function nonNullIds(ids: (string | null)[]): string[] {
+  return ids.filter((id): id is string => id !== null);
+}
+
+/** Safe `Map<string, MemberRef>` lookup for a possibly-null author id: an
+ * erased account's post/reply keeps its content but loses its author
+ * reference (`CommunityPost.authorId`/`CommunityPostReply.authorId`), so
+ * there's nothing to resolve — `null` in, `null` out, without needing every
+ * call site to guard the `.get()` itself. */
+function authorRefOf(
+  authors: Map<string, MemberRef>,
+  authorId: string | null,
+): MemberRef | null {
+  return authorId ? (authors.get(authorId) ?? null) : null;
 }

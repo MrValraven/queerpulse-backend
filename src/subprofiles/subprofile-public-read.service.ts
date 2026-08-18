@@ -706,7 +706,10 @@ export class SubprofilePublicReadService {
     type ResolvedTarget = {
       name: string;
       imageUrl: string | null;
-      ownerId: string;
+      // Null while the community is temporarily ownerless (owner account
+      // erased, pending mod-promotion/reassignment) — there's no owner user
+      // left to block-check against, so the target just passes through.
+      ownerId: string | null;
     };
     const eventBySlug = new Map<string, ResolvedTarget>(
       eventRows
@@ -737,10 +740,12 @@ export class SubprofilePublicReadService {
     // Batched block-filter over the DISTINCT set of target owners (one query
     // total via `BlockFilterService.blockedUserIds`), not per affiliation row.
     const ownerIds = [
-      ...new Set([
-        ...[...eventBySlug.values()].map((target) => target.ownerId),
-        ...[...communityBySlug.values()].map((target) => target.ownerId),
-      ]),
+      ...new Set(
+        [
+          ...[...eventBySlug.values()].map((target) => target.ownerId),
+          ...[...communityBySlug.values()].map((target) => target.ownerId),
+        ].filter((ownerId): ownerId is string => ownerId !== null),
+      ),
     ];
     const blockedOwnerIds = await this.blockFilter.blockedUserIds(
       viewerId,
@@ -754,7 +759,10 @@ export class SubprofilePublicReadService {
           : row.targetType === 'community'
             ? communityBySlug.get(row.targetSlug)
             : undefined;
-      if (!target || blockedOwnerIds.has(target.ownerId)) {
+      if (
+        !target ||
+        (target.ownerId !== null && blockedOwnerIds.has(target.ownerId))
+      ) {
         continue;
       }
       const view: AffiliationView = {

@@ -17,6 +17,7 @@ import {
 import { AuthService } from '../auth/auth.service';
 import { isUniqueViolation } from '../common/db-errors';
 import { cursorPaginate } from '../common/cursor-pagination';
+import { CommunityMembershipService } from '../communities/community-membership.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -28,7 +29,7 @@ import {
 } from '../reports/entities/report.entity';
 import { Listing } from '../listings/entities/listing.entity';
 import { Profile } from '../users/entities/profile.entity';
-import { UserStatus } from '../users/entities/user.entity';
+import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { AccountEnforcementService } from './account-enforcement.service';
 import { LiftSuspensionDto } from './dto/lift-suspension.dto';
 import {
@@ -113,6 +114,10 @@ export class ModerationService {
     private readonly accountEnforcement: AccountEnforcementService,
     private readonly contentModeration: ContentModerationService,
     private readonly notifications: NotificationsService,
+    // Backs the community-owner/mod dismiss carve-out in `actOnReport` — see
+    // `assertCanActOnReport`. Read-only, entity-registration-only module
+    // (`CommunityMembershipModule`), not the full `CommunitiesModule`.
+    private readonly communityMembership: CommunityMembershipService,
   ) {}
 
   // The two actions whose whole point is to change the target content's
@@ -191,12 +196,20 @@ export class ModerationService {
   // `action` → `status` server-side (C6); writes one audit log row. Returns
   // `ModReportDTO` without `detail` (only present on the GET-by-id drawer
   // fetch, per `moderation.api.ts`'s doc comment).
+  //
+  // The controller only requires an active member for this one route (its
+  // class-level `@Roles(Moderator, Admin)` is overridden here) — see
+  // `assertCanActOnReport` for the actual authorization: platform
+  // Moderator/Admin (unchanged), OR a community owner/mod dismissing a report
+  // scoped to a post/reply in the community they moderate.
   async actOnReport(
     id: string,
     actorId: string,
+    actorRole: string,
     dto: ModActionDto,
   ): Promise<ModReportDTO> {
     const report = await this.findReportOrThrow(id);
+    await this.assertCanActOnReport(report, actorId, actorRole, dto.action);
 
     // Report status, enforcement against the member, and the audit row commit
     // together or not at all. A resolved report whose suspension failed to
@@ -274,6 +287,66 @@ export class ModerationService {
     );
 
     return this.toRow(saved);
+  }
+
+  /**
+   * Authorization for `actOnReport`, called after the report is resolved so a
+   * community mod's own community can be checked against the real subject.
+   *
+   * A platform Moderator/Admin may take any action on any report, unchanged.
+   * Everything else is a narrow, community-scoped carve-out: a community
+   * owner/mod may only `dismiss` (never warn/suspend/ban/hide_content/
+   * remove_content/restrict/shield/escalate — those are account- or
+   * platform-wide consequences, not a community queue action) a report whose
+   * subject resolves to a post or reply in the community they own or
+   * moderate. Everyone else — including a community mod acting outside their
+   * own community, or against a non-community-post/reply report (member,
+   * message, venue, ...) — is forbidden. This grants no report *visibility*:
+   * `GET /mod/reports` and `GET /mod/reports/:id` are untouched and still
+   * require the platform role.
+   */
+  private async assertCanActOnReport(
+    report: Report,
+    actorId: string,
+    actorRole: string,
+    action: ModActionCode,
+  ): Promise<void> {
+    if (actorRole === UserRole.Moderator || actorRole === UserRole.Admin) {
+      return;
+    }
+
+    if (action === 'dismiss') {
+      const communityId = await this.communityIdForReportSubject(report);
+      if (
+        communityId &&
+        (await this.communityMembership.isOwnerOrMod(communityId, actorId))
+      ) {
+        return;
+      }
+    }
+
+    throw new ForbiddenException(
+      "Requires a moderator or admin role, or ownership/moderation of the report's community to dismiss it.",
+    );
+  }
+
+  // Resolves a report's `subjectType`/`subjectId` to the community it belongs
+  // to, for a `post`/`reply` subject only — mirrors the exact resolution
+  // pattern `CommunityAutoFreezeService.resolveCommunity` and
+  // `CommunityPostsService.listCommunityReports` already establish (a report
+  // on the community itself, a member, a message, etc. resolves to `null`
+  // here; this carve-out is about content *inside* a community, not the
+  // community-as-subject case).
+  private async communityIdForReportSubject(
+    report: Report,
+  ): Promise<string | null> {
+    if (report.subjectType === ReportSubjectType.Post) {
+      return this.communityMembership.communityIdForPost(report.subjectId);
+    }
+    if (report.subjectType === ReportSubjectType.Reply) {
+      return this.communityMembership.communityIdForReply(report.subjectId);
+    }
+    return null;
   }
 
   // POST /mod/reports/bulk — applies one action to many reports, writing an

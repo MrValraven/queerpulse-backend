@@ -21,9 +21,11 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
+import { BulkReviewJoinRequestsDto } from './dto/bulk-review-join-requests.dto';
 import { CreateJoinRequestDto } from './dto/create-join-request.dto';
 import { ListJoinRequestsQuery } from './dto/list-join-requests.query';
 import { ReviewJoinRequestDto } from './dto/review-join-request.dto';
+import { SampleJoinRequestsQuery } from './dto/sample-join-requests.query';
 import {
   JoinRequestView,
   SubmittedJoinRequestView,
@@ -91,7 +93,48 @@ export class JoinRequestsController {
     description: 'Requires a moderator or admin role.',
   })
   list(@Query() query: ListJoinRequestsQuery): Promise<JoinRequestView[]> {
-    return this.joinRequestsService.list(query.status);
+    return this.joinRequestsService.list(query.status, {
+      source: query.source,
+      cursor: query.cursor,
+      limit: query.limit,
+      sort: query.sort,
+    });
+  }
+
+  @Post('bulk')
+  @UseGuards(ActiveMemberGuard, RolesGuard)
+  @Roles(UserRole.Moderator, UserRole.Admin)
+  @ApiOperation({ summary: 'Approve, decline, or waitlist multiple invite requests' })
+  @ApiOkResponse({ description: 'Per-item bulk review result.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({
+    description: 'Requires a moderator or admin role.',
+  })
+  bulk(
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: BulkReviewJoinRequestsDto,
+  ): Promise<{ succeeded: string[]; failed: { id: string; reason: string }[] }> {
+    return this.joinRequestsService.bulkReview(
+      dto.ids,
+      user.userId,
+      dto.status,
+      dto.declineReason,
+    );
+  }
+
+  @Get('sample')
+  @UseGuards(ActiveMemberGuard, RolesGuard)
+  @Roles(UserRole.Moderator, UserRole.Admin)
+  @ApiOperation({
+    summary: 'A random sample of past decisions, for peer quality review',
+  })
+  @ApiOkResponse({ description: 'Sampled past invite-request decisions.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({
+    description: 'Requires a moderator or admin role.',
+  })
+  sample(@Query() query: SampleJoinRequestsQuery): Promise<JoinRequestView[]> {
+    return this.joinRequestsService.sample(query.n ?? 10);
   }
 
   @Patch(':id')
@@ -112,6 +155,11 @@ export class JoinRequestsController {
     @CurrentUser() user: CurrentUserData,
     @Body() dto: ReviewJoinRequestDto,
   ): Promise<JoinRequestView> {
-    return this.joinRequestsService.review(id, user.userId, dto.status);
+    return this.joinRequestsService.review(
+      id,
+      user.userId,
+      dto.status,
+      dto.declineReason,
+    );
   }
 }

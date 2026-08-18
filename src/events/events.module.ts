@@ -9,11 +9,16 @@ import { PushModule } from '../push/push.module';
 import { SocialModule } from '../social/social.module';
 import { StorageModule } from '../storage/storage.module';
 import { UsersModule } from '../users/users.module';
-import { EventInvitesController, EventsController } from './events.controller';
+import {
+  EventCohostInvitesController,
+  EventInvitesController,
+  EventsController,
+} from './events.controller';
 import { EventPhotosController } from './event-photos.controller';
 import { EventReminderPreferencesController } from './event-reminder-preferences.controller';
 import { EventBookmark } from './entities/event-bookmark.entity';
 import { EventCohost } from './entities/event-cohost.entity';
+import { EventCohostInvite } from './entities/event-cohost-invite.entity';
 import { EventInvite } from './entities/event-invite.entity';
 import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventPhoto } from './entities/event-photo.entity';
@@ -22,6 +27,7 @@ import { Event } from './entities/event.entity';
 import { MemberEventReminderPreferences } from './entities/member-event-reminder-preferences.entity';
 import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBookmarksService } from './event-bookmarks.service';
+import { EventCohostInvitesService } from './event-cohost-invites.service';
 import { EventInvitesService } from './event-invites.service';
 import { EventPhotosService } from './event-photos.service';
 import { EventReminderPreferencesService } from './event-reminder-preferences.service';
@@ -34,6 +40,7 @@ import { RsvpService } from './rsvp.service';
     TypeOrmModule.forFeature([
       Event,
       EventCohost,
+      EventCohostInvite,
       EventRsvp,
       EventInvite,
       EventLineupEntry,
@@ -78,6 +85,7 @@ import { RsvpService } from './rsvp.service';
   controllers: [
     EventsController,
     EventInvitesController,
+    EventCohostInvitesController,
     EventPhotosController,
     EventReminderPreferencesController,
   ],
@@ -86,6 +94,7 @@ import { RsvpService } from './rsvp.service';
     EventBookmarksService,
     RsvpService,
     EventInvitesService,
+    EventCohostInvitesService,
     EventRemindersService,
     EventReminderPreferencesService,
     EventPhotosService,

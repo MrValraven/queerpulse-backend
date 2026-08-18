@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, IsNull, Repository } from 'typeorm';
 import { Profile } from '../users/entities/profile.entity';
+import { Vouch } from '../vouch/entities/vouch.entity';
 import { MagazinePiece } from '../magazine/entities/magazine-piece.entity';
 import { MagazineArticle } from '../magazine/entities/magazine-article.entity';
 import { MagazineDeck } from '../magazine/entities/magazine-deck.entity';
@@ -39,6 +40,7 @@ const MEMBER_SUBJECT_TYPE = 'member';
 export class PublicEligibilityService {
   constructor(
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    @InjectRepository(Vouch) private readonly vouches: Repository<Vouch>,
     @InjectRepository(MagazinePiece)
     private readonly pieces: Repository<MagazinePiece>,
     @InjectRepository(Event) private readonly events: Repository<Event>,
@@ -69,6 +71,11 @@ export class PublicEligibilityService {
     const now = new Date();
 
     const profile = await this.profiles.findOne({ where: { userId } });
+    // Only the raw day count is computed here. The 90-day hard gate itself
+    // (TENURE_FLOOR_DAYS: a deliberate trust-first policy, not an arbitrary
+    // number) lives solely in the frontend's `evaluatePublicEligibility`
+    // (queerpulse/src/features/members/publicFigure.ts) — see that file for
+    // the full rationale. This service does not duplicate the threshold.
     const tenureDays = profile
       ? Math.max(
           0,
@@ -85,6 +92,7 @@ export class PublicEligibilityService {
       subprofileIds,
       connectionCounts,
       eventsAttended,
+      vouchesGivenCount,
       forumThreadCount,
       forumPostCount,
       communityPostCount,
@@ -97,6 +105,9 @@ export class PublicEligibilityService {
       this.publishedSubprofileIds(userId),
       this.connections.counts(userId),
       this.attendedEventCount(userId, now),
+      this.vouches.count({
+        where: { voucherId: userId, withdrawnAt: IsNull() },
+      }),
       this.forumThreads.count({ where: { authorId: userId } }),
       this.forumPosts.count({
         where: { authorId: userId, deletedAt: IsNull() },
@@ -128,6 +139,7 @@ export class PublicEligibilityService {
       workshopsTaught,
       publishedSubprofiles: subprofileIds.length,
       vouchCount: profile?.vouchCount ?? 0,
+      vouchesGivenCount,
       endorsementCount,
       connectionCount: connectionCounts.all,
       eventsAttended,

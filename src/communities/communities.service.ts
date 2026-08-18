@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
@@ -28,6 +29,8 @@ import { User } from '../users/entities/user.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { VouchService } from '../vouch/vouch.service';
+import { CommunityGovernanceLogService } from './community-governance-log.service';
+import { GovernanceLogAction } from './entities/community-governance-log.entity';
 import {
   CommunityCardDTO,
   CommunityDetailDTO,
@@ -82,7 +85,7 @@ export interface CreateCommunityInput {
   coverImageUrl?: string | null; // storage key / https URL / '' to clear
   handle: string; // desired slug
   stewards?: string[]; // member slugs -> seeded as 'mod'
-  invites?: string[]; // member slugs -> accepted for forward-compat, not persisted (see `seedExtraRoster`)
+  invites?: string[]; // member slugs -> sent a CommunityInviteReceived notification, never force-added to the roster (see `seedExtraRoster`)
 }
 
 // `handle` only ever applies at creation time (spec: "handle ignored on
@@ -96,11 +99,29 @@ export type UpdateCommunityInput = Partial<
 
 export type CommunityListFilter = 'discover' | 'mine';
 
+// 'active' (most members / most recent post activity) was deliberately left
+// out: both would need an aggregate join/subquery across `community_members`
+// or `community_posts` evaluated for the *whole* filtered set before
+// pagination — unlike `statsForMany`, which only ever batches stats for the
+// current page's rows after the fact — and neither table carries an index
+// that makes that aggregate cheap. Doing it properly would mean a
+// denormalized, trigger-maintained counter column (its own migration +
+// sync mechanism), which is out of scope here.
+export type CommunityListSort = 'newest' | 'name';
+
 export interface CommunityListQuery {
   filter?: CommunityListFilter;
   type?: CommunityType;
   access?: AccessTier;
   page?: number;
+  // Free-text search over name/tagline/purpose, ANDed with `type`/`access`/
+  // `filter` rather than replacing them — mirrors `searchByText`'s ILIKE
+  // clause, applied inline so it composes with the rest of `list()`'s query
+  // instead of duplicating the pagination/stats/role hydration path.
+  q?: string;
+  // Defaults to 'newest' (the pre-existing, unparametrized behavior) when
+  // omitted — see `list()`'s `ORDER BY`.
+  sort?: CommunityListSort;
 }
 
 export interface JoinCommunityInput {
@@ -140,7 +161,13 @@ export class CommunitiesService {
     // Batched crop lookup (`MediaCropService.getMany`) for `coverImageUrl`'s
     // sibling `coverCrop`.
     private readonly mediaCropService: MediaCropService,
+    // Governance audit trail (`community_governance_log`) — every roster/
+    // lifecycle action this service performs (role change, removal,
+    // ownership transfer, archive, freeze/unfreeze) writes one entry.
+    private readonly governanceLog: CommunityGovernanceLogService,
   ) {}
+
+  private readonly logger = new Logger(CommunitiesService.name);
 
   // A community is taken down under the `community` taxonomy code, keyed by its
   // slug (matching the report `subjectId`).
@@ -175,7 +202,14 @@ export class CommunitiesService {
     ownerId: string,
     dto: CreateCommunityInput,
   ): Promise<CommunityDetailDTO> {
-    const saved = await this.createWithUniqueRef(ownerId, dto);
+    const { community: saved, invitedUserIds } = await this.createWithUniqueRef(
+      ownerId,
+      dto,
+    );
+
+    // Best-effort, after the create transaction has committed — see
+    // `notifyInvitees`.
+    await this.notifyInvitees(saved, ownerId, invitedUserIds);
 
     // The creator is always 'owner' right after creation — skip the extra
     // roster lookup `buildDetail` would otherwise do.
@@ -193,7 +227,7 @@ export class CommunitiesService {
   private async createWithUniqueRef(
     ownerId: string,
     dto: CreateCommunityInput,
-  ): Promise<Community> {
+  ): Promise<{ community: Community; invitedUserIds: string[] }> {
     const MAX_ATTEMPTS = 5;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const slug = await allocateUniqueSlug(
@@ -238,7 +272,7 @@ export class CommunitiesService {
             }),
           );
 
-          await this.seedExtraRoster(
+          const invitedUserIds = await this.seedExtraRoster(
             manager.getRepository(Profile),
             membersRepo,
             community.id,
@@ -247,7 +281,7 @@ export class CommunitiesService {
             dto.invites ?? [],
           );
 
-          return community;
+          return { community, invitedUserIds };
         });
       } catch (err) {
         if (isUniqueViolation(err)) {
@@ -304,13 +338,28 @@ export class CommunitiesService {
     if (query.access) {
       qb.andWhere('c.access_tier = :access', { access: query.access });
     }
+    if (query.q) {
+      // ANDed onto the existing filters (not a replacement) — mirrors
+      // `searchByText`'s ILIKE clause over the same three columns.
+      const pattern = `%${escapeLikeTerm(query.q)}%`;
+      qb.andWhere(
+        '(c.name ILIKE :qPattern OR c.tagline ILIKE :qPattern OR c.purpose ILIKE :qPattern)',
+        { qPattern: pattern },
+      );
+    }
     // An archived community leaves every listing (discover AND mine) — it has
     // been taken down by its owner, so it should stop surfacing anywhere a card
     // is rendered, exactly like the moderated-away exclusion just below.
     qb.andWhere('c.archived_at IS NULL');
     this.excludeModeratedCommunities(qb);
 
-    qb.orderBy('c.createdAt', 'DESC');
+    // 'name' ties (names aren't unique) get a stable, deterministic
+    // secondary key so pagination doesn't reshuffle rows across pages.
+    if (query.sort === 'name') {
+      qb.orderBy('c.name', 'ASC').addOrderBy('c.id', 'ASC');
+    } else {
+      qb.orderBy('c.createdAt', 'DESC');
+    }
 
     return paginate(qb, page, async (rows) => {
       if (!rows.length) return [];
@@ -457,16 +506,68 @@ export class CommunitiesService {
     if (community.archivedAt == null) {
       community.archivedAt = new Date();
       await this.communities.save(community);
+      await this.logGovernanceAction(
+        community.id,
+        userId,
+        GovernanceLogAction.Archived,
+      );
+      await this.notifyRosterArchived(community, userId);
     }
     return this.buildDetail(community, userId, RosterRole.Owner);
   }
 
   /**
-   * `POST /communities/:slug/unfreeze` — an owner or mod lifts an auto-freeze
-   * once they've handled the reports that triggered it. There is no manual
-   * freeze endpoint: freezing is automatic (see `CommunityAutoFreezeService`);
-   * staff only ever lift it. Idempotent — unfreezing a community that isn't
-   * frozen is a no-op 200 that just returns the current detail.
+   * `POST /communities/:slug/freeze` — an owner or mod manually freezes a
+   * community (e.g. ahead of a moderation review), symmetric to `unfreeze`.
+   * Unlike `unfreeze`'s automatic-only counterpart (`CommunityAutoFreezeService`),
+   * this action has a real human actor, so it's logged with `actorUserId`
+   * set rather than `null`. Idempotent: freezing an already-frozen community
+   * is a no-op 200. Uses the same atomic conditional-UPDATE guard (`frozen_at
+   * IS NULL`) as `CommunityAutoFreezeService.maybeFreeze`, so a manual freeze
+   * racing an automatic one (or a second manual call) can't double-log or
+   * double-notify.
+   */
+  async freeze(slug: string, userId: string): Promise<CommunityDetailDTO> {
+    const community = await this.loadOr404(slug);
+    const role = await this.myRole(community.id, userId);
+    if (!CommunitiesService.isStaffRole(role)) {
+      throw new ForbiddenException(
+        'Only an owner or mod can freeze a community',
+      );
+    }
+
+    if (community.frozenAt == null) {
+      const result = await this.communities
+        .createQueryBuilder()
+        .update(Community)
+        .set({ frozenAt: () => 'now()' })
+        .where('id = :id AND frozen_at IS NULL', { id: community.id })
+        .execute();
+      if (result.affected) {
+        community.frozenAt = new Date();
+        await this.logGovernanceAction(
+          community.id,
+          userId,
+          GovernanceLogAction.Frozen,
+          null,
+          { reason: 'manual' },
+        );
+        await this.notifyStaffFreezeChange(
+          community,
+          NotificationType.CommunityFrozen,
+          userId,
+          { reason: 'manual' },
+        );
+      }
+    }
+    return this.buildDetail(community, userId, role);
+  }
+
+  /**
+   * `POST /communities/:slug/unfreeze` — an owner or mod lifts a freeze
+   * (automatic or manual) once they've handled whatever triggered it.
+   * Idempotent — unfreezing a community that isn't frozen is a no-op 200
+   * that just returns the current detail.
    */
   async unfreeze(slug: string, userId: string): Promise<CommunityDetailDTO> {
     const community = await this.loadOr404(slug);
@@ -479,6 +580,16 @@ export class CommunitiesService {
     if (community.frozenAt != null) {
       community.frozenAt = null;
       await this.communities.save(community);
+      await this.logGovernanceAction(
+        community.id,
+        userId,
+        GovernanceLogAction.Unfrozen,
+      );
+      await this.notifyStaffFreezeChange(
+        community,
+        NotificationType.CommunityUnfrozen,
+        userId,
+      );
     }
     return this.buildDetail(community, userId, role);
   }
@@ -576,6 +687,15 @@ export class CommunitiesService {
 
       return savedCommunity;
     });
+
+    await this.logGovernanceAction(
+      community.id,
+      actorId,
+      GovernanceLogAction.OwnershipTransferred,
+      targetUserId,
+      { fromOwnerId: actorId },
+    );
+    await this.notifyOwnershipTransferred(community, actorId, targetUserId);
 
     // The actor is now a moderator of the community they handed off.
     return this.buildDetail(saved, actorId, RosterRole.Mod);
@@ -889,16 +1009,7 @@ export class CommunitiesService {
     requesterId: string,
   ): Promise<void> {
     try {
-      const staff = await this.members.find({
-        where: {
-          communityId: community.id,
-          role: In([RosterRole.Owner, RosterRole.Mod]),
-        },
-        select: { userId: true },
-      });
-      const recipientIds = [
-        ...new Set([community.ownerId, ...staff.map((row) => row.userId)]),
-      ];
+      const recipientIds = await this.staffRecipientIds(community);
       await this.notifications.createForRecipients(
         recipientIds,
         NotificationType.JoinRequestReceived,
@@ -942,6 +1053,20 @@ export class CommunitiesService {
     }
 
     await this.members.delete({ id: targetMembership.id });
+
+    const removedBySelf = actorId === targetUserId;
+    await this.logGovernanceAction(
+      community.id,
+      actorId,
+      GovernanceLogAction.MemberRemoved,
+      targetUserId,
+      { removedBySelf },
+    );
+    // A self-leave doesn't need a "you were removed" notification telling the
+    // member the thing they themselves just did.
+    if (!removedBySelf) {
+      await this.notifyMemberRemoved(community, actorId, targetUserId);
+    }
   }
 
   /**
@@ -1096,8 +1221,23 @@ export class CommunitiesService {
     }
 
     if (targetMembership.role !== role) {
+      const fromRole = targetMembership.role;
       targetMembership.role = role;
       await this.members.save(targetMembership);
+      await this.logGovernanceAction(
+        community.id,
+        actorId,
+        GovernanceLogAction.RoleChanged,
+        targetUserId,
+        { fromRole, toRole: role },
+      );
+      await this.notifyRoleChanged(
+        community,
+        actorId,
+        targetUserId,
+        fromRole,
+        role,
+      );
     }
 
     return { slug: community.slug, memberSlug, role };
@@ -1179,6 +1319,18 @@ export class CommunitiesService {
     return new Map(rows.map((m) => [m.communityId, m.role]));
   }
 
+  /**
+   * Seeds the roster's `mod` rows from `stewards`, and resolves (but never
+   * roster-adds) `invites`. Returns the resolved invitee user ids so the
+   * caller (`create`, after this transaction commits) can send each of them
+   * a `CommunityInviteReceived` notification — closing the gap where invites
+   * were accepted by the create form but silently discarded. Still no
+   * `CommunityInvite`/accept entity: force-adding members without consent is
+   * unsafe, so an invite never becomes a `CommunityMember` row here, only a
+   * notification. The slugs are resolved in one batched lookup alongside
+   * `stewards` so an unknown/typo'd invite slug doesn't silently behave
+   * differently from a valid one — it just resolves to nothing.
+   */
   private async seedExtraRoster(
     profilesRepo: Repository<Profile>,
     membersRepo: Repository<CommunityMember>,
@@ -1186,9 +1338,9 @@ export class CommunitiesService {
     ownerId: string,
     stewards: string[],
     invites: string[],
-  ): Promise<void> {
+  ): Promise<string[]> {
     const slugs = [...stewards, ...invites];
-    if (!slugs.length) return;
+    if (!slugs.length) return [];
 
     const lookup = new MemberLookup(profilesRepo);
     const idBySlug = await lookup.userIdsForSlugs(slugs);
@@ -1208,17 +1360,22 @@ export class CommunitiesService {
         );
       }
     }
-    // invites: no CommunityInvite/accept entity exists yet — accepted for
-    // forward-compat but intentionally not persisted (force-adding members
-    // without consent is unsafe). See phase-A hand-back.
-    // The slugs are still resolved above (batched into the same lookup query
-    // as `stewards`, so this costs nothing extra) purely so an unknown/typo'd
-    // invite slug doesn't silently behave differently from a valid one; the
-    // resolved ids are deliberately never turned into `CommunityMember` rows.
 
     if (rows.length) {
       await membersRepo.save(rows);
     }
+
+    // A steward is already rostered as mod (and the owner is trivially
+    // already in `seen`) — never also "invite" someone who's already on the
+    // roster.
+    const invitedUserIds: string[] = [];
+    for (const slug of invites) {
+      const uid = idBySlug.get(slug);
+      if (uid && !seen.has(uid) && !invitedUserIds.includes(uid)) {
+        invitedUserIds.push(uid);
+      }
+    }
+    return invitedUserIds;
   }
 
   private async buildDetail(
@@ -1233,7 +1390,12 @@ export class CommunitiesService {
           ? Promise.resolve(myRole)
           : this.myRole(community.id, viewerId),
         this.statsFor(community.id),
-        this.profiles.findOne({ where: { userId: community.ownerId } }),
+        // `ownerId` is null for an ownerless (post-erasure, pre-promotion)
+        // community — no profile to look up; the detail simply renders no
+        // owner rather than throwing or querying `userId IS NULL`.
+        community.ownerId
+          ? this.profiles.findOne({ where: { userId: community.ownerId } })
+          : Promise.resolve(null),
         this.joinRequests.findOne({
           where: { communityId: community.id, userId: viewerId },
           order: { createdAt: 'DESC' },
@@ -1317,5 +1479,239 @@ export class CommunitiesService {
     }
 
     return stats;
+  }
+
+  // --- governance audit log + lifecycle notifications ---
+
+  /**
+   * Writes one `community_governance_log` entry. Best-effort: a logging
+   * failure must never roll back the action it describes or surface to the
+   * caller as a failed request — mirrors this module's existing posture on
+   * notification failures (see `notifyStaffOfJoinRequest`).
+   */
+  private async logGovernanceAction(
+    communityId: string,
+    actorUserId: string | null,
+    action: GovernanceLogAction,
+    targetUserId?: string | null,
+    metadata?: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      await this.governanceLog.log({
+        communityId,
+        actorUserId,
+        action,
+        targetUserId,
+        metadata,
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to write governance log (${action}) for community ${communityId}: ${
+          error instanceof Error
+            ? (error.stack ?? error.message)
+            : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * The owner + every mod on the roster, deduped and null-filtered — the
+   * recipient set for staff-scoped notifications (join requests, freeze/
+   * unfreeze). `Community.ownerId` can be null for an ownerless (post-
+   * erasure, pre-promotion) community.
+   */
+  private async staffRecipientIds(community: Community): Promise<string[]> {
+    const staff = await this.members.find({
+      where: {
+        communityId: community.id,
+        role: In([RosterRole.Owner, RosterRole.Mod]),
+      },
+      select: { userId: true },
+    });
+    return [
+      ...new Set(
+        [community.ownerId, ...staff.map((row) => row.userId)].filter(
+          (id): id is string => id !== null,
+        ),
+      ),
+    ];
+  }
+
+  /** Best-effort "your role changed" notification for `setMemberRole`. */
+  private async notifyRoleChanged(
+    community: Community,
+    actorId: string,
+    targetUserId: string,
+    fromRole: RosterRole,
+    toRole: RosterRole,
+  ): Promise<void> {
+    try {
+      await this.notifications.create(
+        targetUserId,
+        NotificationType.CommunityRoleChanged,
+        {
+          actorId,
+          source: 'community',
+          communitySlug: community.slug,
+          fromRole,
+          toRole,
+        },
+        actorId,
+      );
+    } catch {
+      // Intentionally ignored — best-effort; the role change already committed.
+    }
+  }
+
+  /** Best-effort "you were removed" notification for `removeMember` (never
+   *  sent for a self-leave — see the caller). */
+  private async notifyMemberRemoved(
+    community: Community,
+    actorId: string,
+    targetUserId: string,
+  ): Promise<void> {
+    try {
+      await this.notifications.create(
+        targetUserId,
+        NotificationType.CommunityMemberRemoved,
+        {
+          actorId,
+          source: 'community',
+          communitySlug: community.slug,
+        },
+        actorId,
+      );
+    } catch {
+      // Intentionally ignored — best-effort; the removal already committed.
+    }
+  }
+
+  /**
+   * Two best-effort notifications for `transferOwnership`: one to the
+   * incoming owner ("you are now owner"), one to the outgoing owner
+   * ("ownership was transferred"), each own try/catch so one send failing
+   * never suppresses the other.
+   */
+  private async notifyOwnershipTransferred(
+    community: Community,
+    fromOwnerId: string,
+    toOwnerId: string,
+  ): Promise<void> {
+    try {
+      await this.notifications.create(
+        toOwnerId,
+        NotificationType.CommunityOwnershipTransferred,
+        {
+          actorId: fromOwnerId,
+          source: 'community',
+          communitySlug: community.slug,
+          youAreNowOwner: true,
+          counterpartId: fromOwnerId,
+        },
+        fromOwnerId,
+      );
+    } catch {
+      // Intentionally ignored — best-effort; the transfer already committed.
+    }
+    try {
+      await this.notifications.create(
+        fromOwnerId,
+        NotificationType.CommunityOwnershipTransferred,
+        {
+          actorId: fromOwnerId,
+          source: 'community',
+          communitySlug: community.slug,
+          youAreNowOwner: false,
+          counterpartId: toOwnerId,
+        },
+        fromOwnerId,
+      );
+    } catch {
+      // Intentionally ignored — best-effort; the transfer already committed.
+    }
+  }
+
+  /** Best-effort "this community was archived" fan-out to the whole roster,
+   *  for `archive`. Batched via `createForRecipients`, not row-by-row. */
+  private async notifyRosterArchived(
+    community: Community,
+    actorId: string,
+  ): Promise<void> {
+    try {
+      const rosterRows = await this.members.find({
+        where: { communityId: community.id },
+        select: { userId: true },
+      });
+      const recipientIds = rosterRows.map((row) => row.userId);
+      if (!recipientIds.length) return;
+      await this.notifications.createForRecipients(
+        recipientIds,
+        NotificationType.CommunityArchived,
+        { actorId, source: 'community', communitySlug: community.slug },
+        actorId,
+      );
+    } catch {
+      // Intentionally ignored — best-effort; the archive already committed.
+    }
+  }
+
+  /**
+   * Best-effort freeze/unfreeze notification, scoped to staff only (owner +
+   * mods) — operational, matching `notifyStaffOfJoinRequest`'s scope, not the
+   * whole-roster fan-out `notifyRosterArchived` does.
+   */
+  private async notifyStaffFreezeChange(
+    community: Community,
+    type: NotificationType.CommunityFrozen | NotificationType.CommunityUnfrozen,
+    actorId: string,
+    metadata: Record<string, unknown> = {},
+  ): Promise<void> {
+    try {
+      const recipientIds = await this.staffRecipientIds(community);
+      if (!recipientIds.length) return;
+      await this.notifications.createForRecipients(
+        recipientIds,
+        type,
+        {
+          actorId,
+          source: 'community',
+          communitySlug: community.slug,
+          ...metadata,
+        },
+        actorId,
+      );
+    } catch {
+      // Intentionally ignored — best-effort; the freeze/unfreeze already committed.
+    }
+  }
+
+  /**
+   * Best-effort "you were invited" fan-out for `create`'s resolved `invites`.
+   * NOT a roster add — see `seedExtraRoster`'s "no consent-less roster adds"
+   * note. Runs after the create transaction has committed (notification
+   * writes aren't part of it), so a failure here can never roll back a
+   * successful community creation.
+   */
+  private async notifyInvitees(
+    community: Community,
+    inviterId: string,
+    invitedUserIds: string[],
+  ): Promise<void> {
+    if (!invitedUserIds.length) return;
+    try {
+      await this.notifications.createForRecipients(
+        invitedUserIds,
+        NotificationType.CommunityInviteReceived,
+        {
+          actorId: inviterId,
+          source: 'community',
+          communitySlug: community.slug,
+        },
+        inviterId,
+      );
+    } catch {
+      // Intentionally ignored — best-effort; the community already exists.
+    }
   }
 }

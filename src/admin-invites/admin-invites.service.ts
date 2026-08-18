@@ -1,9 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, SelectQueryBuilder } from 'typeorm';
+import { In, Repository, SelectQueryBuilder } from 'typeorm';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { Invite, InviteStatus } from '../membership/entities/invite.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { User } from '../users/entities/user.entity';
 import {
   AdminInviteDTO,
   AdminInviteInviterDTO,
@@ -33,6 +34,7 @@ export class AdminInvitesService {
   constructor(
     @InjectRepository(Invite) private readonly invites: Repository<Invite>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    @InjectRepository(User) private readonly users: Repository<User>,
   ) {}
 
   async list(query: ListAdminInvitesQuery): Promise<AdminInvitesPageDTO> {
@@ -116,6 +118,10 @@ export class AdminInvitesService {
    * platform-wide (not only those on the pages already loaded). Resolved through
    * the same batched `MemberLookup.byUserIds` the list uses — no status filter,
    * so it matches exactly who can appear as an inviter in the rows.
+   *
+   * Also batch-fetches each inviter's `inviteMonthlyQuota` override in one
+   * extra query (never one per row), so the admin invite-oversight page can
+   * show and edit it inline without a second round trip per inviter.
    */
   async listInviters(): Promise<AdminInviteInviterDTO[]> {
     const grouped = await this.invites
@@ -126,8 +132,16 @@ export class AdminInvitesService {
       .getRawMany<{ inviterId: string; count: string }>();
     if (!grouped.length) return [];
 
-    const refsByUserId = await new MemberLookup(this.profiles).byUserIds(
-      grouped.map((row) => row.inviterId),
+    const inviterIds = grouped.map((row) => row.inviterId);
+    const [refsByUserId, quotaRows] = await Promise.all([
+      new MemberLookup(this.profiles).byUserIds(inviterIds),
+      this.users.find({
+        where: { id: In(inviterIds) },
+        select: ['id', 'inviteMonthlyQuota'],
+      }),
+    ]);
+    const quotaByUserId = new Map(
+      quotaRows.map((userRow) => [userRow.id, userRow.inviteMonthlyQuota]),
     );
 
     return grouped
@@ -139,6 +153,7 @@ export class AdminInvitesService {
           name: `${ref.firstName} ${ref.lastName}`.trim(),
           avatarUrl: ref.avatarUrl,
           count: Number(row.count),
+          inviteMonthlyQuota: quotaByUserId.get(row.inviterId) ?? null,
         };
       })
       .filter((inviter): inviter is AdminInviteInviterDTO => inviter !== null)

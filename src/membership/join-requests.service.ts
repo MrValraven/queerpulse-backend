@@ -1,17 +1,24 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { DataSource, In, Repository } from 'typeorm';
 import { CreateJoinRequestDto } from './dto/create-join-request.dto';
 import { Invite } from './entities/invite.entity';
-import { JoinRequest, JoinRequestStatus } from './entities/join-request.entity';
+import {
+  PlatformJoinRequest,
+  PlatformJoinRequestStatus,
+} from './entities/join-request.entity';
 import { InvitesService } from './invites.service';
+import { computeBatchFlags } from './join-request-flags';
 import {
   JoinRequestView,
   SubmittedJoinRequestView,
@@ -19,6 +26,9 @@ import {
   toSubmittedJoinRequestView,
 } from './join-request-response';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import { MailerService } from '../mailer/mailer.service';
+import { Profile } from '../users/entities/profile.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 
 const MIN_AGE_YEARS = 18;
 
@@ -45,12 +55,16 @@ function ageInYears(dob: string, now: Date): number | null {
 
 @Injectable()
 export class JoinRequestsService {
+  private readonly logger = new Logger(JoinRequestsService.name);
+
   constructor(
-    @InjectRepository(JoinRequest)
-    private readonly joinRequests: Repository<JoinRequest>,
+    @InjectRepository(PlatformJoinRequest)
+    private readonly joinRequests: Repository<PlatformJoinRequest>,
     private readonly invitesService: InvitesService,
     private readonly dataSource: DataSource,
     private readonly platformSettings: PlatformSettingsService,
+    private readonly mailer: MailerService,
+    private readonly config: ConfigService,
   ) {}
 
   /**
@@ -105,12 +119,42 @@ export class JoinRequestsService {
       }
     }
 
+    // Reapplication cooldown (E1/P6): a declined applicant can try again, but
+    // not immediately — 30 days gives a reviewer's "no" real weight instead
+    // of inviting an instant resubmission loop. Checked before the
+    // duplicate-pending pre-check below: for a returning applicant, the
+    // cooldown is the more specific and more informative rejection reason.
+    const REAPPLICATION_COOLDOWN_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+    const lastDeclined = await this.joinRequests
+      .createQueryBuilder('jr')
+      .where('lower(jr.email) = :email', { email })
+      .andWhere('jr.status = :status', {
+        status: PlatformJoinRequestStatus.Declined,
+      })
+      .orderBy('jr.reviewedAt', 'DESC')
+      .getOne();
+    if (
+      lastDeclined?.reviewedAt &&
+      Date.now() - lastDeclined.reviewedAt.getTime() <
+        REAPPLICATION_COOLDOWN_MS
+    ) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Forbidden',
+        code: 'REAPPLICATION_COOLDOWN',
+        message:
+          'A previous request from this email was recently reviewed. Please wait before submitting again.',
+      });
+    }
+
     // Pre-check for the friendly 409. Case-insensitive to match the index — a
     // plain `where: { email }` would miss a differently-cased open request.
     const existing = await this.joinRequests
       .createQueryBuilder('jr')
       .where('lower(jr.email) = :email', { email })
-      .andWhere('jr.status = :status', { status: JoinRequestStatus.Pending })
+      .andWhere('jr.status = :status', {
+        status: PlatformJoinRequestStatus.Pending,
+      })
       .getOne();
     if (existing) {
       throw new ConflictException(
@@ -118,12 +162,32 @@ export class JoinRequestsService {
       );
     }
 
+    const mutualMemberEmail =
+      dto.mutualMemberEmail?.trim().toLowerCase() || null;
+
+    // Resolve the claimed reference against a real, ACTIVE member at submit
+    // time (P9), so a reviewer sees a checkable corroboration link instead
+    // of trusting an unverified string. `User.email` is `select: false` —
+    // still filterable in a WHERE, we just never read it back (only `id`,
+    // which is always selected, is needed here). Filtering to Active only: a
+    // reference to a suspended/deactivated account shouldn't read as
+    // corroboration.
+    let referenceUserId: string | null = null;
+    if (mutualMemberEmail) {
+      const referenced = await this.dataSource.getRepository(User).findOne({
+        where: { email: mutualMemberEmail, status: UserStatus.Active },
+      });
+      referenceUserId = referenced?.id ?? null;
+    }
+
     const request = this.joinRequests.create({
       name: dto.name.trim(),
       email,
       city: dto.city?.trim() || null,
       message: dto.message,
-      status: JoinRequestStatus.Pending,
+      mutualMemberEmail,
+      referenceUserId,
+      status: PlatformJoinRequestStatus.Pending,
       ageAttestedAt: new Date(),
       termsVersion: dto.termsVersion,
       // Trimmed to null so a stray `''` from the frontend reads as "no source"
@@ -145,12 +209,30 @@ export class JoinRequestsService {
     }
   }
 
-  async list(status?: JoinRequestStatus): Promise<JoinRequestView[]> {
-    const requests = await this.joinRequests.find({
-      where: status ? { status } : {},
-      order: { createdAt: 'ASC' },
-      take: DEFAULT_LIST_LIMIT,
-    });
+  async list(
+    status?: PlatformJoinRequestStatus,
+    options: {
+      source?: string;
+      cursor?: string;
+      limit?: number;
+      sort?: 'oldest' | 'newest';
+    } = {},
+  ): Promise<JoinRequestView[]> {
+    const sort = options.sort ?? 'oldest';
+    const take = options.limit ?? DEFAULT_LIST_LIMIT;
+
+    const qb = this.joinRequests.createQueryBuilder('jr');
+    if (status) qb.andWhere('jr.status = :status', { status });
+    if (options.source) {
+      qb.andWhere('jr.source = :source', { source: options.source });
+    }
+    if (options.cursor) {
+      const op = sort === 'oldest' ? '>' : '<';
+      qb.andWhere(`jr.createdAt ${op} :cursor`, { cursor: options.cursor });
+    }
+    qb.orderBy('jr.createdAt', sort === 'oldest' ? 'ASC' : 'DESC').take(take);
+
+    const requests = await qb.getMany();
     // One extra query for the whole page rather than N+1 (or a join that would
     // drag the full Invite entity into the view mapper).
     const inviteIds = requests
@@ -166,30 +248,114 @@ export class JoinRequestsService {
         codeById.set(invite.id, invite.code);
       }
     }
-    return requests.map((r) =>
-      toJoinRequestView(
+
+    // Batch-resolve any reference member (P9) to a display name/slug via
+    // `Profile` — not `User`, where the name and slug don't live. Same ad
+    // hoc `getRepository` idiom as the invite-code lookup above: one extra
+    // query for the whole page, not N+1.
+    const referenceUserIds = requests
+      .map((r) => r.referenceUserId)
+      .filter((id): id is string => id !== null);
+    const referenceById = new Map<string, { name: string; slug: string }>();
+    if (referenceUserIds.length > 0) {
+      const profiles = await this.dataSource.getRepository(Profile).find({
+        where: { userId: In(referenceUserIds) },
+        select: { userId: true, firstName: true, lastName: true, slug: true },
+      });
+      for (const profile of profiles) {
+        referenceById.set(profile.userId, {
+          name: `${profile.firstName} ${profile.lastName}`.trim(),
+          slug: profile.slug,
+        });
+      }
+    }
+
+    // Confidence-tiered triage flags (E4), computed from the batch alone —
+    // no extra query, since duplicate-message and source-burst are both
+    // about patterns within the page a reviewer is currently looking at.
+    const flagsById = computeBatchFlags(
+      requests.map((r) => ({
+        id: r.id,
+        email: r.email,
+        message: r.message,
+        source: r.source,
+        createdAt: r.createdAt,
+      })),
+    );
+
+    // One extra query for the whole page: how many DECLINED requests exist
+    // for each email in this batch, regardless of how far back — richer than
+    // a boolean "was this ever declined" flag, so a reviewer sees "declined
+    // twice before" rather than a bare warning icon.
+    const emails = [...new Set(requests.map((r) => r.email.toLowerCase()))];
+    const priorDeclineCounts = new Map<string, number>();
+    if (emails.length > 0) {
+      const rows = await this.joinRequests
+        .createQueryBuilder('jr')
+        .select('lower(jr.email)', 'email')
+        .addSelect('COUNT(*)', 'count')
+        .where('lower(jr.email) IN (:...emails)', { emails })
+        .andWhere('jr.status = :status', {
+          status: PlatformJoinRequestStatus.Declined,
+        })
+        .groupBy('lower(jr.email)')
+        .getRawMany<{ email: string; count: string }>();
+      for (const row of rows) {
+        priorDeclineCounts.set(row.email, Number(row.count));
+      }
+    }
+
+    return requests.map((r) => {
+      const reference = r.referenceUserId
+        ? referenceById.get(r.referenceUserId)
+        : undefined;
+      return toJoinRequestView(
         r,
         r.inviteId ? (codeById.get(r.inviteId) ?? null) : null,
-      ),
-    );
+        flagsById.get(r.id) ?? [],
+        priorDeclineCounts.get(r.email.toLowerCase()) ?? 0,
+        reference?.name ?? null,
+        reference?.slug ?? null,
+      );
+    });
   }
 
   async review(
     id: string,
     reviewerId: string,
-    status: JoinRequestStatus.Approved | JoinRequestStatus.Declined,
+    status:
+      | PlatformJoinRequestStatus.Approved
+      | PlatformJoinRequestStatus.Declined
+      | PlatformJoinRequestStatus.Waitlisted,
+    // Reason key a reviewer picked when declining (e.g. `spam_pattern`).
+    // Required for a decline: defense at the service layer, not just relying
+    // on the frontend always sending it.
+    declineReason?: string,
   ): Promise<JoinRequestView> {
+    if (
+      status === PlatformJoinRequestStatus.Declined &&
+      !declineReason?.trim()
+    ) {
+      throw new BadRequestException('A decline reason is required');
+    }
+
     // The claim and the invite minting run in one transaction on the same
     // manager: if minting fails the review rolls back, so there is no
     // "approved but no invite" stuck state for an applicant who has no other
     // way in.
-    return this.dataSource.transaction(async (manager) => {
-      const repo = manager.getRepository(JoinRequest);
+    const result = await this.dataSource.transaction(async (manager) => {
+      const repo = manager.getRepository(PlatformJoinRequest);
       const current = await repo.findOne({ where: { id } });
       if (!current) {
         throw new NotFoundException('Join request not found');
       }
-      if (current.status !== JoinRequestStatus.Pending) {
+      // Pending AND Waitlisted are both open states a review can act on.
+      // Approved/Declined are terminal.
+      const openStates: PlatformJoinRequestStatus[] = [
+        PlatformJoinRequestStatus.Pending,
+        PlatformJoinRequestStatus.Waitlisted,
+      ];
+      if (!openStates.includes(current.status)) {
         throw new ConflictException('Join request has already been reviewed');
       }
       const reviewedAt = new Date();
@@ -198,7 +364,7 @@ export class JoinRequestsService {
       // the same UPDATE as the status flip.
       let inviteCode: string | null = null;
       let inviteId: string | null = null;
-      if (status === JoinRequestStatus.Approved) {
+      if (status === PlatformJoinRequestStatus.Approved) {
         // The approving admin is recorded as the inviter: `invites.inviter_id`
         // is NOT NULL with an FK to `users` (AddMembership1782691400000), so it
         // needs a real member, and the admin is the one actually vouching for
@@ -214,11 +380,24 @@ export class JoinRequestsService {
         inviteId = invite.id;
       }
 
-      // Conditional claim: only the reviewer who flips it out of pending wins;
-      // a concurrent reviewer sees affected === 0 and is rejected.
+      // Only meaningful when declining; null otherwise (the pre-flight check
+      // above already refused a Declined status without a reason).
+      const resolvedDeclineReason =
+        status === PlatformJoinRequestStatus.Declined
+          ? (declineReason?.trim() ?? null)
+          : null;
+
+      // Conditional claim: only a reviewer who flips it out of an open state
+      // wins; a concurrent reviewer sees affected === 0 and is rejected.
       const claim = await repo.update(
-        { id, status: JoinRequestStatus.Pending },
-        { status, reviewedBy: reviewerId, reviewedAt, inviteId },
+        { id, status: In(openStates) },
+        {
+          status,
+          reviewedBy: reviewerId,
+          reviewedAt,
+          inviteId,
+          declineReason: resolvedDeclineReason,
+        },
       );
       if (claim.affected !== 1) {
         throw new ConflictException('Join request has already been reviewed');
@@ -227,7 +406,163 @@ export class JoinRequestsService {
       current.reviewedBy = reviewerId;
       current.reviewedAt = reviewedAt;
       current.inviteId = inviteId;
-      return toJoinRequestView(current, inviteCode);
+      current.declineReason = resolvedDeclineReason;
+      return {
+        view: toJoinRequestView(current, inviteCode),
+        applicantName: current.name,
+        applicantEmail: current.email,
+        inviteCode,
+      };
     });
+
+    // Sent AFTER the transaction has committed, never inside it: the approval
+    // has already happened by the time this runs, so a mailer failure here can
+    // only ever mean "approved but the applicant has to be told another way",
+    // never "sent an email for an approval that then rolled back".
+    if (status === PlatformJoinRequestStatus.Approved && result.inviteCode) {
+      await this.sendApprovalEmail(
+        result.applicantEmail,
+        result.applicantName,
+        result.inviteCode,
+      );
+    } else if (status === PlatformJoinRequestStatus.Declined) {
+      await this.sendDeclineEmail(result.applicantEmail, result.applicantName);
+    }
+
+    return result.view;
+  }
+
+  /**
+   * Applies one review decision to many join requests in a single call, by
+   * calling `review()` once per id. Mirrors
+   * `VerificationService.bulkDecide`'s per-item pattern (batch size capped at
+   * the DTO layer via `JOIN_REQUEST_BULK_ACTION_CAP`): a failure on one id
+   * (not found, already reviewed, concurrently claimed, missing decline
+   * reason) lands that id in `failed` with the thrown error's message, and
+   * every other id is still attempted.
+   *
+   * Deliberately sequential, not `Promise.all` — each `review()` call is its
+   * own transaction against a shared table, and running many of them
+   * concurrently against the same rows is exactly the kind of contention the
+   * conditional-claim mechanism exists to survive, but there's no reason to
+   * manufacture that contention against a batch the caller selected together.
+   * Sequential also keeps `failed[].reason` deterministic and easy to reason
+   * about.
+   */
+  async bulkReview(
+    ids: string[],
+    reviewerId: string,
+    status:
+      | PlatformJoinRequestStatus.Approved
+      | PlatformJoinRequestStatus.Declined
+      | PlatformJoinRequestStatus.Waitlisted,
+    declineReason?: string,
+  ): Promise<{ succeeded: string[]; failed: { id: string; reason: string }[] }> {
+    const succeeded: string[] = [];
+    const failed: { id: string; reason: string }[] = [];
+    for (const id of ids) {
+      try {
+        await this.review(id, reviewerId, status, declineReason);
+        succeeded.push(id);
+      } catch (err) {
+        failed.push({
+          id,
+          reason: err instanceof Error ? err.message : 'Unknown error',
+        });
+      }
+    }
+    return { succeeded, failed };
+  }
+
+  /**
+   * A random sample of already-decided requests (approved or declined), for
+   * the periodic peer-review quality-sampling pass described in the rubric
+   * doc (P8/E8) — a reviewer re-judges a small, random slice of past
+   * decisions to check the queue's bar is being applied consistently.
+   *
+   * No flags/prior-decline-count on sampled rows: those signals exist to
+   * triage *pending* requests, not to re-triage a decision that has already
+   * been made. `toJoinRequestView` is called with just the invite code, same
+   * as `review()`'s single-row call, so those fields default to `[]`/`0`.
+   */
+  async sample(n: number): Promise<JoinRequestView[]> {
+    const requests = await this.joinRequests
+      .createQueryBuilder('jr')
+      .where('jr.status IN (:...statuses)', {
+        statuses: [
+          PlatformJoinRequestStatus.Approved,
+          PlatformJoinRequestStatus.Declined,
+        ],
+      })
+      .orderBy('RANDOM()')
+      .limit(n)
+      .getMany();
+
+    const inviteIds = requests
+      .map((r) => r.inviteId)
+      .filter((id): id is string => id !== null);
+    const codeById = new Map<string, string>();
+    if (inviteIds.length > 0) {
+      const invites = await this.dataSource.getRepository(Invite).find({
+        where: { id: In(inviteIds) },
+        select: { id: true, code: true },
+      });
+      for (const invite of invites) {
+        codeById.set(invite.id, invite.code);
+      }
+    }
+    return requests.map((r) =>
+      toJoinRequestView(r, r.inviteId ? (codeById.get(r.inviteId) ?? null) : null),
+    );
+  }
+
+  /**
+   * Best-effort notification for a just-approved applicant. The approval is
+   * already committed by the time this runs, so a flaky mailer is logged, not
+   * thrown (mirrors `IntakesService.notifySubmitter` and
+   * `NewsletterService.sendConfirmation`). The admin queue still shows the
+   * invite code/link as a manual fallback either way.
+   */
+  private async sendApprovalEmail(
+    applicantEmail: string,
+    applicantName: string,
+    inviteCode: string,
+  ): Promise<void> {
+    const frontendUrl = this.config.getOrThrow<string>('app.frontendUrl');
+    const inviteUrl = new URL(`/auth/invite/${inviteCode}`, frontendUrl);
+    try {
+      await this.mailer.send(applicantEmail, 'join_request_approved', {
+        applicantName,
+        inviteUrl: inviteUrl.toString(),
+      });
+    } catch (error) {
+      this.logger.error(
+        `Join request approved for ${applicantEmail} but the invite email ` +
+          `failed to send: ${String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Best-effort notification for a just-declined applicant. Mirrors
+   * `sendApprovalEmail`'s shape exactly: sent after the transaction has
+   * committed, logged (not thrown) on failure. Deliberately soft and
+   * generic, with no reason field in the params (P7 decision) — an
+   * applicant never learns which specific reason a reviewer picked.
+   */
+  private async sendDeclineEmail(
+    applicantEmail: string,
+    applicantName: string,
+  ): Promise<void> {
+    try {
+      await this.mailer.send(applicantEmail, 'join_request_declined', {
+        applicantName,
+      });
+    } catch (error) {
+      this.logger.error(
+        `Join request declined for ${applicantEmail} but the notice email ` +
+          `failed to send: ${String(error)}`,
+      );
+    }
   }
 }

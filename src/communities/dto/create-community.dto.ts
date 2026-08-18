@@ -66,8 +66,9 @@ export class CreateCommunityDto {
   @MaxLength(120, { each: true })
   stewards?: string[];
 
-  // Member slugs -> resolved but not force-added (no consent-less roster
-  // adds; see `CommunitiesService.seedExtraRoster`).
+  // Member slugs -> each resolved invitee gets a `CommunityInviteReceived`
+  // notification, but is never force-added to the roster (no consent-less
+  // roster adds; see `CommunitiesService.seedExtraRoster`/`notifyInvitees`).
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(50)

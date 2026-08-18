@@ -7,6 +7,12 @@ import {
   GovernanceOverview,
 } from './entities/governance-overview.entity';
 import { governanceOverviewSeed } from './governance-overview.seed';
+import { Profile } from '../users/entities/profile.entity';
+import { DataSource } from 'typeorm';
+import {
+  GovernanceOverviewChange,
+  OverviewSection,
+} from './entities/governance-overview-change.entity';
 
 function makeOverview(
   overrides: Partial<GovernanceOverview> = {},
@@ -27,20 +33,42 @@ function makeOverview(
 describe('GovernanceOverviewService', () => {
   let service: GovernanceOverviewService;
   let repo: { findOne: jest.Mock; save: jest.Mock };
+  let changesRepo: { find: jest.Mock };
+  let profilesRepo: { find: jest.Mock };
 
   beforeEach(async () => {
     repo = { findOne: jest.fn(), save: jest.fn() };
+    changesRepo = { find: jest.fn() };
+    profilesRepo = { find: jest.fn() };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         GovernanceOverviewService,
+        { provide: getRepositoryToken(GovernanceOverview), useValue: repo },
         {
-          provide: getRepositoryToken(GovernanceOverview),
-          useValue: repo,
+          provide: getRepositoryToken(GovernanceOverviewChange),
+          useValue: changesRepo,
         },
+        { provide: getRepositoryToken(Profile), useValue: profilesRepo },
+        { provide: DataSource, useValue: { transaction: jest.fn() } },
       ],
     }).compile();
     service = module.get(GovernanceOverviewService);
   });
+
+  function makeChange(
+    overrides: Partial<GovernanceOverviewChange> = {},
+  ): GovernanceOverviewChange {
+    return {
+      id: 'c1',
+      section: OverviewSection.Council,
+      actorId: 'user-1',
+      before: governanceOverviewSeed.council,
+      after: governanceOverviewSeed.council,
+      note: null,
+      createdAt: new Date('2026-08-10T00:00:00.000Z'),
+      ...overrides,
+    };
+  }
 
   describe('getOverview', () => {
     it('fetches the singleton row by its fixed id and maps it to the DTO', async () => {
@@ -101,6 +129,56 @@ describe('GovernanceOverviewService', () => {
     it('404s when the overview has not been seeded', async () => {
       repo.findOne.mockResolvedValue(null);
       await expect(service.publish()).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('getAdminOverview', () => {
+    it('returns null editor/editedAt for every section when nothing has been edited', async () => {
+      repo.findOne.mockResolvedValue(makeOverview());
+      changesRepo.find.mockResolvedValue([]);
+
+      const result = await service.getAdminOverview();
+
+      expect(result.meta.council).toEqual({ editor: null, editedAt: null });
+      expect(result.meta.health).toEqual({ editor: null, editedAt: null });
+    });
+
+    it('surfaces only the most recent change per section, resolved to a display ref', async () => {
+      repo.findOne.mockResolvedValue(makeOverview());
+      changesRepo.find.mockResolvedValue([
+        makeChange({
+          id: 'newest',
+          createdAt: new Date('2026-08-15T00:00:00.000Z'),
+        }),
+        makeChange({
+          id: 'older',
+          createdAt: new Date('2026-08-01T00:00:00.000Z'),
+        }),
+      ]);
+      profilesRepo.find.mockResolvedValue([
+        {
+          userId: 'user-1',
+          firstName: 'Ana',
+          lastName: 'Costa',
+          slug: 'ana',
+          avatarUrl: null,
+          pronouns: null,
+        },
+      ]);
+
+      const result = await service.getAdminOverview();
+
+      expect(result.meta.council.editedAt).toBe('2026-08-15T00:00:00.000Z');
+      expect(result.meta.council.editor?.firstName).toBe('Ana');
+      // Sections with no change rows stay untouched.
+      expect(result.meta.decisions).toEqual({ editor: null, editedAt: null });
+    });
+
+    it('404s when the overview has not been seeded', async () => {
+      repo.findOne.mockResolvedValue(null);
+      await expect(service.getAdminOverview()).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 });

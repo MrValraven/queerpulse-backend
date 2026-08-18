@@ -2,6 +2,9 @@ import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { CommunityMembershipService } from '../communities/community-membership.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { PartnersService } from '../partners/partners.service';
 import { Profile } from '../users/entities/profile.entity';
 import { VolunteerOpportunityTeam } from './entities/volunteer-opportunity-team.entity';
@@ -25,14 +28,19 @@ const qbStub = () => {
     'where',
     'andWhere',
     'groupBy',
+    'addGroupBy',
     'orderBy',
     'skip',
     'take',
+    'update',
+    'set',
+    'execute',
   ]) {
     qb[m] = jest.fn().mockReturnValue(qb);
   }
   qb.getRawMany = jest.fn().mockResolvedValue([]);
   qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
+  qb.execute = jest.fn().mockResolvedValue({ affected: 0 });
   return qb;
 };
 
@@ -54,6 +62,7 @@ describe('VolunteeringService', () => {
     count: jest.Mock;
     exists: jest.Mock;
     find: jest.Mock;
+    findOne: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
     delete: jest.Mock;
@@ -65,6 +74,11 @@ describe('VolunteeringService', () => {
     createQueryBuilder: jest.Mock;
   };
   let partnersService: { idBySlug: jest.Mock; refsByIds: jest.Mock };
+  let communityMembership: {
+    assertOwnerOrModBySlug: jest.Mock;
+    refsByIds: jest.Mock;
+  };
+  let notificationsService: { create: jest.Mock };
   let managerFindOne: jest.Mock;
 
   const baseDto = {
@@ -106,6 +120,7 @@ describe('VolunteeringService', () => {
       count: jest.fn().mockResolvedValue(0),
       exists: jest.fn().mockResolvedValue(false),
       find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(null),
       create: jest.fn((v: object) => v),
       save: jest.fn((v: unknown) =>
         Promise.resolve({
@@ -129,6 +144,14 @@ describe('VolunteeringService', () => {
       idBySlug: jest.fn().mockResolvedValue(null),
       refsByIds: jest.fn().mockResolvedValue(new Map()),
     };
+    // Default: no test in this file sets `communitySlug`, so
+    // `resolveCommunityId` short-circuits on the falsy check and never calls
+    // this — registered only so Nest's DI has something to inject.
+    communityMembership = {
+      assertOwnerOrModBySlug: jest.fn().mockResolvedValue('community-1'),
+      refsByIds: jest.fn().mockResolvedValue(new Map()),
+    };
+    notificationsService = { create: jest.fn().mockResolvedValue(null) };
     managerFindOne = jest.fn();
 
     // `manager.getRepository(Entity)` routes to the same mocks the outer
@@ -169,6 +192,11 @@ describe('VolunteeringService', () => {
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: DataSource, useValue: dataSource },
         { provide: PartnersService, useValue: partnersService },
+        {
+          provide: CommunityMembershipService,
+          useValue: communityMembership,
+        },
+        { provide: NotificationsService, useValue: notificationsService },
       ],
     }).compile();
     service = module.get(VolunteeringService);
@@ -222,6 +250,36 @@ describe('VolunteeringService', () => {
           userId: 'teammate-1',
         }),
       ]);
+    });
+
+    it('resolves a communitySlug to community_id via CommunityMembershipService.assertOwnerOrModBySlug', async () => {
+      await service.create('poster-1', {
+        ...baseDto,
+        communitySlug: 'queer-devs',
+      });
+
+      expect(communityMembership.assertOwnerOrModBySlug).toHaveBeenCalledWith(
+        'queer-devs',
+        'poster-1',
+      );
+      expect(opportunities.save).toHaveBeenCalledWith(
+        expect.objectContaining({ communityId: 'community-1' }),
+      );
+    });
+
+    it('rejects a communitySlug the poster only has plain membership in', async () => {
+      communityMembership.assertOwnerOrModBySlug.mockRejectedValue(
+        new ForbiddenException(
+          'Only the community owner or a moderator can do that',
+        ),
+      );
+
+      await expect(
+        service.create('poster-1', {
+          ...baseDto,
+          communitySlug: 'queer-devs',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
     });
   });
 
@@ -360,16 +418,68 @@ describe('VolunteeringService', () => {
         expect.objectContaining({ partnerId: 'partner-1' }),
       );
     });
+
+    it('re-resolves communityId when communitySlug is patched, asserting owner/mod standing', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+        communityId: null,
+        detail: {
+          why: [],
+          tasks: [],
+          commitments: [],
+          goodFor: [],
+          teamIntro: null,
+        },
+      });
+
+      await service.update('x', 'poster-1', { communitySlug: 'queer-devs' });
+
+      expect(communityMembership.assertOwnerOrModBySlug).toHaveBeenCalledWith(
+        'queer-devs',
+        'poster-1',
+      );
+      expect(opportunities.save).toHaveBeenCalledWith(
+        expect.objectContaining({ communityId: 'community-1' }),
+      );
+    });
+
+    it('rejects re-linking to a community the poster no longer owns/moderates', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+        communityId: 'community-1',
+        detail: {
+          why: [],
+          tasks: [],
+          commitments: [],
+          goodFor: [],
+          teamIntro: null,
+        },
+      });
+      communityMembership.assertOwnerOrModBySlug.mockRejectedValue(
+        new ForbiddenException(
+          'Only the community owner or a moderator can do that',
+        ),
+      );
+
+      await expect(
+        service.update('x', 'poster-1', { communitySlug: 'queer-devs' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
   });
 
   describe('signup', () => {
-    it('maps a full opportunity to 409 Conflict', async () => {
+    it('maps a full opportunity (accepted-only count) to 409 Conflict', async () => {
       managerFindOne.mockResolvedValue({
         id: 'opp-1',
         slug: 'x',
+        posterId: 'poster-1',
         spotsTotal: 2,
       });
-      signups.count.mockResolvedValue(2); // already full
+      signups.count.mockResolvedValue(2); // 2 ACCEPTED signups already at capacity
 
       await expect(service.signup('x', 'user-1', {})).rejects.toBeInstanceOf(
         ConflictException,
@@ -377,24 +487,62 @@ describe('VolunteeringService', () => {
       expect(signups.save).not.toHaveBeenCalled();
     });
 
-    it('maps a duplicate (opportunity, user) signup to 409 Conflict', async () => {
+    it('does not count pending applications toward capacity', async () => {
       managerFindOne.mockResolvedValue({
         id: 'opp-1',
         slug: 'x',
+        posterId: 'poster-1',
+        spotsTotal: 2,
+      });
+      // count() is scoped to accepted-only by the service, so a mock
+      // returning 0 here simulates "2 pending, 0 accepted" — capacity check
+      // passes even though 2 people have already applied.
+      signups.count.mockResolvedValue(0);
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'user-1',
+          slug: 'jo',
+          firstName: 'Jo',
+          lastName: 'D',
+          avatarUrl: null,
+        },
+      ]);
+
+      const res = await service.signup('x', 'user-1', {});
+      expect(signups.count).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ status: 'accepted' }),
+        }),
+      );
+      expect(res.status).toBe('pending');
+    });
+
+    it('maps a duplicate (opportunity, user) signup — still pending — to 409 Conflict', async () => {
+      managerFindOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
         spotsTotal: 5,
       });
       signups.count.mockResolvedValue(1);
-      signups.save.mockRejectedValueOnce({ code: '23505' });
+      signups.findOne.mockResolvedValue({
+        id: 'signup-1',
+        opportunityId: 'opp-1',
+        userId: 'user-1',
+        status: 'pending',
+      });
 
       await expect(service.signup('x', 'user-1', {})).rejects.toBeInstanceOf(
         ConflictException,
       );
+      expect(signups.save).not.toHaveBeenCalled();
     });
 
-    it('creates a signup under capacity and resolves the member MemberRef', async () => {
+    it('creates a pending signup under capacity and resolves the member MemberRef', async () => {
       managerFindOne.mockResolvedValue({
         id: 'opp-1',
         slug: 'x',
+        posterId: 'poster-1',
         spotsTotal: 5,
       });
       signups.count.mockResolvedValue(1);
@@ -412,6 +560,102 @@ describe('VolunteeringService', () => {
 
       expect(res.member?.slug).toBe('jo');
       expect(res.note).toBe('Excited!');
+      expect(res.status).toBe('pending');
+      expect(signups.create).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'pending', note: 'Excited!' }),
+      );
+    });
+
+    it('reapplying after a decline reactivates the same row instead of inserting a new one', async () => {
+      managerFindOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+        spotsTotal: 5,
+      });
+      signups.count.mockResolvedValue(0);
+      signups.findOne.mockResolvedValue({
+        id: 'signup-1',
+        opportunityId: 'opp-1',
+        userId: 'user-1',
+        note: 'old note',
+        status: 'declined',
+        decidedAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'user-1',
+          slug: 'jo',
+          firstName: 'Jo',
+          lastName: 'D',
+          avatarUrl: null,
+        },
+      ]);
+
+      const res = await service.signup('x', 'user-1', { note: 'new note' });
+
+      expect(signups.create).not.toHaveBeenCalled();
+      expect(signups.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'signup-1',
+          note: 'new note',
+          status: 'pending',
+          decidedAt: null,
+        }),
+      );
+      expect(res.status).toBe('pending');
+    });
+
+    it('notifies the poster (best-effort) on a new pending application', async () => {
+      managerFindOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+        spotsTotal: 5,
+      });
+      signups.count.mockResolvedValue(0);
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'user-1',
+          slug: 'jo',
+          firstName: 'Jo',
+          lastName: 'D',
+          avatarUrl: null,
+        },
+      ]);
+
+      await service.signup('x', 'user-1', {});
+
+      expect(notificationsService.create).toHaveBeenCalledWith(
+        'poster-1',
+        NotificationType.VolunteerApplicationReceived,
+        expect.objectContaining({ opportunitySlug: 'x' }),
+        'user-1',
+      );
+    });
+
+    it('still returns the created signup when the notification write fails', async () => {
+      managerFindOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+        spotsTotal: 5,
+      });
+      signups.count.mockResolvedValue(0);
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'user-1',
+          slug: 'jo',
+          firstName: 'Jo',
+          lastName: 'D',
+          avatarUrl: null,
+        },
+      ]);
+      notificationsService.create.mockRejectedValue(new Error('down'));
+
+      await expect(service.signup('x', 'user-1', {})).resolves.toEqual(
+        expect.objectContaining({ status: 'pending' }),
+      );
     });
   });
 
@@ -469,6 +713,185 @@ describe('VolunteeringService', () => {
 
       expect(res).toHaveLength(1);
       expect(res[0]!.member?.slug).toBe('jo');
+    });
+  });
+
+  describe('decideSignup', () => {
+    const pendingSignup = {
+      id: 'signup-1',
+      opportunityId: 'opp-1',
+      userId: 'user-1',
+      note: 'Excited!',
+      status: 'pending',
+      decidedAt: null,
+      createdAt: new Date('2026-08-16T00:00:00.000Z'),
+    };
+
+    it('rejects a non-poster (403)', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+      });
+      await expect(
+        service.decideSignup('x', 'signup-1', 'intruder', 'accepted'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('404s an unknown signup id', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+      });
+      signups.findOne.mockResolvedValue(null);
+      await expect(
+        service.decideSignup('x', 'nope', 'poster-1', 'accepted'),
+      ).rejects.toThrow('Signup not found');
+    });
+
+    it('409s an already-decided signup', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+      });
+      signups.findOne.mockResolvedValue({
+        ...pendingSignup,
+        status: 'accepted',
+      });
+      await expect(
+        service.decideSignup('x', 'signup-1', 'poster-1', 'declined'),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('409s when the conditional claim UPDATE affects 0 rows (race)', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+      });
+      signups.findOne.mockResolvedValue({ ...pendingSignup });
+      const qb = qbStub();
+      qb.update = jest.fn().mockReturnValue(qb);
+      qb.set = jest.fn().mockReturnValue(qb);
+      qb.execute = jest.fn().mockResolvedValue({ affected: 0 });
+      signups.createQueryBuilder.mockReturnValue(qb);
+
+      await expect(
+        service.decideSignup('x', 'signup-1', 'poster-1', 'accepted'),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('accepts a pending signup, sets decidedAt, and returns the updated DTO', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+      });
+      signups.findOne.mockResolvedValue({ ...pendingSignup });
+      const qb = qbStub();
+      qb.update = jest.fn().mockReturnValue(qb);
+      qb.set = jest.fn().mockReturnValue(qb);
+      qb.execute = jest.fn().mockResolvedValue({ affected: 1 });
+      signups.createQueryBuilder.mockReturnValue(qb);
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'user-1',
+          slug: 'jo',
+          firstName: 'Jo',
+          lastName: 'D',
+          avatarUrl: null,
+        },
+      ]);
+
+      const res = await service.decideSignup(
+        'x',
+        'signup-1',
+        'poster-1',
+        'accepted',
+      );
+
+      expect(res.status).toBe('accepted');
+      expect(res.decidedAt).not.toBeNull();
+    });
+
+    it('notifies the applicant (best-effort) of the decision', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+      });
+      signups.findOne.mockResolvedValue({
+        id: 'signup-1',
+        opportunityId: 'opp-1',
+        userId: 'user-1',
+        status: 'pending',
+        decidedAt: null,
+        createdAt: new Date('2026-08-16T00:00:00.000Z'),
+      });
+      const qb = qbStub();
+      qb.update = jest.fn().mockReturnValue(qb);
+      qb.set = jest.fn().mockReturnValue(qb);
+      qb.execute = jest.fn().mockResolvedValue({ affected: 1 });
+      signups.createQueryBuilder.mockReturnValue(qb);
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'user-1',
+          slug: 'jo',
+          firstName: 'Jo',
+          lastName: 'D',
+          avatarUrl: null,
+        },
+      ]);
+
+      await service.decideSignup('x', 'signup-1', 'poster-1', 'declined');
+
+      expect(notificationsService.create).toHaveBeenCalledWith(
+        'user-1',
+        NotificationType.VolunteerApplicationDecided,
+        expect.objectContaining({ opportunitySlug: 'x', status: 'declined' }),
+      );
+    });
+  });
+
+  describe('listMine', () => {
+    it('returns posted opportunities with pending/accepted counts', async () => {
+      opportunities.find = jest.fn().mockResolvedValue([
+        {
+          id: 'opp-1',
+          slug: 'x',
+          role: 'Mentor',
+          org: 'QYC',
+          status: OpportunityStatus.Open,
+          spotsTotal: 5,
+          createdAt: new Date('2026-08-01T00:00:00.000Z'),
+        },
+      ]);
+      const qb = qbStub();
+      qb.getRawMany = jest.fn().mockResolvedValue([
+        { opportunityId: 'opp-1', status: 'pending', count: '2' },
+        { opportunityId: 'opp-1', status: 'accepted', count: '3' },
+      ]);
+      signups.createQueryBuilder.mockReturnValue(qb);
+
+      const res = await service.listMine('poster-1');
+
+      expect(opportunities.find).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { posterId: 'poster-1' } }),
+      );
+      expect(res).toEqual([
+        expect.objectContaining({
+          slug: 'x',
+          pendingCount: 2,
+          acceptedCount: 3,
+        }),
+      ]);
+    });
+
+    it('returns an empty list for a poster with no opportunities', async () => {
+      opportunities.find = jest.fn().mockResolvedValue([]);
+      expect(await service.listMine('poster-1')).toEqual([]);
     });
   });
 });

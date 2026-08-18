@@ -1,12 +1,14 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { AuthService } from '../auth/auth.service';
+import { CommunityMembershipService } from '../communities/community-membership.service';
 import {
   Report,
   ReportSeverity,
@@ -105,6 +107,11 @@ describe('ModerationService', () => {
   let notificationsCreate: jest.Mock;
   let applyContentAction: jest.Mock;
   let managerUpdate: jest.Mock;
+  let communityMembership: {
+    isOwnerOrMod: jest.Mock;
+    communityIdForPost: jest.Mock;
+    communityIdForReply: jest.Mock;
+  };
 
   beforeEach(async () => {
     reports = {
@@ -139,6 +146,15 @@ describe('ModerationService', () => {
     notificationsCreate = jest.fn().mockResolvedValue(null);
     applyContentAction = jest.fn().mockResolvedValue(undefined);
     managerUpdate = jest.fn().mockResolvedValue({ affected: 1 });
+    // Defaults to "no community, not staff" so every pre-existing test below
+    // (all acting as a platform Moderator/Admin) never touches this path, and
+    // any test that *does* reach the carve-out fails closed unless it
+    // explicitly opts in.
+    communityMembership = {
+      isOwnerOrMod: jest.fn().mockResolvedValue(false),
+      communityIdForPost: jest.fn().mockResolvedValue(null),
+      communityIdForReply: jest.fn().mockResolvedValue(null),
+    };
 
     // `actOnReport`/`bulkActOnReports`/`reviewAppeal` now run inside
     // `dataSource.transaction` so the report status, the enforcement against
@@ -193,6 +209,10 @@ describe('ModerationService', () => {
         {
           provide: NotificationsService,
           useValue: { create: notificationsCreate },
+        },
+        {
+          provide: CommunityMembershipService,
+          useValue: communityMembership,
         },
       ],
     }).compile();
@@ -393,7 +413,7 @@ describe('ModerationService', () => {
     it('404s an unknown report', async () => {
       reports.findOne.mockResolvedValue(null);
       await expect(
-        service.actOnReport('nope', 'actor-1', {
+        service.actOnReport('nope', 'actor-1', UserRole.Moderator, {
           action: 'dismiss',
           reasonCode: 'spam',
           note: 'Not a violation.',
@@ -404,7 +424,7 @@ describe('ModerationService', () => {
     it('escalate moves the report to escalated', async () => {
       reports.findOne.mockResolvedValue(baseReport());
 
-      const res = await service.actOnReport('report-1', 'actor-1', {
+      const res = await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
         action: 'escalate',
         reasonCode: 'hate_speech',
         note: 'Needs senior review.',
@@ -419,7 +439,7 @@ describe('ModerationService', () => {
     it('every other action resolves the report and does not include detail', async () => {
       reports.findOne.mockResolvedValue(baseReport());
 
-      const res = await service.actOnReport('report-1', 'actor-1', {
+      const res = await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
         action: 'remove_content',
         reasonCode: 'hate_speech',
         note: 'Removed the post.',
@@ -459,7 +479,7 @@ describe('ModerationService', () => {
         status: UserStatus.Active,
       });
 
-      await service.actOnReport('report-1', 'actor-1', {
+      await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
         action: 'suspend',
         reasonCode: 'harassment',
         note: 'Suspended for a week.',
@@ -469,6 +489,127 @@ describe('ModerationService', () => {
       expect(auditLogs.save).toHaveBeenCalledWith(
         expect.objectContaining({ duration: '7d' }),
       );
+    });
+
+    // The community-owner/mod dismiss carve-out: `PATCH /mod/reports/:id`
+    // now admits any active member through the route guard, so
+    // `ModerationService.assertCanActOnReport` is the actual authorization —
+    // platform Moderator/Admin unchanged, OR a community owner/mod
+    // `dismiss`-ing a report on a post/reply in the community they moderate.
+    describe('authorization', () => {
+      it('lets a platform Moderator/Admin act on any report without consulting community roster at all', async () => {
+        reports.findOne.mockResolvedValue(baseReport());
+
+        const res = await service.actOnReport(
+          'report-1',
+          'admin-1',
+          UserRole.Admin,
+          { action: 'dismiss', reasonCode: 'spam', note: 'Not a violation.' },
+        );
+
+        expect(res.status).toBe(ReportStatus.Resolved);
+        // The platform-role path short-circuits before any community lookup.
+        expect(communityMembership.communityIdForPost).not.toHaveBeenCalled();
+        expect(communityMembership.isOwnerOrMod).not.toHaveBeenCalled();
+      });
+
+      it('lets a community owner/mod dismiss a report on a post/reply in the community they moderate', async () => {
+        reports.findOne.mockResolvedValue(
+          baseReport({ subjectType: ReportSubjectType.Post, subjectId: 'post-1' }),
+        );
+        communityMembership.communityIdForPost.mockResolvedValue('community-1');
+        communityMembership.isOwnerOrMod.mockResolvedValue(true);
+
+        const res = await service.actOnReport(
+          'report-1',
+          'community-mod-1',
+          UserRole.Member,
+          { action: 'dismiss', reasonCode: 'spam', note: 'Not a violation.' },
+        );
+
+        expect(res.status).toBe(ReportStatus.Resolved);
+        expect(communityMembership.communityIdForPost).toHaveBeenCalledWith(
+          'post-1',
+        );
+        expect(communityMembership.isOwnerOrMod).toHaveBeenCalledWith(
+          'community-1',
+          'community-mod-1',
+        );
+      });
+
+      it('forbids a community owner/mod from dismissing a report in a community they do not moderate', async () => {
+        reports.findOne.mockResolvedValue(
+          baseReport({ subjectType: ReportSubjectType.Post, subjectId: 'post-1' }),
+        );
+        communityMembership.communityIdForPost.mockResolvedValue(
+          'someone-elses-community',
+        );
+        // Actor is on staff somewhere, just not on THIS post's community.
+        communityMembership.isOwnerOrMod.mockResolvedValue(false);
+
+        await expect(
+          service.actOnReport(
+            'report-1',
+            'other-community-mod-1',
+            UserRole.Member,
+            {
+              action: 'dismiss',
+              reasonCode: 'spam',
+              note: 'Not a violation.',
+            },
+          ),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(reports.save).not.toHaveBeenCalled();
+      });
+
+      it('forbids a community owner/mod from dismissing a non-community report (e.g. a member report)', async () => {
+        reports.findOne.mockResolvedValue(
+          baseReport({
+            subjectType: ReportSubjectType.Member,
+            subjectId: 'reported-member',
+          }),
+        );
+
+        await expect(
+          service.actOnReport(
+            'report-1',
+            'community-mod-1',
+            UserRole.Member,
+            {
+              action: 'dismiss',
+              reasonCode: 'harassment',
+              note: 'Not a violation.',
+            },
+          ),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        // A `member`-subject report never resolves to a community — the
+        // carve-out's resolver isn't even reached for post/reply lookups.
+        expect(communityMembership.communityIdForPost).not.toHaveBeenCalled();
+        expect(communityMembership.communityIdForReply).not.toHaveBeenCalled();
+        expect(reports.save).not.toHaveBeenCalled();
+      });
+
+      it('forbids a community owner/mod from taking any action other than dismiss, even within their own community', async () => {
+        reports.findOne.mockResolvedValue(
+          baseReport({ subjectType: ReportSubjectType.Post, subjectId: 'post-1' }),
+        );
+        communityMembership.communityIdForPost.mockResolvedValue('community-1');
+        communityMembership.isOwnerOrMod.mockResolvedValue(true);
+
+        await expect(
+          service.actOnReport(
+            'report-1',
+            'community-mod-1',
+            UserRole.Member,
+            {
+              action: 'remove_content',
+              reasonCode: 'hate_speech',
+              note: 'Removed the post.',
+            },
+          ),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(reports.save).not.toHaveBeenCalled();
+      });
     });
   });
 
@@ -752,7 +893,7 @@ describe('ModerationService', () => {
     });
 
     it('suspend sets the member suspended with an expiry from the duration', async () => {
-      await service.actOnReport('report-1', 'actor-1', {
+      await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
         action: 'suspend',
         reasonCode: 'harassment',
         note: 'Seven days.',
@@ -771,7 +912,7 @@ describe('ModerationService', () => {
     });
 
     it('ban suspends permanently — no expiry', async () => {
-      await service.actOnReport('report-1', 'actor-1', {
+      await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
         action: 'ban',
         reasonCode: 'harassment',
         note: 'Out.',
@@ -785,7 +926,7 @@ describe('ModerationService', () => {
     });
 
     it('revokes the suspended member’s live sessions', async () => {
-      await service.actOnReport('report-1', 'actor-1', {
+      await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
         action: 'ban',
         reasonCode: 'harassment',
         note: 'Out.',
@@ -806,7 +947,7 @@ describe('ModerationService', () => {
         );
 
       it('warn notifies the warned member with the reason', async () => {
-        await service.actOnReport('report-1', 'actor-1', {
+        await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
           action: 'warn',
           reasonCode: 'harassment',
           note: 'Please stop.',
@@ -825,7 +966,7 @@ describe('ModerationService', () => {
       });
 
       it('suspend notifies the member and carries the expiry', async () => {
-        await service.actOnReport('report-1', 'actor-1', {
+        await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
           action: 'suspend',
           reasonCode: 'harassment',
           note: 'Seven days.',
@@ -843,7 +984,7 @@ describe('ModerationService', () => {
       });
 
       it('ban notifies the member with no expiry', async () => {
-        await service.actOnReport('report-1', 'actor-1', {
+        await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
           action: 'ban',
           reasonCode: 'harassment',
           note: 'Out.',
@@ -856,7 +997,7 @@ describe('ModerationService', () => {
       });
 
       it('is delivered with no actor — bypassing the block/mute + mute gate', async () => {
-        await service.actOnReport('report-1', 'actor-1', {
+        await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
           action: 'warn',
           reasonCode: 'harassment',
           note: 'n',
@@ -877,7 +1018,7 @@ describe('ModerationService', () => {
       ])(
         '%s does not notify the member (no account-facing outcome)',
         async (action) => {
-          await service.actOnReport('report-1', 'actor-1', {
+          await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
             action,
             reasonCode: 'harassment',
             note: 'n',
@@ -890,7 +1031,7 @@ describe('ModerationService', () => {
 
       it('never notifies a moderator acting on their own report', async () => {
         // The reported member IS the actor (edge case) — no self-notification.
-        await service.actOnReport('report-1', 'user-1', {
+        await service.actOnReport('report-1', 'user-1', UserRole.Moderator, {
           action: 'warn',
           reasonCode: 'harassment',
           note: 'n',
@@ -901,7 +1042,7 @@ describe('ModerationService', () => {
     });
 
     it('keeps an open deactivation row’s previousStatus in step', async () => {
-      await service.actOnReport('report-1', 'actor-1', {
+      await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
         action: 'ban',
         reasonCode: 'harassment',
         note: 'Out.',
@@ -917,7 +1058,7 @@ describe('ModerationService', () => {
 
     it('rejects a suspension with no duration rather than making it permanent', async () => {
       await expect(
-        service.actOnReport('report-1', 'actor-1', {
+        service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
           action: 'suspend',
           reasonCode: 'harassment',
           note: 'n',
@@ -929,7 +1070,7 @@ describe('ModerationService', () => {
 
     it('rejects a malformed duration', async () => {
       await expect(
-        service.actOnReport('report-1', 'actor-1', {
+        service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
           action: 'suspend',
           reasonCode: 'harassment',
           note: 'n',
@@ -941,7 +1082,7 @@ describe('ModerationService', () => {
 
     it('rejects a ban carrying a duration', async () => {
       await expect(
-        service.actOnReport('report-1', 'actor-1', {
+        service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
           action: 'ban',
           reasonCode: 'harassment',
           note: 'n',
@@ -954,7 +1095,7 @@ describe('ModerationService', () => {
       reports.findOne.mockResolvedValue(baseReport()); // subjectType: Post
 
       await expect(
-        service.actOnReport('report-1', 'actor-1', {
+        service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
           action: 'suspend',
           reasonCode: 'harassment',
           note: 'n',
@@ -968,7 +1109,7 @@ describe('ModerationService', () => {
       profiles.findOne.mockResolvedValue(null);
 
       await expect(
-        service.actOnReport('report-1', 'actor-1', {
+        service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
           action: 'suspend',
           reasonCode: 'harassment',
           note: 'n',
@@ -981,7 +1122,7 @@ describe('ModerationService', () => {
     it.each(['dismiss', 'warn', 'escalate', 'hide_content', 'remove_content'])(
       '%s never touches users.status',
       async (action) => {
-        await service.actOnReport('report-1', 'actor-1', {
+        await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
           action,
           reasonCode: 'harassment',
           note: 'n',
@@ -993,7 +1134,7 @@ describe('ModerationService', () => {
     );
 
     it('restrict remains unenforced — a known gap, asserted so it is not mistaken for done', async () => {
-      await service.actOnReport('report-1', 'actor-1', {
+      await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
         action: 'restrict',
         reasonCode: 'harassment',
         note: 'n',
@@ -1010,7 +1151,7 @@ describe('ModerationService', () => {
         status: UserStatus.Deactivated,
       });
 
-      await service.actOnReport('report-1', 'actor-1', {
+      await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
         action: 'ban',
         reasonCode: 'harassment',
         note: 'Out.',

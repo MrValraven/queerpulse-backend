@@ -10,19 +10,28 @@ import { DataSource, Repository } from 'typeorm';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
+import { CommunityMembershipService } from '../communities/community-membership.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { PartnersService } from '../partners/partners.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
+  CommunityRef,
+  MyOpportunitySummary,
   OpportunityCardDTO,
   OpportunityDetailDTO,
   PartnerRef,
+  toMyOpportunitySummary,
   toOpportunityCard,
   toOpportunityDetail,
   toVolunteerSignup,
   VolunteerSignupDTO,
 } from './opportunity-response';
 import { VolunteerOpportunityTeam } from './entities/volunteer-opportunity-team.entity';
-import { VolunteerSignup } from './entities/volunteer-signup.entity';
+import {
+  SignupStatus,
+  VolunteerSignup,
+} from './entities/volunteer-signup.entity';
 import {
   OpportunityCause,
   OpportunityCommitLevel,
@@ -43,6 +52,11 @@ export interface CreateOpportunityInput {
   // slug doesn't resolve to any partner (any `status` counts as a match; see
   // `PartnersService.idBySlug`).
   partnerSlug?: string;
+  // Resolved to `community_id` via
+  // `CommunityMembershipService.assertMemberBySlug` — see
+  // `resolveCommunityId`. Unlike `partnerSlug`, an unknown/non-member slug
+  // throws (404/403) rather than resolving to `null`.
+  communitySlug?: string;
   role: string;
   cause: OpportunityCause;
   commit: OpportunityCommitLevel;
@@ -64,9 +78,9 @@ export interface CreateOpportunityInput {
 // `handle`/`team` only ever apply at creation time — a slug never changes
 // post-creation and team membership isn't re-seeded on PATCH (mirrors
 // `UpdateCompanyInput`/`UpdateJobInput`'s identical "ignored on patch"
-// precedent). `partnerSlug` is NOT in that list: re-linking an opportunity to
-// a different (or no) partner org is a legitimate PATCH, unlike a slug or a
-// team roster.
+// precedent). `partnerSlug`/`communitySlug` are NOT in that list: re-linking
+// an opportunity to a different (or no) organization is a legitimate PATCH,
+// unlike a slug or a team roster.
 export type UpdateOpportunityInput = Partial<
   Omit<CreateOpportunityInput, 'handle' | 'team'>
 >;
@@ -113,6 +127,8 @@ export class VolunteeringService {
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly dataSource: DataSource,
     private readonly partnersService: PartnersService,
+    private readonly communityMembership: CommunityMembershipService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async create(
@@ -133,9 +149,13 @@ export class VolunteeringService {
     dto: CreateOpportunityInput,
   ): Promise<VolunteerOpportunity> {
     const MAX_ATTEMPTS = 5;
-    // Resolved once, outside the retry loop — it's a read against Partners,
-    // not part of the slug-race being retried below.
+    // Resolved once, outside the retry loop — these are reads against
+    // Partners/Communities, not part of the slug-race being retried below.
     const partnerId = await this.resolvePartnerId(dto.partnerSlug);
+    const communityId = await this.resolveCommunityId(
+      dto.communitySlug,
+      posterId,
+    );
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const slug = await allocateUniqueSlug(
         slugify(dto.handle ?? `${dto.role} ${dto.org}`, 'opportunity'),
@@ -158,6 +178,7 @@ export class VolunteeringService {
               slug,
               org: dto.org,
               partnerId,
+              communityId,
               role: dto.role,
               cause: dto.cause,
               commit: dto.commit,
@@ -218,14 +239,16 @@ export class VolunteeringService {
 
     return paginate(qb, page, async (rows) => {
       if (!rows.length) return [];
-      const [filled, partnerRefs] = await Promise.all([
+      const [filled, partnerRefs, communityRefs] = await Promise.all([
         this.spotsFilledForMany(rows.map((o) => o.id)),
         this.partnerRefsForMany(rows.map((o) => o.partnerId)),
+        this.communityRefsForMany(rows.map((o) => o.communityId)),
       ]);
       return rows.map((o) =>
         toOpportunityCard(
           o,
           o.partnerId ? (partnerRefs.get(o.partnerId) ?? null) : null,
+          o.communityId ? (communityRefs.get(o.communityId) ?? null) : null,
           filled.get(o.id) ?? 0,
         ),
       );
@@ -273,6 +296,15 @@ export class VolunteeringService {
       opportunity.partnerId = await this.resolvePartnerId(dto.partnerSlug);
     }
 
+    // Same "absent leaves it, present re-resolves/clears it" semantics as
+    // `partnerSlug` above, via `resolveCommunityId` instead.
+    if (dto.communitySlug !== undefined) {
+      opportunity.communityId = await this.resolveCommunityId(
+        dto.communitySlug,
+        posterId,
+      );
+    }
+
     // `why`/`tasks`/`commitments`/`goodFor`/`teamIntro` are flat fields on
     // `CreateOpportunityDto` (unlike Jobs' single nested `detail` object), so
     // each patches its own `detail` subfield independently rather than
@@ -315,19 +347,19 @@ export class VolunteeringService {
     return this.buildDetail(saved, posterId);
   }
 
-  // Capacity + uniqueness both enforced inside one transaction with a
-  // pessimistic write lock on the opportunity row (mirrors
-  // `RsvpService.rsvp`'s row-lock pattern): concurrent signups against the
-  // same opportunity serialize on that lock, so the count-then-insert below
-  // can't oversell `spotsTotal`. The 23505 catch is a backstop for the
-  // (opportunity, user) UNIQUE constraint — a double-submit from the same
-  // user racing itself — not the capacity race, which the lock already
-  // closes.
+  // Capacity is scoped to ACCEPTED signups only — a pile of pending
+  // applications never blocks new applicants, only confirmed volunteers do.
+  // Uniqueness is still enforced inside the same pessimistic-write-locked
+  // transaction (mirrors the prior version), but a `declined` row for this
+  // (opportunity, user) pair is reactivated in place rather than rejected —
+  // see the design's "reapply after decline" decision — since the UNIQUE
+  // constraint on (opportunity_id, user_id) forbids a second row either way.
   async signup(
     slug: string,
     userId: string,
     dto: CreateSignupInput,
   ): Promise<VolunteerSignupDTO> {
+    let posterId = '';
     const saved = await this.dataSource.transaction(async (manager) => {
       const opportunity = await manager.findOne(VolunteerOpportunity, {
         where: { slug },
@@ -336,13 +368,29 @@ export class VolunteeringService {
       if (!opportunity) {
         throw new NotFoundException('Opportunity not found');
       }
+      posterId = opportunity.posterId;
 
       const signupRepo = manager.getRepository(VolunteerSignup);
-      const count = await signupRepo.count({
-        where: { opportunityId: opportunity.id },
+      const acceptedCount = await signupRepo.count({
+        where: { opportunityId: opportunity.id, status: SignupStatus.Accepted },
       });
-      if (count >= opportunity.spotsTotal) {
+      if (acceptedCount >= opportunity.spotsTotal) {
         throw new ConflictException('This opportunity is at capacity');
+      }
+
+      const existing = await signupRepo.findOne({
+        where: { opportunityId: opportunity.id, userId },
+      });
+      if (existing) {
+        if (existing.status !== SignupStatus.Declined) {
+          throw new ConflictException(
+            'You have already signed up for this opportunity',
+          );
+        }
+        existing.note = dto.note ?? null;
+        existing.status = SignupStatus.Pending;
+        existing.decidedAt = null;
+        return signupRepo.save(existing);
       }
 
       try {
@@ -351,6 +399,7 @@ export class VolunteeringService {
             opportunityId: opportunity.id,
             userId,
             note: dto.note ?? null,
+            status: SignupStatus.Pending,
           }),
         );
       } catch (err) {
@@ -364,6 +413,21 @@ export class VolunteeringService {
     });
 
     const member = await this.memberRefFor(userId);
+
+    // Best-effort: the signup already committed above, so a notification
+    // failure must never surface as a failed signup (mirrors
+    // `CommunitiesService.triageJoinRequest`'s identical try/catch-swallow).
+    try {
+      await this.notifications.create(
+        posterId,
+        NotificationType.VolunteerApplicationReceived,
+        { source: 'volunteering', opportunitySlug: slug },
+        userId,
+      );
+    } catch {
+      // Intentionally ignored.
+    }
+
     return toVolunteerSignup(saved, member);
   }
 
@@ -396,6 +460,148 @@ export class VolunteeringService {
       rows.map((s) => s.userId),
     );
     return rows.map((s) => toVolunteerSignup(s, refs.get(s.userId) ?? null));
+  }
+
+  // Mirrors `CommunitiesService.triageJoinRequest`'s atomic conditional-claim
+  // UPDATE: the pre-check above is a fast-path, but only the guarded
+  // `status = 'pending'` WHERE clause actually closes the race between two
+  // concurrent decisions (or a double-decide) on the same signup.
+  async decideSignup(
+    slug: string,
+    signupId: string,
+    posterId: string,
+    status: SignupStatus.Accepted | SignupStatus.Declined,
+  ): Promise<VolunteerSignupDTO> {
+    const opportunity = await this.loadOr404(slug);
+    if (opportunity.posterId !== posterId) {
+      throw new ForbiddenException(
+        'Only the poster can decide on applicants for this opportunity',
+      );
+    }
+
+    const signup = await this.signups.findOne({
+      where: { id: signupId, opportunityId: opportunity.id },
+    });
+    if (!signup) {
+      throw new NotFoundException('Signup not found');
+    }
+    if (signup.status !== SignupStatus.Pending) {
+      throw new ConflictException('This application was already decided');
+    }
+
+    const decidedAt = new Date();
+    const claim = await this.signups
+      .createQueryBuilder()
+      .update(VolunteerSignup)
+      .set({ status, decidedAt })
+      .where('id = :id AND status = :pending', {
+        id: signup.id,
+        pending: SignupStatus.Pending,
+      })
+      .execute();
+    if (claim.affected === 0) {
+      throw new ConflictException('This application was already decided');
+    }
+    signup.status = status;
+    signup.decidedAt = decidedAt;
+
+    const member = await this.memberRefFor(signup.userId);
+
+    try {
+      await this.notifications.create(
+        signup.userId,
+        NotificationType.VolunteerApplicationDecided,
+        { source: 'volunteering', opportunitySlug: slug, status },
+      );
+    } catch {
+      // Intentionally ignored — the decision already committed.
+    }
+
+    return toVolunteerSignup(signup, member);
+  }
+
+  async listMine(posterId: string): Promise<MyOpportunitySummary[]> {
+    const rows = await this.opportunities.find({
+      where: { posterId },
+      order: { createdAt: 'DESC' },
+    });
+    if (!rows.length) return [];
+
+    const counts = await this.signups
+      .createQueryBuilder('s')
+      .select('s.opportunity_id', 'opportunityId')
+      .addSelect('s.status', 'status')
+      .addSelect('COUNT(*)', 'count')
+      .where('s.opportunity_id IN (:...ids)', { ids: rows.map((o) => o.id) })
+      .groupBy('s.opportunity_id')
+      .addGroupBy('s.status')
+      .getRawMany<{
+        opportunityId: string;
+        status: SignupStatus;
+        count: string;
+      }>();
+
+    const pendingByOpp = new Map<string, number>();
+    const acceptedByOpp = new Map<string, number>();
+    for (const row of counts) {
+      const n = Number(row.count);
+      if (row.status === SignupStatus.Pending)
+        pendingByOpp.set(row.opportunityId, n);
+      if (row.status === SignupStatus.Accepted)
+        acceptedByOpp.set(row.opportunityId, n);
+    }
+
+    return rows.map((o) =>
+      toMyOpportunitySummary(
+        o,
+        pendingByOpp.get(o.id) ?? 0,
+        acceptedByOpp.get(o.id) ?? 0,
+      ),
+    );
+  }
+
+  /**
+   * `GET /communities/:slug/pulse`'s opportunities lane — a community's own
+   * still-open opportunities (status `open` AND not yet at capacity),
+   * newest-first. "Open" alone isn't enough: a filled-but-not-yet-closed
+   * opportunity (the poster hasn't called `close()`) shouldn't read as
+   * something a member can still sign up for, so the capacity check is
+   * folded into the query itself (a correlated subquery over
+   * `volunteer_signups`, mirroring `EventsService.excludeModeratedEvents`'s
+   * `NOT EXISTS`-style in-query filtering) rather than fetched then
+   * post-filtered in JS. Card shaping (`toOpportunityCard`) reuses the same
+   * batched partner/community-ref + spots-filled lookups `list()` already
+   * does for a page of cards.
+   */
+  async listOpenByCommunity(
+    communityId: string,
+    limit = 5,
+  ): Promise<OpportunityCardDTO[]> {
+    const rows = await this.opportunities
+      .createQueryBuilder('o')
+      .where('o.community_id = :communityId', { communityId })
+      .andWhere('o.status = :status', { status: OpportunityStatus.Open })
+      .andWhere(
+        `(SELECT COUNT(*) FROM "volunteer_signups" "s" WHERE "s"."opportunity_id" = "o"."id" AND "s"."status" = 'accepted') < "o"."spots_total"`,
+      )
+      .orderBy('o.created_at', 'DESC')
+      .take(limit)
+      .getMany();
+    if (!rows.length) return [];
+
+    const [filled, partnerRefs, communityRefs] = await Promise.all([
+      this.spotsFilledForMany(rows.map((o) => o.id)),
+      this.partnerRefsForMany(rows.map((o) => o.partnerId)),
+      this.communityRefsForMany(rows.map((o) => o.communityId)),
+    ]);
+    return rows.map((o) =>
+      toOpportunityCard(
+        o,
+        o.partnerId ? (partnerRefs.get(o.partnerId) ?? null) : null,
+        o.communityId ? (communityRefs.get(o.communityId) ?? null) : null,
+        filled.get(o.id) ?? 0,
+      ),
+    );
   }
 
   // --- internals ---
@@ -447,16 +653,23 @@ export class VolunteeringService {
     opportunity: VolunteerOpportunity,
     viewerId: string,
   ): Promise<OpportunityDetailDTO> {
-    const [spotsFilled, teamRows, posterProfile, mySignup, partnerRefs] =
-      await Promise.all([
-        this.spotsFilledFor(opportunity.id),
-        this.team.find({ where: { opportunityId: opportunity.id } }),
-        this.profiles.findOne({ where: { userId: opportunity.posterId } }),
-        this.signups.exists({
-          where: { opportunityId: opportunity.id, userId: viewerId },
-        }),
-        this.partnerRefsForMany([opportunity.partnerId]),
-      ]);
+    const [
+      spotsFilled,
+      teamRows,
+      posterProfile,
+      mySignup,
+      partnerRefs,
+      communityRefs,
+    ] = await Promise.all([
+      this.spotsFilledFor(opportunity.id),
+      this.team.find({ where: { opportunityId: opportunity.id } }),
+      this.profiles.findOne({ where: { userId: opportunity.posterId } }),
+      this.signups.exists({
+        where: { opportunityId: opportunity.id, userId: viewerId },
+      }),
+      this.partnerRefsForMany([opportunity.partnerId]),
+      this.communityRefsForMany([opportunity.communityId]),
+    ]);
 
     const teamRefs = teamRows.length
       ? await new MemberLookup(this.profiles).byUserIds(
@@ -470,10 +683,14 @@ export class VolunteeringService {
     const partner = opportunity.partnerId
       ? (partnerRefs.get(opportunity.partnerId) ?? null)
       : null;
+    const community = opportunity.communityId
+      ? (communityRefs.get(opportunity.communityId) ?? null)
+      : null;
 
     return toOpportunityDetail(
       opportunity,
       partner,
+      community,
       spotsFilled,
       team,
       toMemberRef(posterProfile),
@@ -505,12 +722,42 @@ export class VolunteeringService {
     return this.partnersService.refsByIds(ids);
   }
 
+  /** Resolves a `communitySlug` to a `community_id`, asserting the given
+   * user owns or moderates that community (see
+   * `CommunityMembershipService.assertOwnerOrModBySlug` — unknown slug 404s,
+   * non-owner/mod 403s). Attributing an opportunity to a community is
+   * speaking for it, so plain membership isn't enough. Absent/empty slug
+   * resolves to `null`, same "clears the link" convention as
+   * `resolvePartnerId`. */
+  private async resolveCommunityId(
+    slug: string | undefined,
+    userId: string,
+  ): Promise<string | null> {
+    if (!slug) return null;
+    return this.communityMembership.assertOwnerOrModBySlug(slug, userId);
+  }
+
+  /** Batches `communityId -> {slug,name}` resolution through
+   * `CommunityMembershipService.refsByIds`, mirroring
+   * `partnerRefsForMany`. */
+  private async communityRefsForMany(
+    communityIds: (string | null)[],
+  ): Promise<Map<string, CommunityRef>> {
+    const ids = [...new Set(communityIds.filter((id): id is string => !!id))];
+    if (!ids.length) return new Map();
+    return this.communityMembership.refsByIds(ids);
+  }
+
   private async spotsFilledFor(opportunityId: string): Promise<number> {
-    return this.signups.count({ where: { opportunityId } });
+    return this.signups.count({
+      where: { opportunityId, status: SignupStatus.Accepted },
+    });
   }
 
   // Grouped pattern (mirrors `CompaniesService.reviewAggregatesForMany`): one
-  // query across the whole page/id-set instead of N+1 per-row counts.
+  // query across the whole page/id-set instead of N+1 per-row counts. Scoped
+  // to ACCEPTED signups — a card's "spots filled" must never count pending
+  // applications as taking a spot.
   private async spotsFilledForMany(
     opportunityIds: string[],
   ): Promise<Map<string, number>> {
@@ -522,6 +769,7 @@ export class VolunteeringService {
       .select('s.opportunity_id', 'opportunityId')
       .addSelect('COUNT(*)', 'count')
       .where('s.opportunity_id IN (:...ids)', { ids: opportunityIds })
+      .andWhere('s.status = :status', { status: SignupStatus.Accepted })
       .groupBy('s.opportunity_id')
       .getRawMany<{ opportunityId: string; count: string }>();
 

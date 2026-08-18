@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -486,5 +487,77 @@ describe('EventsService', () => {
       NotificationType.EventCancelled,
       expect.objectContaining({ eventId: 'e1' }),
     );
+  });
+});
+
+describe('EventsService.addCohostByUserId', () => {
+  let service: EventsService;
+  let events: { findOne: jest.Mock };
+  let cohosts: { createQueryBuilder: jest.Mock };
+  let insertBuilder: {
+    insert: jest.Mock;
+    into: jest.Mock;
+    values: jest.Mock;
+    orIgnore: jest.Mock;
+    execute: jest.Mock;
+  };
+
+  beforeEach(() => {
+    insertBuilder = {
+      insert: jest.fn(),
+      into: jest.fn(),
+      values: jest.fn(),
+      orIgnore: jest.fn(),
+      execute: jest.fn(),
+    };
+    insertBuilder.insert.mockReturnValue(insertBuilder);
+    insertBuilder.into.mockReturnValue(insertBuilder);
+    insertBuilder.values.mockReturnValue(insertBuilder);
+    insertBuilder.orIgnore.mockReturnValue(insertBuilder);
+    insertBuilder.execute.mockResolvedValue({});
+
+    events = { findOne: jest.fn() };
+    cohosts = { createQueryBuilder: jest.fn(() => insertBuilder) };
+
+    service = new EventsService(
+      events as unknown as Repository<Event>,
+      cohosts as unknown as Repository<EventCohost>,
+      {} as unknown as Repository<EventRsvp>,
+      {} as unknown as Repository<EventInvite>,
+      {} as unknown as Repository<EventLineupEntry>,
+      {} as unknown as Repository<Profile>,
+      {} as unknown as UsersService,
+      {} as unknown as RsvpService,
+      {} as unknown as NotificationsService,
+      {} as unknown as BlockFilterService,
+      {} as unknown as ContentModerationService,
+      {} as unknown as CommunityMembershipService,
+      {} as unknown as EventBookmarksService,
+      {} as unknown as EventAudienceGateService,
+      {} as unknown as MediaCropService,
+    );
+  });
+
+  it('throws NotFoundException when the event does not exist', async () => {
+    events.findOne.mockResolvedValue(null);
+    await expect(
+      service.addCohostByUserId('missing-event', 'user-1'),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('is a no-op when the user is already the host', async () => {
+    events.findOne.mockResolvedValue({ id: 'e1', hostId: 'host-1' });
+    await service.addCohostByUserId('e1', 'host-1');
+    expect(cohosts.createQueryBuilder).not.toHaveBeenCalled();
+  });
+
+  it('inserts an idempotent cohost row for a non-host user', async () => {
+    events.findOne.mockResolvedValue({ id: 'e1', hostId: 'host-1' });
+    await service.addCohostByUserId('e1', 'user-2');
+    expect(insertBuilder.values).toHaveBeenCalledWith({
+      eventId: 'e1',
+      userId: 'user-2',
+    });
+    expect(insertBuilder.orIgnore).toHaveBeenCalled();
   });
 });

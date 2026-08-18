@@ -7,12 +7,15 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { RecognitionAward } from './entities/recognition-award.entity';
 import { RecognitionPerkClaim } from './entities/recognition-perk-claim.entity';
 import { RecognitionStat } from './entities/recognition-stat.entity';
+import { SavedItem } from '../saved/entities/saved-item.entity';
+import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import {
   MemberRecognitionController,
   MyRecognitionController,
 } from './recognition.controller';
 import { RecognitionService } from './recognition.service';
 import { RecognitionAwardingService } from './recognition-awarding.service';
+import { RecognitionListener } from './recognition.listener';
 
 /**
  * Recognition — badges/kudos a member has earned, level + perks (spec §3
@@ -31,12 +34,18 @@ import { RecognitionAwardingService } from './recognition-awarding.service';
       RecognitionAward,
       RecognitionPerkClaim,
       CommunityMember,
+      SavedItem,
+      MemberPreferences,
     ]),
     UsersModule,
     PublicEligibilityModule,
     NotificationsModule,
   ],
   controllers: [MyRecognitionController, MemberRecognitionController],
-  providers: [RecognitionService, RecognitionAwardingService],
+  providers: [
+    RecognitionService,
+    RecognitionAwardingService,
+    RecognitionListener,
+  ],
 })
 export class RecognitionModule {}

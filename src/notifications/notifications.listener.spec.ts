@@ -164,4 +164,21 @@ describe('NotificationsListener', () => {
     });
     expect(notifications.createForRecipients).not.toHaveBeenCalled();
   });
+
+  it('notifies the invitee with a cohost_invite-sourced deep-link payload', async () => {
+    await listener.onEventCohostInvited({
+      eventId: 'e1',
+      eventSlug: 'pride-picnic',
+      inviteId: 'i1',
+      inviterId: 'host-1',
+      inviteeId: 'invitee-1',
+    });
+
+    expect(notifications.create).toHaveBeenCalledWith(
+      'invitee-1',
+      NotificationType.EventCohostInvite,
+      { source: 'cohost_invite', eventSlug: 'pride-picnic', inviteId: 'i1' },
+      'host-1',
+    );
+  });
 });

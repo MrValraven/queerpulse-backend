@@ -1,7 +1,14 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
+import { CommunityGovernanceLogService } from '../communities/community-governance-log.service';
+import { GovernanceLogAction } from '../communities/entities/community-governance-log.entity';
 import {
   CommunityMember,
   RosterRole,
@@ -15,9 +22,10 @@ import {
   ReportSubjectType,
 } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { User } from '../users/entities/user.entity';
 import {
-  AdminCommunityCardDTO,
   AdminCommunityDetailDTO,
+  AdminCommunityListDTO,
   AdminCommunityModeratorDTO,
   AdminCommunityQueueItemDTO,
   CommunityAggregates,
@@ -47,11 +55,10 @@ const MODERATOR_ROLES = [RosterRole.Owner, RosterRole.Mod];
  *  `take` at all — an unbounded, full-platform scan on every admin dashboard
  *  load (AUDIT-2026-07-30.md §I "admin-communities full-platform scan").
  *  Well above current scale; matches the precedent at
- *  `admin-trust-network.service.ts`'s `MAX_NODES`. The endpoint's response is
- *  a flat `AdminCommunityCardDTO[]` with no pagination envelope the frontend
- *  already reads, so — unlike `AdminTrustNetworkService`, whose DTO has room
- *  for a `truncated` field — truncation here is only surfaced via the logger
- *  warning below, not the response body, to avoid an API-contract change. */
+ *  `admin-trust-network.service.ts`'s `MAX_NODES`. `listCommunities` surfaces
+ *  a hit on this cap through `AdminCommunityListDTO.truncated` — mirroring
+ *  `AdminTrustNetworkService`'s `TrustNetworkDTO.truncated` — in addition to
+ *  the logger warning below. */
 const MAX_LISTED_COMMUNITIES = 1000;
 
 /** Payload cap for `loadReportScope`'s platform-wide report scan (AUDIT item
@@ -61,9 +68,11 @@ const MAX_LISTED_COMMUNITIES = 1000;
  *  community's queue). Sized well above `MAX_LISTED_COMMUNITIES` because reports
  *  naturally outnumber communities and this set feeds the platform-wide
  *  aggregate report counts, not a single page; ordered `created_at DESC` so the
- *  cap keeps the newest reports. Like `MAX_LISTED_COMMUNITIES`, truncation is
- *  surfaced only via the logger warning (the response is a flat DTO with no
- *  envelope), and the new `IDX_reports_subject_type_created_at`
+ *  cap keeps the newest reports. Like `MAX_LISTED_COMMUNITIES`, a hit on this
+ *  cap is surfaced through the response body's `truncated` flag
+ *  (`AdminCommunityListDTO.truncated` on `listCommunities`,
+ *  `AdminCommunityDetailDTO.truncated` on `getCommunity`) in addition to the
+ *  logger warning, and the new `IDX_reports_subject_type_created_at`
  *  (`1785903000000-AddReportsSubjectTypeCreatedAtIndex`) lets Postgres serve the
  *  `subject_type IN (...) ORDER BY created_at DESC LIMIT` as a bounded index
  *  scan rather than sorting the whole table first. */
@@ -118,6 +127,9 @@ interface CommunityReportScope {
   reports: Report[];
   communityIdBySubjectId: Map<string, string>;
   slugToCommunityId: Map<string, string>;
+  /** True when `MAX_SCANNED_REPORTS` capped `reports` below the platform's
+   *  actual community-scoped report count. */
+  truncated: boolean;
 }
 
 function emptyCommunityAggregates(): CommunityAggregates {
@@ -173,9 +185,13 @@ export class AdminCommunitiesService {
     private readonly reports: Repository<Report>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
+    @InjectRepository(User)
+    private readonly users: Repository<User>,
+    private readonly dataSource: DataSource,
+    private readonly governanceLog: CommunityGovernanceLogService,
   ) {}
 
-  async listCommunities(): Promise<AdminCommunityCardDTO[]> {
+  async listCommunities(): Promise<AdminCommunityListDTO> {
     // `take` bounds the scan to `MAX_LISTED_COMMUNITIES` — `IDX_communities_created_at`
     // (`1785700200000-AddCommunitiesCreatedAtIndex`) lets Postgres serve this
     // `ORDER BY created_at ASC LIMIT` as an `Index Scan ... Limit` that stops
@@ -184,12 +200,14 @@ export class AdminCommunitiesService {
       order: { createdAt: 'ASC' },
       take: MAX_LISTED_COMMUNITIES,
     });
-    if (allCommunities.length === MAX_LISTED_COMMUNITIES) {
+    const communitiesTruncated =
+      allCommunities.length === MAX_LISTED_COMMUNITIES;
+    if (communitiesTruncated) {
       this.logger.warn(
         `listCommunities truncated at ${MAX_LISTED_COMMUNITIES} communities — the admin dashboard is no longer showing every community on the platform.`,
       );
     }
-    if (!allCommunities.length) return [];
+    if (!allCommunities.length) return { items: [], truncated: false };
 
     const now = new Date();
     // The member and activity windows do not depend on the report scope, so
@@ -201,6 +219,10 @@ export class AdminCommunitiesService {
       now,
       reportScopePromise,
     );
+    // Already resolved by the `Promise.all` inside `aggregatesForMany` above —
+    // awaiting the same promise a second time just reads its cached result,
+    // it does not re-run the query.
+    const { truncated: reportsTruncated } = await reportScopePromise;
 
     const communityCards = allCommunities.map((community) =>
       toAdminCommunityCard(
@@ -221,7 +243,10 @@ export class AdminCommunitiesService {
       }
       return firstCard.healthScore - secondCard.healthScore;
     });
-    return communityCards;
+    return {
+      items: communityCards,
+      truncated: communitiesTruncated || reportsTruncated,
+    };
   }
 
   async getCommunity(slug: string): Promise<AdminCommunityDetailDTO> {
@@ -244,6 +269,7 @@ export class AdminCommunitiesService {
       aggregatesByCommunityId.get(community.id) ?? emptyCommunityAggregates(),
       moderators,
       this.scopedQueueFor(community, reportScope, now),
+      reportScope.truncated,
     );
   }
 
@@ -270,6 +296,296 @@ export class AdminCommunitiesService {
     }
     await this.communities.save(community);
     return this.getCommunity(slug);
+  }
+
+  /**
+   * `POST /admin/communities/:slug/freeze` — freeze a community regardless of
+   * who owns/moderates it (or whether it has an owner at all). This is the
+   * admin override `CommunityAutoFreezeService`'s system-triggered freeze and
+   * `CommunitiesService.unfreeze` (owner/mod-only lift) don't cover: there is
+   * no member-facing "freeze on demand" endpoint, and unlike `unfreeze`, this
+   * never checks roster role — the whole point is to work when the owner/mods
+   * can't be trusted or reached.
+   *
+   * Idempotent: freezing an already-frozen community is a no-op 200 (the
+   * first `frozen_at` timestamp stands) — same conditional-UPDATE race-safety
+   * pattern as `CommunityAutoFreezeService.maybeFreeze` (`WHERE frozen_at IS
+   * NULL`), so two concurrent freezes can't double-write, and a governance-log
+   * entry is only written when this call is the one that actually changed the
+   * state.
+   */
+  async freeze(
+    slug: string,
+    actorUserId: string,
+  ): Promise<AdminCommunityDetailDTO> {
+    const community = await this.communities.findOne({ where: { slug } });
+    if (!community) {
+      throw new NotFoundException('Community not found');
+    }
+
+    const result = await this.communities
+      .createQueryBuilder()
+      .update(Community)
+      .set({ frozenAt: () => 'now()' })
+      .where('id = :id AND frozen_at IS NULL', { id: community.id })
+      .execute();
+
+    if (result.affected) {
+      await this.governanceLog.log({
+        communityId: community.id,
+        actorUserId,
+        action: GovernanceLogAction.Frozen,
+        metadata: { adminOverride: true },
+      });
+    }
+
+    return this.getCommunity(slug);
+  }
+
+  /**
+   * `POST /admin/communities/:slug/unfreeze` — lift a freeze regardless of
+   * who owns/moderates the community. `CommunitiesService.unfreeze` already
+   * covers the normal path (an owner/mod lifting it themselves); this is the
+   * override for when they can't or won't — no roster role is checked here.
+   *
+   * Idempotent, same conditional-UPDATE pattern as `freeze` in reverse
+   * (`WHERE frozen_at IS NOT NULL`): unfreezing a community that isn't frozen
+   * is a no-op 200, and the governance log only gets an entry when this call
+   * actually lifted something.
+   */
+  async unfreeze(
+    slug: string,
+    actorUserId: string,
+  ): Promise<AdminCommunityDetailDTO> {
+    const community = await this.communities.findOne({ where: { slug } });
+    if (!community) {
+      throw new NotFoundException('Community not found');
+    }
+
+    const result = await this.communities
+      .createQueryBuilder()
+      .update(Community)
+      .set({ frozenAt: null })
+      .where('id = :id AND frozen_at IS NOT NULL', { id: community.id })
+      .execute();
+
+    if (result.affected) {
+      await this.governanceLog.log({
+        communityId: community.id,
+        actorUserId,
+        action: GovernanceLogAction.Unfrozen,
+        metadata: { adminOverride: true },
+      });
+    }
+
+    return this.getCommunity(slug);
+  }
+
+  /**
+   * `POST /admin/communities/:slug/archive` — archive a community regardless
+   * of its ownership state. `CommunitiesService.archive` sets the very same
+   * `archivedAt` column but is OWNER-ONLY (`assertOwner`), which an ownerless
+   * community (`Community.ownerId === null`, pending `needsOwnerReviewAt`
+   * review) can never satisfy — there would be no lever left to take such a
+   * community down at all. Reimplemented here directly against the
+   * repository rather than calling that method, precisely to skip its
+   * authorization check.
+   *
+   * Idempotent, same conditional-UPDATE shape as `freeze`/`unfreeze`: an
+   * already-archived community is a no-op 200 (the first `archivedAt` stands,
+   * one-way — there is no unarchive), and the governance log only gets an
+   * entry when this call is the one that actually archived it.
+   */
+  async archive(
+    slug: string,
+    actorUserId: string,
+  ): Promise<AdminCommunityDetailDTO> {
+    const community = await this.communities.findOne({ where: { slug } });
+    if (!community) {
+      throw new NotFoundException('Community not found');
+    }
+
+    const result = await this.communities
+      .createQueryBuilder()
+      .update(Community)
+      .set({ archivedAt: () => 'now()' })
+      .where('id = :id AND archived_at IS NULL', { id: community.id })
+      .execute();
+
+    if (result.affected) {
+      await this.governanceLog.log({
+        communityId: community.id,
+        actorUserId,
+        action: GovernanceLogAction.Archived,
+        metadata: { adminOverride: true },
+      });
+    }
+
+    return this.getCommunity(slug);
+  }
+
+  /**
+   * `POST /admin/communities/:slug/reassign-owner` — hand ownership to any
+   * roster member, admin override of `CommunitiesService.transferOwnership`.
+   * That method is CURRENT-OWNER-ONLY (`assertOwner`) and therefore can never
+   * run on the exact case this endpoint exists for: a community with NO
+   * current owner (`ownerId === null`) — there is no owner to be the actor.
+   * Reimplemented here directly against the repositories, in a transaction
+   * mirroring `transferOwnership`'s three-write shape (new owner's roster row
+   * -> `owner`, `Community.ownerId` -> the target, previous owner's roster
+   * row -> `mod` if one existed), plus clearing `needsOwnerReviewAt` — the
+   * flag this endpoint is the intended way to resolve.
+   *
+   *  - Target must already be on this community's roster: 404 otherwise,
+   *    matching `transferOwnership`'s "Member not found" for an unknown
+   *    target (a reassignment is a promotion of an existing member, never a
+   *    way to force someone onto the roster).
+   *  - The house account can never become an owner — mirrors
+   *    `transferOwnership`'s same guardrail.
+   *  - Idempotent: reassigning to the member who already owns the community
+   *    is a no-op that skips both the write and the governance-log entry.
+   */
+  async reassignOwner(
+    slug: string,
+    actorUserId: string,
+    memberSlug: string,
+  ): Promise<AdminCommunityDetailDTO> {
+    const community = await this.communities.findOne({ where: { slug } });
+    if (!community) {
+      throw new NotFoundException('Community not found');
+    }
+
+    const targetUserId = await new MemberLookup(this.profiles).userIdForSlug(
+      memberSlug,
+    );
+    if (!targetUserId) {
+      throw new NotFoundException('Member not found');
+    }
+    const targetMembership = await this.communityMembers.findOne({
+      where: { communityId: community.id, userId: targetUserId },
+    });
+    if (!targetMembership) {
+      throw new NotFoundException('Member not found');
+    }
+
+    const previousOwnerId = community.ownerId;
+    if (previousOwnerId === targetUserId) {
+      // Already the owner — nothing to change, nothing to log.
+      return this.getCommunity(slug);
+    }
+
+    const targetUser = await this.users.findOne({
+      where: { id: targetUserId },
+      select: { id: true, isSystem: true },
+    });
+    if (targetUser?.isSystem) {
+      throw new BadRequestException(
+        'Ownership cannot be transferred to the house account',
+      );
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      const communitiesRepo = manager.getRepository(Community);
+      const membersRepo = manager.getRepository(CommunityMember);
+
+      await communitiesRepo.update(community.id, {
+        ownerId: targetUserId,
+        needsOwnerReviewAt: null,
+      });
+
+      targetMembership.role = RosterRole.Owner;
+      await membersRepo.save(targetMembership);
+
+      // Outgoing owner (if any) stays on the roster, demoted to mod — guarded
+      // on the row still reading `owner` so this can't double-demote
+      // something already moved by a concurrent call. Mirrors
+      // `CommunitiesService.transferOwnership`.
+      if (previousOwnerId) {
+        const previousOwnerMembership = await membersRepo.findOne({
+          where: { communityId: community.id, userId: previousOwnerId },
+        });
+        if (
+          previousOwnerMembership &&
+          previousOwnerMembership.role === RosterRole.Owner
+        ) {
+          previousOwnerMembership.role = RosterRole.Mod;
+          await membersRepo.save(previousOwnerMembership);
+        }
+      }
+    });
+
+    await this.governanceLog.log({
+      communityId: community.id,
+      actorUserId,
+      action: GovernanceLogAction.OwnershipTransferred,
+      targetUserId,
+      metadata: { adminOverride: true, previousOwnerId },
+    });
+
+    return this.getCommunity(slug);
+  }
+
+  /**
+   * `DELETE /admin/communities/:slug/members/:memberSlug` — remove any
+   * roster member outright, admin override of the fact that
+   * `AdminCommunityModeratorsService` can only ever move someone between
+   * `member` and `mod`, never off the roster entirely. Lives here rather than
+   * on `AdminCommunityModeratorsController` because that controller's
+   * `@Controller('admin/communities/:slug/moderators')` prefix would force
+   * the route under `.../moderators/members/:memberSlug`; this controller's
+   * bare `admin/communities` prefix is what makes the intended
+   * `:slug/members/:memberSlug` path possible, and it's already admin-only
+   * (no `@Roles` override needed, unlike the moderators controller, whose
+   * class-level `@Roles` also admits `Moderator`).
+   *
+   * Deliberately not a call into `CommunitiesService.removeMember`: that
+   * method's authorization (self-removal, or `assertOwnerOrMod`) is the wrong
+   * shape for an admin actor, who is typically on neither the roster nor the
+   * mod team of the community they're moderating from the platform side.
+   *
+   *  - 404 if `memberSlug` is not on this community's roster (mirrors
+   *    `removeMember`'s "Member not found").
+   *  - 400 if the target is the owner — same "the owner cannot be removed"
+   *    guardrail `removeMember` enforces, worded identically. An admin who
+   *    needs the owner gone reassigns ownership first (`reassignOwner`), then
+   *    removes the now-demoted-to-mod former owner if that's still wanted.
+   */
+  async removeMember(
+    slug: string,
+    actorUserId: string,
+    memberSlug: string,
+  ): Promise<void> {
+    const community = await this.communities.findOne({ where: { slug } });
+    if (!community) {
+      throw new NotFoundException('Community not found');
+    }
+
+    const targetUserId = await new MemberLookup(this.profiles).userIdForSlug(
+      memberSlug,
+    );
+    if (!targetUserId) {
+      throw new NotFoundException('Member not found');
+    }
+    const targetMembership = await this.communityMembers.findOne({
+      where: { communityId: community.id, userId: targetUserId },
+    });
+    if (!targetMembership) {
+      throw new NotFoundException('Member not found');
+    }
+
+    if (targetMembership.role === RosterRole.Owner) {
+      throw new BadRequestException('The owner cannot be removed');
+    }
+
+    await this.communityMembers.delete({ id: targetMembership.id });
+
+    await this.governanceLog.log({
+      communityId: community.id,
+      actorUserId,
+      action: GovernanceLogAction.MemberRemoved,
+      targetUserId,
+      metadata: { adminOverride: true },
+    });
   }
 
   /**
@@ -524,7 +840,8 @@ export class AdminCommunitiesService {
       .orderBy('report.createdAt', 'DESC')
       .take(MAX_SCANNED_REPORTS)
       .getMany();
-    if (reports.length === MAX_SCANNED_REPORTS) {
+    const truncated = reports.length === MAX_SCANNED_REPORTS;
+    if (truncated) {
       this.logger.warn(
         `loadReportScope truncated at ${MAX_SCANNED_REPORTS} reports — the admin community dashboard's report aggregates and queues are no longer counting every community-scoped report on the platform.`,
       );
@@ -549,7 +866,7 @@ export class AdminCommunitiesService {
 
     // `IN ()` is not valid SQL — with nothing to resolve, skip both queries.
     if (!reportedContentIds.length || !communityIdsInScope.length) {
-      return { reports, communityIdBySubjectId, slugToCommunityId };
+      return { reports, communityIdBySubjectId, slugToCommunityId, truncated };
     }
 
     const [postIdRows, replyIdRows] = await Promise.all([
@@ -564,7 +881,7 @@ export class AdminCommunitiesService {
       );
     }
 
-    return { reports, communityIdBySubjectId, slugToCommunityId };
+    return { reports, communityIdBySubjectId, slugToCommunityId, truncated };
   }
 
   /** Resolves reported post ids to their community. Subject ids that name a

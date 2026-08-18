@@ -20,7 +20,9 @@ import { UserRole } from '../users/entities/user.entity';
 import { Feature } from '../common/feature.decorator';
 import { GetGovernanceFinancesQuery } from './dto/get-governance-finances.query';
 import { ListFinanceChangesQuery } from './dto/list-finance-changes.query';
+import { ListOverviewChangesQuery } from './dto/list-overview-changes.query';
 import { UpdateAdminFinancesDto } from './dto/update-admin-finances.dto';
+import { UpdateAdminOverviewDto } from './dto/update-admin-overview.dto';
 import { GovernanceFinanceService } from './governance-finance.service';
 import { GovernanceOverviewService } from './governance-overview.service';
 import {
@@ -43,6 +45,7 @@ import {
 //     snapshot (stats/income/expense/eventNotes) plus the reserve + partner
 //     disclosures rendered alongside it.
 const DEFAULT_FINANCE_CHANGES_LIMIT = 50;
+const DEFAULT_OVERVIEW_CHANGES_LIMIT = 50;
 
 @Feature('governance')
 @ApiTags('Governance')
@@ -146,5 +149,57 @@ export class GovernanceController {
   @ApiNotFoundResponse({ description: 'No governance overview is configured.' })
   publish() {
     return this.governanceOverviewService.publish();
+  }
+
+  // Admin-only: the admin Policy tab (`/admin/governance`). Mirrors
+  // `getAdminFinances`'s guard stack — moderators can view, only admins can
+  // write (see `updateOverview` below).
+  @Get('admin/overview')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.Admin, UserRole.Moderator)
+  @ApiOperation({
+    summary: 'Get the admin Policy tab data (overview + per-section audit meta)',
+  })
+  @ApiOkResponse({
+    description: 'The overview sections plus per-section last-edited info.',
+  })
+  @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
+  @ApiNotFoundResponse({ description: 'No governance overview is configured.' })
+  getAdminOverview() {
+    return this.governanceOverviewService.getAdminOverview();
+  }
+
+  // Admin-only (NOT moderators): replacing overview sections is a
+  // higher-blast-radius action, mirroring `updateAdminFinances`'s
+  // admin-only-write stance. State-changing, so it carries a CSRF token
+  // behind the global guard chain.
+  @Patch('admin/overview')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.Admin)
+  @ApiOperation({ summary: 'Replace any subset of the overview sections' })
+  @ApiOkResponse({
+    description: 'The updated Policy tab payload (overview + audit meta).',
+  })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiNotFoundResponse({ description: 'No governance overview is configured.' })
+  updateAdminOverview(
+    @Body() dto: UpdateAdminOverviewDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.governanceOverviewService.updateOverview(dto, user.userId);
+  }
+
+  // Admin-only: the per-section audit trail behind the "last edited" badges.
+  @Get('admin/overview/changes')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.Admin)
+  @ApiOperation({ summary: 'List the overview section change history' })
+  @ApiOkResponse({ description: 'The audit history, newest first.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  listOverviewChanges(@Query() query: ListOverviewChangesQuery) {
+    return this.governanceOverviewService.listChanges(
+      query.limit ?? DEFAULT_OVERVIEW_CHANGES_LIMIT,
+      query.offset ?? 0,
+    );
   }
 }

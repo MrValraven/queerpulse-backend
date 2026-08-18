@@ -19,6 +19,7 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateOpportunityDto } from './dto/create-opportunity.dto';
 import { CreateSignupDto } from './dto/create-signup.dto';
+import { DecideSignupDto } from './dto/decide-signup.dto';
 import { ListOpportunitiesQuery } from './dto/list-opportunities.query';
 import { UpdateOpportunityDto } from './dto/update-opportunity.dto';
 import { VolunteeringService } from './volunteering.service';
@@ -51,6 +52,16 @@ export class VolunteeringController {
   })
   list(@Query() query: ListOpportunitiesQuery) {
     return this.volunteeringService.list(query);
+  }
+
+  @Get('mine')
+  @ApiOperation({ summary: 'List opportunities you posted, with applicant counts' })
+  @ApiOkResponse({ description: 'Opportunities you posted.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  listMine(@CurrentUser() user: CurrentUserData) {
+    return this.volunteeringService.listMine(user.userId);
   }
 
   @Get(':slug')
@@ -144,7 +155,7 @@ export class VolunteeringController {
 
   @Get(':slug/signups')
   @ApiOperation({ summary: 'List signups for an opportunity you posted' })
-  @ApiOkResponse({ description: 'The opportunity’s signups.' })
+  @ApiOkResponse({ description: "The opportunity's signups." })
   @ApiForbiddenResponse({ description: 'Only the poster can view signups.' })
   @ApiNotFoundResponse({ description: 'No opportunity with that slug.' })
   @ApiUnauthorizedResponse({
@@ -155,5 +166,32 @@ export class VolunteeringController {
     @Param('slug') slug: string,
   ) {
     return this.volunteeringService.listSignups(slug, user.userId);
+  }
+
+  @Patch(':slug/signups/:signupId')
+  @ApiOperation({ summary: 'Accept or decline an applicant (poster only)' })
+  @ApiOkResponse({ description: 'The updated signup.' })
+  @ApiForbiddenResponse({
+    description: 'Only the poster can decide on applicants.',
+  })
+  @ApiConflictResponse({
+    description: 'This application was already decided.',
+  })
+  @ApiNotFoundResponse({ description: 'No opportunity or signup with that id.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  decideSignup(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('signupId') signupId: string,
+    @Body() dto: DecideSignupDto,
+  ) {
+    return this.volunteeringService.decideSignup(
+      slug,
+      signupId,
+      user.userId,
+      dto.status,
+    );
   }
 }

@@ -11,7 +11,9 @@ export type MailTemplateKey =
   | 'listing_draft_resume_link'
   | 'newsletter_confirm'
   | 'ops_inquiry_received'
-  | 'concern_update';
+  | 'concern_update'
+  | 'join_request_approved'
+  | 'join_request_declined';
 
 /** The params each template key requires. */
 export interface MailTemplateParams {
@@ -32,6 +34,19 @@ export interface MailTemplateParams {
    *  terminal outcome (a signed-in member gets an in-app notification instead). */
   concern_update: {
     status: 'resolved' | 'dismissed';
+  };
+  /** Sent to an applicant whose public join request an admin has just approved.
+   *  `inviteUrl` is the full, ready-to-click link (`<frontendUrl>/auth/invite/
+   *  <code>`). The applicant has no account and no other way in. */
+  join_request_approved: {
+    applicantName: string;
+    inviteUrl: string;
+  };
+  /** Sent to an applicant whose public join request an admin has just declined.
+   *  Deliberately soft and generic: P7 decided against exposing the specific
+   *  reason to the applicant, so this params shape has no reason field to leak. */
+  join_request_declined: {
+    applicantName: string;
   };
 }
 
@@ -140,6 +155,53 @@ export function renderTemplate<K extends MailTemplateKey>(
           `<p>If you have more to add, you can reply to this email or submit ` +
           `another concern from the governance page. Thank you for helping ` +
           `keep the community safe.</p>`,
+      };
+    }
+    case 'join_request_approved': {
+      const { applicantName, inviteUrl } =
+        params as MailTemplateParams['join_request_approved'];
+      const safeName = escapeHtml(applicantName);
+      const safeUrl = escapeHtml(inviteUrl);
+      return {
+        subject: "You're invited to join QueerPulse",
+        text:
+          `Hi ${applicantName},\n\n` +
+          `Good news: your request to join QueerPulse has been approved.\n\n` +
+          `Here's your invite link:\n\n` +
+          `${inviteUrl}\n\n` +
+          `It's yours alone, and it's good for the next 7 days, so it's worth ` +
+          `using soon. Open it whenever you're ready to sign in with Google and ` +
+          `set up your profile.\n\n` +
+          `We're glad you're here.`,
+        html:
+          `<p>Hi ${safeName},</p>` +
+          `<p>Good news: your request to join QueerPulse has been approved.</p>` +
+          `<p>Here's your invite link:</p>` +
+          `<p><a href="${safeUrl}">${safeUrl}</a></p>` +
+          `<p>It's yours alone, and it's good for the next 7 days, so it's ` +
+          `worth using soon. Open it whenever you're ready to sign in with ` +
+          `Google and set up your profile.</p>` +
+          `<p>We're glad you're here.</p>`,
+      };
+    }
+    case 'join_request_declined': {
+      const { applicantName } =
+        params as MailTemplateParams['join_request_declined'];
+      const safeName = escapeHtml(applicantName);
+      return {
+        subject: 'Your QueerPulse invite request',
+        text:
+          `Hi ${applicantName},\n\n` +
+          `Thanks for your interest in QueerPulse. We're not able to extend ` +
+          `an invite right now.\n\n` +
+          `This isn't necessarily final. You're welcome to submit a new ` +
+          `request in the future.`,
+        html:
+          `<p>Hi ${safeName},</p>` +
+          `<p>Thanks for your interest in QueerPulse. We're not able to ` +
+          `extend an invite right now.</p>` +
+          `<p>This isn't necessarily final. You're welcome to submit a new ` +
+          `request in the future.</p>`,
       };
     }
     default: {

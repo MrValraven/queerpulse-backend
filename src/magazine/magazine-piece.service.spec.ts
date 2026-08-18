@@ -667,6 +667,70 @@ describe('MagazinePieceService', () => {
       expect(result.readMinutes).toBeGreaterThan(0);
     });
 
+    it('merges a rapid second article_edited event into the existing row instead of creating a new one', async () => {
+      const piece = { ...PIECE, articleId: 'article-1' };
+      pieces.findOne.mockResolvedValue(piece);
+      articles.findOne.mockResolvedValue({ ...ARTICLE, blocks: [] });
+
+      const recentEvent = {
+        id: 'event-1',
+        pieceId: 'piece-1',
+        actorId: 'editor-1',
+        action: 'article_edited',
+        detail: null,
+        createdAt: new Date(Date.now() - 1000),
+      };
+      pieceEvents.findOne.mockResolvedValue(recentEvent);
+
+      const dto: UpdateArticleDto = {
+        blocks: [
+          { id: 'b1', kind: 'paragraph', html: 'word '.repeat(300).trim() },
+        ],
+      };
+
+      await service.updateArticleDraft('piece-1', dto, 'editor-1');
+
+      expect(pieceEvents.create).not.toHaveBeenCalled();
+      expect(pieceEvents.save).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'event-1', action: 'article_edited' }),
+      );
+    });
+
+    it('creates a new article_edited row when the previous one is older than the merge window', async () => {
+      const piece = { ...PIECE, articleId: 'article-1' };
+      pieces.findOne.mockResolvedValue(piece);
+      articles.findOne.mockResolvedValue({ ...ARTICLE, blocks: [] });
+
+      pieceEvents.findOne.mockResolvedValue({
+        id: 'event-1',
+        pieceId: 'piece-1',
+        actorId: 'editor-1',
+        action: 'article_edited',
+        detail: null,
+        createdAt: new Date(Date.now() - 10 * 60 * 1000),
+      });
+
+      const dto: UpdateArticleDto = { standfirst: 'Updated lede.' };
+      await service.updateArticleDraft('piece-1', dto, 'editor-1');
+
+      expect(pieceEvents.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            pieceId: 'piece-1',
+            actorId: 'editor-1',
+            action: 'article_edited',
+          }),
+        }),
+      );
+      expect(pieceEvents.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pieceId: 'piece-1',
+          actorId: 'editor-1',
+          action: 'article_edited',
+        }),
+      );
+    });
+
     it('auto-creates the article first when the piece has no articleId yet', async () => {
       const piece = { ...PIECE, articleId: null };
       pieces.findOne.mockResolvedValue(piece);

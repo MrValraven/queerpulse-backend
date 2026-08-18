@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AdminMembersModule } from '../admin-members/admin-members.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { Profile } from '../users/entities/profile.entity';
@@ -10,6 +11,8 @@ import { AdminMagazineIssuesController } from './admin-magazine-issues.controlle
 import { AdminMagazinePiecesController } from './admin-magazine-pieces.controller';
 import { AdminStorySubmissionsController } from './admin-story-submissions.controller';
 import { AdminStorySubmissionsService } from './admin-story-submissions.service';
+import { AdminWriterApplicationsController } from './admin-writer-applications.controller';
+import { AdminWriterApplicationsService } from './admin-writer-applications.service';
 import { MagazineArticle } from './entities/magazine-article.entity';
 import { MagazineArticleComment } from './entities/magazine-article-comment.entity';
 import { MagazineArticleVersion } from './entities/magazine-article-version.entity';
@@ -25,23 +28,20 @@ import { MagazinePiece } from './entities/magazine-piece.entity';
 import { MagazinePitch } from './entities/magazine-pitch.entity';
 import { MagazineSection } from './entities/magazine-section.entity';
 import { MagazineStorySubmission } from './entities/magazine-story-submission.entity';
+import { MagazineWriterApplication } from './entities/magazine-writer-application.entity';
 import { MagazineController } from './magazine.controller';
 import { MagazinePieceService } from './magazine-piece.service';
 import { MagazineWriterController } from './magazine-writer.controller';
 import { MagazineService } from './magazine.service';
 import { StorySubmissionsService } from './story-submissions.service';
+import { WriterApplicationsController } from './writer-applications.controller';
+import { WriterApplicationsService } from './writer-applications.service';
 
-// NOT wired into app.module.ts by this task (coordination protocol: the
-// orchestrator registers modules centrally after a tier's agents finish).
 @Module({
   imports: [
     TypeOrmModule.forFeature([
       MagazineArticle,
-      // Task D1 (article comments/NotesRail) — no FK relation, plain
-      // indexed uuid columns, same idiom as every other magazine_* table.
       MagazineArticleComment,
-      // Task E1 (article versions/VersionsRail) — same idiom: plain indexed
-      // uuid columns, no FK relation.
       MagazineArticleVersion,
       MagazineAuthor,
       MagazineCorrection,
@@ -51,31 +51,21 @@ import { StorySubmissionsService } from './story-submissions.service';
       MagazinePayment,
       MagazinePiece,
       MagazinePieceEvent,
-      // Task F1 (editor↔writer message thread) — same idiom: plain indexed
-      // uuid columns, no FK relation.
       MagazinePieceMessage,
       MagazinePitch,
       MagazineSection,
       MagazineStorySubmission,
-      // Registered here (overlapping `forFeature` is permitted) so the admin
-      // submission read model can resolve submitter refs, and so
-      // `MagazinePieceService.listMagazineEditors` (Magazine Desk Phase 7,
-      // Task A1) can resolve editor names/avatars.
+      MagazineWriterApplication,
       Profile,
-      // `MagazinePieceService.listMagazineEditors` (Task A1) reads the
-      // admin superset off this repo.
       User,
-      // StaffRolesGuard (AdminMagazineDecksController, AdminMagazinePiecesController) injects this repo;
-      // also read directly by `listMagazineEditors` (Task A1).
       UserStaffRole,
     ]),
-    // `NotificationsService` — Task F1 posts a notification to the OTHER
-    // party (editor → writer, or writer → editor) whenever a piece message
-    // is posted.
     NotificationsModule,
-    // Batched crop lookup (`MediaCropService.getMany`) for an issue's
-    // `coverUrl` sibling `crop`.
     MediaCropsModule,
+    // `AdminMembersService.grantStaffRole` — writer-application approval
+    // grants `magazine_writer` through the same mechanism the manual admin
+    // role-assignment screen uses (see `AdminWriterApplicationsService`).
+    AdminMembersModule,
   ],
   controllers: [
     MagazineController,
@@ -84,15 +74,17 @@ import { StorySubmissionsService } from './story-submissions.service';
     AdminMagazinePiecesController,
     AdminStorySubmissionsController,
     MagazineWriterController,
+    WriterApplicationsController,
+    AdminWriterApplicationsController,
   ],
   providers: [
     MagazineService,
     StorySubmissionsService,
     AdminStorySubmissionsService,
     MagazinePieceService,
+    WriterApplicationsService,
+    AdminWriterApplicationsService,
   ],
-  // MagazineService is exported for the cross-entity SearchModule (magazine
-  // article search); StorySubmissionsService for the story-submission flow.
   exports: [StorySubmissionsService, MagazineService],
 })
 export class MagazineModule {}

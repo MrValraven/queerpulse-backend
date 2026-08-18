@@ -61,12 +61,26 @@ export interface AdminCommunityCardDTO {
   needsSupport: boolean;
 }
 
+/**
+ * The full `listCommunities()` payload: the cards, plus whether either scan
+ * behind them (`MAX_LISTED_COMMUNITIES` communities, `MAX_SCANNED_REPORTS`
+ * reports) hit its cap. Mirrors `AdminTrustNetworkService`'s `truncated` flag
+ * on `TrustNetworkDTO` — before this, a capped scan here was surfaced only in
+ * a server log line, so the admin dashboard had no way to know it wasn't
+ * looking at the whole platform.
+ */
+export interface AdminCommunityListDTO {
+  items: AdminCommunityCardDTO[];
+  truncated: boolean;
+}
+
 export interface AdminCommunityModeratorDTO {
   /** The moderator's user id — the roster identity add/remove act on. */
   userId: string;
   slug: string;
   name: string;
   initials: string;
+  avatarUrl: string | null;
   role: 'owner' | 'mod';
   joinedAt: string;
 }
@@ -92,12 +106,17 @@ export interface AdminCommunityDetailDTO extends AdminCommunityCardDTO {
   /** Whether the community auto-freezes when open reports pile up. */
   autoFreezeOnReports: boolean;
   /** True while the community is currently frozen (auto-frozen pending report
-   *  review). Read-only here — staff lift a freeze from the community's own mod
-   *  panel; the admin surface just shows the state. */
+   *  review, or admin-frozen). An admin can also lift it via the admin-only
+   *  freeze/unfreeze endpoints, in addition to staff lifting it from the
+   *  community's own mod panel. */
   frozen: boolean;
   resolvedPercentage: number;
   moderators: AdminCommunityModeratorDTO[];
   scopedQueue: AdminCommunityQueueItemDTO[];
+  /** True when `MAX_SCANNED_REPORTS` capped the report scan this detail's
+   *  aggregates and `scopedQueue` were built from — some of this community's
+   *  reports may not be reflected. See `AdminCommunityListDTO.truncated`. */
+  truncated: boolean;
 }
 
 const SEVERITY_WEIGHT: Record<ReportSeverity, number> = {
@@ -302,6 +321,7 @@ export function toAdminCommunityDetail(
   aggregates: CommunityAggregates,
   moderators: AdminCommunityModeratorDTO[],
   scopedQueue: AdminCommunityQueueItemDTO[],
+  truncated: boolean,
 ): AdminCommunityDetailDTO {
   const communityCard = toAdminCommunityCard(community, aggregates);
   const resolvedPercentage = communityCard.healthBreakdown.reportResolution;
@@ -317,6 +337,7 @@ export function toAdminCommunityDetail(
     resolvedPercentage,
     moderators,
     scopedQueue,
+    truncated,
   };
 }
 
@@ -331,6 +352,7 @@ export function toAdminModerator(
     slug: memberRef.slug,
     name: `${memberRef.firstName} ${memberRef.lastName}`.trim(),
     initials: initialsFor(`${memberRef.firstName} ${memberRef.lastName}`),
+    avatarUrl: memberRef.avatarUrl,
     role,
     joinedAt: joinedAt.toISOString(),
   };

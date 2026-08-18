@@ -129,7 +129,7 @@ export const financeExpenseSeed: FinanceLine[] = [
     width: 26,
     items: [
       {
-        name: 'Domain registration (queerpulse.pt + .com)',
+        name: 'Domain registration (queerpulse.com + .com)',
         period: '€3/mo',
         amount: '€9',
       },

@@ -2,6 +2,7 @@ import { Controller, Get } from '@nestjs/common';
 import { Public } from '../auth/decorators/public.decorator';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 import { PlatformSettingsService } from './platform-settings.service';
+import { CURRENT_GUIDELINES_VERSION } from '../users/users.service';
 import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 /** The public projection. Deliberately narrower than the entity. */
@@ -11,6 +12,15 @@ export interface PlatformStatusView {
   locked: boolean;
   lockdownMessage: string | null;
   registrationClosedMessage: string | null;
+  /**
+   * The community-guidelines revision currently in effect, mirroring
+   * `UsersService.CURRENT_GUIDELINES_VERSION`. Exposed here so the frontend
+   * onboarding wizard can read the live version instead of hardcoding its own
+   * copy — see `GUIDELINES_VERSION` in `queerpulse/src/features/auth/api/auth.api.ts`,
+   * which sources it from this endpoint precisely to avoid the two literals
+   * drifting out of sync.
+   */
+  guidelinesVersion: string;
 }
 
 /**
@@ -45,6 +55,7 @@ export class PlatformStatusController {
       locked: settings.lockdownEnabled,
       lockdownMessage: settings.lockdownMessage,
       registrationClosedMessage: settings.registrationClosedMessage,
+      guidelinesVersion: CURRENT_GUIDELINES_VERSION,
     };
   }
 }

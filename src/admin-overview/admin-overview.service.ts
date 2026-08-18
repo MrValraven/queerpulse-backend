@@ -5,8 +5,8 @@ import { MemberLookup, MemberRef } from '../common/member-ref';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
 import {
-  JoinRequest,
-  JoinRequestStatus,
+  PlatformJoinRequest,
+  PlatformJoinRequestStatus,
 } from '../membership/entities/join-request.entity';
 import { Appeal, AppealStatus } from '../moderation/entities/appeal.entity';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
@@ -84,7 +84,7 @@ interface FeedCandidate {
   type: string;
   actorUserId: string | null;
   /** Set only for actors that are not resolvable via `MemberLookup` (e.g. a
-   *  `JoinRequest` applicant, who has no account/profile yet) — takes
+   *  `PlatformJoinRequest` applicant, who has no account/profile yet) — takes
    *  priority over `actorUserId` when present, including when explicitly
    *  `null` (an anonymous/erased actor). */
   actorNameOverride?: string | null;
@@ -113,8 +113,8 @@ export class AdminOverviewService {
   constructor(
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     @InjectRepository(Report) private readonly reports: Repository<Report>,
-    @InjectRepository(JoinRequest)
-    private readonly joinRequests: Repository<JoinRequest>,
+    @InjectRepository(PlatformJoinRequest)
+    private readonly joinRequests: Repository<PlatformJoinRequest>,
     @InjectRepository(Appeal) private readonly appeals: Repository<Appeal>,
     @InjectRepository(ModAuditLog)
     private readonly modAuditLogs: Repository<ModAuditLog>,
@@ -185,7 +185,7 @@ export class AdminOverviewService {
       }),
       this.loadReportResolutions(),
       this.joinRequests.count({
-        where: { status: JoinRequestStatus.Pending },
+        where: { status: PlatformJoinRequestStatus.Pending },
       }),
       this.appeals.count({ where: { status: AppealStatus.Awaiting } }),
     ]);
@@ -471,7 +471,7 @@ export class AdminOverviewService {
     >[];
     recentVouchesForFeed: Vouch[];
     recentCommunityMembersForFeed: CommunityMember[];
-    recentJoinRequestsForFeed: JoinRequest[];
+    recentJoinRequestsForFeed: PlatformJoinRequest[];
   }): Promise<AdminOverviewDTO['feed']> {
     const feedCandidates: FeedCandidate[] = [];
 

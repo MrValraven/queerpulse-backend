@@ -1,3 +1,13 @@
+/**
+ * COMMUNITY-LEVEL join request: an existing platform member asking to join
+ * one gated community, reviewed by that community's mods. Do not confuse
+ * this with the PLATFORM-LEVEL join request in
+ * `src/membership/entities/join-request.entity.ts`, which is a stranger with
+ * no account asking to join QueerPulse itself. The two share names
+ * (`JoinRequest`, `JoinRequestStatus`, approve/decline) and vocabulary, but
+ * are otherwise unrelated: different tables (`community_join_requests` vs
+ * `join_requests`), different controllers/services, no shared code.
+ */
 import {
   Column,
   CreateDateColumn,

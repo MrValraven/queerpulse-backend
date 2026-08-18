@@ -15,12 +15,16 @@ import { IsImageReference } from '../../common/validators/is-image-reference.dec
 import { ProfileVisibility } from '../../users/entities/profile.entity';
 import { MAX_FEATURED_COMMUNITIES } from '../featured-communities';
 import { INTEREST_LABELS } from '../identities';
+import { LANGUAGE_CODES } from '../languages';
 import {
   MAX_NOW_LENGTH,
   MAX_OPEN_TO_ENTRIES,
   MAX_OPEN_TO_LABEL_LENGTH,
   OPEN_TO_PRESET_IDS,
 } from '../open-to';
+import { DISCIPLINE_IDS, PROFESSIONS_BY_DISCIPLINE } from '../professions';
+
+const ALL_PROFESSION_IDS = Object.values(PROFESSIONS_BY_DISCIPLINE).flat();
 
 // One class covers both arms of the OpenToEntry union. `@ValidateIf` on `kind`
 // keeps the irrelevant arm's field unvalidated without removing it from the
@@ -103,6 +107,28 @@ export class UpdateProfileDto {
   @IsString({ each: true })
   @MaxLength(60, { each: true })
   lookingFor?: string[];
+
+  // Professional-identity facts — see Profile.discipline/profession/languages
+  // and src/profiles/professions.ts. `profession` implies its parent
+  // `discipline`; ProfilesService.updateMe reconciles the two so a member who
+  // picks a profession without its field doesn't end up unfindable by field.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(16)
+  @IsIn(DISCIPLINE_IDS, { each: true })
+  discipline?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(16)
+  @IsIn(ALL_PROFESSION_IDS, { each: true })
+  profession?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(LANGUAGE_CODES.length)
+  @IsIn(LANGUAGE_CODES, { each: true })
+  languages?: string[];
 
   // Whether `lookingFor` is shown on the profile to other viewers.
   @IsOptional()

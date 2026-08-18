@@ -232,7 +232,9 @@ export class LandingService {
     // batch wave above — but it's a single extra round trip for the whole
     // section, not one per community.
     const ownerProfilesByUserId = await this.getProfilesByIds(
-      [...communitiesById.values()].map((community) => community.ownerId),
+      [...communitiesById.values()]
+        .map((community) => community.ownerId)
+        .filter((ownerId): ownerId is string => ownerId !== null),
     );
 
     const members = memberFeatures.flatMap((feature) => {
@@ -254,7 +256,9 @@ export class LandingService {
           feature,
           community,
           memberCountsByCommunityId.get(community.id) ?? 0,
-          ownerProfilesByUserId.get(community.ownerId) ?? null,
+          (community.ownerId
+            ? ownerProfilesByUserId.get(community.ownerId)
+            : undefined) ?? null,
           faces,
         ),
       ];

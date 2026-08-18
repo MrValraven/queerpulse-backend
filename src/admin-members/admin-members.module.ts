@@ -42,5 +42,9 @@ import { AdminMembersService } from './admin-members.service';
   ],
   controllers: [AdminMembersController],
   providers: [AdminMembersService],
+  // Exported so `MagazineModule`'s writer-application triage can grant the
+  // `magazine_writer` staff role via the same `grantStaffRole` the manual
+  // admin role-assignment screen uses, instead of a second mechanism.
+  exports: [AdminMembersService],
 })
 export class AdminMembersModule {}

@@ -36,7 +36,9 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
-// Moderator/admin only. Frontend contract:
+// Moderator/admin only, EXCEPT `PATCH reports/:id` below, which also admits a
+// community owner/mod dismissing a report scoped to their own community (see
+// that route's own doc comment). Frontend contract:
 // `queerpulse/src/features/admin/api/moderation.api.ts`.
 @ApiTags('Admin — Moderation')
 @ApiCookieAuth()
@@ -129,18 +131,34 @@ export class ModerationController {
     return this.moderationService.bulkActOnReports(user.userId, dto);
   }
 
+  // Class-level `@Roles(Moderator, Admin)` is overridden with an empty
+  // `@Roles()` here so `RolesGuard` steps aside for ANY active member (the
+  // class-level `ActiveMemberGuard` still applies) — the real authorization
+  // now lives in `ModerationService.assertCanActOnReport`: platform
+  // Moderator/Admin (unchanged) OR a community owner/mod `dismiss`-ing a
+  // report scoped to a post/reply in the community they moderate. Every
+  // other action on this route still requires the platform role. This does
+  // NOT loosen `GET /mod/reports*` or `PATCH /mod/reports/bulk` above —
+  // those keep the class-level guard, so a community mod still cannot see or
+  // bulk-act on the platform-wide queue.
   @Patch('reports/:id')
+  @Roles()
   @ApiOperation({ summary: 'Apply a moderation action to one report' })
   @ApiOkResponse({ description: 'The updated report.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
+  @ApiForbiddenResponse({
+    description:
+      'Requires a moderator or admin role — except `dismiss`, which a ' +
+      'community owner/mod may also apply to a report on their own ' +
+      "community's post or reply.",
+  })
   @ApiNotFoundResponse({ description: 'The report does not exist.' })
   updateReport(
     @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ModActionDto,
   ) {
-    return this.moderationService.actOnReport(id, user.userId, dto);
+    return this.moderationService.actOnReport(id, user.userId, user.role, dto);
   }
 
   // Lift a suspension or ban. Without this a `ban` would be irreversible

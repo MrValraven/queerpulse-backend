@@ -23,6 +23,7 @@ import { isStaffRoleId } from '../users/staff-roles.registry';
 import { AdminMembersService } from './admin-members.service';
 import { GrantStaffRoleDto } from './dto/grant-staff-role.dto';
 import { ListAdminMembersQuery } from './dto/list-admin-members.query';
+import { UpdateInviteQuotaDto } from './dto/update-invite-quota.dto';
 import { UpdateMemberRoleDto } from './dto/update-member-role.dto';
 import {
   ApiBadRequestResponse,
@@ -137,5 +138,22 @@ export class AdminMembersController {
       throw new BadRequestException('Unknown staff role.');
     }
     return this.adminMembers.revokeStaffRole(currentUser.userId, id, role);
+  }
+
+  // Resource-limits lever, not a moderation action — no self-change or
+  // house-account guardrail (unlike updateRole/grantStaffRole), just the
+  // class-level Admin-only guard already on this controller.
+  @ApiOperation({
+    summary: "Set or clear a member's monthly invite quota override.",
+  })
+  @ApiOkResponse({ description: 'The updated invite quota.' })
+  @ApiBadRequestResponse({ description: 'Malformed request body.' })
+  @ApiNotFoundResponse({ description: 'Member not found.' })
+  @Patch(':id/invite-quota')
+  updateInviteQuota(
+    @Param('id') id: string,
+    @Body() body: UpdateInviteQuotaDto,
+  ) {
+    return this.adminMembers.updateInviteQuota(id, body.quota);
   }
 }

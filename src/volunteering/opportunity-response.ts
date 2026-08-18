@@ -7,7 +7,7 @@ import {
   OpportunityTask,
   VolunteerOpportunity,
 } from './entities/volunteer-opportunity.entity';
-import { VolunteerSignup } from './entities/volunteer-signup.entity';
+import { SignupStatus, VolunteerSignup } from './entities/volunteer-signup.entity';
 
 /**
  * Deliberately kept file-local rather than imported from `partners/` —
@@ -22,10 +22,23 @@ export interface PartnerRef {
   name: string;
 }
 
+/**
+ * Same file-local, duck-type-compatible shape as `PartnerRef`, resolved from
+ * `opportunity.communityId` via `CommunityMembershipService.refsByIds`
+ * (`VolunteeringService.communityRefsForMany`). `partner` and `community` are
+ * structurally independent — the frontend's single combined organization
+ * picker is what keeps only one populated per opportunity in practice.
+ */
+export interface CommunityRef {
+  slug: string;
+  name: string;
+}
+
 export interface OpportunityCardDTO {
   slug: string;
   org: string;
   partner: PartnerRef | null;
+  community: CommunityRef | null;
   role: string;
   cause: OpportunityCause;
   commit: OpportunityCommitLevel;
@@ -57,6 +70,8 @@ export interface VolunteerSignupDTO {
   id: string;
   member: MemberRef | null;
   note: string | null;
+  status: SignupStatus;
+  decidedAt: string | null;
   createdAt: string;
 }
 
@@ -74,12 +89,14 @@ function computeSpotsPct(spotsFilled: number, spotsTotal: number): number {
 export function toOpportunityCard(
   opportunity: VolunteerOpportunity,
   partner: PartnerRef | null,
+  community: CommunityRef | null,
   spotsFilled: number,
 ): OpportunityCardDTO {
   return {
     slug: opportunity.slug,
     org: opportunity.org,
     partner,
+    community,
     role: opportunity.role,
     cause: opportunity.cause,
     commit: opportunity.commit,
@@ -98,6 +115,7 @@ export function toOpportunityCard(
 export function toOpportunityDetail(
   opportunity: VolunteerOpportunity,
   partner: PartnerRef | null,
+  community: CommunityRef | null,
   spotsFilled: number,
   team: MemberRef[],
   poster: MemberRef | null,
@@ -105,7 +123,7 @@ export function toOpportunityDetail(
   mySignup: boolean,
 ): OpportunityDetailDTO {
   return {
-    ...toOpportunityCard(opportunity, partner, spotsFilled),
+    ...toOpportunityCard(opportunity, partner, community, spotsFilled),
     why: opportunity.detail.why,
     tasks: opportunity.detail.tasks,
     commitments: opportunity.detail.commitments,
@@ -127,6 +145,39 @@ export function toVolunteerSignup(
     id: signup.id,
     member,
     note: signup.note,
+    status: signup.status,
+    decidedAt: signup.decidedAt ? signup.decidedAt.toISOString() : null,
     createdAt: signup.createdAt.toISOString(),
+  };
+}
+
+/** One row of `GET /volunteering/mine` — an opportunity the viewer posted,
+ *  annotated with pending/accepted applicant counts for the manage-applicants
+ *  dashboard's opportunity list. */
+export interface MyOpportunitySummary {
+  slug: string;
+  role: string;
+  org: string;
+  status: OpportunityStatus;
+  pendingCount: number;
+  acceptedCount: number;
+  spotsTotal: number;
+  createdAt: string;
+}
+
+export function toMyOpportunitySummary(
+  opportunity: VolunteerOpportunity,
+  pendingCount: number,
+  acceptedCount: number,
+): MyOpportunitySummary {
+  return {
+    slug: opportunity.slug,
+    role: opportunity.role,
+    org: opportunity.org,
+    status: opportunity.status,
+    pendingCount,
+    acceptedCount,
+    spotsTotal: opportunity.spotsTotal,
+    createdAt: opportunity.createdAt.toISOString(),
   };
 }

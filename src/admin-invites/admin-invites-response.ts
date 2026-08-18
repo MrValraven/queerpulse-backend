@@ -67,12 +67,19 @@ export interface AdminInvitesPageDTO {
 // One entry in the "filter by sender" list: every member who has minted at
 // least one invite, with how many they sent. Powers the admin invite filter's
 // dropdown so it can offer every inviter platform-wide, not only those on the
-// pages already loaded. Keyed by `slug` (what the list query filters on).
+// pages already loaded. Keyed by `slug` (what the list query filters on, and
+// what `PATCH /admin/members/:id/invite-quota` accepts too).
 export interface AdminInviteInviterDTO {
   slug: string;
   name: string;
   avatarUrl: string | null;
   count: number;
+  // This inviter's per-member monthly invite quota override
+  // (`User.inviteMonthlyQuota`). `null` means no override — they use the
+  // platform-wide `INVITE_MONTHLY_QUOTA` default. Surfaced here (not just on
+  // the member detail view) so the admin invite-oversight page can show and
+  // edit it inline, right next to who's actually sending invites.
+  inviteMonthlyQuota: number | null;
 }
 
 export function toAdminInviteDTO(

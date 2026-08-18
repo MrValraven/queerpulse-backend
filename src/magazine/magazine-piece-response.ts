@@ -189,6 +189,32 @@ export function toPitchResponse(pitch: MagazinePitch): PitchResponse {
   };
 }
 
+/**
+ * Merges consecutive events sharing piece + actor + action into the first
+ * (most recent, per the DESC-ordered `deskSummary()` query) one — a rapid
+ * autosave burst on one piece shows as a single activity-feed row instead of
+ * flooding the desk-wide feed. Repeats separated by other activity are left
+ * distinct, since those represent separate editing sessions.
+ */
+function collapseRepeatedEvents(
+  events: MagazinePieceEvent[],
+): MagazinePieceEvent[] {
+  const collapsed: MagazinePieceEvent[] = [];
+  for (const event of events) {
+    const previous = collapsed[collapsed.length - 1];
+    if (
+      previous &&
+      previous.pieceId === event.pieceId &&
+      previous.actorId === event.actorId &&
+      previous.action === event.action
+    ) {
+      continue;
+    }
+    collapsed.push(event);
+  }
+  return collapsed;
+}
+
 function toPieceAuditEntry(event: MagazinePieceEvent): PieceAuditEntry {
   return {
     actorId: event.actorId,
@@ -394,7 +420,7 @@ export function toDeskSummary(
   return {
     stageLoad,
     editorLoad,
-    activity: events.map(toPieceAuditEntry),
+    activity: collapseRepeatedEvents(events).map(toPieceAuditEntry),
   };
 }
 

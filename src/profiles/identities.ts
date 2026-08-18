@@ -220,3 +220,20 @@ export function labelsForFacets(facets: readonly string[]): string[] {
   }
   return [...out];
 }
+
+/**
+ * The inverse of `labelsForFacets`: which directory facets a member's own
+ * PUBLISHED labels answer to. Used to put `identityFacets` on the member
+ * card, so the directory's per-facet count badges (`facetCounts` in
+ * `memberDirectoryFilter.data.ts`) have something to count in live mode —
+ * without this the thin card DTO carried no identity data at all and every
+ * badge silently read as "0 declared" even though the filter itself worked.
+ */
+export function facetsForLabels(
+  labels: readonly string[],
+): DirectoryIdentityFacet[] {
+  const set = new Set(labels);
+  return DIRECTORY_IDENTITY_FACETS.filter((facet) =>
+    FACET_LABELS[facet].some((label) => set.has(label)),
+  );
+}

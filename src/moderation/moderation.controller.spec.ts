@@ -61,17 +61,22 @@ describe('ModerationController', () => {
     expect(service.getById).toHaveBeenCalledWith('report-1');
   });
 
-  it('acts on a report as the current actor', async () => {
+  it('acts on a report as the current actor, passing their role through for the service to authorize', async () => {
     await controller.updateReport(actor, 'report-1', {
       action: 'remove_content',
       reasonCode: 'hate_speech',
       note: 'Removed for hate speech.',
     });
-    expect(service.actOnReport).toHaveBeenCalledWith('report-1', 'actor-1', {
-      action: 'remove_content',
-      reasonCode: 'hate_speech',
-      note: 'Removed for hate speech.',
-    });
+    expect(service.actOnReport).toHaveBeenCalledWith(
+      'report-1',
+      'actor-1',
+      'moderator',
+      {
+        action: 'remove_content',
+        reasonCode: 'hate_speech',
+        note: 'Removed for hate speech.',
+      },
+    );
   });
 
   it('bulk-acts on reports as the current actor', async () => {

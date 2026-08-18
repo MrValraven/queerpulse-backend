@@ -119,6 +119,12 @@ export interface ListingDTO {
   notify: string[];
   consentOuting: boolean;
   consentGuide: boolean;
+  /** Moderator-verified confirmation of the "queer-owned" badge — distinct
+   * from `linkToProfile` (the member's own self-reported claim). Surfaced
+   * here too (alongside the public directory card/detail DTOs) so the
+   * general admin listings queue — which reads/writes this owner-facing
+   * shape, not the public directory one — can render and toggle it. */
+  queerOwnedVerified: boolean;
 }
 
 /**
@@ -278,6 +284,13 @@ export interface DirectoryCardDTO {
   tint: DirectoryTint;
   av: string;
   owned: boolean;
+  /** Moderator-verified confirmation of the "queer-owned" badge — distinct
+   * from `owned` (the member's own self-reported `linkToProfile` claim).
+   * `false` until a moderator explicitly confirms it
+   * (`PATCH /listings/:ref/queer-owned-verified`). `DirectoryDetailDTO`
+   * inherits this via `extends DirectoryCardDTO` — no separate detail mapping
+   * needed. */
+  queerOwnedVerified: boolean;
   memberFirst: string | null;
   /** Online-only business (no physical location) — the card shows an "Online"
    *  badge instead of a neighbourhood and never pins the map. */
@@ -305,6 +318,7 @@ export function toDirectoryCard(listing: Listing): DirectoryCardDTO {
     // A listing linked to its owner's member profile is a community-owned
     // ("queer-owned") business; unlinked ones are allied/"friendly" venues.
     owned: listing.linkToProfile,
+    queerOwnedVerified: listing.queerOwnedVerified,
     // The "run by <first>" line names the owner, so it follows their chosen
     // visibility — null for `anon`/`role` (where `owner.first` is blank).
     memberFirst: listing.linkToProfile ? owner.first || null : null,
@@ -679,6 +693,7 @@ export function toListingDTO(
     notify: listing.notify,
     consentOuting: listing.consentOuting,
     consentGuide: listing.consentGuide,
+    queerOwnedVerified: listing.queerOwnedVerified,
   };
 }
 

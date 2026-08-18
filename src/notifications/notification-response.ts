@@ -64,6 +64,7 @@ const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   [NotificationType.SubprofileInvite]: 'invitedByUserId',
   [NotificationType.SubprofileCoOwnerJoined]: 'joinedUserId',
   [NotificationType.MagazinePieceMessage]: 'authorId',
+  [NotificationType.VolunteerApplicationReceived]: 'actorId',
   // The voucher, resolved for the bell + push. An ANONYMOUS safe-space vouch
   // omits `voucherId` from the payload entirely (the emit site only spreads it
   // for a named vouch), so this yields `null` and the row/push read as

@@ -9,6 +9,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { VouchService } from '../vouch/vouch.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -17,6 +18,7 @@ import {
   CommunitiesService,
   CreateCommunityInput,
 } from './communities.service';
+import { CommunityGovernanceLogService } from './community-governance-log.service';
 import {
   CommunityJoinRequest,
   JoinRequestStatus,
@@ -25,6 +27,7 @@ import {
   CommunityMember,
   RosterRole,
 } from './entities/community-member.entity';
+import { GovernanceLogAction } from './entities/community-governance-log.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { CommunityPost } from './entities/community-post.entity';
 import {
@@ -46,6 +49,7 @@ const qbStub = () => {
     'andWhere',
     'groupBy',
     'orderBy',
+    'addOrderBy',
     'skip',
     'take',
     'limit',
@@ -125,6 +129,7 @@ describe('CommunitiesService', () => {
   // flows, so a no-op stub suffices.
   let contentModeration: { stateFor: jest.Mock };
   let notifications: { create: jest.Mock; createForRecipients: jest.Mock };
+  let governanceLog: { log: jest.Mock };
 
   beforeEach(async () => {
     communities = {
@@ -181,6 +186,9 @@ describe('CommunitiesService', () => {
       create: jest.fn().mockResolvedValue(undefined),
       createForRecipients: jest.fn().mockResolvedValue(undefined),
     };
+    governanceLog = {
+      log: jest.fn().mockResolvedValue(undefined),
+    };
 
     // `manager.getRepository(Entity)` routes to the same mocks the outer
     // `@InjectRepository` tokens use, so `communities.save`/`members.save`
@@ -229,6 +237,10 @@ describe('CommunitiesService', () => {
         {
           provide: MediaCropService,
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
+        },
+        {
+          provide: CommunityGovernanceLogService,
+          useValue: governanceLog,
         },
       ],
     }).compile();
@@ -514,6 +526,36 @@ describe('CommunitiesService', () => {
         '(c.access_tier != :privateTier OR m.user_id = :viewerId)',
         { privateTier: AccessTier.Private, viewerId: 'u1' },
       );
+    });
+
+    it('defaults to newest-first (created_at DESC) when sort is omitted', async () => {
+      const qb = qbStub();
+      communities.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('u1', {});
+
+      expect(qb.orderBy).toHaveBeenCalledWith('c.createdAt', 'DESC');
+      expect(qb.addOrderBy).not.toHaveBeenCalled();
+    });
+
+    it("sort='newest' orders by created_at DESC (same as the default)", async () => {
+      const qb = qbStub();
+      communities.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('u1', { sort: 'newest' });
+
+      expect(qb.orderBy).toHaveBeenCalledWith('c.createdAt', 'DESC');
+      expect(qb.addOrderBy).not.toHaveBeenCalled();
+    });
+
+    it("sort='name' orders alphabetically with a stable id tiebreaker", async () => {
+      const qb = qbStub();
+      communities.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('u1', { sort: 'name' });
+
+      expect(qb.orderBy).toHaveBeenCalledWith('c.name', 'ASC');
+      expect(qb.addOrderBy).toHaveBeenCalledWith('c.id', 'ASC');
     });
   });
 
@@ -1070,6 +1112,285 @@ describe('CommunitiesService', () => {
         role: RosterRole.Mod,
       });
       expect(members.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('archive', () => {
+    const community = {
+      id: 'c1',
+      slug: 'x',
+      ownerId: 'owner-1',
+      archivedAt: null as Date | null,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    };
+
+    beforeEach(() => {
+      communities.findOne.mockResolvedValue({ ...community });
+    });
+
+    // `assertOwner` gates purely on `Community.ownerId` — no roster lookup —
+    // so a mod is rejected exactly like any other non-owner, per the
+    // docstring's "OWNER-ONLY, deliberately stricter than the owner/mod gate".
+    it('rejects a mod (owner-only, stricter than update/roster routes)', async () => {
+      await expect(service.archive('x', 'mod-1')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(communities.save).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-member stranger', async () => {
+      await expect(service.archive('x', 'stranger')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+    });
+
+    it('archives for the owner: sets archivedAt, logs governance, notifies the whole roster', async () => {
+      members.find.mockResolvedValue([
+        { userId: 'owner-1' },
+        { userId: 'member-1' },
+      ]);
+
+      const detail = await service.archive('x', 'owner-1');
+
+      expect(detail.myRole).toBe(RosterRole.Owner);
+      expect(communities.save).toHaveBeenCalledWith(
+        expect.objectContaining({ archivedAt: expect.any(Date) as unknown }),
+      );
+      expect(governanceLog.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          communityId: 'c1',
+          actorUserId: 'owner-1',
+          action: GovernanceLogAction.Archived,
+        }),
+      );
+      expect(notifications.createForRecipients).toHaveBeenCalledWith(
+        ['owner-1', 'member-1'],
+        NotificationType.CommunityArchived,
+        expect.objectContaining({ actorId: 'owner-1', communitySlug: 'x' }),
+        'owner-1',
+      );
+    });
+
+    it('is idempotent: archiving an already-archived community is a no-op', async () => {
+      communities.findOne.mockResolvedValue({
+        ...community,
+        archivedAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+
+      const detail = await service.archive('x', 'owner-1');
+
+      expect(detail.myRole).toBe(RosterRole.Owner);
+      expect(communities.save).not.toHaveBeenCalled();
+      expect(governanceLog.log).not.toHaveBeenCalled();
+      expect(notifications.createForRecipients).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('unfreeze', () => {
+    const community = {
+      id: 'c1',
+      slug: 'x',
+      ownerId: 'owner-1',
+      frozenAt: new Date('2026-01-01T00:00:00.000Z') as Date | null,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    };
+
+    beforeEach(() => {
+      communities.findOne.mockResolvedValue({ ...community });
+    });
+
+    it('rejects a plain member', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      await expect(service.unfreeze('x', 'member-1')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(communities.save).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-member stranger', async () => {
+      members.findOne.mockResolvedValue(null);
+      await expect(service.unfreeze('x', 'stranger')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+    });
+
+    it('lets a mod (not just the owner) unfreeze: clears frozenAt, logs governance, notifies staff', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Mod });
+      members.find.mockResolvedValue([{ userId: 'mod-1' }]);
+
+      const detail = await service.unfreeze('x', 'mod-1');
+
+      expect(detail.myRole).toBe(RosterRole.Mod);
+      expect(communities.save).toHaveBeenCalledWith(
+        expect.objectContaining({ frozenAt: null }),
+      );
+      expect(governanceLog.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          communityId: 'c1',
+          actorUserId: 'mod-1',
+          action: GovernanceLogAction.Unfrozen,
+        }),
+      );
+      expect(notifications.createForRecipients).toHaveBeenCalledWith(
+        expect.arrayContaining(['owner-1', 'mod-1']),
+        NotificationType.CommunityUnfrozen,
+        expect.objectContaining({ actorId: 'mod-1', communitySlug: 'x' }),
+        'mod-1',
+      );
+    });
+
+    it('is idempotent: unfreezing a community that is not frozen is a no-op', async () => {
+      communities.findOne.mockResolvedValue({ ...community, frozenAt: null });
+      members.findOne.mockResolvedValue({ role: RosterRole.Owner });
+
+      const detail = await service.unfreeze('x', 'owner-1');
+
+      expect(detail.myRole).toBe(RosterRole.Owner);
+      expect(communities.save).not.toHaveBeenCalled();
+      expect(governanceLog.log).not.toHaveBeenCalled();
+      expect(notifications.createForRecipients).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('transferOwnership', () => {
+    const community = {
+      id: 'c1',
+      slug: 'x',
+      ownerId: 'owner-1',
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    };
+
+    const resolveSlug = (slug: string, userId: string) => {
+      const qb = qbStub();
+      qb.getMany!.mockResolvedValue([{ slug, userId }]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+    };
+
+    beforeEach(() => {
+      communities.findOne.mockResolvedValue({ ...community });
+    });
+
+    it('rejects a mod attempting a transfer (owner-only)', async () => {
+      resolveSlug('target-slug', 'target-1');
+      members.findOne.mockResolvedValue({ role: RosterRole.Mod });
+      await expect(
+        service.transferOwnership('x', 'mod-1', 'target-slug'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(communities.save).not.toHaveBeenCalled();
+    });
+
+    it('rejects self-transfer', async () => {
+      resolveSlug('owner-slug', 'owner-1');
+      await expect(
+        service.transferOwnership('x', 'owner-1', 'owner-slug'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('404s an unknown target member slug', async () => {
+      const emptyQb = qbStub();
+      profiles.createQueryBuilder.mockReturnValue(emptyQb);
+      await expect(
+        service.transferOwnership('x', 'owner-1', 'ghost'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('rejects a transfer to the house account', async () => {
+      resolveSlug('target-slug', 'target-1');
+      members.findOne.mockResolvedValue({
+        id: 'm2',
+        role: RosterRole.Member,
+        userId: 'target-1',
+      });
+      users.findOne.mockResolvedValue({ id: 'target-1', isSystem: true });
+      await expect(
+        service.transferOwnership('x', 'owner-1', 'target-slug'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(communities.save).not.toHaveBeenCalled();
+    });
+
+    it('hands ownership to the target, demotes the outgoing owner to mod, logs governance, notifies both parties', async () => {
+      resolveSlug('target-slug', 'target-1');
+      members.findOne
+        // target's roster row (2nd lookup, after the self-transfer check)
+        .mockResolvedValueOnce({
+          id: 'm2',
+          role: RosterRole.Member,
+          userId: 'target-1',
+        })
+        // outgoing owner's roster row, re-read inside the transaction
+        .mockResolvedValueOnce({
+          id: 'm1',
+          role: RosterRole.Owner,
+          userId: 'owner-1',
+        });
+      users.findOne.mockResolvedValue({ id: 'target-1', isSystem: false });
+
+      const detail = await service.transferOwnership(
+        'x',
+        'owner-1',
+        'target-slug',
+      );
+
+      // The actor is now a moderator of the community they handed off.
+      expect(detail.myRole).toBe(RosterRole.Mod);
+      expect(members.save).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'm2', role: RosterRole.Owner }),
+      );
+      expect(members.save).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'm1', role: RosterRole.Mod }),
+      );
+      expect(communities.save).toHaveBeenCalledWith(
+        expect.objectContaining({ ownerId: 'target-1' }),
+      );
+      expect(governanceLog.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          communityId: 'c1',
+          actorUserId: 'owner-1',
+          action: GovernanceLogAction.OwnershipTransferred,
+          targetUserId: 'target-1',
+        }),
+      );
+      // One notification to the new owner, one to the demoted former owner.
+      expect(notifications.create).toHaveBeenCalledWith(
+        'target-1',
+        NotificationType.CommunityOwnershipTransferred,
+        expect.objectContaining({ youAreNowOwner: true }),
+        'owner-1',
+      );
+      expect(notifications.create).toHaveBeenCalledWith(
+        'owner-1',
+        NotificationType.CommunityOwnershipTransferred,
+        expect.objectContaining({ youAreNowOwner: false }),
+        'owner-1',
+      );
+    });
+
+    it('does not demote the outgoing owner a second time if their roster row already moved (retry-safe)', async () => {
+      resolveSlug('target-slug', 'target-1');
+      members.findOne
+        .mockResolvedValueOnce({
+          id: 'm2',
+          role: RosterRole.Member,
+          userId: 'target-1',
+        })
+        // The outgoing owner's row is no longer 'owner' (already demoted by a
+        // prior attempt) — the guarded demote inside the transaction must
+        // not re-save it.
+        .mockResolvedValueOnce({
+          id: 'm1',
+          role: RosterRole.Mod,
+          userId: 'owner-1',
+        });
+      users.findOne.mockResolvedValue({ id: 'target-1', isSystem: false });
+
+      await service.transferOwnership('x', 'owner-1', 'target-slug');
+
+      expect(members.save).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'm2', role: RosterRole.Owner }),
+      );
+      expect(members.save).not.toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'm1' }),
+      );
     });
   });
 });

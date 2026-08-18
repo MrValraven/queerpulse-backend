@@ -33,6 +33,18 @@ export class CreateOpportunityDto {
   // `PartnersService.idBySlug` (see `VolunteeringService.create`/`update`).
   @IsOptional() @IsString() @MinLength(1) @MaxLength(100) partnerSlug?: string;
 
+  // Community slug — resolved to `community_id` via
+  // `CommunityMembershipService.assertMemberBySlug`, so (unlike
+  // `partnerSlug`) an unknown slug 404s and a non-member slug 403s rather
+  // than silently resolving to `null` (see `VolunteeringService.create`/
+  // `update`). The frontend's combined organization picker only ever sets
+  // one of `partnerSlug`/`communitySlug` at a time.
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(100)
+  communitySlug?: string;
+
   @IsString() @MinLength(1) @MaxLength(200) role!: string;
   @IsEnum(OpportunityCause) cause!: OpportunityCause;
   @IsEnum(OpportunityCommitLevel) commit!: OpportunityCommitLevel;
@@ -80,7 +92,7 @@ export class CreateOpportunityDto {
   @IsArray()
   @ArrayMaxSize(30)
   @IsString({ each: true })
-  @MaxLength(300, { each: true })
+  @MaxLength(1000, { each: true })
   goodFor?: string[];
 
   @IsOptional() @IsString() @MaxLength(2000) teamIntro?: string;

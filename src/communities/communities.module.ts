@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
+import { EventsModule } from '../events/events.module';
+import { ForumModule } from '../forum/forum.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { MentionsModule } from '../mentions/mentions.module';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -9,12 +11,21 @@ import { SocialModule } from '../social/social.module';
 import { StorageModule } from '../storage/storage.module';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersModule } from '../users/users.module';
+import { VolunteeringModule } from '../volunteering/volunteering.module';
 import { VouchModule } from '../vouch/vouch.module';
 import { CommunitiesController } from './communities.controller';
 import { CommunitiesService } from './communities.service';
 import { CommunityAutoFreezeService } from './community-auto-freeze.service';
+import { CommunityGovernanceLogService } from './community-governance-log.service';
+import { CommunityInsightsController } from './community-insights.controller';
+import { CommunityInsightsService } from './community-insights.service';
+import { CommunityMembershipModule } from './community-membership.module';
+import { CommunityOwnerOrphanService } from './community-owner-orphan.service';
 import { CommunityPostsController } from './community-posts.controller';
 import { CommunityPostsService } from './community-posts.service';
+import { CommunityPulseController } from './community-pulse.controller';
+import { CommunityPulseService } from './community-pulse.service';
+import { CommunityGovernanceLog } from './entities/community-governance-log.entity';
 import { CommunityJoinRequest } from './entities/community-join-request.entity';
 import { CommunityMember } from './entities/community-member.entity';
 import { CommunityPostEdit } from './entities/community-post-edit.entity';
@@ -36,6 +47,10 @@ import { MeCommunitiesController } from './me-communities.controller';
       CommunityPostEdit,
       CommunityPostReplyEdit,
       CommunityJoinRequest,
+      // The owner-erasure audit trail (`CommunityGovernanceLogService`) and,
+      // via `CommunityOwnerOrphanService`, the sink for automatic owner→mod
+      // promotion entries.
+      CommunityGovernanceLog,
       Profile,
       // Read-only, for the auto-freeze listener's open-report count. Same
       // cross-module `forFeature` reuse `ReportsModule` itself does with
@@ -72,17 +87,47 @@ import { MeCommunitiesController } from './me-communities.controller';
     // Batched crop lookup (`MediaCropService.getMany`) for `coverImageUrl`'s
     // sibling `coverCrop`.
     MediaCropsModule,
+    // `CommunityMembershipService` — backs `CommunityPulseService`'s
+    // resolve-slug-and-assert-roster-member check
+    // (`assertMemberBySlug`), the same cross-feature pattern
+    // `EventsModule`/`ForumModule`/`VolunteeringModule` already reuse it for.
+    // Read-only module; closes no cycle.
+    CommunityMembershipModule,
+    // `EventsService`/`ForumThreadsService`/`VolunteeringService` — the three
+    // `listUpcomingByCommunity`/`listRecentByCommunity`/`listOpenByCommunity`
+    // lanes `CommunityPulseService` fans out to in parallel. None of these
+    // three modules imports `CommunitiesModule` (only the leaf
+    // `CommunityMembershipModule`), so this closes no cycle.
+    EventsModule,
+    ForumModule,
+    VolunteeringModule,
   ],
   controllers: [
     CommunitiesController,
     CommunityPostsController,
     MeCommunitiesController,
+    // `communities/:slug/pulse` / `communities/:slug/insights` — deliberately
+    // their own controllers (not methods on `CommunitiesController`), so this
+    // feature's read side never has to touch that file. See each
+    // controller's own doc comment.
+    CommunityPulseController,
+    CommunityInsightsController,
   ],
   providers: [
     CommunitiesService,
     CommunityPostsService,
     CommunityAutoFreezeService,
+    CommunityGovernanceLogService,
+    CommunityOwnerOrphanService,
+    CommunityPulseService,
+    CommunityInsightsService,
   ],
-  exports: [CommunitiesService],
+  // `CommunityOwnerOrphanService` is exported so `AccountModule` can call
+  // `handleOwnerErasure(userId)` from `AccountDeletionProcessorService.eraseAccount`,
+  // immediately before the hard-delete of the `User` row — see that service's
+  // own docstring for why the call has to land there. No circular dependency:
+  // nothing this module imports (directly or transitively) imports
+  // `AccountModule`.
+  exports: [CommunitiesService, CommunityOwnerOrphanService],
 })
 export class CommunitiesModule {}

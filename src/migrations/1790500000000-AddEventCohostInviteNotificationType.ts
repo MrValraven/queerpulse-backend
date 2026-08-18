@@ -1,0 +1,29 @@
+import { MigrationInterface, QueryRunner } from 'typeorm';
+
+/**
+ * Adds the `event_cohost_invite` value to `notifications_type_enum`, sent to
+ * the invitee when a host/co-host invites them to co-host a gathering (SDD
+ * 2026-08-18 "cohost invite flow"). Mirrors
+ * `AddSubprofileInviteNotificationTypes1785800500000` exactly: ADD VALUE
+ * only, never used in the same transaction, so this is safe inside the
+ * migration transaction on PostgreSQL 12+. `down()` is a documented no-op;
+ * Postgres cannot drop an enum value.
+ *
+ * DO NOT RUN. Authored for review only; the maintainer runs migrations.
+ */
+export class AddEventCohostInviteNotificationType1790500000000
+  implements MigrationInterface
+{
+  name = 'AddEventCohostInviteNotificationType1790500000000';
+
+  public async up(queryRunner: QueryRunner): Promise<void> {
+    await queryRunner.query(
+      `ALTER TYPE "notifications_type_enum" ADD VALUE IF NOT EXISTS 'event_cohost_invite'`,
+    );
+  }
+
+  public async down(): Promise<void> {
+    // No-op: Postgres cannot drop an enum value; the added value is harmless
+    // if left in place.
+  }
+}

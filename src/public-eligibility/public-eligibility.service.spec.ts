@@ -13,6 +13,7 @@ import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
+import { Vouch } from '../vouch/entities/vouch.entity';
 import { ConnectionsService } from '../connections/connections.service';
 import { SubprofileEndorsementsService } from '../subprofiles/subprofile-endorsements.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
@@ -124,6 +125,10 @@ describe('PublicEligibilityService', () => {
           useValue: repoMock({ count: async () => 0 }),
         },
         {
+          provide: getRepositoryToken(Vouch),
+          useValue: repoMock({ count: async () => 5 }),
+        },
+        {
           provide: ConnectionsService,
           useValue: {
             counts: async () => ({
@@ -156,6 +161,7 @@ describe('PublicEligibilityService', () => {
     const dto = await service.getSignals(user);
     expect(dto.verified).toBe(true);
     expect(dto.vouchCount).toBe(3);
+    expect(dto.vouchesGivenCount).toBe(5);
     expect(dto.tenureDays).toBeGreaterThan(365);
     expect(dto.publishedPieces).toEqual(['2026-07-01T00:00:00.000Z']);
     expect(dto.hostedOpenEvents).toEqual(['2026-06-01T00:00:00.000Z']);

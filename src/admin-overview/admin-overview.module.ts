@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
-import { JoinRequest } from '../membership/entities/join-request.entity';
+import { PlatformJoinRequest } from '../membership/entities/join-request.entity';
 import { Appeal } from '../moderation/entities/appeal.entity';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import { Report } from '../reports/entities/report.entity';
@@ -21,7 +21,7 @@ import { AdminOverviewService } from './admin-overview.service';
     TypeOrmModule.forFeature([
       Profile,
       Report,
-      JoinRequest,
+      PlatformJoinRequest,
       Appeal,
       ModAuditLog,
       Vouch,

@@ -413,6 +413,67 @@ describe('toDeskSummary', () => {
       },
     ]);
   });
+
+  it('collapses a run of consecutive same-piece/actor/action events into the most recent one, while keeping non-consecutive repeats separate', () => {
+    const pieces = [
+      makePiece({ id: 'piece-1', stage: 'drafting', editorId: 'editor-1' }),
+      makePiece({ id: 'piece-2', stage: 'drafting', editorId: 'editor-1' }),
+    ];
+    const events = [
+      makeEvent({
+        id: 'event-4',
+        pieceId: 'piece-1',
+        action: 'article_edited',
+        detail: null,
+        createdAt: new Date('2026-08-02T09:06:00Z'),
+      }),
+      makeEvent({
+        id: 'event-3',
+        pieceId: 'piece-1',
+        action: 'article_edited',
+        detail: null,
+        createdAt: new Date('2026-08-02T09:05:00Z'),
+      }),
+      makeEvent({
+        id: 'event-2',
+        pieceId: 'piece-2',
+        action: 'article_edited',
+        detail: null,
+        createdAt: new Date('2026-08-02T09:03:00Z'),
+      }),
+      makeEvent({
+        id: 'event-1',
+        pieceId: 'piece-1',
+        action: 'article_edited',
+        detail: null,
+        createdAt: new Date('2026-08-02T09:00:00Z'),
+      }),
+    ];
+    const editors = [{ id: 'editor-1', cap: 5 }];
+
+    const summary = toDeskSummary(pieces, events, editors);
+
+    expect(summary.activity).toEqual([
+      {
+        actorId: 'editor-1',
+        action: 'article_edited',
+        detail: null,
+        createdAt: '2026-08-02T09:06:00.000Z',
+      },
+      {
+        actorId: 'editor-1',
+        action: 'article_edited',
+        detail: null,
+        createdAt: '2026-08-02T09:03:00.000Z',
+      },
+      {
+        actorId: 'editor-1',
+        action: 'article_edited',
+        detail: null,
+        createdAt: '2026-08-02T09:00:00.000Z',
+      },
+    ]);
+  });
 });
 
 describe('computePublishGate', () => {

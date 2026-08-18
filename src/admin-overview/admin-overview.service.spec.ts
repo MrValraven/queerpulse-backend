@@ -2,7 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
-import { JoinRequest } from '../membership/entities/join-request.entity';
+import { PlatformJoinRequest } from '../membership/entities/join-request.entity';
 import { Appeal } from '../moderation/entities/appeal.entity';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import {
@@ -87,7 +87,7 @@ describe('AdminOverviewService', () => {
         AdminOverviewService,
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: getRepositoryToken(Report), useValue: reports },
-        { provide: getRepositoryToken(JoinRequest), useValue: joinRequests },
+        { provide: getRepositoryToken(PlatformJoinRequest), useValue: joinRequests },
         { provide: getRepositoryToken(Appeal), useValue: appeals },
         { provide: getRepositoryToken(ModAuditLog), useValue: modAuditLogs },
         { provide: getRepositoryToken(Vouch), useValue: vouches },

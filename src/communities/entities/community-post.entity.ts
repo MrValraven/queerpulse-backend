@@ -29,9 +29,15 @@ export class CommunityPost {
   @Column({ type: 'uuid', nullable: true })
   communityId!: string | null;
 
+  // Nullable since `FixCommunityOwnerAuthorErasureCascades1789900000000`: the
+  // FK was `ON DELETE CASCADE`, so an author's account erasure hard-deleted
+  // their posts instead of tombstoning them — inconsistent with this
+  // feature's own soft-delete design (member-initiated deletes preserve the
+  // body as "[deleted]" with full edit history via `community_post_edit`).
+  // Now `SET NULL`, mirroring `CommunityPostEdit.editorId`.
   @Index('IDX_community_posts_author_id')
-  @Column({ type: 'uuid' })
-  authorId!: string;
+  @Column({ type: 'uuid', nullable: true })
+  authorId!: string | null;
 
   @Column({ type: 'text' })
   body!: string;

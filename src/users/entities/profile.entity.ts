@@ -98,6 +98,24 @@ export class Profile {
   @Column({ type: 'text', array: true, default: '{}' })
   tags!: string[];
 
+  // Professional-identity facts, in the same spirit as `tags` above: set by
+  // the member, ungated by `visibility` (unlike `location`/`openTo`), opt-in
+  // and empty by default with no backfill. Arrays because a member may
+  // hold more than one ("Dancer, model & venture builder"). Range-checked
+  // against src/profiles/professions.ts; `profession` implies its parent
+  // `discipline` — see `reconcileDisciplineProfession`. See
+  // AddProfileDisciplineProfessionLanguages1791000000000.
+  @Column({ type: 'text', array: true, default: '{}' })
+  discipline!: string[];
+
+  @Column({ type: 'text', array: true, default: '{}' })
+  profession!: string[];
+
+  // Range-checked against src/profiles/languages.ts. Same opt-in shape as
+  // discipline/profession above.
+  @Column({ type: 'text', array: true, default: '{}' })
+  languages!: string[];
+
   // Denormalized count of active (non-withdrawn) vouches this member has
   // RECEIVED — kept in sync by VouchService on every vouch create/reactivate/
   // withdraw (atomic `vouch_count = vouch_count ± 1` inside the same

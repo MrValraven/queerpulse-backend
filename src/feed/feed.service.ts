@@ -63,7 +63,10 @@ interface Candidate {
   id: string;
   createdAt: Date;
   type: SourceKind;
-  authorId: string;
+  // Null for a `community_post` whose author's account was erased — the
+  // post itself is preserved (tombstoned), so it still surfaces here; there's
+  // just no author to block-check or resolve a byline for.
+  authorId: string | null;
   row: CommunityPost | ForumThread | Event | Profile | CommunityMember;
 }
 
@@ -477,12 +480,22 @@ export class FeedService {
     candidates: Candidate[],
   ): Promise<Candidate[]> {
     if (!candidates.length) return [];
-    const authorIds = [...new Set(candidates.map((c) => c.authorId))];
+    const authorIds = [
+      ...new Set(
+        candidates
+          .map((c) => c.authorId)
+          .filter((authorId): authorId is string => authorId !== null),
+      ),
+    ];
     const hiddenAuthorIds = await this.blockFilter.hiddenUserIds(
       viewerId,
       authorIds,
     );
-    return candidates.filter((c) => !hiddenAuthorIds.has(c.authorId));
+    // A null `authorId` (erased author, tombstoned post) has no one to
+    // block-check against, so it's never hidden on that basis.
+    return candidates.filter(
+      (c) => c.authorId === null || !hiddenAuthorIds.has(c.authorId),
+    );
   }
 
   /** Batched mapping for a page of merged candidates: one `IN`-query for
@@ -491,7 +504,13 @@ export class FeedService {
   private async toFeedItems(candidates: Candidate[]): Promise<FeedItem[]> {
     if (!candidates.length) return [];
 
-    const authorIds = [...new Set(candidates.map((c) => c.authorId))];
+    const authorIds = [
+      ...new Set(
+        candidates
+          .map((c) => c.authorId)
+          .filter((authorId): authorId is string => authorId !== null),
+      ),
+    ];
     const authors = await new MemberLookup(this.profiles).byUserIds(authorIds);
 
     // Both `community_post` (nullable `communityId` — a flat/global post has
@@ -519,7 +538,9 @@ export class FeedService {
     const communityById = new Map(communityRows.map((c) => [c.id, c]));
 
     return candidates.map((c) => {
-      const author: MemberRef | null = authors.get(c.authorId) ?? null;
+      const author: MemberRef | null = c.authorId
+        ? (authors.get(c.authorId) ?? null)
+        : null;
       switch (c.type) {
         case 'community_post': {
           const post = c.row as CommunityPost;

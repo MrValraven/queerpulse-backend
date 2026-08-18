@@ -131,6 +131,9 @@ function normalizeCreate(dto: CreateListingDto): Omit<
   | 'status'
   | 'createdAt'
   | 'updatedAt'
+  // Queer-owned verification is an ops/moderation concern, never part of the
+  // member-submission wizard — it defaults at the DB level on create.
+  | 'queerOwnedVerified'
   // Partner-space fields are an ops/moderation concern, never part of the
   // member-submission wizard — they default at the DB level on create.
   | 'isPartneredWithQueerpulse'
@@ -1334,6 +1337,20 @@ export class ListingsService {
       }
     }
 
+    const saved = await this.listings.save(listing);
+    return this.buildDTO(saved);
+  }
+
+  // Moderator/admin-only (`ListingsController.setQueerOwnedVerified`'s
+  // `RolesGuard` gate). Simpler than `setSafeSpace` above — a single boolean
+  // with no sub-fields to clear/compose, mirroring `isPartneredWithQueerpulse`'s
+  // shape rather than `safeSpaceStatus`'s.
+  async setQueerOwnedVerified(
+    ref: string,
+    verified: boolean,
+  ): Promise<ListingDTO> {
+    const listing = await this.loadOr404(ref);
+    listing.queerOwnedVerified = verified;
     const saved = await this.listings.save(listing);
     return this.buildDTO(saved);
   }

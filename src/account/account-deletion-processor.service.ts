@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, LessThanOrEqual, Repository } from 'typeorm';
+import { CommunityOwnerOrphanService } from '../communities/community-owner-orphan.service';
 import { StorageService } from '../storage/storage.service';
 import { User } from '../users/entities/user.entity';
 import {
@@ -32,6 +33,10 @@ export class AccountDeletionProcessorService {
     private readonly deletionRequests: Repository<DeletionRequest>,
     private readonly dataSource: DataSource,
     private readonly storage: StorageService,
+    // Resolves an erased owner's communities to a new owner (or flags them
+    // for admin review) — see the call site in `eraseAccount` for why this
+    // has to run before the `User` row is deleted.
+    private readonly communityOwnerOrphan: CommunityOwnerOrphanService,
   ) {}
 
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
@@ -105,8 +110,36 @@ export class AccountDeletionProcessorService {
    * Then, AFTER the transaction commits, erase the member's uploaded objects from
    * bucket storage (step 4). This lives outside the transaction on purpose — see
    * the comment there.
+   *
+   * BEFORE any of that, resolve community ownership (step 0) — see the call
+   * below.
    */
   private async eraseAccount(userId: string): Promise<void> {
+    // 0. Resolve any community ownership BEFORE the user row is deleted.
+    //    `communities.owner_id` is `ON DELETE SET NULL`
+    //    (`FixCommunityOwnerAuthorErasureCascades1789900000000`) — once step 3
+    //    below runs, the FK has already blanked `owner_id` and there is no way
+    //    left to tell who used to own what, which is exactly what
+    //    `CommunityOwnerOrphanService.handleOwnerErasure`'s docstring warns
+    //    about ("MUST be called BEFORE that `manager.delete(User, ...)`
+    //    statement runs").
+    //
+    //    NOT inside the transaction below: `CommunityOwnerOrphanService` does
+    //    not accept an external `EntityManager`/query-runner (by its own
+    //    design note), so as written it opens and commits its own
+    //    transaction per orphaned community. Calling it here, before this
+    //    method's own transaction even opens, keeps the two from overlapping
+    //    and still guarantees the required ordering. The trade-off: these are
+    //    two separate commits, not one atomic unit. If the transaction below
+    //    then fails for an unrelated reason, the owner reassignment already
+    //    committed here is NOT rolled back — but that's safe to leave, not
+    //    just tolerated: `eraseDueAccounts` parks a failed row in `processing`
+    //    for a human to retry rather than auto-retrying, and a retry's call to
+    //    `handleOwnerErasure` is naturally idempotent (it only ever acts on
+    //    communities still owned by `userId`, so a second call for the same
+    //    user finds nothing left to do).
+    await this.communityOwnerOrphan.handleOwnerErasure(userId);
+
     await this.dataSource.transaction(async (manager) => {
       // `addSelect('user.email')` re-includes the `select: false` email column:
       // the suppression row is keyed on `hashSuppressedEmail(user.email)`, so an

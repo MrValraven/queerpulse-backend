@@ -89,9 +89,21 @@ export class Community {
   @Column({ type: 'varchar', nullable: true })
   coverImageUrl!: string | null;
 
+  // Nullable since `FixCommunityOwnerAuthorErasureCascades1789900000000`: the FK
+  // was `ON DELETE CASCADE` (the erased owner's account taking the whole
+  // community with it — every post, reply, reaction, member, and join
+  // request), which is inconsistent with every other actor-reference in this
+  // feature (`ON DELETE SET NULL`, "for account erasure"). Now `SET NULL`:
+  // an erased owner leaves the community intact with `ownerId` NULL.
+  // `CommunityOwnerOrphanService.handleOwnerErasure` reacts by promoting the
+  // longest-tenured `mod` to owner, or — if the roster has no mod — leaving
+  // this NULL and stamping `needsOwnerReviewAt` for an admin surface to
+  // triage. A NULL here means "ownerless", not "no such community"; callers
+  // reading `Community.ownerId` for authority checks must treat NULL as "no
+  // one currently holds owner-only powers" rather than assume non-null.
   @Index('IDX_communities_owner_id')
-  @Column({ type: 'uuid' })
-  ownerId!: string;
+  @Column({ type: 'uuid', nullable: true })
+  ownerId!: string | null;
 
   @Index('UQ_communities_ref', { unique: true })
   @Column({ type: 'varchar' })
@@ -125,4 +137,13 @@ export class Community {
   // paired migration `1789000000000-AddCommunityFrozenAt`.
   @Column({ type: 'timestamptz', nullable: true })
   frozenAt!: Date | null;
+
+  // Set by `CommunityOwnerOrphanService.handleOwnerErasure` when the owner's
+  // account is erased and the roster has no `mod` to promote, leaving
+  // `ownerId` NULL. Nullable (unset while the community has an owner); lets an
+  // admin surface later query `WHERE needs_owner_review_at IS NOT NULL` for
+  // ownerless communities that need a manual owner assignment. Paired
+  // migration `FixCommunityOwnerAuthorErasureCascades1789900000000`.
+  @Column({ type: 'timestamptz', nullable: true })
+  needsOwnerReviewAt!: Date | null;
 }

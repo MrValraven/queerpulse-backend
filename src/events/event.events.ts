@@ -37,3 +37,18 @@ export interface EventRsvpedEvent {
   eventTitle: string;
   eventVisibility: EventVisibility;
 }
+
+export const EVENT_COHOST_INVITED = 'event.cohost_invited';
+
+/**
+ * A host/co-host sent a real cohost invite (SDD 2026-08-18 "cohost invite
+ * flow"). `eventSlug` rides along so the notification listener can build a
+ * deep link without a second query; mirrors `EventRsvpedEvent`.
+ */
+export interface EventCohostInvitedEvent {
+  eventId: string;
+  eventSlug: string;
+  inviteId: string;
+  inviterId: string;
+  inviteeId: string;
+}

@@ -57,6 +57,14 @@ export enum NotificationType {
   // removing creator as the `actorId`. See migration
   // `AddSubprofileMemberRemovedNotificationType1787700100000`.
   SubprofileMemberRemoved = 'subprofile_member_removed',
+  // Volunteering applicant review (SDD 2026-08-18 "volunteer applications").
+  // `VolunteerApplicationReceived` goes to the poster when someone applies
+  // (carries `actorId`, the applicant); `VolunteerApplicationDecided` goes to
+  // the applicant when the poster accepts/declines (no actor — the platform
+  // reporting your own status, like `JoinRequestApproved`/`Declined`). See
+  // migration `AddVolunteerApplicationNotificationTypes1790700000000`.
+  VolunteerApplicationReceived = 'volunteer_application_received',
+  VolunteerApplicationDecided = 'volunteer_application_decided',
   // Sent to the member a moderation action lands on (warn/suspend/ban) so they
   // learn the outcome and why — the exact gap the audit named. Delivered with
   // no actor and no preference toggle: a moderation outcome is the platform's
@@ -132,6 +140,52 @@ export enum NotificationType {
   // carries `{ badgeName }` for the bell copy. See migration
   // `AddRecognitionNotificationTypes1789600000000`.
   BadgeEarned = 'badge_earned',
+  // Community governance audit sweep (owner/mod cascade-fix effort). Enum
+  // values only here — no emit site wired yet; that belongs to a follow-up
+  // task that also wires `CommunityGovernanceLogService.log()` calls into
+  // `CommunitiesService`. See migration
+  // `AddCommunityGovernanceNotificationTypes1790200000000`.
+  //
+  // Sent to a member when a community owner/mod changes their roster role.
+  CommunityRoleChanged = 'community_role_changed',
+  // Sent to a member when a community owner/mod removes them from the roster.
+  CommunityMemberRemoved = 'community_member_removed',
+  // Sent to the outgoing and incoming owner when a community's ownership is
+  // transferred (including the automatic owner→mod promotion on owner
+  // account erasure).
+  CommunityOwnershipTransferred = 'community_ownership_transferred',
+  // Sent to a community's roster when its owner archives it.
+  CommunityArchived = 'community_archived',
+  // Sent to a community's roster when it is frozen (auto or manual).
+  CommunityFrozen = 'community_frozen',
+  // Sent to a community's roster when a freeze is lifted.
+  CommunityUnfrozen = 'community_unfrozen',
+  // Sent to each member slug resolved from `CreateCommunityInput.invites` when
+  // a community is created — closes the gap where an invite accepted by the
+  // founding flow was silently discarded. NOT a roster add (see
+  // `CommunitiesService.seedExtraRoster`'s "no consent-less roster adds"
+  // note) — this is purely "you were invited", so the recipient still has to
+  // `POST /communities/:slug/join` themselves.
+  CommunityInviteReceived = 'community_invite_received',
+  // Sent to the invitee when a host/co-host invites them to co-host a
+  // gathering (the real invite→accept flow, SDD 2026-08-18 "cohost invite
+  // flow"). Carries an actor (the inviter), so block/mute filtering applies
+  // like any member-driven type. See migration
+  // `AddEventCohostInviteNotificationType1790500000000`.
+  EventCohostInvite = 'event_cohost_invite',
+  // Sent to a magazine writer applicant when an admin approves or declines
+  // their application (SDD 2026-08-18 "magazine writer applications").
+  // System-driven — no actor — payload carries `{ reviewNote }`. See
+  // migration `AddWriterApplicationNotificationTypes1790700000000`.
+  WriterApplicationApproved = 'writer_application_approved',
+  WriterApplicationDeclined = 'writer_application_declined',
+  // Sent to the claimant once a moderator reviews their claim on an existing
+  // business listing (`ListingClaimsService.review`). System-driven — no
+  // actor, mirroring `ListingApproved`'s precedent (the platform is telling
+  // the claimant about their own claim). See migration
+  // `AddListingClaimNotificationTypes1790800200000`.
+  ListingClaimApproved = 'listing_claim_approved',
+  ListingClaimDeclined = 'listing_claim_declined',
 }
 
 @Entity('notifications')

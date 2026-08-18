@@ -1,6 +1,10 @@
 import { RecognitionAwardingService } from './recognition-awarding.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
-import { RecognitionSignals } from './recognition.scoring';
+import {
+  RecognitionSignals,
+  scoreSignals,
+  badgeBonusXp,
+} from './recognition.scoring';
 
 type Stat = { userId: string; xp: number; updatedAt: Date };
 type Award = { userId: string; badgeKey: string; context: string | null };
@@ -23,6 +27,19 @@ function makeService(opts: {
       savedStats.push({ ...row, updatedAt: new Date(0) });
       return Promise.resolve(row);
     },
+    // Mirrors the real atomic GREATEST upsert: resolves the max of the
+    // currently stored xp and the computed xp passed as the 2nd param.
+    query: (_sql: string, params: unknown[]) => {
+      const storedXp = opts.stat?.xp ?? 0;
+      const computedXp = Number(params[1]);
+      const resolvedXp = Math.max(storedXp, computedXp);
+      savedStats.push({
+        userId: params[0] as string,
+        xp: resolvedXp,
+        updatedAt: new Date(0),
+      });
+      return Promise.resolve([{ xp: resolvedXp }]);
+    },
   };
   const awardsRepo = {
     find: () => Promise.resolve(opts.awards ?? []),
@@ -43,6 +60,25 @@ function makeService(opts: {
     findOne: () => Promise.resolve({ avatarUrl: 'x', bio: 'hi' }),
   };
   const communityMembersRepo = { count: () => Promise.resolve(0) };
+  const savedItemsRepo = {
+    count: (query: { where: { subjectType: string } }) => {
+      if (query.where.subjectType === 'listing') {
+        return Promise.resolve(opts.signals.listingsSaved);
+      }
+      if (query.where.subjectType === 'article') {
+        return Promise.resolve(opts.signals.articlesSaved);
+      }
+      return Promise.resolve(0);
+    },
+  };
+  const memberPreferencesRepo = {
+    findOne: () =>
+      Promise.resolve(
+        opts.signals.workProfileComplete
+          ? { skills: ['branding'], focusAreas: ['mentorship'] }
+          : { skills: [], focusAreas: [] },
+      ),
+  };
   const eligibility = {
     getSignals: () => Promise.resolve(signalsToDto(opts.signals)),
   };
@@ -62,6 +98,8 @@ function makeService(opts: {
     awardsRepo as never,
     profilesRepo as never,
     communityMembersRepo as never,
+    savedItemsRepo as never,
+    memberPreferencesRepo as never,
     eligibility as never,
     notifications as never,
   );
@@ -97,6 +135,9 @@ const BASE: RecognitionSignals = {
   verified: false,
   gettingStartedStepsDone: 1,
   gettingStartedComplete: false,
+  listingsSaved: 0,
+  articlesSaved: 0,
+  workProfileComplete: false,
 };
 
 const USER = { userId: 'u1', status: 'active' } as never;
@@ -137,14 +178,24 @@ describe('RecognitionAwardingService.recompute', () => {
   });
 
   it('keeps a badge earned even after its signal drops (stickiness)', async () => {
+    const stickinessSignals: RecognitionSignals = {
+      ...BASE,
+      eventsAttended: 0,
+    }; // no longer qualifies
     const { service, insertedAwards } = makeService({
       stat: { userId: 'u1', xp: 0, updatedAt: new Date(0) },
       awards: [{ userId: 'u1', badgeKey: 'regular-attendee', context: null }],
-      signals: { ...BASE, eventsAttended: 0 }, // no longer qualifies
+      signals: stickinessSignals,
     });
-    await service.recompute(USER, { force: true });
+    const result = await service.recompute(USER, { force: true });
     // Not removed and not re-inserted.
     expect(insertedAwards).toHaveLength(0);
+    // The sticky badge's rarity bonus must still be counted in XP, not just
+    // the recomputed signal score, or a regression here would silently drop
+    // the bonus without insertedAwards catching it.
+    expect(result.xpAfter).toBe(
+      scoreSignals(stickinessSignals) + badgeBonusXp(['regular-attendee']),
+    );
   });
 
   it('notifies on level-up and on each new badge', async () => {
@@ -166,6 +217,32 @@ describe('RecognitionAwardingService.recompute', () => {
     expect(notified.some((n) => n.type === NotificationType.BadgeEarned)).toBe(
       true,
     );
+  });
+
+  it('awards local-scout and well-read from saved-item counts', async () => {
+    const { service, insertedAwards } = makeService({
+      stat: { userId: 'u1', xp: 0, updatedAt: new Date(0) },
+      awards: [],
+      signals: { ...BASE, listingsSaved: 3, articlesSaved: 5 },
+    });
+    const result = await service.recompute(USER, { force: true });
+    expect(result.newBadgeKeys).toEqual(
+      expect.arrayContaining(['local-scout', 'well-read']),
+    );
+    expect(insertedAwards.map((a) => a.badgeKey)).toEqual(
+      expect.arrayContaining(['local-scout', 'well-read']),
+    );
+  });
+
+  it('awards work-ready once skills and focus areas are set', async () => {
+    const { service, insertedAwards } = makeService({
+      stat: { userId: 'u1', xp: 0, updatedAt: new Date(0) },
+      awards: [],
+      signals: { ...BASE, workProfileComplete: true },
+    });
+    const result = await service.recompute(USER, { force: true });
+    expect(result.newBadgeKeys).toContain('work-ready');
+    expect(insertedAwards.map((a) => a.badgeKey)).toContain('work-ready');
   });
 
   it('skips recompute when stat was updated within the TTL and not forced', async () => {

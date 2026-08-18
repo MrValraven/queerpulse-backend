@@ -10,7 +10,7 @@ import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
 import { normalizePage, paginate } from '../common/pagination';
 import { randomBytes } from 'node:crypto';
-import { In, Repository, SelectQueryBuilder } from 'typeorm';
+import { In, MoreThanOrEqual, Repository, SelectQueryBuilder } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
@@ -527,19 +527,33 @@ export class EventsService {
     if (!cohostUser || cohostUser.status !== UserStatus.Active) {
       throw new BadRequestException('Co-hosts must be active members');
     }
-    // The host is implicitly an organizer — no cohost row needed. For everyone
-    // else, insert idempotently: ON CONFLICT DO NOTHING absorbs the race between
-    // two concurrent add requests without a pre-check + 23505.
-    if (profile.userId !== event.hostId) {
-      await this.cohosts
-        .createQueryBuilder()
-        .insert()
-        .into(EventCohost)
-        .values({ eventId: event.id, userId: profile.userId })
-        .orIgnore()
-        .execute();
-    }
+    await this.addCohostByUserId(event.id, profile.userId);
     return { ok: true };
+  }
+
+  /**
+   * The actual `event_cohosts` insert, extracted so both the direct-add path
+   * (`addCohost`, organizer-authorized) and the cohost-invite accept path
+   * (`EventCohostInvitesService.respond`, authorized by the pending invite
+   * itself; the acceptor need not be an organizer) share one place
+   * that writes the roster row. Idempotent (`ON CONFLICT DO NOTHING`): a
+   * no-op for the host, who is already an implicit organizer.
+   */
+  async addCohostByUserId(eventId: string, userId: string): Promise<void> {
+    const event = await this.events.findOne({ where: { id: eventId } });
+    if (!event) {
+      throw new NotFoundException('Event not found');
+    }
+    if (userId === event.hostId) {
+      return;
+    }
+    await this.cohosts
+      .createQueryBuilder()
+      .insert()
+      .into(EventCohost)
+      .values({ eventId, userId })
+      .orIgnore()
+      .execute();
   }
 
   async removeCohost(
@@ -715,6 +729,55 @@ export class EventsService {
       pageSize,
       capacity: event.capacity,
     };
+  }
+
+  /**
+   * `GET /communities/:slug/pulse`'s events lane — a community's own
+   * upcoming (published, future-dated) gatherings, soonest-first. Unlike
+   * `list('upcoming', ...)`, this is scoped to one community by id (not the
+   * viewer's own audience-gated browse), so it skips `audienceGate` and
+   * `excludeModeratedEvents` entirely: a community's own page showing its
+   * own tagged events isn't the public discovery surface those two guard.
+   * Card shaping (`toEventSummary`) is reused as-is; `myRsvpStatus` and
+   * `isBookmarked` are viewer-less here (always `null`/`false`) since this
+   * method isn't called with a specific viewer in mind — see
+   * `CommunityPulseService`, which calls this once per pulse request.
+   */
+  async listUpcomingByCommunity(
+    communityId: string,
+    limit = 5,
+  ): Promise<EventSummary[]> {
+    const now = new Date();
+    const events = await this.events.find({
+      where: {
+        communityId,
+        status: EventStatus.Published,
+        startAt: MoreThanOrEqual(now),
+      },
+      order: { startAt: 'ASC' },
+      take: limit,
+    });
+    if (!events.length) return [];
+
+    const eventIds = events.map((e) => e.id);
+    const goingRows = await this.rsvps
+      .createQueryBuilder('r')
+      .select('r.event_id', 'eventId')
+      .addSelect('COUNT(*)', 'count')
+      .where('r.event_id IN (:...ids)', { ids: eventIds })
+      .andWhere('r.status = :status', { status: RsvpStatus.Going })
+      .groupBy('r.event_id')
+      .getRawMany<{ eventId: string; count: string }>();
+    const goingByEvent = new Map(
+      goingRows.map((row) => [row.eventId, Number(row.count)]),
+    );
+    const crops = await this.mediaCropService.getMany(
+      events.flatMap((e) => (e.coverImageUrl ? [e.coverImageUrl] : [])),
+    );
+
+    return events.map((e) =>
+      toEventSummary(e, goingByEvent.get(e.id) ?? 0, null, false, crops),
+    );
   }
 
   async isOrganizer(eventId: string, userId: string): Promise<boolean> {

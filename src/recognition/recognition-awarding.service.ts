@@ -5,10 +5,13 @@ import { RecognitionStat } from './entities/recognition-stat.entity';
 import { RecognitionAward } from './entities/recognition-award.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
+import { SavedItem, SavedKind } from '../saved/entities/saved-item.entity';
+import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { PublicEligibilityService } from '../public-eligibility/public-eligibility.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
+import { UserStatus } from '../users/entities/user.entity';
 import { computeLevel } from './recognition-response';
 import { BADGE_CATALOG, levelName } from './recognition.catalog';
 import {
@@ -46,6 +49,10 @@ export class RecognitionAwardingService {
     private readonly profiles: Repository<Profile>,
     @InjectRepository(CommunityMember)
     private readonly communityMembers: Repository<CommunityMember>,
+    @InjectRepository(SavedItem)
+    private readonly savedItems: Repository<SavedItem>,
+    @InjectRepository(MemberPreferences)
+    private readonly memberPreferences: Repository<MemberPreferences>,
     private readonly eligibility: PublicEligibilityService,
     private readonly notifications: NotificationsService,
   ) {}
@@ -100,8 +107,20 @@ export class RecognitionAwardingService {
     // even if a signal has since dropped below threshold.
     const heldKeys = new Set<string>([...existingKeys, ...newBadgeKeys]);
     const computedXp = scoreSignals(signals) + badgeBonusXp(heldKeys);
-    const xpAfter = Math.max(xpBefore, computedXp);
-    await this.stats.save({ userId, xp: xpAfter });
+
+    // Atomic GREATEST upsert: the DB resolves max(stored, computed), so
+    // concurrent recomputes cannot lose an update. Level-up delta uses the
+    // pre-read xpBefore; under rare concurrency two recomputes could both
+    // emit a level-up notification, an accepted cosmetic tradeoff.
+    const [row] = await this.stats.query<{ xp: number | string }[]>(
+      `INSERT INTO recognition_stats (user_id, xp, updated_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (user_id) DO UPDATE
+         SET xp = GREATEST(recognition_stats.xp, EXCLUDED.xp), updated_at = now()
+       RETURNING xp`,
+      [userId, computedXp],
+    );
+    const xpAfter = Number(row!.xp);
     const levelAfter = computeLevel(xpAfter).level;
 
     await this.emitNotifications(userId, levelBefore, levelAfter, newBadgeKeys);
@@ -109,14 +128,54 @@ export class RecognitionAwardingService {
     return { xpBefore, xpAfter, levelBefore, levelAfter, newBadgeKeys };
   }
 
+  /**
+   * Event-listener entry point: the listener only has a userId, not a full
+   * `CurrentUserData`. `PublicEligibilityService.getSignals` reads only
+   * `user.userId` off the argument; `user.status` feeds `standingOk`, a field
+   * `gatherSignals` above never reads, and `user.role` is unused entirely. A
+   * synthetic active user is therefore safe and avoids an extra user lookup.
+   * Defaults to non-forced so this stays bounded by the same 5-minute TTL as
+   * the on-read path, even under a burst of high-signal events.
+   */
+  async recomputeByUserId(
+    userId: string,
+    options: { force?: boolean } = {},
+  ): Promise<RecomputeResult> {
+    const user: CurrentUserData = {
+      userId,
+      email: '',
+      status: UserStatus.Active,
+      role: '',
+    };
+    return this.recompute(user, options);
+  }
+
   private async gatherSignals(
     user: CurrentUserData,
   ): Promise<RecognitionSignals> {
-    const [signalsDto, profile, communitiesJoined] = await Promise.all([
+    const [
+      signalsDto,
+      profile,
+      communitiesJoined,
+      listingsSaved,
+      articlesSaved,
+      preferences,
+    ] = await Promise.all([
       this.eligibility.getSignals(user),
       this.profiles.findOne({ where: { userId: user.userId } }),
       this.communityMembers.count({ where: { userId: user.userId } }),
+      this.savedItems.count({
+        where: { userId: user.userId, subjectType: SavedKind.Listing },
+      }),
+      this.savedItems.count({
+        where: { userId: user.userId, subjectType: SavedKind.Article },
+      }),
+      this.memberPreferences.findOne({ where: { userId: user.userId } }),
     ]);
+
+    const workProfileComplete =
+      (preferences?.skills.length ?? 0) > 0 &&
+      (preferences?.focusAreas.length ?? 0) > 0;
 
     const profileComplete =
       Boolean(profile?.avatarUrl) && (profile?.bio?.trim().length ?? 0) > 0;
@@ -145,6 +204,9 @@ export class RecognitionAwardingService {
       verified: signalsDto.verified,
       gettingStartedStepsDone,
       gettingStartedComplete: gettingStartedStepsDone === stepsDone.length,
+      listingsSaved,
+      articlesSaved,
+      workProfileComplete,
     };
   }
 

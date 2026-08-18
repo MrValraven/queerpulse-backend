@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
 import { Listing } from '../listings/entities/listing.entity';
 import { AuthModule } from '../auth/auth.module';
+import { CommunityMembershipModule } from '../communities/community-membership.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { ReportsModule } from '../reports/reports.module';
@@ -60,6 +61,13 @@ import { ModerationService } from './moderation.service';
     // an appellant their appeal was decided. `NotificationsModule` imports only
     // `SocialModule`; nothing there reaches `ModerationModule`, so no cycle.
     NotificationsModule,
+    // `CommunityMembershipService` — the community-owner/mod dismiss carve-out
+    // on `PATCH /mod/reports/:id`: resolve a `post`/`reply` report subject to
+    // its owning community, then check the acting member's roster role there.
+    // Read-only, entity-registration-only module (no `CommunitiesModule`
+    // import) — the same cross-feature reuse `EventsModule`/`ForumModule`/
+    // `VolunteeringModule` already lean on it for. Closes no cycle.
+    CommunityMembershipModule,
   ],
   // `AppealsController` (member-facing `POST /appeals`) shares `ModerationService`
   // with `ModerationController` (the mod/admin queue + review), so submitted

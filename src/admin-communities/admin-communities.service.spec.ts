@@ -1,7 +1,9 @@
-import { NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { FindManyOptions, FindOperator, In } from 'typeorm';
+import { DataSource, FindManyOptions, FindOperator, In } from 'typeorm';
+import { CommunityGovernanceLogService } from '../communities/community-governance-log.service';
+import { GovernanceLogAction } from '../communities/entities/community-governance-log.entity';
 import {
   CommunityMember,
   RosterRole,
@@ -20,6 +22,7 @@ import {
   ReportSubjectType,
 } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { User } from '../users/entities/user.entity';
 import { AdminCommunitiesService } from './admin-communities.service';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -63,6 +66,7 @@ function makeCommunity(overrides: Partial<Community> = {}): Community {
     updatedAt: daysAgo(400),
     archivedAt: null,
     frozenAt: null,
+    needsOwnerReviewAt: null,
     ...overrides,
   };
 }
@@ -216,21 +220,65 @@ function queueQueryBuilders(
   return queryBuildersBySelectedColumn;
 }
 
+/** Stubs an `update().set().where().execute()` chain, e.g.
+ *  `freeze`/`unfreeze`/`archive`'s conditional UPDATE. */
+function makeUpdateQueryBuilderStub(affected: number): QueryBuilderStub {
+  const queryBuilder: QueryBuilderStub = {};
+  for (const chainedMethod of ['update', 'set', 'where']) {
+    queryBuilder[chainedMethod] = jest.fn().mockReturnValue(queryBuilder);
+  }
+  queryBuilder.execute = jest.fn().mockResolvedValue({ affected });
+  return queryBuilder;
+}
+
+/** Stubs `MemberLookup.userIdForSlug`'s `innerJoin().where().getMany()` chain
+ *  over the `profiles` repo — distinct from `makeQueryBuilderStub`, which
+ *  models the raw-row `getRawMany()` builders elsewhere in this service. */
+function makeProfileSlugQueryBuilderStub(rows: Profile[]): QueryBuilderStub {
+  const queryBuilder: QueryBuilderStub = {};
+  for (const chainedMethod of ['innerJoin', 'where']) {
+    queryBuilder[chainedMethod] = jest.fn().mockReturnValue(queryBuilder);
+  }
+  queryBuilder.getMany = jest.fn().mockResolvedValue(rows);
+  return queryBuilder;
+}
+
 describe('AdminCommunitiesService', () => {
   let service: AdminCommunitiesService;
-  let communities: { find: jest.Mock; findOne: jest.Mock };
-  let communityMembers: { find: jest.Mock; createQueryBuilder: jest.Mock };
+  let communities: {
+    find: jest.Mock;
+    findOne: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
+  let communityMembers: {
+    find: jest.Mock;
+    findOne: jest.Mock;
+    delete: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
   let communityPosts: { createQueryBuilder: jest.Mock };
   let communityPostReplies: { createQueryBuilder: jest.Mock };
   let reports: { createQueryBuilder: jest.Mock };
-  let profiles: { find: jest.Mock };
+  let profiles: { find: jest.Mock; createQueryBuilder: jest.Mock };
+  let users: { findOne: jest.Mock };
+  let dataSource: { transaction: jest.Mock };
+  let governanceLog: { log: jest.Mock };
 
   beforeEach(async () => {
     jest.useFakeTimers().setSystemTime(FIXED_NOW);
 
-    communities = { find: jest.fn().mockResolvedValue([]), findOne: jest.fn() };
+    communities = {
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn(),
+      // Default: the conditional UPDATE behind freeze/unfreeze/archive
+      // affects one row — individual tests override for the idempotent
+      // no-op (`affected: 0`) case.
+      createQueryBuilder: jest.fn(() => makeUpdateQueryBuilderStub(1)),
+    };
     communityMembers = {
       find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn(),
+      delete: jest.fn().mockResolvedValue({ affected: 1 }),
       createQueryBuilder: jest.fn(() => makeQueryBuilderStub([])),
     };
     communityPosts = {
@@ -241,7 +289,26 @@ describe('AdminCommunitiesService', () => {
     };
     reports = { createQueryBuilder: jest.fn() };
     stubReportsQueryBuilder(reports.createQueryBuilder, []);
-    profiles = { find: jest.fn().mockResolvedValue([]) };
+    profiles = {
+      find: jest.fn().mockResolvedValue([]),
+      // `MemberLookup.userIdForSlug` (`reassignOwner`/`removeMember`'s target
+      // resolution) goes through `createQueryBuilder(...).getMany()`, not
+      // `.find()` — default to "no match" so a test that doesn't care still
+      // gets a clean 404 rather than an unmocked-chain crash.
+      createQueryBuilder: jest.fn(() => makeProfileSlugQueryBuilderStub([])),
+    };
+    users = { findOne: jest.fn().mockResolvedValue(null) };
+    dataSource = {
+      transaction: jest.fn((work: (manager: unknown) => Promise<unknown>) =>
+        work({
+          getRepository: (entity: unknown) =>
+            entity === Community
+              ? { update: jest.fn().mockResolvedValue(undefined) }
+              : communityMembers,
+        }),
+      ),
+    };
+    governanceLog = { log: jest.fn().mockResolvedValue(undefined) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -261,6 +328,9 @@ describe('AdminCommunitiesService', () => {
         },
         { provide: getRepositoryToken(Report), useValue: reports },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        { provide: getRepositoryToken(User), useValue: users },
+        { provide: DataSource, useValue: dataSource },
+        { provide: CommunityGovernanceLogService, useValue: governanceLog },
       ],
     }).compile();
     service = module.get(AdminCommunitiesService);
@@ -296,7 +366,7 @@ describe('AdminCommunitiesService', () => {
         ],
       });
 
-      const result = await service.listCommunities();
+      const { items: result } = await service.listCommunities();
 
       expect(result).toHaveLength(2);
       expect(result.map((card) => card.slug).sort()).toEqual([
@@ -349,7 +419,7 @@ describe('AdminCommunitiesService', () => {
         'member.community_id': [{ communityId: 'community-busy', count: '2' }],
       });
 
-      const result = await service.listCommunities();
+      const { items: result } = await service.listCommunities();
 
       // Quiet Corner has nobody active at all, so it scores lower and leads.
       expect(result.map((card) => card.slug)).toEqual([
@@ -410,7 +480,7 @@ describe('AdminCommunitiesService', () => {
         'member.community_id': [{ communityId: 'community-1', count: '1' }],
       });
 
-      const result = await service.listCommunities();
+      const { items: result } = await service.listCommunities();
 
       for (const queryBuilder of [
         postQueryBuilders['post.id'],
@@ -435,7 +505,7 @@ describe('AdminCommunitiesService', () => {
     it('returns eight sparkline buckets even for a community with no posts', async () => {
       communities.find.mockResolvedValue([makeCommunity()]);
 
-      const result = await service.listCommunities();
+      const { items: result } = await service.listCommunities();
 
       expect(result[0]!.activitySparkline).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
       expect(result[0]!.activityLabel).toBe('Quiet');
@@ -467,7 +537,7 @@ describe('AdminCommunitiesService', () => {
         ],
       });
 
-      const result = await service.listCommunities();
+      const { items: result } = await service.listCommunities();
 
       // The 50-day-old post lands in the oldest bucket, the 1-day-old reply in
       // the newest; the six weeks between are explicit zeros, not gaps.
@@ -501,7 +571,7 @@ describe('AdminCommunitiesService', () => {
         'member.community_id': [{ communityId: 'community-1', count: '4' }],
       });
 
-      const result = await service.listCommunities();
+      const { items: result } = await service.listCommunities();
 
       // Present in the trend line, in the second-newest bucket.
       expect(result[0]!.activitySparkline).toEqual([0, 0, 0, 0, 0, 0, 1, 0]);
@@ -537,7 +607,7 @@ describe('AdminCommunitiesService', () => {
         'member.community_id': [{ communityId: 'community-1', count: '4' }],
       });
 
-      const result = await service.listCommunities();
+      const { items: result } = await service.listCommunities();
 
       // One of four members was active, not two of four: the same author
       // showing up in both the post and the reply window is one person.
@@ -552,11 +622,49 @@ describe('AdminCommunitiesService', () => {
     it('returns an empty array when the platform has no communities yet', async () => {
       communities.find.mockResolvedValue([]);
 
-      await expect(service.listCommunities()).resolves.toEqual([]);
+      await expect(service.listCommunities()).resolves.toEqual({
+        items: [],
+        truncated: false,
+      });
       expect(communityPosts.createQueryBuilder).not.toHaveBeenCalled();
       expect(communityPostReplies.createQueryBuilder).not.toHaveBeenCalled();
       expect(communityMembers.createQueryBuilder).not.toHaveBeenCalled();
       expect(reports.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('is not truncated under the caps', async () => {
+      communities.find.mockResolvedValue([makeCommunity()]);
+
+      const { truncated } = await service.listCommunities();
+
+      expect(truncated).toBe(false);
+    });
+
+    it('reports truncated when the community scan hits MAX_LISTED_COMMUNITIES', async () => {
+      const manyCommunities = Array.from({ length: 1000 }, (_, index) =>
+        makeCommunity({
+          id: `community-${index}`,
+          slug: `community-${index}`,
+          name: `Community ${index}`,
+        }),
+      );
+      communities.find.mockResolvedValue(manyCommunities);
+
+      const { truncated } = await service.listCommunities();
+
+      expect(truncated).toBe(true);
+    });
+
+    it('reports truncated when the report scan hits MAX_SCANNED_REPORTS', async () => {
+      communities.find.mockResolvedValue([makeCommunity()]);
+      const manyReports = Array.from({ length: 2000 }, (_, index) =>
+        makeReport({ id: `report-${index}`, subjectId: REPORTED_POST_ID }),
+      );
+      stubReportsQueryBuilder(reports.createQueryBuilder, manyReports);
+
+      const { truncated } = await service.listCommunities();
+
+      expect(truncated).toBe(true);
     });
   });
 
@@ -851,6 +959,300 @@ describe('AdminCommunitiesService', () => {
       expect(result.scopedQueue.map((queueItem) => queueItem.id)).toEqual([
         'report-real-post',
       ]);
+    });
+
+    it('flags truncated when the report scan hits MAX_SCANNED_REPORTS', async () => {
+      communities.findOne.mockResolvedValue(makeCommunity());
+      const manyReports = Array.from({ length: 2000 }, (_, index) =>
+        makeReport({ id: `report-${index}`, subjectId: REPORTED_POST_ID }),
+      );
+      stubReportsQueryBuilder(reports.createQueryBuilder, manyReports);
+
+      const result = await service.getCommunity('circle-of-care');
+
+      expect(result.truncated).toBe(true);
+    });
+
+    it('is not truncated under the cap', async () => {
+      communities.findOne.mockResolvedValue(makeCommunity());
+
+      const result = await service.getCommunity('circle-of-care');
+
+      expect(result.truncated).toBe(false);
+    });
+  });
+
+  describe('freeze', () => {
+    it('404s on an unknown slug', async () => {
+      communities.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.freeze('no-such-place', 'user-admin'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('freezes the community and logs the admin override', async () => {
+      communities.findOne.mockResolvedValue(makeCommunity({ frozenAt: null }));
+      communities.createQueryBuilder.mockReturnValue(
+        makeUpdateQueryBuilderStub(1),
+      );
+
+      await service.freeze('circle-of-care', 'user-admin');
+
+      expect(governanceLog.log).toHaveBeenCalledWith({
+        communityId: 'community-1',
+        actorUserId: 'user-admin',
+        action: GovernanceLogAction.Frozen,
+        metadata: { adminOverride: true },
+      });
+    });
+
+    it('is idempotent — no governance-log entry when already frozen', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ frozenAt: daysAgo(1) }),
+      );
+      // The conditional `WHERE frozen_at IS NULL` never matches an
+      // already-frozen row, so the real UPDATE would affect 0 rows.
+      communities.createQueryBuilder.mockReturnValue(
+        makeUpdateQueryBuilderStub(0),
+      );
+
+      await service.freeze('circle-of-care', 'user-admin');
+
+      expect(governanceLog.log).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('unfreeze', () => {
+    it('404s on an unknown slug', async () => {
+      communities.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.unfreeze('no-such-place', 'user-admin'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('unfreezes the community and logs the admin override', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ frozenAt: daysAgo(1) }),
+      );
+      communities.createQueryBuilder.mockReturnValue(
+        makeUpdateQueryBuilderStub(1),
+      );
+
+      await service.unfreeze('circle-of-care', 'user-admin');
+
+      expect(governanceLog.log).toHaveBeenCalledWith({
+        communityId: 'community-1',
+        actorUserId: 'user-admin',
+        action: GovernanceLogAction.Unfrozen,
+        metadata: { adminOverride: true },
+      });
+    });
+
+    it('is idempotent — no governance-log entry when not frozen', async () => {
+      communities.findOne.mockResolvedValue(makeCommunity({ frozenAt: null }));
+      communities.createQueryBuilder.mockReturnValue(
+        makeUpdateQueryBuilderStub(0),
+      );
+
+      await service.unfreeze('circle-of-care', 'user-admin');
+
+      expect(governanceLog.log).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('archive', () => {
+    it('404s on an unknown slug', async () => {
+      communities.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.archive('no-such-place', 'user-admin'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('archives the community — even one with no current owner — and logs the admin override', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ ownerId: null, archivedAt: null }),
+      );
+      communities.createQueryBuilder.mockReturnValue(
+        makeUpdateQueryBuilderStub(1),
+      );
+
+      await service.archive('circle-of-care', 'user-admin');
+
+      expect(governanceLog.log).toHaveBeenCalledWith({
+        communityId: 'community-1',
+        actorUserId: 'user-admin',
+        action: GovernanceLogAction.Archived,
+        metadata: { adminOverride: true },
+      });
+    });
+
+    it('is idempotent — no governance-log entry when already archived', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ archivedAt: daysAgo(1) }),
+      );
+      communities.createQueryBuilder.mockReturnValue(
+        makeUpdateQueryBuilderStub(0),
+      );
+
+      await service.archive('circle-of-care', 'user-admin');
+
+      expect(governanceLog.log).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('reassignOwner', () => {
+    it('404s on an unknown slug', async () => {
+      communities.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.reassignOwner('no-such-place', 'user-admin', 'new-owner'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('404s when the target is not on the roster', async () => {
+      communities.findOne.mockResolvedValue(makeCommunity());
+      profiles.createQueryBuilder.mockReturnValue(
+        makeProfileSlugQueryBuilderStub([]),
+      );
+
+      await expect(
+        service.reassignOwner('circle-of-care', 'user-admin', 'ghost'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('works even when the community currently has no owner', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ ownerId: null, needsOwnerReviewAt: daysAgo(1) }),
+      );
+      profiles.createQueryBuilder.mockReturnValue(
+        makeProfileSlugQueryBuilderStub([
+          makeProfile({ userId: 'user-newowner', slug: 'new-owner' }),
+        ]),
+      );
+      communityMembers.findOne.mockResolvedValue(
+        makeCommunityMember({
+          id: 'member-newowner',
+          userId: 'user-newowner',
+          role: RosterRole.Mod,
+        }),
+      );
+
+      await service.reassignOwner('circle-of-care', 'user-admin', 'new-owner');
+
+      expect(governanceLog.log).toHaveBeenCalledWith({
+        communityId: 'community-1',
+        actorUserId: 'user-admin',
+        action: GovernanceLogAction.OwnershipTransferred,
+        targetUserId: 'user-newowner',
+        metadata: { adminOverride: true, previousOwnerId: null },
+      });
+    });
+
+    it('rejects the house account as a target', async () => {
+      communities.findOne.mockResolvedValue(makeCommunity());
+      profiles.createQueryBuilder.mockReturnValue(
+        makeProfileSlugQueryBuilderStub([
+          makeProfile({ userId: 'user-house', slug: 'house-account' }),
+        ]),
+      );
+      communityMembers.findOne.mockResolvedValue(
+        makeCommunityMember({ userId: 'user-house', role: RosterRole.Member }),
+      );
+      users.findOne.mockResolvedValue({ id: 'user-house', isSystem: true });
+
+      await expect(
+        service.reassignOwner('circle-of-care', 'user-admin', 'house-account'),
+      ).rejects.toThrow(BadRequestException);
+      expect(governanceLog.log).not.toHaveBeenCalled();
+    });
+
+    it('is idempotent — no write or log when the target already owns it', async () => {
+      communities.findOne.mockResolvedValue(
+        makeCommunity({ ownerId: 'user-owner' }),
+      );
+      profiles.createQueryBuilder.mockReturnValue(
+        makeProfileSlugQueryBuilderStub([makeProfile()]),
+      );
+      communityMembers.findOne.mockResolvedValue(
+        makeCommunityMember({ userId: 'user-owner', role: RosterRole.Owner }),
+      );
+
+      await service.reassignOwner(
+        'circle-of-care',
+        'user-admin',
+        'ada-lovelace',
+      );
+
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(governanceLog.log).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('removeMember', () => {
+    it('404s on an unknown slug', async () => {
+      communities.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.removeMember('no-such-place', 'user-admin', 'some-member'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('404s when the target is not on the roster', async () => {
+      communities.findOne.mockResolvedValue(makeCommunity());
+      profiles.createQueryBuilder.mockReturnValue(
+        makeProfileSlugQueryBuilderStub([]),
+      );
+
+      await expect(
+        service.removeMember('circle-of-care', 'user-admin', 'ghost'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('rejects removing the owner directly', async () => {
+      communities.findOne.mockResolvedValue(makeCommunity());
+      profiles.createQueryBuilder.mockReturnValue(
+        makeProfileSlugQueryBuilderStub([makeProfile()]),
+      );
+      communityMembers.findOne.mockResolvedValue(
+        makeCommunityMember({ userId: 'user-owner', role: RosterRole.Owner }),
+      );
+
+      await expect(
+        service.removeMember('circle-of-care', 'user-admin', 'ada-lovelace'),
+      ).rejects.toThrow(BadRequestException);
+      expect(communityMembers.delete).not.toHaveBeenCalled();
+    });
+
+    it('removes a plain member and logs the admin override', async () => {
+      communities.findOne.mockResolvedValue(makeCommunity());
+      profiles.createQueryBuilder.mockReturnValue(
+        makeProfileSlugQueryBuilderStub([
+          makeProfile({ userId: 'user-plain', slug: 'plain-pat' }),
+        ]),
+      );
+      communityMembers.findOne.mockResolvedValue(
+        makeCommunityMember({
+          id: 'member-plain',
+          userId: 'user-plain',
+          role: RosterRole.Member,
+        }),
+      );
+
+      await service.removeMember('circle-of-care', 'user-admin', 'plain-pat');
+
+      expect(communityMembers.delete).toHaveBeenCalledWith({
+        id: 'member-plain',
+      });
+      expect(governanceLog.log).toHaveBeenCalledWith({
+        communityId: 'community-1',
+        actorUserId: 'user-admin',
+        action: GovernanceLogAction.MemberRemoved,
+        targetUserId: 'user-plain',
+        metadata: { adminOverride: true },
+      });
     });
   });
 });

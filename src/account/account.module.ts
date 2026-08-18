@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
+import { CommunitiesModule } from '../communities/communities.module';
 import { Connection } from '../connections/entities/connection.entity';
 import { ConsentRecord } from '../consent/entities/consent-record.entity';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
@@ -41,6 +42,13 @@ import { EmailPreference } from './entities/email-preference.entity';
     // The account-erasure sweep uses StorageService to delete an erased member's
     // uploaded objects from bucket storage (see AccountDeletionProcessorService).
     StorageModule,
+    // `CommunityOwnerOrphanService.handleOwnerErasure` — called from
+    // `AccountDeletionProcessorService.eraseAccount` right before the `User`
+    // row is hard-deleted, so an erased owner's communities get a new owner
+    // (or get flagged for review) while `communities.owner_id` still points
+    // at them. Plain import, no `forwardRef`: `CommunitiesModule` does not
+    // import `AccountModule`, directly or transitively.
+    CommunitiesModule,
     TypeOrmModule.forFeature([
       DeletionRequest,
       DsarRequest,

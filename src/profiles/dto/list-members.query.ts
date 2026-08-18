@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, IsString, Min } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 
 /**
  * Directory sort orders. The directory is paginated, so the ordering MUST be
@@ -37,4 +37,35 @@ export class ListMembersQuery {
   @IsOptional() @IsEnum(MemberSort) sort?: MemberSort;
 
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) page?: number;
+
+  // comma-separated "open to" PRESET ids, e.g. ?openTo=mentoring,swaps. Custom
+  // (freeform) entries are never filterable — see open-to.ts. Filters
+  // `profiles.open_to`, a jsonb array, via a preset-membership EXISTS check
+  // (see ProfilesService.searchMembers) rather than the `&&` overlap the
+  // plain-array facets below use.
+  @IsOptional() @IsString() openTo?: string;
+
+  // comma-separated neighbourhood names, e.g. ?hoods=Anjos,Mouraria. Matched
+  // against the free-text `profiles.location` via substring test — see
+  // src/profiles/neighbourhoods.ts. Unknown names are dropped before the
+  // query runs.
+  @IsOptional() @IsString() hoods?: string;
+
+  // comma-separated discipline ids, e.g. ?disciplines=design,tech. Filters
+  // `profiles.discipline`. See src/profiles/professions.ts.
+  @IsOptional() @IsString() disciplines?: string;
+
+  // comma-separated profession ids, e.g. ?professions=graphicDesigner. Filters
+  // `profiles.profession`. See src/profiles/professions.ts.
+  @IsOptional() @IsString() professions?: string;
+
+  // comma-separated language codes, e.g. ?languages=PT,EN. Filters
+  // `profiles.languages`. See src/profiles/languages.ts.
+  @IsOptional() @IsString() languages?: string;
+
+  // Years-on-QueerPulse range, both inclusive. Either bound may be sent
+  // alone. Computed from `profiles.joined_at` at query time — there is no
+  // stored "tenure" column.
+  @IsOptional() @Type(() => Number) @IsInt() @Min(0) yearsFrom?: number;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(200) yearsTo?: number;
 }

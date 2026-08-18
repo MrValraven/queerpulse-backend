@@ -19,6 +19,9 @@ const ZERO: RecognitionSignals = {
   verified: false,
   gettingStartedStepsDone: 0,
   gettingStartedComplete: false,
+  listingsSaved: 0,
+  articlesSaved: 0,
+  workProfileComplete: false,
 };
 
 describe('recognition scoring', () => {
@@ -46,6 +49,37 @@ describe('recognition scoring', () => {
     expect(
       qualifyingBadgeKeys({ ...ZERO, gettingStartedComplete: true }),
     ).toContain('first-steps');
+  });
+
+  it('grants two-homes only once a member has joined 2+ communities', () => {
+    expect(
+      qualifyingBadgeKeys({ ...ZERO, communitiesJoined: 1 }),
+    ).not.toContain('two-homes');
+    expect(
+      qualifyingBadgeKeys({ ...ZERO, communitiesJoined: 2 }),
+    ).toContain('two-homes');
+  });
+
+  it('grants local-scout at 3+ saved listings, well-read at 5+ saved articles', () => {
+    expect(qualifyingBadgeKeys({ ...ZERO, listingsSaved: 2 })).not.toContain(
+      'local-scout',
+    );
+    expect(qualifyingBadgeKeys({ ...ZERO, listingsSaved: 3 })).toContain(
+      'local-scout',
+    );
+    expect(qualifyingBadgeKeys({ ...ZERO, articlesSaved: 4 })).not.toContain(
+      'well-read',
+    );
+    expect(qualifyingBadgeKeys({ ...ZERO, articlesSaved: 5 })).toContain(
+      'well-read',
+    );
+  });
+
+  it('grants work-ready only once the work profile has skills and focus areas', () => {
+    expect(qualifyingBadgeKeys(ZERO)).not.toContain('work-ready');
+    expect(
+      qualifyingBadgeKeys({ ...ZERO, workProfileComplete: true }),
+    ).toContain('work-ready');
   });
 
   it('never auto-grants founding-member (no signal)', () => {

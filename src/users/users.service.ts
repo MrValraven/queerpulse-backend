@@ -18,6 +18,13 @@ const MAX_SLUG_ATTEMPTS = 5;
  * onboarding, used when the client does not send an explicit version. Bump this
  * whenever the guidelines change materially so the stamped `guidelinesVersion`
  * reflects what was actually agreed to. Kept ≤ 32 chars (the column length).
+ *
+ * Also read by `PlatformStatusController` (`GET /platform-status`), which is
+ * the single source of truth the frontend reads instead of keeping its own
+ * hardcoded copy (`GUIDELINES_VERSION` previously lived in
+ * `queerpulse/src/features/auth/api/auth.api.ts` and only stayed in sync by a
+ * comment reminding whoever edited one to bump the other). Bumping this
+ * constant is now the only edit needed; the frontend follows automatically.
  */
 export const CURRENT_GUIDELINES_VERSION = '1.0';
 

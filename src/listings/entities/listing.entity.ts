@@ -262,6 +262,18 @@ export class Listing {
   @Column({ type: 'boolean', default: false })
   consentGuide!: boolean;
 
+  // --- Queer-owned verification (moderator-checked badge) ---
+  // `linkToProfile` is the member's own self-reported claim of ownership; this
+  // is the moderator's independent confirmation of it, mirroring
+  // `safeSpaceStatus`'s "member submission vs. moderator-verified badge"
+  // split. `false` by default and set only via the moderator toggle
+  // (`PATCH /listings/:ref/queer-owned-verified`) — never touched by the
+  // member-submission wizard, same convention as `isPartneredWithQueerpulse`.
+
+  @Index('IDX_listings_queer_owned_verified')
+  @Column({ type: 'boolean', default: false })
+  queerOwnedVerified!: boolean;
+
   // --- Partner-space fields (host directory) ---
   // A listing flagged as a QueerPulse partner venue surfaces on the public
   // host page's "Partner spaces" card (`GET /directory/spaces`). These are an

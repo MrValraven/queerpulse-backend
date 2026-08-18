@@ -15,6 +15,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle, seconds } from '@nestjs/throttler';
 import {
   CurrentUser,
   CurrentUserData,
@@ -62,7 +63,10 @@ export class CommunitiesController {
   ) {}
 
   @Get()
-  @ApiOperation({ summary: 'List communities (discover or mine), paginated.' })
+  @ApiOperation({
+    summary:
+      'List communities (discover or mine), paginated and sortable (newest/name).',
+  })
   @ApiOkResponse({ description: 'A paginated page of community cards.' })
   list(
     @CurrentUser() user: CurrentUserData,
@@ -122,11 +126,24 @@ export class CommunitiesController {
     return this.communitiesService.archive(slug, user.userId);
   }
 
+  @Post(':slug/freeze')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Manually freeze a community ahead of moderation review (owner/mod, idempotent).',
+  })
+  @ApiOkResponse({ description: 'The community detail, now frozen.' })
+  @ApiForbiddenResponse({ description: 'Only an owner or mod may freeze.' })
+  @ApiNotFoundResponse({ description: 'No community exists for this slug.' })
+  freeze(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
+    return this.communitiesService.freeze(slug, user.userId);
+  }
+
   @Post(':slug/unfreeze')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Lift an auto-freeze once reports are handled (owner/mod, idempotent).',
+      'Lift a freeze (automatic or manual) once reports are handled (owner/mod, idempotent).',
   })
   @ApiOkResponse({ description: 'The community detail, no longer frozen.' })
   @ApiForbiddenResponse({ description: 'Only an owner or mod may unfreeze.' })
@@ -174,6 +191,7 @@ export class CommunitiesController {
   }
 
   @Post(':slug/posts')
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @ApiOperation({ summary: 'Create a post in a community (members only).' })
   @ApiCreatedResponse({ description: 'The created community post.' })
   @ApiBadRequestResponse({ description: 'The post payload is invalid.' })
@@ -209,6 +227,7 @@ export class CommunitiesController {
   }
 
   @Post(':slug/posts/:id/reactions')
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @ApiOperation({ summary: 'Add a reaction to a post (idempotent).' })
   @ApiCreatedResponse({ description: 'The post with updated reactions.' })
   @ApiBadRequestResponse({
@@ -253,6 +272,7 @@ export class CommunitiesController {
   }
 
   @Post(':slug/posts/:id/replies')
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @ApiOperation({ summary: 'Reply to a community post.' })
   @ApiCreatedResponse({ description: 'The created reply.' })
   @ApiBadRequestResponse({
@@ -335,6 +355,20 @@ export class CommunitiesController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.communityPostsService.listPostHistory(slug, id, user.userId);
+  }
+
+  @Get(':slug/reports')
+  @ApiOperation({
+    summary: 'List open reports scoped to this community (owner/mod only).',
+  })
+  @ApiOkResponse({ description: 'Open reports whose subject is a post or reply in this community.' })
+  @ApiForbiddenResponse({ description: 'Owner/moderator role required.' })
+  @ApiNotFoundResponse({ description: 'No such community.' })
+  listReports(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.communityPostsService.listCommunityReports(slug, user.userId);
   }
 
   @Patch(':slug/posts/:id/replies/:replyId')

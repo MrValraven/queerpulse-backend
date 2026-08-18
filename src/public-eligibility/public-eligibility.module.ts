@@ -11,6 +11,7 @@ import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
+import { Vouch } from '../vouch/entities/vouch.entity';
 import { ConnectionsModule } from '../connections/connections.module';
 import { SubprofilesModule } from '../subprofiles/subprofiles.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
@@ -39,6 +40,7 @@ import { PublicEligibilityService } from './public-eligibility.service';
       ForumPost,
       CommunityPost,
       CommunityPostReply,
+      Vouch,
     ]),
     // Exports `ConnectionsService` (connection counts).
     ConnectionsModule,

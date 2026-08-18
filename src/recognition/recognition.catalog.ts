@@ -32,6 +32,24 @@ export interface BadgeCatalogEntry {
 
 export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
   {
+    key: 'local-scout',
+    cat: 'Exploration',
+    name: 'Local Scout',
+    rarity: 'common',
+    tint: 'jade',
+    lockedContext: 'Save 3 places in the Local directory',
+    earnedContext: 'Saved 3 places in the Local directory',
+  },
+  {
+    key: 'well-read',
+    cat: 'Culture',
+    name: 'Well-Read',
+    rarity: 'common',
+    tint: 'jade',
+    lockedContext: 'Save 5 articles or resources',
+    earnedContext: 'Saved 5 articles or resources',
+  },
+  {
     key: 'first-gathering',
     cat: 'Attendance',
     name: 'First Gathering',
@@ -113,6 +131,15 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     earnedContext: 'Submitted a member story',
   },
   {
+    key: 'two-homes',
+    cat: 'Community',
+    name: 'Two Homes',
+    rarity: 'common',
+    tint: 'accent',
+    lockedContext: 'Join a second community',
+    earnedContext: 'Joined a second community',
+  },
+  {
     key: 'founding-member',
     cat: 'Platform',
     name: 'Founding Member',
@@ -129,6 +156,15 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     tint: 'accent',
     lockedContext: 'Be a supporting member for 6 months',
     earnedContext: 'Supporting member · 6 months',
+  },
+  {
+    key: 'work-ready',
+    cat: 'Platform',
+    name: 'Work Ready',
+    rarity: 'rare',
+    tint: 'plum',
+    lockedContext: 'Fill out your Work Profile (skills and focus areas)',
+    earnedContext: 'Completed the Work Profile',
   },
   {
     key: 'event-host',

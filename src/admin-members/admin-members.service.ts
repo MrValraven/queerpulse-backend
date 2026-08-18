@@ -786,6 +786,41 @@ export class AdminMembersService {
   }
 
   /**
+   * Set or clear one member's monthly invite quota override
+   * (`User.inviteMonthlyQuota`). `quota === null` clears it, falling back to
+   * the platform-wide `INVITE_MONTHLY_QUOTA` default the next time
+   * `InvitesService.resolveMonthlyLimit` reads it. Unlike `updateRole` /
+   * `grantStaffRole`, this is a resource-limits lever rather than a
+   * moderation action, so there is deliberately no self-change or
+   * house-account guardrail — the class-level Admin-only guard is the only
+   * gate. No audit-log entry either, mirroring how the column itself has
+   * always been a silent, direct-DB-edit affordance up to now — this
+   * endpoint just gives that same lever a UI.
+   */
+  async updateInviteQuota(
+    idOrSlug: string,
+    quota: number | null,
+  ): Promise<{
+    userId: string;
+    slug: string;
+    inviteMonthlyQuota: number | null;
+  }> {
+    const profile = await this.resolveMemberProfile(idOrSlug);
+    const targetUserId = profile.userId;
+
+    await this.users.update(
+      { id: targetUserId },
+      { inviteMonthlyQuota: quota },
+    );
+
+    return {
+      userId: targetUserId,
+      slug: profile.slug,
+      inviteMonthlyQuota: quota,
+    };
+  }
+
+  /**
    * `listFlagged` doesn't know its member set up front — it has to discover
    * it from the reports themselves. Every `Report.subjectId` for a `Member`
    * subject is always tried as a slug; a UUID-shaped one is also tried as a

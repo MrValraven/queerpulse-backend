@@ -1092,7 +1092,13 @@ export class SubprofilesService {
       }
     }
     for (const community of communityRows) {
-      if (community.accessTier !== AccessTier.Private) {
+      // Null while the community is temporarily ownerless (owner account
+      // erased, pending mod-promotion/reassignment) — there's no owner user
+      // left to block-check against, so it's simply skipped here.
+      if (
+        community.accessTier !== AccessTier.Private &&
+        community.ownerId !== null
+      ) {
         ownerIdsToBlockCheck.push(community.ownerId);
       }
     }
@@ -1122,7 +1128,8 @@ export class SubprofilesService {
         if (
           !community ||
           community.accessTier === AccessTier.Private ||
-          blockedOwnerIds.has(community.ownerId)
+          (community.ownerId !== null &&
+            blockedOwnerIds.has(community.ownerId))
         ) {
           throw new BadRequestException(
             `Affiliation target not found or not visible: ${label}`,

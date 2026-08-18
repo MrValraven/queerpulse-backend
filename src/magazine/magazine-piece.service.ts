@@ -7,7 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, In, IsNull, Repository } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -128,6 +128,14 @@ const EDITOR_CAP = 7;
 
 /** How many recent audit events `deskSummary()` surfaces in the activity feed. */
 const RECENT_ACTIVITY_LIMIT = 20;
+
+/**
+ * Autosave fires an `article_edited` event on every draft PATCH (roughly
+ * every 1.2s debounce tick while someone types). Merging repeats from the
+ * same actor into one row keeps the audit trail and activity feed from
+ * being flooded by a single editing session.
+ */
+const ARTICLE_EDIT_MERGE_WINDOW_MS = 5 * 60 * 1000;
 
 /**
  * How many rows `searchArchive` returns, across articles and decks combined
@@ -322,7 +330,9 @@ export class MagazinePieceService {
     });
 
     await this.articles.save(article);
-    await this.recordEvent(pieceId, actorId, 'article_edited');
+    await this.recordEvent(pieceId, actorId, 'article_edited', undefined, {
+      mergeWithinMs: ARTICLE_EDIT_MERGE_WINDOW_MS,
+    });
 
     return toArticleDraftResponse(article);
   }
@@ -1700,7 +1710,24 @@ export class MagazinePieceService {
     actorId: string | null,
     action: string,
     detail?: string | null,
+    options?: { mergeWithinMs?: number },
   ): Promise<void> {
+    if (options?.mergeWithinMs) {
+      const recent = await this.pieceEvents.findOne({
+        where: { pieceId, actorId: actorId ?? IsNull(), action },
+        order: { createdAt: 'DESC' },
+      });
+      if (
+        recent &&
+        Date.now() - recent.createdAt.getTime() <= options.mergeWithinMs
+      ) {
+        recent.detail = detail ?? null;
+        recent.createdAt = new Date();
+        await this.pieceEvents.save(recent);
+        return;
+      }
+    }
+
     const event = this.pieceEvents.create({
       pieceId,
       actorId,

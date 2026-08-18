@@ -1,8 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Brackets, Repository } from 'typeorm';
+import { Brackets, In, Repository } from 'typeorm';
 import { SUPPORT_OPEN_REPORT_THRESHOLD } from '../admin-communities/admin-communities-response';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import {
   Report,
   ReportSeverity,
@@ -10,6 +12,12 @@ import {
   ReportSubjectType,
 } from '../reports/entities/report.entity';
 import { REPORT_CREATED, ReportCreatedEvent } from '../reports/report.events';
+import { CommunityGovernanceLogService } from './community-governance-log.service';
+import { GovernanceLogAction } from './entities/community-governance-log.entity';
+import {
+  CommunityMember,
+  RosterRole,
+} from './entities/community-member.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { CommunityPost } from './entities/community-post.entity';
 import { Community } from './entities/community.entity';
@@ -45,6 +53,10 @@ export class CommunityAutoFreezeService {
     private readonly replies: Repository<CommunityPostReply>,
     @InjectRepository(Report)
     private readonly reports: Repository<Report>,
+    @InjectRepository(CommunityMember)
+    private readonly members: Repository<CommunityMember>,
+    private readonly governanceLog: CommunityGovernanceLogService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   @OnEvent(REPORT_CREATED)
@@ -88,6 +100,60 @@ export class CommunityAutoFreezeService {
         `auto-froze community ${community.slug} (report ${event.reportId}, trigger: ${
           isEmergency ? 'emergency' : 'pile-up'
         })`,
+      );
+      await this.logAndNotifyFreeze(community, isEmergency);
+    }
+  }
+
+  /**
+   * Governance-log + staff notification for an auto-freeze that has already
+   * committed (the conditional UPDATE above). Own try/catch per step — this
+   * runs after the freeze itself succeeded, so a failure here must never make
+   * `maybeFreeze`'s caller (`onReportCreated`) think the freeze didn't
+   * happen, and must never roll it back (there's nothing left to roll back:
+   * no surrounding transaction ties these together).
+   */
+  private async logAndNotifyFreeze(
+    community: Community,
+    isEmergency: boolean,
+  ): Promise<void> {
+    const reason = isEmergency ? 'emergency_report' : 'report_pileup';
+    try {
+      await this.governanceLog.log({
+        communityId: community.id,
+        actorUserId: null,
+        action: GovernanceLogAction.Frozen,
+        metadata: { reason },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to write governance log for auto-freeze of community ${community.id}: ${String(error)}`,
+      );
+    }
+    try {
+      const staff = await this.members.find({
+        where: {
+          communityId: community.id,
+          role: In([RosterRole.Owner, RosterRole.Mod]),
+        },
+        select: { userId: true },
+      });
+      const recipientIds = [
+        ...new Set(
+          [community.ownerId, ...staff.map((row) => row.userId)].filter(
+            (id): id is string => id !== null,
+          ),
+        ),
+      ];
+      if (!recipientIds.length) return;
+      await this.notifications.createForRecipients(
+        recipientIds,
+        NotificationType.CommunityFrozen,
+        { source: 'community', communitySlug: community.slug, reason },
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify staff of auto-freeze for community ${community.id}: ${String(error)}`,
       );
     }
   }

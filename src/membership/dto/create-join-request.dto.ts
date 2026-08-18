@@ -36,6 +36,17 @@ export class CreateJoinRequestDto {
   message!: string;
 
   /**
+   * The email of a member already here who can vouch for the applicant. A
+   * structured, matchable alternative to naming them inside `message` — a
+   * reviewer can look this up directly instead of reading the whole message.
+   * Optional: most applicants have nobody to name.
+   */
+  @IsOptional()
+  @IsEmail()
+  @MaxLength(254)
+  mutualMemberEmail?: string;
+
+  /**
    * 18+ self-attestation (Terms §eligibility). Must be literally `true` — an
    * unattested request is refused rather than stored, mirroring
    * `AuthService.validateOrCreateGoogleUser`'s `age_attestation_required`.

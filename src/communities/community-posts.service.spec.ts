@@ -25,6 +25,7 @@ import {
   Community,
   CommunityType,
 } from './entities/community.entity';
+import { Report } from '../reports/entities/report.entity';
 
 // A chainable query-builder stub whose terminal methods resolve to empty
 // results by default (mirrors `communities.service.spec.ts`'s `qbStub`).
@@ -41,6 +42,17 @@ const qbStub = () => {
     qb[m] = jest.fn().mockReturnValue(qb);
   }
   qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
+  return qb;
+};
+
+// Chainable stub for `listCommunityReports`'s `reports.createQueryBuilder()`
+// (`select`-less; terminal `getMany`, default empty).
+const reportsQbStub = () => {
+  const qb: Record<string, jest.Mock> = {};
+  for (const m of ['select', 'where', 'andWhere', 'orderBy', 'take']) {
+    qb[m] = jest.fn().mockReturnValue(qb);
+  }
+  qb.getMany = jest.fn().mockResolvedValue([]);
   return qb;
 };
 
@@ -121,6 +133,7 @@ const COMMUNITY: Community = {
   updatedAt: new Date('2026-01-01T00:00:00.000Z'),
   archivedAt: null,
   frozenAt: null,
+  needsOwnerReviewAt: null,
 };
 
 const POST: CommunityPost = {
@@ -188,6 +201,10 @@ describe('CommunityPostsService', () => {
     excludeHidden: jest.Mock;
   };
   let storage: { deleteObjectByReference: jest.Mock };
+  // `listCommunityReports`'s open-report query (`createQueryBuilder`, default
+  // empty) — the `posts`/`replies` repos it also reads from are the same
+  // mocks every other test in this file already sets up.
+  let reports: { createQueryBuilder: jest.Mock };
 
   beforeEach(async () => {
     communities = { findOne: jest.fn().mockResolvedValue(COMMUNITY) };
@@ -277,6 +294,7 @@ describe('CommunityPostsService', () => {
     storage = {
       deleteObjectByReference: jest.fn().mockResolvedValue(undefined),
     };
+    reports = { createQueryBuilder: jest.fn(() => reportsQbStub()) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -296,6 +314,7 @@ describe('CommunityPostsService', () => {
           provide: getRepositoryToken(CommunityPostReplyEdit),
           useValue: replyEdits,
         },
+        { provide: getRepositoryToken(Report), useValue: reports },
         { provide: MentionNotificationService, useValue: mentions },
         { provide: ContentModerationService, useValue: contentModeration },
         { provide: StorageService, useValue: storage },
@@ -867,6 +886,90 @@ describe('CommunityPostsService', () => {
       );
       expect(res.revisions.map((r) => r.id)).toEqual(['redit-2', 'redit-1']);
       expect(res.revisions[0]!.author).toBeNull();
+    });
+  });
+
+  // `assertNotFrozen` gates new posts/replies/reactions while a community is
+  // auto-frozen pending report review (`Community.frozenAt`) — owner/mod are
+  // exempt so they can still post a note and moderate (verified against the
+  // actual gate below, not assumed); reads and edits/deletes of existing
+  // content are unaffected by freezing and so aren't covered here.
+  describe('frozen community — assertNotFrozen gate', () => {
+    const FROZEN_COMMUNITY: Community = {
+      ...COMMUNITY,
+      frozenAt: new Date('2026-01-05T00:00:00.000Z'),
+    };
+
+    it('rejects a new post from a plain member while frozen', async () => {
+      communities.findOne.mockResolvedValue(FROZEN_COMMUNITY);
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      await expect(
+        service.createPost('queer-devs', 'u1', { body: 'hi' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(posts.save).not.toHaveBeenCalled();
+    });
+
+    it('allows the owner to post while frozen', async () => {
+      communities.findOne.mockResolvedValue(FROZEN_COMMUNITY);
+      members.findOne.mockResolvedValue({ role: RosterRole.Owner });
+      const res = await service.createPost('queer-devs', 'owner-1', {
+        body: 'a note from the owner',
+      });
+      expect(res.body).toBe('a note from the owner');
+    });
+
+    it('allows a mod to post while frozen', async () => {
+      communities.findOne.mockResolvedValue(FROZEN_COMMUNITY);
+      members.findOne.mockResolvedValue({ role: RosterRole.Mod });
+      const res = await service.createPost('queer-devs', 'mod-1', {
+        body: 'a note from a mod',
+      });
+      expect(res.body).toBe('a note from a mod');
+    });
+
+    it('rejects a new reply from a plain member while frozen', async () => {
+      communities.findOne.mockResolvedValue(FROZEN_COMMUNITY);
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      await expect(
+        service.addReply('queer-devs', 'p1', 'u1', 'hi'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(replies.save).not.toHaveBeenCalled();
+    });
+
+    it('allows an owner/mod to reply while frozen', async () => {
+      communities.findOne.mockResolvedValue(FROZEN_COMMUNITY);
+      members.findOne.mockResolvedValue({ role: RosterRole.Mod });
+      const res = await service.addReply(
+        'queer-devs',
+        'p1',
+        'mod-1',
+        'moderator note',
+      );
+      expect(res.text).toBe('moderator note');
+    });
+
+    it('rejects a new reaction from a plain member while frozen', async () => {
+      communities.findOne.mockResolvedValue(FROZEN_COMMUNITY);
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      await expect(
+        service.addReaction('queer-devs', 'p1', 'u1', ReactionKey.Heart),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('allows the owner to react while frozen', async () => {
+      communities.findOne.mockResolvedValue(FROZEN_COMMUNITY);
+      members.findOne.mockResolvedValue({ role: RosterRole.Owner });
+      const qb = insertQbStub();
+      reactions.createQueryBuilder.mockReturnValue(qb);
+
+      await service.addReaction(
+        'queer-devs',
+        'p1',
+        'owner-1',
+        ReactionKey.Heart,
+      );
+
+      expect(qb.execute).toHaveBeenCalled();
     });
   });
 

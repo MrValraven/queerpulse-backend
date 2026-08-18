@@ -41,7 +41,14 @@ import {
 } from './featured-communities';
 import { ProfileFeaturedCommunity } from './entities/profile-featured-community.entity';
 import { labelsForFacets, pruneDiscoverable } from './identities';
-import { normalizeOpenTo } from './open-to';
+import { normalizeOpenTo, OPEN_TO_PRESET_IDS } from './open-to';
+import { knownLanguages } from './languages';
+import { knownNeighbourhoods } from './neighbourhoods';
+import {
+  knownDisciplines,
+  knownProfessions,
+  reconcileDisciplineProfession,
+} from './professions';
 import { Activity } from './entities/activity.entity';
 import { BoardPost } from './entities/board-post.entity';
 import { Group } from './entities/group.entity';
@@ -440,6 +447,17 @@ export class ProfilesService {
       // rather than as an empty string.
       profile.now = now.trim() || null;
     }
+    // Keep `profession ⊆ discipline` coherent: a profession implies its
+    // parent discipline, auto-added rather than rejected — see
+    // reconcileDisciplineProfession. Unconditional for the same reason the
+    // identity prune below is: idempotent when nothing changed, and a
+    // conditional here is one refactor away from silently going stale.
+    const reconciled = reconcileDisciplineProfession(
+      profile.discipline ?? [],
+      profile.profession ?? [],
+    );
+    profile.discipline = reconciled.disciplines;
+    profile.profession = reconciled.professions;
     // RETRACTION. `rest` may have just replaced `identities`, and anything the
     // member dropped from it must stop being published in the SAME write —
     // otherwise un-declaring "Disabled or chronically ill" leaves them still
@@ -856,6 +874,88 @@ export class ProfilesService {
           identityLabels,
         });
       }
+    }
+
+    // "Open to" filter. `profiles.open_to` is jsonb (preset/custom union, see
+    // open-to.ts), not a plain array, so the `&&` overlap the array facets
+    // below use doesn't apply — an EXISTS over its unpacked elements does.
+    // Customs never participate: they're the member's own words, not a
+    // searchable vocabulary. Same "unknown id -> match nothing" rule as
+    // identities above.
+    const openToIds = csv(q.openTo).filter((id) =>
+      (OPEN_TO_PRESET_IDS as readonly string[]).includes(id),
+    );
+    if (csv(q.openTo).length) {
+      if (!openToIds.length) {
+        qb.andWhere('1 = 0');
+      } else {
+        qb.andWhere(
+          `EXISTS (
+             SELECT 1 FROM jsonb_array_elements(p.open_to) elem
+             WHERE elem->>'kind' = 'preset' AND elem->>'id' = ANY(:openToIds)
+           )`,
+          { openToIds },
+        );
+      }
+    }
+
+    // "Where they're based" filter. `profiles.location` is free text, so a
+    // neighbourhood "match" is the same substring test `matchNeighbourhood`
+    // uses for the card's `hood` field — filtering and display can't drift
+    // apart because they share one function.
+    const hoods = knownNeighbourhoods(csv(q.hoods));
+    if (csv(q.hoods).length) {
+      if (!hoods.length) {
+        qb.andWhere('1 = 0');
+      } else {
+        qb.andWhere(
+          '(' + hoods.map((_, i) => `p.location ILIKE :hood${i}`).join(' OR ') + ')',
+          Object.fromEntries(hoods.map((h, i) => [`hood${i}`, `%${h}%`])),
+        );
+      }
+    }
+
+    // "What they do" / "Profession" filters. Plain array-overlap, same shape
+    // as `tags` above. See src/profiles/professions.ts.
+    const disciplines = knownDisciplines(csv(q.disciplines));
+    if (csv(q.disciplines).length) {
+      if (!disciplines.length) {
+        qb.andWhere('1 = 0');
+      } else {
+        qb.andWhere('p.discipline && :disciplines', { disciplines });
+      }
+    }
+    const professions = knownProfessions(csv(q.professions));
+    if (csv(q.professions).length) {
+      if (!professions.length) {
+        qb.andWhere('1 = 0');
+      } else {
+        qb.andWhere('p.profession && :professions', { professions });
+      }
+    }
+
+    // Languages filter. Plain array-overlap, same shape as `tags`.
+    const languages = knownLanguages(csv(q.languages));
+    if (csv(q.languages).length) {
+      if (!languages.length) {
+        qb.andWhere('1 = 0');
+      } else {
+        qb.andWhere('p.languages && :languages', { languages });
+      }
+    }
+
+    // Member age (tenure) filter — years since joined, computed from
+    // `profiles.joined_at`. Either bound may be sent alone.
+    if (q.yearsFrom !== undefined) {
+      qb.andWhere(
+        `date_part('year', age(now(), p.joined_at)) >= :yearsFrom`,
+        { yearsFrom: q.yearsFrom },
+      );
+    }
+    if (q.yearsTo !== undefined) {
+      qb.andWhere(`date_part('year', age(now(), p.joined_at)) <= :yearsTo`, {
+        yearsTo: q.yearsTo,
+      });
     }
 
     // Ordering. Applied here rather than on the client because the directory is

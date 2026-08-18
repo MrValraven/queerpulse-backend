@@ -14,6 +14,9 @@ export interface RecognitionSignals {
   verified: boolean;
   gettingStartedStepsDone: number; // 0..6
   gettingStartedComplete: boolean;
+  listingsSaved: number;
+  articlesSaved: number;
+  workProfileComplete: boolean;
 }
 
 interface SignalRule {
@@ -83,11 +86,15 @@ export const BADGE_CONDITIONS: Record<
   vouch: (signals) => signals.vouchCount >= 1,
   'thread-starter': (signals) => signals.communityPosts >= 1,
   contributor: (signals) => signals.communityPosts >= 10,
+  'two-homes': (signals) => signals.communitiesJoined >= 2,
   decade: (signals) => signals.tenureDays >= 365,
   sustainer: (signals) => signals.tenureDays >= 180,
   'event-host': (signals) => signals.workshopsTaught >= 1,
   'serial-host': (signals) => signals.workshopsTaught >= 5,
   'first-steps': (signals) => signals.gettingStartedComplete,
+  'local-scout': (signals) => signals.listingsSaved >= 3,
+  'well-read': (signals) => signals.articlesSaved >= 5,
+  'work-ready': (signals) => signals.workProfileComplete,
 };
 
 export function qualifyingBadgeKeys(signals: RecognitionSignals): string[] {

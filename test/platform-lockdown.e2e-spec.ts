@@ -7,7 +7,7 @@ import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { GoogleAuthGuard } from '../src/auth/guards/google-auth.guard';
 import { encodeOAuthState } from '../src/auth/oauth-state';
-import { JoinRequest } from '../src/membership/entities/join-request.entity';
+import { PlatformJoinRequest } from '../src/membership/entities/join-request.entity';
 import { PlatformSettingChange } from '../src/platform-settings/entities/platform-setting-change.entity';
 import { PlatformSettingsService } from '../src/platform-settings/platform-settings.service';
 import { User, UserRole, UserStatus } from '../src/users/entities/user.entity';
@@ -73,7 +73,7 @@ describe('Platform kill switches (e2e)', () => {
     // mysterious, and do not "fix" it by adding a reset method to the service.
     const settingsService = app.get(PlatformSettingsService);
     Object.assign(settingsService as object, { cached: null, cachedAt: 0 });
-    await ds.getRepository(JoinRequest).delete({});
+    await ds.getRepository(PlatformJoinRequest).delete({});
     await ds.getRepository(PlatformSettingChange).delete({});
     await ds.getRepository(User).delete({});
   });

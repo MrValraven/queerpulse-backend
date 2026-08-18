@@ -24,8 +24,10 @@ import { UserRole } from '../users/entities/user.entity';
 import { AnswerListingQuestionDto } from './dto/answer-listing-question.dto';
 import { AskListingQuestionDto } from './dto/ask-listing-question.dto';
 import { BulkRemoveDto, BulkStatusDto } from './dto/bulk-listing.dto';
+import { CreateListingClaimDto } from './dto/create-listing-claim.dto';
 import { CreateListingDto } from './dto/create-listing.dto';
 import { DisputeListingDto } from './dto/dispute-listing.dto';
+import { ReviewListingClaimDto } from './dto/review-listing-claim.dto';
 import { SimilarListingsQuery } from './dto/similar-listings.query';
 import { ListEditSuggestionsQuery } from './dto/list-edit-suggestions.query';
 import { ListListingQueueQuery } from './dto/list-listing-queue.query';
@@ -35,7 +37,9 @@ import { ReplyToReviewDto } from './dto/reply-to-review.dto';
 import { ResolveEditSuggestionDto } from './dto/resolve-edit-suggestion.dto';
 import { UpdateListingStatusDto } from './dto/update-listing-status.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
+import { UpdateQueerOwnedVerifiedDto } from './dto/update-queer-owned-verified.dto';
 import { UpdateSafeSpaceDto } from './dto/update-safe-space.dto';
+import { ListingClaimsService } from './listing-claims.service';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
 import { ListingsService } from './listings.service';
 import {
@@ -71,6 +75,7 @@ export class ListingsController {
   constructor(
     private readonly listingsService: ListingsService,
     private readonly editSuggestionsService: ListingEditSuggestionsService,
+    private readonly listingClaimsService: ListingClaimsService,
   ) {}
 
   @Post()
@@ -187,6 +192,45 @@ export class ListingsController {
     @Body() dto: ResolveEditSuggestionDto,
   ) {
     return this.editSuggestionsService.resolve(id, user.userId, dto);
+  }
+
+  // Moderator-only: the "claim this existing listing" review queue. Declared
+  // before `:ref`, same rationale as `admin/edit-suggestions` above — a
+  // sibling sub-resource of `Listing`, kept on this controller (not a
+  // separate top-level `Admin*Controller`) for the same reason
+  // `ListingEditSuggestion`'s admin routes are.
+  @Get('admin/claims')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.Moderator, UserRole.Admin)
+  @ApiOperation({
+    summary: 'List the pending listing-claim review queue (moderator only)',
+  })
+  @ApiOkResponse({ description: 'The pending claims, oldest first.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
+  listPendingClaims() {
+    return this.listingClaimsService.listPending();
+  }
+
+  // Moderator-only: approve or decline a pending listing claim. On approval
+  // this reassigns the listing's `ownerId` to the claimant.
+  @Patch('admin/claims/:id')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.Moderator, UserRole.Admin)
+  @ApiOperation({
+    summary: 'Approve or decline a listing claim (moderator only)',
+  })
+  @ApiOkResponse({ description: 'The reviewed claim.' })
+  @ApiNotFoundResponse({ description: 'No claim or listing found.' })
+  @ApiConflictResponse({ description: 'This claim has already been reviewed.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
+  reviewClaim(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id') id: string,
+    @Body() dto: ReviewListingClaimDto,
+  ) {
+    return this.listingClaimsService.review(id, user.userId, dto.decision);
   }
 
   // Moderator-only: bulk-apply one status transition to many listings (item
@@ -370,6 +414,31 @@ export class ListingsController {
     return this.listingsService.dispute(ref, user.userId, dto);
   }
 
+  // Any active member (NOT owner-gated): request ownership of an EXISTING
+  // listing the caller doesn't currently own — the real "claim this listing"
+  // flow (as opposed to `POST /listings`, which always creates a brand-new
+  // row). Lands in the moderator-reviewable queue (`GET /listings/admin/claims`
+  // / `PATCH /listings/admin/claims/:id`); throttled like `dispute` above,
+  // same rationale (a member-initiated moderation-queue filing surface).
+  @Post(':ref/claim')
+  @Throttle({ default: { limit: 10, ttl: seconds(60) } })
+  @ApiOperation({ summary: 'Claim ownership of an existing business listing' })
+  @ApiCreatedResponse({
+    description: 'The filed claim (or the caller’s existing open claim).',
+  })
+  @ApiBadRequestResponse({ description: 'The caller already owns this listing.' })
+  @ApiNotFoundResponse({ description: 'No listing with that reference.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  claim(
+    @CurrentUser() user: CurrentUserData,
+    @Param('ref') ref: string,
+    @Body() dto: CreateListingClaimDto,
+  ) {
+    return this.listingClaimsService.requestClaim(ref, user.userId, dto.note);
+  }
+
   // Moderator-only: the FE's `setListingStatus` comment is explicit that
   // this is "NOT called from the member client" — only the moderation
   // surface transitions a listing's status, so this route layers
@@ -466,5 +535,25 @@ export class ListingsController {
   @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
   setSafeSpace(@Param('ref') ref: string, @Body() dto: UpdateSafeSpaceDto) {
     return this.listingsService.setSafeSpace(ref, dto);
+  }
+
+  // Moderator-only, same rationale as `setSafeSpace` above — only the
+  // moderation surface confirms the "queer-owned" badge. Distinct from the
+  // member's own self-reported `linkToProfile` claim.
+  @Patch(':ref/queer-owned-verified')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.Moderator, UserRole.Admin)
+  @ApiOperation({
+    summary: "Toggle a listing's queer-owned verification (moderator only)",
+  })
+  @ApiOkResponse({ description: 'The updated listing.' })
+  @ApiNotFoundResponse({ description: 'No listing with that reference.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
+  setQueerOwnedVerified(
+    @Param('ref') ref: string,
+    @Body() dto: UpdateQueerOwnedVerifiedDto,
+  ) {
+    return this.listingsService.setQueerOwnedVerified(ref, dto.verified);
   }
 }

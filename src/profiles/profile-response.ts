@@ -11,6 +11,8 @@ import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
 import { WorkItem } from './entities/work-item.entity';
 import { OpenToEntry } from './open-to';
+import { facetsForLabels } from './identities';
+import { matchNeighbourhood } from './neighbourhoods';
 
 export interface ProfileCard {
   slug: string;
@@ -20,6 +22,12 @@ export interface ProfileCard {
   tagline: string | null;
   avatarUrl: string | null;
   tags: string[];
+  // Professional-identity facts, ungated by `visibility` — same as `tags`
+  // above. See Profile.discipline/profession/languages and
+  // src/profiles/professions.ts.
+  discipline: string[];
+  profession: string[];
+  languages: string[];
   vouchCount: number;
   visibility: string;
 }
@@ -136,6 +144,20 @@ export interface LimitedProfileResponse extends ProfileCard {
 export interface MemberCard extends ProfileCard {
   location: string | null;
   openTo: OpenToEntry[];
+  // Neighbourhood matched out of `location` — see neighbourhoods.ts. Gated
+  // behind `open` visibility, same as `location`/`openTo` above, since it's
+  // derived from `location` and must not leak it indirectly for a
+  // network/private profile.
+  hood: string | null;
+  // Directory facets this member's PUBLISHED identities answer to — the
+  // inverse of the `?identities=` query filter, present so the directory's
+  // per-facet count badges have something to count. See
+  // `identities.ts#facetsForLabels`.
+  identityFacets: string[];
+  // Years on QueerPulse, floor-rounded from `joinedAt`. Ungated — mirrors the
+  // `MostVouched` sort's vouchCount in being a plain derived number, not
+  // profile content.
+  years: number;
 }
 
 export const SHAPING_KIND_ORDER: ShapingKind[] = [
@@ -169,16 +191,26 @@ export function toProfileCard(
     tagline: profile.tagline,
     avatarUrl: toImageUrl(profile.avatarUrl),
     tags: profile.tags,
+    discipline: profile.discipline ?? [],
+    profession: profile.profession ?? [],
+    languages: profile.languages ?? [],
     vouchCount,
     visibility: profile.visibility,
   };
+}
+
+/** Whole years between `joinedAt` and now, floor-rounded (never negative). */
+function tenureYears(joinedAt: Date): number {
+  const ms = Date.now() - joinedAt.getTime();
+  return Math.max(0, Math.floor(ms / (365.25 * 24 * 60 * 60 * 1000)));
 }
 
 export function toMemberCard(p: Profile, vouchCount: number): MemberCard {
   // The directory lists every member (§8), but only `open` profiles expose
   // location/openTo on the card — `network`/`private` keep them blank here,
   // mirroring toLimitedProfile so the card can't leak what the profile detail
-  // deliberately hides.
+  // deliberately hides. `hood` is derived from `location` and follows the
+  // same gate for the same reason.
   const open = p.visibility === ProfileVisibility.Open;
   return {
     ...toProfileCard(p, vouchCount),
@@ -188,6 +220,9 @@ export function toMemberCard(p: Profile, vouchCount: number): MemberCard {
     tagline: directoryBlurb(p.tagline, p.bio),
     location: open ? p.location : null,
     openTo: open ? p.openTo : [],
+    hood: open ? matchNeighbourhood(p.location) : null,
+    identityFacets: facetsForLabels(p.discoverableIdentities ?? []),
+    years: tenureYears(p.joinedAt),
   };
 }
 

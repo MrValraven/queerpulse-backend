@@ -64,6 +64,14 @@ export class VolunteerOpportunity {
   @Column({ type: 'uuid', nullable: true })
   partnerId!: string | null;
 
+  // Nullable, no FK constraint — mirrors `partnerId` above. Structurally
+  // independent from it: a poster picks one org (partner or community) from
+  // a single combined control on the frontend, but the two links don't
+  // enforce mutual exclusivity against each other server-side.
+  @Index('IDX_volunteer_opportunities_community_id')
+  @Column({ type: 'uuid', nullable: true })
+  communityId!: string | null;
+
   @Column({ type: 'varchar' })
   role!: string;
 

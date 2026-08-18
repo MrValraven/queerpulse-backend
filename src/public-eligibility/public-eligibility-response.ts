@@ -15,6 +15,11 @@ export interface PublicEligibilitySignalsDto {
   workshopsTaught: number;
   publishedSubprofiles: number;
   vouchCount: number;
+  /** How many members this member has vouched FOR (not withdrawn) — the
+   *  outbound side of the trust graph, distinct from `vouchCount` (inbound).
+   *  Signup's auto-vouch runs the invitER as voucher, so this only counts a
+   *  vouch the member gave of their own accord. */
+  vouchesGivenCount: number;
   endorsementCount: number;
   connectionCount: number;
   eventsAttended: number;
@@ -38,6 +43,7 @@ export function toPublicEligibilitySignals(
     workshopsTaught: raw.workshopsTaught,
     publishedSubprofiles: raw.publishedSubprofiles,
     vouchCount: raw.vouchCount,
+    vouchesGivenCount: raw.vouchesGivenCount,
     endorsementCount: raw.endorsementCount,
     connectionCount: raw.connectionCount,
     eventsAttended: raw.eventsAttended,

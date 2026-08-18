@@ -18,15 +18,18 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { CohostDto } from './dto/cohost.dto';
+import { CreateCohostInviteDto } from './dto/create-cohost-invite.dto';
 import { CreateEventDto } from './dto/create-event.dto';
 import { InviteEventDto } from './dto/invite-event.dto';
 import { ListAttendeesQuery } from './dto/list-attendees.query';
 import { ListEventsQuery } from './dto/list-events.query';
 import { PutLineupDto } from './dto/put-lineup.dto';
+import { RespondCohostInviteDto } from './dto/respond-cohost-invite.dto';
 import { RespondEventInviteDto } from './dto/respond-event-invite.dto';
 import { RsvpDto } from './dto/rsvp.dto';
 import { UpdateEventDto } from './dto/update-event.dto';
 import { EventBookmarksService } from './event-bookmarks.service';
+import { EventCohostInvitesService } from './event-cohost-invites.service';
 import { EventInvitesService } from './event-invites.service';
 import { EventsService } from './events.service';
 import { RsvpService } from './rsvp.service';
@@ -57,6 +60,7 @@ export class EventsController {
     private readonly rsvpService: RsvpService,
     private readonly eventInvitesService: EventInvitesService,
     private readonly eventBookmarksService: EventBookmarksService,
+    private readonly eventCohostInvitesService: EventCohostInvitesService,
   ) {}
 
   @Get()
@@ -250,6 +254,27 @@ export class EventsController {
     return this.eventInvitesService.createInvites(slug, user.userId, dto.slugs);
   }
 
+  @Post(':slug/cohost-invites')
+  @ApiOperation({ summary: 'Invite a member to co-host an event you organize.' })
+  @ApiCreatedResponse({ description: 'The created invite id and status.' })
+  @ApiBadRequestResponse({
+    description: 'Co-hosts must be active members, and you cannot invite yourself.',
+  })
+  @ApiForbiddenResponse({
+    description: 'Only the host or a co-host can invite.',
+  })
+  @ApiNotFoundResponse({ description: 'No such event or member.' })
+  @ApiConflictResponse({
+    description: 'An invite is already pending for this member.',
+  })
+  inviteCohost(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: CreateCohostInviteDto,
+  ) {
+    return this.eventCohostInvitesService.createInvite(slug, user.userId, dto);
+  }
+
   @Put(':slug/lineup')
   @ApiOperation({
     summary:
@@ -316,5 +341,49 @@ export class EventInvitesController {
     @Body() dto: RespondEventInviteDto,
   ) {
     return this.eventInvitesService.respondInvite(id, user.userId, dto.action);
+  }
+}
+
+@Feature('events')
+@ApiTags('Events')
+@ApiCookieAuth('access_token')
+@ApiUnauthorizedResponse({
+  description: 'Requires an authenticated, active member session.',
+})
+@Controller('event-cohost-invites')
+@UseGuards(ActiveMemberGuard)
+export class EventCohostInvitesController {
+  constructor(
+    private readonly eventCohostInvitesService: EventCohostInvitesService,
+  ) {}
+
+  @Get(':id')
+  @ApiOperation({ summary: 'Get a cohost invite (inviter or invitee only).' })
+  @ApiOkResponse({ description: 'The invite detail.' })
+  @ApiForbiddenResponse({ description: 'This invite is not visible to you.' })
+  @ApiNotFoundResponse({ description: 'Invite not found.' })
+  get(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.eventCohostInvitesService.getById(id, user.userId);
+  }
+
+  @Patch(':id')
+  @ApiOperation({ summary: 'Respond to a cohost invite (accept or decline).' })
+  @ApiOkResponse({ description: 'The invite id and its new status.' })
+  @ApiForbiddenResponse({
+    description: 'This invite is not addressed to you.',
+  })
+  @ApiNotFoundResponse({ description: 'Invite not found.' })
+  @ApiConflictResponse({
+    description: 'This invite has already been answered.',
+  })
+  respond(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: RespondCohostInviteDto,
+  ) {
+    return this.eventCohostInvitesService.respond(id, user.userId, dto.action);
   }
 }

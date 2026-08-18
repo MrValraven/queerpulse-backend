@@ -92,11 +92,16 @@ export class MentionNotificationService {
         for (const slug of mentions.communities) {
           const community = communityBySlug.get(slug);
           if (!community) continue;
+          // `ownerId` is null while the community is temporarily ownerless
+          // (owner account erased, pending mod-promotion/reassignment) — the
+          // mod recipients from `staffByCommunityId` still carry the group.
           const recipients = Array.from(
-            new Set([
-              community.ownerId,
-              ...(staffByCommunityId.get(community.id) ?? []),
-            ]),
+            new Set(
+              [
+                community.ownerId,
+                ...(staffByCommunityId.get(community.id) ?? []),
+              ].filter((userId): userId is string => userId !== null),
+            ),
           );
           groups.push({ kind: 'community', ref: slug, recipients });
         }
