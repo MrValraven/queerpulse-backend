@@ -1,4 +1,8 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
@@ -43,7 +47,9 @@ const baseThread = (overrides: Partial<ForumThread> = {}): ForumThread => ({
   category: 'general',
   communityId: null,
   isPinned: false,
+  pinnedAt: null,
   isLocked: false,
+  isOfficial: false,
   tags: [],
   opVoteCount: 0,
   replyCount: 0,
@@ -66,6 +72,13 @@ const member: CurrentUserData = {
   role: 'member',
 };
 
+const admin: CurrentUserData = {
+  userId: 'admin-1',
+  email: 'admin@example.com',
+  status: 'active',
+  role: 'admin',
+};
+
 const baseProfile = (overrides: Partial<Profile> = {}): Profile =>
   ({
     userId: 'author-1',
@@ -81,6 +94,7 @@ describe('ForumThreadsService', () => {
   let threads: {
     findOne: jest.Mock;
     exists: jest.Mock;
+    count: jest.Mock;
     increment: jest.Mock;
     update: jest.Mock;
     save: jest.Mock;
@@ -109,6 +123,7 @@ describe('ForumThreadsService', () => {
     threads = {
       findOne: jest.fn(),
       exists: jest.fn().mockResolvedValue(false),
+      count: jest.fn().mockResolvedValue(0),
       increment: jest.fn().mockResolvedValue(undefined),
       update: jest.fn().mockResolvedValue(undefined),
       save: jest.fn((thread: unknown) => Promise.resolve(thread)),
@@ -231,6 +246,15 @@ describe('ForumThreadsService', () => {
         't.category = :category',
         expect.anything(),
       );
+    });
+
+    it('excludes pinned threads (they render in their own bucket)', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('viewer-1', undefined, undefined, undefined);
+
+      expect(qb.andWhere).toHaveBeenCalledWith('t.is_pinned = false');
     });
 
     it('excludes blocked/muted authors in-query, keyed on the author column', async () => {
@@ -367,6 +391,51 @@ describe('ForumThreadsService', () => {
       });
 
       expect(res.slug).toMatch(/^hello-world-[0-9a-f]{6}$/);
+    });
+
+    it('posts as "QueerPulse Official" when the caller is an admin and asks for it', async () => {
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const res = await service.create(
+        'author-1',
+        {
+          title: 'Hello, World!',
+          body: 'First post body',
+          category: 'general',
+          isOfficial: true,
+        },
+        false,
+        true,
+      );
+
+      expect(res.author).toEqual({
+        handle: 'queerpulse',
+        displayName: 'QueerPulse',
+        avatarUrl: null,
+        official: true,
+      });
+    });
+
+    it('ignores isOfficial from a non-admin caller', async () => {
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const res = await service.create(
+        'author-1',
+        {
+          title: 'Hello, World!',
+          body: 'First post body',
+          category: 'general',
+          isOfficial: true,
+        },
+        false,
+        false,
+      );
+
+      expect(res.author).toEqual({
+        handle: 'ava',
+        displayName: 'Ava Lee',
+        avatarUrl: null,
+      });
     });
   });
 
@@ -650,6 +719,152 @@ describe('ForumThreadsService', () => {
       await service.setLocked('hello-world', moderator, true);
 
       expect(threads.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('setPinned', () => {
+    it('pins a thread for a moderator, stamping pinnedAt', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ isPinned: false }));
+      threads.count.mockResolvedValue(0);
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const res = await service.setPinned('hello-world', moderator, true);
+
+      const [saved] = threads.save.mock.calls[0] as [ForumThread];
+      expect(saved.isPinned).toBe(true);
+      expect(saved.pinnedAt).toBeInstanceOf(Date);
+      expect(res.isPinned).toBe(true);
+    });
+
+    it('unpins a thread for a moderator, clearing pinnedAt', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ isPinned: true, pinnedAt: new Date() }),
+      );
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const res = await service.setPinned('hello-world', moderator, false);
+
+      const [saved] = threads.save.mock.calls[0] as [ForumThread];
+      expect(saved.isPinned).toBe(false);
+      expect(saved.pinnedAt).toBeNull();
+      expect(res.isPinned).toBe(false);
+    });
+
+    it('forbids a non-moderator before touching the thread', async () => {
+      await expect(
+        service.setPinned('hello-world', member, true),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(threads.findOne).not.toHaveBeenCalled();
+      expect(threads.save).not.toHaveBeenCalled();
+    });
+
+    it('is a no-op write when already in the target state', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ isPinned: true, pinnedAt: new Date() }),
+      );
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      await service.setPinned('hello-world', moderator, true);
+
+      expect(threads.save).not.toHaveBeenCalled();
+    });
+
+    it('rejects pinning past the cap', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ isPinned: false }));
+      threads.count.mockResolvedValue(3);
+
+      await expect(
+        service.setPinned('hello-world', moderator, true),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(threads.save).not.toHaveBeenCalled();
+    });
+
+    it('does not check the cap when unpinning', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ isPinned: true, pinnedAt: new Date() }),
+      );
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      await service.setPinned('hello-world', moderator, false);
+
+      expect(threads.count).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('setOfficial', () => {
+    it('marks a thread official and swaps the displayed author', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ isOfficial: false }));
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const res = await service.setOfficial('hello-world', admin, true);
+
+      const [saved] = threads.save.mock.calls[0] as [ForumThread];
+      expect(saved.isOfficial).toBe(true);
+      expect(res.author).toEqual({
+        handle: 'queerpulse',
+        displayName: 'QueerPulse',
+        avatarUrl: null,
+        official: true,
+      });
+    });
+
+    it('unmarks a thread official, reverting to the real author', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ isOfficial: true }));
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const res = await service.setOfficial('hello-world', admin, false);
+
+      const [saved] = threads.save.mock.calls[0] as [ForumThread];
+      expect(saved.isOfficial).toBe(false);
+      expect(res.author).toEqual({
+        handle: 'ava',
+        displayName: 'Ava Lee',
+        avatarUrl: null,
+      });
+    });
+
+    it('is a no-op write when already in the target state', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ isOfficial: true }));
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      await service.setOfficial('hello-world', admin, true);
+
+      expect(threads.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('listPinned', () => {
+    it('queries pinned threads honoring category + block filter, capped and ordered by pinnedAt', async () => {
+      const qb = qbStub([baseThread({ isPinned: true, pinnedAt: new Date() })]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const result = await service.listPinned('viewer-1', 'housing', false);
+
+      expect(qb.andWhere).toHaveBeenCalledWith('t.is_pinned = true');
+      expect(qb.andWhere).toHaveBeenCalledWith('t.category = :category', {
+        category: 'housing',
+      });
+      expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
+        qb,
+        'viewer-1',
+        '"t"."author_id"',
+      );
+      expect(qb.orderBy).toHaveBeenCalledWith('t.pinned_at', 'DESC');
+      expect(qb.take).toHaveBeenCalledWith(3);
+      expect(result).toEqual([expect.objectContaining({ isPinned: true })]);
+    });
+
+    it('omits the category filter when not provided', async () => {
+      const qb = qbStub([]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.listPinned('viewer-1', undefined, false);
+
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        't.category = :category',
+        expect.anything(),
+      );
     });
   });
 

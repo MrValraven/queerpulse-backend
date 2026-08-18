@@ -369,6 +369,11 @@ export class VolunteeringService {
         throw new NotFoundException('Opportunity not found');
       }
       posterId = opportunity.posterId;
+      if (posterId === userId) {
+        throw new ForbiddenException(
+          'You cannot apply to your own opportunity',
+        );
+      }
 
       const signupRepo = manager.getRepository(VolunteerSignup);
       const acceptedCount = await signupRepo.count({

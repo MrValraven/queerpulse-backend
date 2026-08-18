@@ -2,9 +2,7 @@ import { ConflictException, NotFoundException } from '@nestjs/common';
 import { AdminWriterApplicationsService } from './admin-writer-applications.service';
 import { WriterApplicationStatus } from './entities/magazine-writer-application.entity';
 
-function makeApplication(
-  overrides: Partial<Record<string, unknown>> = {},
-) {
+function makeApplication(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: 'app-1',
     userId: 'user-1',

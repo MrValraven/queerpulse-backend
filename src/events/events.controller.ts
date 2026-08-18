@@ -255,10 +255,13 @@ export class EventsController {
   }
 
   @Post(':slug/cohost-invites')
-  @ApiOperation({ summary: 'Invite a member to co-host an event you organize.' })
+  @ApiOperation({
+    summary: 'Invite a member to co-host an event you organize.',
+  })
   @ApiCreatedResponse({ description: 'The created invite id and status.' })
   @ApiBadRequestResponse({
-    description: 'Co-hosts must be active members, and you cannot invite yourself.',
+    description:
+      'Co-hosts must be active members, and you cannot invite yourself.',
   })
   @ApiForbiddenResponse({
     description: 'Only the host or a co-host can invite.',

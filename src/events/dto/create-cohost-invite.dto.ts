@@ -1,4 +1,10 @@
-import { IsIn, IsISO8601, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  IsIn,
+  IsISO8601,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from 'class-validator';
 import {
   COHOST_INVITE_COMMITMENT_IDS,
   COHOST_INVITE_ROLE_IDS,

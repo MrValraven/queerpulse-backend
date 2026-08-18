@@ -111,7 +111,11 @@ function signalsToDto(signals: RecognitionSignals) {
   return {
     verified: signals.verified,
     tenureDays: signals.tenureDays,
-    vouchCount: signals.vouchCount,
+    // Inbound vouchCount isn't read by gatherSignals; it derives its own
+    // `vouchCount` (an outbound signal, see recognition-awarding.service.ts)
+    // from the DTO's `vouchesGivenCount` field.
+    vouchCount: 0,
+    vouchesGivenCount: signals.vouchCount,
     endorsementCount: signals.endorsementCount,
     connectionCount: signals.connectionCount,
     eventsAttended: signals.eventsAttended,

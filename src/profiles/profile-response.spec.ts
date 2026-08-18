@@ -7,7 +7,11 @@ import { RosterRole } from '../communities/entities/community-member.entity';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { DIRECTORY_BLURB_MAX_CHARS, truncateAtWord } from './directory-blurb';
 import { Activity, ActivityKind } from './entities/activity.entity';
-import { BoardKind, BoardPost } from './entities/board-post.entity';
+import {
+  BoardKind,
+  BoardPost,
+  BoardPostStatus,
+} from './entities/board-post.entity';
 import { Shaping, ShapingKind } from './entities/shaping.entity';
 import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
@@ -15,6 +19,8 @@ import { WorkItem } from './entities/work-item.entity';
 import { OpenToEntry } from './open-to';
 import {
   ProfileRelations,
+  gateAvatarUrl,
+  gateLocation,
   sortShapings,
   toFullProfile,
   toLimitedProfile,
@@ -29,11 +35,17 @@ const profile = (overrides: Partial<Profile> = {}): Profile =>
     firstName: 'Tiago',
     lastName: 'Costa',
     pronouns: 'he/they',
+    pronunciation: null,
     tagline: 'Fullstack Developer',
     bio: 'a bio',
+    bioPt: null,
     location: 'Arroios',
     now: 'building things',
+    notHereFor: null,
     avatarUrl: 'https://x/a.png',
+    photoVisible: true,
+    hoodVisible: true,
+    vouchersVisible: true,
     visibility: ProfileVisibility.Open,
     openTo: [{ kind: 'preset', id: 'collaborating' }] as OpenToEntry[],
     identities: ['Queer'],
@@ -75,18 +87,25 @@ describe('profile-response mappers', () => {
     expect(card.avatarUrl).toBe(`https://api.test/files/${key}`);
   });
 
-  it('toProfileCard returns exactly the 9 card fields', () => {
+  it('toProfileCard returns exactly the card fields', () => {
     const card = toProfileCard(profile(), 2);
     expect(card).toEqual({
       slug: 'tiago',
       firstName: 'Tiago',
       lastName: 'Costa',
       pronouns: 'he/they',
+      pronunciation: null,
       tagline: 'Fullstack Developer',
       avatarUrl: 'https://x/a.png',
       tags: ['React', 'TypeScript'],
+      discipline: [],
+      profession: [],
+      languages: [],
       vouchCount: 2,
       visibility: 'open',
+      photoVisible: true,
+      hoodVisible: true,
+      vouchersVisible: true,
     });
   });
 
@@ -111,6 +130,88 @@ describe('profile-response mappers', () => {
     expect(viewed.lookingFor).toEqual([]);
   });
 
+  it('toFullProfile exposes hiddenUntil only to the owner', () => {
+    const hiddenAt = new Date('2026-08-19T12:00:00.000Z');
+
+    const owned = toFullProfile(
+      profile({ hiddenUntil: hiddenAt }),
+      emptyRels,
+      2,
+      true,
+    );
+    expect(owned.hiddenUntil).toBe('2026-08-19T12:00:00.000Z');
+
+    const ownedNotHidden = toFullProfile(
+      profile({ hiddenUntil: null }),
+      emptyRels,
+      2,
+      true,
+    );
+    expect(ownedNotHidden.hiddenUntil).toBeNull();
+
+    // Never included in the object for a non-owner viewer, mirroring
+    // privateNetwork/featuredConsent — it cannot leak on another member's
+    // full profile response.
+    const viewed = toFullProfile(
+      profile({ hiddenUntil: hiddenAt }),
+      emptyRels,
+      2,
+    );
+    expect(viewed).not.toHaveProperty('hiddenUntil');
+  });
+
+  it('toFullProfile carries bioPt/notHereFor through ungated', () => {
+    const dto = toFullProfile(
+      profile({ bioPt: 'Uma bio', notHereFor: 'Casual hookups' }),
+      emptyRels,
+      2,
+    );
+    expect(dto.bioPt).toBe('Uma bio');
+    expect(dto.notHereFor).toBe('Casual hookups');
+  });
+
+  it('toFullProfile hides avatarUrl/location from a non-owner viewer when the toggle is off, but always shows the owner', () => {
+    const p = profile({
+      avatarUrl: 'https://x/a.png',
+      location: 'Arroios',
+      photoVisible: false,
+      hoodVisible: false,
+    });
+
+    // The owner sees their own real photo and location regardless of the
+    // toggle — the toggle only controls what OTHER people see.
+    const owned = toFullProfile(p, emptyRels, 2, true);
+    expect(owned.avatarUrl).toBe('https://x/a.png');
+    expect(owned.location).toBe('Arroios');
+    // The toggle itself is always the true stored value, even for the owner.
+    expect(owned.photoVisible).toBe(false);
+    expect(owned.hoodVisible).toBe(false);
+
+    // A non-owner, non-vouched-for viewer (the default `isOwner = false`)
+    // gets the content suppressed to null — this is the privacy-sensitive
+    // gate the whole feature exists for.
+    const viewed = toFullProfile(p, emptyRels, 2);
+    expect(viewed.avatarUrl).toBeNull();
+    expect(viewed.location).toBeNull();
+    // The boolean itself is still the true value for a non-owner too — only
+    // the CONTENT is gated, never the toggle (a viewer needs to know whether
+    // e.g. the vouchers endpoint is worth calling).
+    expect(viewed.photoVisible).toBe(false);
+    expect(viewed.hoodVisible).toBe(false);
+  });
+
+  it('toFullProfile shows avatarUrl/location to a non-owner viewer when the toggle is on', () => {
+    const p = profile({
+      avatarUrl: 'https://x/a.png',
+      location: 'Arroios',
+      photoVisible: true,
+      hoodVisible: true,
+    });
+    const viewed = toFullProfile(p, emptyRels, 2);
+    expect(viewed.avatarUrl).toBe('https://x/a.png');
+    expect(viewed.location).toBe('Arroios');
+  });
+
   it('toFullProfile maps relations to their DTO shapes (no position leak)', () => {
     const rels: ProfileRelations = {
       ...emptyRels,
@@ -124,6 +225,7 @@ describe('profile-response mappers', () => {
           year: '2022',
           imageUrl: null,
           position: 0,
+          links: [{ kind: 'external', href: 'https://example.com' }],
         },
       ] as unknown as WorkItem[],
       board: [
@@ -132,6 +234,11 @@ describe('profile-response mappers', () => {
           title: 'Help',
           slug: 'web-dev-help',
           position: 0,
+          status: BoardPostStatus.Open,
+          closedNote: null,
+          closedAt: null,
+          expiresAt: new Date('2026-11-01T00:00:00.000Z'),
+          createdAt: new Date('2026-08-03T00:00:00.000Z'),
         },
       ] as unknown as BoardPost[],
       skills: [
@@ -169,11 +276,17 @@ describe('profile-response mappers', () => {
       title: 'X',
       year: '2022',
       imageUrl: null,
+      links: [{ kind: 'external', href: 'https://example.com' }],
     });
     expect(dto.board[0]).toEqual({
       kind: 'offering',
       title: 'Help',
       slug: 'web-dev-help',
+      status: 'open',
+      closedNote: null,
+      closedAt: null,
+      expiresAt: '2026-11-01T00:00:00.000Z',
+      createdAt: '2026-08-03T00:00:00.000Z',
     });
     expect(dto.skills[0]).toEqual({ name: 'Web dev', meta: 'React' });
     expect(dto.groups[0]).toEqual({ name: 'Queer Devs', role: 'Member' });
@@ -205,11 +318,18 @@ describe('profile-response mappers', () => {
       firstName: 'Tiago',
       lastName: 'Costa',
       pronouns: 'he/they',
+      pronunciation: null,
       tagline: 'Fullstack Developer',
       avatarUrl: 'https://x/a.png',
       tags: ['React', 'TypeScript'],
+      discipline: [],
+      profession: [],
+      languages: [],
       vouchCount: 5,
       visibility: 'private',
+      photoVisible: true,
+      hoodVisible: true,
+      vouchersVisible: true,
       verified: true,
       joinedAt: '2024-03-01T00:00:00.000Z',
       openTo: [],
@@ -224,6 +344,28 @@ describe('profile-response mappers', () => {
       featuredCommunities: [],
       limited: true,
     });
+  });
+
+  it('toLimitedProfile hides avatarUrl from a non-owner viewer when photoVisible is off, but always shows the owner', () => {
+    const p = profile({
+      visibility: ProfileVisibility.Private,
+      avatarUrl: 'https://x/a.png',
+      photoVisible: false,
+    });
+
+    // A limited profile is, by definition, almost always seen by a non-owner
+    // (that's WHY it's limited) — the default `isOwner = false` must not ship
+    // the real avatarUrl alongside `photoVisible: false`, or the response
+    // contradicts itself.
+    const viewed = toLimitedProfile(p, 5);
+    expect(viewed.avatarUrl).toBeNull();
+    expect(viewed.photoVisible).toBe(false);
+
+    // Mirrors toFullProfile/toMemberCard: an owner-preview call still sees
+    // their own real photo regardless of the toggle.
+    const owned = toLimitedProfile(p, 5, true);
+    expect(owned.avatarUrl).toBe('https://x/a.png');
+    expect(owned.photoVisible).toBe(false);
   });
 
   it('toMemberCard exposes location/openTo only for open profiles', () => {
@@ -246,6 +388,77 @@ describe('profile-response mappers', () => {
       // identity fields are still listed in the directory
       expect(card.slug).toBe('tiago');
     }
+  });
+
+  it('toMemberCard hides avatarUrl/location/hood from a non-owner viewer when the toggle is off', () => {
+    const p = profile({
+      visibility: ProfileVisibility.Open,
+      avatarUrl: 'https://x/a.png',
+      location: 'Arroios',
+      photoVisible: false,
+      hoodVisible: false,
+    });
+    // Default (no isOwner arg) is the safe, non-owner behaviour — the same
+    // default toFullProfile uses.
+    const card = toMemberCard(p, 1);
+    expect(card.avatarUrl).toBeNull();
+    expect(card.location).toBeNull();
+    expect(card.hood).toBeNull();
+    // The toggle itself is still the true stored value on the card.
+    expect(card.photoVisible).toBe(false);
+    expect(card.hoodVisible).toBe(false);
+  });
+
+  it('toMemberCard shows avatarUrl/location/hood to a non-owner viewer when the toggle is on', () => {
+    const p = profile({
+      visibility: ProfileVisibility.Open,
+      avatarUrl: 'https://x/a.png',
+      location: 'Arroios',
+      photoVisible: true,
+      hoodVisible: true,
+    });
+    const card = toMemberCard(p, 1);
+    expect(card.avatarUrl).toBe('https://x/a.png');
+    expect(card.location).toBe('Arroios');
+  });
+
+  it('toMemberCard shows a member their own real photo/hood in their own search result, even with the toggle off', () => {
+    // Directory search never excludes the viewer's own profile from their own
+    // results — see ProfilesService.searchMembers. When a member's own row
+    // turns up, `isOwner: true` means they see their real photo/hood
+    // regardless of their own toggle, same as toFullProfile.
+    const p = profile({
+      visibility: ProfileVisibility.Open,
+      avatarUrl: 'https://x/a.png',
+      location: 'Arroios',
+      photoVisible: false,
+      hoodVisible: false,
+    });
+    const card = toMemberCard(p, 1, true);
+    expect(card.avatarUrl).toBe('https://x/a.png');
+    expect(card.location).toBe('Arroios');
+  });
+
+  it('gateAvatarUrl/gateLocation: owner always sees the real value, non-owner only when the toggle is on', () => {
+    const p = profile({
+      avatarUrl: 'https://x/a.png',
+      location: 'Arroios',
+      photoVisible: false,
+      hoodVisible: false,
+    });
+    expect(gateAvatarUrl(p, true)).toBe('https://x/a.png');
+    expect(gateAvatarUrl(p, false)).toBeNull();
+    expect(gateLocation(p, true)).toBe('Arroios');
+    expect(gateLocation(p, false)).toBeNull();
+
+    const open = profile({
+      avatarUrl: 'https://x/a.png',
+      location: 'Arroios',
+      photoVisible: true,
+      hoodVisible: true,
+    });
+    expect(gateAvatarUrl(open, false)).toBe('https://x/a.png');
+    expect(gateLocation(open, false)).toBe('Arroios');
   });
 
   it('toMemberCard shows a written tagline verbatim, untruncated', () => {

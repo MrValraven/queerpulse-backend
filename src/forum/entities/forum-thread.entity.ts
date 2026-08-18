@@ -44,8 +44,27 @@ export class ForumThread {
   @Column({ type: 'boolean', default: false })
   isPinned!: boolean;
 
+  // Watermark: null = never pinned; a timestamp = pinned since then. Lets
+  // multiple pinned threads order deterministically (`pinned_at DESC`) — same
+  // pattern as `conversation_participants.pinned_at` (see
+  // `AddConversationPinFavorite`). Set alongside `isPinned` in
+  // `ForumThreadsService.setPinned`, never independently.
+  @Column({ type: 'timestamptz', precision: 3, nullable: true })
+  pinnedAt!: Date | null;
+
   @Column({ type: 'boolean', default: false })
   isLocked!: boolean;
+
+  // When true, the thread's author is displayed as "QueerPulse Official"
+  // instead of the real poster (see `toForumThreadResponse`'s `author`
+  // branch in `forum-response.ts`). `authorId` above is left untouched — it
+  // stays the real admin who posted, so `canEdit`/ownership checks keep
+  // working unchanged. Settable only by an admin: at creation via
+  // `CreateThreadDto.isOfficial` (coerced server-side in
+  // `ForumThreadsService.create`), or after the fact via
+  // `ForumThreadsService.setOfficial` (`AdminForumController`).
+  @Column({ type: 'boolean', default: false })
+  isOfficial!: boolean;
 
   // Normalized (lowercase, deduped, `#`-stripped) free-text tags the author
   // attaches to a thread; drives the tag-filter chips in the frontend list.

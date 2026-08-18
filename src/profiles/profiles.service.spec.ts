@@ -15,6 +15,7 @@ import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { StorageService } from '../storage/storage.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { HiddenFromService } from '../social/hidden-from.service';
 import { Community } from '../communities/entities/community.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
@@ -142,6 +143,13 @@ describe('ProfilesService.getBySlug visibility', () => {
         },
         { provide: ConnectionsService, useValue: connections },
         { provide: BlockFilterService, useValue: blockFilter },
+        {
+          provide: HiddenFromService,
+          useValue: {
+            isHiddenFrom: jest.fn().mockResolvedValue(false),
+            excludeHiddenFrom: jest.fn((qb: unknown) => qb),
+          },
+        },
         { provide: HandlesService, useValue: { rename: jest.fn() } },
         {
           provide: StorageService,
@@ -250,6 +258,88 @@ describe('ProfilesService.getBySlug visibility', () => {
     expect(profiles.createQueryBuilder).not.toHaveBeenCalled();
   });
 
+  describe('loadRelated photoVisible gate', () => {
+    // `related` excludes the PROFILE OWNER (`p.user_id != :self`) but not the
+    // VIEWER — a related member (matched by shared tags) can legitimately be
+    // the person looking at this page. They must see their own real photo
+    // regardless of their own `photoVisible` toggle; anyone else's related
+    // card is gated like every other non-owner card.
+    it("hides a related member's photo when they turned photoVisible off", async () => {
+      profiles.findOne.mockResolvedValue(
+        profile({ tags: ['queer'], visibility: ProfileVisibility.Open }),
+      );
+      const qb = qbStub();
+      qb.getMany.mockResolvedValue([
+        profile({
+          userId: 'someone-else',
+          slug: 'other',
+          tags: ['queer'],
+          avatarUrl: 'https://x/other.png',
+          photoVisible: false,
+        }),
+      ]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      const res = await service.getBySlug('jo', 'viewer-1');
+      const full = res as Extract<typeof res, { limited: false }>;
+      expect(full.related[0]?.avatarUrl).toBeNull();
+    });
+
+    it('shows the viewer their own real photo when they turn up in their own related list', async () => {
+      profiles.findOne.mockResolvedValue(
+        profile({ tags: ['queer'], visibility: ProfileVisibility.Open }),
+      );
+      const qb = qbStub();
+      qb.getMany.mockResolvedValue([
+        profile({
+          userId: 'viewer-1',
+          slug: 'me',
+          tags: ['queer'],
+          avatarUrl: 'https://x/me.png',
+          photoVisible: false,
+        }),
+      ]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      const res = await service.getBySlug('jo', 'viewer-1');
+      const full = res as Extract<typeof res, { limited: false }>;
+      expect(full.related[0]?.avatarUrl).toBe('https://x/me.png');
+    });
+  });
+
+  describe('hiddenUntil self-hide gate (member profile v2 Task 6)', () => {
+    it('404s a non-owner viewer while hiddenUntil is still in the future', async () => {
+      profiles.findOne.mockResolvedValue(
+        profile({ hiddenUntil: new Date(Date.now() + 60_000) }),
+      );
+      await expect(
+        service.getBySlug('jo', 'someone-else'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('still returns the full profile to the owner regardless of hiddenUntil', async () => {
+      profiles.findOne.mockResolvedValue(
+        profile({ hiddenUntil: new Date(Date.now() + 60_000) }),
+      );
+      const res = await service.getBySlug('jo', 'owner-1');
+      expect(res.limited).toBe(false);
+    });
+
+    it('leaves a non-owner viewer unaffected once hiddenUntil is in the past', async () => {
+      profiles.findOne.mockResolvedValue(
+        profile({ hiddenUntil: new Date(Date.now() - 60_000) }),
+      );
+      const res = await service.getBySlug('jo', 'someone-else');
+      expect(res.limited).toBe(false);
+    });
+
+    it('leaves a non-owner viewer unaffected when hiddenUntil is null', async () => {
+      profiles.findOne.mockResolvedValue(profile({ hiddenUntil: null }));
+      const res = await service.getBySlug('jo', 'someone-else');
+      expect(res.limited).toBe(false);
+    });
+  });
+
   it('updateMe writes now and returns the full profile', async () => {
     const p = profile({ visibility: ProfileVisibility.Open });
     profiles.findOne.mockResolvedValue(p);
@@ -309,6 +399,50 @@ describe('ProfilesService.getBySlug visibility', () => {
     await service.updateMe('owner-1', { tagline: 'new tagline' });
 
     expect(p.now).toBe('old status');
+  });
+
+  // Same explicit `!== undefined` clearing shape as `now` above, for the
+  // three Task 2 text fields.
+  it.each([
+    ['pronunciation', 'old pronunciation'],
+    ['bioPt', 'old bioPt'],
+    ['notHereFor', 'old notHereFor'],
+  ] as const)(
+    'updateMe clears %s when sent an empty string, and leaves it when omitted',
+    async (field, oldValue) => {
+      const p = profile({ [field]: oldValue });
+      profiles.findOne.mockResolvedValue(p);
+      (profiles as unknown as { save: jest.Mock }).save = jest
+        .fn()
+        .mockResolvedValue(p);
+
+      await service.updateMe('owner-1', { [field]: '' });
+      expect(p[field]).toBeNull();
+
+      const p2 = profile({ [field]: oldValue });
+      profiles.findOne.mockResolvedValue(p2);
+      (profiles as unknown as { save: jest.Mock }).save = jest
+        .fn()
+        .mockResolvedValue(p2);
+      await service.updateMe('owner-1', { tagline: 'new tagline' });
+      expect(p2[field]).toBe(oldValue);
+    },
+  );
+
+  it('updateMe stores hiddenUntil as a Date and clears it on null', async () => {
+    const p = profile({ hiddenUntil: null });
+    profiles.findOne.mockResolvedValue(p);
+    (profiles as unknown as { save: jest.Mock }).save = jest
+      .fn()
+      .mockResolvedValue(p);
+
+    await service.updateMe('owner-1', {
+      hiddenUntil: '2026-08-19T12:00:00.000Z',
+    });
+    expect(p.hiddenUntil).toEqual(new Date('2026-08-19T12:00:00.000Z'));
+
+    await service.updateMe('owner-1', { hiddenUntil: null });
+    expect(p.hiddenUntil).toBeNull();
   });
 
   // Regression: onboarding sends ONLY `lookingFor`. Run that body through the
@@ -422,6 +556,65 @@ describe('ProfilesService.getBySlug visibility', () => {
         'viewer-1',
         '"p"."user_id"',
       );
+    });
+
+    it("excludes members with a live hiddenUntil from every viewer's search, unconditionally (member profile v2 Task 6)", async () => {
+      const qb = qbStub();
+      qb.getManyAndCount.mockResolvedValue([[], 0]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.searchMembers({}, 'viewer-1');
+
+      // Unlike `excludeBlocked`/`excludeHiddenFrom` above, this predicate
+      // takes no viewer parameter at all — it is spliced in verbatim and
+      // applies to every candidate row regardless of who is searching.
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        '("p"."hidden_until" IS NULL OR "p"."hidden_until" <= now())',
+      );
+    });
+
+    it("hides another member's photo/hood on their card when they turned the toggle off", async () => {
+      const p = profile({
+        userId: 'someone-else',
+        avatarUrl: 'https://x/a.png',
+        location: 'Arroios',
+        visibility: ProfileVisibility.Open,
+        photoVisible: false,
+        hoodVisible: false,
+      });
+      const qb = qbStub();
+      qb.getManyAndCount.mockResolvedValue([[p], 1]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      const list = await service.searchMembers({}, 'viewer-1');
+      expect(list.items[0]?.avatarUrl).toBeNull();
+      expect(list.items[0]?.location).toBeNull();
+      expect(list.items[0]?.hood).toBeNull();
+      // The toggle itself is still the true stored value on the card, same as
+      // toFullProfile's gating.
+      expect(list.items[0]?.photoVisible).toBe(false);
+    });
+
+    // Directory search never excludes the viewer's own profile from their own
+    // results (only blocked members are excluded — see the test above), so a
+    // member CAN see their own row in their own search. When that happens
+    // they must see their real photo/hood regardless of their own toggle.
+    it('shows the viewer their own real photo/hood when their own card turns up in their own search, even with the toggle off', async () => {
+      const p = profile({
+        userId: 'viewer-1',
+        avatarUrl: 'https://x/a.png',
+        location: 'Arroios',
+        visibility: ProfileVisibility.Open,
+        photoVisible: false,
+        hoodVisible: false,
+      });
+      const qb = qbStub();
+      qb.getManyAndCount.mockResolvedValue([[p], 1]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      const list = await service.searchMembers({}, 'viewer-1');
+      expect(list.items[0]?.avatarUrl).toBe('https://x/a.png');
+      expect(list.items[0]?.location).toBe('Arroios');
     });
 
     it('serves the bio-derived blurb on the card, but the raw tagline on the profile', async () => {
@@ -572,6 +765,13 @@ describe('ProfilesService replace-list endpoints', () => {
           useValue: {
             isBlockedEitherWay: jest.fn().mockResolvedValue(false),
             excludeBlocked: jest.fn((qb: unknown) => qb),
+          },
+        },
+        {
+          provide: HiddenFromService,
+          useValue: {
+            isHiddenFrom: jest.fn().mockResolvedValue(false),
+            excludeHiddenFrom: jest.fn((qb: unknown) => qb),
           },
         },
         { provide: HandlesService, useValue: { rename: jest.fn() } },

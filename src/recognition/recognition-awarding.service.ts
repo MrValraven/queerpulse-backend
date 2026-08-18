@@ -184,7 +184,7 @@ export class RecognitionAwardingService {
       profileComplete,
       communitiesJoined > 0,
       signalsDto.publishedSubprofiles > 0,
-      signalsDto.vouchCount > 0,
+      signalsDto.vouchesGivenCount > 0,
       signalsDto.connectionCount > 0,
       signalsDto.communityPosts > 0,
     ];
@@ -194,7 +194,13 @@ export class RecognitionAwardingService {
       profileComplete,
       communitiesJoined,
       personasPublished: signalsDto.publishedSubprofiles,
-      vouchCount: signalsDto.vouchCount,
+      // `vouchCount` here means "vouches this member has GIVEN", mirroring the
+      // getting-started step ("vouch for someone else") and matching the
+      // frontend's `useGettingStarted.ts`, which reads the same outbound
+      // field for the identical reason (inbound `vouchCount` is denormalized
+      // on Profile and ticks itself for an invite-vouched member who has
+      // never vouched for anyone).
+      vouchCount: signalsDto.vouchesGivenCount,
       connectionCount: signalsDto.connectionCount,
       eventsAttended: signalsDto.eventsAttended,
       communityPosts: signalsDto.communityPosts,

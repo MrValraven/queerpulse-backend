@@ -361,7 +361,10 @@ export class CommunitiesController {
   @ApiOperation({
     summary: 'List open reports scoped to this community (owner/mod only).',
   })
-  @ApiOkResponse({ description: 'Open reports whose subject is a post or reply in this community.' })
+  @ApiOkResponse({
+    description:
+      'Open reports whose subject is a post or reply in this community.',
+  })
   @ApiForbiddenResponse({ description: 'Owner/moderator role required.' })
   @ApiNotFoundResponse({ description: 'No such community.' })
   listReports(

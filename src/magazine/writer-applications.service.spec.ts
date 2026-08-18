@@ -96,21 +96,18 @@ describe('WriterApplicationsService', () => {
 
     it('returns the latest application, mapped', async () => {
       const applications = makeApplicationsRepo({
-        findOne: jest.fn(
-          async () =>
-            ({
-              id: 'app-1',
-              userId: 'user-1',
-              pitchNote: null,
-              sampleText: 'A paragraph.',
-              sampleLink: null,
-              status: WriterApplicationStatus.Pending,
-              reviewedBy: null,
-              reviewNote: null,
-              createdAt: new Date('2026-08-18T00:00:00.000Z'),
-              reviewedAt: null,
-            }) as MagazineWriterApplication,
-        ),
+        findOne: jest.fn(async () => ({
+          id: 'app-1',
+          userId: 'user-1',
+          pitchNote: null,
+          sampleText: 'A paragraph.',
+          sampleLink: null,
+          status: WriterApplicationStatus.Pending,
+          reviewedBy: null,
+          reviewNote: null,
+          createdAt: new Date('2026-08-18T00:00:00.000Z'),
+          reviewedAt: null,
+        })),
       });
       const service = new WriterApplicationsService(
         applications as any,

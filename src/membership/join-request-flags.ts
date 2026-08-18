@@ -9,9 +9,7 @@
  */
 
 export type JoinRequestFlag =
-  | 'disposable_email'
-  | 'duplicate_message'
-  | 'source_burst';
+  'disposable_email' | 'duplicate_message' | 'source_burst';
 
 // A small, curated set of well-known disposable/throwaway email providers.
 // Not exhaustive — a real bad actor can always use a fresh domain — but it

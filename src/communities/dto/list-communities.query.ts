@@ -9,10 +9,7 @@ import {
   MinLength,
   Min,
 } from 'class-validator';
-import {
-  CommunityListFilter,
-  CommunityListSort,
-} from '../communities.service';
+import { CommunityListFilter, CommunityListSort } from '../communities.service';
 import { AccessTier, CommunityType } from '../entities/community.entity';
 
 export class ListCommunitiesQuery {

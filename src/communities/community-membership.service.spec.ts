@@ -177,9 +177,9 @@ describe('CommunityMembershipService', () => {
     it('returns false for a plain member', async () => {
       members.findOne.mockResolvedValue(MEMBERSHIP);
 
-      await expect(
-        service.isOwnerOrMod('community-1', 'user-1'),
-      ).resolves.toBe(false);
+      await expect(service.isOwnerOrMod('community-1', 'user-1')).resolves.toBe(
+        false,
+      );
     });
 
     it('returns false when the caller is not on the roster at all', async () => {

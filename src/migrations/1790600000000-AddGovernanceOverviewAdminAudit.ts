@@ -13,9 +13,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * most recent row in this table (see `GovernanceOverviewService.getAdminOverview`),
  * so a Council edit never makes the Health badge look touched.
  */
-export class AddGovernanceOverviewAdminAudit1790600000000
-  implements MigrationInterface
-{
+export class AddGovernanceOverviewAdminAudit1790600000000 implements MigrationInterface {
   name = 'AddGovernanceOverviewAdminAudit1790600000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

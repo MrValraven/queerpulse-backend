@@ -15,12 +15,28 @@ export interface AuthorSummary {
   handle: string;
   displayName: string;
   avatarUrl: string | null;
+  // Optional — only a `ForumThreadResponse.author` ever carries this (a
+  // thread an admin posted as "QueerPulse Official"; see `isOfficial` below).
+  // Absent/`undefined` everywhere else (post/reply authors, edit-history
+  // editors), so it's never mistaken for a general-purpose author field.
+  official?: boolean;
 }
 
 const UNKNOWN_AUTHOR: AuthorSummary = {
   handle: '',
   displayName: 'Member',
   avatarUrl: null,
+};
+
+// The displayed author for a thread with `isOfficial: true` — swapped in by
+// `toForumThreadResponse` instead of the real poster's `AuthorSummary`. The
+// real `authorId` is left untouched on the entity (audit trail + ownership
+// checks), this only changes what's rendered.
+const QUEERPULSE_AUTHOR: AuthorSummary = {
+  handle: 'queerpulse',
+  displayName: 'QueerPulse',
+  avatarUrl: null,
+  official: true,
 };
 
 // Author identity hidden on a tombstoned post. The frontend branches on the
@@ -73,6 +89,9 @@ export interface ForumThreadResponse {
   canRestore: boolean;
   canViewHistory: boolean;
   canLock: boolean;
+  // Whether the viewer may pin/unpin this thread — a plain moderator check,
+  // same shape as `canLock`.
+  canPin: boolean;
   // Id of the thread's opening post (the oldest `ForumPost`). Lets the
   // list-row upvote button + row moderation act on the OP without a second
   // request. Empty string when the caller hasn't resolved it (e.g. a
@@ -106,7 +125,7 @@ export interface ForumThreadViewer {
  * The `canDelete`/`canRestore`/`canViewHistory` flags mirror
  * `toForumPostResponse`'s logic applied to the OP post (moderation-table state
  * isn't consulted on this path, so a merely author-tombstoned OP is the only
- * "blanked" case here); `canLock` is a plain moderator check.
+ * "blanked" case here); `canLock`/`canPin` are plain moderator checks.
  */
 export function toForumThreadResponse(
   thread: ForumThread,
@@ -122,7 +141,7 @@ export function toForumThreadResponse(
     id: thread.id,
     slug: thread.slug,
     title: thread.title,
-    author: toAuthorSummary(author),
+    author: thread.isOfficial ? QUEERPULSE_AUTHOR : toAuthorSummary(author),
     category: thread.category,
     isPinned: thread.isPinned,
     isLocked: thread.isLocked,
@@ -135,6 +154,7 @@ export function toForumThreadResponse(
     canRestore: opPost != null && canModerateOp && opTombstoned,
     canViewHistory: opPost != null && canModerateOp && opPost.editedAt != null,
     canLock: viewer.isModerator,
+    canPin: viewer.isModerator,
     opPostId: opPost?.id ?? '',
     opVoteCount: thread.opVoteCount,
     myVote,

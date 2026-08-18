@@ -424,11 +424,16 @@ describe('ModerationService', () => {
     it('escalate moves the report to escalated', async () => {
       reports.findOne.mockResolvedValue(baseReport());
 
-      const res = await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
-        action: 'escalate',
-        reasonCode: 'hate_speech',
-        note: 'Needs senior review.',
-      });
+      const res = await service.actOnReport(
+        'report-1',
+        'actor-1',
+        UserRole.Moderator,
+        {
+          action: 'escalate',
+          reasonCode: 'hate_speech',
+          note: 'Needs senior review.',
+        },
+      );
 
       expect(res.status).toBe(ReportStatus.Escalated);
       expect(reports.save).toHaveBeenCalledWith(
@@ -439,12 +444,17 @@ describe('ModerationService', () => {
     it('every other action resolves the report and does not include detail', async () => {
       reports.findOne.mockResolvedValue(baseReport());
 
-      const res = await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
-        action: 'remove_content',
-        reasonCode: 'hate_speech',
-        note: 'Removed the post.',
-        duration: undefined,
-      });
+      const res = await service.actOnReport(
+        'report-1',
+        'actor-1',
+        UserRole.Moderator,
+        {
+          action: 'remove_content',
+          reasonCode: 'hate_speech',
+          note: 'Removed the post.',
+          duration: undefined,
+        },
+      );
 
       expect(res.status).toBe(ReportStatus.Resolved);
       expect(res).not.toHaveProperty('detail');
@@ -515,7 +525,10 @@ describe('ModerationService', () => {
 
       it('lets a community owner/mod dismiss a report on a post/reply in the community they moderate', async () => {
         reports.findOne.mockResolvedValue(
-          baseReport({ subjectType: ReportSubjectType.Post, subjectId: 'post-1' }),
+          baseReport({
+            subjectType: ReportSubjectType.Post,
+            subjectId: 'post-1',
+          }),
         );
         communityMembership.communityIdForPost.mockResolvedValue('community-1');
         communityMembership.isOwnerOrMod.mockResolvedValue(true);
@@ -539,7 +552,10 @@ describe('ModerationService', () => {
 
       it('forbids a community owner/mod from dismissing a report in a community they do not moderate', async () => {
         reports.findOne.mockResolvedValue(
-          baseReport({ subjectType: ReportSubjectType.Post, subjectId: 'post-1' }),
+          baseReport({
+            subjectType: ReportSubjectType.Post,
+            subjectId: 'post-1',
+          }),
         );
         communityMembership.communityIdForPost.mockResolvedValue(
           'someone-elses-community',
@@ -571,16 +587,11 @@ describe('ModerationService', () => {
         );
 
         await expect(
-          service.actOnReport(
-            'report-1',
-            'community-mod-1',
-            UserRole.Member,
-            {
-              action: 'dismiss',
-              reasonCode: 'harassment',
-              note: 'Not a violation.',
-            },
-          ),
+          service.actOnReport('report-1', 'community-mod-1', UserRole.Member, {
+            action: 'dismiss',
+            reasonCode: 'harassment',
+            note: 'Not a violation.',
+          }),
         ).rejects.toBeInstanceOf(ForbiddenException);
         // A `member`-subject report never resolves to a community — the
         // carve-out's resolver isn't even reached for post/reply lookups.
@@ -591,22 +602,20 @@ describe('ModerationService', () => {
 
       it('forbids a community owner/mod from taking any action other than dismiss, even within their own community', async () => {
         reports.findOne.mockResolvedValue(
-          baseReport({ subjectType: ReportSubjectType.Post, subjectId: 'post-1' }),
+          baseReport({
+            subjectType: ReportSubjectType.Post,
+            subjectId: 'post-1',
+          }),
         );
         communityMembership.communityIdForPost.mockResolvedValue('community-1');
         communityMembership.isOwnerOrMod.mockResolvedValue(true);
 
         await expect(
-          service.actOnReport(
-            'report-1',
-            'community-mod-1',
-            UserRole.Member,
-            {
-              action: 'remove_content',
-              reasonCode: 'hate_speech',
-              note: 'Removed the post.',
-            },
-          ),
+          service.actOnReport('report-1', 'community-mod-1', UserRole.Member, {
+            action: 'remove_content',
+            reasonCode: 'hate_speech',
+            note: 'Removed the post.',
+          }),
         ).rejects.toBeInstanceOf(ForbiddenException);
         expect(reports.save).not.toHaveBeenCalled();
       });

@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { CommunityMembershipModule } from '../communities/community-membership.module';
 import { ConnectionsModule } from '../connections/connections.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
+import { ListingLookupModule } from '../listings/listing-lookup.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PushModule } from '../push/push.module';
@@ -81,6 +82,10 @@ import { RsvpService } from './rsvp.service';
     // gathering photo's `crop` sibling, shared by `EventsService` and
     // `EventPhotosService`.
     MediaCropsModule,
+    // `ListingLookupService` — an optional `listingId` on create/update
+    // resolves+validates against a real, live directory listing before the
+    // event's venue is linked to it. Read-only module; closes no cycle.
+    ListingLookupModule,
   ],
   controllers: [
     EventsController,

@@ -14,7 +14,10 @@ import {
   OpportunityStatus,
   VolunteerOpportunity,
 } from './entities/volunteer-opportunity.entity';
-import { SignupStatus, VolunteerSignup } from './entities/volunteer-signup.entity';
+import {
+  SignupStatus,
+  VolunteerSignup,
+} from './entities/volunteer-signup.entity';
 import { VolunteeringService } from './volunteering.service';
 
 // A chainable query-builder stub whose terminal methods resolve to empty
@@ -736,7 +739,12 @@ describe('VolunteeringService', () => {
         posterId: 'poster-1',
       });
       await expect(
-        service.decideSignup('x', 'signup-1', 'intruder', SignupStatus.Accepted),
+        service.decideSignup(
+          'x',
+          'signup-1',
+          'intruder',
+          SignupStatus.Accepted,
+        ),
       ).rejects.toBeInstanceOf(ForbiddenException);
     });
 
@@ -763,7 +771,12 @@ describe('VolunteeringService', () => {
         status: 'accepted',
       });
       await expect(
-        service.decideSignup('x', 'signup-1', 'poster-1', SignupStatus.Declined),
+        service.decideSignup(
+          'x',
+          'signup-1',
+          'poster-1',
+          SignupStatus.Declined,
+        ),
       ).rejects.toBeInstanceOf(ConflictException);
     });
 
@@ -781,7 +794,12 @@ describe('VolunteeringService', () => {
       signups.createQueryBuilder.mockReturnValue(qb);
 
       await expect(
-        service.decideSignup('x', 'signup-1', 'poster-1', SignupStatus.Accepted),
+        service.decideSignup(
+          'x',
+          'signup-1',
+          'poster-1',
+          SignupStatus.Accepted,
+        ),
       ).rejects.toBeInstanceOf(ConflictException);
     });
 
@@ -847,7 +865,12 @@ describe('VolunteeringService', () => {
         },
       ]);
 
-      await service.decideSignup('x', 'signup-1', 'poster-1', SignupStatus.Declined);
+      await service.decideSignup(
+        'x',
+        'signup-1',
+        'poster-1',
+        SignupStatus.Declined,
+      );
 
       expect(notificationsService.create).toHaveBeenCalledWith(
         'user-1',

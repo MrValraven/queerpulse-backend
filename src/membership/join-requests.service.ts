@@ -135,8 +135,7 @@ export class JoinRequestsService {
       .getOne();
     if (
       lastDeclined?.reviewedAt &&
-      Date.now() - lastDeclined.reviewedAt.getTime() <
-        REAPPLICATION_COOLDOWN_MS
+      Date.now() - lastDeclined.reviewedAt.getTime() < REAPPLICATION_COOLDOWN_MS
     ) {
       throw new ForbiddenException({
         statusCode: 403,
@@ -457,7 +456,10 @@ export class JoinRequestsService {
       | PlatformJoinRequestStatus.Declined
       | PlatformJoinRequestStatus.Waitlisted,
     declineReason?: string,
-  ): Promise<{ succeeded: string[]; failed: { id: string; reason: string }[] }> {
+  ): Promise<{
+    succeeded: string[];
+    failed: { id: string; reason: string }[];
+  }> {
     const succeeded: string[] = [];
     const failed: { id: string; reason: string }[] = [];
     for (const id of ids) {
@@ -512,7 +514,10 @@ export class JoinRequestsService {
       }
     }
     return requests.map((r) =>
-      toJoinRequestView(r, r.inviteId ? (codeById.get(r.inviteId) ?? null) : null),
+      toJoinRequestView(
+        r,
+        r.inviteId ? (codeById.get(r.inviteId) ?? null) : null,
+      ),
     );
   }
 

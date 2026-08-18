@@ -1,6 +1,7 @@
 import {
   ArrayMaxSize,
   IsArray,
+  IsBoolean,
   IsOptional,
   IsString,
   Matches,
@@ -49,4 +50,12 @@ export class CreateThreadDto {
   @IsString()
   @MaxLength(200)
   communitySlug?: string;
+
+  // Post this thread as "QueerPulse Official" instead of the caller. Only an
+  // admin can actually set this — `ForumThreadsService.create` silently
+  // coerces it to `false` for anyone else, since the composer only ever
+  // shows the checkbox to admins.
+  @IsOptional()
+  @IsBoolean()
+  isOfficial?: boolean;
 }

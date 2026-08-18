@@ -12,9 +12,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN. Authored for review only; the maintainer runs migrations.
  */
-export class AddMagazineWriterApplications1790600000000
-  implements MigrationInterface
-{
+export class AddMagazineWriterApplications1790600000000 implements MigrationInterface {
   name = 'AddMagazineWriterApplications1790600000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

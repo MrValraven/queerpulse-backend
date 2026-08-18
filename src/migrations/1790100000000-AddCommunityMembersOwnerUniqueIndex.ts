@@ -24,9 +24,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
-export class AddCommunityMembersOwnerUniqueIndex1790100000000
-  implements MigrationInterface
-{
+export class AddCommunityMembersOwnerUniqueIndex1790100000000 implements MigrationInterface {
   name = 'AddCommunityMembersOwnerUniqueIndex1790100000000';
 
   transaction = false as const;

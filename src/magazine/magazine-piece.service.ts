@@ -7,7 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, IsNull, Repository } from 'typeorm';
+import { DataSource, In, Not, Repository } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -44,6 +44,7 @@ import {
   MagazineIssue,
 } from './entities/magazine-issue.entity';
 import { MagazineLetter } from './entities/magazine-letter.entity';
+import { MagazineNotificationRead } from './entities/magazine-notification-read.entity';
 import { MagazinePayment } from './entities/magazine-payment.entity';
 import { MagazinePieceEvent } from './entities/magazine-piece-event.entity';
 import { MagazinePieceMessage } from './entities/magazine-piece-message.entity';
@@ -130,14 +131,6 @@ const EDITOR_CAP = 7;
 const RECENT_ACTIVITY_LIMIT = 20;
 
 /**
- * Autosave fires an `article_edited` event on every draft PATCH (roughly
- * every 1.2s debounce tick while someone types). Merging repeats from the
- * same actor into one row keeps the audit trail and activity feed from
- * being flooded by a single editing session.
- */
-const ARTICLE_EDIT_MERGE_WINDOW_MS = 5 * 60 * 1000;
-
-/**
  * How many rows `searchArchive` returns, across articles and decks combined
  * (Magazine Desk Phase 7, Task B1) — matches the ArchiveTab's page size.
  */
@@ -195,6 +188,8 @@ export class MagazinePieceService {
     private readonly payments: Repository<MagazinePayment>,
     @InjectRepository(MagazineLetter)
     private readonly letters: Repository<MagazineLetter>,
+    @InjectRepository(MagazineNotificationRead)
+    private readonly notificationReads: Repository<MagazineNotificationRead>,
     @InjectRepository(MagazineCorrection)
     private readonly corrections: Repository<MagazineCorrection>,
     @InjectRepository(MagazineArticle)
@@ -317,6 +312,12 @@ export class MagazinePieceService {
     const blocks =
       dto.blocks !== undefined ? validateArticleBlocks(dto.blocks) : undefined;
 
+    const trimmedTitle = dto.title?.trim();
+    const isRealTitleChange =
+      trimmedTitle !== undefined &&
+      trimmedTitle.length > 0 &&
+      trimmedTitle !== article.title;
+
     Object.assign(article, {
       ...(dto.title !== undefined ? { title: dto.title } : {}),
       ...(dto.standfirst !== undefined ? { standfirst: dto.standfirst } : {}),
@@ -329,9 +330,36 @@ export class MagazinePieceService {
       ...(blocks !== undefined ? { blocks } : {}),
     });
 
+    // The slug is server-generated and read-only in the editor (ArticleMetaRail)
+    // — it's derived from the title, never typed directly. It's seeded once,
+    // lazily, from whatever title existed the first time the editor opened
+    // (`ensureArticleForPiece`), which is often still a commission-time
+    // placeholder. Keep it following the real headline while the article is
+    // still unpublished; once published the slug is a public URL and must
+    // stay stable, so it stops tracking title edits at that point.
+    if (isRealTitleChange && article.publishedAt === null) {
+      article.slug = await allocateUniqueSlug(
+        slugify(trimmedTitle, 'draft'),
+        async (candidate) =>
+          (await this.articles.findOne({
+            where: { slug: candidate, id: Not(article.id) },
+          })) !== null,
+      );
+    }
+
     await this.articles.save(article);
+
+    // `MagazinePiece.title` is what every surface outside the editor reads
+    // (command palette, piece board, piece record) — sync it with the
+    // article's real headline instead of leaving it frozen at whatever
+    // placeholder was set at commission time (e.g. "Untitled piece").
+    if (isRealTitleChange && piece.title !== trimmedTitle) {
+      piece.title = trimmedTitle;
+      await this.pieces.save(piece);
+    }
+
     await this.recordEvent(pieceId, actorId, 'article_edited', undefined, {
-      mergeWithinMs: ARTICLE_EDIT_MERGE_WINDOW_MS,
+      mergeWhileLatest: true,
     });
 
     return toArticleDraftResponse(article);
@@ -689,9 +717,12 @@ export class MagazinePieceService {
    * back to a second batched `Profile` lookup for any actor the directory
    * doesn't cover — most notably a writer (e.g. a `filed` event) — so
    * attribution is truthful instead of misreading a writer's action as an
-   * editor's.
+   * editor's. `isUnread` compares each event against the viewer's own
+   * `MagazineNotificationRead.lastReadAt` — a viewer who has never dismissed
+   * the panel has no row, so everything reads unread.
    */
   async listMagazineNotifications(
+    actorId: string,
     limit = NOTIFICATIONS_DEFAULT_LIMIT,
   ): Promise<MagazineNotificationResponse[]> {
     const events = await this.pieceEvents.find({
@@ -702,11 +733,14 @@ export class MagazinePieceService {
       return [];
     }
 
-    const pieceIds = [...new Set(events.map((event) => event.pieceId))];
-    const [pieces, editors] = await Promise.all([
-      this.pieces.find({ where: { id: In(pieceIds) } }),
+    const [pieces, editors, ownReadCursor] = await Promise.all([
+      this.pieces.find({
+        where: { id: In([...new Set(events.map((event) => event.pieceId))]) },
+      }),
       this.listMagazineEditors(),
+      this.notificationReads.findOne({ where: { actorId } }),
     ]);
+    const lastReadAt = ownReadCursor?.lastReadAt ?? null;
 
     const titleByPieceId = new Map(
       pieces.map((piece) => [piece.id, piece.title]),
@@ -742,8 +776,29 @@ export class MagazinePieceService {
         event,
         titleByPieceId.get(event.pieceId),
         actorNameById,
+        lastReadAt,
       ),
     );
+  }
+
+  /**
+   * Upserts the viewer's read cursor to now — everything currently in
+   * `listMagazineNotifications` reads unread until they dismiss again.
+   */
+  async markNotificationsRead(actorId: string): Promise<void> {
+    const existing = await this.notificationReads.findOne({
+      where: { actorId },
+    });
+    if (existing) {
+      existing.lastReadAt = new Date();
+      await this.notificationReads.save(existing);
+      return;
+    }
+    const read = this.notificationReads.create({
+      actorId,
+      lastReadAt: new Date(),
+    });
+    await this.notificationReads.save(read);
   }
 
   // --- article comments / NotesRail (Magazine Desk Phase 7, Task D1) ---
@@ -1710,20 +1765,21 @@ export class MagazinePieceService {
     actorId: string | null,
     action: string,
     detail?: string | null,
-    options?: { mergeWithinMs?: number },
+    options?: { mergeWhileLatest?: boolean },
   ): Promise<void> {
-    if (options?.mergeWithinMs) {
-      const recent = await this.pieceEvents.findOne({
-        where: { pieceId, actorId: actorId ?? IsNull(), action },
+    if (options?.mergeWhileLatest) {
+      const latestOnPiece = await this.pieceEvents.findOne({
+        where: { pieceId },
         order: { createdAt: 'DESC' },
       });
       if (
-        recent &&
-        Date.now() - recent.createdAt.getTime() <= options.mergeWithinMs
+        latestOnPiece &&
+        latestOnPiece.actorId === actorId &&
+        latestOnPiece.action === action
       ) {
-        recent.detail = detail ?? null;
-        recent.createdAt = new Date();
-        await this.pieceEvents.save(recent);
+        latestOnPiece.detail = detail ?? null;
+        latestOnPiece.createdAt = new Date();
+        await this.pieceEvents.save(latestOnPiece);
         return;
       }
     }

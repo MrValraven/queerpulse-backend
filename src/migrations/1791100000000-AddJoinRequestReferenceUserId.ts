@@ -11,9 +11,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * this null. FK is ON DELETE SET NULL — the reference is corroborating
  * context, not something worth blocking a user deletion over.
  */
-export class AddJoinRequestReferenceUserId1791100000000
-  implements MigrationInterface
-{
+export class AddJoinRequestReferenceUserId1791100000000 implements MigrationInterface {
   name = 'AddJoinRequestReferenceUserId1791100000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

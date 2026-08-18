@@ -870,6 +870,102 @@ export class ConnectionsService {
   }
 
   /**
+   * `userId`'s accepted-connection counterpart ids, ordered oldest-accepted
+   * edge first (ties broken by connection `id`) — a deterministic ordering
+   * key for {@link mutualMembers}'s "top `limit`" slice, so the same names
+   * don't shuffle between requests on unstable DB row order. Distinct from
+   * `getAcceptedConnectionUserIds` (200-capped, unordered — fine for the UI
+   * lists it backs) and `allAcceptedConnectionUserIds` (uncapped, also
+   * unordered) — this one is for a list a person actually reads in order.
+   */
+  private async acceptedConnectionUserIdsOrdered(
+    userId: string,
+  ): Promise<string[]> {
+    const rows = await this.connections.find({
+      where: [
+        { requesterId: userId, status: ConnectionStatus.Accepted },
+        { addresseeId: userId, status: ConnectionStatus.Accepted },
+      ],
+      order: { respondedAt: 'ASC', id: 'ASC' },
+    });
+    return rows.map((c) =>
+      c.requesterId === userId ? c.addresseeId : c.requesterId,
+    );
+  }
+
+  /**
+   * Mutual (accepted-connected-to-both) member ids between `viewerUserId` and
+   * `otherUserId`, in the deterministic order documented on
+   * {@link acceptedConnectionUserIdsOrdered}. The per-pair logic
+   * `mutualCountsByUserIds` uses to test "is this far end also one of the
+   * viewer's accepted connections?" is {@link acceptedConnectionsAmong} — this
+   * reuses that exact same bounded query rather than re-deriving the join, it
+   * just supplies a single member's ordered connection list as the candidate
+   * set instead of `mutualCountsByUserIds`'s batched, unordered one.
+   */
+  private async mutualUserIdsBetween(
+    viewerUserId: string,
+    otherUserId: string,
+  ): Promise<string[]> {
+    const otherConnections =
+      await this.acceptedConnectionUserIdsOrdered(otherUserId);
+    if (!otherConnections.length) {
+      return [];
+    }
+    const viewerConnections = await this.acceptedConnectionsAmong(
+      viewerUserId,
+      otherConnections,
+    );
+    if (!viewerConnections.size) {
+      return [];
+    }
+    // Filter, don't rebuild from the Set — this preserves
+    // acceptedConnectionUserIdsOrdered's deterministic order, which a Set
+    // (or a fresh query keyed by IN (...)) would not.
+    return otherConnections.filter((id) => viewerConnections.has(id));
+  }
+
+  /**
+   * The viewer and `otherUserId`'s shared accepted connections: a total count
+   * plus up to `limit` of their profiles (slug + name), for a "N mutual
+   * connections" chip on another member's profile. Ordering is deterministic
+   * end-to-end — {@link mutualUserIdsBetween}'s order is preserved through the
+   * final profile lookup by mapping `top` to a userId->Profile lookup rather
+   * than trusting `Repository.find`'s row order (unstable for an `IN (...)`
+   * with no `ORDER BY`).
+   */
+  async mutualMembers(
+    viewerUserId: string,
+    otherUserId: string,
+    limit = 2,
+  ): Promise<{
+    count: number;
+    members: { slug: string; firstName: string; lastName: string }[];
+  }> {
+    const mutualUserIds = await this.mutualUserIdsBetween(
+      viewerUserId,
+      otherUserId,
+    );
+    const top = mutualUserIds.slice(0, limit);
+    const profiles = top.length
+      ? await this.profiles.find({
+          where: { userId: In(top) },
+          select: { userId: true, slug: true, firstName: true, lastName: true },
+        })
+      : [];
+    const profileByUserId = new Map(profiles.map((p) => [p.userId, p]));
+    const members = top
+      .map((userId) => profileByUserId.get(userId))
+      .filter((p): p is Profile => p !== undefined)
+      .map((p) => ({
+        slug: p.slug,
+        firstName: p.firstName,
+        lastName: p.lastName,
+      }));
+    return { count: mutualUserIds.length, members };
+  }
+
+  /**
    * The vouch badge between the viewer and each of `otherIds`: `you-vouched`
    * when the viewer vouched for them, `vouched-for-you` the other way, `mutual`
    * for both. One query loads every vouch in either direction across the set.

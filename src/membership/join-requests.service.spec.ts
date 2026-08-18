@@ -292,7 +292,9 @@ describe('JoinRequestsService', () => {
           })
           .mockResolvedValueOnce(null);
         await expect(service.submit(dto())).resolves.toEqual(
-          expect.objectContaining({ status: PlatformJoinRequestStatus.Pending }),
+          expect.objectContaining({
+            status: PlatformJoinRequestStatus.Pending,
+          }),
         );
       });
     });

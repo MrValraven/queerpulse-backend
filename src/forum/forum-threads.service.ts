@@ -42,6 +42,10 @@ import {
 const DEFAULT_LIMIT = 20;
 const MAX_SLUG_ATTEMPTS = 5;
 const MAX_TAGS = 5;
+// Cap on simultaneously pinned threads — mirrors
+// `ConversationsService.MAX_PINNED_CONVERSATIONS`, enforced the same way (an
+// application-code count check in `setPinned`, not a DB constraint).
+const MAX_PINNED_THREADS = 3;
 
 // A `GET /forum/threads` sort mode (mirrors `ListThreadsQuery.sort`). `new`
 // (default) and `unanswered` both page the `(createdAt, id)` keyset; `top` and
@@ -94,6 +98,7 @@ export interface CreateThreadInput {
   category: string;
   tags?: string[];
   communitySlug?: string;
+  isOfficial?: boolean;
 }
 
 @Injectable()
@@ -138,6 +143,10 @@ export class ForumThreadsService {
     if (category) {
       qb.andWhere('t.category = :category', { category });
     }
+    // Pinned threads live in their own bucket (`listPinned`, rendered above
+    // this paginated list) — excluded here so a pinned thread never appears
+    // twice across a scroll session.
+    qb.andWhere('t.is_pinned = false');
     // `q`/`tag` fold in AFTER the block filter (spec §Backend): same visibility
     // rules first, then narrow the visible set by title text / tag membership.
     this.applyTextAndTagFilters(qb, q, tag);
@@ -233,6 +242,104 @@ export class ForumThreadsService {
     );
   }
 
+  // POST /forum/threads/:slug/pin|unpin — moderator-only pin toggle, same
+  // shape as `setLocked`. Pinning past `MAX_PINNED_THREADS` 409s rather than
+  // silently displacing an older pin — the caller unpins one first.
+  // `pinnedAt` is the ordering watermark (`listPinned` sorts by it): set to
+  // `now()` on pin, cleared to `null` on unpin so a re-pin gets a fresh
+  // timestamp rather than reusing a stale one.
+  async setPinned(
+    slug: string,
+    user: CurrentUserData,
+    pinned: boolean,
+  ): Promise<ForumThreadResponse> {
+    if (!isModeratorRole(user.role)) {
+      throw new ForbiddenException('Only a moderator can pin threads');
+    }
+    const thread = await this.loadOr404(slug, user.userId);
+    if (thread.isPinned !== pinned) {
+      if (pinned) {
+        const pinnedCount = await this.threads.count({
+          where: { isPinned: true },
+        });
+        if (pinnedCount >= MAX_PINNED_THREADS) {
+          throw new ConflictException(
+            `Only ${MAX_PINNED_THREADS} threads can be pinned at once`,
+          );
+        }
+      }
+      thread.isPinned = pinned;
+      thread.pinnedAt = pinned ? new Date() : null;
+      await this.threads.save(thread);
+    }
+    const [authors, op] = await Promise.all([
+      new MemberLookup(this.profiles).byUserIds([thread.authorId]),
+      this.resolveOp(thread.id, user.userId),
+    ]);
+    // The role gate above already proved the caller is a moderator.
+    return toForumThreadResponse(
+      thread,
+      authors.get(thread.authorId) ?? null,
+      { userId: user.userId, isModerator: isModeratorRole(user.role) },
+      op.opPost,
+      op.myVote,
+    );
+  }
+
+  // PATCH /admin/forum/threads/:slug/official — admin-only toggle, flipping a
+  // published thread's displayed author between the real poster and
+  // "QueerPulse Official" (see `isOfficial` on the entity). Reachable only
+  // through `AdminForumController`, which gates the whole controller on the
+  // admin role via `RolesGuard`/`@Roles(UserRole.Admin)` — unlike
+  // `setLocked`/`setPinned`, there's no in-method role check here.
+  async setOfficial(
+    slug: string,
+    user: CurrentUserData,
+    official: boolean,
+  ): Promise<ForumThreadResponse> {
+    const thread = await this.loadOr404(slug);
+    if (thread.isOfficial !== official) {
+      thread.isOfficial = official;
+      await this.threads.save(thread);
+    }
+    const [authors, op] = await Promise.all([
+      new MemberLookup(this.profiles).byUserIds([thread.authorId]),
+      this.resolveOp(thread.id, user.userId),
+    ]);
+    return toForumThreadResponse(
+      thread,
+      authors.get(thread.authorId) ?? null,
+      { userId: user.userId, isModerator: isModeratorRole(user.role) },
+      op.opPost,
+      op.myVote,
+    );
+  }
+
+  // GET /forum/threads/pinned?category= — the small, unpaginated "sticky"
+  // bucket rendered above the regular list (see `list()`, which excludes
+  // pinned threads from its own page so nothing appears twice). Most-recently-
+  // pinned first; capped at `MAX_PINNED_THREADS` (already enforced on write by
+  // `setPinned`, so this cap is a defensive ceiling, not expected to bite).
+  async listPinned(
+    viewerId: string,
+    category: string | undefined,
+    viewerIsModerator: boolean,
+  ): Promise<ForumThreadResponse[]> {
+    const qb = this.threads
+      .createQueryBuilder('t')
+      .andWhere('t.is_pinned = true');
+    this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
+    if (category) {
+      qb.andWhere('t.category = :category', { category });
+    }
+    const rows = await qb
+      .orderBy('t.pinned_at', 'DESC')
+      .addOrderBy('t.id', 'DESC')
+      .take(MAX_PINNED_THREADS)
+      .getMany();
+    return this.toThreadResponses(rows, viewerId, viewerIsModerator);
+  }
+
   // Cross-entity global search (SearchService) — ILIKE over thread `title`
   // only (post-body search is deferred). Reuses the same block filter as
   // `list()`. Most-recently-active first.
@@ -283,6 +390,7 @@ export class ForumThreadsService {
     authorId: string,
     input: CreateThreadInput,
     viewerIsModerator = false,
+    viewerIsAdmin = false,
   ): Promise<ForumThreadResponse> {
     // Resolve the optional community BEFORE the create transaction opens —
     // a non-member gets 403 (or a missing/archived community 404s) without a
@@ -294,9 +402,13 @@ export class ForumThreadsService {
         authorId,
       );
     }
+    // Only an admin can actually post as "QueerPulse Official" — silently
+    // coerced here (not a 403) since the composer only shows the checkbox to
+    // admins in the first place; anyone else's value is simply ignored.
+    const isOfficial = viewerIsAdmin && !!input.isOfficial;
     const { thread, opPost } = await this.createWithUniqueSlug(
       authorId,
-      input,
+      { ...input, isOfficial },
       communityId,
     );
     // After the thread has committed: record it as public profile activity for
@@ -506,6 +618,7 @@ export class ForumThreadsService {
               category: input.category,
               isPinned: false,
               isLocked: false,
+              isOfficial: input.isOfficial ?? false,
               tags: normalizeTags(input.tags),
               communityId,
               // Explicit 0 (not just the DB default) so the create echo returns

@@ -2,7 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
-import { CommunityMember, RosterRole } from './entities/community-member.entity';
+import {
+  CommunityMember,
+  RosterRole,
+} from './entities/community-member.entity';
 import { GovernanceLogAction } from './entities/community-governance-log.entity';
 import { Community } from './entities/community.entity';
 

@@ -1,4 +1,4 @@
-import { Controller, Get, Param, UseGuards } from '@nestjs/common';
+import { Controller, Get, Logger, Param, UseGuards } from '@nestjs/common';
 import {
   CurrentUser,
   CurrentUserData,
@@ -26,6 +26,8 @@ import {
 @Controller('me/recognition')
 @UseGuards(ActiveMemberGuard)
 export class MyRecognitionController {
+  private readonly logger = new Logger(MyRecognitionController.name);
+
   constructor(
     private readonly recognitionService: RecognitionService,
     private readonly awarding: RecognitionAwardingService,
@@ -41,11 +43,14 @@ export class MyRecognitionController {
   async getMine(@CurrentUser() user: CurrentUserData) {
     // Recompute (throttled to once / 5 min inside the service) so the read
     // reflects fresh XP/badges and fires level-up / badge notifications.
-    // Best-effort: a recompute failure must not blank the recognition page.
+    // Best-effort: a recompute failure must not blank the recognition page,
+    // but the failure is still logged so it isn't invisible in production.
     try {
       await this.awarding.recompute(user);
-    } catch {
-      // swallow. fall through to whatever is already materialized
+    } catch (error) {
+      this.logger.warn(
+        `recompute failed for user ${user.userId}: ${String(error)}`,
+      );
     }
     return this.recognitionService.getForUser(user.userId, true);
   }

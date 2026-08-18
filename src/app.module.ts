@@ -52,6 +52,7 @@ import { AdminOverviewModule } from './admin-overview/admin-overview.module';
 import { AdminMediaModule } from './admin-media/admin-media.module';
 import { MyMediaModule } from './my-media/my-media.module';
 import { AdminBotsModule } from './admin-bots/admin-bots.module';
+import { AdminForumModule } from './admin-forum/admin-forum.module';
 import { AdminHousingModule } from './admin-housing/admin-housing.module';
 import { PlatformStaffModule } from './platform-staff/platform-staff.module';
 import { PublicEligibilityModule } from './public-eligibility/public-eligibility.module';
@@ -290,6 +291,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     AdminMediaModule,
     MyMediaModule,
     AdminBotsModule,
+    AdminForumModule,
     AdminHousingModule,
     PlatformStaffModule,
     PublicEligibilityModule,

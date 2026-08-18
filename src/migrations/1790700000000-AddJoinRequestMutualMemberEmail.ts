@@ -14,9 +14,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * name, and historical rows already carry the reference inside `message` —
  * this column only applies going forward.
  */
-export class AddJoinRequestMutualMemberEmail1790700000000
-  implements MigrationInterface
-{
+export class AddJoinRequestMutualMemberEmail1790700000000 implements MigrationInterface {
   name = 'AddJoinRequestMutualMemberEmail1790700000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

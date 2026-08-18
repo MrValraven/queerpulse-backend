@@ -7,6 +7,7 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Throttle, seconds } from '@nestjs/throttler';
 import { CreateReportDto } from './dto/create-report.dto';
 import { ListReasonsQuery } from './dto/list-reasons.query';
+import { formatReportReference } from './report-reference';
 import { ReportsService } from './reports.service';
 import {
   ApiCookieAuth,
@@ -53,5 +54,28 @@ export class ReportsController {
   @Get('reasons')
   reasons(@Query() query: ListReasonsQuery) {
     return this.reportsService.reasonsFor(query.subjectType);
+  }
+
+  // Static path segment (`mine`), not a `:id`-shaped param route — there is no
+  // existing `Get(':id')` on this controller to be swallowed by/ordered
+  // against, but this stays ahead of any future one on general principle.
+  @ApiOperation({ summary: "List the current member's own filed reports" })
+  @ApiOkResponse({
+    description:
+      'The caller’s own filed reports, newest first, with a human-friendly reference code.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
+  @Get('mine')
+  async listMine(@CurrentUser() user: CurrentUserData) {
+    const reports = await this.reportsService.listMine(user.userId);
+    return reports.map((report) => ({
+      id: report.id,
+      reference: formatReportReference(report),
+      subjectType: report.subjectType,
+      reasonCode: report.reasonCode,
+      status: report.status,
+      createdAt: report.createdAt.toISOString(),
+    }));
   }
 }

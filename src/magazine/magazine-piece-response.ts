@@ -792,6 +792,7 @@ export interface MagazineNotificationResponse {
   what: string;
   when: string;
   route: string;
+  isUnread: boolean;
   tone: 'normal' | 'warn';
 }
 
@@ -919,6 +920,7 @@ export function toMagazineNotification(
   event: MagazinePieceEvent,
   title: string | undefined,
   actorNameById: Map<string, string>,
+  viewerLastReadAt: Date | null,
 ): MagazineNotificationResponse {
   const resolvedTitle = title ?? UNRESOLVED_TITLE_LABEL;
   return {
@@ -927,6 +929,7 @@ export function toMagazineNotification(
     what: describeNotificationAction(event.action, event.detail, resolvedTitle),
     when: event.createdAt.toISOString(),
     route: pieceNotificationRoute(event.pieceId),
+    isUnread: viewerLastReadAt === null || event.createdAt > viewerLastReadAt,
     tone: deriveNotificationTone(event.action),
   };
 }

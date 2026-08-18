@@ -9,7 +9,7 @@ import { BoardPost } from './entities/board-post.entity';
 import { Shaping, ShapingKind } from './entities/shaping.entity';
 import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
-import { WorkItem } from './entities/work-item.entity';
+import { WorkItem, WorkLink } from './entities/work-item.entity';
 import { OpenToEntry } from './open-to';
 import { facetsForLabels } from './identities';
 import { matchNeighbourhood } from './neighbourhoods';
@@ -19,6 +19,8 @@ export interface ProfileCard {
   firstName: string;
   lastName: string;
   pronouns: string | null;
+  // How the member's name is said aloud. Ungated — same as `pronouns` above.
+  pronunciation: string | null;
   tagline: string | null;
   avatarUrl: string | null;
   tags: string[];
@@ -30,6 +32,15 @@ export interface ProfileCard {
   languages: string[];
   vouchCount: number;
   visibility: string;
+  // Member-controlled visibility toggles. These are ALWAYS the true stored
+  // value, for every viewer — they say whether the corresponding CONTENT
+  // (avatarUrl/location/vouchers list) is gated, they are never themselves
+  // gated. The owner reads them to render the real settings-sheet toggle
+  // state; a non-owner viewer can use them to know whether e.g. calling the
+  // vouchers-list endpoint is worth it. See toFullProfile's isOwner gating.
+  photoVisible: boolean;
+  hoodVisible: boolean;
+  vouchersVisible: boolean;
 }
 
 export interface SocialLinkView {
@@ -44,12 +55,18 @@ export interface WorkView {
   imageUrl: string | null;
   /** Crop rect for `imageUrl`, when the owner reframed it. */
   crop?: CropRect;
+  links: WorkLink[];
 }
 
 export interface BoardView {
   kind: string;
   title: string;
   slug: string;
+  status: string;
+  closedNote: string | null;
+  closedAt: string | null;
+  expiresAt: string;
+  createdAt: string;
 }
 
 export interface SkillView {
@@ -91,8 +108,13 @@ export interface FullProfileResponse extends ProfileCard {
   verified: boolean;
   joinedAt: string;
   bio: string | null;
+  // Portuguese translation of `bio`. Ungated — same as `bio` above.
+  bioPt: string | null;
   location: string | null;
   now: string | null;
+  // What the member is explicitly not here for, shown alongside `now`.
+  // Ungated — same as `now` above.
+  notHereFor: string | null;
   openTo: OpenToEntry[];
   // Private Interests preferences — populated only when the requester is the
   // profile owner; `[]` for everyone else (see toFullProfile's `isOwner`).
@@ -108,6 +130,12 @@ export interface FullProfileResponse extends ProfileCard {
   // homepage (see Profile.featuredConsent). Never surfaced to non-owner
   // viewers, mirroring privateNetwork above.
   featuredConsent?: boolean;
+  // Owner-only: when set and in the future, the member has hidden their
+  // profile until this instant (see Profile.hiddenUntil /
+  // UpdateProfileDto.hiddenUntil). Never surfaced to non-owner viewers,
+  // mirroring privateNetwork/featuredConsent above — knowing exactly when
+  // someone will reappear from hiding is itself a minor privacy leak.
+  hiddenUntil?: string | null;
   socials: SocialLinkView[];
   work: WorkView[];
   board: BoardView[];
@@ -188,6 +216,7 @@ export function toProfileCard(
     firstName: profile.firstName,
     lastName: profile.lastName,
     pronouns: profile.pronouns,
+    pronunciation: profile.pronunciation,
     tagline: profile.tagline,
     avatarUrl: toImageUrl(profile.avatarUrl),
     tags: profile.tags,
@@ -196,6 +225,9 @@ export function toProfileCard(
     languages: profile.languages ?? [],
     vouchCount,
     visibility: profile.visibility,
+    photoVisible: profile.photoVisible,
+    hoodVisible: profile.hoodVisible,
+    vouchersVisible: profile.vouchersVisible,
   };
 }
 
@@ -205,24 +237,72 @@ function tenureYears(joinedAt: Date): number {
   return Math.max(0, Math.floor(ms / (365.25 * 24 * 60 * 60 * 1000)));
 }
 
-export function toMemberCard(p: Profile, vouchCount: number): MemberCard {
+/**
+ * `avatarUrl` gated by the member's `photoVisible` toggle. `isOwner` means
+ * "this card's subject IS the viewer" — true for the profile owner's own
+ * full/limited profile read, but ALSO true when a member turns up as their
+ * OWN row in a directory search result or another profile's `related` list;
+ * either way they always see their own real photo. Everyone else sees `null`
+ * once the member has turned `photoVisible` off. Shared by `toFullProfile`,
+ * `toMemberCard`, and `ProfilesService.loadRelated`'s `related` list so the
+ * three non-owner-facing card surfaces can't drift out of sync with each
+ * other.
+ */
+export function gateAvatarUrl(p: Profile, isOwner: boolean): string | null {
+  return isOwner || p.photoVisible ? toImageUrl(p.avatarUrl) : null;
+}
+
+/**
+ * `location` gated by the member's `hoodVisible` toggle — same shape as
+ * `gateAvatarUrl` above, shared for the same reason.
+ */
+export function gateLocation(p: Profile, isOwner: boolean): string | null {
+  return isOwner || p.hoodVisible ? p.location : null;
+}
+
+export function toMemberCard(
+  p: Profile,
+  vouchCount: number,
+  // Whether this card's subject IS the viewer running the search — see
+  // `gateAvatarUrl`. Directory search never excludes the viewer's own
+  // profile from their own results (see `ProfilesService.searchMembers`), so
+  // this can legitimately be true, not just a theoretical parameter.
+  isOwner = false,
+): MemberCard {
   // The directory lists every member (§8), but only `open` profiles expose
   // location/openTo on the card — `network`/`private` keep them blank here,
   // mirroring toLimitedProfile so the card can't leak what the profile detail
   // deliberately hides. `hood` is derived from `location` and follows the
-  // same gate for the same reason.
+  // same gate for the same reason. Layered with the `hoodVisible` member
+  // toggle: a viewer only ever sees `location`/`hood` when BOTH the profile
+  // is `open` AND (they are the owner OR the member opted into `hoodVisible`).
   const open = p.visibility === ProfileVisibility.Open;
+  const locationVisible = open && (isOwner || p.hoodVisible);
   return {
     ...toProfileCard(p, vouchCount),
     // The card DTO deliberately omits `bio`, so a browser can't do this itself —
     // the fallback has to happen here, where the bio is in scope. See
     // ./directory-blurb.ts; this is the list path only.
     tagline: directoryBlurb(p.tagline, p.bio),
-    location: open ? p.location : null,
+    avatarUrl: gateAvatarUrl(p, isOwner),
+    location: locationVisible ? p.location : null,
     openTo: open ? p.openTo : [],
-    hood: open ? matchNeighbourhood(p.location) : null,
+    hood: locationVisible ? matchNeighbourhood(p.location) : null,
     identityFacets: facetsForLabels(p.discoverableIdentities ?? []),
     years: tenureYears(p.joinedAt),
+  };
+}
+
+export function toBoardView(b: BoardPost): BoardView {
+  return {
+    kind: b.kind,
+    title: b.title,
+    slug: b.slug,
+    status: b.status,
+    closedNote: b.closedNote,
+    closedAt: b.closedAt?.toISOString() ?? null,
+    expiresAt: b.expiresAt.toISOString(),
+    createdAt: b.createdAt.toISOString(),
   };
 }
 
@@ -243,8 +323,17 @@ export function toFullProfile(
     verified: p.verified,
     joinedAt: p.joinedAt.toISOString(),
     bio: p.bio,
-    location: p.location,
+    bioPt: p.bioPt,
+    // Overrides the ungated `avatarUrl` the spread above copied from
+    // toProfileCard: a non-owner viewer sees the real photo only when the
+    // member has opted in via `photoVisible`. The owner always sees their own
+    // photo, same as every other owner-only override in this mapper. See
+    // gateAvatarUrl/gateLocation, shared with toMemberCard/loadRelated so the
+    // three non-owner-facing card surfaces can't drift out of sync.
+    avatarUrl: gateAvatarUrl(p, isOwner),
+    location: gateLocation(p, isOwner),
     now: p.now,
+    notHereFor: p.notHereFor,
     openTo: p.openTo,
     identities: isOwner ? (p.identities ?? []) : [],
     // Owner always sees their own list; others see it only when the member has
@@ -255,6 +344,7 @@ export function toFullProfile(
     // cannot leak on another member's full profile response.
     ...(isOwner ? { privateNetwork: p.privateNetwork ?? false } : {}),
     ...(isOwner ? { featuredConsent: p.featuredConsent ?? false } : {}),
+    ...(isOwner ? { hiddenUntil: p.hiddenUntil?.toISOString() ?? null } : {}),
     socials: rels.socials.map((s) => ({
       platform: s.platform,
       urlOrHandle: s.urlOrHandle,
@@ -265,12 +355,9 @@ export function toFullProfile(
       year: workItem.year,
       imageUrl: toImageUrl(workItem.imageUrl),
       crop: cropFor(workItem.imageUrl, crops),
+      links: workItem.links,
     })),
-    board: rels.board.map((b) => ({
-      kind: b.kind,
-      title: b.title,
-      slug: b.slug,
-    })),
+    board: rels.board.map(toBoardView),
     skills: rels.skills.map((s) => ({ name: s.name, meta: s.meta })),
     groups: rels.groups,
     shapings: sortShapings(rels.shapings).map((s) => ({
@@ -293,9 +380,20 @@ export function toFullProfile(
 export function toLimitedProfile(
   p: Profile,
   vouchCount: number,
+  // Whether this card's subject IS the viewer — see `gateAvatarUrl`. A
+  // limited profile is by definition almost always viewed by a non-owner
+  // (that's why it's limited), but this mirrors `toFullProfile`/
+  // `toMemberCard`'s signature rather than assuming `isOwner` is always
+  // false, in case an owner-preview code path exists somewhere.
+  isOwner = false,
 ): LimitedProfileResponse {
   return {
     ...toProfileCard(p, vouchCount),
+    // Overrides the ungated `avatarUrl`/`location`-adjacent fields the spread
+    // above copied from toProfileCard — same gating as toFullProfile/
+    // toMemberCard, so a `photoVisible: false` limited profile can't ship a
+    // working real avatarUrl alongside that flag. See gateAvatarUrl.
+    avatarUrl: gateAvatarUrl(p, isOwner),
     verified: p.verified,
     joinedAt: p.joinedAt.toISOString(),
     openTo: [],

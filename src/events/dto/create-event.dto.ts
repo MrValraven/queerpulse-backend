@@ -8,6 +8,7 @@ import {
   IsString,
   IsTimeZone,
   IsUrl,
+  IsUUID,
   MaxLength,
   Min,
   MinLength,
@@ -22,6 +23,12 @@ export class CreateEventDto {
   @IsOptional() @IsISO8601() endAt?: string;
   @IsTimeZone() timezone!: string;
   @IsOptional() @IsString() @MaxLength(300) venue?: string;
+  // `string | null` (not just optional) — mirrors `communitySlug` below: on
+  // UPDATE, `null` explicitly detaches the venue from a directory listing
+  // (falling back to plain-text `venue`), distinct from omitting the field
+  // ("leave the existing link, if any, unchanged"). `create()` has no
+  // existing link to detach, so it treats `null`/absent identically.
+  @IsOptional() @IsUUID() listingId?: string | null;
   @IsOptional() @IsBoolean() isOnline?: boolean;
   @IsOptional()
   @IsUrl({ protocols: ['http', 'https'], require_protocol: true })

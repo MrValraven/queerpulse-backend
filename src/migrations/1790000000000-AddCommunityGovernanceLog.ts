@@ -20,9 +20,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
-export class AddCommunityGovernanceLog1790000000000
-  implements MigrationInterface
-{
+export class AddCommunityGovernanceLog1790000000000 implements MigrationInterface {
   name = 'AddCommunityGovernanceLog1790000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
@@ -83,8 +81,6 @@ export class AddCommunityGovernanceLog1790000000000
       `ALTER TABLE "community_governance_log" DROP CONSTRAINT "FK_community_governance_log_community_id"`,
     );
     await queryRunner.query(`DROP TABLE "community_governance_log"`);
-    await queryRunner.query(
-      `DROP TYPE "community_governance_log_action_enum"`,
-    );
+    await queryRunner.query(`DROP TYPE "community_governance_log_action_enum"`);
   }
 }

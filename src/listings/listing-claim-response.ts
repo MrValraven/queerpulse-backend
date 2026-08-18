@@ -1,5 +1,8 @@
 import { MemberRef } from '../common/member-ref';
-import { ListingClaim, ListingClaimStatus } from './entities/listing-claim.entity';
+import {
+  ListingClaim,
+  ListingClaimStatus,
+} from './entities/listing-claim.entity';
 
 /**
  * The admin-queue + owner-response view of a claim on an existing listing.

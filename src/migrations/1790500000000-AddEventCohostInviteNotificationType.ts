@@ -11,9 +11,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN. Authored for review only; the maintainer runs migrations.
  */
-export class AddEventCohostInviteNotificationType1790500000000
-  implements MigrationInterface
-{
+export class AddEventCohostInviteNotificationType1790500000000 implements MigrationInterface {
   name = 'AddEventCohostInviteNotificationType1790500000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

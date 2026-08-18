@@ -276,6 +276,12 @@ function ownerIdentity(listing: Listing): OwnerIdentityView {
  * it to show the "run by a member" line.
  */
 export interface DirectoryCardDTO {
+  /** The listing's real DB uuid — distinct from `ref` (the human-readable
+   * mutation-path id) and `slug` (the cosmetic public URL id). Exposed so a
+   * cross-entity FK (e.g. a gathering's `Event.listingId`) can target a real
+   * listing picked from this public card grid — mirrors `UpcomingEventDTO.id`
+   * already exposed on this same detail payload. */
+  id: string;
   slug: string;
   name: string;
   cat: string;
@@ -308,6 +314,7 @@ export interface DirectoryCardDTO {
 export function toDirectoryCard(listing: Listing): DirectoryCardDTO {
   const owner = ownerIdentity(listing);
   return {
+    id: listing.id,
     slug: listing.slug,
     name: listing.name,
     cat: listing.cats[0] ?? '',

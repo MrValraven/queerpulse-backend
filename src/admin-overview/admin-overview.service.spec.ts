@@ -87,7 +87,10 @@ describe('AdminOverviewService', () => {
         AdminOverviewService,
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: getRepositoryToken(Report), useValue: reports },
-        { provide: getRepositoryToken(PlatformJoinRequest), useValue: joinRequests },
+        {
+          provide: getRepositoryToken(PlatformJoinRequest),
+          useValue: joinRequests,
+        },
         { provide: getRepositoryToken(Appeal), useValue: appeals },
         { provide: getRepositoryToken(ModAuditLog), useValue: modAuditLogs },
         { provide: getRepositoryToken(Vouch), useValue: vouches },

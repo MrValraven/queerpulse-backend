@@ -12,9 +12,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN. Authored for review only; the maintainer runs migrations.
  */
-export class AddListingClaimNotificationTypes1790800200000
-  implements MigrationInterface
-{
+export class AddListingClaimNotificationTypes1790800200000 implements MigrationInterface {
   name = 'AddListingClaimNotificationTypes1790800200000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

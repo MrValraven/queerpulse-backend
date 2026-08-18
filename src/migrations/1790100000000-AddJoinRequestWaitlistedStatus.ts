@@ -14,9 +14,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * it is first used at runtime, in a separate transaction, by
  * `JoinRequestsService.review()`.
  */
-export class AddJoinRequestWaitlistedStatus1790100000000
-  implements MigrationInterface
-{
+export class AddJoinRequestWaitlistedStatus1790100000000 implements MigrationInterface {
   name = 'AddJoinRequestWaitlistedStatus1790100000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

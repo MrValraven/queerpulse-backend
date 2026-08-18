@@ -292,7 +292,11 @@ describe('VouchService', () => {
 
   describe('listVouchers excludes withdrawn', () => {
     it('filters count and rows by withdrawnAt IS NULL', async () => {
-      profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'target' });
+      profiles.findOne.mockResolvedValue({
+        userId: 'u2',
+        slug: 'target',
+        vouchersVisible: true,
+      });
       vouches.count.mockResolvedValue(0);
       vouches.find.mockResolvedValue([]);
       await service.listVouchers('target');
@@ -322,7 +326,11 @@ describe('VouchService', () => {
     });
 
     it('returns the full count and a bounded, mapped page', async () => {
-      profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
+      profiles.findOne.mockResolvedValue({
+        userId: 'u2',
+        slug: 'them',
+        vouchersVisible: true,
+      });
       vouches.count.mockResolvedValue(42);
       vouches.find.mockResolvedValue([
         { voucherId: 'v1', note: 'ally', createdAt: new Date('2026-01-01') },
@@ -344,12 +352,17 @@ describe('VouchService', () => {
           note: 'ally',
           createdAt: new Date('2026-01-01'),
           anonymous: false,
+          relationships: null,
         },
       ]);
     });
 
     it('shields anonymous vouchers — no identity leaks, only note/timestamp', async () => {
-      profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
+      profiles.findOne.mockResolvedValue({
+        userId: 'u2',
+        slug: 'them',
+        vouchersVisible: true,
+      });
       vouches.count.mockResolvedValue(1);
       vouches.find.mockResolvedValue([
         {
@@ -377,16 +390,94 @@ describe('VouchService', () => {
           note: 'quietly in your corner',
           createdAt: new Date('2026-03-03'),
           anonymous: true,
+          relationships: null,
         },
       ]);
     });
 
     it('defaults to a bounded page when no pagination is supplied', async () => {
-      profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
+      profiles.findOne.mockResolvedValue({
+        userId: 'u2',
+        slug: 'them',
+        vouchersVisible: true,
+      });
       await service.listVouchers('them');
       expect(vouches.find).toHaveBeenCalledWith(
         expect.objectContaining({ take: 20, skip: 0 }),
       );
+    });
+  });
+
+  describe('listVouchers vouchersVisible gate', () => {
+    it('hides the roster (count-only) for a non-owner viewer when vouchersVisible is off', async () => {
+      profiles.findOne.mockResolvedValue({
+        userId: 'u2',
+        slug: 'them',
+        vouchersVisible: false,
+      });
+      vouches.count.mockResolvedValue(7);
+      vouches.find.mockResolvedValue([
+        { voucherId: 'v1', note: 'ally', createdAt: new Date('2026-01-01') },
+      ]);
+      const res = await service.listVouchers(
+        'them',
+        undefined,
+        'some-other-viewer',
+      );
+      expect(res).toEqual({ count: 7, vouchers: [] });
+      // The gate short-circuits before the page query even runs.
+      expect(vouches.find).not.toHaveBeenCalled();
+    });
+
+    it('hides the roster for an unauthenticated/unknown viewer the same way', async () => {
+      profiles.findOne.mockResolvedValue({
+        userId: 'u2',
+        slug: 'them',
+        vouchersVisible: false,
+      });
+      vouches.count.mockResolvedValue(3);
+      const res = await service.listVouchers('them');
+      expect(res).toEqual({ count: 3, vouchers: [] });
+    });
+
+    it('still shows the full roster to the owner even when vouchersVisible is off', async () => {
+      profiles.findOne.mockResolvedValue({
+        userId: 'u2',
+        slug: 'them',
+        vouchersVisible: false,
+      });
+      vouches.count.mockResolvedValue(1);
+      vouches.find.mockResolvedValue([
+        { voucherId: 'v1', note: 'ally', createdAt: new Date('2026-01-01') },
+      ]);
+      profiles.find.mockResolvedValue([
+        { userId: 'v1', slug: 'val', firstName: 'Val', lastName: 'Reis' },
+      ]);
+      const res = await service.listVouchers('them', undefined, 'u2');
+      expect(res.count).toBe(1);
+      expect(res.vouchers).toHaveLength(1);
+      expect(res.vouchers[0]!.slug).toBe('val');
+    });
+
+    it('shows the full roster to a non-owner viewer when vouchersVisible is on', async () => {
+      profiles.findOne.mockResolvedValue({
+        userId: 'u2',
+        slug: 'them',
+        vouchersVisible: true,
+      });
+      vouches.count.mockResolvedValue(1);
+      vouches.find.mockResolvedValue([
+        { voucherId: 'v1', note: 'ally', createdAt: new Date('2026-01-01') },
+      ]);
+      profiles.find.mockResolvedValue([
+        { userId: 'v1', slug: 'val', firstName: 'Val', lastName: 'Reis' },
+      ]);
+      const res = await service.listVouchers(
+        'them',
+        undefined,
+        'some-other-viewer',
+      );
+      expect(res.vouchers).toHaveLength(1);
     });
   });
 

@@ -25,6 +25,7 @@ import { MagazineCorrection } from './entities/magazine-correction.entity';
 import { MagazineDeck } from './entities/magazine-deck.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
 import { MagazineLetter } from './entities/magazine-letter.entity';
+import { MagazineNotificationRead } from './entities/magazine-notification-read.entity';
 import { MagazinePayment } from './entities/magazine-payment.entity';
 import { MagazinePieceEvent } from './entities/magazine-piece-event.entity';
 import { MagazinePieceMessage } from './entities/magazine-piece-message.entity';
@@ -183,6 +184,7 @@ describe('MagazinePieceService', () => {
   let sections: RepositoryMock;
   let payments: RepositoryMock;
   let letters: RepositoryMock;
+  let notificationReads: RepositoryMock;
   let corrections: RepositoryMock;
   let articles: RepositoryMock;
   let articleComments: RepositoryMock;
@@ -205,6 +207,7 @@ describe('MagazinePieceService', () => {
     sections = makeRepositoryMock();
     payments = makeRepositoryMock();
     letters = makeRepositoryMock();
+    notificationReads = makeRepositoryMock();
     corrections = makeRepositoryMock();
     articles = makeRepositoryMock();
     articleComments = makeRepositoryMock();
@@ -261,6 +264,10 @@ describe('MagazinePieceService', () => {
         { provide: getRepositoryToken(MagazineSection), useValue: sections },
         { provide: getRepositoryToken(MagazinePayment), useValue: payments },
         { provide: getRepositoryToken(MagazineLetter), useValue: letters },
+        {
+          provide: getRepositoryToken(MagazineNotificationRead),
+          useValue: notificationReads,
+        },
         {
           provide: getRepositoryToken(MagazineCorrection),
           useValue: corrections,
@@ -696,7 +703,36 @@ describe('MagazinePieceService', () => {
       );
     });
 
-    it('creates a new article_edited row when the previous one is older than the merge window', async () => {
+    it('merges article_edited into the existing row no matter how long ago it was made, as long as it is still the latest event on the piece', async () => {
+      const piece = { ...PIECE, articleId: 'article-1' };
+      pieces.findOne.mockResolvedValue(piece);
+      articles.findOne.mockResolvedValue({ ...ARTICLE, blocks: [] });
+
+      const staleEvent = {
+        id: 'event-1',
+        pieceId: 'piece-1',
+        actorId: 'editor-1',
+        action: 'article_edited',
+        detail: null,
+        createdAt: new Date(Date.now() - 10 * 60 * 1000),
+      };
+      pieceEvents.findOne.mockResolvedValue(staleEvent);
+
+      const dto: UpdateArticleDto = { standfirst: 'Updated lede.' };
+      await service.updateArticleDraft('piece-1', dto, 'editor-1');
+
+      expect(pieceEvents.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ pieceId: 'piece-1' }),
+        }),
+      );
+      expect(pieceEvents.create).not.toHaveBeenCalled();
+      expect(pieceEvents.save).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'event-1', action: 'article_edited' }),
+      );
+    });
+
+    it("starts a new article_edited row when the piece's latest event since the last edit is something else", async () => {
       const piece = { ...PIECE, articleId: 'article-1' };
       pieces.findOne.mockResolvedValue(piece);
       articles.findOne.mockResolvedValue({ ...ARTICLE, blocks: [] });
@@ -704,24 +740,15 @@ describe('MagazinePieceService', () => {
       pieceEvents.findOne.mockResolvedValue({
         id: 'event-1',
         pieceId: 'piece-1',
-        actorId: 'editor-1',
-        action: 'article_edited',
-        detail: null,
-        createdAt: new Date(Date.now() - 10 * 60 * 1000),
+        actorId: 'editor-2',
+        action: 'stage_changed',
+        detail: 'ready_to_publish',
+        createdAt: new Date(Date.now() - 1000),
       });
 
       const dto: UpdateArticleDto = { standfirst: 'Updated lede.' };
       await service.updateArticleDraft('piece-1', dto, 'editor-1');
 
-      expect(pieceEvents.findOne).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: expect.objectContaining({
-            pieceId: 'piece-1',
-            actorId: 'editor-1',
-            action: 'article_edited',
-          }),
-        }),
-      );
       expect(pieceEvents.create).toHaveBeenCalledWith(
         expect.objectContaining({
           pieceId: 'piece-1',
@@ -1509,7 +1536,7 @@ describe('MagazinePieceService', () => {
         { ...PIECE, id: 'piece-1', title: 'The chosen-family budget' },
       ]);
 
-      const result = await service.listMagazineNotifications(2);
+      const result = await service.listMagazineNotifications('editor-1', 2);
 
       expect(pieceEvents.find).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1530,7 +1557,8 @@ describe('MagazinePieceService', () => {
         { ...PIECE, id: 'piece-1', title: 'The chosen-family budget' },
       ]);
 
-      const [notification] = await service.listMagazineNotifications();
+      const [notification] =
+        await service.listMagazineNotifications('editor-1');
 
       expect(notification?.who).toBe('Marta Reis');
       expect(notification?.who).not.toContain('@');
@@ -1577,7 +1605,7 @@ describe('MagazinePieceService', () => {
       ]);
 
       const [firstNotification, secondNotification] =
-        await service.listMagazineNotifications();
+        await service.listMagazineNotifications('editor-1');
 
       // A writer's `filed`/payment action must attribute to the writer, not
       // misread as an editor's action — this was the misattribution bug.
@@ -1608,7 +1636,8 @@ describe('MagazinePieceService', () => {
       ]);
       profiles.find.mockResolvedValue([]);
 
-      const [notification] = await service.listMagazineNotifications();
+      const [notification] =
+        await service.listMagazineNotifications('editor-1');
 
       expect(notification?.who).toBe('Someone on the team');
       expect(notification?.who).not.toContain('ghost-9');
@@ -1622,7 +1651,8 @@ describe('MagazinePieceService', () => {
         { ...PIECE, id: 'piece-1', title: 'The chosen-family budget' },
       ]);
 
-      const [paymentRow, stageRow] = await service.listMagazineNotifications();
+      const [paymentRow, stageRow] =
+        await service.listMagazineNotifications('editor-1');
 
       expect(paymentRow?.tone).toBe('warn');
       expect(stageRow?.tone).toBe('normal');
@@ -1637,7 +1667,8 @@ describe('MagazinePieceService', () => {
         { ...PIECE, id: 'piece-1', title: 'The chosen-family budget' },
       ]);
 
-      const [notification] = await service.listMagazineNotifications();
+      const [notification] =
+        await service.listMagazineNotifications('editor-1');
 
       expect(notification?.route).toBe('/magazine/editor/piece/piece-1');
     });
@@ -1645,10 +1676,89 @@ describe('MagazinePieceService', () => {
     it('returns an empty array when the event log is empty', async () => {
       pieceEvents.find.mockResolvedValue([]);
 
-      const result = await service.listMagazineNotifications();
+      const result = await service.listMagazineNotifications('editor-1');
 
       expect(result).toEqual([]);
       expect(pieces.find).not.toHaveBeenCalled();
+    });
+
+    it('flags an event unread when the viewer has never dismissed the panel', async () => {
+      stubEditorDirectory();
+      pieceEvents.find.mockResolvedValue([STAGE_EVENT]);
+      pieces.find.mockResolvedValue([
+        { ...PIECE, id: 'piece-1', title: 'The chosen-family budget' },
+      ]);
+      notificationReads.findOne.mockResolvedValue(null);
+
+      const [notification] =
+        await service.listMagazineNotifications('editor-1');
+
+      expect(notification?.isUnread).toBe(true);
+    });
+
+    it("flags an event unread when it happened after the viewer's last read", async () => {
+      stubEditorDirectory();
+      pieceEvents.find.mockResolvedValue([STAGE_EVENT]);
+      pieces.find.mockResolvedValue([
+        { ...PIECE, id: 'piece-1', title: 'The chosen-family budget' },
+      ]);
+      notificationReads.findOne.mockResolvedValue({
+        actorId: 'editor-1',
+        lastReadAt: new Date('2026-08-01T00:00:00.000Z'),
+      });
+
+      const [notification] =
+        await service.listMagazineNotifications('editor-1');
+
+      expect(notification?.isUnread).toBe(true);
+    });
+
+    it("flags an event read when it happened at or before the viewer's last read", async () => {
+      stubEditorDirectory();
+      pieceEvents.find.mockResolvedValue([STAGE_EVENT]);
+      pieces.find.mockResolvedValue([
+        { ...PIECE, id: 'piece-1', title: 'The chosen-family budget' },
+      ]);
+      notificationReads.findOne.mockResolvedValue({
+        actorId: 'editor-1',
+        lastReadAt: new Date('2026-08-09T00:00:00.000Z'),
+      });
+
+      const [notification] =
+        await service.listMagazineNotifications('editor-1');
+
+      expect(notification?.isUnread).toBe(false);
+    });
+  });
+
+  describe('markNotificationsRead', () => {
+    it('creates a new read-cursor row for a viewer who has never dismissed the panel', async () => {
+      notificationReads.findOne.mockResolvedValue(null);
+
+      await service.markNotificationsRead('editor-1');
+
+      expect(notificationReads.create).toHaveBeenCalledWith(
+        expect.objectContaining({ actorId: 'editor-1' }),
+      );
+      expect(notificationReads.save).toHaveBeenCalled();
+    });
+
+    it("updates the viewer's existing read-cursor row instead of creating a second one", async () => {
+      const existing = {
+        actorId: 'editor-1',
+        lastReadAt: new Date('2026-08-01T00:00:00.000Z'),
+      };
+      notificationReads.findOne.mockResolvedValue(existing);
+
+      await service.markNotificationsRead('editor-1');
+
+      expect(notificationReads.create).not.toHaveBeenCalled();
+      expect(notificationReads.save).toHaveBeenCalledWith(
+        expect.objectContaining({ actorId: 'editor-1' }),
+      );
+      expect(existing.lastReadAt.getTime()).toBeGreaterThan(
+        new Date('2026-08-01T00:00:00.000Z').getTime(),
+      );
     });
   });
 

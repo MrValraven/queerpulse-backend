@@ -5,6 +5,7 @@ import {
   IsBoolean,
   IsEnum,
   IsIn,
+  IsISO8601,
   IsOptional,
   IsString,
   MaxLength,
@@ -53,8 +54,15 @@ export class UpdateProfileDto {
   @IsOptional() @IsString() @MaxLength(100) firstName?: string;
   @IsOptional() @IsString() @MaxLength(100) lastName?: string;
   @IsOptional() @IsString() @MaxLength(100) pronouns?: string;
+  // How the member's name is said aloud — a short phonetic hint, distinct from
+  // `pronouns`. Same "empty string clears" pattern as `now`/`bioPt`/
+  // `notHereFor` — see ProfilesService.updateMe.
+  @IsOptional() @IsString() @MaxLength(80) pronunciation?: string;
   @IsOptional() @IsString() @MaxLength(160) tagline?: string;
   @IsOptional() @IsString() @MaxLength(5000) bio?: string;
+  // Portuguese translation of `bio`, shown alongside it when present. Same
+  // "empty string clears" pattern as `now` — see ProfilesService.updateMe.
+  @IsOptional() @IsString() @MaxLength(2000) bioPt?: string;
   @IsOptional() @IsString() @MaxLength(120) location?: string;
 
   // `@IsOptional()` treats both `undefined` and `null` as "skip", so `null` and
@@ -65,6 +73,20 @@ export class UpdateProfileDto {
   // section when empty), so this is not treated as "no change". See
   // ProfilesService.updateMe.
   @IsOptional() @IsString() @MaxLength(MAX_NOW_LENGTH) now?: string;
+
+  // ISO string sets a 24h-from-now-ish value chosen by the caller; `null`
+  // clears it early ("bring me back"). The FE always sends
+  // `new Date(Date.now() + 24*60*60*1000).toISOString()` or `null` — the
+  // backend does not recompute "24 hours", it just stores whatever timestamp
+  // it's given and treats `hiddenUntil > now()` as hidden.
+  @IsOptional()
+  @ValidateIf((_o, v: unknown) => v !== null)
+  @IsISO8601()
+  hiddenUntil?: string | null;
+
+  // What the member is explicitly NOT here for — shown alongside `now`. Same
+  // "empty string clears" pattern — see ProfilesService.updateMe.
+  @IsOptional() @IsString() @MaxLength(280) notHereFor?: string;
 
   @IsOptional() @IsEnum(ProfileVisibility) visibility?: ProfileVisibility;
 
@@ -140,6 +162,25 @@ export class UpdateProfileDto {
   @IsOptional()
   @IsBoolean()
   privateNetwork?: boolean;
+
+  // Whether `avatarUrl` is shown to non-owner viewers. Owner always sees the
+  // real photo regardless — see toFullProfile's isOwner gating.
+  @IsOptional()
+  @IsBoolean()
+  photoVisible?: boolean;
+
+  // Whether `location` is shown to non-owner viewers. Owner always sees it
+  // regardless — see toFullProfile's isOwner gating.
+  @IsOptional()
+  @IsBoolean()
+  hoodVisible?: boolean;
+
+  // Whether the vouchers-list endpoint (`GET /members/:slug/vouchers`) shows
+  // names to non-owner viewers, vs. count-only. Owner always sees the real
+  // list — see VouchService.listVouchers.
+  @IsOptional()
+  @IsBoolean()
+  vouchersVisible?: boolean;
 
   // Whether the member consents to being featured (member quote /
   // changemaker highlight) on the admin-curated live landing page. See

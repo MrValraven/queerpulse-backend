@@ -25,9 +25,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * every existing row starts empty and stays sparse until members opt in, so
  * a sequential scan is the cheaper plan until real usage says otherwise.
  */
-export class AddProfileDisciplineProfessionLanguages1791000000000
-  implements MigrationInterface
-{
+export class AddProfileDisciplineProfessionLanguages1791000000000 implements MigrationInterface {
   name = 'AddProfileDisciplineProfessionLanguages1791000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

@@ -61,6 +61,12 @@ export interface VoucherView {
    * anonymity is a safety property, so the voucher's identity is never emitted.
    */
   anonymous: boolean;
+  /**
+   * The ways the voucher knows this member ("collaborated", "friends", …).
+   * Non-identifying, so it is emitted for anonymous vouchers too. Null when the
+   * vouch carries no recorded relationship (e.g. the signup auto-vouch).
+   */
+  relationships: VouchRelationship[] | null;
 }
 
 export interface GivenVouchView {
@@ -71,6 +77,14 @@ export interface GivenVouchView {
   note: string | null;
   createdAt: Date;
   anonymous: boolean;
+  /**
+   * The ways the current member knows this vouchee ("collaborated",
+   * "friends", …). `listGiven` reuses the same `toVouchView` mapper as
+   * `listVouchers`, which always attaches it — declared here too so the
+   * interface matches what the endpoint actually returns. Null when the
+   * vouch carries no recorded relationship.
+   */
+  relationships: VouchRelationship[] | null;
 }
 
 /**
@@ -269,6 +283,10 @@ export class VouchService {
   async listVouchers(
     slug: string,
     page?: PageParams,
+    // The authenticated caller, when known — used only to decide whether they
+    // ARE the target member (see `vouchersVisible` gate below). `undefined`
+    // is treated the same as "some other member": never the owner.
+    viewerId?: string,
   ): Promise<{ count: number; vouchers: VoucherView[] }> {
     const target = await this.profiles.findOne({ where: { slug } });
     if (!target) {
@@ -278,6 +296,15 @@ export class VouchService {
     const count = await this.vouches.count({
       where: { voucheeId: target.userId, withdrawnAt: IsNull() },
     });
+    // Names hidden: when the target has turned `vouchersVisible` off, a
+    // non-owner viewer still gets the true `count` ("Names hidden — visitors
+    // see the number only") but never the roster of who vouched — the owner
+    // always sees the real list, same as the photoVisible/hoodVisible content
+    // gates in toFullProfile.
+    const isOwner = viewerId !== undefined && viewerId === target.userId;
+    if (!isOwner && !target.vouchersVisible) {
+      return { count, vouchers: [] };
+    }
     const rows = await this.vouches.find({
       where: { voucheeId: target.userId, withdrawnAt: IsNull() },
       order: { createdAt: 'DESC' },
@@ -292,11 +319,12 @@ export class VouchService {
     );
     const vouchers = rows.map((v) =>
       v.anonymous
-        ? this.toShieldedVouchView(v.note, v.createdAt)
+        ? this.toShieldedVouchView(v.note, v.createdAt, v.relationships)
         : this.toVouchView(
             voucherProfiles.get(v.voucherId),
             v.note,
             v.createdAt,
+            v.relationships,
           ),
     );
     return { count, vouchers };
@@ -316,7 +344,12 @@ export class VouchService {
       rows.map((v) => v.voucheeId),
     );
     return rows.map((v) =>
-      this.toVouchView(voucheeProfiles.get(v.voucheeId), v.note, v.createdAt),
+      this.toVouchView(
+        voucheeProfiles.get(v.voucheeId),
+        v.note,
+        v.createdAt,
+        v.relationships,
+      ),
     );
   }
 
@@ -443,6 +476,7 @@ export class VouchService {
     profile: Profile | undefined,
     note: string | null,
     createdAt: Date,
+    relationships: VouchRelationship[] | null = null,
   ): VoucherView {
     return {
       slug: profile?.slug ?? '',
@@ -452,6 +486,7 @@ export class VouchService {
       note,
       createdAt,
       anonymous: false,
+      relationships,
     };
   }
 
@@ -464,6 +499,7 @@ export class VouchService {
   private toShieldedVouchView(
     note: string | null,
     createdAt: Date,
+    relationships: VouchRelationship[] | null = null,
   ): VoucherView {
     return {
       slug: '',
@@ -473,6 +509,7 @@ export class VouchService {
       note,
       createdAt,
       anonymous: true,
+      relationships,
     };
   }
 }

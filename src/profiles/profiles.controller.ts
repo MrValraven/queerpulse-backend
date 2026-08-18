@@ -13,6 +13,8 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { ConnectionsService } from '../connections/connections.service';
+import { CloseBoardItemDto } from './dto/close-board-item.dto';
 import { ListMembersQuery } from './dto/list-members.query';
 import { ReplaceBoardDto } from './dto/replace-board.dto';
 import { ReplaceGroupsDto } from './dto/replace-groups.dto';
@@ -40,7 +42,10 @@ import {
 @ApiCookieAuth('access_token')
 @Controller('profiles')
 export class ProfilesController {
-  constructor(private readonly profilesService: ProfilesService) {}
+  constructor(
+    private readonly profilesService: ProfilesService,
+    private readonly connectionsService: ConnectionsService,
+  ) {}
 
   // pending-ok: edit your own draft profile.
   @ApiOperation({ summary: "Update the caller's own profile" })
@@ -127,6 +132,21 @@ export class ProfilesController {
     return this.profilesService.replaceBoard(user.userId, dto.items);
   }
 
+  @ApiOperation({
+    summary: "Mark one of the caller's board items closed/found",
+  })
+  @ApiOkResponse({ description: 'The board item, now closed.' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiNotFoundResponse({ description: 'No board item with that slug.' })
+  @Patch('me/board/:slug/close')
+  closeBoardItem(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: CloseBoardItemDto,
+  ) {
+    return this.profilesService.closeBoardItem(user.userId, slug, dto.note);
+  }
+
   @ApiOperation({ summary: "Replace the caller's shaping entries" })
   @ApiOkResponse({
     description: 'The persisted shaping entries, in canonical order.',
@@ -173,6 +193,37 @@ export class ProfilesController {
     // `user.role` lets a moderator/admin still view a taken-down member's
     // profile (the takedown 404s it for ordinary members only).
     return this.profilesService.getBySlug(slug, user.userId, user.role);
+  }
+
+  // Declared AFTER ':slug' but is not shadowed by it — ':slug/mutuals' is a
+  // distinct two-segment path Express/Nest only matches on its own route.
+  @ApiOperation({
+    summary: 'Mutual accepted connections between the caller and a member',
+  })
+  @ApiOkResponse({
+    description:
+      'The shared accepted-connection count and up to 2 of their names.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
+  @ApiNotFoundResponse({ description: 'No profile with that slug.' })
+  @Get(':slug/mutuals')
+  @UseGuards(ActiveMemberGuard)
+  async getMutuals(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    const target = await this.profilesService.findBySlugOrThrow(
+      slug,
+      user.userId,
+      user.role,
+    );
+    if (target.userId === user.userId) {
+      // Viewing your own profile: "mutual connections with yourself" is a
+      // meaningless (and pointlessly expensive) query — short-circuit.
+      return { count: 0, members: [] };
+    }
+    return this.connectionsService.mutualMembers(user.userId, target.userId);
   }
 }
 

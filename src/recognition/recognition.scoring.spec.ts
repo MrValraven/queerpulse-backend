@@ -55,9 +55,9 @@ describe('recognition scoring', () => {
     expect(
       qualifyingBadgeKeys({ ...ZERO, communitiesJoined: 1 }),
     ).not.toContain('two-homes');
-    expect(
-      qualifyingBadgeKeys({ ...ZERO, communitiesJoined: 2 }),
-    ).toContain('two-homes');
+    expect(qualifyingBadgeKeys({ ...ZERO, communitiesJoined: 2 })).toContain(
+      'two-homes',
+    );
   });
 
   it('grants local-scout at 3+ saved listings, well-read at 5+ saved articles', () => {

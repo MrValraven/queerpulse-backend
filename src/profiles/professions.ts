@@ -27,12 +27,7 @@ export const PROFESSIONS_BY_DISCIPLINE: Record<string, readonly string[]> = {
     'peerCounsellor',
     'communityHealthWorker',
   ],
-  legal: [
-    'immigrationLawyer',
-    'familyLawyer',
-    'paralegal',
-    'legalAdvocate',
-  ],
+  legal: ['immigrationLawyer', 'familyLawyer', 'paralegal', 'legalAdvocate'],
   education: ['teacher', 'workshopFacilitator', 'researcher', 'tutor'],
   tech: [
     'softwareEngineer',
@@ -41,18 +36,8 @@ export const PROFESSIONS_BY_DISCIPLINE: Record<string, readonly string[]> = {
     'productManager',
   ],
   photo: ['portraitPhotographer', 'photojournalist', 'retoucher'],
-  film: [
-    'documentaryFilmmaker',
-    'filmmaker',
-    'cinematographer',
-    'filmEditor',
-  ],
-  performance: [
-    'choreographer',
-    'dancer',
-    'theatreMaker',
-    'performanceArtist',
-  ],
+  film: ['documentaryFilmmaker', 'filmmaker', 'cinematographer', 'filmEditor'],
+  performance: ['choreographer', 'dancer', 'theatreMaker', 'performanceArtist'],
   music: [
     'musicProducer',
     'dj',
@@ -125,7 +110,9 @@ export function reconcileDisciplineProfession(
   const known = knownProfessions(professions);
   const impliedDisciplines = known.map((p) => DISCIPLINE_BY_PROFESSION[p]!);
   return {
-    disciplines: [...new Set([...knownDisciplines(disciplines), ...impliedDisciplines])],
+    disciplines: [
+      ...new Set([...knownDisciplines(disciplines), ...impliedDisciplines]),
+    ],
     professions: known,
   };
 }

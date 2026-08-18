@@ -426,7 +426,9 @@ export class ListingsController {
   @ApiCreatedResponse({
     description: 'The filed claim (or the caller’s existing open claim).',
   })
-  @ApiBadRequestResponse({ description: 'The caller already owns this listing.' })
+  @ApiBadRequestResponse({
+    description: 'The caller already owns this listing.',
+  })
   @ApiNotFoundResponse({ description: 'No listing with that reference.' })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',

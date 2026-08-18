@@ -82,8 +82,12 @@ export class VouchController {
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
-  vouchers(@Param('slug') slug: string, @Query() page: PaginationQuery) {
-    return this.vouchService.listVouchers(slug, page);
+  vouchers(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Query() page: PaginationQuery,
+  ) {
+    return this.vouchService.listVouchers(slug, page, user.userId);
   }
 }
 

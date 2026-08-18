@@ -18,9 +18,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
-export class AddCommunityGovernanceNotificationTypes1790200000000
-  implements MigrationInterface
-{
+export class AddCommunityGovernanceNotificationTypes1790200000000 implements MigrationInterface {
   name = 'AddCommunityGovernanceNotificationTypes1790200000000';
 
   transaction = false as const;

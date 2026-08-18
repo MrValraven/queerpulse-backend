@@ -12,10 +12,7 @@ import { MemberLookup } from '../common/member-ref';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
-import {
-  ListingClaimDTO,
-  toListingClaimDTO,
-} from './listing-claim-response';
+import { ListingClaimDTO, toListingClaimDTO } from './listing-claim-response';
 import {
   ListingClaim,
   ListingClaimStatus,

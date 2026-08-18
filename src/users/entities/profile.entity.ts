@@ -44,10 +44,16 @@ export class Profile {
   pronouns!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
+  pronunciation!: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
   tagline!: string | null;
 
   @Column({ type: 'text', nullable: true })
   bio!: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  bioPt!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
   location!: string | null;
@@ -68,6 +74,9 @@ export class Profile {
   // round-trip. See src/profiles/open-to.ts for the shared vocabulary.
   @Column({ type: 'jsonb', default: () => "'[]'::jsonb" })
   openTo!: OpenToEntry[];
+
+  @Column({ type: 'text', nullable: true })
+  notHereFor!: string | null;
 
   // Private Settings → Interests preferences — never shown on the public profile,
   // only returned to the owner (see toFullProfile). Distinct from the public
@@ -157,8 +166,20 @@ export class Profile {
   @Column({ type: 'boolean', default: false })
   featuredConsent!: boolean;
 
+  @Column({ type: 'boolean', default: true })
+  photoVisible!: boolean;
+
+  @Column({ type: 'boolean', default: true })
+  hoodVisible!: boolean;
+
+  @Column({ type: 'boolean', default: true })
+  vouchersVisible!: boolean;
+
   @Column({ type: 'text', nullable: true })
   now!: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  hiddenUntil!: Date | null;
 
   // Indexed for AdminMembersService.list's `filter === 'new'` window
   // (`.andWhere('profile.joinedAt >= :since', ...)`) — see

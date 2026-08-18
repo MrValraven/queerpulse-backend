@@ -84,6 +84,24 @@ export class ForumController {
     return this.threadsService.counts(user.userId, query.q, query.tag);
   }
 
+  // Declared BEFORE `threads/:slug` so Express doesn't route `pinned` as a
+  // slug (same reason as `threads/counts` above).
+  @Get('threads/pinned')
+  @ApiOperation({
+    summary: 'List pinned threads (small, unpaginated sticky bucket)',
+  })
+  @ApiOkResponse({ description: 'Pinned threads, most-recently-pinned first.' })
+  pinnedThreads(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: ListThreadsQuery,
+  ) {
+    return this.threadsService.listPinned(
+      user.userId,
+      query.category,
+      isModeratorRole(user.role),
+    );
+  }
+
   @Get('threads/:slug')
   @ApiOperation({ summary: 'Get a single forum thread by slug' })
   @ApiOkResponse({ description: 'The forum thread.' })
@@ -122,6 +140,7 @@ export class ForumController {
       user.userId,
       dto,
       isModeratorRole(user.role),
+      user.role === 'admin',
     );
   }
 
@@ -260,5 +279,29 @@ export class ForumController {
     @Param('slug') slug: string,
   ) {
     return this.threadsService.setLocked(slug, user, false);
+  }
+
+  @Post('threads/:slug/pin')
+  @ApiOperation({ summary: 'Pin a thread (moderator only)' })
+  @ApiCreatedResponse({ description: 'The updated (pinned) thread.' })
+  @ApiForbiddenResponse({ description: 'Only a moderator can pin threads.' })
+  @ApiConflictResponse({
+    description: 'The pinned-thread cap has already been reached.',
+  })
+  @ApiNotFoundResponse({ description: 'Thread not found.' })
+  pinThread(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
+    return this.threadsService.setPinned(slug, user, true);
+  }
+
+  @Post('threads/:slug/unpin')
+  @ApiOperation({ summary: 'Unpin a thread (moderator only)' })
+  @ApiCreatedResponse({ description: 'The updated (unpinned) thread.' })
+  @ApiForbiddenResponse({ description: 'Only a moderator can pin threads.' })
+  @ApiNotFoundResponse({ description: 'Thread not found.' })
+  unpinThread(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.threadsService.setPinned(slug, user, false);
   }
 }

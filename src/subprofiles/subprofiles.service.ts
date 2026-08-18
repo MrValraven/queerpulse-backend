@@ -1128,8 +1128,7 @@ export class SubprofilesService {
         if (
           !community ||
           community.accessTier === AccessTier.Private ||
-          (community.ownerId !== null &&
-            blockedOwnerIds.has(community.ownerId))
+          (community.ownerId !== null && blockedOwnerIds.has(community.ownerId))
         ) {
           throw new BadRequestException(
             `Affiliation target not found or not visible: ${label}`,

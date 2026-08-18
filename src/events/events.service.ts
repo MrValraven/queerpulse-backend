@@ -13,6 +13,7 @@ import { randomBytes } from 'node:crypto';
 import { In, MoreThanOrEqual, Repository, SelectQueryBuilder } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { ListingLookupService } from '../listings/listing-lookup.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -52,6 +53,12 @@ export interface CreateEventInput {
   endAt?: string;
   timezone: string;
   venue?: string;
+  // `null` (update only — `create()` treats it the same as absent, since
+  // there's no existing link to detach) explicitly detaches the venue from a
+  // directory listing; a uuid resolves+validates it (400 if not a live
+  // listing); absent (the `Partial` in `UpdateEventInput` below) leaves it
+  // unchanged on update. Mirrors `communitySlug` below in shape.
+  listingId?: string | null;
   isOnline?: boolean;
   onlineUrl?: string;
   capacity?: number;
@@ -118,6 +125,9 @@ export class EventsService {
     // Batched crop lookup (`MediaCropService.getMany`) for `coverImageUrl`'s
     // sibling `coverCrop`.
     private readonly mediaCropService: MediaCropService,
+    // Resolves+validates an optional `listingId` against a real, live
+    // directory listing — see `CreateEventInput.listingId`.
+    private readonly listingLookup: ListingLookupService,
   ) {}
 
   // Events are reported (and taken down) under the `event` taxonomy code, keyed
@@ -160,6 +170,10 @@ export class EventsService {
       );
     }
 
+    const listingId = dto.listingId
+      ? await this.assertLiveListing(dto.listingId)
+      : null;
+
     const event = this.events.create({
       hostId,
       slug: '', // assigned (race-safely) by saveWithUniqueSlug
@@ -169,6 +183,7 @@ export class EventsService {
       endAt,
       timezone: dto.timezone,
       venue: dto.venue ?? null,
+      listingId,
       isOnline: dto.isOnline ?? false,
       onlineUrl: dto.onlineUrl ?? null,
       capacity: dto.capacity ?? null,
@@ -236,6 +251,17 @@ export class EventsService {
       );
     }
 
+    // Same absent/null/uuid three-way as `communitySlug` above: absent
+    // leaves the existing link (if any) unchanged, `null` explicitly
+    // detaches it (falling back to plain-text `venue`), a uuid
+    // resolves+validates the new link.
+    let listingId = event.listingId;
+    if (dto.listingId !== undefined) {
+      listingId = dto.listingId
+        ? await this.assertLiveListing(dto.listingId)
+        : null;
+    }
+
     const oldStartAt = event.startAt;
     const oldCapacity = event.capacity;
     // Snapshot the material fields (when + where) before the patch so we can
@@ -266,6 +292,7 @@ export class EventsService {
         : {}),
       ...(dto.timezone !== undefined ? { timezone: dto.timezone } : {}),
       ...(dto.venue !== undefined ? { venue: dto.venue ?? null } : {}),
+      ...(dto.listingId !== undefined ? { listingId } : {}),
       ...(dto.isOnline !== undefined ? { isOnline: dto.isOnline } : {}),
       ...(dto.onlineUrl !== undefined
         ? { onlineUrl: dto.onlineUrl ?? null }
@@ -845,6 +872,18 @@ export class EventsService {
     }
   }
 
+  // Resolves a `listingId` payload value to a validated FK — 400s (not 404;
+  // this is a create/update input, not a route lookup) when it isn't a real,
+  // live listing. Returns the same id back, mirroring `assertMemberBySlug`'s
+  // "resolve + authorize, or throw" shape for `communitySlug`.
+  private async assertLiveListing(listingId: string): Promise<string> {
+    const listing = await this.listingLookup.findLive(listingId);
+    if (!listing) {
+      throw new BadRequestException('Venue listing not found');
+    }
+    return listingId;
+  }
+
   private async loadEventOr404(slug: string): Promise<Event> {
     const event = await this.events.findOne({ where: { slug } });
     if (!event) {
@@ -920,6 +959,7 @@ export class EventsService {
       isBookmarked,
       communitySlug,
       crops,
+      venueListing,
     ] = await Promise.all([
       this.rsvps.count({
         where: { eventId: event.id, status: RsvpStatus.Going },
@@ -940,6 +980,9 @@ export class EventsService {
       this.mediaCropService.getMany(
         event.coverImageUrl ? [event.coverImageUrl] : [],
       ),
+      event.listingId
+        ? this.listingLookup.findLive(event.listingId)
+        : Promise.resolve(null),
     ]);
     const organizerIds = [event.hostId, ...cohostRows.map((c) => c.userId)];
     const profiles = await this.profilesByUserIds(organizerIds);
@@ -959,6 +1002,7 @@ export class EventsService {
       description: event.description,
       onlineUrl: event.onlineUrl,
       communitySlug,
+      venueListing,
       host: toOrganizerView(profiles.get(event.hostId)),
       cohosts: cohostRows
         .map((c) => toOrganizerView(profiles.get(c.userId)))

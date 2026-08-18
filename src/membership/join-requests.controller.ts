@@ -104,7 +104,9 @@ export class JoinRequestsController {
   @Post('bulk')
   @UseGuards(ActiveMemberGuard, RolesGuard)
   @Roles(UserRole.Moderator, UserRole.Admin)
-  @ApiOperation({ summary: 'Approve, decline, or waitlist multiple invite requests' })
+  @ApiOperation({
+    summary: 'Approve, decline, or waitlist multiple invite requests',
+  })
   @ApiOkResponse({ description: 'Per-item bulk review result.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({
@@ -113,7 +115,10 @@ export class JoinRequestsController {
   bulk(
     @CurrentUser() user: CurrentUserData,
     @Body() dto: BulkReviewJoinRequestsDto,
-  ): Promise<{ succeeded: string[]; failed: { id: string; reason: string }[] }> {
+  ): Promise<{
+    succeeded: string[];
+    failed: { id: string; reason: string }[];
+  }> {
     return this.joinRequestsService.bulkReview(
       dto.ids,
       user.userId,

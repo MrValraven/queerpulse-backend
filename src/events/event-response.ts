@@ -44,6 +44,12 @@ export interface EventSummary {
   // the detail view (unlike `communitySlug` below, which DOES need a join and
   // is detail-only — see `EventDetail`).
   communityId: string | null;
+  // The directory listing this event's venue is linked to, or null for a
+  // free-text venue — same plain-column-on-every-row precedent as
+  // `communityId` above. Resolving it to a display name/slug (`venueListing`
+  // below) DOES need a lookup, so that stays detail-only, mirroring
+  // `communitySlug`'s split from `communityId` exactly.
+  listingId: string | null;
 }
 
 export interface EventDetail extends EventSummary {
@@ -57,6 +63,13 @@ export interface EventDetail extends EventSummary {
   // rows: doing so would require a join (or an extra batched lookup) on every
   // row of a hot browse/search page for a field only the edit flow needs.
   communitySlug: string | null;
+  // The linked venue's display name + public slug (or null when `listingId`
+  // is null, or the listing is no longer live) — resolved via
+  // `ListingLookupService.findLive` in `EventsService.buildDetail`, same
+  // detail-only lookup shape as `communitySlug` immediately above. The
+  // frontend builds the `/local/directory/:slug` link itself (see
+  // `businessPath` in `routeMap.ts`) rather than the backend emitting a path.
+  venueListing: { slug: string; name: string } | null;
   host: EventOrganizerView | null;
   cohosts: EventOrganizerView[];
   isOrganizer: boolean;
@@ -156,6 +169,7 @@ export function toEventSummary(
     myRsvpStatus: myRsvp ? myRsvp.status : null,
     isBookmarked,
     communityId: e.communityId,
+    listingId: e.listingId,
   };
 }
 

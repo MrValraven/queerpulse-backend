@@ -11,9 +11,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
-export class AddListingQueerOwnedVerified1790800000000
-  implements MigrationInterface
-{
+export class AddListingQueerOwnedVerified1790800000000 implements MigrationInterface {
   name = 'AddListingQueerOwnedVerified1790800000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

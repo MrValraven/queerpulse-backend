@@ -5,7 +5,10 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Repository } from 'typeorm';
-import { CommunityMember, RosterRole } from './entities/community-member.entity';
+import {
+  CommunityMember,
+  RosterRole,
+} from './entities/community-member.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { CommunityPost } from './entities/community-post.entity';
 import { Community } from './entities/community.entity';
@@ -82,7 +85,8 @@ export class CommunityMembershipService {
     });
     if (
       !membership ||
-      (membership.role !== RosterRole.Owner && membership.role !== RosterRole.Mod)
+      (membership.role !== RosterRole.Owner &&
+        membership.role !== RosterRole.Mod)
     ) {
       throw new ForbiddenException(
         'Only the community owner or a moderator can do that',

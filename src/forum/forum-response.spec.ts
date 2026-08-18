@@ -27,7 +27,9 @@ function makeThread(overrides: Partial<ForumThread> = {}): ForumThread {
     category: 'general',
     communityId: null,
     isPinned: false,
+    pinnedAt: null,
     isLocked: false,
+    isOfficial: false,
     tags: [],
     opVoteCount: 0,
     replyCount: 0,
@@ -95,6 +97,43 @@ describe('toForumPostResponse permission flags', () => {
   });
 });
 
+describe('toForumThreadResponse official author', () => {
+  const author = { userId: 'author-1', isModerator: false };
+  const realAuthor = {
+    slug: 'ava',
+    firstName: 'Ava',
+    lastName: 'Lee',
+    avatarUrl: null,
+  } as never;
+
+  it('swaps the displayed author for "QueerPulse Official" when isOfficial is set', () => {
+    const dto = toForumThreadResponse(
+      makeThread({ isOfficial: true }),
+      realAuthor,
+      author,
+    );
+    expect(dto.author).toEqual({
+      handle: 'queerpulse',
+      displayName: 'QueerPulse',
+      avatarUrl: null,
+      official: true,
+    });
+  });
+
+  it('shows the real author when isOfficial is false', () => {
+    const dto = toForumThreadResponse(
+      makeThread({ isOfficial: false }),
+      realAuthor,
+      author,
+    );
+    expect(dto.author).toEqual({
+      handle: 'ava',
+      displayName: 'Ava Lee',
+      avatarUrl: null,
+    });
+  });
+});
+
 describe('toForumThreadResponse OP card flags', () => {
   const author = { userId: 'author-1', isModerator: false };
   const moderator = { userId: 'mod-1', isModerator: true };
@@ -111,9 +150,10 @@ describe('toForumThreadResponse OP card flags', () => {
     expect(dto.canRestore).toBe(false);
     expect(dto.canViewHistory).toBe(false);
     expect(dto.canLock).toBe(false);
+    expect(dto.canPin).toBe(false);
   });
 
-  it('moderator can delete + lock another member OP', () => {
+  it('moderator can delete + lock + pin another member OP', () => {
     const dto = toForumThreadResponse(
       makeThread(),
       null,
@@ -122,6 +162,7 @@ describe('toForumThreadResponse OP card flags', () => {
     );
     expect(dto.canDelete).toBe(true);
     expect(dto.canLock).toBe(true);
+    expect(dto.canPin).toBe(true);
   });
 
   it('stranger can do nothing', () => {

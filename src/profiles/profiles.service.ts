@@ -18,6 +18,7 @@ import { escapeLikeTerm } from '../common/like-escape';
 import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { HiddenFromService } from '../social/hidden-from.service';
 import { StorageService } from '../storage/storage.service';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserRole, UserStatus } from '../users/entities/user.entity';
@@ -35,6 +36,7 @@ import { ListMembersQuery, MemberSort } from './dto/list-members.query';
 import { SocialLinkDto } from './dto/replace-socials.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { WorkItemDto } from './dto/replace-work.dto';
+import { normalizeWorkLinks } from './work-links';
 import {
   FeaturedCommunityRefView,
   communityTypeLabel,
@@ -50,7 +52,11 @@ import {
   reconcileDisciplineProfession,
 } from './professions';
 import { Activity } from './entities/activity.entity';
-import { BoardPost } from './entities/board-post.entity';
+import {
+  BoardKind,
+  BoardPost,
+  BoardPostStatus,
+} from './entities/board-post.entity';
 import { Group } from './entities/group.entity';
 import { GroupMembership } from './entities/group-membership.entity';
 import { Shaping } from './entities/shaping.entity';
@@ -67,7 +73,9 @@ import {
   ProfileRelations,
   SocialLinkView,
   WorkView,
+  gateAvatarUrl,
   sortShapings,
+  toBoardView,
   toFullProfile,
   toLimitedProfile,
   toMemberCard,
@@ -77,6 +85,14 @@ import {
 const PAGE_SIZE = 20;
 const RELATED_LIMIT = 4;
 const ACTIVITY_LIMIT = 6;
+const DAY_MS = 24 * 60 * 60 * 1000;
+// "looking" items expire sooner than "offering" items — a member actively
+// searching for something needs a shorter shelf life than one advertising
+// something they have to give.
+const BOARD_ITEM_LIFESPAN_DAYS: Record<BoardKind, number> = {
+  [BoardKind.Looking]: 30,
+  [BoardKind.Offering]: 90,
+};
 
 // Comma-separated query param -> trimmed, non-empty values.
 function csv(raw: string | undefined): string[] {
@@ -126,6 +142,7 @@ export class ProfilesService {
     private readonly vouchService: VouchService,
     private readonly connectionsService: ConnectionsService,
     private readonly blockFilter: BlockFilterService,
+    private readonly hiddenFrom: HiddenFromService,
     private readonly handles: HandlesService,
     private readonly storage: StorageService,
     private readonly contentModeration: ContentModerationService,
@@ -161,10 +178,44 @@ export class ProfilesService {
     viewerUserId: string,
     viewerRole?: string,
   ): Promise<FullProfileResponse | LimitedProfileResponse> {
+    const profile = await this.findBySlugOrThrow(
+      slug,
+      viewerUserId,
+      viewerRole,
+    );
+    const vouchCount = await this.vouchService.getVouchCount(profile.userId);
+    if (!(await this.canViewFull(profile, viewerUserId))) {
+      return toLimitedProfile(
+        profile,
+        vouchCount,
+        profile.userId === viewerUserId,
+      );
+    }
+    return this.buildFullProfile(profile, vouchCount, viewerUserId);
+  }
+
+  /**
+   * Resolve `slug` to a `Profile`, applying the same not-found-indistinguish-
+   * able-from-hidden gates `getBySlug` has always applied — block, hidden-from
+   * (member profile v2 Task 5), self-hide (member profile v2 Task 6), and
+   * moderator takedown — WITHOUT assembling a full/limited response. Factored
+   * out of `getBySlug` so any endpoint that needs "does the viewer get to know
+   * this member/slug exists at all?" (currently `getBySlug` itself and the
+   * `GET /:slug/mutuals` controller route) shares one answer instead of
+   * re-deriving or drifting out of sync.
+   */
+  async findBySlugOrThrow(
+    slug: string,
+    viewerUserId: string,
+    viewerRole?: string,
+  ): Promise<Profile> {
     const profile = await this.profiles.findOne({ where: { slug } });
     if (!profile) {
       throw new NotFoundException('Profile not found');
     }
+    // Computed once, up front, so every owner-exception below (self-hide,
+    // takedown) reads the same answer.
+    const isOwner = profile.userId === viewerUserId;
     // Block-gate the lookup (P1-3): never surface a member's profile to someone
     // they've blocked, or who has blocked them — the same 404 subprofiles and
     // flatmate profiles already return, so a block is indistinguishable from a
@@ -175,32 +226,47 @@ export class ProfilesService {
     ) {
       throw new NotFoundException('Profile not found');
     }
+    // Hidden-from gate (member profile v2 Task 5): same 404-not-distinguish-
+    // able-from-nonexistent posture as the block gate above, but one-way —
+    // `profile.userId` is the owner who may have hidden themself FROM
+    // `viewerUserId`, not the reverse. `isHiddenFrom` short-circuits to
+    // false when they're equal, so `getMine` is unaffected.
+    if (await this.hiddenFrom.isHiddenFrom(profile.userId, viewerUserId)) {
+      throw new NotFoundException('Profile not found');
+    }
+    // Self-hide gate (member profile v2 Task 6, "Hide me for 24 hours"): same
+    // 404-not-distinguishable-from-nonexistent posture as the block/hidden-
+    // from gates above, but blanket rather than viewer-relative — a live
+    // `hiddenUntil` hides the profile from EVERY non-owner viewer, not just
+    // one. The owner is exempted so they can always see (and manage) their
+    // own hidden profile, matching the design's "you're hidden" banner.
+    if (!isOwner && profile.hiddenUntil && profile.hiddenUntil > new Date()) {
+      throw new NotFoundException('Profile not found');
+    }
     // Moderator takedown gate. A `hide_content`/`remove_content` on this member
     // 404s the profile for everyone but the member themselves and platform
     // staff (admin/moderator) — the same don't-leak-existence posture as a
     // block above and `CommunitiesService.getBySlug`. The member subject is
     // addressed by slug OR userId, so both are checked.
-    const isOwner = profile.userId === viewerUserId;
     if (!isOwner && !ProfilesService.isStaffRole(viewerRole)) {
       await this.assertNotTakenDown(profile.slug, profile.userId);
     }
-    const vouchCount = await this.vouchService.getVouchCount(profile.userId);
-    if (!(await this.canViewFull(profile, viewerUserId))) {
-      return toLimitedProfile(profile, vouchCount);
-    }
-    return this.buildFullProfile(
-      profile,
-      vouchCount,
-      profile.userId === viewerUserId,
-    );
+    return profile;
   }
 
   private async buildFullProfile(
     profile: Profile,
     vouchCount: number,
-    // Owner-only private fields (Interests) are included only when true.
-    isOwner: boolean,
+    // The actual caller, not just an isOwner bool: `loadRelated` below needs
+    // it too, because a `related` entry (a DIFFERENT member, similar by tags/
+    // location to the profile being viewed — never the profile owner, see the
+    // `p.user_id != :self` exclusion there) can still legitimately BE the
+    // viewer themselves, and that person must see their own real photo/hood
+    // regardless of their own photoVisible/hoodVisible toggle.
+    viewerUserId: string,
   ): Promise<FullProfileResponse> {
+    // Owner-only private fields (Interests) are included only when true.
+    const isOwner = profile.userId === viewerUserId;
     const userId = profile.userId;
     const [
       socials,
@@ -227,7 +293,7 @@ export class ProfilesService {
         take: ACTIVITY_LIMIT,
       }),
       this.loadGroups(userId),
-      this.loadRelated(profile),
+      this.loadRelated(profile, viewerUserId),
       this.loadFeaturedCommunities(userId),
     ]);
     const rels: ProfileRelations = {
@@ -340,7 +406,15 @@ export class ProfilesService {
     });
   }
 
-  private async loadRelated(profile: Profile): Promise<ProfileCard[]> {
+  private async loadRelated(
+    profile: Profile,
+    // The `related` set is filtered to exclude the PROFILE OWNER
+    // (`p.user_id != :self` below) but not the viewer — a related member (by
+    // shared tags/location) can legitimately BE the person looking at this
+    // page, and that person must see their own real photo regardless of
+    // their own `photoVisible` toggle. See `gateAvatarUrl`.
+    viewerUserId: string,
+  ): Promise<ProfileCard[]> {
     const hasTags = profile.tags.length > 0;
     const hasLocation = !!profile.location;
     if (!hasTags && !hasLocation) {
@@ -369,7 +443,10 @@ export class ProfilesService {
     const counts = await this.vouchService.getVouchCounts(
       rows.map((r) => r.userId),
     );
-    return rows.map((r) => toProfileCard(r, counts.get(r.userId) ?? 0));
+    return rows.map((r) => ({
+      ...toProfileCard(r, counts.get(r.userId) ?? 0),
+      avatarUrl: gateAvatarUrl(r, r.userId === viewerUserId),
+    }));
   }
 
   private async canViewFull(
@@ -422,11 +499,24 @@ export class ProfilesService {
     if (!profile) {
       throw new NotFoundException('Profile not found');
     }
-    // `now` and `openTo` are pulled out of the blanket assign because both need
-    // an explicit `undefined` check: `{ now: '' }` CLEARS the status and
-    // `{ openTo: [] }` clears the chips, so neither empty value may be treated
-    // as "field omitted". `openTo` is a full replace, not a merge.
-    const { now, openTo, featuredCommunities, ...rest } = dto;
+    // `now`, `openTo`, `pronunciation`, `bioPt`, `notHereFor`, and `hiddenUntil`
+    // are pulled out of the blanket assign because each needs an explicit
+    // `undefined` check: `{ now: '' }` CLEARS the status and `{ openTo: [] }`
+    // clears the chips, so neither empty value may be treated as "field
+    // omitted". `pronunciation`/`bioPt`/`notHereFor` follow the same
+    // empty-string-clears pattern as `now`. `hiddenUntil` additionally needs a
+    // string → Date conversion the DTO's wire shape doesn't carry. `openTo` is
+    // a full replace, not a merge.
+    const {
+      now,
+      openTo,
+      featuredCommunities,
+      pronunciation,
+      bioPt,
+      notHereFor,
+      hiddenUntil,
+      ...rest
+    } = dto;
     // Snapshot the avatar the profile pointed at BEFORE `Object.assign` overwrites
     // it, so a replaced/cleared upload can be deleted from the bucket afterwards.
     const previousAvatarUrl = profile.avatarUrl;
@@ -446,6 +536,22 @@ export class ProfilesService {
       // An empty status normalises to NULL so a cleared Now reads back absent
       // rather than as an empty string.
       profile.now = now.trim() || null;
+    }
+    if (pronunciation !== undefined) {
+      profile.pronunciation = pronunciation.trim() || null;
+    }
+    if (bioPt !== undefined) {
+      profile.bioPt = bioPt.trim() || null;
+    }
+    if (notHereFor !== undefined) {
+      profile.notHereFor = notHereFor.trim() || null;
+    }
+    if (hiddenUntil !== undefined) {
+      // `null` clears it early ("bring me back"); an ISO string is stored
+      // verbatim as the timestamp past which the profile is hidden — see the
+      // DTO's `hiddenUntil` comment. `@IsISO8601()` already validated the
+      // string, so this Date conversion cannot fail.
+      profile.hiddenUntil = hiddenUntil === null ? null : new Date(hiddenUntil);
     }
     // Keep `profession ⊆ discipline` coherent: a profession implies its
     // parent discipline, auto-added rather than rejected — see
@@ -493,7 +599,7 @@ export class ProfilesService {
       }
     }
     const vouchCount = await this.vouchService.getVouchCount(userId);
-    return this.buildFullProfile(profile, vouchCount, true);
+    return this.buildFullProfile(profile, vouchCount, userId);
   }
 
   /**
@@ -580,7 +686,7 @@ export class ProfilesService {
     // No-op if it already resolves to the current username.
     if (username === profile.slug) {
       const vouchCount = await this.vouchService.getVouchCount(userId);
-      return this.buildFullProfile(profile, vouchCount, true);
+      return this.buildFullProfile(profile, vouchCount, userId);
     }
 
     const fmt = handleFormatError(username);
@@ -620,7 +726,7 @@ export class ProfilesService {
 
     const updated = await this.profiles.findOne({ where: { userId } });
     const vouchCount = await this.vouchService.getVouchCount(userId);
-    return this.buildFullProfile(updated ?? profile, vouchCount, true);
+    return this.buildFullProfile(updated ?? profile, vouchCount, userId);
   }
 
   async replaceSocials(
@@ -663,6 +769,7 @@ export class ProfilesService {
           year: it.year,
           imageUrl: it.imageUrl ?? null,
           position: index,
+          links: normalizeWorkLinks(it.links ?? []),
         }),
       );
       if (rows.length) {
@@ -678,6 +785,7 @@ export class ProfilesService {
       title: workItem.title,
       year: workItem.year,
       imageUrl: toImageUrl(workItem.imageUrl),
+      links: workItem.links,
       position: workItem.position,
     }));
   }
@@ -722,16 +830,42 @@ export class ProfilesService {
       seenSlugs.add(item.slug);
     }
     await this.dataSource.transaction(async (manager) => {
+      // This endpoint replaces the caller's whole ORDERED LIST on every save
+      // (title/slug/position edits, reordering, add/remove) — it does not
+      // reset each item's closed/found lifecycle. Load the current rows
+      // before deleting them so a re-saved slug can carry its
+      // status/closedAt/closedNote/expiresAt/createdAt forward unchanged;
+      // only a slug that is genuinely new (not present before) gets a fresh
+      // expiresAt/createdAt. `createdAt` matters beyond bookkeeping: the FE
+      // renders it as relative-age copy ("Asked 12 days ago") — silently
+      // resetting it on an unrelated list edit would misdate every existing
+      // item shown to visitors.
+      const existing = await manager.find(BoardPost, { where: { userId } });
+      const existingBySlug = new Map(
+        existing.map((boardPost) => [boardPost.slug, boardPost]),
+      );
+
       await manager.delete(BoardPost, { userId });
-      const rows = items.map((item, index) =>
-        manager.create(BoardPost, {
+      const now = Date.now();
+      const rows = items.map((item, index) => {
+        const previous = existingBySlug.get(item.slug);
+        return manager.create(BoardPost, {
           userId,
           kind: item.kind,
           title: item.title,
           slug: item.slug,
           position: index,
-        }),
-      );
+          status: previous ? previous.status : BoardPostStatus.Open,
+          closedNote: previous ? previous.closedNote : null,
+          closedAt: previous ? previous.closedAt : null,
+          expiresAt: previous
+            ? previous.expiresAt
+            : new Date(now + BOARD_ITEM_LIFESPAN_DAYS[item.kind] * DAY_MS),
+          // Left undefined for a genuinely new slug so `@CreateDateColumn`
+          // populates it on insert as usual.
+          createdAt: previous ? previous.createdAt : undefined,
+        });
+      });
       if (rows.length) {
         await manager.save(rows);
       }
@@ -740,11 +874,25 @@ export class ProfilesService {
       where: { userId },
       order: { position: 'ASC' },
     });
-    return saved.map((boardPost) => ({
-      kind: boardPost.kind,
-      title: boardPost.title,
-      slug: boardPost.slug,
-    }));
+    return saved.map(toBoardView);
+  }
+
+  async closeBoardItem(
+    userId: string,
+    slug: string,
+    note: string | undefined,
+  ): Promise<BoardView> {
+    const boardPost = await this.boardPosts.findOne({
+      where: { userId, slug },
+    });
+    if (!boardPost) {
+      throw new NotFoundException('No board item with that slug.');
+    }
+    boardPost.status = BoardPostStatus.Closed;
+    boardPost.closedAt = new Date();
+    boardPost.closedNote = note ?? null;
+    await this.boardPosts.save(boardPost);
+    return toBoardView(boardPost);
   }
 
   async replaceShapings(
@@ -836,6 +984,18 @@ export class ProfilesService {
     // directory (spec §2). `p`'s primary key is `user_id` (snake_case, per
     // SnakeNamingStrategy) — matches this query builder's alias.
     this.blockFilter.excludeBlocked(qb, viewerUserId, '"p"."user_id"');
+    // Hidden-from (member profile v2 Task 5): a candidate who hid THEIR
+    // profile from this viewer never surfaces either, same as a block —
+    // directional, unlike `excludeBlocked` above.
+    this.hiddenFrom.excludeHiddenFrom(qb, viewerUserId, '"p"."user_id"');
+    // Self-hide (member profile v2 Task 6, "Hide me for 24 hours"): a member
+    // with a live `hiddenUntil` excludes themself from EVERY viewer's search
+    // results — unlike the block/hidden-from gates above, this is not
+    // viewer-relative, so it applies unconditionally rather than being
+    // scoped to `viewerUserId`. They can still fetch their own profile
+    // directly (`getMine`/`getBySlug` own the owner exception via
+    // `findBySlugOrThrow`).
+    qb.andWhere('("p"."hidden_until" IS NULL OR "p"."hidden_until" <= now())');
 
     if (q.query) {
       // Escape LIKE metacharacters (\ % _) so a user-supplied term is matched
@@ -909,7 +1069,9 @@ export class ProfilesService {
         qb.andWhere('1 = 0');
       } else {
         qb.andWhere(
-          '(' + hoods.map((_, i) => `p.location ILIKE :hood${i}`).join(' OR ') + ')',
+          '(' +
+            hoods.map((_, i) => `p.location ILIKE :hood${i}`).join(' OR ') +
+            ')',
           Object.fromEntries(hoods.map((h, i) => [`hood${i}`, `%${h}%`])),
         );
       }
@@ -947,10 +1109,9 @@ export class ProfilesService {
     // Member age (tenure) filter — years since joined, computed from
     // `profiles.joined_at`. Either bound may be sent alone.
     if (q.yearsFrom !== undefined) {
-      qb.andWhere(
-        `date_part('year', age(now(), p.joined_at)) >= :yearsFrom`,
-        { yearsFrom: q.yearsFrom },
-      );
+      qb.andWhere(`date_part('year', age(now(), p.joined_at)) >= :yearsFrom`, {
+        yearsFrom: q.yearsFrom,
+      });
     }
     if (q.yearsTo !== undefined) {
       qb.andWhere(`date_part('year', age(now(), p.joined_at)) <= :yearsTo`, {
@@ -1034,7 +1195,15 @@ export class ProfilesService {
       rows.map((r) => r.userId),
     );
     return {
-      items: rows.map((r) => toMemberCard(r, counts.get(r.userId) ?? 0)),
+      // Directory search never excludes the viewer's own profile from their
+      // own results (unlike `excludeBlocked` above) — the viewer's own name/
+      // slug can legitimately match their own query, or they can simply
+      // appear on a page in the unfiltered listing. When that happens, they
+      // must still see their own real photo/hood, hence `isOwner` here rather
+      // than a hardcoded `false`. See `toMemberCard`/`gateAvatarUrl`.
+      items: rows.map((r) =>
+        toMemberCard(r, counts.get(r.userId) ?? 0, r.userId === viewerUserId),
+      ),
       total,
       page,
       pageSize: PAGE_SIZE,

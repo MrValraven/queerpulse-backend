@@ -19,6 +19,8 @@ describe('ForumController', () => {
     getBySlug: jest.Mock;
     create: jest.Mock;
     setLocked: jest.Mock;
+    setPinned: jest.Mock;
+    listPinned: jest.Mock;
   };
   let postsService: { listPosts: jest.Mock; reply: jest.Mock; vote: jest.Mock };
 
@@ -29,6 +31,8 @@ describe('ForumController', () => {
       getBySlug: jest.fn().mockResolvedValue({}),
       create: jest.fn().mockResolvedValue({}),
       setLocked: jest.fn().mockResolvedValue({}),
+      setPinned: jest.fn().mockResolvedValue({}),
+      listPinned: jest.fn().mockResolvedValue([]),
     };
     postsService = {
       listPosts: jest.fn().mockResolvedValue({ data: [], pageInfo: {} }),
@@ -93,6 +97,39 @@ describe('ForumController', () => {
     );
   });
 
+  it('delegates pin/unpin with the caller and the target state', async () => {
+    await controller.pinThread(user, 'hello-world');
+    expect(threadsService.setPinned).toHaveBeenCalledWith(
+      'hello-world',
+      user,
+      true,
+    );
+
+    await controller.unpinThread(user, 'hello-world');
+    expect(threadsService.setPinned).toHaveBeenCalledWith(
+      'hello-world',
+      user,
+      false,
+    );
+  });
+
+  it('delegates pinnedThreads with the caller id, category, and moderator role', async () => {
+    await controller.pinnedThreads(user, { category: 'housing' });
+    expect(threadsService.listPinned).toHaveBeenCalledWith(
+      'user-1',
+      'housing',
+      false,
+    );
+
+    const mod: CurrentUserData = { ...user, role: 'moderator' };
+    await controller.pinnedThreads(mod, {});
+    expect(threadsService.listPinned).toHaveBeenLastCalledWith(
+      'user-1',
+      undefined,
+      true,
+    );
+  });
+
   it('delegates getThread by slug with the caller id', async () => {
     await controller.getThread(user, 'hello-world');
     expect(threadsService.getBySlug).toHaveBeenCalledWith(
@@ -117,7 +154,24 @@ describe('ForumController', () => {
   it('delegates createThread with the caller id', async () => {
     const dto = { title: 'Hi', body: 'Body', category: 'general' };
     await controller.createThread(user, dto);
-    expect(threadsService.create).toHaveBeenCalledWith('user-1', dto, false);
+    expect(threadsService.create).toHaveBeenCalledWith(
+      'user-1',
+      dto,
+      false,
+      false,
+    );
+  });
+
+  it('threads the admin role into createThread', async () => {
+    const admin: CurrentUserData = { ...user, role: 'admin' };
+    const dto = { title: 'Hi', body: 'Body', category: 'general' };
+    await controller.createThread(admin, dto);
+    expect(threadsService.create).toHaveBeenCalledWith(
+      'user-1',
+      dto,
+      true,
+      true,
+    );
   });
 
   it('threads the moderator role into the read paths', async () => {
@@ -144,7 +198,12 @@ describe('ForumController', () => {
 
     const dto = { title: 'Hi', body: 'Body', category: 'general' };
     await controller.createThread(mod, dto);
-    expect(threadsService.create).toHaveBeenLastCalledWith('user-1', dto, true);
+    expect(threadsService.create).toHaveBeenLastCalledWith(
+      'user-1',
+      dto,
+      true,
+      false,
+    );
   });
 
   it('delegates reply with the caller user', async () => {

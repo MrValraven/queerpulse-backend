@@ -181,6 +181,17 @@ export class ReportsService {
     return reasonsFor(subjectType);
   }
 
+  // The reporter's own filed reports, newest first — backs `GET /reports/mine`
+  // so a member can check on something they reported. Capped at 50: this is a
+  // self-service status list, not a full moderation history export.
+  async listMine(reporterId: string): Promise<Report[]> {
+    return this.reports.find({
+      where: { reporterId },
+      order: { createdAt: 'DESC' },
+      take: 50,
+    });
+  }
+
   /**
    * Merges the reporter's own evidence with a server-authoritative snapshot
    * of the reported message's content, when the subject is a message

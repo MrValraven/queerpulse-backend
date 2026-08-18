@@ -158,7 +158,8 @@ export class GovernanceController {
   @UseGuards(RolesGuard)
   @Roles(UserRole.Admin, UserRole.Moderator)
   @ApiOperation({
-    summary: 'Get the admin Policy tab data (overview + per-section audit meta)',
+    summary:
+      'Get the admin Policy tab data (overview + per-section audit meta)',
   })
   @ApiOkResponse({
     description: 'The overview sections plus per-section last-edited info.',

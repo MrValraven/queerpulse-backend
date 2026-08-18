@@ -98,6 +98,92 @@ describe('UpdateProfileDto — avatarUrl', () => {
   });
 });
 
+describe('UpdateProfileDto — pronunciation/bioPt/notHereFor', () => {
+  // These three follow the exact same "empty string is the clearing write"
+  // shape as `now` above — ProfilesService.updateMe pulls each out of the
+  // blanket Object.assign and stores `value.trim() || null`, so an empty
+  // string must validate (not be rejected) here, same as `now: ''` above.
+
+  it('accepts a well-formed pronunciation and rejects one over 80 chars', async () => {
+    expect(await check({ pronunciation: 'tee-AH-go' })).toHaveLength(0);
+    const errors = await check({ pronunciation: 'x'.repeat(81) });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.property).toBe('pronunciation');
+  });
+
+  it('accepts an empty pronunciation, which is the clearing write', async () => {
+    expect(await check({ pronunciation: '' })).toHaveLength(0);
+  });
+
+  it('leaves pronunciation valid (and thus unchanged) when omitted entirely', async () => {
+    // At the DTO layer "omitted" just means the key is absent — there is
+    // nothing to reject, mirroring `now`'s omitted case. The actual
+    // "value unchanged" behaviour lives in ProfilesService.updateMe's
+    // `pronunciation !== undefined` check.
+    expect(await check({ firstName: 'Tiago' })).toHaveLength(0);
+  });
+
+  it('accepts a well-formed bioPt and rejects one over 2000 chars', async () => {
+    expect(await check({ bioPt: 'Uma bio em português' })).toHaveLength(0);
+    const errors = await check({ bioPt: 'x'.repeat(2001) });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.property).toBe('bioPt');
+  });
+
+  it('accepts an empty bioPt, which is the clearing write', async () => {
+    expect(await check({ bioPt: '' })).toHaveLength(0);
+  });
+
+  it('accepts a well-formed notHereFor and rejects one over 280 chars', async () => {
+    expect(
+      await check({ notHereFor: 'Not here for casual hookups' }),
+    ).toHaveLength(0);
+    const errors = await check({ notHereFor: 'x'.repeat(281) });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.property).toBe('notHereFor');
+  });
+
+  it('accepts an empty notHereFor, which is the clearing write', async () => {
+    expect(await check({ notHereFor: '' })).toHaveLength(0);
+  });
+});
+
+describe('UpdateProfileDto — hiddenUntil', () => {
+  it('accepts a well-formed ISO 8601 timestamp', async () => {
+    expect(
+      await check({ hiddenUntil: '2026-08-19T12:00:00.000Z' }),
+    ).toHaveLength(0);
+  });
+
+  it('accepts null, which clears it early', async () => {
+    expect(await check({ hiddenUntil: null })).toHaveLength(0);
+  });
+
+  it('rejects a non-ISO-8601 string rather than storing a bad timestamp', async () => {
+    const errors = await check({ hiddenUntil: 'not-a-date' });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.property).toBe('hiddenUntil');
+  });
+});
+
+describe('UpdateProfileDto — photoVisible/hoodVisible/vouchersVisible', () => {
+  it('accepts booleans for all three visibility toggles', async () => {
+    expect(
+      await check({
+        photoVisible: false,
+        hoodVisible: true,
+        vouchersVisible: false,
+      }),
+    ).toHaveLength(0);
+  });
+
+  it('rejects a non-boolean photoVisible', async () => {
+    const errors = await check({ photoVisible: 'nope' });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.property).toBe('photoVisible');
+  });
+});
+
 describe('UpdateProfileDto — openTo', () => {
   it('accepts a mixed preset/custom list', async () => {
     const errors = await check({

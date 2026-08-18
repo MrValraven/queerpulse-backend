@@ -782,4 +782,106 @@ describe('ConnectionsService', () => {
       await expect(service.areConnected('a', 'b')).resolves.toBe(false);
     });
   });
+
+  describe('mutualMembers', () => {
+    // `mutualMembers` makes two `connections.find` calls in sequence:
+    //  1. `acceptedConnectionUserIdsOrdered('them')` — `them`'s accepted
+    //     connections, oldest-`respondedAt`-first (the real query's
+    //     `ORDER BY respondedAt ASC, id ASC`; this mock supplies rows already
+    //     in that order, since the fake repo doesn't apply real SQL ordering).
+    //  2. `acceptedConnectionsAmong('me', <those ids>)` — which of them the
+    //     viewer ('me') is also accepted-connected to.
+    // Order is deterministic through BOTH steps: which of `them`'s connections
+    // are mutual is decided by (1)'s order (oldest shared connection first),
+    // and is never reshuffled by (2) since acceptedConnectionsAmong only
+    // narrows a Set (membership test), the final list is filtered from (1)'s
+    // ordered array, not rebuilt from the Set.
+
+    it('orders mutuals by how long `them` has known each one, oldest first, and is unaffected by the profiles lookup row order', async () => {
+      connections.find
+        // `them`'s accepted connections, oldest first: a, then b, then c.
+        .mockResolvedValueOnce([
+          { requesterId: 'them', addresseeId: 'a', status: 'accepted' },
+          { requesterId: 'them', addresseeId: 'b', status: 'accepted' },
+          { requesterId: 'them', addresseeId: 'c', status: 'accepted' },
+        ])
+        // Of [a, b, c], the viewer ('me') is connected to a and c, not b.
+        .mockResolvedValueOnce([
+          { requesterId: 'me', addresseeId: 'a', status: 'accepted' },
+          { requesterId: 'c', addresseeId: 'me', status: 'accepted' },
+        ]);
+      // Deliberately returned in the REVERSE of the expected [a, c] order, to
+      // prove the final `members` order comes from the mutuals list, not from
+      // `Repository.find`'s (unstable, no-ORDER-BY) row order.
+      profiles.find.mockResolvedValue([
+        { userId: 'c', slug: 'cleo', firstName: 'Cleo', lastName: 'Cruz' },
+        { userId: 'a', slug: 'ana', firstName: 'Ana', lastName: 'Alvarez' },
+      ]);
+
+      const result = await service.mutualMembers('me', 'them');
+
+      expect(result).toEqual({
+        count: 2,
+        members: [
+          { slug: 'ana', firstName: 'Ana', lastName: 'Alvarez' },
+          { slug: 'cleo', firstName: 'Cleo', lastName: 'Cruz' },
+        ],
+      });
+      expect(profiles.find).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { userId: In(['a', 'c']) } }),
+      );
+    });
+
+    it('returns the full count but caps the returned members at `limit`', async () => {
+      connections.find
+        .mockResolvedValueOnce([
+          { requesterId: 'them', addresseeId: 'a', status: 'accepted' },
+          { requesterId: 'them', addresseeId: 'b', status: 'accepted' },
+          { requesterId: 'them', addresseeId: 'c', status: 'accepted' },
+        ])
+        // All three are mutual this time.
+        .mockResolvedValueOnce([
+          { requesterId: 'me', addresseeId: 'a', status: 'accepted' },
+          { requesterId: 'me', addresseeId: 'b', status: 'accepted' },
+          { requesterId: 'me', addresseeId: 'c', status: 'accepted' },
+        ]);
+      profiles.find.mockResolvedValue([
+        { userId: 'a', slug: 'ana', firstName: 'Ana', lastName: 'Alvarez' },
+        { userId: 'b', slug: 'bo', firstName: 'Bo', lastName: 'Byrne' },
+      ]);
+
+      const result = await service.mutualMembers('me', 'them', 2);
+
+      expect(result.count).toBe(3);
+      expect(result.members).toHaveLength(2);
+      // Only the top-2 ids (a, b) are ever looked up — c's profile is never
+      // fetched.
+      expect(profiles.find).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { userId: In(['a', 'b']) } }),
+      );
+    });
+
+    it('short-circuits to {count: 0, members: []} when `them` has no accepted connections, skipping the profile lookup', async () => {
+      connections.find.mockResolvedValueOnce([]);
+
+      const result = await service.mutualMembers('me', 'them');
+
+      expect(result).toEqual({ count: 0, members: [] });
+      expect(profiles.find).not.toHaveBeenCalled();
+      // Only the first `connections.find` (them's connections) ran — no
+      // second call to test them against the viewer's connections.
+      expect(connections.find).toHaveBeenCalledTimes(1);
+    });
+
+    it("short-circuits to {count: 0, members: []} when none of `them`'s connections are mutual with the viewer", async () => {
+      connections.find
+        .mockResolvedValueOnce([
+          { requesterId: 'them', addresseeId: 'a', status: 'accepted' },
+        ])
+        .mockResolvedValueOnce([]); // viewer shares none of them
+      const result = await service.mutualMembers('me', 'them');
+      expect(result).toEqual({ count: 0, members: [] });
+      expect(profiles.find).not.toHaveBeenCalled();
+    });
+  });
 });
