@@ -38,8 +38,11 @@ export class RecognitionListener {
 
   @OnEvent(VOUCH_CREATED)
   async onVouchCreated(event: VouchCreatedEvent): Promise<void> {
-    // Recompute the member who RECEIVED the vouch; vouchCount is their signal.
-    await this.safeRecompute(event.voucheeId);
+    // `vouchCount` in the scoring signals is the outbound count (vouches
+    // GIVEN, mirroring the "vouch for someone else" getting-started step —
+    // see recognition-awarding.service.ts's gatherSignals), so it's the
+    // voucher's own stats that change here, not the vouchee's.
+    await this.safeRecompute(event.voucherId);
   }
 
   @OnEvent(CONNECTION_ACCEPTED)

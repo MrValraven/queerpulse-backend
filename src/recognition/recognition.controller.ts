@@ -1,4 +1,11 @@
-import { Controller, Get, Logger, Param, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Logger,
+  Param,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import {
   CurrentUser,
   CurrentUserData,
@@ -40,13 +47,20 @@ export class MyRecognitionController {
   @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
   @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
   @Get()
-  async getMine(@CurrentUser() user: CurrentUserData) {
-    // Recompute (throttled to once / 5 min inside the service) so the read
-    // reflects fresh XP/badges and fires level-up / badge notifications.
-    // Best-effort: a recompute failure must not blank the recognition page,
-    // but the failure is still logged so it isn't invisible in production.
+  async getMine(
+    @CurrentUser() user: CurrentUserData,
+    // Bypasses the 5-min recompute throttle. Used sparingly by the frontend
+    // (the Getting Started checklist) where several XP-earning actions can
+    // land within minutes and a stale read would look like a bug.
+    @Query('force') force?: string,
+  ) {
+    // Recompute (throttled to once / 5 min inside the service, unless
+    // `force`) so the read reflects fresh XP/badges and fires level-up /
+    // badge notifications. Best-effort: a recompute failure must not blank
+    // the recognition page, but the failure is still logged so it isn't
+    // invisible in production.
     try {
-      await this.awarding.recompute(user);
+      await this.awarding.recompute(user, { force: force === 'true' });
     } catch (error) {
       this.logger.warn(
         `recompute failed for user ${user.userId}: ${String(error)}`,

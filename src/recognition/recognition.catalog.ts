@@ -16,6 +16,7 @@
 
 export type BadgeRarity = 'common' | 'rare' | 'legendary';
 export type BadgeTint = 'jade' | 'accent' | 'plum';
+export type BadgeVerification = 'auto' | 'host' | 'review' | 'peer';
 
 export interface BadgeCatalogEntry {
   /** Stable slug the frontend maps to an icon (see `badgeIcons.tsx`). */
@@ -28,6 +29,27 @@ export interface BadgeCatalogEntry {
   lockedContext: string;
   /** Shown once earned, when no per-award `context` was recorded. */
   earnedContext: string;
+  /**
+   * How the badge is checked, surfaced in the frontend drawer's "how it's
+   * checked" copy. Every badge with a `BADGE_REQUIREMENTS` entry (see
+   * `recognition.scoring.ts`) is awarded programmatically by `recompute()`,
+   * so it's honestly `'auto'` — there is no host-attested, reviewed, or
+   * peer-given award path anywhere in this backend yet. Omitted (not
+   * defaulted) for a badge with no wired signal, e.g. `founding-member`: we
+   * don't yet know how it'll be verified, so we don't claim to.
+   */
+  verifiedBy?: BadgeVerification;
+}
+
+/** A time-limited badge, shown in its own band rather than the main grid.
+ *  Content only, like `BADGE_CATALOG` — no award path exists for these yet
+ *  (same precedent as `founding-member`: a catalogue entry that isn't
+ *  auto-granted). `window` is display text; `opensAt`/`closesAt` are ISO
+ *  dates a future awarding pass could gate on. */
+export interface SeasonalBadgeCatalogEntry extends BadgeCatalogEntry {
+  window: string;
+  opensAt: string;
+  closesAt: string;
 }
 
 export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
@@ -39,6 +61,7 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     tint: 'jade',
     lockedContext: 'Save 3 places in the Local directory',
     earnedContext: 'Saved 3 places in the Local directory',
+    verifiedBy: 'auto',
   },
   {
     key: 'well-read',
@@ -48,6 +71,7 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     tint: 'jade',
     lockedContext: 'Save 5 articles or resources',
     earnedContext: 'Saved 5 articles or resources',
+    verifiedBy: 'auto',
   },
   {
     key: 'first-gathering',
@@ -57,6 +81,7 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     tint: 'jade',
     lockedContext: 'Attend your first gathering',
     earnedContext: 'Attended a QueerPulse gathering',
+    verifiedBy: 'auto',
   },
   {
     key: 'three-company',
@@ -66,6 +91,7 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     tint: 'jade',
     lockedContext: 'Attend 3 gatherings',
     earnedContext: '3 gatherings attended',
+    verifiedBy: 'auto',
   },
   {
     key: 'regular-attendee',
@@ -75,15 +101,17 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     tint: 'accent',
     lockedContext: 'Attend 5 gatherings in one year',
     earnedContext: '5 gatherings in one year',
+    verifiedBy: 'auto',
   },
   {
     key: 'decade',
-    cat: 'Attendance',
-    name: 'Decade',
+    cat: 'Platform',
+    name: 'Anniversary',
     rarity: 'rare',
     tint: 'jade',
-    lockedContext: 'Attend 10 gatherings',
-    earnedContext: '10 gatherings attended',
+    lockedContext: 'Be a member for 1 year',
+    earnedContext: 'Member for 1 year',
+    verifiedBy: 'auto',
   },
   {
     key: 'connector',
@@ -93,6 +121,7 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     tint: 'jade',
     lockedContext: 'Make 10 connections',
     earnedContext: '10 connections made',
+    verifiedBy: 'auto',
   },
   {
     key: 'vouch',
@@ -102,6 +131,7 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     tint: 'accent',
     lockedContext: 'Vouch for a new member',
     earnedContext: 'Vouched for a new member',
+    verifiedBy: 'auto',
   },
   {
     key: 'thread-starter',
@@ -111,6 +141,7 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     tint: 'jade',
     lockedContext: 'Start a community thread',
     earnedContext: 'Started a community thread',
+    verifiedBy: 'auto',
   },
   {
     key: 'networker',
@@ -120,6 +151,7 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     tint: 'plum',
     lockedContext: 'Connect with 50 members',
     earnedContext: 'Connected with 50 members',
+    verifiedBy: 'auto',
   },
   {
     key: 'contributor',
@@ -129,6 +161,7 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     tint: 'jade',
     lockedContext: 'Submit a member story',
     earnedContext: 'Submitted a member story',
+    verifiedBy: 'auto',
   },
   {
     key: 'two-homes',
@@ -138,6 +171,7 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     tint: 'accent',
     lockedContext: 'Join a second community',
     earnedContext: 'Joined a second community',
+    verifiedBy: 'auto',
   },
   {
     key: 'founding-member',
@@ -147,15 +181,18 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     tint: 'plum',
     lockedContext: 'Join in the first 500 members',
     earnedContext: 'Joined in the first 500',
+    // No signal wired yet (see recognition.scoring.ts) — we don't yet know
+    // how this will be verified, so we don't claim to.
   },
   {
     key: 'sustainer',
     cat: 'Platform',
-    name: 'Sustainer',
+    name: 'Rooted',
     rarity: 'rare',
     tint: 'accent',
-    lockedContext: 'Be a supporting member for 6 months',
-    earnedContext: 'Supporting member · 6 months',
+    lockedContext: 'Be a member for 6 months',
+    earnedContext: 'Member for 6 months',
+    verifiedBy: 'auto',
   },
   {
     key: 'work-ready',
@@ -165,6 +202,7 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     tint: 'plum',
     lockedContext: 'Fill out your Work Profile (skills and focus areas)',
     earnedContext: 'Completed the Work Profile',
+    verifiedBy: 'auto',
   },
   {
     key: 'event-host',
@@ -174,6 +212,7 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     tint: 'plum',
     lockedContext: 'Host a QueerPulse gathering',
     earnedContext: 'Hosted a QueerPulse gathering',
+    verifiedBy: 'auto',
   },
   {
     key: 'serial-host',
@@ -183,6 +222,7 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     tint: 'jade',
     lockedContext: 'Host 3 approved gatherings',
     earnedContext: 'Hosted 3 approved gatherings',
+    verifiedBy: 'auto',
   },
   {
     key: 'first-steps',
@@ -192,6 +232,54 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     tint: 'accent',
     lockedContext: 'Finish your getting started checklist',
     earnedContext: 'Completed the getting started checklist',
+    verifiedBy: 'auto',
+  },
+];
+
+/**
+ * Time-limited badges (spec-equivalent extension for the v2 Badges & Levels
+ * frontend redesign). Purely informational today — no `BADGE_REQUIREMENTS`
+ * entry exists for any of these, so `qualifyingBadgeKeys` never grants them
+ * (same as `founding-member` above). A future task can wire real signals
+ * (e.g. "attended a gathering tagged Pride between opensAt/closesAt") without
+ * touching this catalogue's shape.
+ */
+export const SEASONAL_BADGE_CATALOG: readonly SeasonalBadgeCatalogEntry[] = [
+  {
+    key: 'pride-2026',
+    cat: 'Attendance',
+    name: 'Pride 2026',
+    rarity: 'rare',
+    tint: 'accent',
+    lockedContext: 'March with the QueerPulse block',
+    earnedContext: 'Marched with the QueerPulse block',
+    window: 'Open until 30 June 2026',
+    opensAt: '2026-01-01T00:00:00.000Z',
+    closesAt: '2026-06-30T23:59:59.000Z',
+  },
+  {
+    key: 'first-table-2026',
+    cat: 'Attendance',
+    name: 'New Year, First Table',
+    rarity: 'common',
+    tint: 'jade',
+    lockedContext: 'Attend the first gathering of the year',
+    earnedContext: 'Attended the first gathering of the year',
+    window: 'January only',
+    opensAt: '2026-01-01T00:00:00.000Z',
+    closesAt: '2026-01-31T23:59:59.000Z',
+  },
+  {
+    key: 'winter-warmth-2026',
+    cat: 'Community',
+    name: 'Winter Warmth',
+    rarity: 'rare',
+    tint: 'plum',
+    lockedContext: 'Bring someone new to a December gathering',
+    earnedContext: 'Brought someone new to a December gathering',
+    window: 'Opens 1 December',
+    opensAt: '2026-12-01T00:00:00.000Z',
+    closesAt: '2026-12-31T23:59:59.000Z',
   },
 ];
 

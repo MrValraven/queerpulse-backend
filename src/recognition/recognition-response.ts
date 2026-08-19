@@ -3,13 +3,17 @@ import {
   BASE_PERKS_BY_LEVEL,
   BadgeRarity,
   BadgeTint,
+  BadgeVerification,
   LEVEL_LADDER_DEF,
   PERK_CATALOG,
+  SEASONAL_BADGE_CATALOG,
   levelName,
   levelStartXp,
 } from './recognition.catalog';
 import {
+  BADGE_BONUS_BY_RARITY,
   badgeBonusXp,
+  badgeProgress,
   RecognitionSignals,
   xpBreakdown,
 } from './recognition.scoring';
@@ -47,12 +51,22 @@ export interface BadgeDTO {
   context: string;
   rarity: BadgeRarity;
   tint: BadgeTint;
+  /** XP awarded once earned, derived from rarity (`BADGE_BONUS_BY_RARITY`). */
+  xpReward?: number;
+  /** Omitted (not defaulted) when no `BADGE_REQUIREMENTS` entry exists. */
+  verifiedBy?: BadgeVerification;
+  /** Locked badges only, and only when signals are available (owner view). */
+  progress?: { units: number; target: number };
+  /** Present only for time-limited badges (see `SEASONAL_BADGE_CATALOG`). */
+  seasonal?: { when: string };
 }
 export interface BadgesDTO {
   earnedCount: number;
   discoverCount: number;
   earned: BadgeDTO[];
   locked: BadgeDTO[];
+  /** Time-limited badges, shown in their own band. */
+  seasonal: BadgeDTO[];
 }
 
 export type PerkState = 'available' | 'locked' | 'claimed';
@@ -100,12 +114,24 @@ export interface XpBreakdownItemDTO {
   xp: number;
 }
 
+/** One dated row in a member's XP history, as read from
+ *  `RecognitionLedgerEntry`. `[]` until the backend adds real event logging
+ *  for a given member (i.e. before their first `recompute()` XP increase) —
+ *  the frontend renders its own empty state for that. */
+export interface XpLedgerEntryDTO {
+  createdAt: string;
+  description: string;
+  xp: number;
+  reason?: string;
+}
+
 export interface RecognitionDTO {
   level: LevelDTO;
   levelLadder: LevelLadderRowDTO[];
   badges: BadgesDTO;
   perks: PerksDTO;
   xpBreakdown: XpBreakdownItemDTO[];
+  xpLedger: XpLedgerEntryDTO[];
 }
 
 /** A single earned badge row, as read from `RecognitionAward`. */
@@ -118,6 +144,14 @@ export interface EarnedAwardRow {
 export interface ClaimedPerkRow {
   perkKey: string;
   claimedAt: Date;
+}
+
+/** A single ledger row, as read from `RecognitionLedgerEntry`. */
+export interface LedgerEntryRow {
+  description: string;
+  xp: number;
+  reason: string | null;
+  createdAt: Date;
 }
 
 /** Derives level, progress-within-level, `xpToNext` and `nextName` from a
@@ -174,12 +208,19 @@ export function buildLevelLadder(currentLevel: number): LevelLadderRowDTO[] {
   }));
 }
 
-export function buildBadges(earned: EarnedAwardRow[]): BadgesDTO {
+/** `signals` drives locked-badge `progress` and is owner-only (mirrors
+ *  `xpBreakdown` below) — pass `null` for a non-owner view so a stranger
+ *  can't read e.g. "6 of 10 gatherings attended" off someone else's page. */
+export function buildBadges(
+  earned: EarnedAwardRow[],
+  signals: RecognitionSignals | null = null,
+): BadgesDTO {
   const earnedByKey = new Map(earned.map((row) => [row.badgeKey, row]));
   const earnedBadges: BadgeDTO[] = [];
   const lockedBadges: BadgeDTO[] = [];
   for (const def of BADGE_CATALOG) {
     const row = earnedByKey.get(def.key);
+    const xpReward = BADGE_BONUS_BY_RARITY[def.rarity];
     if (row) {
       earnedBadges.push({
         key: def.key,
@@ -188,6 +229,8 @@ export function buildBadges(earned: EarnedAwardRow[]): BadgesDTO {
         context: row.context ?? def.earnedContext,
         rarity: def.rarity,
         tint: def.tint,
+        xpReward,
+        verifiedBy: def.verifiedBy,
       });
     } else {
       lockedBadges.push({
@@ -197,6 +240,9 @@ export function buildBadges(earned: EarnedAwardRow[]): BadgesDTO {
         context: def.lockedContext,
         rarity: def.rarity,
         tint: def.tint,
+        xpReward,
+        verifiedBy: def.verifiedBy,
+        progress: signals ? badgeProgress(def.key, signals) : undefined,
       });
     }
   }
@@ -205,7 +251,36 @@ export function buildBadges(earned: EarnedAwardRow[]): BadgesDTO {
     discoverCount: BADGE_CATALOG.length - earnedBadges.length,
     earned: earnedBadges,
     locked: lockedBadges,
+    seasonal: buildSeasonalBadges(),
   };
+}
+
+/** Time-limited badges are purely informational today (no award path — see
+ *  `SEASONAL_BADGE_CATALOG`), so every entry renders the same for every
+ *  viewer: locked context, no `progress`. */
+function buildSeasonalBadges(): BadgeDTO[] {
+  return SEASONAL_BADGE_CATALOG.map((def) => ({
+    key: def.key,
+    cat: def.cat,
+    name: def.name,
+    context: def.lockedContext,
+    rarity: def.rarity,
+    tint: def.tint,
+    xpReward: BADGE_BONUS_BY_RARITY[def.rarity],
+    verifiedBy: def.verifiedBy,
+    seasonal: { when: def.window },
+  }));
+}
+
+/** Maps stored ledger rows to the frontend's `XpLedgerEntryDTO` shape.
+ *  Owner-only — see `buildRecognition`. */
+export function buildXpLedger(rows: LedgerEntryRow[]): XpLedgerEntryDTO[] {
+  return rows.map((row) => ({
+    createdAt: row.createdAt.toISOString(),
+    description: row.description,
+    xp: row.xp,
+    reason: row.reason ?? undefined,
+  }));
 }
 
 function xpAwayLabel(unlockLevel: number, totalXp: number): string {
@@ -328,16 +403,18 @@ export function buildRecognition(
   earned: EarnedAwardRow[],
   claimed: ClaimedPerkRow[],
   signals: RecognitionSignals | null = null,
+  ledgerRows: LedgerEntryRow[] = [],
 ): RecognitionDTO {
   const level = computeLevel(totalXp);
   return {
     level,
     levelLadder: buildLevelLadder(level.level),
-    badges: buildBadges(earned),
+    badges: buildBadges(earned, signals),
     perks: buildPerks(level.level, totalXp, claimed),
     xpBreakdown: buildXpBreakdown(
       signals,
       earned.map((a) => a.badgeKey),
     ),
+    xpLedger: signals ? buildXpLedger(ledgerRows) : [],
   };
 }

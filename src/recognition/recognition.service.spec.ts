@@ -4,8 +4,10 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
 import { RecognitionAward } from './entities/recognition-award.entity';
+import { RecognitionLedgerEntry } from './entities/recognition-ledger-entry.entity';
 import { RecognitionPerkClaim } from './entities/recognition-perk-claim.entity';
 import { RecognitionStat } from './entities/recognition-stat.entity';
+import { RecognitionAwardingService } from './recognition-awarding.service';
 import { RecognitionService } from './recognition.service';
 
 describe('RecognitionService', () => {
@@ -13,13 +15,38 @@ describe('RecognitionService', () => {
   let statsRepo: { findOne: jest.Mock };
   let awardsRepo: { find: jest.Mock };
   let perkClaimsRepo: { find: jest.Mock };
+  let ledgerRepo: { find: jest.Mock };
   let profilesRepo: { findOne: jest.Mock };
+  let awardingService: { gatherSignalsForUser: jest.Mock };
 
   beforeEach(async () => {
     statsRepo = { findOne: jest.fn().mockResolvedValue(null) };
     awardsRepo = { find: jest.fn().mockResolvedValue([]) };
     perkClaimsRepo = { find: jest.fn().mockResolvedValue([]) };
+    ledgerRepo = { find: jest.fn().mockResolvedValue([]) };
     profilesRepo = { findOne: jest.fn() };
+    // Non-null signals so buildRecognition's owner-gated fields (xpBreakdown,
+    // xpLedger) populate — mirrors a real `includePerks: true` call.
+    awardingService = {
+      gatherSignalsForUser: jest.fn().mockResolvedValue({
+        profileComplete: false,
+        communitiesJoined: 0,
+        personasPublished: 0,
+        vouchCount: 0,
+        connectionCount: 0,
+        eventsAttended: 0,
+        communityPosts: 0,
+        endorsementCount: 0,
+        workshopsTaught: 0,
+        tenureDays: 0,
+        verified: false,
+        gettingStartedStepsDone: 0,
+        gettingStartedComplete: false,
+        listingsSaved: 0,
+        articlesSaved: 0,
+        workProfileComplete: false,
+      }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -30,7 +57,12 @@ describe('RecognitionService', () => {
           provide: getRepositoryToken(RecognitionPerkClaim),
           useValue: perkClaimsRepo,
         },
+        {
+          provide: getRepositoryToken(RecognitionLedgerEntry),
+          useValue: ledgerRepo,
+        },
         { provide: getRepositoryToken(Profile), useValue: profilesRepo },
+        { provide: RecognitionAwardingService, useValue: awardingService },
       ],
     }).compile();
     service = module.get(RecognitionService);
@@ -97,13 +129,27 @@ describe('RecognitionService', () => {
       );
     });
 
-    it('(I9) omits perks when includePerks=false, and skips the perk-claims query entirely', async () => {
+    it('(owner-only) queries the XP ledger, newest first, alongside perks/signals', async () => {
+      statsRepo.findOne.mockResolvedValue({ userId: 'u1', xp: 1000 });
+
+      await service.getForUser('u1');
+
+      expect(ledgerRepo.find).toHaveBeenCalledWith({
+        where: { userId: 'u1' },
+        order: { createdAt: 'DESC' },
+        take: DEFAULT_LIST_LIMIT,
+      });
+    });
+
+    it('(I9) omits perks when includePerks=false, and skips the perk-claims and ledger queries entirely', async () => {
       statsRepo.findOne.mockResolvedValue({ userId: 'u1', xp: 1000 });
 
       const dto = await service.getForUser('u1', false);
 
       expect(perkClaimsRepo.find).not.toHaveBeenCalled();
+      expect(ledgerRepo.find).not.toHaveBeenCalled();
       expect(dto.perks).toEqual({ availableCount: 0, groups: [], ladder: [] });
+      expect(dto.xpLedger).toEqual([]);
       // Level/badges are unaffected by includePerks.
       expect(dto.level.level).toBe(4);
     });

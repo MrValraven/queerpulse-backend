@@ -5,6 +5,7 @@ import { CommunityMember } from '../communities/entities/community-member.entity
 import { PublicEligibilityModule } from '../public-eligibility/public-eligibility.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { RecognitionAward } from './entities/recognition-award.entity';
+import { RecognitionLedgerEntry } from './entities/recognition-ledger-entry.entity';
 import { RecognitionPerkClaim } from './entities/recognition-perk-claim.entity';
 import { RecognitionStat } from './entities/recognition-stat.entity';
 import { SavedItem } from '../saved/entities/saved-item.entity';
@@ -33,6 +34,7 @@ import { RecognitionListener } from './recognition.listener';
       RecognitionStat,
       RecognitionAward,
       RecognitionPerkClaim,
+      RecognitionLedgerEntry,
       CommunityMember,
       SavedItem,
       MemberPreferences,

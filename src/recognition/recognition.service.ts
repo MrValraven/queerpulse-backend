@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
 import { RecognitionAward } from './entities/recognition-award.entity';
+import { RecognitionLedgerEntry } from './entities/recognition-ledger-entry.entity';
 import { RecognitionPerkClaim } from './entities/recognition-perk-claim.entity';
 import { RecognitionStat } from './entities/recognition-stat.entity';
 import { buildRecognition, RecognitionDTO } from './recognition-response';
@@ -18,6 +19,8 @@ export class RecognitionService {
     private readonly awards: Repository<RecognitionAward>,
     @InjectRepository(RecognitionPerkClaim)
     private readonly perkClaims: Repository<RecognitionPerkClaim>,
+    @InjectRepository(RecognitionLedgerEntry)
+    private readonly ledgerEntries: Repository<RecognitionLedgerEntry>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
     private readonly awarding: RecognitionAwardingService,
@@ -38,7 +41,7 @@ export class RecognitionService {
     userId: string,
     includePerks = true,
   ): Promise<RecognitionDTO> {
-    const [stat, earned, claimed, signals] = await Promise.all([
+    const [stat, earned, claimed, signals, ledgerRows] = await Promise.all([
       this.stats.findOne({ where: { userId } }),
       this.awards.find({ where: { userId }, take: DEFAULT_LIST_LIMIT }),
       includePerks
@@ -47,12 +50,27 @@ export class RecognitionService {
       // The XP breakdown is owner-only, same as perks (I9) — skip the
       // signal-gathering queries entirely for another member's view.
       includePerks ? this.awarding.gatherSignalsForUser(userId) : null,
+      // The XP ledger is owner-only too (same reasoning as xpBreakdown) —
+      // skip the query for a non-owner view.
+      includePerks
+        ? this.ledgerEntries.find({
+            where: { userId },
+            order: { createdAt: 'DESC' },
+            take: DEFAULT_LIST_LIMIT,
+          })
+        : Promise.resolve([]),
     ]);
     const dto = buildRecognition(
       stat?.xp ?? 0,
       earned.map((a) => ({ badgeKey: a.badgeKey, context: a.context })),
       claimed.map((c) => ({ perkKey: c.perkKey, claimedAt: c.claimedAt })),
       signals,
+      ledgerRows.map((row) => ({
+        description: row.description,
+        xp: row.xp,
+        reason: row.reason,
+        createdAt: row.createdAt,
+      })),
     );
     if (!includePerks) {
       dto.perks = { availableCount: 0, groups: [], ladder: [] };

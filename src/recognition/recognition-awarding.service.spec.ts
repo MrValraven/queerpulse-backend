@@ -8,6 +8,11 @@ import {
 
 type Stat = { userId: string; xp: number; updatedAt: Date };
 type Award = { userId: string; badgeKey: string; context: string | null };
+type LedgerRow = {
+  userId: string;
+  description: string;
+  xp: number;
+};
 
 function makeService(opts: {
   stat?: Stat | null;
@@ -16,6 +21,7 @@ function makeService(opts: {
 }) {
   const savedStats: Stat[] = [];
   const insertedAwards: Award[] = [];
+  const insertedLedgerRows: LedgerRow[] = [];
   const notified: {
     type: NotificationType;
     payload: Record<string, unknown>;
@@ -55,6 +61,12 @@ function makeService(opts: {
         }),
       }),
     }),
+  };
+  const ledgerRepo = {
+    insert: (rows: LedgerRow[]) => {
+      insertedLedgerRows.push(...rows);
+      return Promise.resolve({ identifiers: [] });
+    },
   };
   const profilesRepo = {
     findOne: () => Promise.resolve({ avatarUrl: 'x', bio: 'hi' }),
@@ -96,6 +108,7 @@ function makeService(opts: {
   const service = new RecognitionAwardingService(
     statsRepo as never,
     awardsRepo as never,
+    ledgerRepo as never,
     profilesRepo as never,
     communityMembersRepo as never,
     savedItemsRepo as never,
@@ -103,7 +116,7 @@ function makeService(opts: {
     eligibility as never,
     notifications as never,
   );
-  return { service, savedStats, insertedAwards, notified };
+  return { service, savedStats, insertedAwards, insertedLedgerRows, notified };
 }
 
 // Minimal PublicEligibilitySignalsDto stand-in: only the fields gatherSignals reads.
@@ -258,5 +271,45 @@ describe('RecognitionAwardingService.recompute', () => {
     const result = await service.recompute(USER); // no force
     expect(result.xpAfter).toBe(100);
     expect(savedStats).toHaveLength(0);
+  });
+
+  describe('XP ledger', () => {
+    it('writes one precise row per newly-earned badge, worth its rarity bonus', async () => {
+      const { service, insertedLedgerRows } = makeService({
+        stat: null,
+        awards: [],
+        signals: { ...BASE, eventsAttended: 1 }, // first-gathering (common, +40)
+      });
+      await service.recompute(USER, { force: true });
+      expect(insertedLedgerRows).toContainEqual({
+        userId: 'u1',
+        description: 'Badge earned: First Gathering',
+        xp: 40,
+      });
+    });
+
+    it('writes a generic activity row for signal-driven XP growth beyond any new badge bonus', async () => {
+      const { service, insertedLedgerRows } = makeService({
+        stat: { userId: 'u1', xp: 0, updatedAt: new Date(0) },
+        awards: [],
+        signals: BASE, // profileComplete: true => 50 XP, no badge qualifies
+      });
+      const result = await service.recompute(USER, { force: true });
+      expect(insertedLedgerRows).toContainEqual({
+        userId: 'u1',
+        description: 'Recognition recalculated from recent activity',
+        xp: result.xpAfter,
+      });
+    });
+
+    it('writes nothing when a recompute finds no XP growth', async () => {
+      const { service, insertedLedgerRows } = makeService({
+        stat: { userId: 'u1', xp: 5000, updatedAt: new Date(0) },
+        awards: [],
+        signals: BASE, // computes far less than the stored 5000
+      });
+      await service.recompute(USER, { force: true });
+      expect(insertedLedgerRows).toHaveLength(0);
+    });
   });
 });

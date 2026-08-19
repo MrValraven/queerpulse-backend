@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { RecognitionStat } from './entities/recognition-stat.entity';
 import { RecognitionAward } from './entities/recognition-award.entity';
+import { RecognitionLedgerEntry } from './entities/recognition-ledger-entry.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { SavedItem, SavedKind } from '../saved/entities/saved-item.entity';
@@ -15,6 +16,7 @@ import { UserStatus } from '../users/entities/user.entity';
 import { computeLevel } from './recognition-response';
 import { BADGE_CATALOG, levelName } from './recognition.catalog';
 import {
+  BADGE_BONUS_BY_RARITY,
   RecognitionSignals,
   scoreSignals,
   badgeBonusXp,
@@ -45,6 +47,8 @@ export class RecognitionAwardingService {
     private readonly stats: Repository<RecognitionStat>,
     @InjectRepository(RecognitionAward)
     private readonly awards: Repository<RecognitionAward>,
+    @InjectRepository(RecognitionLedgerEntry)
+    private readonly ledgerEntries: Repository<RecognitionLedgerEntry>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
     @InjectRepository(CommunityMember)
@@ -123,9 +127,55 @@ export class RecognitionAwardingService {
     const xpAfter = Number(row!.xp);
     const levelAfter = computeLevel(xpAfter).level;
 
+    await this.writeLedgerEntries(userId, xpBefore, xpAfter, newBadgeKeys);
     await this.emitNotifications(userId, levelBefore, levelAfter, newBadgeKeys);
 
     return { xpBefore, xpAfter, levelBefore, levelAfter, newBadgeKeys };
+  }
+
+  /**
+   * Appends the "receipts" rows behind the frontend's XP ledger. One precise
+   * row per newly-earned badge (name + its rarity bonus); the remaining
+   * delta — signal-driven growth `recompute` can't attribute to a single
+   * action, since XP here is computed lazily from live counts rather than
+   * discrete events — becomes one generic row. Skipped entirely when XP
+   * didn't grow (a no-op recompute, or a rare case where new-badge bonus
+   * offset a signal that dropped in the interim).
+   */
+  private async writeLedgerEntries(
+    userId: string,
+    xpBefore: number,
+    xpAfter: number,
+    newBadgeKeys: string[],
+  ): Promise<void> {
+    if (xpAfter <= xpBefore) return;
+
+    let badgeBonusTotal = 0;
+    const rows: Partial<RecognitionLedgerEntry>[] = newBadgeKeys.map(
+      (badgeKey) => {
+        const entry = BADGE_CATALOG.find((badge) => badge.key === badgeKey);
+        const xp = entry ? (BADGE_BONUS_BY_RARITY[entry.rarity] ?? 0) : 0;
+        badgeBonusTotal += xp;
+        return {
+          userId,
+          description: `Badge earned: ${entry?.name ?? badgeKey}`,
+          xp,
+        };
+      },
+    );
+
+    const activityDelta = xpAfter - xpBefore - badgeBonusTotal;
+    if (activityDelta > 0) {
+      rows.push({
+        userId,
+        description: 'Recognition recalculated from recent activity',
+        xp: activityDelta,
+      });
+    }
+
+    if (rows.length > 0) {
+      await this.ledgerEntries.insert(rows);
+    }
   }
 
   /**

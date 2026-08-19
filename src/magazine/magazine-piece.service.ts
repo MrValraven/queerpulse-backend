@@ -82,6 +82,7 @@ import {
   toPaymentResponse,
   toPieceListItem,
   toPieceRecordFull,
+  stripHtmlTags,
   toPieceRecordSummary,
   toPitchResponse,
 } from './magazine-piece-response';
@@ -313,6 +314,14 @@ export class MagazinePieceService {
       dto.blocks !== undefined ? validateArticleBlocks(dto.blocks) : undefined;
 
     const trimmedTitle = dto.title?.trim();
+    // `article.title` is rich text (the editor's contentEditable headline —
+    // may legitimately carry `<em>`/`<strong>` emphasis), but the slug and
+    // `MagazinePiece.title` below are both meant to be plain text, so they
+    // derive from this stripped copy rather than `trimmedTitle` directly.
+    const plainTitle =
+      trimmedTitle !== undefined
+        ? stripHtmlTags(trimmedTitle).trim()
+        : undefined;
     const isRealTitleChange =
       trimmedTitle !== undefined &&
       trimmedTitle.length > 0 &&
@@ -339,7 +348,7 @@ export class MagazinePieceService {
     // stay stable, so it stops tracking title edits at that point.
     if (isRealTitleChange && article.publishedAt === null) {
       article.slug = await allocateUniqueSlug(
-        slugify(trimmedTitle, 'draft'),
+        slugify(plainTitle || 'draft', 'draft'),
         async (candidate) =>
           (await this.articles.findOne({
             where: { slug: candidate, id: Not(article.id) },
@@ -352,9 +361,12 @@ export class MagazinePieceService {
     // `MagazinePiece.title` is what every surface outside the editor reads
     // (command palette, piece board, piece record) — sync it with the
     // article's real headline instead of leaving it frozen at whatever
-    // placeholder was set at commission time (e.g. "Untitled piece").
-    if (isRealTitleChange && piece.title !== trimmedTitle) {
-      piece.title = trimmedTitle;
+    // placeholder was set at commission time (e.g. "Untitled piece"). It's
+    // rendered as plain text everywhere it's read, so it must never carry
+    // the rich-text markup `article.title` is allowed to hold — hence
+    // `plainTitle`, not `trimmedTitle`, here.
+    if (isRealTitleChange && plainTitle && piece.title !== plainTitle) {
+      piece.title = plainTitle;
       await this.pieces.save(piece);
     }
 

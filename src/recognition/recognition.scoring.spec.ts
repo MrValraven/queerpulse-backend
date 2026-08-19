@@ -1,7 +1,9 @@
 import {
   RecognitionSignals,
+  badgeProgress,
   scoreSignals,
   badgeBonusXp,
+  isBadgeEarned,
   qualifyingBadgeKeys,
 } from './recognition.scoring';
 
@@ -94,5 +96,33 @@ describe('recognition scoring', () => {
       gettingStartedComplete: true,
     };
     expect(qualifyingBadgeKeys(maxed)).not.toContain('founding-member');
+  });
+});
+
+describe('badgeProgress', () => {
+  it('reports {units, target} for a badge with a wired requirement', () => {
+    expect(
+      badgeProgress('three-company', { ...ZERO, eventsAttended: 2 }),
+    ).toEqual({ units: 2, target: 3 });
+  });
+
+  it('clamps units to the target — raw signal values can exceed it', () => {
+    expect(
+      badgeProgress('three-company', { ...ZERO, eventsAttended: 999 }),
+    ).toEqual({ units: 3, target: 3 });
+  });
+
+  it('returns undefined for a badge with no requirement (e.g. founding-member)', () => {
+    expect(badgeProgress('founding-member', ZERO)).toBeUndefined();
+  });
+
+  it('agrees with isBadgeEarned/qualifyingBadgeKeys at the boundary', () => {
+    const atTarget = { ...ZERO, eventsAttended: 3 };
+    expect(badgeProgress('three-company', atTarget)).toEqual({
+      units: 3,
+      target: 3,
+    });
+    expect(isBadgeEarned('three-company', atTarget)).toBe(true);
+    expect(qualifyingBadgeKeys(atTarget)).toContain('three-company');
   });
 });

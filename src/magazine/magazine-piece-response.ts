@@ -448,7 +448,7 @@ export interface ArticleDraftResponse {
 const WORDS_PER_MINUTE = 220;
 
 /** Strips HTML tags (`<...>`) from a fragment, leaving plain text behind. */
-function stripHtmlTags(html: string): string {
+export function stripHtmlTags(html: string): string {
   return html.replace(/<[^>]*>/g, ' ');
 }
 

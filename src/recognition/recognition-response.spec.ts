@@ -1,9 +1,11 @@
 import { BADGE_CATALOG, PERK_CATALOG } from './recognition.catalog';
+import type { RecognitionSignals } from './recognition.scoring';
 import {
   buildBadges,
   buildLevelLadder,
   buildPerks,
   buildRecognition,
+  buildXpLedger,
   computeLevel,
 } from './recognition-response';
 
@@ -94,10 +96,72 @@ describe('buildBadges', () => {
         context: 'Pride Brunch · Jun 2025',
         rarity: 'common',
         tint: 'jade',
+        xpReward: 40,
+        verifiedBy: 'auto',
       },
     ]);
     expect(result.locked).toHaveLength(BADGE_CATALOG.length - 1);
     expect(result.locked.some((b) => b.key === 'first-gathering')).toBe(false);
+  });
+
+  it('every wired badge is honestly verifiedBy "auto"; founding-member (no signal) has none', () => {
+    const result = buildBadges([]);
+    const founding = result.locked.find((b) => b.key === 'founding-member');
+    expect(founding?.verifiedBy).toBeUndefined();
+    const decade = result.locked.find((b) => b.key === 'decade');
+    expect(decade?.verifiedBy).toBe('auto');
+  });
+
+  it('xpReward is derived from rarity for every badge', () => {
+    const result = buildBadges([]);
+    const legendary = result.locked.find((b) => b.key === 'founding-member');
+    expect(legendary?.xpReward).toBe(150);
+    const common = result.locked.find((b) => b.key === 'first-gathering');
+    expect(common?.xpReward).toBe(40);
+  });
+
+  it('includes the time-limited seasonal band alongside earned/locked', () => {
+    const result = buildBadges([]);
+    expect(result.seasonal.length).toBeGreaterThan(0);
+    expect(result.seasonal[0]).toMatchObject({
+      seasonal: { when: expect.any(String) as string },
+    });
+    // Seasonal badges are content, not per-user state — never earned/locked
+    // via BADGE_CATALOG's own earn machinery.
+    expect(result.seasonal.every((b) => b.progress === undefined)).toBe(true);
+  });
+
+  describe('locked-badge progress', () => {
+    const ZERO_SIGNALS: RecognitionSignals = {
+      profileComplete: false,
+      communitiesJoined: 0,
+      personasPublished: 0,
+      vouchCount: 0,
+      connectionCount: 0,
+      eventsAttended: 2,
+      communityPosts: 0,
+      endorsementCount: 0,
+      workshopsTaught: 0,
+      tenureDays: 0,
+      verified: false,
+      gettingStartedStepsDone: 0,
+      gettingStartedComplete: false,
+      listingsSaved: 0,
+      articlesSaved: 0,
+      workProfileComplete: false,
+    };
+
+    it('is populated when signals are passed (owner view)', () => {
+      const result = buildBadges([], ZERO_SIGNALS);
+      const threeCompany = result.locked.find((b) => b.key === 'three-company');
+      expect(threeCompany?.progress).toEqual({ units: 2, target: 3 });
+    });
+
+    it('is omitted entirely for a non-owner view (signals = null)', () => {
+      const result = buildBadges([], null);
+      const threeCompany = result.locked.find((b) => b.key === 'three-company');
+      expect(threeCompany?.progress).toBeUndefined();
+    });
   });
 
   it('falls back to the catalogue earnedContext when no per-award context was recorded', () => {
@@ -112,7 +176,7 @@ describe('buildBadges', () => {
     expect(result.earnedCount).toBe(0);
     expect(result.discoverCount).toBe(BADGE_CATALOG.length);
     const decade = result.locked.find((b) => b.key === 'decade');
-    expect(decade?.context).toBe('Attend 10 gatherings');
+    expect(decade?.context).toBe('Be a member for 1 year');
   });
 
   it('ignores an awarded key that no longer exists in the catalogue', () => {
@@ -214,5 +278,36 @@ describe('buildRecognition', () => {
     expect(dto.badges.discoverCount).toBe(BADGE_CATALOG.length - 1);
     expect(dto.perks.ladder).toHaveLength(7);
     expect(Array.isArray(dto.perks.groups)).toBe(true);
+    // No signals passed => xpLedger is owner-gated closed, same as xpBreakdown.
+    expect(dto.xpLedger).toEqual([]);
+  });
+});
+
+describe('buildXpLedger', () => {
+  it('maps stored rows to the frontend DTO, ISO-stamping createdAt', () => {
+    const createdAt = new Date('2026-06-19T00:00:00.000Z');
+    const rows = buildXpLedger([
+      { description: 'Badge earned: Vouch', xp: 80, reason: null, createdAt },
+      {
+        description: 'Adjustment',
+        xp: -20,
+        reason: 'Duplicate entry removed.',
+        createdAt,
+      },
+    ]);
+    expect(rows).toEqual([
+      {
+        createdAt: '2026-06-19T00:00:00.000Z',
+        description: 'Badge earned: Vouch',
+        xp: 80,
+        reason: undefined,
+      },
+      {
+        createdAt: '2026-06-19T00:00:00.000Z',
+        description: 'Adjustment',
+        xp: -20,
+        reason: 'Duplicate entry removed.',
+      },
+    ]);
   });
 });

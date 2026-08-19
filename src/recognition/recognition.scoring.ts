@@ -173,34 +173,75 @@ export function badgeBonusXp(heldBadgeKeys: Iterable<string>): number {
   return bonus;
 }
 
-// One predicate per auto-grantable badge key. Keys absent here are never
-// auto-granted (e.g. 'founding-member' has no signal yet: it stays in the
-// catalog and lights up when a future task adds the signal).
-export const BADGE_CONDITIONS: Record<
-  string,
-  (signals: RecognitionSignals) => boolean
-> = {
-  'first-gathering': (signals) => signals.eventsAttended >= 1,
-  'three-company': (signals) => signals.eventsAttended >= 3,
-  'regular-attendee': (signals) => signals.eventsAttended >= 10,
-  connector: (signals) => signals.connectionCount >= 10,
-  networker: (signals) => signals.connectionCount >= 25,
-  vouch: (signals) => signals.vouchCount >= 1,
-  'thread-starter': (signals) => signals.communityPosts >= 1,
-  contributor: (signals) => signals.communityPosts >= 10,
-  'two-homes': (signals) => signals.communitiesJoined >= 2,
-  decade: (signals) => signals.tenureDays >= 365,
-  sustainer: (signals) => signals.tenureDays >= 180,
-  'event-host': (signals) => signals.workshopsTaught >= 1,
-  'serial-host': (signals) => signals.workshopsTaught >= 5,
-  'first-steps': (signals) => signals.gettingStartedComplete,
-  'local-scout': (signals) => signals.listingsSaved >= 3,
-  'well-read': (signals) => signals.articlesSaved >= 5,
-  'work-ready': (signals) => signals.workProfileComplete,
+/** One requirement per auto-grantable badge key: how many `units` of a
+ *  signal a member currently has, and the `target` needed to earn it. Keys
+ *  absent here are never auto-granted (e.g. 'founding-member' has no signal
+ *  yet: it stays in the catalog and lights up when a future task adds one).
+ *  A single declaration backs both the boolean earned-check
+ *  (`qualifyingBadgeKeys`) and the frontend's locked-badge progress readout
+ *  (`badgeProgress`) — one source of truth, no threshold duplicated. Boolean
+ *  signals (e.g. `gettingStartedComplete`) coerce to 0/1 units against a
+ *  target of 1. */
+export interface BadgeRequirement {
+  units: (signals: RecognitionSignals) => number;
+  target: number;
+}
+
+export const BADGE_REQUIREMENTS: Record<string, BadgeRequirement> = {
+  'first-gathering': { units: (s) => s.eventsAttended, target: 1 },
+  'three-company': { units: (s) => s.eventsAttended, target: 3 },
+  'regular-attendee': { units: (s) => s.eventsAttended, target: 10 },
+  connector: { units: (s) => s.connectionCount, target: 10 },
+  networker: { units: (s) => s.connectionCount, target: 25 },
+  vouch: { units: (s) => s.vouchCount, target: 1 },
+  'thread-starter': { units: (s) => s.communityPosts, target: 1 },
+  contributor: { units: (s) => s.communityPosts, target: 10 },
+  'two-homes': { units: (s) => s.communitiesJoined, target: 2 },
+  decade: { units: (s) => s.tenureDays, target: 365 },
+  sustainer: { units: (s) => s.tenureDays, target: 180 },
+  'event-host': { units: (s) => s.workshopsTaught, target: 1 },
+  'serial-host': { units: (s) => s.workshopsTaught, target: 5 },
+  'first-steps': {
+    units: (s) => (s.gettingStartedComplete ? 1 : 0),
+    target: 1,
+  },
+  'local-scout': { units: (s) => s.listingsSaved, target: 3 },
+  'well-read': { units: (s) => s.articlesSaved, target: 5 },
+  'work-ready': { units: (s) => (s.workProfileComplete ? 1 : 0), target: 1 },
 };
 
+export function isBadgeEarned(
+  badgeKey: string,
+  signals: RecognitionSignals,
+): boolean {
+  const requirement = BADGE_REQUIREMENTS[badgeKey];
+  return requirement ? requirement.units(signals) >= requirement.target : false;
+}
+
 export function qualifyingBadgeKeys(signals: RecognitionSignals): string[] {
-  return Object.entries(BADGE_CONDITIONS)
-    .filter(([, condition]) => condition(signals))
-    .map(([badgeKey]) => badgeKey);
+  return Object.keys(BADGE_REQUIREMENTS).filter((badgeKey) =>
+    isBadgeEarned(badgeKey, signals),
+  );
+}
+
+export interface BadgeProgress {
+  units: number;
+  target: number;
+}
+
+/** `{units, target}` for a locked badge's progress readout, or `undefined`
+ *  when the badge has no wired requirement (progress tracking isn't
+ *  guessable, so the frontend falls back to a binary locked state). `units`
+ *  is clamped to `[0, target]` — raw signal values can exceed the target. */
+export function badgeProgress(
+  badgeKey: string,
+  signals: RecognitionSignals,
+): BadgeProgress | undefined {
+  const requirement = BADGE_REQUIREMENTS[badgeKey];
+  if (!requirement) return undefined;
+  const units = Math.max(
+    0,
+    Math.min(requirement.target, Math.floor(requirement.units(signals))),
+  );
+  return { units, target: requirement.target };
 }

@@ -4,11 +4,13 @@ import {
   MemberRecognitionController,
   MyRecognitionController,
 } from './recognition.controller';
+import { RecognitionAwardingService } from './recognition-awarding.service';
 import { RecognitionService } from './recognition.service';
 
 describe('MyRecognitionController', () => {
   let controller: MyRecognitionController;
   let service: { getForUser: jest.Mock; getBySlug: jest.Mock };
+  let awarding: { recompute: jest.Mock };
 
   const user: CurrentUserData = {
     userId: 'u1',
@@ -19,9 +21,13 @@ describe('MyRecognitionController', () => {
 
   beforeEach(async () => {
     service = { getForUser: jest.fn(), getBySlug: jest.fn() };
+    awarding = { recompute: jest.fn().mockResolvedValue(undefined) };
     const module: TestingModule = await Test.createTestingModule({
       controllers: [MyRecognitionController],
-      providers: [{ provide: RecognitionService, useValue: service }],
+      providers: [
+        { provide: RecognitionService, useValue: service },
+        { provide: RecognitionAwardingService, useValue: awarding },
+      ],
     }).compile();
     controller = module.get(MyRecognitionController);
   });
@@ -32,6 +38,7 @@ describe('MyRecognitionController', () => {
 
     const result = await controller.getMine(user);
 
+    expect(awarding.recompute).toHaveBeenCalledWith(user);
     expect(service.getForUser).toHaveBeenCalledWith('u1', true);
     expect(result).toBe(dto);
   });
