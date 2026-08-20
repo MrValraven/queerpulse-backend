@@ -1,4 +1,12 @@
-import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsString,
+  Min,
+  MaxLength,
+} from 'class-validator';
 
 /**
  * Optional server-side filters for the public directory grid. The frontend
@@ -26,4 +34,19 @@ export class ListDirectoryQuery {
   @IsOptional()
   @IsIn(['verified'])
   safe?: 'verified';
+
+  /**
+   * Opt into the paginated `Paginated<DirectoryCardDTO>` envelope
+   * (`DirectoryService.listDirectory`), `PAGE_SIZE`-per-page instead of the
+   * bare, `DEFAULT_LIST_LIMIT`-capped array. Omitting `page` entirely keeps
+   * the original bare-array response — the frontend's whole-catalog callers
+   * (venue picker, @mention suggestions, "related places") rely on that exact
+   * shape and don't paginate; only the `/local/directory` grid opts in by
+   * sending `page` (see `directory.api.ts#getDirectoryPage`).
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number;
 }

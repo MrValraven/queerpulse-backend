@@ -4,6 +4,8 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
@@ -23,10 +25,14 @@ import { ListFinanceChangesQuery } from './dto/list-finance-changes.query';
 import { ListOverviewChangesQuery } from './dto/list-overview-changes.query';
 import { UpdateAdminFinancesDto } from './dto/update-admin-finances.dto';
 import { UpdateAdminOverviewDto } from './dto/update-admin-overview.dto';
+import { CreateGovernanceProposalDto } from './dto/create-governance-proposal.dto';
+import { CastGovernanceVoteDto } from './dto/cast-governance-vote.dto';
 import { GovernanceFinanceService } from './governance-finance.service';
 import { GovernanceOverviewService } from './governance-overview.service';
+import { GovernanceProposalService } from './governance-proposal.service';
 import {
   ApiCookieAuth,
+  ApiCreatedResponse,
   ApiForbiddenResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
@@ -59,6 +65,7 @@ export class GovernanceController {
   constructor(
     private readonly governanceFinanceService: GovernanceFinanceService,
     private readonly governanceOverviewService: GovernanceOverviewService,
+    private readonly governanceProposalService: GovernanceProposalService,
   ) {}
 
   @Get('overview')
@@ -202,5 +209,64 @@ export class GovernanceController {
       query.limit ?? DEFAULT_OVERVIEW_CHANGES_LIMIT,
       query.offset ?? 0,
     );
+  }
+
+  // ── Proposals & votes (COM-1) ────────────────────────────────────────────
+  // Backs the "two-thirds community vote" (council removal) and "the
+  // community will vote on it" (funding-policy change) promises made on the
+  // public Governance page — real member votes, tallied live from
+  // `governance_votes`, modeled on `RoadmapController`'s vote routes.
+
+  @Post('proposals')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.Admin)
+  @ApiOperation({ summary: 'Open a new governance proposal for a member vote' })
+  @ApiCreatedResponse({ description: 'The created proposal.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  createProposal(
+    @Body() dto: CreateGovernanceProposalDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.governanceProposalService.createProposal(dto, user.userId);
+  }
+
+  @Get('proposals')
+  @ApiOperation({
+    summary: 'List every governance proposal, open and resolved',
+  })
+  @ApiOkResponse({
+    description: 'Proposals newest-first, each with a live tally.',
+  })
+  listProposals(@CurrentUser() user: CurrentUserData) {
+    return this.governanceProposalService.listProposals(user.userId);
+  }
+
+  @Get('proposals/:id')
+  @ApiOperation({ summary: 'Get one governance proposal with its live tally' })
+  @ApiOkResponse({
+    description: 'The proposal, its tally, and the caller’s own vote.',
+  })
+  @ApiNotFoundResponse({ description: 'No proposal with that id.' })
+  getProposal(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.governanceProposalService.getProposal(id, user.userId);
+  }
+
+  @Post('proposals/:id/vote')
+  @ApiOperation({
+    summary: 'Cast (or idempotently re-cast) a for/against vote',
+  })
+  @ApiCreatedResponse({
+    description: 'The proposal, its updated tally, and the caller’s vote.',
+  })
+  @ApiNotFoundResponse({ description: 'No proposal with that id.' })
+  castVote(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CastGovernanceVoteDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.governanceProposalService.castVote(user.userId, id, dto);
   }
 }

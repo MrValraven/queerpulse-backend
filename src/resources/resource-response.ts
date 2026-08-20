@@ -12,6 +12,8 @@ export interface ResourceResponseDTO {
   body: string;
   meta: string | null;
   externalUrl: string | null;
+  /** ISO timestamp of the last editorial verification, or null if never verified. */
+  lastVerifiedAt: string | null;
 }
 
 // Mirrors `contracts.ts`'s `GlossaryTermResponse` exactly.
@@ -31,6 +33,9 @@ export function toResourceResponse(resource: Resource): ResourceResponseDTO {
     body: resource.body,
     meta: resource.meta,
     externalUrl: resource.externalUrl,
+    lastVerifiedAt: resource.lastVerifiedAt
+      ? resource.lastVerifiedAt.toISOString()
+      : null,
   };
 }
 

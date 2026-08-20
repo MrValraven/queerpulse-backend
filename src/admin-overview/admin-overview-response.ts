@@ -18,8 +18,18 @@ export interface AdminOverviewDTO {
       emergencies: number;
     };
     medianResponseHours: number | null;
-    sustainerMrr: number | null;
-    sustainerCount: number | null;
+    /**
+     * A platform-wide summary of `AdminCommunityCardDTO.healthScore` (the
+     * composite activity/report-resolution/safety score already computed by
+     * `AdminCommunitiesService.listCommunities()` for the communities admin
+     * section) — reused here rather than re-derived, so this and the
+     * per-community score can never drift apart. `averageScore` is `null`
+     * only when the platform has no communities yet (nothing to average).
+     */
+    communityHealth: {
+      averageScore: number | null;
+      needingSupportCount: number;
+    };
     verifiedMembers: number;
   };
   triage: {

@@ -110,6 +110,10 @@ export interface AdminCommunityDetailDTO extends AdminCommunityCardDTO {
    *  freeze/unfreeze endpoints, in addition to staff lifting it from the
    *  community's own mod panel. */
   frozen: boolean;
+  /** True once an admin (or the owner, via the member-facing endpoint) has
+   *  archived the community. Reversible via the admin-only unarchive
+   *  endpoint (COM-18) — archiving is no longer a one-way door. */
+  archived: boolean;
   resolvedPercentage: number;
   moderators: AdminCommunityModeratorDTO[];
   scopedQueue: AdminCommunityQueueItemDTO[];
@@ -334,6 +338,7 @@ export function toAdminCommunityDetail(
     requiresSecondVouch: community.requiresSecondVouch,
     autoFreezeOnReports: community.autoFreezeOnReports,
     frozen: community.frozenAt != null,
+    archived: community.archivedAt != null,
     resolvedPercentage,
     moderators,
     scopedQueue,

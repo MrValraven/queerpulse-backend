@@ -1,16 +1,21 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { DataSource, EntityManager, MoreThan, Repository } from 'typeorm';
+import { Profile } from '../users/entities/profile.entity';
+import type { UpdateRsvpDetailsDto } from './dto/update-rsvp-details.dto';
 import {
   EVENT_RSVPED,
   EVENT_WAITLIST_PROMOTED,
   EventRsvpedEvent,
   EventWaitlistPromotedEvent,
 } from './event.events';
+import { RsvpDetailsView, toRsvpDetailsView } from './event-response';
 import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
@@ -29,6 +34,17 @@ export class RsvpService {
     private readonly dataSource: DataSource,
     private readonly eventEmitter: EventEmitter2,
     private readonly audienceGate: EventAudienceGateService,
+    // Resolves a host/co-host's target-member `slug` (what the manage-
+    // attendees UI has) to the `userId` an `EventRsvp` row is keyed by — see
+    // `removeAttendee`/`promoteAttendee`. `UsersModule` (imported by
+    // `EventsModule`) exports `TypeOrmModule`, so this repository is already
+    // in scope with no module change.
+    @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    // Plain (non-transactional) repos for `updateRsvpDetails` below — that
+    // path never touches capacity/waitlist ordering, so it doesn't need the
+    // `pessimistic_write` event lock every other write in this service takes.
+    @InjectRepository(Event) private readonly events: Repository<Event>,
+    @InjectRepository(EventRsvp) private readonly rsvps: Repository<EventRsvp>,
   ) {}
 
   async rsvp(
@@ -117,6 +133,16 @@ export class RsvpService {
             ...hostRsvp,
           };
         }
+        // The host turned off the manage-dashboard "Allow waitlist" toggle
+        // (`Event.allowWaitlist`) — a full event stays full rather than
+        // silently enqueueing someone the host doesn't want to run a
+        // waitlist for. Strictly `=== false` (not falsy): a row loaded before
+        // this column existed, or a test/mock fixture that never sets it,
+        // must keep the historical "always waitlist" behavior rather than
+        // silently start rejecting.
+        if (event.allowWaitlist === false) {
+          throw new BadRequestException('This event is full');
+        }
         resolved = RsvpStatus.Waitlisted;
         const maxPos = await rsvpRepo
           .createQueryBuilder('r')
@@ -160,7 +186,41 @@ export class RsvpService {
     return outcome.result;
   }
 
-  async cancelRsvp(slug: string, userId: string): Promise<{ ok: true }> {
+  /**
+   * `scope` (MSG-10) — for an occurrence that belongs to a series, `'future'`
+   * also cancels the CALLER'S OWN RSVP (never anyone else's) on every later
+   * occurrence in the series, exactly mirroring the demo prototype's
+   * "leave whole series" choice (`SeriesScopeModal`, queerpulse FE) with a
+   * real backend behind it. `'this'` (the default) is unchanged prior
+   * behavior — cancels only this one event's RSVP.
+   */
+  async cancelRsvp(
+    slug: string,
+    userId: string,
+    scope: 'this' | 'future' = 'this',
+  ): Promise<{ ok: true }> {
+    const primary = await this.cancelRsvpOne(slug, userId);
+    if (scope === 'future' && primary.seriesId && primary.seriesIndex !== null) {
+      const siblings = await this.events.find({
+        where: {
+          seriesId: primary.seriesId,
+          seriesIndex: MoreThan(primary.seriesIndex),
+        },
+      });
+      for (const sibling of siblings) {
+        await this.cancelRsvpOne(sibling.slug, userId);
+      }
+    }
+    return { ok: true };
+  }
+
+  // The actual single-event RSVP cancel — everything `cancelRsvp()` did
+  // before MSG-10 added series scope, plus the event's own series linkage so
+  // the public method above can find later siblings without a second lookup.
+  private async cancelRsvpOne(
+    slug: string,
+    userId: string,
+  ): Promise<{ seriesId: string | null; seriesIndex: number | null }> {
     const result = await this.dataSource.transaction(async (manager) => {
       const event = await manager.findOne(Event, {
         where: { slug },
@@ -175,7 +235,13 @@ export class RsvpService {
         where: { eventId: event.id, userId },
       });
       if (!mine || mine.status === RsvpStatus.Cancelled) {
-        return null;
+        return {
+          eventId: event.id,
+          eventSlug: event.slug,
+          promoted: [] as string[],
+          seriesId: event.seriesId,
+          seriesIndex: event.seriesIndex,
+        };
       }
       const wasGoing = mine.status === RsvpStatus.Going;
       mine.status = RsvpStatus.Cancelled;
@@ -186,13 +252,17 @@ export class RsvpService {
       const promoted = wasGoing
         ? await this.promoteWaitlist(manager, event)
         : [];
-      return { eventId: event.id, eventSlug: event.slug, promoted };
+      return {
+        eventId: event.id,
+        eventSlug: event.slug,
+        promoted,
+        seriesId: event.seriesId,
+        seriesIndex: event.seriesIndex,
+      };
     });
 
-    if (result) {
-      this.emitPromotions(result.eventId, result.eventSlug, result.promoted);
-    }
-    return { ok: true };
+    this.emitPromotions(result.eventId, result.eventSlug, result.promoted);
+    return { seriesId: result.seriesId, seriesIndex: result.seriesIndex };
   }
 
   // Re-runs waitlist promotion for an event out of band — e.g. after its
@@ -217,7 +287,176 @@ export class RsvpService {
     }
   }
 
+  /**
+   * Host/co-host-initiated removal of an attendee — `DELETE
+   * /events/:slug/attendees/:memberSlug`. Cancels whichever active RSVP the
+   * target member holds (going, maybe, or waitlisted) and, exactly like a
+   * member cancelling their own RSVP, pulls the waitlist head(s) up when a
+   * 'going' seat was freed. Idempotent: removing someone with no active RSVP
+   * (or already-cancelled) is a no-op.
+   */
+  async removeAttendee(
+    slug: string,
+    actorId: string,
+    memberSlug: string,
+  ): Promise<{ ok: true }> {
+    const targetUserId = await this.resolveMemberUserId(memberSlug);
+    const result = await this.dataSource.transaction(async (manager) => {
+      const event = await manager.findOne(Event, {
+        where: { slug },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!event) {
+        throw new NotFoundException('Event not found');
+      }
+      await this.assertOrganizer(manager, event, actorId);
+
+      const rsvpRepo = manager.getRepository(EventRsvp);
+      const target = await rsvpRepo.findOne({
+        where: { eventId: event.id, userId: targetUserId },
+      });
+      if (!target || target.status === RsvpStatus.Cancelled) {
+        return null;
+      }
+      const wasGoing = target.status === RsvpStatus.Going;
+      target.status = RsvpStatus.Cancelled;
+      target.waitlistPosition = null;
+      await rsvpRepo.save(target);
+
+      const promoted = wasGoing
+        ? await this.promoteWaitlist(manager, event)
+        : [];
+      return { eventId: event.id, eventSlug: event.slug, promoted };
+    });
+
+    if (result) {
+      this.emitPromotions(result.eventId, result.eventSlug, result.promoted);
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Host/co-host-initiated manual promotion — `POST
+   * /events/:slug/waitlist/:memberSlug/promote`. Unlike the automatic FIFO
+   * sweep in `promoteWaitlist` (which always admits the head of the queue),
+   * this lets the host pick a specific waitlisted member out of order — the
+   * same 'going' capacity check the automatic path enforces (via the same
+   * `pessimistic_write` row lock), just for one targeted attendee instead of
+   * a bulk sweep. The member's `waitlist_position` is simply cleared rather
+   * than renumbering everyone behind them: the automatic sweep only ever
+   * reads positions in ascending order, so a gap changes nothing about who's
+   * "next".
+   */
+  async promoteAttendee(
+    slug: string,
+    actorId: string,
+    memberSlug: string,
+  ): Promise<{ ok: true }> {
+    const targetUserId = await this.resolveMemberUserId(memberSlug);
+    const result = await this.dataSource.transaction(async (manager) => {
+      const event = await manager.findOne(Event, {
+        where: { slug },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!event) {
+        throw new NotFoundException('Event not found');
+      }
+      await this.assertOrganizer(manager, event, actorId);
+
+      const rsvpRepo = manager.getRepository(EventRsvp);
+      const target = await rsvpRepo.findOne({
+        where: { eventId: event.id, userId: targetUserId },
+      });
+      if (!target || target.status !== RsvpStatus.Waitlisted) {
+        throw new BadRequestException('That member is not on the waitlist');
+      }
+      if (event.capacity !== null) {
+        const goingCount = await rsvpRepo.count({
+          where: { eventId: event.id, status: RsvpStatus.Going },
+        });
+        if (goingCount >= event.capacity) {
+          throw new BadRequestException('The event is at capacity');
+        }
+      }
+      target.status = RsvpStatus.Going;
+      target.waitlistPosition = null;
+      await rsvpRepo.save(target);
+      return { eventId: event.id, eventSlug: event.slug };
+    });
+
+    this.eventEmitter.emit(EVENT_WAITLIST_PROMOTED, {
+      eventId: result.eventId,
+      eventSlug: result.eventSlug,
+      userId: targetUserId,
+    } satisfies EventWaitlistPromotedEvent);
+    return { ok: true };
+  }
+
+  /**
+   * `PATCH /events/:slug/rsvp/details` — the caller's own RSVP only ("Anything
+   * we should know?": guest count, access/dietary needs, visibility). Every
+   * field is optional so a partial edit doesn't clobber the rest; only fields
+   * actually present in `dto` are written.
+   */
+  async updateRsvpDetails(
+    slug: string,
+    userId: string,
+    dto: UpdateRsvpDetailsDto,
+  ): Promise<RsvpDetailsView> {
+    const event = await this.events.findOne({ where: { slug } });
+    if (!event) {
+      throw new NotFoundException('Event not found');
+    }
+    const rsvp = await this.rsvps.findOne({
+      where: { eventId: event.id, userId },
+    });
+    if (!rsvp || rsvp.status === RsvpStatus.Cancelled) {
+      throw new NotFoundException('You do not have an active RSVP to this event');
+    }
+    Object.assign(rsvp, {
+      ...(dto.guestCount !== undefined ? { guestCount: dto.guestCount } : {}),
+      ...(dto.accessNeeds !== undefined
+        ? { accessNeeds: dto.accessNeeds }
+        : {}),
+      ...(dto.dietaryNeeds !== undefined
+        ? { dietaryNeeds: dto.dietaryNeeds }
+        : {}),
+      ...(dto.visibility !== undefined ? { visibility: dto.visibility } : {}),
+    });
+    const saved = await this.rsvps.save(rsvp);
+    return toRsvpDetailsView(saved);
+  }
+
   // --- internals ---
+
+  // Manager-scoped organizer check (host or co-host) — mirrors
+  // `EventsService.isOrganizer`/`assertOrganizer` but reads through the
+  // SAME transaction/lock as the event row this call is gating, matching
+  // `assertMayRsvp`'s reasoning above.
+  private async assertOrganizer(
+    manager: EntityManager,
+    event: Event,
+    userId: string,
+  ): Promise<void> {
+    const isOrganizer =
+      event.hostId === userId ||
+      (await manager.exists(EventCohost, {
+        where: { eventId: event.id, userId },
+      }));
+    if (!isOrganizer) {
+      throw new ForbiddenException('Only the host or a co-host can do that');
+    }
+  }
+
+  private async resolveMemberUserId(memberSlug: string): Promise<string> {
+    const profile = await this.profiles.findOne({
+      where: { slug: memberSlug },
+    });
+    if (!profile) {
+      throw new NotFoundException('Member not found');
+    }
+    return profile.userId;
+  }
 
   // Enforces the SAME gathering-audience-scope gate `EventsService
   // .assertCanView` applies to reads — see `EventAudienceGateService`'s class

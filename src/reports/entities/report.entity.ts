@@ -162,6 +162,48 @@ export class Report {
   @Column({ type: 'uuid', nullable: true })
   reporterId!: string | null;
 
+  // The moderator who has claimed this report (COM-5). Nullable — NULL means
+  // unassigned. `ON DELETE SET NULL` (see `AddReportAssignee`): the report
+  // reverts to unassigned rather than blocking the erasure sweep when the
+  // assigning moderator erases their account.
+  @Index('IDX_reports_assigned_moderator_id')
+  @Column({ type: 'uuid', nullable: true })
+  assignedModeratorId!: string | null;
+
+  // Set together with `assignedModeratorId`, cleared together on unassign —
+  // mirrors `forum_thread.pinnedAt`'s pin-watermark pattern.
+  @Column({ type: 'timestamptz', nullable: true })
+  assignedAt!: Date | null;
+
+  // --- resolution (COM-7): denormalized onto the row at the moment
+  // `actOnReport`/`bulkActOnReports` resolves the report, so the resolved-tab
+  // queue never needs a join to show the outcome. NULL `resolvedAt` = never
+  // resolved (open/escalated). See `AddReportResolution` for the erasure-safe
+  // shape of `resolutionActorId`. ---
+
+  @Column({ type: 'timestamptz', nullable: true })
+  resolvedAt!: Date | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  resolutionActorId!: string | null;
+
+  // The `ModActionCode` that resolved the report (e.g. "restrict"/"suspend").
+  @Column({ type: 'varchar', nullable: true })
+  resolutionAction!: string | null;
+
+  // e.g. "7d" — only set for a duration-bearing resolution (restrict/suspend).
+  @Column({ type: 'varchar', nullable: true })
+  resolutionDuration!: string | null;
+
+  // The exact member-facing text the resolving moderator wrote.
+  @Column({ type: 'text', nullable: true })
+  resolutionNote!: string | null;
+
+  // Which parties the outcome was actually communicated to —
+  // `ResolutionNotifiedParty[]` ("member" | "reporter" | "affected").
+  @Column({ type: 'varchar', array: true, nullable: true })
+  resolutionNotified!: string[] | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 }

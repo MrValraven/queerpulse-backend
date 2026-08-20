@@ -36,8 +36,8 @@ export class SendMessagePayload {
   clientMessageId?: string;
 
   @IsOptional()
-  @IsIn(['user', 'gif'])
-  kind?: 'user' | 'gif';
+  @IsIn(['user', 'gif', 'image'])
+  kind?: 'user' | 'gif' | 'image';
 
   @IsOptional()
   @ValidateNested()

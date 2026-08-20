@@ -182,7 +182,10 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
     lockedContext: 'Join in the first 500 members',
     earnedContext: 'Joined in the first 500',
     // No signal wired yet (see recognition.scoring.ts) — we don't yet know
-    // how this will be verified, so we don't claim to.
+    // how this will be verified, so we don't claim to. Also has no
+    // `BADGE_REQUIREMENTS` entry, so `buildBadges` (recognition-response.ts)
+    // omits it from the locked grid entirely rather than showing "how to
+    // earn it" copy for a badge nobody can actually get (COM-14).
   },
   {
     key: 'sustainer',
@@ -240,9 +243,13 @@ export const BADGE_CATALOG: readonly BadgeCatalogEntry[] = [
  * Time-limited badges (spec-equivalent extension for the v2 Badges & Levels
  * frontend redesign). Purely informational today — no `BADGE_REQUIREMENTS`
  * entry exists for any of these, so `qualifyingBadgeKeys` never grants them
- * (same as `founding-member` above). A future task can wire real signals
- * (e.g. "attended a gathering tagged Pride between opensAt/closesAt") without
- * touching this catalogue's shape.
+ * (same as `founding-member` above), and `buildSeasonalBadges`
+ * (recognition-response.ts) never surfaces them to the frontend either
+ * (COM-14) — so the seasonal band doesn't show earning instructions for a
+ * badge with no real award path. A future task can wire real signals (e.g.
+ * "attended a gathering tagged Pride between opensAt/closesAt") without
+ * touching this catalogue's shape; the entry starts appearing the moment it
+ * gets a `BADGE_REQUIREMENTS` row.
  */
 export const SEASONAL_BADGE_CATALOG: readonly SeasonalBadgeCatalogEntry[] = [
   {
@@ -306,11 +313,19 @@ export const PERK_CATALOG: readonly PerkCatalogEntry[] = [
     key: 'vouch-access',
     cat: 'Community',
     title: 'Vouch access',
-    desc: 'The ability to vouch for new members on the waitlist.',
-    unlockLevel: 3,
+    desc: 'The ability to vouch for other members — a trust signal that helps them stand out.',
+    // `vouch.controller.ts` has no level check: any active member can vouch
+    // from day one (`ActiveMemberGuard` is the only gate). This used to read
+    // `unlockLevel: 3` with "Applied automatically at Level 3 · Regular"
+    // copy — a gate that never existed in the backend (COM-15). Rather than
+    // adding a real Level 3 gate nobody asked for, this entry is honest about
+    // being available from Level 1 (every active member already has it), so
+    // it always renders in "Available to claim" instead of a fake locked
+    // tier.
+    unlockLevel: 1,
     availableFooter: {
       type: 'active-auto',
-      autoLabel: 'Applied automatically at Level 3 · Regular',
+      autoLabel: 'Available to every active member',
     },
   },
   {

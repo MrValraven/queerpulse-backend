@@ -193,12 +193,16 @@ export class DirectoryService {
   }
 
   /**
-   * Every live listing for the public `/local/directory` grid, optionally
-   * filtered by category and free-text search. Returns the full result set
-   * (the directory is a curated, bounded city registry and the frontend renders
-   * a "showing X of Y" count over all of it) rather than a page.
+   * Builds the shared `WHERE`/`ORDER BY` for the public directory grid — cat/
+   * q/safe filters, the moderation takedown exclusion, and the
+   * verified-safe-space-first ordering — factored out so both the bare
+   * (`listDirectory`) and paginated (`listDirectoryPage`) read paths apply
+   * IDENTICAL filtering/ordering and only differ in how the result set is
+   * bounded (`take` vs `paginate`'s `skip`/`take`).
    */
-  async listDirectory(query: ListDirectoryQuery): Promise<DirectoryCardDTO[]> {
+  private buildDirectoryQuery(
+    query: Pick<ListDirectoryQuery, 'cat' | 'q' | 'safe'>,
+  ): SelectQueryBuilder<Listing> {
     const qb = this.listings
       .createQueryBuilder('listing')
       .where('listing.status = :status', { status: ListingStatus.Live });
@@ -234,15 +238,46 @@ export class DirectoryService {
     // existing name order, which remains the tiebreaker). Boost happens in
     // the SQL `ORDER BY` — not a JS re-sort — so it stays correct across
     // `take`/pagination.
-    const rows = await qb
+    return qb
       .orderBy(
         `CASE WHEN listing.safeSpaceStatus = '${SafeSpaceStatus.Verified}' THEN 0 ELSE 1 END`,
         'ASC',
       )
-      .addOrderBy('listing.name', 'ASC')
+      .addOrderBy('listing.name', 'ASC');
+  }
+
+  /**
+   * Every live listing for the public `/local/directory` grid, optionally
+   * filtered by category and free-text search. Returns the full result set
+   * capped at `DEFAULT_LIST_LIMIT` (never a `Paginated` envelope) — kept for
+   * the frontend's whole-catalog callers (venue picker, @mention suggestions,
+   * "related places", and `SearchService`'s cross-domain search) that need
+   * the working set client-side rather than a browsable page. The
+   * `/local/directory` grid itself instead calls `listDirectoryPage` (below)
+   * when it wants real pagination — see `ListDirectoryQuery.page`'s doc
+   * comment for why the two coexist.
+   */
+  async listDirectory(query: ListDirectoryQuery): Promise<DirectoryCardDTO[]> {
+    const rows = await this.buildDirectoryQuery(query)
       .take(DEFAULT_LIST_LIMIT)
       .getMany();
     return rows.map(toDirectoryCard);
+  }
+
+  /**
+   * Paginated variant of `listDirectory` backing the `/local/directory` grid
+   * (HSG-5 of the 2026-08-20 gap audit): real `PAGE_SIZE`-at-a-time offset
+   * pagination via the shared `paginate()` helper, with an honest `total`
+   * across every matching row (not the old silent `DEFAULT_LIST_LIMIT` cap).
+   * Same filters/ordering as `listDirectory` (shared `buildDirectoryQuery`).
+   */
+  async listDirectoryPage(
+    query: ListDirectoryQuery,
+  ): Promise<Paginated<DirectoryCardDTO>> {
+    const qb = this.buildDirectoryQuery(query);
+    return paginate(qb, normalizePage(query.page), (rows) =>
+      rows.map(toDirectoryCard),
+    );
   }
 
   /**

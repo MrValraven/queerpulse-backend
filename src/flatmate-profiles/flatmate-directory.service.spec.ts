@@ -61,7 +61,10 @@ function makeFlatmate(
 
 describe('FlatmateDirectoryService', () => {
   let service: FlatmateDirectoryService;
-  let flatmates: RepoMock;
+  // Declared with the exact method shape (rather than the bare `RepoMock`
+  // index-signature alias) so `flatmates.findOne.mockResolvedValue(...)`-style
+  // chained access doesn't see `noUncheckedIndexedAccess`'s `| undefined`.
+  let flatmates: { findOne: jest.Mock; createQueryBuilder: jest.Mock };
   let profiles: RepoMock;
   let blockFilter: { isBlockedEitherWay: jest.Mock; excludeHidden: jest.Mock };
   let verification: { levelForUser: jest.Mock; levelsForUsers: jest.Mock };

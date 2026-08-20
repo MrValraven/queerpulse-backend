@@ -18,6 +18,7 @@ import { StorageModule } from '../storage/storage.module';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
+import { UsersModule } from '../users/users.module';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import { AccountDeletionProcessorService } from './account-deletion-processor.service';
 import { AccountExportService } from './account-export.service';
@@ -49,6 +50,11 @@ import { EmailPreference } from './entities/email-preference.entity';
     // at them. Plain import, no `forwardRef`: `CommunitiesModule` does not
     // import `AccountModule`, directly or transitively.
     CommunitiesModule,
+    // `UsersModule` exports `UsersService`, injected for the shared
+    // `countAdmins` last-admin guard `deactivate`/`requestDeletion` use
+    // (`assertNotSoleAdmin`) — the same helper `AdminMembersService.updateRole`
+    // uses against role-demotion.
+    UsersModule,
     TypeOrmModule.forFeature([
       DeletionRequest,
       DsarRequest,

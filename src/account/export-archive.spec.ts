@@ -131,6 +131,35 @@ describe('describeExportDownload', () => {
       ]);
     });
 
+    it('includes the newer-domain categories (subprofiles/listings/housing/saved/notifications/consent), not just the original six', () => {
+      // These are registered via DATA_EXPORT_CONTRIBUTORS
+      // (data-export-contributors.ts) rather than
+      // AccountExportService.coreContributions, and used to be silently
+      // dropped from the csv/zip format even though the json/both formats
+      // (built straight from job.data) always carried them.
+      const result = describeExportDownload(
+        job(DataExportFormat.Csv, {
+          subprofiles: [{ id: 's1' }],
+          listings: [{ id: 'l1' }],
+          housing: [{ id: 'h1' }],
+          saved: [{ id: 'sv1' }],
+          notifications: [{ id: 'n1' }],
+          consent: [{ id: 'c1' }],
+        }),
+      );
+      if (result.kind !== 'zip') {
+        throw new Error('expected zip');
+      }
+      expect(result.entries.map((e) => e.name)).toEqual([
+        'subprofiles.csv',
+        'listings.csv',
+        'housing.csv',
+        'saved.csv',
+        'notifications.csv',
+        'consent.csv',
+      ]);
+    });
+
     it('does NOT include the full .json', () => {
       const result = describeExportDownload(job(DataExportFormat.Csv, payload));
       if (result.kind !== 'zip') {

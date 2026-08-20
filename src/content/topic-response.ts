@@ -59,3 +59,17 @@ export function toTopicDetailResponse(
     relatedTopics,
   };
 }
+
+/** Row shape `TopicsService.searchByText` returns for `SearchService` — mirrors
+ * every other `*SearchRow` fed into `search/search-response.ts`. */
+export interface TopicSearchRow {
+  tag: string;
+  totalPosts: number;
+}
+
+export function toTopicSearchRow(topic: Topic): TopicSearchRow {
+  return {
+    tag: topic.tag,
+    totalPosts: topic.totalPosts,
+  };
+}

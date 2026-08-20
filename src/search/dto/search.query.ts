@@ -22,6 +22,7 @@ export enum SearchResultType {
   Resource = 'resource',
   Workshop = 'workshop',
   Subprofile = 'subprofile',
+  Topic = 'topic',
 }
 
 export class SearchQuery {

@@ -7,6 +7,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
 import { CreateEditSuggestionDto } from './dto/create-edit-suggestion.dto';
 import { ResolveEditSuggestionDto } from './dto/resolve-edit-suggestion.dto';
@@ -45,6 +47,7 @@ export class ListingEditSuggestionsService {
     @InjectRepository(ListingEditSuggestion)
     private readonly suggestions: Repository<ListingEditSuggestion>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /**
@@ -148,7 +151,14 @@ export class ListingEditSuggestionsService {
    * `RolesGuard` gate): accept or dismiss a pending suggestion. Re-resolving
    * an already-resolved row overwrites the prior decision (idempotent
    * update, mirrors `ListingsService.replyToReview`'s overwrite semantics) —
-   * there's no narrower state machine in the spec's contract. */
+   * there's no narrower state machine in the spec's contract.
+   *
+   * Accepting used to only flip this row's own status — the listing itself
+   * never changed and the owner was never told. It now also applies the
+   * correction (where there's a safe column to apply it to) and notifies the
+   * owner, best-effort, AFTER this row's own status commits — see
+   * `applyAcceptedBestEffort`. A failure there must never surface as if the
+   * accept/dismiss itself failed. */
   async resolve(
     id: string,
     moderatorUserId: string,
@@ -167,7 +177,89 @@ export class ListingEditSuggestionsService {
     suggestion.resolvedByUserId = moderatorUserId;
 
     const saved = await this.suggestions.save(suggestion);
+
+    if (saved.status === ListingEditSuggestionStatus.Accepted) {
+      await this.applyAcceptedBestEffort(saved);
+    }
+
     return { id: saved.id, status: saved.status };
+  }
+
+  /**
+   * Writes an accepted correction onto the actual `Listing` row and notifies
+   * the owner. Best-effort (mirrors `ListingsService.notifyApprovedBestEffort`
+   * exactly): the suggestion's own status flip has already committed by the
+   * time this runs, so a lookup/save/notify failure here must not undo or
+   * appear to undo that decision.
+   *
+   * Only 3 of the 6 `EDIT_SUGGESTION_FIELDS` map onto a plain string column
+   * the free-text `message` can safely become verbatim: `address` ->
+   * `Listing.address`, `phone`/`website` -> the matching key in
+   * `Listing.social`. `hours` has no safe auto-apply target — `Listing.hours`
+   * is a structured per-weekday interval map (`ListingDayHours`), and a
+   * free-text correction can't become that shape without a human parsing it,
+   * so it lands on the adjoining free-text `hoursNote` column instead (which
+   * exists for exactly this: a plain-text clarification shown next to the
+   * hours grid). `description` has no dedicated column at all; the closest
+   * fit is `tagline` (the detail page's own pull-quote copy), not `blurb`,
+   * which is DB-capped at 140 chars and would reject a longer correction
+   * outright. `other` is an intentional catch-all with no column to target —
+   * accepting it still resolves the queue row and still notifies the owner
+   * with the suggested message, it just leaves every listing column
+   * untouched (there's nothing safe to overwrite).
+   */
+  private async applyAcceptedBestEffort(
+    suggestion: ListingEditSuggestion,
+  ): Promise<void> {
+    try {
+      const listing = await this.listings.findOne({
+        where: { id: suggestion.listingId },
+      });
+      // Hard-deleted since the suggestion was filed — nothing left to
+      // correct or notify about.
+      if (!listing) return;
+
+      switch (suggestion.field) {
+        case 'address':
+          listing.address = suggestion.message;
+          await this.listings.save(listing);
+          break;
+        case 'phone':
+          listing.social = { ...listing.social, phone: suggestion.message };
+          await this.listings.save(listing);
+          break;
+        case 'website':
+          listing.social = { ...listing.social, website: suggestion.message };
+          await this.listings.save(listing);
+          break;
+        case 'hours':
+          listing.hoursNote = suggestion.message;
+          await this.listings.save(listing);
+          break;
+        case 'description':
+          listing.tagline = suggestion.message;
+          await this.listings.save(listing);
+          break;
+        default:
+          // 'other' (or any future field): no column to apply to — the
+          // owner still gets notified below with the raw message.
+          break;
+      }
+
+      await this.notifications.create(
+        listing.ownerId,
+        NotificationType.ListingEditSuggestionAccepted,
+        {
+          source: 'listing',
+          listingSlug: listing.slug,
+          field: suggestion.field,
+        },
+      );
+    } catch {
+      // Intentionally ignored — the suggestion's own accept already
+      // committed; a failure here must not surface to the moderator as if
+      // the accept itself failed.
+    }
   }
 
   /** Mirrors `DirectoryService.loadLiveOr404` exactly (slug + `Live` status) —

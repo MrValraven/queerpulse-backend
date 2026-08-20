@@ -71,14 +71,21 @@ export class DirectoryController {
     return this.directoryService.listPartnerSpaces();
   }
 
-  // Public directory grid — every live listing, optionally filtered.
+  // Public directory grid — every live listing, optionally filtered. Bare
+  // array by default; sending `page` opts into the paginated envelope (see
+  // `ListDirectoryQuery.page`'s doc comment).
   @Public()
   @Get()
   @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
   @ApiOperation({ summary: 'List the public directory of live listings' })
-  @ApiOkResponse({ description: 'Matching directory cards.' })
+  @ApiOkResponse({
+    description:
+      'Matching directory cards — a bare array by default, or a `{items,total,page,pageSize}` page when `page` is given.',
+  })
   listDirectory(@Query() query: ListDirectoryQuery) {
-    return this.directoryService.listDirectory(query);
+    return query.page
+      ? this.directoryService.listDirectoryPage(query)
+      : this.directoryService.listDirectory(query);
   }
 
   // Public Safe Spaces page — verified + removed safe spaces with hero stats.

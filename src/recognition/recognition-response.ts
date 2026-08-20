@@ -12,6 +12,7 @@ import {
 } from './recognition.catalog';
 import {
   BADGE_BONUS_BY_RARITY,
+  BADGE_REQUIREMENTS,
   badgeBonusXp,
   badgeProgress,
   RecognitionSignals,
@@ -232,7 +233,7 @@ export function buildBadges(
         xpReward,
         verifiedBy: def.verifiedBy,
       });
-    } else {
+    } else if (BADGE_REQUIREMENTS[def.key]) {
       lockedBadges.push({
         key: def.key,
         cat: def.cat,
@@ -245,10 +246,16 @@ export function buildBadges(
         progress: signals ? badgeProgress(def.key, signals) : undefined,
       });
     }
+    // else: catalogue entry with no `BADGE_REQUIREMENTS` wiring (e.g.
+    // `founding-member`) — omitted from the locked grid rather than shown
+    // with earning instructions that lead nowhere (COM-14).
   }
   return {
     earnedCount: earnedBadges.length,
-    discoverCount: BADGE_CATALOG.length - earnedBadges.length,
+    // Only counts badges a member can actually still go earn — matches what
+    // `locked` now contains, so "N of M badges" never advertises a total
+    // that includes unobtainable catalogue entries.
+    discoverCount: lockedBadges.length,
     earned: earnedBadges,
     locked: lockedBadges,
     seasonal: buildSeasonalBadges(),
@@ -257,9 +264,15 @@ export function buildBadges(
 
 /** Time-limited badges are purely informational today (no award path — see
  *  `SEASONAL_BADGE_CATALOG`), so every entry renders the same for every
- *  viewer: locked context, no `progress`. */
+ *  viewer: locked context, no `progress`. Filtered the same way as the main
+ *  locked grid (COM-14): a seasonal entry only surfaces once it has a real
+ *  `BADGE_REQUIREMENTS` signal, so the plum "seasonal" band never promises an
+ *  earning path ("March with the QueerPulse block") that doesn't exist yet.
+ *  Today none of them do, so this returns `[]` until one is wired. */
 function buildSeasonalBadges(): BadgeDTO[] {
-  return SEASONAL_BADGE_CATALOG.map((def) => ({
+  return SEASONAL_BADGE_CATALOG.filter(
+    (def) => BADGE_REQUIREMENTS[def.key],
+  ).map((def) => ({
     key: def.key,
     cat: def.cat,
     name: def.name,

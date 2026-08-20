@@ -33,6 +33,7 @@ describe('ChangemakerNominationsService', () => {
   describe('create', () => {
     const dto: CreateChangemakerNominationDto = {
       nomineeName: '  Inês Tavares  ',
+      reason: '  Always shows up for people.  ',
     };
 
     it('scopes the nomination to the calling nominator and trims the name', async () => {
@@ -41,10 +42,12 @@ describe('ChangemakerNominationsService', () => {
       expect(repo.create).toHaveBeenCalledWith({
         nominatorId: 'u1',
         nomineeName: 'Inês Tavares',
+        reason: 'Always shows up for people.',
       });
       expect(result).toEqual({
         id: 'cn-1',
         nomineeName: 'Inês Tavares',
+        reason: 'Always shows up for people.',
         createdAt: now.toISOString(),
       });
     });

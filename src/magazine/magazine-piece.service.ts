@@ -21,7 +21,9 @@ import { CreateLetterDto } from './dto/create-letter.dto';
 import { CreatePieceDto } from './dto/create-piece.dto';
 import { CreatePieceMessageDto } from './dto/create-piece-message.dto';
 import { CreatePitchDto } from './dto/create-pitch.dto';
+import { FileDraftDto } from './dto/file-draft.dto';
 import { ListPiecesQuery, SavedViewId } from './dto/list-pieces.query';
+import { PublishArticleDto } from './dto/publish-article.dto';
 import { ReplyArticleCommentDto } from './dto/reply-article-comment.dto';
 import { ResolveArticleCommentDto } from './dto/resolve-article-comment.dto';
 import { SubmitPitchDto } from './dto/submit-pitch.dto';
@@ -72,6 +74,7 @@ import {
   toArchiveEntryFromArticle,
   toArchiveEntryFromDeck,
   toArticleDraftResponse,
+  isArticlePublishReady,
   toCorrectionResponse,
   toDeskSummary,
   toIssueProduction,
@@ -332,6 +335,16 @@ export class MagazinePieceService {
       ...(dto.standfirst !== undefined ? { standfirst: dto.standfirst } : {}),
       ...(dto.kicker !== undefined ? { kicker: dto.kicker } : {}),
       ...(dto.section !== undefined ? { section: dto.section } : {}),
+      ...(dto.role !== undefined ? { role: dto.role } : {}),
+      ...(dto.metaDescription !== undefined
+        ? { metaDescription: dto.metaDescription }
+        : {}),
+      ...(dto.socialImage !== undefined
+        ? { socialImage: dto.socialImage }
+        : {}),
+      ...(dto.canonicalUrl !== undefined
+        ? { canonicalUrl: dto.canonicalUrl }
+        : {}),
       ...(dto.tags !== undefined ? { tags: dto.tags } : {}),
       ...(dto.contentNotes !== undefined
         ? { contentNotes: dto.contentNotes }
@@ -373,6 +386,68 @@ export class MagazinePieceService {
     await this.recordEvent(pieceId, actorId, 'article_edited', undefined, {
       mergeWhileLatest: true,
     });
+
+    return toArticleDraftResponse(article);
+  }
+
+  /**
+   * Publishes, schedules, or unpublishes an article draft (CNT-1/CNT-2 audit
+   * follow-up) — the richer sibling of `updateDeck`'s boolean `published`
+   * toggle, needed here because `MagazineArticle.publishedAt` doubles as the
+   * schedule instant: the public read paths (`MagazineService.listArticles`/
+   * `getArticleBySlug`) already gate on `publishedAt > now`, so setting it to
+   * a FUTURE instant schedules the piece for free, no separate column needed.
+   *
+   * `dto.publishedAt` reads three ways: omitted -> publish now; an ISO
+   * string -> publish/schedule at exactly that instant (past or future);
+   * `null` -> unpublish, back to draft. A transition INTO a published/
+   * scheduled state (`publishedAt` was `null`, now isn't) is gated by
+   * `isArticlePublishReady` — the same standfirst + image-alt bar
+   * `articlePublishChecklist.ts` enforces client-side, re-checked here so a
+   * malformed or malicious request can't skip it. Reverting to draft
+   * (`publishedAt: null`) is never gated — an editor must always be able to
+   * pull a live piece back down regardless of its current shape.
+   */
+  async publishArticle(
+    pieceId: string,
+    dto: PublishArticleDto,
+    actorId: string,
+  ): Promise<ArticleDraftResponse> {
+    const piece = await this.loadPieceOr404(pieceId);
+    const article = await this.ensureArticleForPiece(piece, actorId);
+
+    const wasPublished = article.publishedAt !== null;
+    const nextPublishedAt =
+      dto.publishedAt === null
+        ? null
+        : dto.publishedAt !== undefined
+          ? new Date(dto.publishedAt)
+          : new Date();
+
+    if (nextPublishedAt !== null && !wasPublished) {
+      if (!isArticlePublishReady(article)) {
+        throw new BadRequestException(
+          'Article is not ready to publish: a standfirst and alt text on every image are required.',
+        );
+      }
+    }
+
+    article.publishedAt = nextPublishedAt;
+    await this.articles.save(article);
+
+    const isScheduledForFuture =
+      nextPublishedAt !== null && nextPublishedAt.getTime() > Date.now();
+    const publishEvent =
+      nextPublishedAt === null
+        ? 'article_unpublished'
+        : isScheduledForFuture
+          ? 'article_scheduled'
+          : 'article_published';
+    // Its own distinct, un-merged audit row — never collapsed into the
+    // autosave's `mergeWhileLatest` edit entry, so the desk timeline keeps a
+    // clear record of exactly when the article went live/was scheduled/came
+    // down.
+    await this.recordEvent(pieceId, actorId, publishEvent);
 
     return toArticleDraftResponse(article);
   }
@@ -1519,19 +1594,42 @@ export class MagazinePieceService {
    * `in_review`/beyond) is left as-is rather than erroring, so a duplicate
    * or out-of-order file action is a harmless no-op instead of a crash.
    *
+   * `dto?.blocks` (CNT-6 audit follow-up): `FileDraftModal`'s "paste your
+   * draft" textarea used to be captured into state and discarded — a real
+   * data-loss bug. When present, these are already-converted paragraph
+   * blocks (the frontend splits the pasted text on blank lines, same rule
+   * `ArticleDocument`'s in-editor paste uses), validated here exactly like
+   * `updateArticleDraft`'s `blocks` patch and APPENDED to whatever the
+   * article draft already holds (never replacing it — a writer refiling
+   * after already drafting in the block editor must not lose that work).
+   * Lazily creates the article row via `ensureArticleForPiece` if the piece
+   * doesn't have one yet, same as `updateArticleDraft`. This intentionally
+   * goes through the writer-scoped `MagazineWriterController`, not the
+   * editor-only `PATCH /magazine/admin/pieces/:id/article` — a plain writer
+   * (no `magazine_editor` staff role) can't reach that admin route.
+   *
    * Also snapshots an article version (Magazine Desk Phase 7, Task E1,
    * label `"Filed draft"`) so the VersionsRail always has a checkpoint at
    * the moment a draft went to the editor — a piece with no article yet
    * (or no linked article row, defensively) simply skips the snapshot
-   * rather than crashing the file action.
+   * rather than crashing the file action. The snapshot runs AFTER any pasted
+   * blocks are applied, so it captures what was just filed.
    */
   async fileDraft(
     writerId: string,
     pieceId: string,
+    dto?: FileDraftDto,
   ): Promise<WriterAssignmentResponse> {
     const piece = await this.loadPieceOr404(pieceId);
     if (piece.writerId !== writerId) {
       throw new ForbiddenException('This piece is not assigned to you.');
+    }
+
+    if (dto?.blocks !== undefined) {
+      const pastedBlocks = validateArticleBlocks(dto.blocks);
+      const article = await this.ensureArticleForPiece(piece, writerId);
+      article.blocks = [...article.blocks, ...pastedBlocks];
+      await this.articles.save(article);
     }
 
     if (piece.stage === 'drafting' || piece.stage === 'commissioned') {
@@ -1854,10 +1952,12 @@ export class MagazinePieceService {
   /**
    * Published articles for `searchArchive`, optionally filtered by title,
    * byline (joined `MagazineAuthor.name`), or tag — mirrors
-   * `MagazineService.searchByText`'s `published_at <= now` shape but reads
-   * `IS NOT NULL` directly (spec wording), which is equivalent for any row
-   * whose `publishedAt` was ever stamped by `shipIssue`/`updateDeck`
-   * (never future-dated).
+   * `MagazineService.searchByText`'s `published_at <= now` shape exactly
+   * (NOT just `IS NOT NULL`): `publishArticle` can stamp `publishedAt` with a
+   * FUTURE instant to schedule a piece, so a plain not-null check would leak
+   * a scheduled-but-not-yet-live article into the archive early. Decks have
+   * no scheduling path (`updateDeck` only ever stamps "now"), so
+   * `searchPublishedDecksForArchive` below keeps the simpler `IS NOT NULL`.
    */
   private async searchPublishedArticlesForArchive(
     term: string,
@@ -1865,7 +1965,8 @@ export class MagazinePieceService {
     const queryBuilder = this.articles
       .createQueryBuilder('article')
       .leftJoin(MagazineAuthor, 'author', 'author.id = article.author_id')
-      .where('article.published_at IS NOT NULL');
+      .where('article.published_at IS NOT NULL')
+      .andWhere('article.published_at <= :now', { now: new Date() });
 
     if (term.length > 0) {
       const pattern = `%${escapeLikeTerm(term)}%`;

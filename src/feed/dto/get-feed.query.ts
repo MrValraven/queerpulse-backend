@@ -6,6 +6,7 @@ import { IsIn, IsOptional, IsString } from 'class-validator';
 export const FEED_TABS = [
   'all',
   'communities',
+  'connections',
   'gatherings',
   'people',
   'posts',

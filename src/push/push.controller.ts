@@ -1,4 +1,16 @@
-import { Body, Controller, Headers, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Headers,
+  HttpCode,
+  HttpStatus,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import { Throttle, seconds } from '@nestjs/throttler';
 import {
   CurrentUser,
@@ -7,11 +19,19 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { PushSubscribeDto } from './dto/push-subscribe.dto';
 import { PushUnsubscribeDto } from './dto/push-unsubscribe.dto';
+import {
+  PushSubscriptionResponse,
+  toPushSubscriptionResponse,
+} from './push-response';
 import { PushService } from './push.service';
 import {
+  ApiBadRequestResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
   ApiForbiddenResponse,
+  ApiNoContentResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
   ApiOperation,
   ApiTags,
   ApiUnauthorizedResponse,
@@ -57,6 +77,46 @@ export class PushController {
   ): Promise<{ ok: true }> {
     await this.pushService.removeSubscription(user.userId, dto.endpoint);
     return { ok: true };
+  }
+
+  // Lets a member see every device currently registered to receive their
+  // pushes — the "Devices" list in Settings. Newest-first, unpaginated (a
+  // member has, at most, a handful of devices).
+  @ApiOperation({
+    summary: "List the caller's registered push subscriptions (devices)",
+  })
+  @ApiOkResponse({ description: 'The subscriptions, newest first.' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
+  @Get('subscriptions')
+  async listSubscriptions(
+    @CurrentUser() user: CurrentUserData,
+  ): Promise<PushSubscriptionResponse[]> {
+    const rows = await this.pushService.listSubscriptions(user.userId);
+    return rows.map(toPushSubscriptionResponse);
+  }
+
+  // Remote-revoke one device's push subscription — the answer to "my phone
+  // was stolen, stop sending it my notifications" when the member no longer
+  // has that device to unsubscribe from itself. Ownership is enforced by
+  // userId in the service, not just the row id, so a caller can never revoke
+  // another member's subscription by guessing an id.
+  @ApiOperation({
+    summary: "Remove one of the caller's push subscriptions (devices)",
+  })
+  @ApiNoContentResponse({ description: 'The subscription was removed.' })
+  @ApiBadRequestResponse({ description: 'Malformed subscription id.' })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
+  @ApiNotFoundResponse({ description: 'Subscription not found.' })
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
+  @Delete('subscriptions/:id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async removeSubscriptionById(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<void> {
+    await this.pushService.removeSubscriptionById(user.userId, id);
   }
 
   // Lets a member fire a single push to their own devices to confirm the whole

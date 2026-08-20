@@ -69,6 +69,16 @@ export class ForumPostsService {
   // keyed by the post's uuid. Reads check both.
   private static readonly SUBJECT_TYPES = ['post', 'reply'];
 
+  // Backs the `hasPosted` flag on `GET /forum/threads/counts` (see
+  // `ForumController.threadCounts`) — a cheap EXISTS check, backed by
+  // `IDX_forum_post_author_id`, for "has this member ever posted." A thread's
+  // opening post is itself a `forum_post` row (`ForumThreadsService.create`
+  // inserts it alongside the thread), so this single check covers both thread
+  // authorship and replies — no separate thread-table lookup needed.
+  async hasEverPosted(userId: string): Promise<boolean> {
+    return this.posts.exists({ where: { authorId: userId } });
+  }
+
   // GET /forum/threads/:slug/posts?cursor= — OP + replies, oldest-first.
   // `cursorPaginate`'s default keyset is hard-wired to a newest-first
   // `(createdAt, id) DESC` ordering, which doesn't fit this endpoint's

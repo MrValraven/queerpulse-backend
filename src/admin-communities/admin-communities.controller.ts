@@ -36,8 +36,8 @@ import {
 /**
  * Admin view over every community on the platform — health metrics, the
  * safety-policy toggles, and (below) the moderation-of-last-resort actions no
- * member-facing endpoint can reach: freeze/unfreeze, archive, reassign
- * ownership, and remove any roster member outright. Those exist for exactly
+ * member-facing endpoint can reach: freeze/unfreeze, archive/unarchive,
+ * reassign ownership, and remove any roster member outright. Those exist for exactly
  * the case a community's own owner/mods can't be trusted or reached — every
  * one of them bypasses the normal owner/mod-only authorization on purpose
  * (see each method's doc on `AdminCommunitiesService`) and is logged via
@@ -121,6 +121,19 @@ export class AdminCommunitiesController {
     @Param('slug') slug: string,
   ) {
     return this.adminCommunities.archive(slug, currentUser.userId);
+  }
+
+  @ApiOperation({
+    summary:
+      'Reverse an archive, regardless of ownership state (admin override).',
+  })
+  @ApiOkResponse({ description: 'The updated community detail.' })
+  @Post(':slug/unarchive')
+  unarchive(
+    @CurrentUser() currentUser: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.adminCommunities.unarchive(slug, currentUser.userId);
   }
 
   @ApiOperation({

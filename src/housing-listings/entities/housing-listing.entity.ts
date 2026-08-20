@@ -56,7 +56,12 @@ const numericToNumber = {
  * is the human-readable identifier for owner mutations; `slug` is the public
  * browse lookup key. Kept entirely separate from the co-ops `housing/` module.
  */
+// Composite index backing both the sweep's WHERE (status = live AND filled_at
+// IS NULL AND expires_at < now()) and the browse query's (status = live AND
+// expires_at > now()) — TypeORM composite indexes are declared class-level,
+// not on the property (see e.g. `roadmap-item.entity.ts`'s column/sortOrder).
 @Entity('housing_listings')
+@Index('IDX_housing_listings_status_expires_at', ['status', 'expiresAt'])
 export class HousingListing {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -200,6 +205,26 @@ export class HousingListing {
   // section on the listing when present; null when the lister added none.
   @Column({ type: 'varchar', length: 500, nullable: true })
   virtualTourUrl!: string | null;
+
+  // ── Owner lifecycle (HSG-1 / HSG-3) ────────────────────────────────────────
+  // Orthogonal to `status` above: `status` is the MODERATION lifecycle (a
+  // member never self-transitions it), while `filledAt` is a member-settable
+  // "found a place / no longer looking" signal an owner can flip back and
+  // forth via `PATCH :ref/mark-filled` / `PATCH :ref/mark-available`. Also set
+  // by `HousingListingExpirySweeperService` (the daily cron) when a listing's
+  // `expiresAt` passes unattended — same "hide from public browse" effect,
+  // never a hard delete. Null = still looking / still live to the public.
+  @Column({ type: 'timestamptz', nullable: true })
+  filledAt!: Date | null;
+
+  // Auto-computed at create time (see HousingListingsService.computeExpiry,
+  // DEFAULT_LISTING_LIFETIME_DAYS) and resettable by the owner via
+  // `PATCH :ref/extend`. NOT NULL (mirrors `board_posts.expires_at` —
+  // AddBoardPostLifecycleFields1791200100000): every listing always carries a
+  // real expiry, so browse/sweep queries never need an `IS NULL` branch. The
+  // migration backfills existing rows with a fresh 60-day window from `now()`.
+  @Column({ type: 'timestamptz' })
+  expiresAt!: Date;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

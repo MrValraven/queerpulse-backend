@@ -49,6 +49,7 @@ const baseThread = (overrides: Partial<ForumThread> = {}): ForumThread => ({
   isPinned: false,
   pinnedAt: null,
   isLocked: false,
+  lockReason: null,
   isOfficial: false,
   tags: [],
   opVoteCount: 0,

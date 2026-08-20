@@ -30,6 +30,34 @@ export interface MessageView {
   attachment: GifAttachment | null;
 }
 
+/**
+ * Resolves a stored `GifAttachment`'s `url`/`previewUrl` through `toImageUrl`
+ * before it ever reaches the client. A no-op for a `kind:'gif'` message (its
+ * `url` is already an absolute `https://` provider URL — `toImageUrl` passes
+ * those through unchanged); for a `kind:'image'` message it turns the private
+ * storage KEY the upload minted into a fetchable `GET /files/<key>` URL, the
+ * same way every other image field in this app resolves at read time. `null`
+ * in → `null` out.
+ */
+export function resolveAttachment(
+  attachment: GifAttachment | null,
+): GifAttachment | null {
+  if (!attachment) {
+    return null;
+  }
+  const url = toImageUrl(attachment.url);
+  const previewUrl = toImageUrl(attachment.previewUrl);
+  // toImageUrl only returns null for a value that's neither a storage key nor
+  // an absolute https URL — shouldn't happen for a value this service itself
+  // validated on write (see `MessagingCoreService.postMessage`), but blanking
+  // a message's attachment entirely (rather than sending a broken/`null` src)
+  // is the safe failure mode if it ever does.
+  if (!url || !previewUrl) {
+    return null;
+  }
+  return { ...attachment, url, previewUrl };
+}
+
 export function toMessageView(m: Message): MessageView {
   return {
     id: m.id,
@@ -165,10 +193,11 @@ export interface MessageResponse {
     senderName: string;
     deleted: boolean;
   } | null;
-  /** `user` (an ordinary bubble) or `system` (a rendered event pill). Present on
+  /** `user` (an ordinary bubble), `system` (a rendered event pill), `gif` (a
+   *  picked provider GIF), or `image` (a member-uploaded photo). Present on
    *  every message; a DM's messages are all `user`, so the client's existing
    *  bubble path is unchanged. */
-  kind: 'user' | 'system' | 'gif';
+  kind: 'user' | 'system' | 'gif' | 'image';
   /** Resolved system event for a `system` message, else null. Actor/target are
    *  resolved to DISPLAY NAMES server-side (the client only renders bilingual
    *  templates, never user ids). `value` carries a scalar the event needs (e.g. a
@@ -179,8 +208,11 @@ export interface MessageResponse {
     targetName: string | null;
     value: string | null;
   } | null;
-  /** Provider-hosted GIF for a `kind:'gif'` message, else null. The client
-   *  renders it as an inline image; `body` carries a "GIF" text fallback. */
+  /** The media attachment for a `kind:'gif'` or `kind:'image'` message, else
+   *  null. The client renders it as an inline image; `body` carries a
+   *  "GIF"/"Photo" text fallback so previews/notifications keep working.
+   *  `url`/`previewUrl` are always resolved, fetchable URLs here (see
+   *  `resolveAttachment`) — never a bare storage key. */
   attachment: GifAttachment | null;
 }
 

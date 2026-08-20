@@ -55,6 +55,15 @@ export class ForumThread {
   @Column({ type: 'boolean', default: false })
   isLocked!: boolean;
 
+  // Optional moderator note explaining why the thread was closed (e.g.
+  // "resolved", "off-topic"), set alongside `isLocked` by
+  // `ForumThreadsService.setLocked`. Null when a lock carried no reason (every
+  // lock cast before this column existed, or a moderator who left it blank),
+  // in which case the locked banner falls back to its generic copy. Cleared
+  // back to null on unlock — a fresh lock note, not an append-only log.
+  @Column({ type: 'varchar', length: 280, nullable: true })
+  lockReason!: string | null;
+
   // When true, the thread's author is displayed as "QueerPulse Official"
   // instead of the real poster (see `toForumThreadResponse`'s `author`
   // branch in `forum-response.ts`). `authorId` above is left untouched — it

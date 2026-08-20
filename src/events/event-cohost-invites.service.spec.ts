@@ -124,7 +124,7 @@ describe('EventCohostInvitesService', () => {
       profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'sofia' });
       usersService.findById.mockResolvedValue({
         id: 'u2',
-        status: UserStatus.Pending,
+        status: UserStatus.Deactivated,
       });
       await expect(
         service.createInvite('x', 'host-1', {

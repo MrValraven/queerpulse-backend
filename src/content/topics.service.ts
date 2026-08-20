@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { MoreThanOrEqual, Repository } from 'typeorm';
 import { CursorPage, cursorPaginate } from '../common/cursor-pagination';
+import { escapeLikeTerm } from '../common/like-escape';
 import { BlockFilterService } from '../social/block-filter.service';
 import { TopicPost } from './entities/topic-post.entity';
 import { Topic } from './entities/topic.entity';
@@ -10,8 +11,10 @@ import {
   RelatedTopicResponse,
   TopicDetailResponse,
   TopicResponse,
+  TopicSearchRow,
   toTopicDetailResponse,
   toTopicResponse,
+  toTopicSearchRow,
 } from './topic-response';
 
 const DEFAULT_POSTS_LIMIT = 20;
@@ -99,6 +102,25 @@ export class TopicsService {
       data: rows.map(toTopicPostResponse),
       pageInfo: { nextCursor, hasMore },
     };
+  }
+
+  // Global search (`SearchService`, `search/search.query.ts`'s `topic` type) —
+  // matches the same tag/label/description ILIKE style every other
+  // `*.searchByText` on the search fan-out uses (e.g. `resources.service.ts`,
+  // `magazine.service.ts`). Ordered by post volume like `list()` so a broad
+  // query surfaces the most active topics first.
+  async searchByText(term: string, limit: number): Promise<TopicSearchRow[]> {
+    const pattern = `%${escapeLikeTerm(term)}%`;
+    const rows = await this.topics
+      .createQueryBuilder('topic')
+      .where(
+        '(topic.tag ILIKE :pattern OR topic.label ILIKE :pattern OR topic.description ILIKE :pattern)',
+        { pattern },
+      )
+      .orderBy('topic.totalPosts', 'DESC')
+      .take(limit)
+      .getMany();
+    return rows.map(toTopicSearchRow);
   }
 
   // --- internals ---

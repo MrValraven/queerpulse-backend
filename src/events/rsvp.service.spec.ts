@@ -1,10 +1,12 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
+import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { Profile } from '../users/entities/profile.entity';
 import { EventAudienceGateService } from './event-audience-gate.service';
-import { RsvpStatus } from './entities/event-rsvp.entity';
-import { EventStatus, EventVisibility } from './entities/event.entity';
+import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
+import { Event, EventStatus, EventVisibility } from './entities/event.entity';
 import { RsvpService } from './rsvp.service';
 
 describe('RsvpService', () => {
@@ -81,6 +83,14 @@ describe('RsvpService', () => {
         { provide: DataSource, useValue: dataSource },
         { provide: EventEmitter2, useValue: emitter },
         { provide: EventAudienceGateService, useValue: audienceGate },
+        // `removeAttendee`/`promoteAttendee`/`updateRsvpDetails` (P1-9/MSG-5)
+        // read these two directly (not through `dataSource.transaction`'s
+        // manager) — unused by the tests below, which only exercise
+        // `rsvp`/`cancelRsvp`/`reconcileWaitlist`, but required for the
+        // module to compile/resolve.
+        { provide: getRepositoryToken(Profile), useValue: {} },
+        { provide: getRepositoryToken(Event), useValue: {} },
+        { provide: getRepositoryToken(EventRsvp), useValue: rsvpRepo },
       ],
     }).compile();
     service = module.get(RsvpService);

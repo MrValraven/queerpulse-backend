@@ -438,6 +438,10 @@ export interface ArticleDraftResponse {
   standfirst: string;
   kicker: string;
   section: string;
+  role: string;
+  metaDescription: string;
+  socialImage: string;
+  canonicalUrl: string;
   tags: string[];
   contentNotes: string[];
   blocks: ArticleBlock[];
@@ -510,6 +514,10 @@ export function toArticleDraftResponse(
     standfirst: article.standfirst,
     kicker: article.kicker,
     section: article.section,
+    role: article.role,
+    metaDescription: article.metaDescription,
+    socialImage: article.socialImage,
+    canonicalUrl: article.canonicalUrl,
     tags: article.tags,
     contentNotes: article.contentNotes,
     blocks: article.blocks,
@@ -520,6 +528,28 @@ export function toArticleDraftResponse(
     publishedAt:
       article.publishedAt === null ? null : article.publishedAt.toISOString(),
   };
+}
+
+/**
+ * Whether an article draft has the minimum an editor must fill in before a
+ * fresh publish (mirrors the frontend's `articlePublishChecklist.ts`
+ * REQUIRED items exactly, so the client-side checklist and this server-side
+ * gate never disagree): a non-empty standfirst, and every image block's
+ * `alt` text filled in. Only gates a null -> true `publishedAt` transition
+ * (see `publishArticle`'s use) — re-publishing/rescheduling or unpublishing
+ * an already-live article is never blocked by it, same as the deck's publish
+ * toggle never re-checks a live deck's draft state.
+ */
+export function isArticlePublishReady(article: MagazineArticle): boolean {
+  const hasStandfirst = stripHtmlTags(article.standfirst).trim() !== '';
+  const imageBlocks = article.blocks.filter(
+    (block): block is Extract<ArticleBlock, { kind: 'image' }> =>
+      block.kind === 'image',
+  );
+  const everyImageHasAlt = imageBlocks.every(
+    (block) => block.alt.trim() !== '',
+  );
+  return hasStandfirst && everyImageHasAlt;
 }
 
 /**
@@ -877,6 +907,12 @@ function describeNotificationAction(
       return `opened the article draft for ${title}`;
     case 'article_edited':
       return `edited the article draft for ${title}`;
+    case 'article_published':
+      return `published ${title}`;
+    case 'article_scheduled':
+      return `scheduled ${title} to publish`;
+    case 'article_unpublished':
+      return `unpublished ${title}`;
     default:
       return `${action.replace(/_/g, ' ')} ${title}`.trim();
   }

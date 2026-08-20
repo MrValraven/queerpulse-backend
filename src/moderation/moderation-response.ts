@@ -23,6 +23,57 @@ export interface ModReportedDTO {
   priorReports: number;
 }
 
+/** Which parties a resolved report's outcome was communicated to — mirrors
+ *  the frontend's `ResolutionNotifiedParty` exactly. */
+export type ResolutionNotifiedParty = 'member' | 'reporter' | 'affected';
+
+// Mirrors `ModReportDTO['resolution']` (`moderation.api.ts`) — the
+// denormalized outcome a resolved report's row now carries (COM-7).
+export interface ModReportResolutionDTO {
+  action: string;
+  outcomeLabel: string;
+  actorName: string;
+  closedAt: string;
+  note: string;
+  notified: ResolutionNotifiedParty[];
+}
+
+const DURATION_UNIT: Record<string, string> = { h: 'hour', d: 'day' };
+
+// "7d" -> "7 days", "24h" -> "24 hours". Falls back to the raw string for
+// anything that doesn't match the `parseDuration` shape (defensive only —
+// every duration reaching here already passed that validator).
+function humanDuration(duration: string): string {
+  const match = /^(\d+)([hd])$/.exec(duration);
+  if (!match) return duration;
+  const amount = match[1];
+  const unitKey = match[2];
+  if (!amount || !unitKey) return duration;
+  const unit = DURATION_UNIT[unitKey] ?? unitKey;
+  return `${amount} ${unit}${amount === '1' ? '' : 's'}`;
+}
+
+// The member-facing outcome badge text for a resolved report — server-owned
+// so the frontend never has to reconstruct it from the raw action code.
+const OUTCOME_LABEL: Record<string, string> = {
+  dismiss: 'Dismissed',
+  warn: 'Warned',
+  hide_content: 'Hid content',
+  remove_content: 'Removed content',
+  restrict: 'Restricted',
+  suspend: 'Suspended',
+  ban: 'Banned',
+  shield: 'Shielded member',
+};
+
+export function outcomeLabelFor(
+  action: string,
+  duration: string | null,
+): string {
+  const base = OUTCOME_LABEL[action] ?? action;
+  return duration ? `${base} · ${humanDuration(duration)}` : base;
+}
+
 export interface ModReportDetail {
   contentAuthor: string;
   excerpt: string;
@@ -69,6 +120,14 @@ export interface ModReportDTO {
   createdAt: string;
   slaDueAt: string;
   status: ReportStatus;
+  /** Null when unassigned (COM-5). */
+  assignedModeratorId?: string | null;
+  /** Only present when `assignedModeratorId` is set. "Deleted member" after
+   *  the assigning moderator's erasure. */
+  assignedModeratorName?: string;
+  /** Only present on a resolved report, once `moderation.service.ts` has
+   *  written the resolution block (COM-7). */
+  resolution?: ModReportResolutionDTO;
   /** Only present on `GET /mod/reports/:id`. */
   detail?: ModReportDetail;
 }
@@ -95,6 +154,8 @@ export function toModReportDTO(
   reporter: ModReporterDTO,
   reported: ModReportedDTO,
   detail?: ModReportDetail,
+  assignedModeratorName?: string,
+  resolution?: ModReportResolutionDTO,
 ): ModReportDTO {
   return {
     id: report.id,
@@ -116,7 +177,33 @@ export function toModReportDTO(
     createdAt: report.createdAt.toISOString(),
     slaDueAt: report.slaDueAt.toISOString(),
     status: report.status,
+    assignedModeratorId: report.assignedModeratorId,
+    ...(assignedModeratorName ? { assignedModeratorName } : {}),
+    ...(resolution ? { resolution } : {}),
     ...(detail ? { detail } : {}),
+  };
+}
+
+/** Builds the `resolution` DTO block for a resolved report, or `undefined`
+ *  when it hasn't been resolved yet (`resolvedAt` unset). `actorName` is
+ *  pre-resolved by the caller (batched via `ModAuditService.namesForUserIds`
+ *  for a page, or a single `nameForUserId` for one report) so this stays a
+ *  pure shape builder. */
+export function toResolutionDTO(
+  report: Report,
+  actorName: string,
+): ModReportResolutionDTO | undefined {
+  if (!report.resolvedAt || !report.resolutionAction) return undefined;
+  return {
+    action: report.resolutionAction,
+    outcomeLabel: outcomeLabelFor(
+      report.resolutionAction,
+      report.resolutionDuration,
+    ),
+    actorName,
+    closedAt: report.resolvedAt.toISOString(),
+    note: report.resolutionNote ?? '',
+    notified: (report.resolutionNotified ?? []) as ResolutionNotifiedParty[],
   };
 }
 
@@ -259,6 +346,35 @@ export function toSubmittedAppealDTO(appeal: Appeal): SubmittedAppealDTO {
   return {
     id: appeal.id,
     status: appeal.status,
+    createdAt: appeal.createdAt.toISOString(),
+  };
+}
+
+// `GET /appeals/me` response — the calling member's OWN appeal record.
+// Deliberately narrower than `AppealDTO` (the moderator queue's enriched
+// view): a member checking on their own appeal has no business seeing an
+// `appellant` block (it's already them) or the original moderator's name —
+// only their own case's status, the moderator's decision text (once
+// resolved), and the facts they themselves supplied. Mirrors
+// `queerpulse/src/features/safety/api/appeals.api.ts`'s `MemberAppealDTO`.
+export interface MemberAppealDTO {
+  id: string;
+  status: AppealStatus;
+  decision: string | null;
+  argument: string;
+  severity: ReportSeverity;
+  community: string | null;
+  createdAt: string;
+}
+
+export function toMemberAppealDTO(appeal: Appeal): MemberAppealDTO {
+  return {
+    id: appeal.id,
+    status: appeal.status,
+    decision: appeal.decision,
+    argument: appeal.argument,
+    severity: appeal.severity,
+    community: appeal.community,
     createdAt: appeal.createdAt.toISOString(),
   };
 }

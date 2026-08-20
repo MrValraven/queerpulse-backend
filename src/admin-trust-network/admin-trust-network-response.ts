@@ -9,6 +9,11 @@ export type Standing = 'trusted' | 'warned' | 'new' | 'flagged';
 
 export interface TrustNodeDTO {
   id: string;
+  /** The member's real account id (`User.id`) — distinct from `id`/`slug`
+   *  above, which are the profile slug used as the graph's node key. Admin
+   *  actions that address the account directly (e.g. verifying a member)
+   *  need this, not the slug. */
+  userId: string;
   slug: string;
   name: string;
   pronouns: string | null;
@@ -48,6 +53,15 @@ export interface TrustNetworkDTO {
   edges: TrustEdgeDTO[];
   scenes: SceneDTO[];
   truncated: boolean;
+}
+
+/** One typeahead result from `GET /admin/trust-network/search` — enough to
+ *  render a picker row and jump the graph to `slug` (ADM-10). */
+export interface TrustNetworkMemberSearchResultDTO {
+  slug: string;
+  name: string;
+  initials: string;
+  avatarUrl: string | null;
 }
 
 /** Standing precedence: flagged > warned > new > trusted. A member suspended

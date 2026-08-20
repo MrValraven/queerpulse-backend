@@ -27,7 +27,9 @@ import { PutLineupDto } from './dto/put-lineup.dto';
 import { RespondCohostInviteDto } from './dto/respond-cohost-invite.dto';
 import { RespondEventInviteDto } from './dto/respond-event-invite.dto';
 import { RsvpDto } from './dto/rsvp.dto';
+import { SeriesScopeQuery } from './dto/series-scope.query';
 import { UpdateEventDto } from './dto/update-event.dto';
+import { UpdateRsvpDetailsDto } from './dto/update-rsvp-details.dto';
 import { EventBookmarksService } from './event-bookmarks.service';
 import { EventCohostInvitesService } from './event-cohost-invites.service';
 import { EventInvitesService } from './event-invites.service';
@@ -76,6 +78,7 @@ export class EventsController {
       user.userId,
       query.filter ?? 'upcoming',
       query.page ?? 1,
+      { hostSlug: query.hostSlug, excludeSlug: query.excludeSlug },
     );
   }
 
@@ -100,7 +103,14 @@ export class EventsController {
   }
 
   @Patch(':slug')
-  @ApiOperation({ summary: 'Update an event you organize.' })
+  @ApiOperation({
+    summary: 'Update an event you organize.',
+    description:
+      'For a recurring occurrence, `?scope=future` (MSG-10) also applies ' +
+      'the patch to every later occurrence in its series (never `startAt`/' +
+      '`endAt` — each occurrence keeps its own date). `?scope=this` (the ' +
+      'default) touches only this occurrence.',
+  })
   @ApiOkResponse({ description: 'The updated event detail.' })
   @ApiBadRequestResponse({ description: 'Invalid resulting schedule.' })
   @ApiForbiddenResponse({
@@ -112,19 +122,30 @@ export class EventsController {
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
     @Body() dto: UpdateEventDto,
+    @Query() query: SeriesScopeQuery,
   ) {
-    return this.eventsService.update(slug, user.userId, dto);
+    return this.eventsService.update(slug, user.userId, dto, query.scope);
   }
 
   @Post(':slug/cancel')
-  @ApiOperation({ summary: 'Cancel an event you organize.' })
+  @ApiOperation({
+    summary: 'Cancel an event you organize.',
+    description:
+      'For a recurring occurrence, `?scope=future` (MSG-10) also cancels ' +
+      'every later, not-yet-cancelled occurrence in its series. `?scope=this` ' +
+      '(the default) cancels only this occurrence.',
+  })
   @ApiCreatedResponse({ description: 'The cancelled event detail.' })
   @ApiForbiddenResponse({
     description: 'Only the host or a co-host can cancel it.',
   })
   @ApiNotFoundResponse({ description: 'No event with that slug.' })
-  cancel(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
-    return this.eventsService.cancel(slug, user.userId);
+  cancel(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Query() query: SeriesScopeQuery,
+  ) {
+    return this.eventsService.cancel(slug, user.userId, query.scope);
   }
 
   @Post(':slug/rsvp')
@@ -145,15 +166,41 @@ export class EventsController {
     return this.rsvpService.rsvp(slug, user.userId, dto.status);
   }
 
+  @Patch(':slug/rsvp/details')
+  @ApiOperation({
+    summary:
+      "Update your own RSVP details (\"Anything we should know?\"): guest " +
+      'count, access/dietary needs, and who can see them.',
+  })
+  @ApiOkResponse({ description: 'The updated RSVP details.' })
+  @ApiNotFoundResponse({
+    description: 'No event with that slug, or you have no active RSVP to it.',
+  })
+  updateRsvpDetails(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: UpdateRsvpDetailsDto,
+  ) {
+    return this.rsvpService.updateRsvpDetails(slug, user.userId, dto);
+  }
+
   @Delete(':slug/rsvp')
-  @ApiOperation({ summary: 'Cancel your RSVP to an event.' })
+  @ApiOperation({
+    summary: 'Cancel your RSVP to an event.',
+    description:
+      'For a recurring occurrence, `?scope=future` (MSG-10) also cancels ' +
+      "your own RSVP (if any) on every later occurrence in its series — " +
+      "never anyone else's. `?scope=this` (the default) cancels only this " +
+      'occurrence.',
+  })
   @ApiOkResponse({ description: 'Cancellation acknowledged.' })
   @ApiNotFoundResponse({ description: 'No event with that slug.' })
   cancelRsvp(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
+    @Query() query: SeriesScopeQuery,
   ) {
-    return this.rsvpService.cancelRsvp(slug, user.userId);
+    return this.rsvpService.cancelRsvp(slug, user.userId, query.scope);
   }
 
   @Post(':slug/bookmark')
@@ -181,6 +228,52 @@ export class EventsController {
     @Param('slug') slug: string,
   ) {
     return this.eventBookmarksService.removeBookmark(user.userId, slug);
+  }
+
+  @Delete(':slug/attendees/:memberSlug')
+  @ApiOperation({
+    summary: 'Remove an attendee from an event you organize.',
+    description:
+      "Cancels the member's RSVP (going, maybe, or waitlisted) on their " +
+      'behalf and, exactly like a self-cancellation, pulls the waitlist ' +
+      "head(s) up when a 'going' seat is freed. Idempotent.",
+  })
+  @ApiOkResponse({ description: 'The attendee was removed (idempotent).' })
+  @ApiForbiddenResponse({
+    description: 'Only the host or a co-host can do that.',
+  })
+  @ApiNotFoundResponse({ description: 'No such event or member.' })
+  removeAttendee(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('memberSlug') memberSlug: string,
+  ) {
+    return this.rsvpService.removeAttendee(slug, user.userId, memberSlug);
+  }
+
+  @Post(':slug/waitlist/:memberSlug/promote')
+  @ApiOperation({
+    summary:
+      'Manually promote one waitlisted member to going — host/co-host only.',
+    description:
+      'Unlike the automatic FIFO sweep that runs on cancellation/capacity ' +
+      'increase, this lets the host pick a specific waitlisted member out ' +
+      'of order, subject to the same capacity check.',
+  })
+  @ApiCreatedResponse({ description: 'The member was promoted to going.' })
+  @ApiBadRequestResponse({
+    description: 'That member is not on the waitlist, or the event is full.',
+  })
+  @ApiForbiddenResponse({
+    description: 'Only the host or a co-host can do that.',
+  })
+  @ApiNotFoundResponse({ description: 'No such event or member.' })
+  promoteAttendee(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('memberSlug') memberSlug: string,
+  ) {
+    return this.rsvpService.promoteAttendee(slug, user.userId, memberSlug);
   }
 
   @Get(':slug/attendees')

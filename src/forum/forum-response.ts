@@ -74,6 +74,10 @@ export interface ForumThreadResponse {
   category: string;
   isPinned: boolean;
   isLocked: boolean;
+  // Optional moderator note explaining why the thread was locked (see
+  // `ForumThread.lockReason`). Null when the current lock (or the thread's
+  // unlocked state) carries no note.
+  lockReason: string | null;
   replyCount: number;
   lastActivityAt: string;
   createdAt: string;
@@ -145,6 +149,7 @@ export function toForumThreadResponse(
     category: thread.category,
     isPinned: thread.isPinned,
     isLocked: thread.isLocked,
+    lockReason: thread.lockReason,
     replyCount: thread.replyCount,
     lastActivityAt: thread.lastActivityAt.toISOString(),
     createdAt: thread.createdAt.toISOString(),

@@ -26,6 +26,7 @@ import { MemberLookup } from '../common/member-ref';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { CommunityMembershipService } from '../communities/community-membership.service';
+import { TopicPostLinkService } from '../content/topic-post-link.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole } from '../users/entities/user.entity';
@@ -119,6 +120,9 @@ export class ForumThreadsService {
     private readonly mentions: MentionNotificationService,
     private readonly eventEmitter: EventEmitter2,
     private readonly membership: CommunityMembershipService,
+    // DISC-5 — reconciles a newly created thread's tags against the topics
+    // directory (`ContentModule`, imported by `ForumModule`).
+    private readonly topicPostLink: TopicPostLinkService,
   ) {}
 
   // GET /forum/threads?category=&cursor=&sort=&tag=&q= — a cursor page ordered
@@ -214,11 +218,14 @@ export class ForumThreadsService {
   // POST /forum/threads/:slug/lock|unlock — moderator-only lock toggle. The
   // role gate isn't resource-scoped, so a non-moderator gets 403 up front,
   // before the slug is even resolved. Idempotent: re-locking a locked thread is
-  // a no-op write-wise but still echoes the current state.
+  // a no-op write-wise but still echoes the current state. `reason` is only
+  // ever applied on the locking transition (`unlock` never passes one) and is
+  // cleared back to null on unlock — see `ForumThread.lockReason`'s docstring.
   async setLocked(
     slug: string,
     user: CurrentUserData,
     locked: boolean,
+    reason?: string,
   ): Promise<ForumThreadResponse> {
     if (!isModeratorRole(user.role)) {
       throw new ForbiddenException('Only a moderator can lock threads');
@@ -226,6 +233,8 @@ export class ForumThreadsService {
     const thread = await this.loadOr404(slug, user.userId);
     if (thread.isLocked !== locked) {
       thread.isLocked = locked;
+      const trimmedReason = reason?.trim();
+      thread.lockReason = locked && trimmedReason ? trimmedReason : null;
       await this.threads.save(thread);
     }
     const [authors, op] = await Promise.all([
@@ -419,6 +428,10 @@ export class ForumThreadsService {
       threadSlug: thread.slug,
       title: thread.title,
     } satisfies ForumThreadCreatedEvent);
+    // DISC-5 — best-effort, never throws (see `TopicPostLinkService.linkThread`);
+    // a matching tag materializes a `topic_post` row and fans out DISC-3's
+    // topic-follow notification (`TOPIC_POST_LINKED`, topics module).
+    await this.topicPostLink.linkThread(thread, input.body);
     await this.mentions.notify(input.body, authorId, {
       actorId: authorId,
       source: 'forum',

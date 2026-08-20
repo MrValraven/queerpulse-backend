@@ -10,7 +10,14 @@ import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
 import { normalizePage, paginate } from '../common/pagination';
 import { randomBytes } from 'node:crypto';
-import { In, MoreThanOrEqual, Repository, SelectQueryBuilder } from 'typeorm';
+import {
+  In,
+  MoreThan,
+  MoreThanOrEqual,
+  Not,
+  Repository,
+  SelectQueryBuilder,
+} from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { ListingLookupService } from '../listings/listing-lookup.service';
@@ -22,15 +29,21 @@ import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { AttendeeStatusFilter } from './dto/list-attendees.query';
+import type {
+  RecurrenceCadence,
+  RecurrenceEndType,
+} from './dto/recurrence.dto';
 import {
   AttendeesPageDTO,
   EventDetail,
   EventLineupDTO,
+  EventOrganizerView,
   EventSummary,
   toAttendeeView,
   toEventSummary,
   toLineupEntryView,
   toOrganizerView,
+  toRsvpDetailsView,
 } from './event-response';
 import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBookmarksService } from './event-bookmarks.service';
@@ -38,8 +51,16 @@ import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
 import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
+import {
+  EventSeries,
+  EventSeriesCadence,
+  EventSeriesEndType,
+} from './entities/event-series.entity';
 import { Event, EventStatus, EventVisibility } from './entities/event.entity';
 import { RsvpService } from './rsvp.service';
+
+/** Edit/cancel scope for a recurring occurrence — see `SeriesScopeQuery`'s doc. */
+export type SeriesScope = 'this' | 'future';
 
 export interface LineupEntryInput {
   memberSlug: string;
@@ -70,9 +91,20 @@ export interface CreateEventInput {
   // `communityId`; a non-empty slug resolves/authorizes it; absent (the
   // `Partial` in `UpdateEventInput` below) leaves it unchanged on update.
   communitySlug?: string | null;
+  // Manage-dashboard "Options" toggles — see `Event.allowWaitlist`'s doc.
+  allowWaitlist?: boolean;
+  showAttendeeCount?: boolean;
+  // Optional repeat rule (MSG-10) — see `RecurrenceDto`'s doc. CREATE-only;
+  // `UpdateEventInput` (below) never carries this.
+  recurrence?: {
+    cadence: RecurrenceCadence;
+    endType: RecurrenceEndType;
+    endCount?: number;
+    endUntil?: string;
+  };
 }
 
-export type UpdateEventInput = Partial<CreateEventInput>;
+export type UpdateEventInput = Partial<Omit<CreateEventInput, 'recurrence'>>;
 export type EventListFilter =
   'upcoming' | 'going' | 'hosting' | 'waitlisted' | 'past' | 'saved';
 
@@ -82,6 +114,12 @@ const PAGE_SIZE = 20;
 // `ReplaceAffiliationsDTO`'s `ArrayMaxSize` shape (validated again here so a
 // caller can't route around the DTO cap by calling the service directly).
 const MAX_LINEUP_ENTRIES = 50;
+
+// Hard cap on how many `Event` rows one series creates up front (a year of
+// weekly occurrences). Keeps the "generate everything now, no cron job"
+// design (see `EventSeries`'s class doc) bounded regardless of how far out
+// an `endUntil` date is, or how large an `endCount` is requested.
+const MAX_OCCURRENCES = 52;
 
 // Postgres unique-violation SQLSTATE. TypeORM surfaces it either directly on the
 // QueryFailedError or on the wrapped driverError depending on the path.
@@ -107,6 +145,8 @@ export class EventsService {
     private readonly invites: Repository<EventInvite>,
     @InjectRepository(EventLineupEntry)
     private readonly lineupEntries: Repository<EventLineupEntry>,
+    @InjectRepository(EventSeries)
+    private readonly eventSeries: Repository<EventSeries>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly usersService: UsersService,
     private readonly rsvpService: RsvpService,
@@ -174,26 +214,143 @@ export class EventsService {
       ? await this.assertLiveListing(dto.listingId)
       : null;
 
-    const event = this.events.create({
-      hostId,
-      slug: '', // assigned (race-safely) by saveWithUniqueSlug
-      title: dto.title,
-      description: dto.description,
-      startAt,
-      endAt,
-      timezone: dto.timezone,
-      venue: dto.venue ?? null,
-      listingId,
-      isOnline: dto.isOnline ?? false,
-      onlineUrl: dto.onlineUrl ?? null,
-      capacity: dto.capacity ?? null,
-      visibility,
-      status: dto.status ?? EventStatus.Published,
-      coverImageUrl: dto.coverImageUrl ?? null,
-      communityId,
-    });
-    const saved = await this.saveWithUniqueSlug(event, dto.title);
-    return this.buildDetail(saved, hostId);
+    // MSG-10 — a `recurrence` rule expands this one create() call into a
+    // whole series: `resolveOccurrences` computes every occurrence's own
+    // start/end up front (capped at `MAX_OCCURRENCES`), an `EventSeries` row
+    // is created to hold the repeat rule, and one independent `Event` row is
+    // written per occurrence below — each fully RSVPable/editable/cancelable
+    // on its own via the normal slug-keyed endpoints. No `recurrence` (the
+    // common case) is exactly the prior single-event behavior: one
+    // occurrence, no series.
+    const occurrences = this.resolveOccurrences(startAt, endAt, dto.recurrence);
+    let seriesId: string | null = null;
+    if (occurrences.length > 1 && dto.recurrence) {
+      const series = await this.eventSeries.save(
+        this.eventSeries.create({
+          hostId,
+          cadence: dto.recurrence.cadence as EventSeriesCadence,
+          endType: dto.recurrence.endType as EventSeriesEndType,
+          endCount:
+            dto.recurrence.endType === 'count'
+              ? (dto.recurrence.endCount ?? null)
+              : null,
+          endUntil:
+            dto.recurrence.endType === 'date' && dto.recurrence.endUntil
+              ? new Date(dto.recurrence.endUntil)
+              : null,
+          occurrenceCount: occurrences.length,
+        }),
+      );
+      seriesId = series.id;
+    }
+
+    // Every occurrence shares the same content (title, description, venue,
+    // audience scope, …) — only `startAt`/`endAt` and `seriesIndex` differ
+    // per row. `saveWithUniqueSlug` already de-dupes identical titles (the
+    // 2nd..Nth occurrence of "Weekly Support Group" gets a random-suffixed
+    // slug), so no extra handling is needed here.
+    let firstSaved: Event | null = null;
+    for (const [index, occurrence] of occurrences.entries()) {
+      const event = this.events.create({
+        hostId,
+        slug: '', // assigned (race-safely) by saveWithUniqueSlug
+        title: dto.title,
+        description: dto.description,
+        startAt: occurrence.startAt,
+        endAt: occurrence.endAt,
+        timezone: dto.timezone,
+        venue: dto.venue ?? null,
+        listingId,
+        isOnline: dto.isOnline ?? false,
+        onlineUrl: dto.onlineUrl ?? null,
+        capacity: dto.capacity ?? null,
+        visibility,
+        status: dto.status ?? EventStatus.Published,
+        coverImageUrl: dto.coverImageUrl ?? null,
+        communityId,
+        allowWaitlist: dto.allowWaitlist ?? true,
+        showAttendeeCount: dto.showAttendeeCount ?? true,
+        seriesId,
+        seriesIndex: seriesId ? index : null,
+      });
+      const saved = await this.saveWithUniqueSlug(event, dto.title);
+      if (index === 0) firstSaved = saved;
+    }
+    // `firstSaved` is always set: `occurrences` always has at least one entry
+    // (the gathering's own start), so the loop runs at least once with
+    // `index === 0`.
+    return this.buildDetail(firstSaved!, hostId);
+  }
+
+  // Computes every occurrence's own `{ startAt, endAt }` for a create() call,
+  // capped at `MAX_OCCURRENCES`. No `recurrence` → a single-element array (the
+  // gathering's own schedule, unchanged) — the non-recurring path. `endAt`'s
+  // duration (when set) is preserved across every occurrence.
+  private resolveOccurrences(
+    startAt: Date,
+    endAt: Date | null,
+    recurrence?: CreateEventInput['recurrence'],
+  ): { startAt: Date; endAt: Date | null }[] {
+    if (!recurrence) return [{ startAt, endAt }];
+
+    const durationMs = endAt ? endAt.getTime() - startAt.getTime() : null;
+    let maxCount = MAX_OCCURRENCES;
+    let untilMs: number | null = null;
+
+    if (recurrence.endType === 'count') {
+      if (!recurrence.endCount) {
+        throw new BadRequestException(
+          'endCount is required when endType is "count"',
+        );
+      }
+      maxCount = Math.min(recurrence.endCount, MAX_OCCURRENCES);
+    } else {
+      if (!recurrence.endUntil) {
+        throw new BadRequestException(
+          'endUntil is required when endType is "date"',
+        );
+      }
+      const until = new Date(recurrence.endUntil);
+      if (Number.isNaN(until.getTime()) || until.getTime() <= startAt.getTime()) {
+        throw new BadRequestException(
+          "endUntil must be after the gathering's start",
+        );
+      }
+      untilMs = until.getTime();
+    }
+
+    const occurrences: { startAt: Date; endAt: Date | null }[] = [];
+    for (let index = 0; index < maxCount; index++) {
+      const occurrenceStart = EventsService.addCadence(
+        startAt,
+        recurrence.cadence,
+        index,
+      );
+      if (untilMs !== null && occurrenceStart.getTime() > untilMs) break;
+      const occurrenceEnd =
+        durationMs !== null
+          ? new Date(occurrenceStart.getTime() + durationMs)
+          : null;
+      occurrences.push({ startAt: occurrenceStart, endAt: occurrenceEnd });
+    }
+    return occurrences;
+  }
+
+  // The Nth occurrence's start, `index` cadence-steps after `base` (index 0
+  // === `base` itself). Monthly uses `setMonth`, so a 31st-of-the-month start
+  // rolls into the next month on a shorter one (JS `Date` overflow) — an
+  // accepted, documented edge case for this deliberately minimal recurrence
+  // model (no RFC5545 "same weekday" or "last day of month" semantics).
+  private static addCadence(
+    base: Date,
+    cadence: RecurrenceCadence,
+    index: number,
+  ): Date {
+    const next = new Date(base);
+    if (cadence === 'weekly') next.setDate(next.getDate() + 7 * index);
+    else if (cadence === 'biweekly') next.setDate(next.getDate() + 14 * index);
+    else next.setMonth(next.getMonth() + index); // 'monthly'
+    return next;
   }
 
   async getBySlug(slug: string, viewerId: string): Promise<EventDetail> {
@@ -202,14 +359,55 @@ export class EventsService {
     return this.buildDetail(event, viewerId);
   }
 
+  /**
+   * `scope` (MSG-10) — for an occurrence that belongs to a series,
+   * `'future'` also applies the same patch to every LATER occurrence in the
+   * series (`seriesIndex` strictly after this one), skipping any that are
+   * already cancelled. `startAt`/`endAt` are deliberately never propagated —
+   * each occurrence keeps its own date; only structural fields (title,
+   * description, venue, audience, options, …) carry across. Per-occurrence
+   * authorization isn't re-checked for the propagated siblings: the caller
+   * already proved they organize THIS occurrence, every occurrence in a
+   * series shares the same `hostId` (set once at series-create time), and
+   * bulk-applying a structural edit across a series is exactly what
+   * `'future'` scope is for. `'this'` (the default) is unchanged prior
+   * behavior — a single event's own update.
+   */
   async update(
     slug: string,
     userId: string,
     dto: UpdateEventInput,
+    scope: SeriesScope = 'this',
   ): Promise<EventDetail> {
     const event = await this.loadEventOr404(slug);
     await this.assertOrganizer(event.id, userId);
+    const saved = await this.applyUpdate(event, userId, dto);
 
+    if (scope === 'future' && saved.seriesId && saved.seriesIndex !== null) {
+      const { startAt: _startAt, endAt: _endAt, ...seriesPatch } = dto;
+      const futureSiblings = await this.events.find({
+        where: {
+          seriesId: saved.seriesId,
+          seriesIndex: MoreThan(saved.seriesIndex),
+          status: Not(EventStatus.Cancelled),
+        },
+      });
+      for (const sibling of futureSiblings) {
+        await this.applyUpdate(sibling, userId, seriesPatch);
+      }
+    }
+
+    return this.buildDetail(saved, userId);
+  }
+
+  // The actual single-event patch — everything `update()` did before MSG-10
+  // added series scope. Called once for the primary occurrence and, under
+  // `scope: 'future'`, once more per later sibling (see `update()`'s doc).
+  private async applyUpdate(
+    event: Event,
+    userId: string,
+    dto: UpdateEventInput,
+  ): Promise<Event> {
     // A cancelled event is terminal: cancel() is the only way in and there is no
     // way back out. The update DTO only allows Draft | Published for status, so
     // any provided status is a reopen attempt and must be rejected.
@@ -304,6 +502,12 @@ export class EventsService {
         ? { coverImageUrl: dto.coverImageUrl ?? null }
         : {}),
       ...(dto.communitySlug !== undefined ? { communityId } : {}),
+      ...(dto.allowWaitlist !== undefined
+        ? { allowWaitlist: dto.allowWaitlist }
+        : {}),
+      ...(dto.showAttendeeCount !== undefined
+        ? { showAttendeeCount: dto.showAttendeeCount }
+        : {}),
     });
 
     // Pushing the start later makes an already-sent reminder premature — re-arm
@@ -348,7 +552,7 @@ export class EventsService {
       await this.notifyEventUpdated(saved, userId, materialChanges);
     }
 
-    return this.buildDetail(saved, userId);
+    return saved;
   }
 
   /**
@@ -398,9 +602,40 @@ export class EventsService {
     );
   }
 
-  async cancel(slug: string, userId: string): Promise<EventDetail> {
+  /**
+   * `scope` (MSG-10) — `'future'` also cancels every LATER, not-yet-cancelled
+   * occurrence in the same series (mirrors `update()`'s scope semantics
+   * exactly, including skipping the per-sibling organizer re-check — see its
+   * doc). `'this'` (the default) is unchanged prior behavior.
+   */
+  async cancel(
+    slug: string,
+    userId: string,
+    scope: SeriesScope = 'this',
+  ): Promise<EventDetail> {
     const event = await this.loadEventOr404(slug);
     await this.assertOrganizer(event.id, userId);
+    const saved = await this.cancelOne(event, userId);
+
+    if (scope === 'future' && saved.seriesId && saved.seriesIndex !== null) {
+      const futureSiblings = await this.events.find({
+        where: {
+          seriesId: saved.seriesId,
+          seriesIndex: MoreThan(saved.seriesIndex),
+          status: Not(EventStatus.Cancelled),
+        },
+      });
+      for (const sibling of futureSiblings) {
+        await this.cancelOne(sibling, userId);
+      }
+    }
+
+    return this.buildDetail(saved, userId);
+  }
+
+  // The actual single-event cancel — everything `cancel()` did before MSG-10
+  // added series scope.
+  private async cancelOne(event: Event, userId: string): Promise<Event> {
     event.status = EventStatus.Cancelled;
     const saved = await this.events.save(event);
     // Tell attendees the event is off. Fan out AFTER the status is persisted;
@@ -426,13 +661,16 @@ export class EventsService {
         startAt: saved.startAt.toISOString(),
       },
     );
-    return this.buildDetail(saved, userId);
+    return saved;
   }
 
   async list(
     userId: string,
     filter: EventListFilter,
     page: number,
+    // Only honoured on the 'upcoming' branch — see `ListEventsQuery`'s doc.
+    // `GatheringRecapPage`'s "more from this host" CTA is the sole caller.
+    options?: { hostSlug?: string; excludeSlug?: string },
   ): Promise<EventSummary[]> {
     const now = new Date();
     const skip = (page - 1) * PAGE_SIZE;
@@ -498,6 +736,22 @@ export class EventsService {
         .andWhere('e.start_at >= :now', { now })
         .andWhere(visibilityClause, visibilityParams);
       this.excludeModeratedEvents(upcomingQb);
+      if (options?.hostSlug) {
+        const hostProfile = await this.profiles.findOne({
+          where: { slug: options.hostSlug },
+        });
+        // No such member -> a uuid that can never match, so the filter fails
+        // closed (an empty result) instead of silently falling back to the
+        // unfiltered upcoming feed.
+        upcomingQb.andWhere('e.host_id = :hostId', {
+          hostId: hostProfile?.userId ?? '00000000-0000-0000-0000-000000000000',
+        });
+      }
+      if (options?.excludeSlug) {
+        upcomingQb.andWhere('e.slug != :excludeSlug', {
+          excludeSlug: options.excludeSlug,
+        });
+      }
       events = await upcomingQb
         .orderBy('e.start_at', 'ASC')
         .skip(skip)
@@ -801,9 +1055,19 @@ export class EventsService {
     const crops = await this.mediaCropService.getMany(
       events.flatMap((e) => (e.coverImageUrl ? [e.coverImageUrl] : [])),
     );
+    const hostProfiles = await this.profilesByUserIds(
+      events.map((e) => e.hostId),
+    );
 
     return events.map((e) =>
-      toEventSummary(e, goingByEvent.get(e.id) ?? 0, null, false, crops),
+      toEventSummary(
+        e,
+        goingByEvent.get(e.id) ?? 0,
+        null,
+        false,
+        crops,
+        toOrganizerView(hostProfiles.get(e.hostId)),
+      ),
     );
   }
 
@@ -928,6 +1192,17 @@ export class EventsService {
     const crops = await this.mediaCropService.getMany(
       events.flatMap((e) => (e.coverImageUrl ? [e.coverImageUrl] : [])),
     );
+    // ...and ONE batched host-profile lookup — see `EventSummary.host`'s doc
+    // for why the list surface carries a real host ref now, not just an org
+    // label (MyEvents' "Block host" flow needs the host's own member slug).
+    const hostProfiles = await this.profilesByUserIds(
+      events.map((e) => e.hostId),
+    );
+    // ...and ONE batched series lookup for every recurring event on the page
+    // (see `EventSummary.series`'s doc) — never a per-event query.
+    const seriesById = await this.eventSeriesByIds(
+      events.flatMap((e) => (e.seriesId ? [e.seriesId] : [])),
+    );
 
     return events.map((e) =>
       toEventSummary(
@@ -936,8 +1211,19 @@ export class EventsService {
         myRsvpByEvent.get(e.id) ?? null,
         bookmarkedIds.has(e.id),
         crops,
+        toOrganizerView(hostProfiles.get(e.hostId)),
+        e.seriesId ? seriesById.get(e.seriesId) : undefined,
       ),
     );
+  }
+
+  private async eventSeriesByIds(
+    seriesIds: string[],
+  ): Promise<Map<string, EventSeries>> {
+    const uniqueIds = [...new Set(seriesIds)];
+    if (!uniqueIds.length) return new Map();
+    const rows = await this.eventSeries.find({ where: { id: In(uniqueIds) } });
+    return new Map(rows.map((row) => [row.id, row]));
   }
 
   private async buildDetail(
@@ -960,6 +1246,7 @@ export class EventsService {
       communitySlug,
       crops,
       venueListing,
+      series,
     ] = await Promise.all([
       this.rsvps.count({
         where: { eventId: event.id, status: RsvpStatus.Going },
@@ -983,12 +1270,20 @@ export class EventsService {
       event.listingId
         ? this.listingLookup.findLive(event.listingId)
         : Promise.resolve(null),
+      event.seriesId
+        ? this.eventSeries.findOne({ where: { id: event.seriesId } })
+        : Promise.resolve(undefined),
     ]);
     const organizerIds = [event.hostId, ...cohostRows.map((c) => c.userId)];
     const profiles = await this.profilesByUserIds(organizerIds);
     const isOrganizer =
       event.hostId === viewerId ||
       cohostRows.some((c) => c.userId === viewerId);
+    const attendeesPreview = await this.buildGoingAttendeesPreview(
+      event,
+      viewerId,
+      isOrganizer,
+    );
 
     const summary = toEventSummary(
       event,
@@ -996,6 +1291,8 @@ export class EventsService {
       myRsvp ?? null,
       isBookmarked,
       crops,
+      null,
+      series ?? undefined,
     );
     return {
       ...summary,
@@ -1010,7 +1307,63 @@ export class EventsService {
       isOrganizer,
       waitlistCount,
       myWaitlistPosition: myRsvp?.waitlistPosition ?? null,
+      showAttendeeCount: event.showAttendeeCount,
+      allowWaitlist: event.allowWaitlist,
+      myRsvpDetails:
+        myRsvp && myRsvp.status !== RsvpStatus.Cancelled
+          ? toRsvpDetailsView(myRsvp)
+          : null,
+      goingAttendeesPreview: attendeesPreview.attendees,
+      goingAttendeesPreviewTotal: attendeesPreview.total,
     };
+  }
+
+  // At most this many profiles ride on `EventDetail.goingAttendeesPreview` —
+  // a small pre-RSVP "safety in numbers" glance, not the full guest list
+  // (that's `attendees()`, paginated, organizer-facing).
+  private static readonly ATTENDEE_PREVIEW_LIMIT = 8;
+
+  /**
+   * MSG-12 — `EventDetail.goingAttendeesPreview`'s query. Two privacy layers,
+   * same primitives `attendees()` already uses:
+   *  - `Event.showAttendeeCount` (MSG-18 "Show attendee count" toggle): when
+   *    the host has turned it off, a non-organizer viewer gets no preview at
+   *    all — same signal the FE's numeric "spots" copy already hides behind
+   *    this flag (`detailToGathering`'s `hideCount`). The organizer's own
+   *    view is unaffected; the toggle only hides the signal from others.
+   *  - Blocks (not mutes) via `BlockFilterService.excludeBlocked` — a blocked/
+   *    blocking member must never surface here in either direction. See
+   *    `attendees()`'s own doc for why blocks (not mutes) are the right
+   *    primitive for a guest list.
+   * There is currently no per-member "hide me from attendee lists" opt-out
+   * anywhere in this codebase (checked `Profile` and every existing privacy
+   * toggle) — only the event-level toggle above exists to honor today.
+   */
+  private async buildGoingAttendeesPreview(
+    event: Event,
+    viewerId: string,
+    isOrganizer: boolean,
+  ): Promise<{ attendees: EventOrganizerView[]; total: number }> {
+    if (!event.showAttendeeCount && !isOrganizer) {
+      return { attendees: [], total: 0 };
+    }
+
+    const qb = this.rsvps
+      .createQueryBuilder('r')
+      .where('r.event_id = :eventId', { eventId: event.id })
+      .andWhere('r.status = :status', { status: RsvpStatus.Going })
+      .orderBy('r.created_at', 'ASC');
+    this.blockFilter.excludeBlocked(qb, viewerId, '"r"."user_id"');
+
+    const total = await qb.getCount();
+    if (total === 0) return { attendees: [], total: 0 };
+
+    const rows = await qb.take(EventsService.ATTENDEE_PREVIEW_LIMIT).getMany();
+    const profiles = await this.profilesByUserIds(rows.map((r) => r.userId));
+    const attendees = rows
+      .map((r) => toOrganizerView(profiles.get(r.userId)))
+      .filter((view): view is NonNullable<typeof view> => view !== null);
+    return { attendees, total };
   }
 
   private async profilesByUserIds(

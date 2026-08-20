@@ -68,6 +68,22 @@ export class MagazineArticle {
   @Column({ type: 'varchar', default: '' })
   section!: string;
 
+  /** The contributor's credit-line qualifier (e.g. "Contributing editor"),
+   * mirroring `MagazineDeck.role`. */
+  @Column({ type: 'varchar', default: '' })
+  role!: string;
+
+  /** SEO/social fields (added alongside `role` — no equivalent existed
+   * before this). All optional, default `''`. */
+  @Column({ type: 'varchar', default: '' })
+  metaDescription!: string;
+
+  @Column({ type: 'varchar', default: '' })
+  socialImage!: string;
+
+  @Column({ type: 'varchar', default: '' })
+  canonicalUrl!: string;
+
   /** Legacy plain-text body, retained but superseded by `blocks`. */
   @Column({ type: 'text' })
   body!: string;

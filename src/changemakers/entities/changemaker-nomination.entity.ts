@@ -6,13 +6,23 @@ import {
   PrimaryGeneratedColumn,
 } from 'typeorm';
 
+export enum ChangemakerNominationStatus {
+  Pending = 'pending',
+  Approved = 'approved',
+  Dismissed = 'dismissed',
+}
+
 /**
  * A member nominating someone for the Change Makers directory (see the
  * "Nominate them" form in `ChangemakersPage.tsx`). The directory itself
  * (`CHANGEMAKERS`) is curated editorial content with no `changemaker` table
- * to reference — the form's only field is the nominee's name, so that's all
- * this row captures, denormalized the same way `CommissionInterest`
- * denormalizes its target.
+ * to reference — the nominee's name (and, since COM-16, a short reason) is
+ * denormalized here the same way `CommissionInterest` denormalizes its
+ * target. Triaged by an admin (COM-17: this used to be a one-way black
+ * hole — a submit toast, then silence forever), mirroring
+ * `MagazineWriterApplication`'s pending/approved/declined shape, renamed
+ * approved/dismissed here since there's no role grant riding on the
+ * decision, just a yes/no on the directory pitch.
  */
 @Entity('changemaker_nomination')
 export class ChangemakerNomination {
@@ -23,9 +33,32 @@ export class ChangemakerNomination {
   @Column({ type: 'uuid' })
   nominatorId!: string;
 
-  // The form's only field: "Their name…".
+  // The form's first field: "Their name…".
   @Column({ type: 'varchar', length: 200 })
   nomineeName!: string;
+
+  // The form's second field, added for COM-16 — the copy promises "a name
+  // and a sentence is enough to start"; this is that sentence. Nullable:
+  // rows submitted before this field existed have nothing to backfill.
+  @Column({ type: 'text', nullable: true })
+  reason!: string | null;
+
+  @Column({
+    type: 'enum',
+    enum: ChangemakerNominationStatus,
+    enumName: 'changemaker_nomination_status_enum',
+    default: ChangemakerNominationStatus.Pending,
+  })
+  status!: ChangemakerNominationStatus;
+
+  @Column({ type: 'uuid', nullable: true })
+  reviewedBy!: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  reviewNote!: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  reviewedAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

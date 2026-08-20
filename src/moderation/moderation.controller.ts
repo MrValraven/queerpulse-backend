@@ -23,6 +23,7 @@ import { LiftSuspensionDto } from './dto/lift-suspension.dto';
 import { ListModReportsQuery } from './dto/list-mod-reports.query';
 import { ModActionDto } from './dto/mod-action.dto';
 import { ModBulkActionDto } from './dto/mod-bulk-action.dto';
+import { ReportAssignmentDto } from './dto/report-assignment.dto';
 import { ReviewAppealDto } from './dto/review-appeal.dto';
 import { ModerationService } from './moderation.service';
 import {
@@ -53,8 +54,11 @@ export class ModerationController {
   @ApiOkResponse({ description: 'The filtered, paginated report queue.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
-  listReports(@Query() query: ListModReportsQuery) {
-    return this.moderationService.list(query);
+  listReports(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: ListModReportsQuery,
+  ) {
+    return this.moderationService.list(query, user.userId);
   }
 
   // Static path registered before `:id` so `/mod/reports/audit` never gets
@@ -121,7 +125,10 @@ export class ModerationController {
   // `reports/:id` with id="bulk" and fail the ParseUUIDPipe.
   @Patch('reports/bulk')
   @ApiOperation({ summary: 'Apply one moderation action to many reports' })
-  @ApiOkResponse({ description: 'The ids of the reports that were updated.' })
+  @ApiOkResponse({
+    description:
+      'The ids of the reports that were updated, plus any that failed with a reason (continue-on-error — one bad report no longer fails the whole batch).',
+  })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
   bulkUpdateReports(
@@ -183,6 +190,26 @@ export class ModerationController {
     return this.moderationService.liftSuspension(userId, user.userId, dto);
   }
 
+  // Self-assign/unassign a report (COM-5) — a moderator claiming a report
+  // (or releasing it) so the queue's "Assigned to me" filter has a real
+  // column to filter by. Platform Moderator/Admin only, unlike
+  // `PATCH reports/:id` above — claiming a report is a workflow action, not a
+  // decision, so it stays under the class-level role guard rather than the
+  // community-mod carve-out.
+  @Patch('reports/:id/assignment')
+  @ApiOperation({ summary: 'Self-assign or unassign a report' })
+  @ApiOkResponse({ description: 'The updated report.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
+  @ApiNotFoundResponse({ description: 'The report does not exist.' })
+  setAssignment(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReportAssignmentDto,
+  ) {
+    return this.moderationService.setAssignment(id, user.userId, dto.assign);
+  }
+
   @Get('appeals')
   @ApiOperation({ summary: 'List appeals awaiting review' })
   @ApiOkResponse({ description: 'The appeals queue, newest first.' })
@@ -196,7 +223,11 @@ export class ModerationController {
   @ApiOperation({ summary: 'Uphold or overturn an appeal' })
   @ApiOkResponse({ description: 'The decided appeal.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
+  @ApiForbiddenResponse({
+    description:
+      'Requires a moderator or admin role — or the caller made the ' +
+      'original decision being appealed (conflict-of-interest guard, COM-10).',
+  })
   @ApiNotFoundResponse({ description: 'The appeal does not exist.' })
   @ApiConflictResponse({ description: 'The appeal has already been decided.' })
   reviewAppeal(

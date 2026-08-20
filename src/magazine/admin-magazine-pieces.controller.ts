@@ -41,6 +41,7 @@ import { CreatePieceDto } from './dto/create-piece.dto';
 import { CreatePieceMessageDto } from './dto/create-piece-message.dto';
 import { CreatePitchDto } from './dto/create-pitch.dto';
 import { ListPiecesQuery } from './dto/list-pieces.query';
+import { PublishArticleDto } from './dto/publish-article.dto';
 import { ReplyArticleCommentDto } from './dto/reply-article-comment.dto';
 import { ResolveArticleCommentDto } from './dto/resolve-article-comment.dto';
 import { TriagePitchDto } from './dto/triage-pitch.dto';
@@ -216,6 +217,25 @@ export class AdminMagazinePiecesController {
     @CurrentUser() user: CurrentUserData,
   ) {
     return this.magazinePieces.updateArticleDraft(id, dto, user.userId);
+  }
+
+  @Patch('pieces/:id/article/publish')
+  @ApiOperation({
+    summary:
+      'Publish, schedule, or unpublish the article draft for a magazine piece.',
+  })
+  @ApiOkResponse({ description: 'The updated article draft.' })
+  @ApiBadRequestResponse({
+    description:
+      'Malformed id or payload, or the draft is not ready to publish (missing standfirst or an image alt).',
+  })
+  @ApiNotFoundResponse({ description: 'No piece exists for this id.' })
+  publishArticle(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: PublishArticleDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.magazinePieces.publishArticle(id, dto, user.userId);
   }
 
   @Get('pieces/:id/comments')

@@ -26,6 +26,7 @@ import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { StaffRoleId } from '../users/staff-roles.registry';
 import { VouchService } from '../vouch/vouch.service';
+import { UsersService } from '../users/users.service';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import {
   initialsFor,
@@ -124,6 +125,7 @@ export class AdminMembersService {
     @InjectRepository(UserStaffRole)
     private readonly staffRoles: Repository<UserStaffRole>,
     private readonly vouchService: VouchService,
+    private readonly usersService: UsersService,
     private readonly dataSource: DataSource,
   ) {}
 
@@ -568,9 +570,7 @@ export class AdminMembersService {
       // platform is locked out of every admin surface. Counted inside the
       // transaction so a concurrent demotion can't slip past a stale count.
       if (previousRole === UserRole.Admin && targetRole !== UserRole.Admin) {
-        const adminCount = await users.count({
-          where: { role: UserRole.Admin },
-        });
+        const adminCount = await this.usersService.countAdmins(manager);
         if (adminCount <= 1) {
           throw new ConflictException(
             'This is the last admin — promote another member to admin before removing this one.',
@@ -585,6 +585,8 @@ export class AdminMembersService {
         auditLogs.create({
           reportId: null,
           actorId: actorUserId,
+          targetUserId,
+          targetName: `${profile.firstName} ${profile.lastName}`.trim(),
           action: 'role_changed',
           reasonCode: null,
           note: `${previousRole} → ${targetRole}`,
@@ -688,6 +690,8 @@ export class AdminMembersService {
             auditLogs.create({
               reportId: null,
               actorId: actorUserId,
+              targetUserId,
+              targetName: `${profile.firstName} ${profile.lastName}`.trim(),
               action: 'staff_role_granted',
               reasonCode: null,
               note: role,
@@ -763,6 +767,8 @@ export class AdminMembersService {
           auditLogs.create({
             reportId: null,
             actorId: actorUserId,
+            targetUserId,
+            targetName: `${profile.firstName} ${profile.lastName}`.trim(),
             action: 'staff_role_revoked',
             reasonCode: null,
             note: role,

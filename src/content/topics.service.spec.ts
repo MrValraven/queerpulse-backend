@@ -62,6 +62,7 @@ describe('TopicsService', () => {
     replyLabel: 'replies',
     tags: ['healthcare', 'trans', 'lisbon'],
     href: '/forum',
+    forumThreadId: null,
     createdAt: new Date('2026-07-01T00:00:00.000Z'),
   };
 

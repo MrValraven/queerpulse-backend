@@ -41,6 +41,7 @@ import { CreateAppealDto } from './dto/create-appeal.dto';
 import { ModActionCode, ModActionDto } from './dto/mod-action.dto';
 import { ModBulkActionDto } from './dto/mod-bulk-action.dto';
 import { ReasonCode } from '../reports/reason-catalogue';
+import { ReportAssignmentDto } from './dto/report-assignment.dto';
 import { ReviewAppealDto } from './dto/review-appeal.dto';
 import { Appeal, AppealStatus } from './entities/appeal.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
@@ -52,15 +53,19 @@ import {
   AppealOriginal,
   AuditEntryDTO,
   AuditFeedResponseDTO,
+  MemberAppealDTO,
   ModCounts,
   ModReportDetail,
   ModReportDTO,
   ModReportedDTO,
   ModReporterDTO,
   ModReportsResponse,
+  ResolutionNotifiedParty,
   SubmittedAppealDTO,
   toAppealDTO,
+  toMemberAppealDTO,
   toModReportDTO,
+  toResolutionDTO,
   toSubmittedAppealDTO,
 } from './moderation-response';
 
@@ -132,9 +137,13 @@ export class ModerationService {
   // The actions that produce a member-facing outcome the sanctioned member
   // should be told about. `warn` has no account effect (so `enforceAgainstUser`
   // returns null for it) but is still an outcome the member must hear — the
-  // audit named "warned" first.
+  // audit named "warned" first. `restrict` was added once `enforceAgainstUser`
+  // started giving it a real, time-boxed effect (previously a no-op, so there
+  // was nothing to report) — it reuses the exact suspend/ban notification path
+  // via `resolveOutcomeTarget`'s `enforceResult` fallback below.
   private static readonly OUTCOME_ACTIONS = new Set<string>([
     'warn',
+    'restrict',
     'suspend',
     'ban',
   ]);
@@ -145,7 +154,10 @@ export class ModerationService {
   // (`{ data, pageInfo: { nextCursor, hasMore } }`) every other list endpoint
   // uses, with the queue's real per-tab `counts` carried alongside it — the
   // former one-off `{ items, counts, page: { cursor } }` outlier is gone.
-  async list(query: ListModReportsQuery): Promise<ModReportsResponse> {
+  async list(
+    query: ListModReportsQuery,
+    actorId?: string,
+  ): Promise<ModReportsResponse> {
     const qb = this.reports.createQueryBuilder('r');
     this.applyTabFilter(qb, query.tab);
 
@@ -153,6 +165,9 @@ export class ModerationService {
       qb.andWhere('r.subjectType = :subjectType', {
         subjectType: query.subjectType,
       });
+    }
+    if (query.subjectId) {
+      qb.andWhere('r.subjectId = :subjectId', { subjectId: query.subjectId });
     }
     if (query.severity) {
       qb.andWhere('r.severity = :severity', { severity: query.severity });
@@ -162,12 +177,22 @@ export class ModerationService {
         emergencySeverity: ReportSeverity.Emergency,
       });
     }
-    // `filter: 'mine'` is accepted (no 400) but is a documented no-op: reports
-    // carry no assignee column to filter by, and adding one is out of this
-    // fix's scope. `sort: 'priority'` is likewise accepted but not distinctly
-    // honored — `cursorPaginate` hardcodes `(createdAt, id)` keyset ordering
-    // (see connect-FINAL-review.md C1, a separate cross-cutting bug this task
-    // doesn't touch) — both fall back to the default age ordering rather than
+    // `filter: 'mine'` (COM-5): the caller's own claimed reports, via the
+    // `assigned_moderator_id` column (`AddReportAssignee`) + the self-assign/
+    // unassign `PATCH /mod/reports/:id/assignment` route. `actorId` is always
+    // present when this filter can fire — `ModerationController.listReports`
+    // passes the authenticated moderator's id — but guard anyway so a
+    // hypothetical unauthenticated caller sees an empty result, never
+    // everyone else's assigned reports.
+    if (query.filter === 'mine') {
+      qb.andWhere('r.assignedModeratorId = :actorId', {
+        actorId: actorId ?? null,
+      });
+    }
+    // `sort: 'priority'` is accepted but not distinctly honored —
+    // `cursorPaginate` hardcodes `(createdAt, id)` keyset ordering (see
+    // connect-FINAL-review.md C1, a separate cross-cutting bug this task
+    // doesn't touch) — it falls back to the default age ordering rather than
     // rejecting the request, which is what C4 requires.
 
     const { rows, nextCursor, hasMore } = await cursorPaginate(
@@ -216,14 +241,17 @@ export class ModerationService {
     // write is exactly the bug this method exists to fix, in a subtler form.
     const { saved, enforceResult } = await this.dataSource.transaction(
       async (manager) => {
-        report.status = statusForAction(dto.action);
-        const saved = await manager.save(report);
-
         const enforceResult = await this.accountEnforcement.enforceAgainstUser(
           manager,
           report,
           dto,
         );
+
+        report.status = statusForAction(dto.action);
+        if (report.status === ReportStatus.Resolved) {
+          await this.applyResolution(report, actorId, dto, enforceResult);
+        }
+        const saved = await manager.save(report);
 
         await this.audit.writeAuditLog(
           saved.id,
@@ -257,8 +285,12 @@ export class ModerationService {
     // Outside the transaction: revocation touches a different aggregate and
     // must not be able to roll the enforcement back if it fails. It is defence
     // in depth anyway — `JwtStrategy` re-reads status per request, so the
-    // member is already locked out with or without this.
-    if (enforceResult) {
+    // member is already locked out with or without this. Skipped for
+    // `restrict`: a restriction is deliberately not a lockout (see
+    // `AccountEnforcementService.enforceAgainstUser`), so signing the member
+    // out of every device would be a stronger consequence than the action
+    // taken.
+    if (enforceResult && enforceResult.kind !== 'restrict') {
       await this.auth.revokeAllForUser(enforceResult.userId);
     }
 
@@ -351,67 +383,96 @@ export class ModerationService {
 
   // POST /mod/reports/bulk — applies one action to many reports, writing an
   // audit log row per report actually found. Unknown ids are silently
-  // skipped (mirrors the frontend's `{ updated: string[] }` echo, which only
-  // ever lists the ids that were actually touched).
+  // skipped. Continue-on-error (P0-16): each report is applied in its OWN
+  // transaction, so one report failing (e.g. `ban` against a non-member-
+  // subject report slipped into a mixed selection) can no longer roll back
+  // every other report in the batch — the previous single-transaction
+  // implementation meant one bad row silently failed the whole selection. The
+  // response now reports both halves instead of a single all-or-nothing list.
   async bulkActOnReports(
     actorId: string,
     dto: ModBulkActionDto,
-  ): Promise<{ updated: string[] }> {
+  ): Promise<{
+    updated: string[];
+    failed: { id: string; reason: string }[];
+  }> {
     const rows = await this.reports.find({ where: { id: In(dto.ids) } });
-    if (!rows.length) return { updated: [] };
+    if (!rows.length) return { updated: [], failed: [] };
 
     const status = statusForAction(dto.action);
 
-    const outcomes = await this.dataSource.transaction(async (manager) => {
-      for (const report of rows) {
-        report.status = status;
-      }
-      await manager.save(rows);
+    const updated: string[] = [];
+    const failed: { id: string; reason: string }[] = [];
+    // Each report paired with its enforcement result, so the post-commit pass
+    // can revoke sessions AND notify the right member with the right expiry —
+    // only for the reports that actually committed.
+    const outcomes: Array<{
+      report: Report;
+      enforceResult: {
+        userId: string;
+        suspendedUntil: Date | null;
+        kind: 'suspend' | 'ban' | 'restrict';
+      } | null;
+    }> = [];
 
-      // Each report paired with its enforcement result, so the post-commit
-      // pass can revoke sessions AND notify the right member with the right
-      // suspension expiry.
-      const outcomes: Array<{
-        report: Report;
-        enforceResult: { userId: string; suspendedUntil: Date | null } | null;
-      }> = [];
-      for (const report of rows) {
-        // Any unenforceable subject fails the whole batch rather than
-        // partially applying. A moderator selecting twelve reports and
-        // suspending needs to know all twelve landed, not eleven.
-        const enforceResult = await this.accountEnforcement.enforceAgainstUser(
-          manager,
-          report,
-          dto,
+    for (const report of rows) {
+      try {
+        const enforceResult = await this.dataSource.transaction(
+          async (manager) => {
+            const enforceResult =
+              await this.accountEnforcement.enforceAgainstUser(
+                manager,
+                report,
+                dto,
+              );
+
+            report.status = status;
+            if (status === ReportStatus.Resolved) {
+              await this.applyResolution(report, actorId, dto, enforceResult);
+            }
+            await manager.save(report);
+
+            await this.audit.writeAuditLog(
+              report.id,
+              actorId,
+              dto.action,
+              dto.reasonCode,
+              dto.note,
+              dto.duration,
+              manager,
+            );
+
+            if (ModerationService.CONTENT_ACTIONS.has(dto.action)) {
+              await this.contentModeration.applyAction(manager, {
+                subjectType: report.subjectType,
+                subjectId: report.subjectId,
+                action: dto.action as 'hide_content' | 'remove_content',
+                actorId,
+                reportId: report.id,
+                reasonCode: dto.reasonCode,
+                note: dto.note,
+              });
+            }
+
+            return enforceResult;
+          },
         );
+
         outcomes.push({ report, enforceResult });
-
-        await this.audit.writeAuditLog(
-          report.id,
-          actorId,
-          dto.action,
-          dto.reasonCode,
-          dto.note,
-          dto.duration,
-          manager,
-        );
-
-        if (ModerationService.CONTENT_ACTIONS.has(dto.action)) {
-          await this.contentModeration.applyAction(manager, {
-            subjectType: report.subjectType,
-            subjectId: report.subjectId,
-            action: dto.action as 'hide_content' | 'remove_content',
-            actorId,
-            reportId: report.id,
-            reasonCode: dto.reasonCode,
-            note: dto.note,
-          });
-        }
+        updated.push(report.id);
+      } catch (error) {
+        failed.push({
+          id: report.id,
+          reason: error instanceof Error ? error.message : 'Unknown error',
+        });
       }
-      return outcomes;
-    });
+    }
 
+    // Same `restrict` carve-out as the single-report path above: a restriction
+    // is deliberately not a lockout, so it must not sign the member out of
+    // every device.
     const suspendedUserIds = outcomes
+      .filter((outcome) => outcome.enforceResult?.kind !== 'restrict')
       .map((outcome) => outcome.enforceResult?.userId)
       .filter((userId): userId is string => Boolean(userId));
     for (const userId of new Set(suspendedUserIds)) {
@@ -420,7 +481,8 @@ export class ModerationService {
 
     // Notify each sanctioned member of the outcome — one row per report, so a
     // member named in several reports of the same batch hears about each. Same
-    // best-effort, post-commit contract as the single-report path.
+    // best-effort, post-commit contract as the single-report path. Only for
+    // reports that actually committed — `outcomes` never carries a failed one.
     for (const { report, enforceResult } of outcomes) {
       await this.notifyModerationOutcome(
         actorId,
@@ -429,7 +491,7 @@ export class ModerationService {
       );
     }
 
-    return { updated: rows.map((r) => r.id) };
+    return { updated, failed };
   }
 
   /**
@@ -459,6 +521,56 @@ export class ModerationService {
           expiresAt: enforceResult.suspendedUntil,
         }
       : null;
+  }
+
+  /**
+   * Writes the resolution block (COM-7) onto `report` IN PLACE — mutates the
+   * entity the caller is about to `manager.save()`, rather than returning a
+   * value, so `actOnReport`/`bulkActOnReports` can call this right where they
+   * already set `report.status = statusForAction(...)` and fold it into the
+   * same save. Only called when the action actually resolves the report
+   * (never for `escalate`).
+   *
+   * `notified` is computed from the same facts the post-commit notification
+   * pass below uses — a target resolves (member) and/or the report has a
+   * reachable, non-self reporter — so the resolution block can never claim a
+   * party was notified that `notifyModerationOutcome`/the reporter-notify
+   * block wouldn't actually reach. It does not depend on whether that
+   * best-effort send later succeeds, matching how those notifications are
+   * already "fire and don't roll back the decision" (see their own doc
+   * comments).
+   */
+  private async applyResolution(
+    report: Report,
+    actorId: string,
+    dto: {
+      action: ModActionCode;
+      reasonCode: ReasonCode;
+      note?: string;
+      duration?: string;
+    },
+    enforceResult: { userId: string; suspendedUntil: Date | null } | null,
+  ): Promise<void> {
+    const outcomeTarget = await this.resolveOutcomeTarget(
+      report,
+      dto,
+      enforceResult,
+    );
+
+    const notified: ResolutionNotifiedParty[] = [];
+    if (outcomeTarget && outcomeTarget.userId !== actorId) {
+      notified.push('member');
+    }
+    if (report.reporterId && report.reporterId !== actorId) {
+      notified.push('reporter');
+    }
+
+    report.resolvedAt = new Date();
+    report.resolutionActorId = actorId;
+    report.resolutionAction = dto.action;
+    report.resolutionDuration = dto.duration ?? null;
+    report.resolutionNote = dto.note ?? null;
+    report.resolutionNotified = notified;
   }
 
   /**
@@ -592,6 +704,21 @@ export class ModerationService {
     }
   }
 
+  // GET /appeals/me — the calling member's OWN appeals, most recent first.
+  // Reachable by a suspended member (same `AppealSubmitGuard` as `POST
+  // /appeals`) since that's exactly who needs to check on a filed appeal.
+  // Deliberately returns the narrow `MemberAppealDTO`, never the moderator
+  // queue's enriched `AppealDTO` — a self-view has no business seeing an
+  // appellant handle (it's already them) or the original moderator's name.
+  async listMine(appellantUserId: string): Promise<MemberAppealDTO[]> {
+    const rows = await this.appeals.find({
+      where: { appellantId: appellantUserId },
+      order: { createdAt: 'DESC' },
+      take: DEFAULT_LIMIT,
+    });
+    return rows.map(toMemberAppealDTO);
+  }
+
   /**
    * Resolves which enforcement action a member's appeal is really about, so the
    * appeal lands in the moderator queue with the same context a moderator-side
@@ -691,6 +818,27 @@ export class ModerationService {
       throw new ConflictException('Appeal has already been decided');
     }
 
+    // Conflict-of-interest guard (COM-10): the moderator who made the ORIGINAL
+    // decision being appealed may not also decide the appeal — that lets them
+    // uphold their own call unchecked, which is exactly what an appeal process
+    // exists to prevent. Blocks outright (409, same family as the
+    // already-decided guard) rather than merely flagging: every other guard in
+    // this method (the awaiting-status check, the conditional `update` race
+    // guard) already blocks rather than warns, and a moderator who cannot
+    // review their own case has no legitimate reason to see a "review anyway"
+    // path. Silent when the appeal has no resolvable `actionId` (a cold
+    // appeal) — there is no original decision to compare against.
+    if (appeal.actionId) {
+      const originalAction = await this.auditLogs.findOne({
+        where: { id: appeal.actionId },
+      });
+      if (originalAction?.actorId === actorId) {
+        throw new ForbiddenException(
+          'You made the original decision being appealed and cannot review this appeal.',
+        );
+      }
+    }
+
     const decidedStatus =
       dto.decision === 'uphold' ? AppealStatus.Upheld : AppealStatus.Overturned;
     const decision = dto.note ?? dto.decision;
@@ -769,6 +917,22 @@ export class ModerationService {
     return this.accountEnforcement.liftSuspension(userId, actorId, dto);
   }
 
+  // PATCH /mod/reports/:id/assignment — self-assign or unassign a report
+  // (COM-5). No audit-log row: claiming/releasing a report is workflow
+  // bookkeeping, not a moderation decision — the immutable trail stays
+  // reserved for actions that change a report's outcome.
+  async setAssignment(
+    id: string,
+    actorId: string,
+    assign: boolean,
+  ): Promise<ModReportDTO> {
+    const report = await this.findReportOrThrow(id);
+    report.assignedModeratorId = assign ? actorId : null;
+    report.assignedAt = assign ? new Date() : null;
+    const saved = await this.reports.save(report);
+    return this.toRow(saved);
+  }
+
   // --- internals ---
 
   private applyTabFilter(
@@ -808,14 +972,31 @@ export class ModerationService {
     report: Report,
     withDetail = false,
   ): Promise<ModReportDTO> {
-    const [reporter, reported] = await Promise.all([
-      this.describeReporter(report),
-      this.describeReported(report),
-    ]);
+    const [reporter, reported, assignedModeratorName, resolutionActorName] =
+      await Promise.all([
+        this.describeReporter(report),
+        this.describeReported(report),
+        report.assignedModeratorId
+          ? this.audit.nameForUserId(report.assignedModeratorId)
+          : undefined,
+        report.resolvedAt
+          ? this.audit.nameForUserId(report.resolutionActorId)
+          : undefined,
+      ]);
     const detail = withDetail
       ? await this.buildDetail(report, reporter, reported)
       : undefined;
-    return toModReportDTO(report, reporter, reported, detail);
+    const resolution = resolutionActorName
+      ? toResolutionDTO(report, resolutionActorName)
+      : undefined;
+    return toModReportDTO(
+      report,
+      reporter,
+      reported,
+      detail,
+      assignedModeratorName,
+      resolution,
+    );
   }
 
   /**
@@ -838,11 +1019,24 @@ export class ModerationService {
       .filter((report) => !report.anonymous && report.reporterId)
       .map((report) => report.reporterId as string);
 
-    const [reporterNames, reportedProfiles, priorReportCounts] =
+    // Assigned-moderator names (COM-5) and resolution-actor names (COM-7)
+    // share one batched lookup — both resolve through the exact same
+    // "moderator id -> display name" rule.
+    const moderatorIds = [
+      ...reports
+        .filter((report) => report.assignedModeratorId)
+        .map((report) => report.assignedModeratorId as string),
+      ...reports
+        .filter((report) => report.resolvedAt && report.resolutionActorId)
+        .map((report) => report.resolutionActorId as string),
+    ];
+
+    const [reporterNames, reportedProfiles, priorReportCounts, moderatorNames] =
       await Promise.all([
         this.audit.namesForUserIds(reporterUserIds),
         this.resolveReportedProfiles(reports),
         this.priorReportCountsBySubject(reports),
+        this.audit.namesForUserIds(moderatorIds),
       ]);
 
     return reports.map((report) => {
@@ -852,7 +1046,29 @@ export class ModerationService {
         reportedProfiles,
         priorReportCounts,
       );
-      return toModReportDTO(report, reporter, reported);
+      const assignedModeratorName = report.assignedModeratorId
+        ? this.audit.resolveActorName(
+            report.assignedModeratorId,
+            moderatorNames,
+          )
+        : undefined;
+      const resolution = report.resolvedAt
+        ? toResolutionDTO(
+            report,
+            this.audit.resolveActorName(
+              report.resolutionActorId,
+              moderatorNames,
+            ),
+          )
+        : undefined;
+      return toModReportDTO(
+        report,
+        reporter,
+        reported,
+        undefined,
+        assignedModeratorName,
+        resolution,
+      );
     });
   }
 

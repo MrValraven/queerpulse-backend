@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
+import { escapeLikeTerm } from '../common/like-escape';
 import { toImageUrl } from '../common/image-url';
 import { Community } from '../communities/entities/community.entity';
 import {
@@ -25,12 +26,20 @@ import {
   toneFor,
   TrustEdgeDTO,
   TrustNetworkDTO,
+  TrustNetworkMemberSearchResultDTO,
   TrustNodeDTO,
 } from './admin-trust-network-response';
+import { GetTrustNetworkQuery } from './dto/get-trust-network.query';
 
 /** Payload cap: the most-recently-joined members and all edges among them.
  *  Well above current scale; `truncated` signals when it bites. */
 const MAX_NODES = 500;
+
+/** `searchMembers` typeahead: shortest term it fires on (a 1-char ILIKE would
+ *  match almost everyone) and the max rows returned. Mirrors
+ *  AdminMediaService's uploader search. */
+const MIN_SEARCH_LENGTH = 2;
+const SEARCH_LIMIT = 20;
 
 @Injectable()
 export class AdminTrustNetworkService {
@@ -43,12 +52,23 @@ export class AdminTrustNetworkService {
     @InjectRepository(Report) private readonly reports: Repository<Report>,
   ) {}
 
-  async getGraph(): Promise<TrustNetworkDTO> {
+  async getGraph(query: GetTrustNetworkQuery = {}): Promise<TrustNetworkDTO> {
     const totalMembers = await this.profiles.count();
-    const profiles = await this.profiles.find({
+    const newest = await this.profiles.find({
       order: { joinedAt: 'DESC' },
       take: MAX_NODES,
     });
+
+    // `focus` pins the member the graph modal is centered on into the node
+    // set even when their join date falls outside the newest-first cutoff —
+    // otherwise opening an older member's network renders as "not found"
+    // just because they joined a while ago (ADM-10).
+    const focusSlug = query.focus?.trim();
+    const focusProfile =
+      focusSlug && !newest.some((profile) => profile.slug === focusSlug)
+        ? await this.profiles.findOne({ where: { slug: focusSlug } })
+        : null;
+    const profiles = focusProfile ? [focusProfile, ...newest] : newest;
     const truncated = totalMembers > profiles.length;
 
     const userIds = profiles.map((profile) => profile.userId);
@@ -77,6 +97,7 @@ export class AdminTrustNetworkService {
       if (scene) sceneLabelById.set(scene.id, scene.label);
       return {
         id: profile.slug,
+        userId: profile.userId,
         slug: profile.slug,
         name: `${profile.firstName} ${profile.lastName}`.trim(),
         pronouns: profile.pronouns,
@@ -250,5 +271,40 @@ export class AdminTrustNetworkService {
       byUserId.set(row.userId, list);
     }
     return byUserId;
+  }
+
+  /**
+   * Typeahead behind the graph modal's "find a member" search box (ADM-10) —
+   * lets an admin locate a member outside the MAX_NODES join-date window
+   * instead of only ever seeing the newest MAX_NODES. Mirrors
+   * `AdminMediaService.searchUploaders`: ILIKE over first/last name + slug,
+   * ordered by name, capped, empty for a too-short term rather than matching
+   * almost everyone. Picking a result feeds its `slug` back in as `getGraph`'s
+   * `focus`, which pins it into the node set regardless of join date.
+   */
+  async searchMembers(
+    term: string | undefined,
+  ): Promise<TrustNetworkMemberSearchResultDTO[]> {
+    const trimmed = (term ?? '').trim();
+    if (trimmed.length < MIN_SEARCH_LENGTH) return [];
+
+    const pattern = `%${escapeLikeTerm(trimmed)}%`;
+    const rows = await this.profiles
+      .createQueryBuilder('profile')
+      .where(
+        '(profile.firstName ILIKE :pattern OR profile.lastName ILIKE :pattern OR profile.slug ILIKE :pattern)',
+        { pattern },
+      )
+      .orderBy('profile.firstName', 'ASC')
+      .addOrderBy('profile.lastName', 'ASC')
+      .take(SEARCH_LIMIT)
+      .getMany();
+
+    return rows.map((profile) => ({
+      slug: profile.slug,
+      name: `${profile.firstName} ${profile.lastName}`.trim(),
+      initials: initialsFor(profile.firstName, profile.lastName),
+      avatarUrl: toImageUrl(profile.avatarUrl),
+    }));
   }
 }

@@ -15,8 +15,10 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateThreadDto } from './dto/create-thread.dto';
+import { LockThreadDto } from './dto/lock-thread.dto';
 import { ListPostsQuery } from './dto/list-posts.query';
 import { ListThreadsQuery } from './dto/list-threads.query';
 import { ReplyThreadDto } from './dto/reply-thread.dto';
@@ -37,6 +39,7 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
+import { Throttle, seconds } from '@nestjs/throttler';
 
 @Feature('forum')
 @ApiTags('Forum')
@@ -72,16 +75,32 @@ export class ForumController {
   }
 
   // Declared BEFORE `threads/:slug` so Express doesn't route `counts` as a slug.
+  // Fetched on every ForumPage load regardless of filter (see
+  // `useForumPageState`/`useForumCounts`), so `hasPosted` piggybacks on this
+  // existing round-trip rather than costing the frontend a dedicated request —
+  // it's what gates the truthful "you haven't posted yet" first-post prompt.
   @Get('threads/counts')
-  @ApiOperation({ summary: 'Per-category thread counts (block-filtered)' })
-  @ApiOkResponse({
-    description: 'An `all` total plus a count per category.',
+  @ApiOperation({
+    summary:
+      'Per-category thread counts (block-filtered) plus whether the caller has ever posted',
   })
-  threadCounts(
+  @ApiOkResponse({
+    description:
+      'An `all` total plus a count per category, and a `hasPosted` flag.',
+  })
+  async threadCounts(
     @CurrentUser() user: CurrentUserData,
     @Query() query: ListThreadsQuery,
   ) {
-    return this.threadsService.counts(user.userId, query.q, query.tag);
+    // `hasPosted` is nested (not spread into the per-category counts) so it
+    // stays a plain `boolean`, not a value that has to share a type with the
+    // `Record<string, number>` category tally — the frontend contract keeps
+    // both shapes distinct instead of widening one to accommodate the other.
+    const [counts, hasPosted] = await Promise.all([
+      this.threadsService.counts(user.userId, query.q, query.tag),
+      this.postsService.hasEverPosted(user.userId),
+    ]);
+    return { counts, hasPosted };
   }
 
   // Declared BEFORE `threads/:slug` so Express doesn't route `pinned` as a
@@ -127,10 +146,15 @@ export class ForumController {
   }
 
   @Post('threads')
+  @UseGuards(NotRestrictedGuard)
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @ApiOperation({ summary: 'Create a new thread with its opening post' })
   @ApiCreatedResponse({ description: 'The created thread.' })
   @ApiConflictResponse({
     description: 'Could not allocate a unique thread slug.',
+  })
+  @ApiForbiddenResponse({
+    description: 'A moderation restriction is currently in effect.',
   })
   createThread(
     @CurrentUser() user: CurrentUserData,
@@ -145,11 +169,16 @@ export class ForumController {
   }
 
   @Post('threads/:slug/posts')
+  @UseGuards(NotRestrictedGuard)
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @ApiOperation({
     summary: 'Reply to a thread (optionally nested under a post)',
   })
   @ApiCreatedResponse({ description: 'The created reply post.' })
-  @ApiForbiddenResponse({ description: 'The thread is locked.' })
+  @ApiForbiddenResponse({
+    description:
+      'The thread is locked, or a moderation restriction is currently in effect.',
+  })
   @ApiBadRequestResponse({
     description:
       'Parent post is in another thread, or is a deleted post you cannot reply to.',
@@ -164,6 +193,7 @@ export class ForumController {
   }
 
   @Post('posts/:id/vote')
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @ApiOperation({ summary: 'Cast or clear an upvote on a post (idempotent)' })
   @ApiCreatedResponse({
     description: 'Updated vote count and the caller vote.',
@@ -258,15 +288,18 @@ export class ForumController {
   }
 
   @Post('threads/:slug/lock')
-  @ApiOperation({ summary: 'Lock a thread (moderator only)' })
+  @ApiOperation({
+    summary: 'Lock a thread (moderator only), with an optional reason note',
+  })
   @ApiCreatedResponse({ description: 'The updated (locked) thread.' })
   @ApiForbiddenResponse({ description: 'Only a moderator can lock threads.' })
   @ApiNotFoundResponse({ description: 'Thread not found.' })
   lockThread(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
+    @Body() dto: LockThreadDto,
   ) {
-    return this.threadsService.setLocked(slug, user, true);
+    return this.threadsService.setLocked(slug, user, true, dto.reason);
   }
 
   @Post('threads/:slug/unlock')

@@ -22,6 +22,7 @@ import {
   ApiConflictResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
+  ApiForbiddenResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
@@ -43,6 +44,9 @@ export class VouchController {
   @ApiBadRequestResponse({ description: 'You cannot vouch for yourself.' })
   @ApiConflictResponse({
     description: 'You have already vouched for this member.',
+  })
+  @ApiForbiddenResponse({
+    description: "You've reached your daily vouch limit.",
   })
   @ApiNotFoundResponse({ description: 'No member with that slug.' })
   @ApiUnauthorizedResponse({

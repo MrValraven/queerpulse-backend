@@ -1,6 +1,9 @@
 import { toImageUrl } from '../common/image-url';
 import { Profile } from '../users/entities/profile.entity';
-import { Subprofile } from './entities/subprofile.entity';
+import {
+  Subprofile,
+  SubprofileLinkVisibility,
+} from './entities/subprofile.entity';
 import { SubprofileMember } from './entities/subprofile-member.entity';
 import { SubprofileInvite } from './entities/subprofile-invite.entity';
 
@@ -70,6 +73,12 @@ export interface MyInviteView {
   personaAvatarUrl: string | null;
   invitedByName: string;
   createdAt: string;
+  // Drives the accept-confirmation disclosure (IDN-2): an Unlinked persona is
+  // marketed as pseudonymous, so accepting is the moment the invitee's real
+  // identity first becomes visible to its other co-owners (and vice versa) —
+  // the invitee needs to see that stated plainly before they accept, not
+  // just after.
+  linkVisibility: SubprofileLinkVisibility;
 }
 
 export function toMyInviteView(
@@ -85,5 +94,6 @@ export function toMyInviteView(
     invitedByName:
       `${inviterProfile.firstName} ${inviterProfile.lastName}`.trim(),
     createdAt: invite.createdAt.toISOString(),
+    linkVisibility: persona.linkVisibility,
   };
 }

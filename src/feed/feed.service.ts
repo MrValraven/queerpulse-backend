@@ -14,6 +14,7 @@ import {
   AccessTier,
   Community,
 } from '../communities/entities/community.entity';
+import { ConnectionsService } from '../connections/connections.service';
 import {
   Event,
   EventStatus,
@@ -125,6 +126,7 @@ export class FeedService {
     @InjectRepository(CommunityMember)
     private readonly communityMembers: Repository<CommunityMember>,
     private readonly blockFilter: BlockFilterService,
+    private readonly connectionsService: ConnectionsService,
   ) {}
 
   async getFeed(
@@ -141,6 +143,16 @@ export class FeedService {
     // `community_new_member` needs no branch: it's already inherently
     // viewer-scoped (Task 5).
     const membershipScoped = resolvedTab === 'communities';
+    // DISC-2: personalizes the same three author-bearing sources to the
+    // viewer's ACCEPTED connections when serving the `connections` tab —
+    // orthogonal to `membershipScoped` (never both true at once, since each
+    // is tied to its own tab). `null` means "not scoped this way" (every
+    // other tab); resolved once per request rather than per source, since
+    // all three branches below filter against the exact same id set.
+    const connectionAuthorIds =
+      resolvedTab === 'connections'
+        ? await this.connectionsService.allAcceptedConnectionUserIds(viewerId)
+        : null;
 
     const perSourceLimit = limit + 1;
     const candidateLists = await Promise.all(
@@ -151,6 +163,7 @@ export class FeedService {
           cursor,
           perSourceLimit,
           membershipScoped,
+          connectionAuthorIds,
         ),
       ),
     );
@@ -176,7 +189,14 @@ export class FeedService {
    * surface in the unfiltered feed too. `communities` unions all four
    * membership-scoped sources (Task 6) — note it uses
    * `community_new_member`, NOT the global `new_member` that `all`/`people`
-   * use, since this tab is personalized to the viewer's own communities. */
+   * use, since this tab is personalized to the viewer's own communities.
+   * `connections` (DISC-2) unions the three author-bearing sources —
+   * `community_post`, `forum_thread`, `gathering` — each additionally
+   * author-scoped to the viewer's accepted connections in `fetchCandidates`
+   * (the `connectionAuthorIds` branches below). It deliberately excludes
+   * `new_member`/`community_new_member`: those sources surface a PROFILE as
+   * the candidate itself (the newly-joined member), not something a member
+   * AUTHORED, so "from your connections" doesn't apply to them. */
   private sourcesForTab(tab: FeedTab): SourceKind[] {
     switch (tab) {
       case 'communities':
@@ -186,6 +206,8 @@ export class FeedService {
           'forum_thread',
           'community_new_member',
         ];
+      case 'connections':
+        return ['community_post', 'forum_thread', 'gathering'];
       case 'gatherings':
         return ['gathering'];
       case 'posts':
@@ -204,7 +226,15 @@ export class FeedService {
     cursor: string | undefined,
     limit: number,
     membershipScoped: boolean,
+    // DISC-2: non-null on the `connections` tab only. An empty array means
+    // the viewer has zero accepted connections — short-circuit to no
+    // candidates rather than issuing an `IN ()` query (invalid SQL, and a
+    // wasted round-trip either way).
+    connectionAuthorIds: string[] | null = null,
   ): Promise<Candidate[]> {
+    if (connectionAuthorIds !== null && connectionAuthorIds.length === 0) {
+      return [];
+    }
     switch (kind) {
       case 'community_post': {
         // Soft-deleted posts are tombstoned in-place in a community's own feed
@@ -258,6 +288,16 @@ export class FeedService {
             { privateTier: AccessTier.Private, viewerId },
           );
         }
+        if (connectionAuthorIds !== null) {
+          // `connections` tab (DISC-2): on top of whichever visibility gate
+          // above applied, restrict to posts authored by one of the
+          // viewer's accepted connections. Stacked, not swapped-in — a
+          // connection's post in a private community the viewer hasn't
+          // joined must still stay hidden.
+          qb.andWhere('cp.author_id IN (:...connectionAuthorIds)', {
+            connectionAuthorIds,
+          });
+        }
         // `true`: `CommunityPost.createdAt` is migrated to `timestamptz(3)`
         // (see `1785001400000-NarrowCursorCreatedAtPrecision.ts`), so
         // `cursorPaginate` orders/filters on the raw column instead of
@@ -284,6 +324,13 @@ export class FeedService {
                WHERE "mem"."community_id" = t.community_id AND "mem"."user_id" = :viewerId)`,
             { viewerId },
           );
+        }
+        if (connectionAuthorIds !== null) {
+          // `connections` tab (DISC-2): see the matching branch in
+          // `community_post` above — same stacked-not-swapped rationale.
+          qb.andWhere('t.author_id IN (:...connectionAuthorIds)', {
+            connectionAuthorIds,
+          });
         }
         // `true`: `ForumThread.createdAt` is migrated to `timestamptz(3)`
         // (see `1785001400000-NarrowCursorCreatedAtPrecision.ts`), so this
@@ -339,6 +386,15 @@ export class FeedService {
                WHERE "mem"."community_id" = e.community_id AND "mem"."user_id" = :viewerId)`,
             { viewerId },
           );
+        }
+        if (connectionAuthorIds !== null) {
+          // `connections` tab (DISC-2): restrict to gatherings hosted by one
+          // of the viewer's accepted connections. The base public/members
+          // visibility set above still applies underneath — a connection
+          // hosting a private/invite-only gathering doesn't leak it here.
+          qb.andWhere('e.host_id IN (:...connectionAuthorIds)', {
+            connectionAuthorIds,
+          });
         }
         // `true`: `Event.createdAt` is migrated to `timestamptz(3)` (see
         // `1785001400000-NarrowCursorCreatedAtPrecision.ts`), so the general

@@ -1,3 +1,4 @@
+import { Type } from 'class-transformer';
 import {
   IsBoolean,
   IsEnum,
@@ -12,9 +13,11 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateNested,
 } from 'class-validator';
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 import { EventStatus, EventVisibility } from '../entities/event.entity';
+import { RecurrenceDto } from './recurrence.dto';
 
 export class CreateEventDto {
   @IsString() @MinLength(1) @MaxLength(200) title!: string;
@@ -56,4 +59,19 @@ export class CreateEventDto {
   @IsString()
   @MaxLength(200)
   communitySlug?: string | null;
+  // Manage-dashboard "Options" toggles — see `Event.allowWaitlist`'s doc.
+  // Create-time default is `true` for both (`EventsService.create`); these
+  // are realistically only ever changed later via `UpdateEventDto`, but are
+  // accepted at create time too for symmetry.
+  @IsOptional() @IsBoolean() allowWaitlist?: boolean;
+  @IsOptional() @IsBoolean() showAttendeeCount?: boolean;
+  // Optional repeat rule (MSG-10) — see `RecurrenceDto`'s doc. When present,
+  // `EventsService.create` generates a full `EventSeries` plus one
+  // independent `Event` row per occurrence instead of just this one event.
+  // CREATE-only: `UpdateEventDto` omits this field — converting an existing
+  // standalone event into a series after the fact is out of scope.
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => RecurrenceDto)
+  recurrence?: RecurrenceDto;
 }

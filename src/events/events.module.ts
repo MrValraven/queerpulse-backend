@@ -24,6 +24,7 @@ import { EventInvite } from './entities/event-invite.entity';
 import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventPhoto } from './entities/event-photo.entity';
 import { EventRsvp } from './entities/event-rsvp.entity';
+import { EventSeries } from './entities/event-series.entity';
 import { Event } from './entities/event.entity';
 import { MemberEventReminderPreferences } from './entities/member-event-reminder-preferences.entity';
 import { EventAudienceGateService } from './event-audience-gate.service';
@@ -48,6 +49,7 @@ import { RsvpService } from './rsvp.service';
       EventPhoto,
       EventBookmark,
       MemberEventReminderPreferences,
+      EventSeries,
     ]),
     UsersModule,
     NotificationsModule,

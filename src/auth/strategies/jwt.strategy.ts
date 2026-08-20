@@ -62,6 +62,8 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         status: true,
         role: true,
         suspendedUntil: true,
+        restricted: true,
+        restrictedUntil: true,
       },
     });
     if (!user) {
@@ -70,12 +72,14 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     }
 
     const status = await this.liftExpiredSuspension(user);
+    const restricted = await this.liftExpiredRestriction(user);
 
     return {
       userId: user.id,
       email: user.email,
       status,
       role: user.role,
+      restricted,
     };
   }
 
@@ -115,5 +119,34 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     );
 
     return UserStatus.Active;
+  }
+
+  /**
+   * Lazy expiry for the `restrict` moderation action, with write-through —
+   * the exact `liftExpiredSuspension` pattern, applied to the lighter
+   * `restricted`/`restrictedUntil` pair instead of `status`/`suspendedUntil`.
+   *
+   * Unlike a suspension, a restriction never has a `null` (permanent) expiry —
+   * `AccountEnforcementService.enforceAgainstUser` always sets one — so this
+   * has no "ban" case to skip: every restriction ends by the clock.
+   */
+  private async liftExpiredRestriction(user: User): Promise<boolean> {
+    if (
+      !user.restricted ||
+      user.restrictedUntil === null ||
+      user.restrictedUntil > new Date()
+    ) {
+      return user.restricted;
+    }
+
+    await this.users.update(
+      // Conditional on still being restricted so a concurrent moderator action
+      // (a fresh restriction landing between the read above and this write) is
+      // not clobbered by a stale expiry decision.
+      { id: user.id, restricted: true },
+      { restricted: false, restrictedUntil: null },
+    );
+
+    return false;
   }
 }

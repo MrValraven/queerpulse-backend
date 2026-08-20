@@ -9,6 +9,7 @@ import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
 import { HousingDirectoryService } from './housing-directory.service';
 import {
+  HousingListerKind,
   HousingListing,
   HousingListingStatus,
   HousingListingType,
@@ -44,11 +45,16 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     ownerId: 'owner-1',
     status: HousingListingStatus.Live,
     type: HousingListingType.Room,
+    // Column default — member vs agent/broker disclosure badge.
+    listerKind: HousingListerKind.Member,
     title: 'Sunny room',
     blurb: 'Bright',
     city: 'Lisbon',
     area: 'Arroios',
     rentEuros: 500,
+    // Null = bedroom count not specified (additive nullable column; old rows
+    // never backfilled).
+    bedrooms: null,
     billsIncluded: false,
     lgbtqFriendly: true,
     availableFrom: null,
@@ -60,6 +66,22 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     latitude: null,
     longitude: null,
     addressLine: null,
+    // Column default `''` for old rows (required going forward, enforced by
+    // `CreateHousingListingDto`, not nullable at the DB).
+    accessibilityInfo: '',
+    // Column defaults — deterministic pre-publish risk score/reasons, never
+    // exposed on public browse.
+    riskScore: 0,
+    riskReasons: [],
+    // Null = lister added no virtual-tour link.
+    virtualTourUrl: null,
+    // Null = still looking / still live to the public (owner hasn't marked it
+    // filled and the sweeper hasn't hidden it).
+    filledAt: null,
+    // NOT NULL on the entity — every listing always carries a real expiry.
+    // Comfortably after the fixture's `createdAt` so "live" fixtures read as
+    // not-yet-expired by default.
+    expiresAt: new Date('2026-03-02T00:00:00.000Z'),
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
@@ -68,7 +90,10 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
 
 describe('HousingDirectoryService', () => {
   let service: HousingDirectoryService;
-  let listings: RepoMock;
+  // Declared with the exact method shape (rather than the bare `RepoMock`
+  // index-signature alias) so `listings.findOne.mockResolvedValue(...)`-style
+  // chained access doesn't see `noUncheckedIndexedAccess`'s `| undefined`.
+  let listings: { findOne: jest.Mock; createQueryBuilder: jest.Mock };
   let profiles: RepoMock;
   let contentModeration: { stateFor: jest.Mock };
   let verification: { levelForUser: jest.Mock; levelsForUsers: jest.Mock };

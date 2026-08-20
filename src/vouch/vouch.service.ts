@@ -1,13 +1,21 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { DataSource, EntityManager, In, IsNull, Repository } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  In,
+  IsNull,
+  MoreThanOrEqual,
+  Repository,
+} from 'typeorm';
 import { toImageUrl } from '../common/image-url';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -20,6 +28,25 @@ import { VOUCH_CREATED, VouchCreatedEvent } from './vouch.events';
 
 // Bounds an otherwise-unbounded list read; callers may narrow with limit/offset.
 const DEFAULT_PAGE_SIZE = 20;
+
+// Caps how many *new* vouches a single member can give in a day (COM-26):
+// vouching has only ever had a per-minute throttle
+// (`vouch.controller.ts`'s `@Throttle`), which stops rapid-fire bursts but not
+// a member steadily vouching for hundreds of people over weeks — that dilutes
+// vouching as a trust signal. This is deliberately generous (a genuine
+// community connector vouching for a dozen people they actually know in one
+// day is normal); it exists to catch abuse, not to gate everyday use.
+const DAILY_VOUCH_LIMIT = 20;
+
+// Start of the current UTC calendar day — the lower bound of the "vouches
+// given today" count. UTC (not local) so the reset instant is deterministic
+// across deploy regions, same convention as `invites.service.ts`'s monthly
+// invite quota.
+function currentDayStart(now: Date): Date {
+  return new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+  );
+}
 
 const VOUCH_RELATIONSHIP_SET = new Set<VouchRelationship>(VOUCH_RELATIONSHIPS);
 
@@ -153,8 +180,29 @@ export class VouchService {
     // invite (or by an admin approving a join request), never by accumulation.
     let vouchCount = 0;
     await this.dataSource.transaction(async (manager) => {
-      // Take a write lock on the vouchee row first so concurrent vouches for
-      // the same member serialize and `vouchCount` below is read consistently
+      // Lock the voucher's own row so concurrent vouches FROM this member
+      // serialize against the daily-cap count below (same pessimistic-lock +
+      // count-then-write pattern as `invites.service.ts`'s monthly invite
+      // quota). Enforced here — inside the same transaction as the write,
+      // never as separate infrastructure like a cron or counter table.
+      await manager.findOne(User, {
+        where: { id: voucherId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      const givenToday = await manager.count(Vouch, {
+        where: {
+          voucherId,
+          createdAt: MoreThanOrEqual(currentDayStart(new Date())),
+        },
+      });
+      if (givenToday >= DAILY_VOUCH_LIMIT) {
+        throw new ForbiddenException(
+          `You can vouch for up to ${DAILY_VOUCH_LIMIT} members per day. Try again tomorrow.`,
+        );
+      }
+
+      // Take a write lock on the vouchee row so concurrent vouches for the
+      // same member serialize and `vouchCount` below is read consistently
       // rather than from a racing snapshot. The lock is held to commit.
       await manager.findOne(User, {
         where: { id: voucheeId },

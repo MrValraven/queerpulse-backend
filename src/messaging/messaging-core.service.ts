@@ -16,6 +16,9 @@ import { MessageReaction } from './entities/message-reaction.entity';
 import { MessageStar } from './entities/message-star.entity';
 import { GifAttachment, Message, MessageKind } from './entities/message.entity';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
+import { storageKeyFromImageUrl } from '../common/image-url';
+import { parseStorageKey, storageKeyOwnerId } from '../storage/storage-key';
+import { UPLOAD_KIND_SPECS } from '../storage/upload-kinds';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
@@ -27,11 +30,30 @@ import {
   MessageView,
   ReactionSummary,
   requireAuthorSummary,
+  resolveAttachment,
   toMessageReactionSummaries,
   toMessageView,
 } from './message-response';
 import { EDIT_WINDOW_MS } from './messaging.constants';
 import { MESSAGE_CREATED, MessageCreatedEvent } from './messaging.events';
+
+/** `Message.kind` (the entity enum) → the frontend-contract `MessageResponse.kind`
+ *  string union. Shared by `buildLastMessagePreview` and `toMessageResponses` so
+ *  the mapping can't drift between the inbox-preview and full-thread paths. */
+function messageKindToResponseKind(
+  kind: MessageKind,
+): MessageResponse['kind'] {
+  switch (kind) {
+    case MessageKind.System:
+      return 'system';
+    case MessageKind.Gif:
+      return 'gif';
+    case MessageKind.Image:
+      return 'image';
+    default:
+      return 'user';
+  }
+}
 
 /**
  * The fields needed to build a `MessageResponse`. Structural, so both a
@@ -314,13 +336,8 @@ export class MessagingCoreService {
       canDelete: false,
       canReport: false,
       replyTo: null,
-      kind:
-        message.kind === MessageKind.System
-          ? 'system'
-          : message.kind === MessageKind.Gif
-            ? 'gif'
-            : 'user',
-      attachment: message.attachment ?? null,
+      kind: messageKindToResponseKind(message.kind),
+      attachment: resolveAttachment(message.attachment),
       systemEvent: isSystem
         ? buildSystemEvent(message.systemEvent, profileByUser)
         : null,
@@ -584,13 +601,8 @@ export class MessagingCoreService {
         // event; a `system` one resolves actor/target ids to display names so the
         // client renders bilingual templates ("You created the group", "Ana
         // added Bea") without ever seeing a user id.
-        kind:
-          m.kind === MessageKind.System
-            ? 'system'
-            : m.kind === MessageKind.Gif
-              ? 'gif'
-              : 'user',
-        attachment: isDeleted ? null : (m.attachment ?? null),
+        kind: messageKindToResponseKind(m.kind),
+        attachment: isDeleted ? null : resolveAttachment(m.attachment),
         systemEvent:
           m.kind === MessageKind.System
             ? buildSystemEvent(m.systemEvent, profileByUser)
@@ -617,7 +629,7 @@ export class MessagingCoreService {
     replyToId?: string,
     clientMessageId?: string,
     forwarded?: boolean,
-    kind?: 'user' | 'gif',
+    kind?: 'user' | 'gif' | 'image',
     attachment?: GifAttachment,
   ): Promise<{ view: MessageView; response: MessageResponse }> {
     if (clientMessageId) {
@@ -629,9 +641,57 @@ export class MessagingCoreService {
         return this.buildPostResult(existing, senderId, false);
       }
     }
-    if (kind === 'gif' && !attachment) {
-      throw new BadRequestException('attachment is required for a gif message');
+    if ((kind === 'gif' || kind === 'image') && !attachment) {
+      throw new BadRequestException(
+        `attachment is required for a ${kind} message`,
+      );
     }
+    if (kind === 'gif' && attachment && !/^https:\/\//.test(attachment.url)) {
+      throw new BadRequestException('A gif attachment must be an https URL');
+    }
+    if (kind === 'image' && attachment) {
+      // A forwarded image's `url`/`previewUrl` arrive as the ALREADY-RESOLVED
+      // `GET /files/<key>` URL (the forwarded ChatMessage's attachment came
+      // from a server response, which resolves keys at read time — see
+      // `resolveAttachment`), not the bare key a fresh upload sends. Collapse
+      // either shape back to the canonical bare key before validating or
+      // persisting — the storage layer stores keys, never URLs (mirrors every
+      // other image field via `storageKeyFromImageUrl`), and this is also what
+      // makes the ownership check below correct for a forward, not just a
+      // fresh send.
+      attachment = {
+        ...attachment,
+        url: storageKeyFromImageUrl(attachment.url),
+        previewUrl: storageKeyFromImageUrl(attachment.previewUrl),
+      };
+      // The attachment's `url` must be a well-formed `message-image` storage
+      // key — otherwise any authenticated member could attach an arbitrary
+      // key (an unrelated kind's, or a malformed string) to a message. 404-
+      // style rejection posture doesn't apply here (unlike `FilesController`,
+      // nothing is disclosed either way) — a plain 400 is correct.
+      if (parseStorageKey(attachment.url) !== UPLOAD_KIND_SPECS['message-image']) {
+        throw new BadRequestException('Invalid image attachment');
+      }
+      // A FRESH send must additionally be the sender's OWN upload — the abuse
+      // this guards against is attaching someone else's private key to a
+      // message you didn't upload it into. A FORWARD is exempt: it re-sends
+      // an existing message's attachment (the forwarder already saw the image
+      // as a participant of the original conversation, and the key's shape
+      // was already validated above), so requiring the forwarder to also be
+      // the original uploader would break the ordinary "forward a photo"
+      // action for no real safety gain.
+      if (!forwarded && storageKeyOwnerId(attachment.url) !== senderId) {
+        throw new ForbiddenException(
+          'You may only attach an image you uploaded',
+        );
+      }
+    }
+    const entityKind =
+      kind === 'gif'
+        ? MessageKind.Gif
+        : kind === 'image'
+          ? MessageKind.Image
+          : MessageKind.User;
     let saved: Message;
     try {
       saved = await this.messages.save(
@@ -642,10 +702,11 @@ export class MessagingCoreService {
           replyToId: replyToId ?? null,
           clientMessageId: clientMessageId ?? null,
           forwarded: forwarded ?? false,
-          kind: kind === 'gif' ? MessageKind.Gif : MessageKind.User,
-          // Only a gif message carries an attachment — never persist one onto a
-          // plain text send even if a client mistakenly supplies both.
-          attachment: kind === 'gif' ? (attachment ?? null) : null,
+          kind: entityKind,
+          // Only a gif/image message carries an attachment — never persist one
+          // onto a plain text send even if a client mistakenly supplies both.
+          attachment:
+            kind === 'gif' || kind === 'image' ? (attachment ?? null) : null,
         }),
       );
     } catch (error) {

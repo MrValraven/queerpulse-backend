@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { EntityManager, In, Repository } from 'typeorm';
 import { Profile } from './entities/profile.entity';
-import { User, UserStatus } from './entities/user.entity';
+import { User, UserRole, UserStatus } from './entities/user.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 
 // Bounds the slug-collision retry loop (see insertProfileWithUniqueSlug). This
@@ -289,5 +289,21 @@ export class UsersService {
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '');
+  }
+
+  /**
+   * Count of members currently holding the Admin role. The shared guard
+   * behind "never leave the platform with zero admins" — used both by
+   * `AdminMembersService.updateRole` (never demote the last admin) and by
+   * `AccountService.deactivate` / `requestDeletion` (never let the last admin
+   * lock themselves out via ordinary member settings).
+   *
+   * Takes the caller's transaction `manager` rather than this service's own
+   * repository, so the count is read inside the same transaction as the write
+   * it gates — a concurrent action against a different admin can't slip past
+   * a stale count.
+   */
+  countAdmins(manager: EntityManager): Promise<number> {
+    return manager.count(User, { where: { role: UserRole.Admin } });
   }
 }

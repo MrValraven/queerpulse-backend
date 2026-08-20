@@ -72,9 +72,31 @@ function uniqueViolation(): Error & { code: string } {
 
 describe('LandlordsService', () => {
   let service: LandlordsService;
-  let landlords: RepoMock;
-  let recommendations: RepoMock;
-  let introRequests: RepoMock;
+  // Declared with the exact method shape (rather than the bare `RepoMock`
+  // index-signature alias) so `landlords.findOne.mockResolvedValue(...)`-style
+  // chained access doesn't see `noUncheckedIndexedAccess`'s `| undefined`.
+  let landlords: {
+    find: jest.Mock;
+    findOne: jest.Mock;
+    exists: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+    remove: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
+  let recommendations: {
+    find: jest.Mock;
+    findOne: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+    remove: jest.Mock;
+  };
+  let introRequests: {
+    find: jest.Mock;
+    findOne: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+  };
   let profiles: RepoMock;
   let verification: {
     requireLevel: jest.Mock;

@@ -14,3 +14,15 @@ export interface SubscribeResultDto {
 export interface ConfirmResultDto {
   status: 'confirmed';
 }
+
+/**
+ * Response for `GET /newsletter/unsubscribe`. `alreadyUnsubscribed`
+ * distinguishes a no-op re-visit from a fresh transition purely so the
+ * confirmation page can show honest copy ("you're unsubscribed" vs "you were
+ * already unsubscribed") — it doesn't open a new enumeration surface, since
+ * reaching this response at all already requires holding a valid token.
+ */
+export interface UnsubscribeResultDto {
+  status: 'unsubscribed';
+  alreadyUnsubscribed: boolean;
+}

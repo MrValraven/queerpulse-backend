@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { AdminCommunitiesService } from '../admin-communities/admin-communities.service';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
 import { PlatformJoinRequest } from '../membership/entities/join-request.entity';
@@ -40,6 +41,14 @@ function makeReport(overrides: Partial<Report> = {}): Report {
     slaDueAt: daysAgo(-1),
     status: ReportStatus.Open,
     reporterId: 'user-reporter',
+    assignedModeratorId: null,
+    assignedAt: null,
+    resolvedAt: null,
+    resolutionActorId: null,
+    resolutionAction: null,
+    resolutionDuration: null,
+    resolutionNote: null,
+    resolutionNotified: null,
     createdAt: daysAgo(2),
     ...overrides,
   };
@@ -68,6 +77,7 @@ describe('AdminOverviewService', () => {
   let communityMembers: MockRepo;
   let communities: MockRepo;
   let usersService: { countActiveMembers: jest.Mock };
+  let adminCommunitiesService: { listCommunities: jest.Mock };
 
   beforeEach(async () => {
     jest.useFakeTimers().setSystemTime(FIXED_NOW);
@@ -81,6 +91,11 @@ describe('AdminOverviewService', () => {
     communityMembers = makeMockRepo();
     communities = makeMockRepo();
     usersService = { countActiveMembers: jest.fn().mockResolvedValue(8412) };
+    adminCommunitiesService = {
+      listCommunities: jest
+        .fn()
+        .mockResolvedValue({ items: [], truncated: false }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -100,6 +115,7 @@ describe('AdminOverviewService', () => {
         },
         { provide: getRepositoryToken(Community), useValue: communities },
         { provide: UsersService, useValue: usersService },
+        { provide: AdminCommunitiesService, useValue: adminCommunitiesService },
       ],
     }).compile();
 
@@ -111,11 +127,28 @@ describe('AdminOverviewService', () => {
   });
 
   describe('getOverview', () => {
-    it('never fabricates the un-backed sustainer metrics', async () => {
+    it('reports communityHealth.averageScore as null with no communities yet, rather than a fabricated 0', async () => {
       const result = await service.getOverview();
 
-      expect(result.stats.sustainerMrr).toBeNull();
-      expect(result.stats.sustainerCount).toBeNull();
+      expect(result.stats.communityHealth.averageScore).toBeNull();
+      expect(result.stats.communityHealth.needingSupportCount).toBe(0);
+    });
+
+    it('rolls up communityHealth from AdminCommunitiesService.listCommunities() rather than recomputing the score', async () => {
+      adminCommunitiesService.listCommunities.mockResolvedValue({
+        items: [
+          { healthScore: 90, needsSupport: false },
+          { healthScore: 60, needsSupport: true },
+          { healthScore: 30, needsSupport: true },
+        ],
+        truncated: false,
+      });
+
+      const result = await service.getOverview();
+
+      expect(adminCommunitiesService.listCommunities).toHaveBeenCalledTimes(1);
+      expect(result.stats.communityHealth.averageScore).toBe(60);
+      expect(result.stats.communityHealth.needingSupportCount).toBe(2);
     });
 
     it('never fabricates churn — every member-growth point reports it as null', async () => {

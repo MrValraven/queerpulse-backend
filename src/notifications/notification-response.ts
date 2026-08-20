@@ -71,6 +71,9 @@ const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   // "Someone" — while the emit site still passes the voucher as the block/mute
   // `actorId` argument, keeping that safety gate intact.
   [NotificationType.SafeSpaceVouch]: 'voucherId',
+  // The posting member — `TopicFollowNotificationsListener` writes this
+  // alongside `topicSlug`/`topicLabel`/`threadSlug`/`threadTitle`.
+  [NotificationType.TopicNewPost]: 'actorId',
 };
 
 /** The acting member's user id for a notification, or `null` when its type

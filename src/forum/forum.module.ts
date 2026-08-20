@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CommunityMembershipModule } from '../communities/community-membership.module';
+import { ContentModule } from '../content/content.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { MentionsModule } from '../mentions/mentions.module';
 import { SocialModule } from '../social/social.module';
@@ -43,6 +44,11 @@ import { ForumThreadsService } from './forum-threads.service';
     // resolves + roster-checks a community for the thread to attach to.
     // Mirrors `EventsModule`'s import.
     CommunityMembershipModule,
+    // `TopicPostLinkService` (DISC-5) — a newly created thread's tags are
+    // reconciled against the topics directory on create. Plain import, no
+    // `forwardRef`: `ContentModule` imports `SocialModule` + `UsersModule`,
+    // neither of which reaches back into `ForumModule`.
+    ContentModule,
   ],
   controllers: [ForumController],
   providers: [ForumThreadsService, ForumPostsService],

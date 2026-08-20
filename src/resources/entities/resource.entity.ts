@@ -54,6 +54,14 @@ export class Resource {
   @Column({ type: 'timestamptz', nullable: true })
   publishedAt!: Date | null;
 
+  // When an editor last confirmed this guide's information (phone numbers,
+  // eligibility rules, statute references, clinic hours, …) is still
+  // accurate. NULL means never verified — the FE shows an honest "not yet
+  // verified" state rather than a fabricated date. Set by hand during
+  // editorial review; there is no automated re-verification sweep yet.
+  @Column({ type: 'timestamptz', nullable: true })
+  lastVerifiedAt!: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 

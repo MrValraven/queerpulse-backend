@@ -47,8 +47,8 @@ describe('ModerationController', () => {
       severity: ReportSeverity.High,
       sort: 'priority' as const,
     };
-    await controller.listReports(query);
-    expect(service.list).toHaveBeenCalledWith(query);
+    await controller.listReports(actor, query);
+    expect(service.list).toHaveBeenCalledWith(query, actor.userId);
   });
 
   it('reads the audit trail for a reportId', async () => {

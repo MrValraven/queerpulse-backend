@@ -24,7 +24,7 @@ export class SearchController {
   @Get()
   @ApiOperation({
     summary:
-      'Global search across members, communities, events, forum, businesses, magazine, jobs, housing, resources, workshops and subprofiles',
+      'Global search across members, communities, events, forum, businesses, magazine, jobs, housing, resources, workshops, subprofiles and topics',
   })
   @ApiOkResponse({
     description: 'Grouped, per-type-capped search results for the query.',

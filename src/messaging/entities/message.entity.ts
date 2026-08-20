@@ -17,6 +17,10 @@ export enum MessageKind {
   User = 'user',
   System = 'system',
   Gif = 'gif',
+  /** A member-uploaded image attachment (MSG-8), presigned through
+   *  `POST /uploads/presign` (`kind: 'message-image'`) the same way every
+   *  other image upload in the app is — never a bespoke messaging-only path. */
+  Image = 'image',
 }
 
 /** The kinds of system event a `system` message can carry. `member_added` /
@@ -42,17 +46,32 @@ export interface SystemEvent {
   value?: string;
 }
 
-/** A provider-hosted GIF attached to a `kind:'gif'` message. `url` is the full
- *  animated GIF rendered in the bubble; `previewUrl` is a lightweight thumbnail.
- *  Intrinsic `width`/`height` are set as <img> attrs client-side so the bubble
- *  reserves space (no layout shift). NULL for every non-gif message. */
+/**
+ * A media attachment on a `kind:'gif'` OR `kind:'image'` message. `url` is the
+ * full asset rendered in the bubble; `previewUrl` is a lightweight thumbnail
+ * (for an uploaded image, the same value as `url` — no separate thumbnail is
+ * generated). Intrinsic `width`/`height` are set as <img> attrs client-side so
+ * the bubble reserves space (no layout shift). NULL for every message without
+ * an attachment.
+ *
+ * `url`/`previewUrl` hold two different KINDS of value depending on `provider`:
+ * a `kind:'gif'` message's is an absolute `https://` URL from the GIF provider
+ * (passed through `toImageUrl` unchanged); a `kind:'image'` message's is a
+ * private storage KEY minted by `POST /uploads/presign` (`message-image`),
+ * resolved through `toImageUrl` → `GET /files/<key>` at every read path —
+ * mirrors how every other image field in this app stores a key, never a URL.
+ * Named `GifAttachment` for history (it predates image uploads); not renamed
+ * to avoid a wider, purely-cosmetic diff across the DTO/response layers.
+ */
 export interface GifAttachment {
   url: string;
   previewUrl: string;
   width: number;
   height: number;
-  /** Which service the GIF came from (e.g. "klipy"). Free-form so swapping the
-   *  provider never requires a schema/type change. */
+  /** Which service the media came from (e.g. "klipy" for a picked GIF,
+   *  "upload" for a member-uploaded image). Free-form so swapping the GIF
+   *  provider — or adding another attachment source later — never requires a
+   *  schema/type change. */
   provider: string;
 }
 
@@ -106,8 +125,9 @@ export class Message {
   systemEvent!: SystemEvent | null;
 
   /**
-   * Provider-hosted GIF for a `kind:'gif'` message (else NULL). `body` still
-   * carries a "GIF" text fallback for push/notification/last-message previews.
+   * The media attachment for a `kind:'gif'` or `kind:'image'` message (else
+   * NULL). `body` still carries a "GIF"/"Photo" text fallback for
+   * push/notification/last-message previews.
    */
   @Column({ type: 'jsonb', nullable: true })
   attachment!: GifAttachment | null;

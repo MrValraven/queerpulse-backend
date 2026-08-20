@@ -32,6 +32,8 @@ export class PlatformStaffService {
       .filter((staffUser) => staffUser.profile?.slug)
       .map((staffUser) => ({
         slug: staffUser.profile.slug,
+        firstName: staffUser.profile.firstName,
+        lastName: staffUser.profile.lastName,
         platformRole: staffUser.role as StaffRole,
       }));
   }

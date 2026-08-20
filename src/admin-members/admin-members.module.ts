@@ -6,6 +6,7 @@ import { ReportsModule } from '../reports/reports.module';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
+import { UsersModule } from '../users/users.module';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import { VouchModule } from '../vouch/vouch.module';
 import { AdminMembersController } from './admin-members.controller';
@@ -16,14 +17,15 @@ import { AdminMembersService } from './admin-members.service';
     // Own `forFeature` for every entity this service reads directly —
     // `Profile`/`User`/`CommunityMember` follow `AdminCommunitiesModule`'s
     // precedent of registering its own copies rather than importing
-    // `UsersModule` (TypeORM permits overlapping registrations).
+    // `UsersModule` for its repositories (TypeORM permits overlapping
+    // registrations).
     // `Vouch` also needs its own registration here: `VouchModule` exports
     // only `VouchService`, not `TypeOrmModule` — see `vouch.module.ts`.
     // `ModAuditLog` likewise: `ModerationModule` exports nothing at all
     // (no `exports` array), so `Repository<ModAuditLog>` is not reachable
     // by importing it.
     // `UserStaffRole` (grant/revokeStaffRole) follows the same precedent —
-    // `UsersModule` isn't imported here, so it gets its own registration too.
+    // it gets its own registration too, rather than relying on `UsersModule`.
     TypeOrmModule.forFeature([
       Profile,
       User,
@@ -39,6 +41,10 @@ import { AdminMembersService } from './admin-members.service';
     // `VouchModule` exports `VouchService`, which `AdminMembersService`
     // injects directly for `getVouchCounts`/`getVouchCount`.
     VouchModule,
+    // `UsersModule` exports `UsersService`, injected here for the shared
+    // `countAdmins` last-admin guard `updateRole` uses (also used by
+    // `AccountService.deactivate`/`requestDeletion`).
+    UsersModule,
   ],
   controllers: [AdminMembersController],
   providers: [AdminMembersService],

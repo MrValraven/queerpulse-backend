@@ -19,6 +19,7 @@ import {
   EventStatus,
   EventVisibility,
 } from '../events/entities/event.entity';
+import { ConnectionsService } from '../connections/connections.service';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -71,7 +72,10 @@ const baseThread = (overrides: Partial<ForumThread> = {}): ForumThread => ({
   category: 'general',
   communityId: null,
   isPinned: false,
+  pinnedAt: null,
   isLocked: false,
+  lockReason: null,
+  isOfficial: false,
   replyCount: 3,
   lastActivityAt: t('2026-07-10T00:00:00.000Z'),
   createdAt: t('2026-07-09T00:00:00.000Z'),
@@ -99,6 +103,10 @@ const baseEvent = (overrides: Partial<Event> = {}): Event => ({
   status: EventStatus.Published,
   coverImageUrl: null,
   reminderSentAt: null,
+  allowWaitlist: true,
+  showAttendeeCount: true,
+  seriesId: null,
+  seriesIndex: null,
   createdAt: t('2026-07-08T00:00:00.000Z'),
   updatedAt: t('2026-07-08T00:00:00.000Z'),
   ...overrides,
@@ -214,6 +222,7 @@ describe('FeedService', () => {
   let profiles: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let communityMembers: { createQueryBuilder: jest.Mock };
   let blockFilter: { hiddenUserIds: jest.Mock };
+  let connectionsService: { allAcceptedConnectionUserIds: jest.Mock };
 
   beforeEach(async () => {
     communityPosts = { createQueryBuilder: jest.fn(() => qbStub()) };
@@ -232,6 +241,13 @@ describe('FeedService', () => {
     blockFilter = {
       hiddenUserIds: jest.fn().mockResolvedValue(new Set<string>()),
     };
+    // DISC-2: `connections` tab support. Defaults to "no connections" so
+    // every pre-existing test (none of which exercise the `connections`
+    // tab) is unaffected — those tests never call this at all, since
+    // `getFeed` only invokes it when `resolvedTab === 'connections'`.
+    connectionsService = {
+      allAcceptedConnectionUserIds: jest.fn().mockResolvedValue([]),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -249,6 +265,7 @@ describe('FeedService', () => {
           useValue: communityMembers,
         },
         { provide: BlockFilterService, useValue: blockFilter },
+        { provide: ConnectionsService, useValue: connectionsService },
       ],
     }).compile();
     service = module.get(FeedService);

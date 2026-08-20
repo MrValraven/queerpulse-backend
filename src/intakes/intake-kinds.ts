@@ -9,7 +9,14 @@
  *
  * Each value maps to exactly one frontend intake modal:
  *  - `grant`             → resources/GrantApplicationModal
- *  - `suggest_edit`      → resources/SuggestEditModal (glossary edit)
+ *  - `suggest_edit`      → resources/SuggestEditModal, opened from
+ *                          resources/SuggestEditTrigger. Started as a
+ *                          glossary-only edit form; now shared by Legal,
+ *                          Trans Healthcare, Harm Reduction, Mental Health and
+ *                          the Library grid too. The jsonb payload's
+ *                          `context` field (e.g. "glossary", "legal",
+ *                          "library") tells staff which surface a suggestion
+ *                          came from — no schema change needed to add it.
  *  - `sober_host`        → resources/SoberHostModal
  *  - `panel_signup`      → resources/PanelSignupModal
  *  - `incubator_cohort`  → economy/IncubatorModals · CohortApplyModal
@@ -18,6 +25,17 @@
  *  - `governance_concern`→ governance/GovernanceSections · RaiseSection
  *                          (the public "Submit a concern" form; staff triage it
  *                          on the /admin/concerns dashboard)
+ *  - `culture_suggest_pick`    → culture/CultureFormModals · SuggestPickModal
+ *  - `culture_post_project`    → culture/CultureFormModals · PostProjectModal
+ *  - `culture_submit_work`     → culture/CultureFormModals · SubmitWorkModal
+ *  - `culture_submit_playlist` → culture/CultureFormModals · SubmitPlaylistModal
+ *                          (Culture's four member-submission forms: previously
+ *                          wired to a prototype-only local timer that never
+ *                          sent anything anywhere; now recorded for real
+ *                          through this same generic pipeline, same as every
+ *                          other kind above. No dedicated admin page reads
+ *                          them yet — visible via `GET /intakes?kind=...` —
+ *                          so their success copy makes no reply-time promise.)
  */
 export const INTAKE_KINDS = [
   'grant',
@@ -28,6 +46,10 @@ export const INTAKE_KINDS = [
   'incubator_mentor',
   'incubator_session',
   'governance_concern',
+  'culture_suggest_pick',
+  'culture_post_project',
+  'culture_submit_work',
+  'culture_submit_playlist',
 ] as const;
 
 export type IntakeKind = (typeof INTAKE_KINDS)[number];

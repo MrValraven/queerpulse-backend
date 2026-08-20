@@ -30,6 +30,7 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { StaffRolesGuard } from '../auth/guards/staff-roles.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreatePieceMessageDto } from './dto/create-piece-message.dto';
+import { FileDraftDto } from './dto/file-draft.dto';
 import { SubmitPitchDto } from './dto/submit-pitch.dto';
 import { UpdateBylineDto } from './dto/update-byline.dto';
 import { MagazinePieceService } from './magazine-piece.service';
@@ -120,14 +121,17 @@ export class MagazineWriterController {
     summary: "File a draft for the authenticated writer's own piece.",
   })
   @ApiOkResponse({ description: 'The updated assignment.' })
-  @ApiBadRequestResponse({ description: 'Malformed piece id.' })
+  @ApiBadRequestResponse({
+    description: 'Malformed piece id, or an invalid `blocks` payload.',
+  })
   @ApiNotFoundResponse({ description: 'No piece exists for this id.' })
   @ApiForbiddenResponse({ description: "The piece isn't this writer's." })
   fileDraft(
     @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: FileDraftDto,
     @CurrentUser() user: CurrentUserData,
   ) {
-    return this.magazinePieces.fileDraft(user.userId, id);
+    return this.magazinePieces.fileDraft(user.userId, id, dto);
   }
 
   @Get('pieces/:id/messages')

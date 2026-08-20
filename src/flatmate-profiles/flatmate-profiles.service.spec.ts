@@ -6,6 +6,7 @@ import { MessagingService } from '../messaging/messaging.service';
 import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
+import { UpsertFlatmateProfileDto } from './dto/upsert-flatmate-profile.dto';
 import {
   FlatmateProfile,
   FlatmateProfileType,
@@ -42,15 +43,27 @@ function makeFlatmate(
   };
 }
 
-const UPSERT_DTO = {
+// Typed as the real DTO (not the previous `as never` cast) so spreading it
+// with an override below type-checks: spreading a `never`-typed value is a
+// compile error ("Spread types may only be created from object types").
+const UPSERT_DTO: UpsertFlatmateProfileDto = {
   type: FlatmateProfileType.Seeking,
   budgetEuros: 600,
-} as never;
+};
 
 describe('FlatmateProfilesService', () => {
   let service: FlatmateProfilesService;
-  let flatmates: RepoMock;
-  let profiles: RepoMock;
+  // Declared with the exact method shape (rather than the bare `RepoMock`
+  // index-signature alias) so `flatmates.findOne.mockResolvedValue(...)`-style
+  // chained access doesn't see `noUncheckedIndexedAccess`'s `| undefined`.
+  let flatmates: {
+    findOne: jest.Mock;
+    exists: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+    remove: jest.Mock;
+  };
+  let profiles: { find: jest.Mock; findOne: jest.Mock };
   let messaging: { deliverEnquiry: jest.Mock };
   let verification: {
     requireLevel: jest.Mock;
@@ -103,7 +116,7 @@ describe('FlatmateProfilesService', () => {
       const result = await service.upsertMine('owner-1', {
         ...UPSERT_DTO,
         about: 'new bio',
-      } as never);
+      });
 
       // PUT semantics: the write goes to the loaded row (no create/slug work).
       expect(flatmates.create).not.toHaveBeenCalled();

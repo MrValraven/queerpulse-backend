@@ -11,6 +11,7 @@ export enum GovernanceLogAction {
   MemberRemoved = 'member_removed',
   OwnershipTransferred = 'ownership_transferred',
   Archived = 'archived',
+  Unarchived = 'unarchived',
   Frozen = 'frozen',
   Unfrozen = 'unfrozen',
   // Written by `CommunityOwnerOrphanService.handleOwnerErasure` when a

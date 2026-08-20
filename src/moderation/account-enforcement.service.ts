@@ -23,6 +23,18 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * Default `restrict` duration when the caller doesn't send one. The moderation
+ * queue drawer (`AdminReportDrawer.tsx`) has no duration input for ANY action
+ * today (`ban` is always sent duration-less too, and is permanent as a
+ * result) — a `restrict` needs a duration, so an unspecified one falls back to
+ * this rather than 400ing on every real click. A week is long enough to change
+ * a member's next actions, short enough that a mis-click self-corrects without
+ * needing a "lift restriction" endpoint (there isn't one — see `restricted`'s
+ * doc comment on `User`).
+ */
+const DEFAULT_RESTRICTION_DURATION = '7d';
+
+/**
  * The account-enforcement cluster, extracted from `ModerationService` as a
  * behavior-preserving concern split: applying a moderator action to the
  * reported member (`enforceAgainstUser`), restoring a member
@@ -114,23 +126,39 @@ export class AccountEnforcementService {
    * Applies a moderator action to the reported *member*, if the action is one
    * that has an effect on an account.
    *
-   * Returns the suspended user's id (so the caller can revoke their sessions
-   * outside the transaction) alongside the suspension's expiry — `null` for a
-   * permanent ban, a `Date` for a time-boxed suspension — so the caller can put
-   * "suspended until X" in the outcome notification. Returns `null` when the
-   * action was not an enforcement action.
+   * Returns the affected user's id (so the caller can revoke their sessions
+   * outside the transaction) alongside the sanction's expiry — `null` for a
+   * permanent ban, a `Date` for a time-boxed suspension or a restriction — so
+   * the caller can put "until X" in the outcome notification. Returns `null`
+   * when the action was not an enforcement action.
    *
-   * `restrict` is deliberately NOT handled here: there is no scoped-restriction
-   * model in this codebase to write to. It continues to resolve the report and
-   * write an audit row, and has NO enforcement effect. That is a known gap, not
-   * an oversight — do not read its absence as "already handled".
+   * `restrict` writes the scoped restriction (`User.restricted` +
+   * `restrictedUntil`), enforced by `NotRestrictedGuard` on the specific write
+   * actions it gates (forum thread + reply creation) — NOT the full
+   * suspend/ban lockout `ActiveMemberGuard` enforces. A restricted member stays
+   * `Active` and keeps every other read/write. This used to be a documented
+   * no-op ("no scoped-restriction model in this codebase") — it now is one.
    */
   async enforceAgainstUser(
     manager: EntityManager,
     report: Report,
     dto: { action: ModActionCode; duration?: string },
-  ): Promise<{ userId: string; suspendedUntil: Date | null } | null> {
-    if (dto.action !== 'suspend' && dto.action !== 'ban') {
+  ): Promise<{
+    userId: string;
+    suspendedUntil: Date | null;
+    /**
+     * Discriminates a `restrict` result from `suspend`/`ban`: callers must NOT
+     * revoke the member's sessions for a restriction (see this method's doc
+     * comment — it is deliberately not a lockout), only for the two actions
+     * that actually change `status`.
+     */
+    kind: 'suspend' | 'ban' | 'restrict';
+  } | null> {
+    if (
+      dto.action !== 'suspend' &&
+      dto.action !== 'ban' &&
+      dto.action !== 'restrict'
+    ) {
       return null;
     }
 
@@ -153,6 +181,45 @@ export class AccountEnforcementService {
     const userId = profile.userId;
 
     const now = new Date();
+
+    if (dto.action === 'restrict') {
+      // No permanent/indefinite restriction — see `User.restricted`'s doc
+      // comment — so this is always time-boxed, falling back to
+      // `DEFAULT_RESTRICTION_DURATION` when the caller sends none.
+      const restrictedUntil = parseDuration(
+        dto.duration ?? DEFAULT_RESTRICTION_DURATION,
+        now,
+      );
+
+      const restrictedUser = await manager.findOne(User, {
+        where: { id: userId },
+      });
+      if (!restrictedUser) {
+        throw new BadRequestException(
+          'Could not restrict the reported member.',
+        );
+      }
+      // Same staff carve-out as suspend/ban below — a moderator may only act
+      // against an ordinary member.
+      if (restrictedUser.role !== UserRole.Member) {
+        throw new ForbiddenException(
+          'Moderation actions cannot target staff accounts.',
+        );
+      }
+
+      // Deliberately does NOT touch `status`/`suspendedUntil` or run
+      // `syncDeactivationPreviousStatus`: a restriction never changes what the
+      // member's account status is, only what a couple of specific write
+      // actions accept while it's active (see `NotRestrictedGuard`).
+      await manager.update(
+        User,
+        { id: userId },
+        { restricted: true, restrictedUntil },
+      );
+
+      return { userId, suspendedUntil: restrictedUntil, kind: 'restrict' };
+    }
+
     // `ban` is permanent (NULL never expires); `suspend` is time-boxed.
     // Requiring exactly one of these shapes means a missing or malformed
     // duration can never quietly become a permanent ban.
@@ -204,7 +271,11 @@ export class AccountEnforcementService {
       UserStatus.Suspended,
     );
 
-    return { userId, suspendedUntil };
+    return {
+      userId,
+      suspendedUntil,
+      kind: dto.action === 'ban' ? 'ban' : 'suspend',
+    };
   }
 
   /**

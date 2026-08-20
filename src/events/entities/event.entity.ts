@@ -119,6 +119,26 @@ export class Event {
   @Column({ type: 'timestamptz', nullable: true })
   reminderSentAt!: Date | null;
 
+  // ── Manage-dashboard "Options" toggles — see `AddEventOptionsFlags`'s doc
+  // for why only these two of the four mock toggles got a real backend field.
+  @Column({ type: 'boolean', default: true })
+  allowWaitlist!: boolean;
+
+  @Column({ type: 'boolean', default: true })
+  showAttendeeCount!: boolean;
+
+  // ── Recurring series (MSG-10) — see `EventSeries`'s class doc. Both null
+  // for a standalone (non-repeating) event; both set together, never one
+  // without the other.
+  @Index('IDX_events_series_id')
+  @Column({ type: 'uuid', nullable: true })
+  seriesId!: string | null;
+
+  // 0-based position of this occurrence within its series (0 = the first,
+  // the one whose own `startAt` the host originally picked).
+  @Column({ type: 'int', nullable: true })
+  seriesIndex!: number | null;
+
   // Millisecond precision (not Postgres's microsecond default): matches the
   // resolution of the JS `Date` cursor `cursorPaginate` builds from this
   // column, so the raw column can be ordered/filtered on directly instead of

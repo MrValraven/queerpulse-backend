@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, MoreThanOrEqual, Not, Repository } from 'typeorm';
+import { AdminCommunityCardDTO } from '../admin-communities/admin-communities-response';
+import { AdminCommunitiesService } from '../admin-communities/admin-communities.service';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
@@ -107,6 +109,15 @@ interface FeedCandidate {
  * age that `computeCounts()` doesn't expose, and getting those still requires
  * fetching the open reports directly — injecting `ModerationService` on top
  * of that would just be a second, redundant path to the same repository.
+ *
+ * `stats.communityHealth` is the one exception to "computed here": it is
+ * `AdminCommunitiesService.listCommunities()`'s own per-community
+ * `healthScore`/`needsSupport`, rolled up into a platform-wide figure by
+ * `summariseCommunityHealth`. That score's formula lives in
+ * `admin-communities-response.ts` and is deliberately not duplicated here —
+ * unlike the reports-open/triage counts above, there is no cheaper direct
+ * query for it, only the same aggregation `AdminCommunitiesService` already
+ * runs for the communities admin section.
  */
 @Injectable()
 export class AdminOverviewService {
@@ -124,6 +135,7 @@ export class AdminOverviewService {
     @InjectRepository(Community)
     private readonly communities: Repository<Community>,
     private readonly usersService: UsersService,
+    private readonly adminCommunities: AdminCommunitiesService,
   ) {}
 
   async getOverview(): Promise<AdminOverviewDTO> {
@@ -135,6 +147,13 @@ export class AdminOverviewService {
     const memberGrowthWindowStart = new Date(
       now.getTime() - MEMBER_GROWTH_WEEK_COUNT * WEEK_MS,
     );
+
+    // Started here, ahead of the query waves below, so it runs fully
+    // concurrently with them rather than serializing after — it is
+    // `AdminCommunitiesService`'s own self-contained, already-batched-and-capped
+    // query set (see that service's `listCommunities` doc), not one more query
+    // to fold into the wave budget above.
+    const communityHealthPromise = this.adminCommunities.listCommunities();
 
     // 14 independent queries, run in 3 waves of at most 5 concurrent queries
     // (mirroring `SearchService.MAX_CONCURRENT_QUERIES`) rather than one
@@ -333,6 +352,10 @@ export class AdminOverviewService {
       recentJoinRequestsForFeed,
     });
 
+    // --- stats.communityHealth ---
+    const { items: communityCards } = await communityHealthPromise;
+    const communityHealth = this.summariseCommunityHealth(communityCards);
+
     return {
       stats: {
         activeMembers: {
@@ -346,8 +369,7 @@ export class AdminOverviewService {
           emergencies: emergenciesCount,
         },
         medianResponseHours,
-        sustainerMrr: null,
-        sustainerCount: null,
+        communityHealth,
         verifiedMembers: verifiedMembersCount,
       },
       triage: {
@@ -632,6 +654,32 @@ export class AdminOverviewService {
     const memberRef = memberRefsByUserId.get(userId);
     if (!memberRef) return null;
     return `${memberRef.firstName} ${memberRef.lastName}`.trim();
+  }
+
+  /** Rolls `AdminCommunitiesService.listCommunities()`'s per-community
+   *  `healthScore`/`needsSupport` (already computed there — never
+   *  re-derived here) into the one platform-wide figure the overview
+   *  dashboard shows. `averageScore` is `null` only when there are no
+   *  communities at all, the same "nothing to measure yet" convention the
+   *  rest of this DTO uses rather than a fabricated 0. */
+  private summariseCommunityHealth(communityCards: AdminCommunityCardDTO[]): {
+    averageScore: number | null;
+    needingSupportCount: number;
+  } {
+    const needingSupportCount = communityCards.filter(
+      (communityCard) => communityCard.needsSupport,
+    ).length;
+    if (!communityCards.length) {
+      return { averageScore: null, needingSupportCount };
+    }
+    const totalHealthScore = communityCards.reduce(
+      (sum, communityCard) => sum + communityCard.healthScore,
+      0,
+    );
+    return {
+      averageScore: Math.round(totalHealthScore / communityCards.length),
+      needingSupportCount,
+    };
   }
 
   /** `weekCount` empty buckets, oldest first, each stamped with the ISO

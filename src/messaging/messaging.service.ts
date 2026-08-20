@@ -138,8 +138,14 @@ export class MessagingService {
     userId: string,
     rawQuery: string,
     limit?: number,
+    conversationId?: string,
   ): Promise<MessageSearchResponse> {
-    return this.messagesService.searchMessages(userId, rawQuery, limit);
+    return this.messagesService.searchMessages(
+      userId,
+      rawQuery,
+      limit,
+      conversationId,
+    );
   }
 
   sendMessage(
@@ -149,7 +155,7 @@ export class MessagingService {
     replyToId?: string,
     clientMessageId?: string,
     forwarded?: boolean,
-    kind?: 'user' | 'gif',
+    kind?: 'user' | 'gif' | 'image',
     attachment?: GifAttachment,
   ): Promise<MessageResponse> {
     return this.messagesService.sendMessage(

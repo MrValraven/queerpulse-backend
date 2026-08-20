@@ -263,6 +263,7 @@ export class MessagesService {
     userId: string,
     rawQuery: string,
     limit?: number,
+    conversationId?: string,
   ): Promise<MessageSearchResponse> {
     const query = rawQuery.trim();
     const cappedLimit = Math.min(
@@ -285,6 +286,14 @@ export class MessagesService {
         { userId },
       )
       .where('m.body ILIKE :pattern', { pattern })
+      // Single-thread scope ("search in this chat", opened from an already-open
+      // conversation) — additive on top of the participation join above, so a
+      // conversation the caller isn't in still yields zero rows rather than
+      // ever widening the search.
+      .andWhere(
+        conversationId ? 'm.conversation_id = :conversationId' : '1=1',
+        conversationId ? { conversationId } : {},
+      )
       // clearedAt floor: at-or-before the caller's clear point does not exist
       // for them (mirrors getMessages' history floor).
       .andWhere('(p.cleared_at IS NULL OR m.created_at > p.cleared_at)')
@@ -377,7 +386,7 @@ export class MessagesService {
     replyToId?: string,
     clientMessageId?: string,
     forwarded?: boolean,
-    kind?: 'user' | 'gif',
+    kind?: 'user' | 'gif' | 'image',
     attachment?: GifAttachment,
   ): Promise<MessageResponse> {
     const participant = await this.core.requireParticipant(

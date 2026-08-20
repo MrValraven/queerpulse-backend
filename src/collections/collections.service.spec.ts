@@ -106,7 +106,7 @@ describe('CollectionsService', () => {
         expect.objectContaining({ where: { ownerId: 'owner-1' } }),
       );
       expect(result).toHaveLength(1);
-      expect(result[0].itemCount).toBe(3);
+      expect(result[0]!.itemCount).toBe(3);
     });
   });
 
@@ -161,8 +161,8 @@ describe('CollectionsService', () => {
     it('applies provided fields and returns the fresh count', async () => {
       const { service, collections, collectionItems } = build();
       collections.findOne.mockResolvedValue(collectionRow());
-      collections.save.mockImplementation((value: Collection) =>
-        Promise.resolve(value),
+      collections.save.mockImplementation((value: unknown) =>
+        Promise.resolve(value as Collection),
       );
       collectionItems.count.mockResolvedValue(5);
 
@@ -216,9 +216,9 @@ describe('CollectionsService', () => {
 
       expect(savedItems.find).toHaveBeenCalledTimes(1); // one batched IN query, no N+1
       expect(detail.items).toHaveLength(2);
-      expect(detail.items[0].title).toBe('Coming Out: A Guide');
+      expect(detail.items[0]!.title).toBe('Coming Out: A Guide');
       // Orphan falls back to a bare title keyed off the subject id.
-      expect(detail.items[1].title).toBe('orphaned-slug');
+      expect(detail.items[1]!.title).toBe('orphaned-slug');
       expect(detail.itemCount).toBe(2);
     });
 

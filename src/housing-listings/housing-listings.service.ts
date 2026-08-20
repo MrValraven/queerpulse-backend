@@ -89,6 +89,20 @@ export interface ListMyHousingQueryInput {
   page?: number;
 }
 
+// HSG-3: how long a new (or freshly-extended) listing stays live before the
+// daily sweep withholds it from public browse. 60 days comfortably covers a
+// typical room/sublet search cycle without letting a stale listing linger
+// indefinitely (mirrors the `board_posts` kind-dependent expiry precedent —
+// looking=30d/offering=90d — sitting between the two since a housing listing
+// is neither).
+const DEFAULT_LISTING_LIFETIME_DAYS = 60;
+
+function computeExpiry(from: Date = new Date()): Date {
+  return new Date(
+    from.getTime() + DEFAULT_LISTING_LIFETIME_DAYS * 24 * 60 * 60 * 1000,
+  );
+}
+
 /**
  * Member-submitted housing listings. `ref` (`QPH-<year>-<seq>`) is the owner
  * mutation identifier; `GET/PATCH/DELETE /housing-listings/:ref` are all
@@ -170,6 +184,43 @@ export class HousingListingsService {
     const listing = await this.loadOr404(ref);
     this.assertOwner(listing, userId);
     await this.listings.remove(listing);
+  }
+
+  /** Owner self-service "found a place" (HSG-1) — withholds the listing from
+   * public browse (see `HousingDirectoryService.browse`) without touching the
+   * moderation `status` or deleting anything. Reversible via `markAvailable`. */
+  async markFilled(ref: string, userId: string): Promise<HousingListingDTO> {
+    const listing = await this.loadOr404(ref);
+    this.assertOwner(listing, userId);
+    listing.filledAt = new Date();
+    const saved = await this.listings.save(listing);
+    return this.buildDTO(saved);
+  }
+
+  /** Reverses `markFilled`/an auto-expiry. If the listing's `expiresAt` has
+   * already passed, also refreshes it — otherwise the next daily sweep would
+   * immediately re-mark it filled, silently undoing the owner's action. */
+  async markAvailable(ref: string, userId: string): Promise<HousingListingDTO> {
+    const listing = await this.loadOr404(ref);
+    this.assertOwner(listing, userId);
+    listing.filledAt = null;
+    if (listing.expiresAt.getTime() <= Date.now()) {
+      listing.expiresAt = computeExpiry();
+    }
+    const saved = await this.listings.save(listing);
+    return this.buildDTO(saved);
+  }
+
+  /** Owner self-service "renew" (HSG-3) — refreshes `expiresAt` to a fresh
+   * `DEFAULT_LISTING_LIFETIME_DAYS`-day window. Deliberately does not touch
+   * `filledAt`: extending a listing the owner marked filled on purpose
+   * shouldn't silently un-hide it from browse — call `markAvailable` for that. */
+  async extend(ref: string, userId: string): Promise<HousingListingDTO> {
+    const listing = await this.loadOr404(ref);
+    this.assertOwner(listing, userId);
+    listing.expiresAt = computeExpiry();
+    const saved = await this.listings.save(listing);
+    return this.buildDTO(saved);
   }
 
   /**
@@ -394,6 +445,8 @@ export class HousingListingsService {
             virtualTourUrl: dto.virtualTourUrl ?? null,
             riskScore: assessment.score,
             riskReasons: assessment.reasons,
+            filledAt: null,
+            expiresAt: computeExpiry(),
           }),
         );
       } catch (err) {

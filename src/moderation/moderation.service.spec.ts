@@ -75,6 +75,14 @@ const baseReport = (overrides: Partial<Report> = {}): Report => ({
   slaDueAt: new Date('2026-01-02T00:00:00.000Z'),
   status: ReportStatus.Open,
   reporterId: 'reporter-1',
+  assignedModeratorId: null,
+  assignedAt: null,
+  resolvedAt: null,
+  resolutionActorId: null,
+  resolutionAction: null,
+  resolutionDuration: null,
+  resolutionNote: null,
+  resolutionNotified: null,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   ...overrides,
 });
@@ -222,6 +230,8 @@ describe('ModerationService', () => {
   interface UserPatch {
     status: UserStatus;
     suspendedUntil: Date | null;
+    restricted?: boolean;
+    restrictedUntil?: Date | null;
   }
   type UpdateCall = [unknown, { id: string }, UserPatch];
 
@@ -1018,25 +1028,36 @@ describe('ModerationService', () => {
         expect(memberCall()).toHaveLength(3);
       });
 
-      it.each([
-        'dismiss',
-        'escalate',
-        'hide_content',
-        'remove_content',
-        'restrict',
-      ])(
+      it.each(['dismiss', 'escalate', 'hide_content', 'remove_content'])(
         '%s does not notify the member (no account-facing outcome)',
         async (action) => {
           await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
             action,
             reasonCode: 'harassment',
             note: 'n',
-            ...(action === 'restrict' ? { duration: '7d' } : {}),
           } as never);
 
           expect(memberCall()).toBeUndefined();
         },
       );
+
+      it('restrict notifies the member and carries the expiry', async () => {
+        await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+          action: 'restrict',
+          reasonCode: 'harassment',
+          note: 'Cool it for a week.',
+          duration: '7d',
+        });
+
+        const call = memberCall();
+        expect(call?.[0]).toBe('user-1');
+        expect(call?.[2]).toEqual(
+          expect.objectContaining({
+            action: 'restrict',
+            expiresAt: expect.any(String),
+          }),
+        );
+      });
 
       it('never notifies a moderator acting on their own report', async () => {
         // The reported member IS the actor (edge case) — no self-notification.
@@ -1142,7 +1163,7 @@ describe('ModerationService', () => {
       },
     );
 
-    it('restrict remains unenforced — a known gap, asserted so it is not mistaken for done', async () => {
+    it('restrict sets the member restricted with an expiry from the duration, leaving status untouched', async () => {
       await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
         action: 'restrict',
         reasonCode: 'harassment',
@@ -1150,7 +1171,29 @@ describe('ModerationService', () => {
         duration: '7d',
       });
 
-      expect(userUpdates()).toHaveLength(0);
+      const [, where, patch] = userUpdates()[0]!;
+      expect(where).toEqual({ id: 'user-1' });
+      expect(patch).not.toHaveProperty('status');
+      expect(patch).not.toHaveProperty('suspendedUntil');
+      expect(patch.restricted).toBe(true);
+      expect(patch.restrictedUntil).toBeInstanceOf(Date);
+      const days =
+        ((patch.restrictedUntil as Date).getTime() - Date.now()) /
+        (24 * 60 * 60 * 1000);
+      expect(days).toBeGreaterThan(6.9);
+      expect(days).toBeLessThan(7.1);
+    });
+
+    it('restrict without a duration falls back to a default rather than 400ing', async () => {
+      await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+        action: 'restrict',
+        reasonCode: 'harassment',
+        note: 'n',
+      });
+
+      const [, , patch] = userUpdates()[0]!;
+      expect(patch.restricted).toBe(true);
+      expect(patch.restrictedUntil).toBeInstanceOf(Date);
     });
 
     it('preserves a member-initiated deactivation rather than overwriting it', async () => {

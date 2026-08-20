@@ -1,4 +1,9 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Agent as HttpsAgent } from 'node:https';
@@ -124,6 +129,33 @@ export class PushService implements OnModuleInit {
 
   async removeSubscription(userId: string, endpoint: string): Promise<void> {
     await this.subscriptions.delete({ userId, endpoint });
+  }
+
+  // Backs `GET /push/subscriptions` — lets a member see every device currently
+  // registered to receive their pushes (IDN-7: a lost/stolen device otherwise
+  // has no remote "stop sending this device pushes" control). Newest first, to
+  // match the sessions list's ordering convention.
+  async listSubscriptions(userId: string): Promise<PushSubscription[]> {
+    return this.subscriptions.find({
+      where: { userId },
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  // Backs `DELETE /push/subscriptions/:id`. Ownership is verified by userId,
+  // not just the row id, so one member can never revoke another member's
+  // device (IDOR) — mirrors `AccountService.revokeSession`.
+  async removeSubscriptionById(
+    userId: string,
+    subscriptionId: string,
+  ): Promise<void> {
+    const row = await this.subscriptions.findOne({
+      where: { id: subscriptionId, userId },
+    });
+    if (!row) {
+      throw new NotFoundException('Push subscription not found');
+    }
+    await this.subscriptions.delete(row.id);
   }
 
   // Single-recipient convenience wrapper — delegates to `sendToUsers` so every

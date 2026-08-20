@@ -39,6 +39,13 @@ import {
  * `description` already use. The engagement numbers themselves
  * (`reactionCount`/`replyCount`) stay structured integers rather than a
  * single opaque "stats" string, since the frontend needs real counts.
+ *
+ * DISC-5 UPDATE — this table's "materialize, don't aggregate" posture now
+ * also covers real forum threads: `forumThreadId` below links a row to the
+ * `ForumThread` it was created from when that thread's tags matched a topic
+ * (`TopicPostLinkService`). This still isn't the read-time aggregation
+ * rejected in (1) above — the link is written ONCE at thread-create time,
+ * not recomputed on every topic-page read.
  */
 @Entity('topic_post')
 @Index('IDX_topic_post_topic_id_created_at_id', ['topicId', 'createdAt', 'id'])
@@ -124,6 +131,21 @@ export class TopicPost {
 
   @Column({ type: 'varchar' })
   href!: string;
+
+  /** DISC-5 — the `forum_thread` this row was materialized from, when it was
+   *  linked automatically because the thread carried a tag matching this
+   *  topic's own `tag` (`TopicPostLinkService.linkThread`, called from
+   *  `ForumThreadsService.create`). NULL for every hand-curated/seeded row —
+   *  see `1792400000000-AddTopicPostForumThreadLink` for the nullability and
+   *  `ON DELETE CASCADE` rationale. Only thread CREATION is reconciled; a tag
+   *  added to an existing thread afterwards is not retroactively linked — a
+   *  documented gap, not a fake success, matching the `topVoices`/`resources`
+   *  gaps `topics.adapters.tsx` already documents on the frontend side. */
+  @Index('IDX_topic_post_forum_thread_id', {
+    where: '"forum_thread_id" IS NOT NULL',
+  })
+  @Column({ type: 'uuid', nullable: true })
+  forumThreadId!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

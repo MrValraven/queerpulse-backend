@@ -12,6 +12,7 @@ import { HousingDirectoryController } from './housing-directory.controller';
 import { HousingDirectoryService } from './housing-directory.service';
 import { HousingListingsController } from './housing-listings.controller';
 import { HousingListingsService } from './housing-listings.service';
+import { HousingListingExpirySweeperService } from './housing-listing-expiry-sweeper.service';
 import { HousingListing } from './entities/housing-listing.entity';
 
 @Module({
@@ -41,7 +42,15 @@ import { HousingListing } from './entities/housing-listing.entity';
     HousingDirectoryController,
     AdminHousingListingsController,
   ],
-  providers: [HousingListingsService, HousingDirectoryService],
+  providers: [
+    HousingListingsService,
+    HousingDirectoryService,
+    // HSG-3 daily expiry sweep (see the service's own doc comment). Registered
+    // here, not exported — it's a background job, not a dependency of another
+    // module. `ScheduleModule.forRoot()` is already wired app-wide in
+    // `app.module.ts`.
+    HousingListingExpirySweeperService,
+  ],
   // HousingDirectoryService is exported for the cross-entity SearchModule
   // (public LIVE-listing search); the owner-mutation HousingListingsService
   // stays module-private.

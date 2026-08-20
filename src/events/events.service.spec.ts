@@ -9,6 +9,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { ListingLookupService } from '../listings/listing-lookup.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
@@ -21,6 +22,7 @@ import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
 import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventRsvp } from './entities/event-rsvp.entity';
+import { EventSeries } from './entities/event-series.entity';
 import { Event, EventStatus, EventVisibility } from './entities/event.entity';
 import { EventsService } from './events.service';
 import { RsvpService } from './rsvp.service';
@@ -525,6 +527,7 @@ describe('EventsService.addCohostByUserId', () => {
       {} as unknown as Repository<EventRsvp>,
       {} as unknown as Repository<EventInvite>,
       {} as unknown as Repository<EventLineupEntry>,
+      {} as unknown as Repository<EventSeries>,
       {} as unknown as Repository<Profile>,
       {} as unknown as UsersService,
       {} as unknown as RsvpService,
@@ -535,6 +538,7 @@ describe('EventsService.addCohostByUserId', () => {
       {} as unknown as EventBookmarksService,
       {} as unknown as EventAudienceGateService,
       {} as unknown as MediaCropService,
+      {} as unknown as ListingLookupService,
     );
   });
 

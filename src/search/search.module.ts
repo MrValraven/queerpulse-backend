@@ -10,6 +10,7 @@ import { HousingListingsModule } from '../housing-listings/housing-listings.modu
 import { ResourcesModule } from '../resources/resources.module';
 import { WorkshopsModule } from '../workshops/workshops.module';
 import { SubprofilesModule } from '../subprofiles/subprofiles.module';
+import { ContentModule } from '../content/content.module';
 import { SearchController } from './search.controller';
 import { SearchService } from './search.service';
 
@@ -26,6 +27,7 @@ import { SearchService } from './search.service';
     ResourcesModule,
     WorkshopsModule,
     SubprofilesModule,
+    ContentModule,
   ],
   controllers: [SearchController],
   providers: [SearchService],

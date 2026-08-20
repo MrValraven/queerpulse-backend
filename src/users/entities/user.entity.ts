@@ -108,6 +108,30 @@ export class User {
   @Column({ type: 'timestamptz', nullable: true })
   suspendedUntil!: Date | null;
 
+  /**
+   * A scoped moderation restriction — the `restrict` action's real effect (see
+   * `AccountEnforcementService.enforceAgainstUser`). Deliberately orthogonal to
+   * `status`/`suspendedUntil`: a restricted member stays `Active` and keeps
+   * ordinary read/browse access and most writes; only the handlers gated by
+   * `NotRestrictedGuard` (forum thread + reply creation; starting a
+   * conversation, a group, or a message request; sending a message) reject
+   * them while `restricted` is true. Always paired with a `restrictedUntil`
+   * expiry — there
+   * is no permanent/indefinite restriction, so it always self-lifts and never
+   * needs a moderator "lift" action.
+   */
+  @Column({ type: 'boolean', default: false })
+  restricted!: boolean;
+
+  /**
+   * When the current restriction lapses. Lazy expiry with write-through in
+   * `JwtStrategy.liftExpiredRestriction`, mirroring `suspendedUntil`'s pattern:
+   * the member's own next request clears it. Meaningless while
+   * `restricted = false` (always `null` then).
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  restrictedUntil!: Date | null;
+
   @Column({ type: 'timestamptz', nullable: true })
   activatedAt!: Date | null;
 

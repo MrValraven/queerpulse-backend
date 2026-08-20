@@ -186,6 +186,34 @@ export enum NotificationType {
   // `AddListingClaimNotificationTypes1790800200000`.
   ListingClaimApproved = 'listing_claim_approved',
   ListingClaimDeclined = 'listing_claim_declined',
+  // Sent to a listing's owner when a moderator ACCEPTS a non-owner member's
+  // suggested correction (`ListingEditSuggestionsService.resolve`) — before
+  // this, accepting a suggestion silently updated only the suggestion row
+  // itself and told the owner nothing. System-driven — no actor and no
+  // preference toggle, like `ListingApproved`: it's the platform reporting a
+  // change to the owner's own listing, not "moderator X did this". Payload
+  // carries `{ source: 'listing', listingSlug, field }` for the bell copy.
+  // See migration `AddListingEditSuggestionAcceptedNotificationType1791900000000`.
+  ListingEditSuggestionAccepted = 'listing_edit_suggestion_accepted',
+  // Sent to a member who follows a topic (`topic_follows`) when a new post
+  // lands on it — a forum thread created with a tag matching that topic
+  // (`TopicPostLinkService`, content module). Carries the posting member as
+  // `payload.actorId` (block/mute applies), plus `topicSlug`/`topicLabel`/
+  // `source: 'forum'`/`threadSlug`/`threadTitle` for the bell copy + deep
+  // link. No `NotificationPreferenceCategory` gates it — the topic FOLLOW
+  // itself is the member's consent, mirroring `HousingListingMatch`'s
+  // `alertsEnabled` precedent (see `TopicFollowNotificationsListener`'s
+  // docstring). See migration `AddTopicNewPostNotificationType1792400100000`.
+  TopicNewPost = 'topic_new_post',
+  // Sent to the nominator when an admin approves or dismisses their Change
+  // Makers nomination (`AdminChangemakerNominationsService.triage`, COM-17:
+  // nominations used to be a one-way black hole — a submit toast, then
+  // silence forever). System-driven — no actor — payload carries
+  // `{ nomineeName, reviewNote }`. Mirrors `WriterApplicationApproved`/
+  // `WriterApplicationDeclined`. See migration
+  // `AddChangemakerNominationTriage1792500100000`.
+  ChangemakerNominationApproved = 'changemaker_nomination_approved',
+  ChangemakerNominationDismissed = 'changemaker_nomination_dismissed',
 }
 
 @Entity('notifications')

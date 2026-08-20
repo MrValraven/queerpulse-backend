@@ -17,6 +17,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { AddMembersDto } from './dto/add-members.dto';
 import { ChangeMemberRoleDto } from './dto/change-member-role.dto';
@@ -92,6 +93,7 @@ export class ConversationsController {
 
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Post()
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: 'Open (or reuse) a 1:1 conversation with a member by handle',
   })
@@ -103,7 +105,7 @@ export class ConversationsController {
   })
   @ApiForbiddenResponse({
     description:
-      'The two members are not connected, or one has blocked the other.',
+      'The two members are not connected, or one has blocked the other, or the caller is under an active moderation restriction.',
   })
   @ApiNotFoundResponse({ description: 'The recipient handle does not exist.' })
   create(
@@ -124,6 +126,7 @@ export class ConversationsController {
    */
   @Throttle({ default: { limit: 15, ttl: seconds(60) } })
   @Post('group')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: 'Create a group conversation (caller becomes owner)',
   })
@@ -276,6 +279,7 @@ export class ConversationsController {
 
   @Throttle({ default: { limit: 60, ttl: seconds(60) } })
   @Post(':id/messages')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Send a message to a conversation' })
   @ApiCreatedResponse({
     description:
@@ -286,7 +290,7 @@ export class ConversationsController {
   })
   @ApiForbiddenResponse({
     description:
-      'Not a participant, has left the group, is blocked, or is not a connected member.',
+      'Not a participant, has left the group, is blocked, is not a connected member, or is under an active moderation restriction.',
   })
   @ApiNotFoundResponse({
     description: 'The conversation or the replied-to message was not found.',
@@ -614,6 +618,7 @@ export class MessageRequestController {
       user.userId,
       query.q,
       query.limit,
+      query.conversationId,
     );
   }
 
@@ -638,6 +643,7 @@ export class MessageRequestController {
 
   @Throttle({ default: { limit: 15, ttl: seconds(60) } })
   @Post('request')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: 'Send a first-contact message request to a member by handle',
   })
@@ -648,7 +654,8 @@ export class MessageRequestController {
     description: 'Invalid body, or the recipient is the caller.',
   })
   @ApiForbiddenResponse({
-    description: 'The recipient has blocked the caller (or vice versa).',
+    description:
+      'The recipient has blocked the caller (or vice versa), or the caller is under an active moderation restriction.',
   })
   @ApiNotFoundResponse({ description: 'The recipient handle does not exist.' })
   request(

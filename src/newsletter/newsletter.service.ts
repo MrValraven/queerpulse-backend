@@ -7,6 +7,7 @@ import { MailerService } from '../mailer/mailer.service';
 import type {
   ConfirmResultDto,
   SubscribeResultDto,
+  UnsubscribeResultDto,
 } from './dto/newsletter-response.dto';
 import { NewsletterSubscription } from './entities/newsletter-subscription.entity';
 
@@ -46,6 +47,10 @@ export class NewsletterService {
       existing.status = 'pending';
       existing.confirmToken = confirmToken;
       existing.confirmedAt = null;
+      // A re-subscribe fully resets the row's lifecycle, including a prior
+      // unsubscribe — otherwise a resubscribed-then-reconfirmed row would
+      // still carry a stale unsubscribedAt alongside its new confirmedAt.
+      existing.unsubscribedAt = null;
       await this.subscriptions.save(existing);
     } else {
       await this.subscriptions.save(
@@ -72,6 +77,31 @@ export class NewsletterService {
       await this.subscriptions.save(subscription);
     }
     return { status: 'confirmed' };
+  }
+
+  /**
+   * Mark the address behind `token` unsubscribed (CNT-19). Reuses the same
+   * `confirmToken` a fresh subscribe mints — it doubles as this row's stable
+   * unsubscribe key rather than a second secret being generated for it — so
+   * an invalid/unknown token is rejected exactly like `confirm`'s. Idempotent:
+   * calling this on an already-unsubscribed row is not an error, it just
+   * reports `alreadyUnsubscribed: true` instead of stamping a new timestamp.
+   */
+  async unsubscribe(token: string): Promise<UnsubscribeResultDto> {
+    const subscription = token
+      ? await this.subscriptions.findOne({ where: { confirmToken: token } })
+      : null;
+    if (!subscription) {
+      throw new NotFoundException('Invalid or expired unsubscribe link.');
+    }
+
+    const alreadyUnsubscribed = subscription.status === 'unsubscribed';
+    if (!alreadyUnsubscribed) {
+      subscription.status = 'unsubscribed';
+      subscription.unsubscribedAt = new Date();
+      await this.subscriptions.save(subscription);
+    }
+    return { status: 'unsubscribed', alreadyUnsubscribed };
   }
 
   /**

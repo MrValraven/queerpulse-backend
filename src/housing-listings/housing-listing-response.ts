@@ -37,6 +37,17 @@ export interface HousingListingDTO {
    * that states exactly what the chip means (or why it's absent). */
   listingVerifiedReason: ListingVerifiedReason;
   createdAt: string;
+  /** Owner "found a place / no longer looking" signal (HSG-1), or null while
+   * still looking. Set by the owner (`mark-filled`/`mark-available`) or by the
+   * daily expiry sweep — either way, a filled listing is withheld from public
+   * browse but still visible to its owner on `GET /housing-listings/mine`. */
+  filledAt: string | null;
+  /** TTL (HSG-3) — auto-computed at create time, resettable via `extend`. */
+  expiresAt: string;
+  /** Server-computed `expiresAt < now` — avoids client clock skew. A listing
+   * can be expired before the daily sweep has actually run; browse already
+   * excludes it either way (see `HousingDirectoryService.browse`). */
+  expired: boolean;
 
   type: HousingListingType;
   title: string;
@@ -124,6 +135,9 @@ export function toHousingListingDTO(
     listingVerified: verified.verified,
     listingVerifiedReason: verified.reason,
     createdAt: listing.createdAt.toISOString(),
+    filledAt: listing.filledAt ? listing.filledAt.toISOString() : null,
+    expiresAt: listing.expiresAt.toISOString(),
+    expired: listing.expiresAt.getTime() < Date.now(),
 
     type: listing.type,
     title: listing.title,

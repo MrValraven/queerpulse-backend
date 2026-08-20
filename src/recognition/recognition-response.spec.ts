@@ -1,5 +1,8 @@
-import { BADGE_CATALOG, PERK_CATALOG } from './recognition.catalog';
-import type { RecognitionSignals } from './recognition.scoring';
+import { PERK_CATALOG } from './recognition.catalog';
+import {
+  BADGE_REQUIREMENTS,
+  type RecognitionSignals,
+} from './recognition.scoring';
 import {
   buildBadges,
   buildLevelLadder,
@@ -8,6 +11,11 @@ import {
   buildXpLedger,
   computeLevel,
 } from './recognition-response';
+
+// `founding-member` is the only `BADGE_CATALOG` entry with no
+// `BADGE_REQUIREMENTS` wiring, so it's excluded from `locked`/`discoverCount`
+// (COM-14) — this is the count of badges a member can actually still earn.
+const OBTAINABLE_BADGE_COUNT = Object.keys(BADGE_REQUIREMENTS).length;
 
 describe('computeLevel', () => {
   it('0 XP → Level 1 Newcomer, 0% progress, xpToNext = the full span', () => {
@@ -87,7 +95,7 @@ describe('buildBadges', () => {
       { badgeKey: 'first-gathering', context: 'Pride Brunch · Jun 2025' },
     ]);
     expect(result.earnedCount).toBe(1);
-    expect(result.discoverCount).toBe(BADGE_CATALOG.length - 1);
+    expect(result.discoverCount).toBe(OBTAINABLE_BADGE_COUNT - 1);
     expect(result.earned).toEqual([
       {
         key: 'first-gathering',
@@ -100,35 +108,29 @@ describe('buildBadges', () => {
         verifiedBy: 'auto',
       },
     ]);
-    expect(result.locked).toHaveLength(BADGE_CATALOG.length - 1);
+    expect(result.locked).toHaveLength(OBTAINABLE_BADGE_COUNT - 1);
     expect(result.locked.some((b) => b.key === 'first-gathering')).toBe(false);
   });
 
-  it('every wired badge is honestly verifiedBy "auto"; founding-member (no signal) has none', () => {
+  it('founding-member has no BADGE_REQUIREMENTS wiring, so it never appears in the locked grid (COM-14); every badge that does appear is honestly verifiedBy "auto"', () => {
     const result = buildBadges([]);
-    const founding = result.locked.find((b) => b.key === 'founding-member');
-    expect(founding?.verifiedBy).toBeUndefined();
+    expect(result.locked.some((b) => b.key === 'founding-member')).toBe(false);
+    expect(result.locked.every((b) => b.verifiedBy === 'auto')).toBe(true);
     const decade = result.locked.find((b) => b.key === 'decade');
     expect(decade?.verifiedBy).toBe('auto');
   });
 
   it('xpReward is derived from rarity for every badge', () => {
     const result = buildBadges([]);
-    const legendary = result.locked.find((b) => b.key === 'founding-member');
+    const legendary = result.locked.find((b) => b.key === 'event-host');
     expect(legendary?.xpReward).toBe(150);
     const common = result.locked.find((b) => b.key === 'first-gathering');
     expect(common?.xpReward).toBe(40);
   });
 
-  it('includes the time-limited seasonal band alongside earned/locked', () => {
+  it('the seasonal band is empty until a seasonal badge gets a real BADGE_REQUIREMENTS signal (COM-14) — none has one today', () => {
     const result = buildBadges([]);
-    expect(result.seasonal.length).toBeGreaterThan(0);
-    expect(result.seasonal[0]).toMatchObject({
-      seasonal: { when: expect.any(String) as string },
-    });
-    // Seasonal badges are content, not per-user state — never earned/locked
-    // via BADGE_CATALOG's own earn machinery.
-    expect(result.seasonal.every((b) => b.progress === undefined)).toBe(true);
+    expect(result.seasonal).toEqual([]);
   });
 
   describe('locked-badge progress', () => {
@@ -174,7 +176,7 @@ describe('buildBadges', () => {
   it('locked badges surface the catalogue lockedContext (how to earn it)', () => {
     const result = buildBadges([]);
     expect(result.earnedCount).toBe(0);
-    expect(result.discoverCount).toBe(BADGE_CATALOG.length);
+    expect(result.discoverCount).toBe(OBTAINABLE_BADGE_COUNT);
     const decade = result.locked.find((b) => b.key === 'decade');
     expect(decade?.context).toBe('Be a member for 1 year');
   });
@@ -184,25 +186,32 @@ describe('buildBadges', () => {
       { badgeKey: 'not-a-real-badge', context: '???' },
     ]);
     expect(result.earnedCount).toBe(0);
-    expect(result.discoverCount).toBe(BADGE_CATALOG.length);
+    expect(result.discoverCount).toBe(OBTAINABLE_BADGE_COUNT);
   });
 });
 
 describe('buildPerks', () => {
-  it('below every unlock level: nothing available, all perks bucketed as locked by level', () => {
+  it('at Level 1: vouch-access is already available (no level gate — COM-15), everything else is locked by level', () => {
     const result = buildPerks(1, 50, []);
-    expect(result.availableCount).toBe(0);
+    // `vouch-access` has `unlockLevel: 1` — any active member can vouch from
+    // day one, so it's never shown as locked behind a level (COM-15).
+    expect(result.availableCount).toBe(1);
     const labels = result.groups.map((g) => g.label);
-    expect(labels).not.toContain('Available to claim');
-    expect(labels.some((l) => l.startsWith('Coming at Level 3'))).toBe(true);
+    const available = result.groups.find(
+      (g) => g.label === 'Available to claim',
+    );
+    expect(available?.perks).toEqual([
+      expect.objectContaining({ title: 'Vouch access', state: 'available' }),
+    ]);
+    expect(labels.some((l) => l.startsWith('Coming at Level 4'))).toBe(true);
     expect(labels.some((l) => l.startsWith('Coming at Level 5'))).toBe(true);
     // Locked perks carry a lock footer, not the catalogue's available footer.
     const lockedGroup = result.groups.find((g) =>
-      g.label.startsWith('Coming at Level 3'),
+      g.label.startsWith('Coming at Level 4'),
     );
     expect(lockedGroup?.perks[0]).toMatchObject({
       state: 'locked',
-      footer: { type: 'lock', label: 'Unlocks at Level 3 · Regular' },
+      footer: { type: 'lock', label: 'Unlocks at Level 4 · Familiar' },
     });
   });
 
@@ -275,7 +284,7 @@ describe('buildRecognition', () => {
     expect(dto.level.name).toBe('Familiar');
     expect(dto.levelLadder).toHaveLength(7);
     expect(dto.badges.earnedCount).toBe(1);
-    expect(dto.badges.discoverCount).toBe(BADGE_CATALOG.length - 1);
+    expect(dto.badges.discoverCount).toBe(OBTAINABLE_BADGE_COUNT - 1);
     expect(dto.perks.ladder).toHaveLength(7);
     expect(Array.isArray(dto.perks.groups)).toBe(true);
     // No signals passed => xpLedger is owner-gated closed, same as xpBreakdown.

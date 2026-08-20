@@ -27,6 +27,15 @@ import { toCsv } from './export-csv';
  * key, not the category id the request used, so `forumPosts` is `posts.csv` and
  * `activityLog` is `activity.csv`. `manifest` is excluded: it is metadata about
  * the export, not a category of member data, and it stays JSON.
+ *
+ * The first six are the original core contributions
+ * (`AccountExportService.coreContributions`); the remaining six are the
+ * newer-domain contributors registered in `data-export-contributors.ts` /
+ * `NEW_DOMAIN_EXPORT_CONTRIBUTORS` (subprofiles, listings, housing, saved,
+ * notifications, consent). Both lists build the archive the same way — a
+ * category missing from here would still land in the `json`/`both` payload
+ * (built from `job.data`) but silently vanish from a `csv`-only export, so
+ * every registered contributor's `archiveKey` must appear here too.
  */
 export const EXPORT_CSV_CATEGORIES = [
   'profile',
@@ -35,6 +44,12 @@ export const EXPORT_CSV_CATEGORIES = [
   'events',
   'connections',
   'activity',
+  'subprofiles',
+  'listings',
+  'housing',
+  'saved',
+  'notifications',
+  'consent',
 ] as const;
 
 export interface ExportEntry {

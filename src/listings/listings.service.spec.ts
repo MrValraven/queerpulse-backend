@@ -134,6 +134,7 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   notify: [],
   consentOuting: false,
   consentGuide: false,
+  queerOwnedVerified: false,
   isPartneredWithQueerpulse: false,
   spaceType: '',
   capacity: null,

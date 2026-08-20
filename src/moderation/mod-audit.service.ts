@@ -199,6 +199,18 @@ export class ModAuditService {
       }
     }
 
+    // Role-management rows (`role_changed`, `staff_role_granted`,
+    // `staff_role_revoked`) carry no `reportId` but do carry `targetUserId` —
+    // resolve those names in the same batch as actors so the row can say who
+    // the action was taken against instead of falling back to
+    // `'Platform action'`. Kept as a fallback behind `targetName` below (a
+    // live lookup can't survive the target's erasure, which NULLs
+    // `targetUserId`; `targetName` can, since it's a write-time snapshot).
+    const targetUserIds = rows
+      .map((row) => row.targetUserId)
+      .filter((targetUserId): targetUserId is string => targetUserId !== null);
+    const targetNames = await this.namesForUserIds(targetUserIds);
+
     const subjectFor = (log: ModAuditLog): string => {
       if (log.reportId) {
         const linkedReport = reportsById.get(log.reportId);
@@ -206,6 +218,18 @@ export class ModAuditService {
           return `Report · ${linkedReport.subjectType} ${linkedReport.subjectId.slice(0, 8)}`;
         }
         return `Report #${log.reportId.slice(0, 8)}`;
+      }
+      // `targetName` first: a denormalized snapshot of the target's display
+      // name taken when the row was written, so a role-change row still names
+      // the member after they're erased (`targetUserId` → NULL via
+      // `ON DELETE SET NULL`) or later change their name. `targetUserId`'s
+      // live lookup is the fallback, for any row that somehow carries one
+      // without the other.
+      if (log.targetName) {
+        return log.targetName;
+      }
+      if (log.targetUserId) {
+        return targetNames.get(log.targetUserId) ?? 'Member';
       }
       return 'Platform action';
     };

@@ -278,7 +278,7 @@ describe('StorageKeyOwnershipInterceptor', () => {
       const ctx = httpContext('PUT', body, { userId: OWN_USER_ID });
       interceptor.intercept(ctx, nextHandler()).subscribe((value) => {
         expect(value).toBe(RESULT);
-        expect(body.items[0].imageUrl).toBe(OWN_KEY);
+        expect(body.items[0]!.imageUrl).toBe(OWN_KEY);
         done();
       });
     });

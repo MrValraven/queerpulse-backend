@@ -113,9 +113,9 @@ describe('MentionsInboxService', () => {
       expect(profiles.find).toHaveBeenCalledTimes(1);
       expect(threads.find).toHaveBeenCalledTimes(1);
       expect(communities.find).toHaveBeenCalledTimes(1);
-      expect(result.items[0].actor?.slug).toBe('ada');
-      expect(result.items[0].sourceLabel).toBe('Welcome');
-      expect(result.items[1].sourceLabel).toBe('Pride');
+      expect(result.items[0]!.actor?.slug).toBe('ada');
+      expect(result.items[0]!.sourceLabel).toBe('Welcome');
+      expect(result.items[1]!.sourceLabel).toBe('Pride');
     });
 
     it('skips enrichment queries entirely when the page has no such refs', async () => {

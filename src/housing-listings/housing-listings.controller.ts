@@ -119,6 +119,63 @@ export class HousingListingsController {
     return this.service.update(ref, user.userId, dto);
   }
 
+  @Patch(':ref/mark-filled')
+  @ApiOperation({
+    summary: 'Mark a housing listing as filled (found a place)',
+  })
+  @ApiOkResponse({ description: 'The updated housing listing.' })
+  @ApiNotFoundResponse({
+    description: 'No housing listing with that reference.',
+  })
+  @ApiForbiddenResponse({
+    description: 'The listing is not owned by the caller.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  markFilled(@CurrentUser() user: CurrentUserData, @Param('ref') ref: string) {
+    return this.service.markFilled(ref, user.userId);
+  }
+
+  @Patch(':ref/mark-available')
+  @ApiOperation({
+    summary: 'Mark a housing listing as available again (still looking)',
+  })
+  @ApiOkResponse({ description: 'The updated housing listing.' })
+  @ApiNotFoundResponse({
+    description: 'No housing listing with that reference.',
+  })
+  @ApiForbiddenResponse({
+    description: 'The listing is not owned by the caller.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  markAvailable(
+    @CurrentUser() user: CurrentUserData,
+    @Param('ref') ref: string,
+  ) {
+    return this.service.markAvailable(ref, user.userId);
+  }
+
+  @Patch(':ref/extend')
+  @ApiOperation({
+    summary: "Extend a housing listing's expiry by a fresh window",
+  })
+  @ApiOkResponse({ description: 'The updated housing listing.' })
+  @ApiNotFoundResponse({
+    description: 'No housing listing with that reference.',
+  })
+  @ApiForbiddenResponse({
+    description: 'The listing is not owned by the caller.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  extend(@CurrentUser() user: CurrentUserData, @Param('ref') ref: string) {
+    return this.service.extend(ref, user.userId);
+  }
+
   @Delete(':ref')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: "Delete one of the member's own housing listings" })

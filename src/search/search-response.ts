@@ -9,6 +9,7 @@ import type { HousingSearchRow } from '../housing-listings/housing-listing-respo
 import type { ResourceSearchRow } from '../resources/resource-response';
 import type { WorkshopSearchRow } from '../workshops/workshop-response';
 import type { SubprofileSearchRow } from '../subprofiles/subprofile-response';
+import type { TopicSearchRow } from '../content/topic-response';
 import { SearchResultType } from './dto/search.query';
 
 export interface SearchResultDTO {
@@ -130,5 +131,21 @@ export function subprofileToResult(row: SubprofileSearchRow): SearchResultDTO {
     slug: row.handle,
     name: row.displayName,
     sub: joinSub(row.tagline, row.kind),
+  };
+}
+
+export function topicToResult(row: TopicSearchRow): SearchResultDTO {
+  return {
+    type: 'topic',
+    // The tag IS the topic's routing slug (`topicPath()`/`TopicsService.loadOr404`
+    // both key off it) — there's no separate slug field.
+    slug: row.tag,
+    // `#tag` mirrors the frontend's own `topicResponseToSearchItem` naming, so
+    // the "jump to #tag" shortcut on the search page keeps matching by name.
+    name: `#${row.tag}`,
+    // Short factual metadata, matching every other type's `sub` — the full
+    // `description` is a multi-sentence paragraph (see `topic.entity.ts`),
+    // too long for a result-card subline.
+    sub: joinSub(`${row.totalPosts} posts`),
   };
 }

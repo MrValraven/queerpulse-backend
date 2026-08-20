@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AdminCommunitiesModule } from '../admin-communities/admin-communities.module';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
 import { PlatformJoinRequest } from '../membership/entities/join-request.entity';
@@ -31,6 +32,10 @@ import { AdminOverviewService } from './admin-overview.service';
     // `UsersModule` exports `UsersService` (and `TypeOrmModule`), which
     // `AdminOverviewService` injects directly for `countActiveMembers`.
     UsersModule,
+    // Exports `AdminCommunitiesService`, which `AdminOverviewService` injects
+    // directly to reuse its already-computed per-community health score
+    // (see that module's `exports` comment).
+    AdminCommunitiesModule,
   ],
   controllers: [AdminOverviewController],
   providers: [AdminOverviewService],

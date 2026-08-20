@@ -10,7 +10,8 @@ export type UploadKind =
   | 'gathering-photo'
   | 'group-avatar'
   | 'listing-photo'
-  | 'community-cover';
+  | 'community-cover'
+  | 'message-image';
 
 export interface UploadKindSpec {
   /** Storage-key prefix the object is namespaced under (then `/<userId>/<uuid>.<ext>`). */
@@ -89,6 +90,25 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
   'community-cover': {
     prefix: 'community-covers',
     maxBytes: 10 * MB,
+    requiresSession: false,
+  },
+  // A message-composer image attachment (MSG-8). `requiresSession: false` is
+  // deliberate, not an oversight: `requiresSession: true` in `FilesController`
+  // restricts a key to its UPLOADER ONLY (see `serve()`'s ownership check) —
+  // fine for a private one-person surface like an avatar draft, but wrong here,
+  // since the whole point is the RECIPIENT must be able to load the image too,
+  // and there is no participant-scoped serving path (no message-attachment ↔
+  // conversation lookup) to grant them access under `requiresSession: true`.
+  // This mirrors every other multi-viewer image kind (avatar, listing-photo,
+  // community-cover): privacy rests on the unguessable key, not a session
+  // check. A DM photo is therefore only as private as its URL, same as those
+  // kinds — a real (if consistent-with-the-rest-of-the-app) limit; scoping
+  // `GET /files/*` to a message's actual conversation participants would need
+  // a message-attachment lookup this route doesn't have and is a follow-up,
+  // not something this change silently papers over.
+  'message-image': {
+    prefix: 'message-images',
+    maxBytes: 8 * MB,
     requiresSession: false,
   },
 };

@@ -5,6 +5,7 @@ import { ChangemakerNomination } from './entities/changemaker-nomination.entity'
 export interface ChangemakerNominationResponseDTO {
   id: string;
   nomineeName: string;
+  reason: string | null;
   createdAt: string;
 }
 
@@ -14,6 +15,7 @@ export function toChangemakerNominationResponse(
   return {
     id: entity.id,
     nomineeName: entity.nomineeName,
+    reason: entity.reason,
     createdAt: entity.createdAt.toISOString(),
   };
 }

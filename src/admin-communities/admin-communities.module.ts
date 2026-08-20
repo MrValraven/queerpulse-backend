@@ -48,5 +48,11 @@ import { AdminCommunityModeratorsService } from './admin-community-moderators.se
     AdminCommunityModeratorsService,
     CommunityGovernanceLogService,
   ],
+  // `AdminOverviewService` injects `AdminCommunitiesService` directly to
+  // reuse its already-computed per-community health score for the overview
+  // dashboard's community-health summary, rather than re-deriving the score
+  // from a second copy of the aggregation queries — same precedent as
+  // `AdminOverviewModule` importing `UsersModule` for `UsersService`.
+  exports: [AdminCommunitiesService],
 })
 export class AdminCommunitiesModule {}

@@ -1,7 +1,7 @@
 import { SearchService } from './search.service';
 import { SearchResultType } from './dto/search.query';
 
-// Direct construction (mirrors `mention-notification.service.spec.ts`): the 11
+// Direct construction (mirrors `mention-notification.service.spec.ts`): the 12
 // federated resources are injected verbatim, so each is a minimal fake exposing
 // only the one method `SearchService` calls on it. The real `*ToResult` mappers
 // run against the rows these fakes return.
@@ -19,6 +19,7 @@ function build() {
   const resources = { searchByText: jest.fn().mockResolvedValue([]) };
   const workshops = { searchByText: jest.fn().mockResolvedValue([]) };
   const subprofiles = { searchByText: jest.fn().mockResolvedValue([]) };
+  const topics = { searchByText: jest.fn().mockResolvedValue([]) };
 
   const service = new SearchService(
     profiles as never,
@@ -32,6 +33,7 @@ function build() {
     resources as never,
     workshops as never,
     subprofiles as never,
+    topics as never,
   );
 
   return {
@@ -47,6 +49,7 @@ function build() {
     resources,
     workshops,
     subprofiles,
+    topics,
   };
 }
 

@@ -36,6 +36,19 @@ export class ListModReportsQuery {
   @IsIn(Object.values(ReportSubjectType))
   subjectType?: ReportSubjectType;
 
+  /**
+   * Filters to reports carrying this exact `subjectId` string (COM-6) — the
+   * same literal value `ModerationService.describeReported`/
+   * `priorReportCountsBySubject` already group "prior reports" by, so a
+   * report's `priorReports` count and this filter can never disagree about
+   * what counts as "another report about the same subject". Powers the
+   * moderation queue's "view this member's report history" click-through;
+   * combine with `subjectType` for an unambiguous match.
+   */
+  @IsOptional()
+  @IsString()
+  subjectId?: string;
+
   @IsOptional()
   @IsIn(SORTS)
   sort?: ModReportsSort;

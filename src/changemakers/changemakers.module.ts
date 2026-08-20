@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { Profile } from '../users/entities/profile.entity';
 import { AdminChangemakerNominationsController } from './admin-changemaker-nominations.controller';
 import { AdminChangemakerNominationsService } from './admin-changemaker-nominations.service';
@@ -22,6 +23,7 @@ import { ChangemakerNomination } from './entities/changemaker-nomination.entity'
       ChangemakerNomination,
       Profile,
     ]),
+    NotificationsModule,
   ],
   controllers: [
     ChangemakersController,

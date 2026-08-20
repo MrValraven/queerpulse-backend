@@ -43,6 +43,28 @@ export class ModAuditLog {
   @Column({ type: 'varchar' })
   action!: string;
 
+  // The member a role-management action (`role_changed`, `staff_role_granted`,
+  // `staff_role_revoked`) was taken against — `AdminMembersService.updateRole`/
+  // `grantStaffRole`/`revokeStaffRole` are the only writers. Nullable because
+  // every other action logs against a `reportId` instead (or, for
+  // `suspension_lifted`, neither): a row without a report is not automatically
+  // about a member. `ON DELETE SET NULL` mirrors `actorId` — an audit row
+  // outlives the account it names when that account is erased.
+  @Index('IDX_mod_audit_logs_target_user_id')
+  @Column({ type: 'uuid', nullable: true })
+  targetUserId!: string | null;
+
+  // Denormalized snapshot of the target member's display name at the moment
+  // of the action (`firstName lastName`, the same shape `nameForUserId`
+  // resolves). Written alongside `targetUserId` by the same three call sites
+  // so the audit trail can still say who was promoted/granted/revoked after
+  // the member is erased (`targetUserId` → NULL) or later changes their name
+  // — immutable once written, like `note`. This is what `subjectFor()`
+  // (`mod-audit.service.ts`) renders instead of the generic "Platform action"
+  // fallback for these row types.
+  @Column({ type: 'varchar', nullable: true })
+  targetName!: string | null;
+
   // The `ReasonCode` (`../../reports/reason-catalogue.ts`) the moderator
   // cited for this action, when one was given (`ModActionInput.reasonCode`).
   @Column({ type: 'varchar', nullable: true })

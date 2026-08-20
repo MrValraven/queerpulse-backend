@@ -13,7 +13,8 @@ import {
   USER_SESSION_REVOKED,
   UserSessionRevokedEvent,
 } from '../chat/session.events';
-import { User, UserStatus } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+import { UsersService } from '../users/users.service';
 import { AccountExportService } from './account-export.service';
 import {
   DeletionRequestResponse,
@@ -83,6 +84,10 @@ export class AccountService {
     private readonly dataSource: DataSource,
     // Drops live sockets on deactivation/deletion — see revokeAllSessions.
     private readonly eventEmitter: EventEmitter2,
+    // `countAdmins` backs `assertNotSoleAdmin` — the same last-admin guard
+    // `AdminMembersService.updateRole` uses against demotion, reused here
+    // against self-deactivation/self-deletion.
+    private readonly usersService: UsersService,
   ) {}
 
   // --- Step-up re-authentication -------------------------------------------
@@ -156,6 +161,36 @@ export class AccountService {
     );
   }
 
+  /**
+   * Blocks self-deactivation/self-deletion for the platform's sole remaining
+   * Admin. `AdminMembersService.updateRole` already guards this lockout for
+   * role-demotion; this is the more realistic path to the same dead end — a
+   * lone admin pausing or erasing their own account through ordinary member
+   * settings, with no other admin left to reverse it. Reads through the
+   * caller's transaction `manager` (via `UsersService.countAdmins`), matching
+   * `updateRole`'s "count inside the same transaction as the write" guard, so
+   * a concurrent action against a different admin can't slip past a stale
+   * count.
+   */
+  private async assertNotSoleAdmin(
+    manager: EntityManager,
+    userId: string,
+  ): Promise<void> {
+    const user = await manager.findOne(User, {
+      where: { id: userId },
+      select: { id: true, role: true },
+    });
+    if (user?.role !== UserRole.Admin) {
+      return;
+    }
+    const adminCount = await this.usersService.countAdmins(manager);
+    if (adminCount <= 1) {
+      throw new ConflictException(
+        'You’re the only remaining admin. Promote another member to admin before deactivating or deleting your account.',
+      );
+    }
+  }
+
   async deactivate(
     userId: string,
     dto: DeactivateDto,
@@ -165,6 +200,7 @@ export class AccountService {
     // status change hides nobody (the bug this replaces), and a status change
     // without the row leaves the member with no recorded way back.
     await this.dataSource.transaction(async (manager) => {
+      await this.assertNotSoleAdmin(manager, userId);
       const previousStatus = await this.resolveRestoreStatus(manager, userId);
       const existing = await manager.findOne(AccountDeactivation, {
         where: { userId },
@@ -211,6 +247,7 @@ export class AccountService {
     // the first clause true, via the `status = 'active'` filters that already
     // exist everywhere.
     const saved = await this.dataSource.transaction(async (manager) => {
+      await this.assertNotSoleAdmin(manager, userId);
       const previousStatus = await this.resolveRestoreStatus(manager, userId);
       const row = await manager.save(DeletionRequest, {
         userId,

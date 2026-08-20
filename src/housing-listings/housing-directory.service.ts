@@ -82,7 +82,13 @@ export class HousingDirectoryService {
     const page = normalizePage(query.page);
     const qb = this.listings
       .createQueryBuilder('l')
-      .where('l.status = :live', { live: HousingListingStatus.Live });
+      .where('l.status = :live', { live: HousingListingStatus.Live })
+      // HSG-1 / HSG-3: a member-filled ("found a place") or expired listing is
+      // withheld from public browse — checked here (not just left to the daily
+      // sweep) so there is never a same-day lag where a stale listing still
+      // shows. Backed by IDX_housing_listings_status_expires_at.
+      .andWhere('l.filled_at IS NULL')
+      .andWhere('l.expires_at > :now', { now: new Date() });
 
     if (query.type) {
       qb.andWhere('l.type = :type', { type: query.type });
@@ -171,6 +177,9 @@ export class HousingDirectoryService {
     const qbSearch = this.listings
       .createQueryBuilder('l')
       .where('l.status = :live', { live: HousingListingStatus.Live })
+      // Same filled/expired withhold as `browse` above.
+      .andWhere('l.filled_at IS NULL')
+      .andWhere('l.expires_at > :now', { now: new Date() })
       .andWhere(
         '(l.title ILIKE :pattern OR l.blurb ILIKE :pattern OR l.city ILIKE :pattern OR l.area ILIKE :pattern)',
         { pattern },
@@ -203,6 +212,18 @@ export class HousingDirectoryService {
       slug,
     );
     if (moderation.hidden || moderation.removed) {
+      throw new NotFoundException('Housing listing not found');
+    }
+    // HSG-1 / HSG-3: a filled or expired listing 404s for everyone EXCEPT its
+    // own owner — the owner still reaches this same public detail route
+    // (`GET /housing-directory/:slug`, the one `HousingListingPage` renders)
+    // from their "My Listings" management view to see/un-mark it, while a
+    // stranger following an old link or search hit gets the same honest 404 a
+    // moderation takedown would give.
+    const isOwner = listing.ownerId === viewerId;
+    const isWithheld =
+      listing.filledAt !== null || listing.expiresAt.getTime() < Date.now();
+    if (!isOwner && isWithheld) {
       throw new NotFoundException('Housing listing not found');
     }
     const refs = await new MemberLookup(this.profiles).byUserIds([

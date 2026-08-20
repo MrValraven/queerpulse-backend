@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { Community } from '../communities/entities/community.entity';
+import { ConnectionsModule } from '../connections/connections.module';
 import { Event } from '../events/entities/event.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { SocialModule } from '../social/social.module';
@@ -21,7 +22,9 @@ import { FeedService } from './feed.service';
  * `UsersModule` supplies the `Profile` repository (for `MemberLookup`,
  * resolving authors/hosts to `AuthorSummary`) — see `ForumModule`'s import
  * for the same idiom. `SocialModule` supplies `BlockFilterService` for the
- * cross-cutting block enforcement (spec §2).
+ * cross-cutting block enforcement (spec §2). `ConnectionsModule` supplies
+ * `ConnectionsService`, used to scope the `connections` tab (DISC-2) to the
+ * viewer's accepted-connection author set.
  */
 @Module({
   imports: [
@@ -34,6 +37,7 @@ import { FeedService } from './feed.service';
     ]),
     UsersModule,
     SocialModule,
+    ConnectionsModule,
   ],
   controllers: [FeedController],
   providers: [FeedService],

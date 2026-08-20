@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -150,7 +151,10 @@ describe('VouchService', () => {
 
     it('behaves identically at a high vouch count (no threshold effect)', async () => {
       profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
-      manager.count.mockResolvedValue(99);
+      // First `manager.count` call is the daily-cap pre-check (kept under the
+      // limit); the second is the post-insert active-vouchCount tally being
+      // asserted here — the two are unrelated counts (COM-26).
+      manager.count.mockResolvedValueOnce(2).mockResolvedValueOnce(99);
       const result = await service.createVouch('u1', 'them');
       expect(result).toEqual({ vouchCount: 99 });
       expect(emitter.emit).toHaveBeenCalledTimes(1);
@@ -163,6 +167,37 @@ describe('VouchService', () => {
         ConflictException,
       );
       expect(emitter.emit).not.toHaveBeenCalled();
+    });
+
+    // COM-26: a daily cap alongside the existing per-minute @Throttle, so a
+    // member can't dilute vouching as a trust signal by vouching for hundreds
+    // of people over time.
+    describe('daily vouch cap', () => {
+      it("locks the voucher's own row before counting vouches given today", async () => {
+        profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
+        await service.createVouch('u1', 'them');
+        expect(manager.findOne).toHaveBeenCalledWith(User, {
+          where: { id: 'u1' },
+          lock: { mode: 'pessimistic_write' },
+        });
+      });
+
+      it('allows the vouch when under the daily limit', async () => {
+        profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
+        manager.count.mockResolvedValueOnce(19).mockResolvedValueOnce(1);
+        await expect(service.createVouch('u1', 'them')).resolves.toBeDefined();
+        expect(manager.insert).toHaveBeenCalled();
+      });
+
+      it('rejects with 403 once the daily limit is reached, without inserting', async () => {
+        profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
+        manager.count.mockResolvedValueOnce(20);
+        await expect(service.createVouch('u1', 'them')).rejects.toBeInstanceOf(
+          ForbiddenException,
+        );
+        expect(manager.insert).not.toHaveBeenCalled();
+        expect(emitter.emit).not.toHaveBeenCalled();
+      });
     });
   });
 

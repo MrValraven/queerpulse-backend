@@ -23,6 +23,7 @@ export class ChangemakerNominationsService {
       this.changemakerNominations.create({
         nominatorId,
         nomineeName: dto.nomineeName.trim(),
+        reason: dto.reason.trim(),
       }),
     );
     return toChangemakerNominationResponse(saved);

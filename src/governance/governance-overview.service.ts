@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { Profile } from '../users/entities/profile.entity';
+import { UsersService } from '../users/users.service';
 import {
   GovernanceOverviewResponseDTO,
   GovernancePublishResponseDTO,
@@ -20,11 +21,19 @@ import { UpdateAdminOverviewDto } from './dto/update-admin-overview.dto';
 import {
   GOVERNANCE_OVERVIEW_ID,
   GovernanceOverview,
+  OverviewHealthStat,
 } from './entities/governance-overview.entity';
 import {
   GovernanceOverviewChange,
   OverviewSection,
 } from './entities/governance-overview-change.entity';
+
+// The one `health` stat key that is a real, cheaply queryable number rather
+// than admin-typed prose (COM-4) — every read forces its `n` to the live
+// active-member count, and it is never persisted as anything else (see
+// `withLiveActiveMemberCount`/`updateOverview` below). `AdminGovernanceHealthEditor`
+// (frontend) matches this by disabling that one row's value field.
+const ACTIVE_MEMBERS_HEALTH_KEY = 'activeMembers';
 
 @Injectable()
 export class GovernanceOverviewService {
@@ -35,8 +44,27 @@ export class GovernanceOverviewService {
     private readonly changes: Repository<GovernanceOverviewChange>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
+    private readonly usersService: UsersService,
     private readonly dataSource: DataSource,
   ) {}
+
+  // Replaces the `activeMembers` row's `n` with the live account-standing
+  // count (active, non-suspended members — the same figure
+  // `AdminOverviewService`/press-kit already report elsewhere), leaving every
+  // other health stat untouched. A no-op if the row isn't present.
+  private async withLiveActiveMemberCount(
+    health: OverviewHealthStat[],
+  ): Promise<OverviewHealthStat[]> {
+    if (!health.some((stat) => stat.key === ACTIVE_MEMBERS_HEALTH_KEY)) {
+      return health;
+    }
+    const activeMemberCount = await this.usersService.countActiveMembers();
+    return health.map((stat) =>
+      stat.key === ACTIVE_MEMBERS_HEALTH_KEY
+        ? { ...stat, n: String(activeMemberCount) }
+        : stat,
+    );
+  }
 
   // The Governance page's non-financial structure (health snapshot, moderation
   // steps, advisory council, principles, decision log). A singleton row keyed
@@ -50,6 +78,7 @@ export class GovernanceOverviewService {
     if (!overview) {
       throw new NotFoundException('Governance overview not found');
     }
+    overview.health = await this.withLiveActiveMemberCount(overview.health);
     return toGovernanceOverviewResponse(overview);
   }
 
@@ -81,6 +110,7 @@ export class GovernanceOverviewService {
     if (!overview) {
       throw new NotFoundException('Governance overview not found');
     }
+    overview.health = await this.withLiveActiveMemberCount(overview.health);
 
     const allChanges = await this.changes.find({
       order: { createdAt: 'DESC' },
@@ -152,8 +182,17 @@ export class GovernanceOverviewService {
       };
 
       if (dto.health !== undefined) {
-        recordIfChanged(OverviewSection.Health, overview.health, dto.health);
-        overview.health = dto.health;
+        // Force the `activeMembers` row's `n` to the live count on BOTH sides
+        // of the diff before recording/saving (COM-4) — an admin can no
+        // longer hand-type that one figure, and the live count ticking
+        // between fetch and save never produces a phantom audit entry for a
+        // field nobody actually edited.
+        const liveBefore = await this.withLiveActiveMemberCount(
+          overview.health,
+        );
+        const liveAfter = await this.withLiveActiveMemberCount(dto.health);
+        recordIfChanged(OverviewSection.Health, liveBefore, liveAfter);
+        overview.health = liveAfter;
       }
       if (dto.moderationSteps !== undefined) {
         recordIfChanged(

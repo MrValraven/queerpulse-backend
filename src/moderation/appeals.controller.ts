@@ -1,9 +1,10 @@
-import { Body, Controller, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
 import {
   ApiConflictResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
   ApiForbiddenResponse,
+  ApiOkResponse,
   ApiOperation,
   ApiTags,
   ApiUnauthorizedResponse,
@@ -51,5 +52,20 @@ export class AppealsController {
   })
   submit(@CurrentUser() user: CurrentUserData, @Body() dto: CreateAppealDto) {
     return this.moderationService.submitAppeal(user.userId, dto);
+  }
+
+  // The member-facing complement to `submit` above: checking on an appeal
+  // already filed. Deep-linked from the enforcement/appeal-resolved
+  // notifications and polled by `AppealOutcomePage` (frontend) so a member
+  // sees their REAL status rather than a stale demo toggle. Same guard as
+  // `submit` — a suspended member is exactly who needs to check on this.
+  @Get('me')
+  @ApiOperation({ summary: "List the calling member's own appeals" })
+  @ApiOkResponse({
+    description: "The member's own appeals, most recent first.",
+  })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  listMine(@CurrentUser() user: CurrentUserData) {
+    return this.moderationService.listMine(user.userId);
   }
 }

@@ -83,6 +83,9 @@ export class PushNotificationListener {
         case NotificationType.HousingListingMatch:
           await this.pushHousingMatch(userIds, notification);
           return;
+        case NotificationType.TopicNewPost:
+          await this.pushTopicNewPost(userIds, notification);
+          return;
         // Whitelist: every other type — CRITICALLY `NewMessage` and
         // `EventReminder`, which already push elsewhere — falls through here and
         // produces no push. Do NOT add them; doing so double-sends.
@@ -308,6 +311,32 @@ export class PushNotificationListener {
           ? 'push:housing.match.body'
           : 'push:housing.match.bodyNoArea',
         params: { title, area: area ?? '' },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  private async pushTopicNewPost(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    // Always-on (no category gate), like `pushHousingMatch`: the topic FOLLOW
+    // itself is the member's consent — see
+    // `TopicFollowNotificationsListener`'s docstring for why no
+    // `NotificationPreferenceCategory` gates this type.
+    const actor = await this.resolveActor(notification);
+    const name = this.displayName(actor);
+    const topic = this.payloadString(notification, 'topicLabel') ?? 'a topic';
+    await this.pushService.sendToUsers(userIds, {
+      title: 'New post in a topic you follow',
+      body: `${name} posted in #${topic}.`,
+      tag: `notification:${notification.id}`,
+      data: { url: this.threadUrl(notification) },
+      ...this.iconOf(actor),
+      l10n: {
+        titleKey: 'push:topic.newPost.title',
+        bodyKey: 'push:topic.newPost.body',
+        params: { name, topic },
       },
       timestamp: notification.createdAt.getTime(),
     });

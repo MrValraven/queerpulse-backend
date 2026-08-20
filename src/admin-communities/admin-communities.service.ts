@@ -392,9 +392,10 @@ export class AdminCommunitiesService {
    * authorization check.
    *
    * Idempotent, same conditional-UPDATE shape as `freeze`/`unfreeze`: an
-   * already-archived community is a no-op 200 (the first `archivedAt` stands,
-   * one-way — there is no unarchive), and the governance log only gets an
-   * entry when this call is the one that actually archived it.
+   * already-archived community is a no-op 200 (the first `archivedAt`
+   * stands), and the governance log only gets an entry when this call is the
+   * one that actually archived it. Reversible via `unarchive` below
+   * (COM-18) — archiving a community is no longer a one-way door.
    */
   async archive(
     slug: string,
@@ -417,6 +418,42 @@ export class AdminCommunitiesService {
         communityId: community.id,
         actorUserId,
         action: GovernanceLogAction.Archived,
+        metadata: { adminOverride: true },
+      });
+    }
+
+    return this.getCommunity(slug);
+  }
+
+  /**
+   * `POST /admin/communities/:slug/unarchive` — reverse an archive regardless
+   * of the community's ownership state (COM-18: archiving used to be a
+   * one-way door even for admins). Same conditional-UPDATE shape as `archive`
+   * in reverse (`WHERE archived_at IS NOT NULL`): unarchiving a community that
+   * isn't archived is a no-op 200, and the governance log only gets an entry
+   * when this call actually lifted the archive.
+   */
+  async unarchive(
+    slug: string,
+    actorUserId: string,
+  ): Promise<AdminCommunityDetailDTO> {
+    const community = await this.communities.findOne({ where: { slug } });
+    if (!community) {
+      throw new NotFoundException('Community not found');
+    }
+
+    const result = await this.communities
+      .createQueryBuilder()
+      .update(Community)
+      .set({ archivedAt: null })
+      .where('id = :id AND archived_at IS NOT NULL', { id: community.id })
+      .execute();
+
+    if (result.affected) {
+      await this.governanceLog.log({
+        communityId: community.id,
+        actorUserId,
+        action: GovernanceLogAction.Unarchived,
         metadata: { adminOverride: true },
       });
     }

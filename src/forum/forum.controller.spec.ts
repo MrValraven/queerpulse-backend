@@ -22,7 +22,12 @@ describe('ForumController', () => {
     setPinned: jest.Mock;
     listPinned: jest.Mock;
   };
-  let postsService: { listPosts: jest.Mock; reply: jest.Mock; vote: jest.Mock };
+  let postsService: {
+    listPosts: jest.Mock;
+    reply: jest.Mock;
+    vote: jest.Mock;
+    hasEverPosted: jest.Mock;
+  };
 
   beforeEach(async () => {
     threadsService = {
@@ -38,6 +43,7 @@ describe('ForumController', () => {
       listPosts: jest.fn().mockResolvedValue({ data: [], pageInfo: {} }),
       reply: jest.fn().mockResolvedValue({}),
       vote: jest.fn().mockResolvedValue({ voteCount: 1, myVote: 1 }),
+      hasEverPosted: jest.fn().mockResolvedValue(false),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -72,21 +78,28 @@ describe('ForumController', () => {
     );
   });
 
-  it('delegates threadCounts with the caller id and q/tag', async () => {
-    await controller.threadCounts(user, { q: 'lease', tag: 'rent' });
+  it('delegates threadCounts with the caller id and q/tag, plus hasEverPosted', async () => {
+    postsService.hasEverPosted.mockResolvedValueOnce(true);
+    const res = await controller.threadCounts(user, {
+      q: 'lease',
+      tag: 'rent',
+    });
     expect(threadsService.counts).toHaveBeenCalledWith(
       'user-1',
       'lease',
       'rent',
     );
+    expect(postsService.hasEverPosted).toHaveBeenCalledWith('user-1');
+    expect(res).toEqual({ counts: { all: 0 }, hasPosted: true });
   });
 
-  it('delegates lock/unlock with the caller and the target state', async () => {
-    await controller.lockThread(user, 'hello-world');
+  it('delegates lock/unlock with the caller, the target state, and an optional lock reason', async () => {
+    await controller.lockThread(user, 'hello-world', { reason: 'Resolved' });
     expect(threadsService.setLocked).toHaveBeenCalledWith(
       'hello-world',
       user,
       true,
+      'Resolved',
     );
 
     await controller.unlockThread(user, 'hello-world');
