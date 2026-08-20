@@ -1,7 +1,10 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AdminMembersModule } from '../admin-members/admin-members.module';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
+import { MailerModule } from '../mailer/mailer.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
+import { NewsletterSubscription } from '../newsletter/entities/newsletter-subscription.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -27,11 +30,13 @@ import { MagazinePieceEvent } from './entities/magazine-piece-event.entity';
 import { MagazinePieceMessage } from './entities/magazine-piece-message.entity';
 import { MagazinePiece } from './entities/magazine-piece.entity';
 import { MagazinePitch } from './entities/magazine-pitch.entity';
+import { MagazineReaderComment } from './entities/magazine-reader-comment.entity';
 import { MagazineSection } from './entities/magazine-section.entity';
 import { MagazineStorySubmission } from './entities/magazine-story-submission.entity';
 import { MagazineWriterApplication } from './entities/magazine-writer-application.entity';
 import { MagazineController } from './magazine.controller';
 import { MagazinePieceService } from './magazine-piece.service';
+import { MagazineReaderCommentsService } from './magazine-reader-comments.service';
 import { MagazineWriterController } from './magazine-writer.controller';
 import { MagazineService } from './magazine.service';
 import { StorySubmissionsService } from './story-submissions.service';
@@ -55,15 +60,19 @@ import { WriterApplicationsService } from './writer-applications.service';
       MagazinePieceEvent,
       MagazinePieceMessage,
       MagazinePitch,
+      MagazineReaderComment,
       MagazineSection,
       MagazineStorySubmission,
       MagazineWriterApplication,
+      NewsletterSubscription,
       Profile,
       User,
       UserStaffRole,
     ]),
     NotificationsModule,
     MediaCropsModule,
+    MailerModule,
+    ContentModerationModule,
     // `AdminMembersService.grantStaffRole` — writer-application approval
     // grants `magazine_writer` through the same mechanism the manual admin
     // role-assignment screen uses (see `AdminWriterApplicationsService`).
@@ -84,6 +93,7 @@ import { WriterApplicationsService } from './writer-applications.service';
     StorySubmissionsService,
     AdminStorySubmissionsService,
     MagazinePieceService,
+    MagazineReaderCommentsService,
     WriterApplicationsService,
     AdminWriterApplicationsService,
   ],

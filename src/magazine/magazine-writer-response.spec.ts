@@ -125,6 +125,11 @@ const WRITER_ASSIGNMENT_KEYS: (keyof WriterAssignmentResponse)[] = [
   'note',
   'byline',
   'terms',
+  'wants',
+  'avoid',
+  'rate',
+  'commissionedBy',
+  'commissionedOn',
 ];
 
 describe('toWriterAssignment', () => {

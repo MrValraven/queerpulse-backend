@@ -33,6 +33,8 @@ import { MagazinePiece, PieceCare } from './entities/magazine-piece.entity';
 import { MagazinePitch } from './entities/magazine-pitch.entity';
 import { MagazineSection } from './entities/magazine-section.entity';
 import { MagazinePieceService } from './magazine-piece.service';
+import { MailerService } from '../mailer/mailer.service';
+import { NewsletterSubscription } from '../newsletter/entities/newsletter-subscription.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -144,6 +146,8 @@ const ISSUE: MagazineIssue = {
   runOrder: [],
   digest: [],
   coverlines: [],
+  digestSendOnPublish: false,
+  digestSentAt: null,
   createdAt: new Date('2026-08-01T00:00:00.000Z'),
   updatedAt: new Date('2026-08-01T00:00:00.000Z'),
 };
@@ -199,9 +203,11 @@ describe('MagazinePieceService', () => {
   let staffRoles: RepositoryMock;
   let users: RepositoryMock;
   let profiles: RepositoryMock;
+  let newsletterSubscriptions: RepositoryMock;
   let transactionManager: { getRepository: jest.Mock };
   let dataSource: { transaction: jest.Mock };
   let notifications: { create: jest.Mock };
+  let mailer: { send: jest.Mock };
 
   beforeEach(async () => {
     pieces = makeRepositoryMock();
@@ -222,6 +228,7 @@ describe('MagazinePieceService', () => {
     staffRoles = makeRepositoryMock();
     users = makeRepositoryMock();
     profiles = makeRepositoryMock();
+    newsletterSubscriptions = makeRepositoryMock();
 
     // The commission/ship flows run inside `dataSource.transaction`,
     // resolving per-entity repos off the transactional `EntityManager` —
@@ -251,6 +258,7 @@ describe('MagazinePieceService', () => {
         ),
     };
     notifications = { create: jest.fn().mockResolvedValue(null) };
+    mailer = { send: jest.fn().mockResolvedValue(undefined) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -291,8 +299,13 @@ describe('MagazinePieceService', () => {
         { provide: getRepositoryToken(UserStaffRole), useValue: staffRoles },
         { provide: getRepositoryToken(User), useValue: users },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        {
+          provide: getRepositoryToken(NewsletterSubscription),
+          useValue: newsletterSubscriptions,
+        },
         { provide: DataSource, useValue: dataSource },
         { provide: NotificationsService, useValue: notifications },
+        { provide: MailerService, useValue: mailer },
       ],
     }).compile();
 

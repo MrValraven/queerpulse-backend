@@ -10,6 +10,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Not, Repository } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
+import { MailerService } from '../mailer/mailer.service';
+import { NewsletterSubscription } from '../newsletter/entities/newsletter-subscription.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -118,6 +120,7 @@ import {
   validatePieceBrief,
   validatePieceCare,
 } from './piece-jsonb.validation';
+import { mapDeckSlidesToArticleBlocks } from './deck-to-article.mapper';
 
 /** Today as a `date`-column-shaped ISO string (`YYYY-MM-DD`), UTC. */
 function todayIsoDate(): string {
@@ -214,8 +217,11 @@ export class MagazinePieceService {
     private readonly users: Repository<User>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
+    @InjectRepository(NewsletterSubscription)
+    private readonly newsletterSubscriptions: Repository<NewsletterSubscription>,
     private readonly dataSource: DataSource,
     private readonly notifications: NotificationsService,
+    private readonly mailer: MailerService,
   ) {}
 
   async listPieces(query: ListPiecesQuery): Promise<PieceListItem[]> {
@@ -1353,8 +1359,28 @@ export class MagazinePieceService {
   ): Promise<IssueProductionResponse> {
     const issue = await this.loadIssueOr404(issueNumber);
     issue.digest = dto.items;
+    if (dto.sendOnPublish !== undefined) {
+      issue.digestSendOnPublish = dto.sendOnPublish;
+    }
     await this.issues.save(issue);
     return this.getIssueProduction(issueNumber);
+  }
+
+  /**
+   * Sends a one-off preview of the issue's current members' digest to the
+   * caller's own inbox (CNT-6 "Send test"). Reuses the `digest_test` mail
+   * template; a real SMTP delivery failure is left to bubble up (not
+   * swallowed) so the desk's toast reports a genuine failure rather than a
+   * false success.
+   */
+  async sendDigestTest(issueNumber: string, toEmail: string): Promise<void> {
+    const issue = await this.loadIssueOr404(issueNumber);
+    const items = await this.resolveDigestMailItems(issue);
+    await this.mailer.send(toEmail, 'digest_test', {
+      issueNumber: issue.number,
+      issueTitle: issue.title,
+      items,
+    });
   }
 
   /**
@@ -1388,7 +1414,10 @@ export class MagazinePieceService {
     issueNumber: string,
     actorId: string,
   ): Promise<IssueProductionResponse> {
-    return this.dataSource.transaction(async (manager) => {
+    let shippedIssue!: MagazineIssue;
+    let shippedPieces!: MagazinePiece[];
+
+    await this.dataSource.transaction(async (manager) => {
       const issueRepository = manager.getRepository(MagazineIssue);
       const pieceRepository = manager.getRepository(MagazinePiece);
       const articleRepository = manager.getRepository(MagazineArticle);
@@ -1457,8 +1486,170 @@ export class MagazinePieceService {
         }
       }
 
-      return toIssueProduction(issue, pieces);
+      shippedIssue = issue;
+      shippedPieces = pieces;
     });
+
+    // Outside the transaction, deliberately: this is a best-effort external
+    // send to potentially many subscribers, and it must never hold the
+    // piece-publishing transaction open (or roll it back) if mail delivery is
+    // slow or fails. `sendDigestIfScheduled` re-checks `digestSentAt` itself,
+    // so this is safe to call on every ship — it only ever sends once.
+    await this.sendDigestIfScheduled(shippedIssue, shippedPieces);
+
+    return toIssueProduction(shippedIssue, shippedPieces);
+  }
+
+  /**
+   * CNT-6 "Schedule with issue": the real dispatch behind the toggle. Fires
+   * from `shipIssue` right after a ship actually publishes pieces — there is
+   * no cron in this module, so shipping IS the scheduled moment. Guarded on
+   * `digestSentAt === null` so a re-ship (the issue's publish gate can be hit
+   * more than once as later pieces clear it) never re-sends. Best-effort per
+   * recipient: one failed send is logged and skipped rather than aborting
+   * the rest of the list or leaving `digestSentAt` unset (which would retry
+   * every subscriber, including the ones who already got it, on the next
+   * ship).
+   */
+  private async sendDigestIfScheduled(
+    issue: MagazineIssue,
+    pieces: MagazinePiece[],
+  ): Promise<void> {
+    if (!issue.digestSendOnPublish || issue.digestSentAt !== null) {
+      return;
+    }
+
+    const items = this.resolveDigestMailItemsFromPieces(issue, pieces);
+    const subscribers = await this.newsletterSubscriptions.find({
+      where: { status: 'confirmed' },
+    });
+
+    for (const subscriber of subscribers) {
+      try {
+        await this.mailer.send(subscriber.email, 'digest', {
+          issueNumber: issue.number,
+          issueTitle: issue.title,
+          items,
+        });
+      } catch (error) {
+        this.logger.warn(
+          `Failed to send issue ${issue.number} digest to ${subscriber.email}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+
+    issue.digestSentAt = new Date();
+    await this.issues.save(issue);
+  }
+
+  /** `sendDigestTest` variant: loads the issue's own pieces first. */
+  private async resolveDigestMailItems(
+    issue: MagazineIssue,
+  ): Promise<{ title: string; blurb: string }[]> {
+    const pieces = await this.pieces.find({ where: { issueId: issue.id } });
+    return this.resolveDigestMailItemsFromPieces(issue, pieces);
+  }
+
+  /**
+   * Resolves the issue's curated (`on: true`) digest entries to
+   * `{ title, blurb }` mail rows, dropping any entry whose piece no longer
+   * resolves (deleted, or genuinely missing a title) rather than mailing a
+   * blank line.
+   */
+  private resolveDigestMailItemsFromPieces(
+    issue: MagazineIssue,
+    pieces: MagazinePiece[],
+  ): { title: string; blurb: string }[] {
+    const pieceById = new Map(pieces.map((piece) => [piece.id, piece]));
+    return issue.digest
+      .filter((item) => item.on)
+      .map((item) => ({
+        title: pieceById.get(item.pieceId)?.title ?? '',
+        blurb: item.blurb,
+      }))
+      .filter((item) => item.title.length > 0);
+  }
+
+  /**
+   * CNT-6 "Convert": one-way, one-time transform of a deck-format piece into
+   * an article-format one. Looked up by `deckId` (not `pieceId`) since the
+   * deck editor page only ever knows the deck's own id — never the piece's
+   * (`DeckEditorPage`/`PieceRecordPage` link to it as `?id=<deckId>`).
+   * `piece.articleId !== null` is the idempotency guard: a piece can only be
+   * converted once, and the orphaned `MagazineDeck` row is deliberately left
+   * alone (not deleted) in case of a future undo. Uses the same
+   * slug-allocation and byline-resolution helpers as `ensureArticleForPiece`
+   * so a converted article behaves identically to one drafted from scratch.
+   */
+  async convertDeckToArticle(
+    deckId: string,
+    actorId: string,
+  ): Promise<{
+    pieceId: string;
+    articleId: string;
+    droppedSlideKinds: string[];
+  }> {
+    const deck = await this.decks.findOne({ where: { id: deckId } });
+    if (!deck) {
+      throw new NotFoundException('Deck not found');
+    }
+
+    const piece = await this.pieces.findOne({ where: { deckId } });
+    if (!piece) {
+      throw new NotFoundException('No piece links to this deck.');
+    }
+    if (piece.articleId !== null) {
+      throw new ConflictException(
+        'This piece has already been converted to an article.',
+      );
+    }
+
+    const { blocks, droppedSlideKinds } = mapDeckSlidesToArticleBlocks(
+      deck.slides,
+    );
+
+    const authorId = await this.resolveAuthorId(piece.byline);
+    const slug = await allocateUniqueSlug(
+      slugify(piece.title, 'draft'),
+      async (candidate) =>
+        (await this.articles.findOne({ where: { slug: candidate } })) !== null,
+    );
+
+    const article = this.articles.create({
+      slug,
+      title: piece.title,
+      dek: '',
+      body: '',
+      standfirst: '',
+      kicker: deck.kicker,
+      section: deck.section || piece.section,
+      contentNotes: [],
+      blocks,
+      authorId,
+      issueId: piece.issueId,
+      tags: deck.tags,
+      readMinutes: 1,
+      publishedAt: null,
+    });
+    await this.articles.save(article);
+
+    piece.articleId = article.id;
+    piece.deckId = null;
+    piece.format = 'article';
+    await this.pieces.save(piece);
+
+    await this.recordEvent(
+      piece.id,
+      actorId,
+      'converted_to_article',
+      droppedSlideKinds.length > 0
+        ? `dropped: ${droppedSlideKinds.join(', ')}`
+        : null,
+    );
+
+    return { pieceId: piece.id, articleId: article.id, droppedSlideKinds };
   }
 
   // --- writer workspace (Magazine Desk Phase 6, Task 2) ---

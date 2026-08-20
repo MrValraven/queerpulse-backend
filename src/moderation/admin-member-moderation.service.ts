@@ -7,6 +7,7 @@ import { AuthService } from '../auth/auth.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { AccountEnforcementService } from './account-enforcement.service';
+import { ModAuditLog } from './entities/mod-audit-log.entity';
 import { ModAuditService } from './mod-audit.service';
 import { RestrictMemberDto } from './dto/restrict-member.dto';
 
@@ -26,6 +27,14 @@ export interface RestrictedMemberDTO {
   suspendedUntil: string | null;
 }
 
+/** `POST /admin/members/:id/cite` response (ADM-9). */
+export interface CitedMemberDTO {
+  id: string;
+  slug: string;
+  note: string;
+  citedAt: string;
+}
+
 /**
  * The admin member-drawer moderation actions — "Verify" and "Restrict" — that
  * had no backend before (P2-3). Lives in the moderation module because that is
@@ -39,6 +48,8 @@ export interface RestrictedMemberDTO {
 export class AdminMemberModerationService {
   constructor(
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    @InjectRepository(ModAuditLog)
+    private readonly auditLogs: Repository<ModAuditLog>,
     private readonly enforcement: AccountEnforcementService,
     private readonly audit: ModAuditService,
     private readonly notifications: NotificationsService,
@@ -75,6 +86,51 @@ export class AdminMemberModerationService {
       slug: profile.slug,
       verified: profile.verified,
       verifiedAt: profile.verifiedAt?.toISOString() ?? null,
+    };
+  }
+
+  /**
+   * Cite evidence against a member (ADM-9) — a free-text note attached
+   * directly to their audit trail from the trust network graph inspector's
+   * "Cite" action. Report-less, like `member_verified`, but writes
+   * `targetUserId`/`targetName` directly (bypassing `ModAuditService.
+   * writeAuditLog`, which has no target-member parameter) — the same shape
+   * `AdminMembersService.updateRole`/`grantStaffRole`/`revokeStaffRole` use
+   * for their own report-less, member-directed rows, so this one resolves a
+   * real subject in the global `GET /mod/audit` feed instead of falling back
+   * to "Platform action", and surfaces in the member's own drawer timeline
+   * (`AdminMembersService.detail`, which reads rows by `targetUserId`).
+   */
+  async citeMember(
+    actorId: string,
+    memberId: string,
+    note: string,
+  ): Promise<CitedMemberDTO> {
+    const profile = await this.profiles.findOne({
+      where: { userId: memberId },
+    });
+    if (!profile) {
+      throw new NotFoundException('Member not found.');
+    }
+
+    const auditLog = await this.auditLogs.save(
+      this.auditLogs.create({
+        reportId: null,
+        actorId,
+        targetUserId: memberId,
+        targetName: `${profile.firstName} ${profile.lastName}`.trim(),
+        action: 'evidence_cited',
+        reasonCode: null,
+        note,
+        duration: null,
+      }),
+    );
+
+    return {
+      id: profile.userId,
+      slug: profile.slug,
+      note: auditLog.note ?? note,
+      citedAt: auditLog.createdAt.toISOString(),
     };
   }
 

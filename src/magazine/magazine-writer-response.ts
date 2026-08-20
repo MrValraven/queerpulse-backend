@@ -45,6 +45,17 @@ export interface WriterAssignmentResponse {
   note: string;
   byline: string;
   terms: WriterAssignmentTerms;
+  /**
+   * Full brief detail for "Read the brief" (CNT-6) — writer-safe fields off
+   * `PieceBrief` beyond `note`/`words`/`target`/`terms.killFee` above. Still
+   * scoped by the same rule as the rest of this file: brief-adjacent fields
+   * only, never internal editor notes/comments/`care`.
+   */
+  wants: string[];
+  avoid: string;
+  rate: string;
+  commissionedBy: string;
+  commissionedOn: string;
 }
 
 /** Static house terms shared by every commission (see `WriterAssignmentTerms`). */
@@ -113,6 +124,11 @@ export function toWriterAssignment(
       rights: HOUSE_RIGHTS_TERM,
       edits: HOUSE_EDITS_TERM,
     },
+    wants: piece.brief?.wants ?? [],
+    avoid: piece.brief?.avoid ?? '',
+    rate: piece.brief?.rate ?? '',
+    commissionedBy: piece.brief?.commissionedBy ?? '',
+    commissionedOn: piece.brief?.commissionedOn ?? '',
   };
 }
 

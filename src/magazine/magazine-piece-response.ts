@@ -581,6 +581,9 @@ export interface IssueProductionResponse {
   coverlines: string[];
   runOrder: IssueRunOrderEntry[];
   digest: IssueDigestItem[];
+  /** CNT-6 "Schedule with issue" toggle + send watermark — see `MagazineIssue`. */
+  digestSendOnPublish: boolean;
+  digestSentAt: string | null;
   shipChecklist: PublishGateItem[];
   pages: { editorial: number; total: number; max: number };
 }
@@ -669,6 +672,8 @@ export function toIssueProduction(
     coverlines: issue.coverlines,
     runOrder,
     digest: issue.digest,
+    digestSendOnPublish: issue.digestSendOnPublish,
+    digestSentAt: issue.digestSentAt ? issue.digestSentAt.toISOString() : null,
     shipChecklist,
     pages: {
       editorial: runOrder.length,

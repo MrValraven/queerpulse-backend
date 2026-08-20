@@ -337,19 +337,45 @@ export class AdminMembersService {
     ).length;
     const reportIds = memberReports.map((report) => report.id);
 
-    const [auditLogEntries, voucherRefsByUserId, voucheeRefsByUserId] =
-      await Promise.all([
-        reportIds.length
-          ? this.modAuditLogs.find({
-              where: { reportId: In(reportIds) },
-              order: { createdAt: 'ASC' },
-            })
-          : Promise.resolve([] as ModAuditLog[]),
-        memberLookup.byUserIds(
-          vouchersReceived.map((vouch) => vouch.voucherId),
-        ),
-        memberLookup.byUserIds(vouchesGiven.map((vouch) => vouch.voucheeId)),
-      ]);
+    const [
+      reportScopedAuditLogEntries,
+      targetScopedAuditLogEntries,
+      voucherRefsByUserId,
+      voucheeRefsByUserId,
+    ] = await Promise.all([
+      reportIds.length
+        ? this.modAuditLogs.find({
+            where: { reportId: In(reportIds) },
+            order: { createdAt: 'ASC' },
+          })
+        : Promise.resolve([] as ModAuditLog[]),
+      // Report-LESS rows written directly against this member (e.g.
+      // `evidence_cited` from the trust network graph inspector's Cite
+      // action — ADM-9 — and `role_changed`/`staff_role_granted`/
+      // `staff_role_revoked` from `updateRole`/`grantStaffRole`/
+      // `revokeStaffRole`) never carry a `reportId`, so the query above never
+      // finds them. Without this second lookup a citation the admin just
+      // wrote would vanish from the very timeline the graph inspector
+      // promises it lands in.
+      this.modAuditLogs.find({
+        where: { targetUserId: profile.userId },
+        order: { createdAt: 'ASC' },
+      }),
+      memberLookup.byUserIds(vouchersReceived.map((vouch) => vouch.voucherId)),
+      memberLookup.byUserIds(vouchesGiven.map((vouch) => vouch.voucheeId)),
+    ]);
+    // A row can only ever match one of the two queries above (report-scoped
+    // rows carry no `targetUserId`; target-scoped rows carry no `reportId`),
+    // but de-dupe by id anyway rather than relying on that invariant holding
+    // forever.
+    const auditLogEntriesById = new Map<string, ModAuditLog>();
+    for (const auditLogEntry of [
+      ...reportScopedAuditLogEntries,
+      ...targetScopedAuditLogEntries,
+    ]) {
+      auditLogEntriesById.set(auditLogEntry.id, auditLogEntry);
+    }
+    const auditLogEntries = [...auditLogEntriesById.values()];
 
     const actorUserIds = [
       ...new Set(

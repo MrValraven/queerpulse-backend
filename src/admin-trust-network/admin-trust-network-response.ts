@@ -22,6 +22,11 @@ export interface TrustNodeDTO {
   avatarUrl: string | null;
   joinedAt: string;
   standing: Standing;
+  /** ADM-23: real cycle detection (`detectRingSlugs`) — true when this node
+   *  is part of a closed self-vouching loop among new/unverified accounts.
+   *  A graph-structure signal distinct from `standing`, which keeps its own
+   *  meaning (suspended/frozen/high-report-count). */
+  inRing: boolean;
   sceneId: string | null;
   role: string | null;
   openReportCount: number;

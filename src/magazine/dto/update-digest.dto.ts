@@ -2,6 +2,7 @@ import { Type } from 'class-transformer';
 import {
   IsArray,
   IsBoolean,
+  IsOptional,
   IsString,
   IsUUID,
   ValidateNested,
@@ -27,4 +28,10 @@ export class UpdateDigestDto {
   @ValidateNested({ each: true })
   @Type(() => DigestItemInput)
   items!: DigestItemInput[];
+
+  /** CNT-6 "Schedule with issue" toggle — omitted leaves the issue's current
+   *  `digestSendOnPublish` untouched, so a plain curation save never resets it. */
+  @IsOptional()
+  @IsBoolean()
+  sendOnPublish?: boolean;
 }

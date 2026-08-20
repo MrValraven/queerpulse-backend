@@ -29,6 +29,7 @@ import {
   TrustNetworkMemberSearchResultDTO,
   TrustNodeDTO,
 } from './admin-trust-network-response';
+import { detectRingSlugs } from './admin-trust-network-ring';
 import { GetTrustNetworkQuery } from './dto/get-trust-network.query';
 
 /** Payload cap: the most-recently-joined members and all edges among them.
@@ -111,6 +112,9 @@ export class AdminTrustNetworkService {
           openReportCount,
           verified: profile.verified,
         }),
+        // Real value computed below, once the edges (which `detectRingSlugs`
+        // needs) exist — this placeholder just satisfies the DTO shape.
+        inRing: false,
         sceneId: scene?.id ?? null,
         role: roleLabelFor(scene?.role ?? null),
         openReportCount,
@@ -163,6 +167,21 @@ export class AdminTrustNetworkService {
         anonymous: vouch.anonymous,
         kind,
       });
+    }
+
+    // ADM-23: real ring detection now that both nodes (standing/verified) and
+    // edges (active vouches) exist — mutates each node's placeholder `inRing`
+    // in place rather than rebuilding the array.
+    const ringSlugs = detectRingSlugs(
+      nodes.map((node) => ({
+        id: node.slug,
+        verified: node.verified,
+        standing: node.standing,
+      })),
+      edges,
+    );
+    for (const node of nodes) {
+      node.inRing = ringSlugs.has(node.slug);
     }
 
     return { nodes, edges, scenes: buildScenes(sceneLabelById), truncated };

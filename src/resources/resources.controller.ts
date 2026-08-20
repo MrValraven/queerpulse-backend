@@ -1,11 +1,20 @@
-import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
+import { CreateResourceSuggestionDto } from './dto/create-resource-suggestion.dto';
 import { ListGlossaryQuery } from './dto/list-glossary.query';
+import { ListResourceListingsQuery } from './dto/list-resource-listings.query';
 import { ListResourcesQuery } from './dto/list-resources.query';
+import { ResourceListingsService } from './resource-listings.service';
+import { ResourceSuggestionsService } from './resource-suggestions.service';
 import { ResourcesService } from './resources.service';
 import {
   ApiCookieAuth,
+  ApiCreatedResponse,
   ApiForbiddenResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
@@ -16,15 +25,55 @@ import {
 
 // Read-only resource directory (guides — housing/health/legal/finance/trans
 // life). Any active member can browse it; there's no ownership/authorship
-// concept and no write endpoint (seed + read only, per the Tier 5 design
-// note).
+// concept and no write endpoint on the guide side (seed + read only). Also
+// hosts CNT-14's two additions: the real Legal Aid / Sexual Health Testing
+// listings directory (`GET /listings`) and the "suggest a resource"
+// submission pathway (`POST /suggestions`) that feeds the admin review queue
+// (`AdminResourceSuggestionsController`).
 @Feature('resources')
 @ApiTags('Resources')
 @ApiCookieAuth('access_token')
 @Controller('resources')
 @UseGuards(ActiveMemberGuard)
 export class ResourcesController {
-  constructor(private readonly resourcesService: ResourcesService) {}
+  constructor(
+    private readonly resourcesService: ResourcesService,
+    private readonly resourceListingsService: ResourceListingsService,
+    private readonly resourceSuggestionsService: ResourceSuggestionsService,
+  ) {}
+
+  // NOTE: this MUST stay declared before `getBySlug(':slug')` below — Nest
+  // matches routes on the same controller in declaration order, and a
+  // `:slug` wildcard registered first would swallow `/resources/listings` as
+  // slug="listings" before this handler ever ran.
+  @Get('listings')
+  @ApiOperation({
+    summary: 'List active resource listings, optionally by category',
+  })
+  @ApiOkResponse({
+    description: 'Active Legal Aid / Sexual Health Testing listings.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
+  listListings(@Query() query: ListResourceListingsQuery) {
+    return this.resourceListingsService.list(query.category);
+  }
+
+  @Post('suggestions')
+  @ApiOperation({
+    summary: 'Suggest a Legal Aid / Sexual Health Testing resource',
+  })
+  @ApiCreatedResponse({
+    description: 'The suggestion was recorded as pending.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
+  createSuggestion(
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: CreateResourceSuggestionDto,
+  ) {
+    return this.resourceSuggestionsService.create(user.userId, dto);
+  }
 
   @ApiOperation({ summary: 'List published resources, optionally by category' })
   @ApiOkResponse({ description: 'A page of published resources.' })

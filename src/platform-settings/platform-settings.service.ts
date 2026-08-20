@@ -3,6 +3,7 @@ import {
   Logger,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
@@ -37,6 +38,8 @@ export const TOGGLEABLE_KEYS = [
   'lockdownAllowsModerators',
   'lockdownMessage',
   'registrationClosedMessage',
+  'announcementEnabled',
+  'announcementMessage',
 ] as const;
 
 export type SettingKey = (typeof TOGGLEABLE_KEYS)[number];
@@ -148,6 +151,7 @@ export class PlatformSettingsService {
         });
         // Read before the loop mutates `current` below.
         const wasLockedDown = current.lockdownEnabled;
+        const previousAnnouncementMessage = current.announcementMessage;
 
         const auditRows: PlatformSettingChange[] = [];
         for (const key of TOGGLEABLE_KEYS) {
@@ -170,6 +174,45 @@ export class PlatformSettingsService {
             }),
           );
           Object.assign(current, { [key]: next });
+        }
+
+        // `announcementExpiresAt` is a `Date` column, so it can't go through
+        // the string/boolean loop above (`normaliseValue`/`stringifyValue`
+        // assume primitive equality and `''` -> `null` collapsing, neither of
+        // which applies to a Date). Handled here instead, audited the same
+        // way as every other field.
+        if (dto.announcementExpiresAt !== undefined) {
+          const nextExpiresAt =
+            dto.announcementExpiresAt === null
+              ? null
+              : new Date(dto.announcementExpiresAt);
+          const previousExpiresAt = current.announcementExpiresAt;
+          const previousIso = previousExpiresAt
+            ? previousExpiresAt.toISOString()
+            : null;
+          const nextIso = nextExpiresAt ? nextExpiresAt.toISOString() : null;
+          if (previousIso !== nextIso) {
+            auditRows.push(
+              manager.create(PlatformSettingChange, {
+                actorId,
+                settingKey: 'announcementExpiresAt',
+                oldValue: previousIso,
+                newValue: nextIso,
+                note: dto.note ?? null,
+              }),
+            );
+            current.announcementExpiresAt = nextExpiresAt;
+          }
+        }
+
+        // Bump the announcement's version whenever its MESSAGE actually
+        // changes, so a member who dismissed the old banner sees the new one.
+        // Not on every save: toggling `announcementEnabled` off and back on
+        // with the same message should not re-surface it for someone who
+        // already dismissed it. Not audited as its own field — it is a
+        // derived id, not something an admin directly sets.
+        if (current.announcementMessage !== previousAnnouncementMessage) {
+          current.announcementVersion = randomUUID();
         }
 
         if (auditRows.length === 0) {

@@ -11,12 +11,17 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { StaffRolesGuard } from '../auth/guards/staff-roles.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateDeckDto } from './dto/create-deck.dto';
 import { UpdateDeckDto } from './dto/update-deck.dto';
+import { MagazinePieceService } from './magazine-piece.service';
 import { MagazineService } from './magazine.service';
 import {
   ApiBadRequestResponse,
@@ -47,7 +52,10 @@ import {
 @UseGuards(ActiveMemberGuard, StaffRolesGuard)
 @StaffRoles('magazine_editor')
 export class AdminMagazineDecksController {
-  constructor(private readonly magazine: MagazineService) {}
+  constructor(
+    private readonly magazine: MagazineService,
+    private readonly magazinePieces: MagazinePieceService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'List every magazine deck, drafts included.' })
@@ -91,5 +99,28 @@ export class AdminMagazineDecksController {
   @ApiNotFoundResponse({ description: 'No deck exists for this id.' })
   remove(@Param('id', ParseUUIDPipe) id: string) {
     return this.magazine.deleteDeck(id);
+  }
+
+  @Post(':id/convert-to-article')
+  @ApiOperation({
+    summary:
+      'Convert this deck to an article (one-way, one-time — CNT-6 "Convert").',
+  })
+  @ApiOkResponse({
+    description:
+      'The piece and newly created article ids, plus which slides (if any) had no article-block equivalent and were dropped.',
+  })
+  @ApiBadRequestResponse({ description: 'Malformed deck id.' })
+  @ApiConflictResponse({
+    description: 'This piece has already been converted to an article.',
+  })
+  @ApiNotFoundResponse({
+    description: 'No deck exists for this id, or no piece links to it.',
+  })
+  convertToArticle(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.magazinePieces.convertDeckToArticle(id, user.userId);
   }
 }

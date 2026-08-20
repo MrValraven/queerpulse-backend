@@ -73,6 +73,23 @@ export class MagazineIssue {
   @Column({ type: 'jsonb', default: () => "'[]'" })
   coverlines!: string[];
 
+  /**
+   * CNT-6 "Schedule with issue": whether the members' digest should go out
+   * automatically to every confirmed newsletter subscriber the moment this
+   * issue ships (there is no cron in this module — "schedule" gates the
+   * real ship action instead, see `MagazinePieceService.shipIssue`).
+   */
+  @Column({ type: 'boolean', default: false })
+  digestSendOnPublish!: boolean;
+
+  /**
+   * Set once the digest has actually gone out for this issue (CNT-6);
+   * `null` until then. The idempotency guard on `shipIssue` — a re-ship
+   * never re-sends once this is stamped.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  digestSentAt!: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 

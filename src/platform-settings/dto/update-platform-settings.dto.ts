@@ -1,4 +1,10 @@
-import { IsBoolean, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  IsBoolean,
+  IsISO8601,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from 'class-validator';
 
 /**
  * Every field optional — this is a partial update, and the service only writes
@@ -34,6 +40,24 @@ export class UpdatePlatformSettingsDto {
   @IsString()
   @MaxLength(1000)
   registrationClosedMessage?: string | null;
+
+  @IsOptional()
+  @IsBoolean()
+  announcementEnabled?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  announcementMessage?: string | null;
+
+  /**
+   * ISO 8601 timestamp; `null` clears it. Validated as a date string here —
+   * the service converts it to a `Date` before writing, since the entity
+   * column is `timestamptz`.
+   */
+  @IsOptional()
+  @IsISO8601()
+  announcementExpiresAt?: string | null;
 
   /** Free-text reason, recorded on every audit row this request produces. */
   @IsOptional()

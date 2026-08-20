@@ -1,9 +1,7 @@
 import { Body, Controller, Get, Param, Patch, UseGuards } from '@nestjs/common';
-import { Roles } from '../auth/decorators/roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { HousingModerationGuard } from '../auth/guards/housing-moderation.guard';
 import { Feature } from '../common/feature.decorator';
-import { UserRole } from '../users/entities/user.entity';
 import { UpdateHousingListingStatusDto } from './dto/update-housing-listing-status.dto';
 import { HousingListingsService } from './housing-listings.service';
 import {
@@ -20,7 +18,9 @@ import {
  * Moderator/admin moderation of housing listings — list all (incl. non-live)
  * and transition status. Mirrors `ListingsController.setStatus`'s
  * Moderator+Admin gate (co-ops are Admin-only; housing listings follow the
- * listings precedent so moderators can clear the review queue).
+ * listings precedent so moderators can clear the review queue), OR a member
+ * holding the additive `housing_moderator` staff role (see
+ * `HousingModerationGuard`).
  */
 @Feature('housingListings')
 @ApiTags('Admin — Housing')
@@ -28,10 +28,12 @@ import {
 @ApiUnauthorizedResponse({
   description: 'Not authenticated.',
 })
-@ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
+@ApiForbiddenResponse({
+  description:
+    'Requires moderator or admin role, or the housing_moderator staff role.',
+})
 @Controller('admin/housing-listings')
-@UseGuards(ActiveMemberGuard, RolesGuard)
-@Roles(UserRole.Moderator, UserRole.Admin)
+@UseGuards(ActiveMemberGuard, HousingModerationGuard)
 export class AdminHousingListingsController {
   constructor(private readonly service: HousingListingsService) {}
 

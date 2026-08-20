@@ -345,6 +345,8 @@ describe('ModerationService', () => {
         anonymous: false,
         id: 'reporter-1',
         name: 'Member',
+        priorReports: 0,
+        priorDismissed: 0,
       });
       expect(page.data[0]!.reported).toEqual({
         id: 'post-1',
@@ -370,6 +372,37 @@ describe('ModerationService', () => {
         anonymous: false,
         id: 'reporter-1',
         name: 'Ada Lovelace',
+        priorReports: 0,
+        priorDismissed: 0,
+      });
+    });
+
+    it("surfaces a reporter's prior resolved-report history, excluding an already-resolved current report", async () => {
+      const qb = qbStub([
+        baseReport({
+          status: ReportStatus.Resolved,
+          resolvedAt: new Date('2026-01-03T00:00:00.000Z'),
+          resolutionAction: 'dismiss',
+        }),
+      ]);
+      reports.createQueryBuilder.mockReturnValue(qb);
+      // Two resolved reports total for this reporter across the page's
+      // batched query: the current row (dismissed) plus one prior warn.
+      qb.getRawMany = jest
+        .fn()
+        .mockResolvedValue([
+          { reporterId: 'reporter-1', total: '2', dismissed: '1' },
+        ]);
+
+      const page = await service.list({});
+      expect(page.data[0]!.reporter).toEqual({
+        anonymous: false,
+        id: 'reporter-1',
+        name: 'Member',
+        // The current (already-resolved, dismissed) report is subtracted
+        // from both totals so it never counts against its own reporter.
+        priorReports: 1,
+        priorDismissed: 0,
       });
     });
 

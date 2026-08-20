@@ -36,6 +36,11 @@ export enum ReportSubjectType {
   // Backed by `AddReviewReportSubject` (adds the value to
   // `reports_subject_type_enum`).
   Review = 'review',
+  // A public reader comment on a magazine article (`magazine_reader_comment`
+  // — CNT-10), addressed by the comment's uuid. Backed by
+  // `AddMagazineReaderComments1793100000000` (adds the value to
+  // `reports_subject_type_enum`).
+  MagazineComment = 'magazine_comment',
 }
 
 // Mirrors the frontend's `ReportDTO`/`ModReportDTO` status union

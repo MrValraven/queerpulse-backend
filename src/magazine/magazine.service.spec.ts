@@ -5,6 +5,7 @@ import { MagazineArticle } from './entities/magazine-article.entity';
 import { MagazineAuthor } from './entities/magazine-author.entity';
 import { MagazineDeck } from './entities/magazine-deck.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
+import { MagazineSection } from './entities/magazine-section.entity';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { MagazineService } from './magazine.service';
 
@@ -75,6 +76,7 @@ describe('MagazineService', () => {
   };
   let authors: { find: jest.Mock; findOne: jest.Mock };
   let issues: { find: jest.Mock; findOne: jest.Mock };
+  let sections: { find: jest.Mock };
 
   beforeEach(async () => {
     articles = {
@@ -83,6 +85,7 @@ describe('MagazineService', () => {
     };
     authors = { find: jest.fn().mockResolvedValue([]), findOne: jest.fn() };
     issues = { find: jest.fn().mockResolvedValue([]), findOne: jest.fn() };
+    sections = { find: jest.fn().mockResolvedValue([]) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -94,6 +97,7 @@ describe('MagazineService', () => {
           provide: getRepositoryToken(MagazineDeck),
           useValue: { find: jest.fn(), findOne: jest.fn() },
         },
+        { provide: getRepositoryToken(MagazineSection), useValue: sections },
         {
           provide: MediaCropService,
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
@@ -229,6 +233,32 @@ describe('MagazineService', () => {
 
       const page = await service.listArticles({});
       expect(page.items).toEqual([]);
+    });
+
+    it('filters by section via an exact string match (CNT-20 browse)', async () => {
+      const qb = makeQueryBuilder([], 0);
+      articles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.listArticles({ section: 'Essays' });
+
+      expect(qb.andWhere).toHaveBeenCalledWith('article.section = :section', {
+        section: 'Essays',
+      });
+    });
+  });
+
+  describe('listSections', () => {
+    it('maps each row to SectionResponse, ordered by orderIndex', async () => {
+      sections.find.mockResolvedValue([
+        { id: 'section-1', name: 'Essays', target: 4, note: '', orderIndex: 4 },
+      ]);
+
+      await expect(service.listSections()).resolves.toEqual([
+        { id: 'section-1', name: 'Essays', target: 4, note: '', orderIndex: 4 },
+      ]);
+      expect(sections.find).toHaveBeenCalledWith({
+        order: { orderIndex: 'ASC' },
+      });
     });
   });
 

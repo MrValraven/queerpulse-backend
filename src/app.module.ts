@@ -49,6 +49,7 @@ import { AdminMembersModule } from './admin-members/admin-members.module';
 import { AdminInvitesModule } from './admin-invites/admin-invites.module';
 import { AdminTrustNetworkModule } from './admin-trust-network/admin-trust-network.module';
 import { AdminOverviewModule } from './admin-overview/admin-overview.module';
+import { AdminReportsModule } from './admin-reports/admin-reports.module';
 import { AdminMediaModule } from './admin-media/admin-media.module';
 import { MyMediaModule } from './my-media/my-media.module';
 import { AdminBotsModule } from './admin-bots/admin-bots.module';
@@ -290,6 +291,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     AdminInvitesModule,
     AdminTrustNetworkModule,
     AdminOverviewModule,
+    AdminReportsModule,
     AdminMediaModule,
     MyMediaModule,
     AdminBotsModule,

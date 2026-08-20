@@ -1031,16 +1031,26 @@ export class ModerationService {
         .map((report) => report.resolutionActorId as string),
     ];
 
-    const [reporterNames, reportedProfiles, priorReportCounts, moderatorNames] =
-      await Promise.all([
-        this.audit.namesForUserIds(reporterUserIds),
-        this.resolveReportedProfiles(reports),
-        this.priorReportCountsBySubject(reports),
-        this.audit.namesForUserIds(moderatorIds),
-      ]);
+    const [
+      reporterNames,
+      reportedProfiles,
+      priorReportCounts,
+      moderatorNames,
+      reporterCredibility,
+    ] = await Promise.all([
+      this.audit.namesForUserIds(reporterUserIds),
+      this.resolveReportedProfiles(reports),
+      this.priorReportCountsBySubject(reports),
+      this.audit.namesForUserIds(moderatorIds),
+      this.reporterCredibilityByReporterId(reports),
+    ]);
 
     return reports.map((report) => {
-      const reporter = this.buildReporter(report, reporterNames);
+      const reporter = this.buildReporter(
+        report,
+        reporterNames,
+        reporterCredibility,
+      );
       const reported = this.buildReported(
         report,
         reportedProfiles,
@@ -1078,13 +1088,37 @@ export class ModerationService {
   private buildReporter(
     report: Report,
     reporterNames: Map<string, string>,
+    reporterCredibility: Map<
+      string,
+      { priorReports: number; priorDismissed: number }
+    >,
   ): ModReporterDTO {
     if (report.anonymous) return { anonymous: true };
     if (!report.reporterId) return { anonymous: true };
+    const aggregate = reporterCredibility.get(report.reporterId) ?? {
+      priorReports: 0,
+      priorDismissed: 0,
+    };
+    // Subtract the current report from its own totals when it is itself
+    // already resolved (mirrors `buildReported`'s subtract-self trick) — an
+    // open/escalated current report never entered the aggregate to begin
+    // with, so there is nothing to subtract for it.
+    const isSelfResolved = Boolean(report.resolvedAt);
+    const priorReports = Math.max(
+      0,
+      aggregate.priorReports - (isSelfResolved ? 1 : 0),
+    );
+    const priorDismissed = Math.max(
+      0,
+      aggregate.priorDismissed -
+        (isSelfResolved && report.resolutionAction === 'dismiss' ? 1 : 0),
+    );
     return {
       anonymous: false,
       id: report.reporterId,
       name: reporterNames.get(report.reporterId) ?? 'Member',
+      priorReports,
+      priorDismissed,
     };
   }
 
@@ -1183,6 +1217,58 @@ export class ModerationService {
     return totalsBySubject;
   }
 
+  /**
+   * ADM-22: batched twin of `priorReportCountsBySubject`, but `GROUP BY
+   * reporterId` over each reporter's PAST RESOLVED reports across the page —
+   * an open/escalated report has no verdict yet, so it carries no
+   * credibility signal either way. `total` is every resolved report the
+   * reporter has filed; `dismissed` is the subset that resolved to
+   * `dismiss` (the unfounded outcome). Deliberately a raw count pair rather
+   * than a derived score/tier a moderator can't audit.
+   *
+   * `buildReporter` subtracts the current report from both counts when the
+   * current report is itself already resolved, mirroring
+   * `priorReportCountsBySubject`/`buildReported`'s subtract-self trick.
+   */
+  private async reporterCredibilityByReporterId(
+    reports: Report[],
+  ): Promise<Map<string, { priorReports: number; priorDismissed: number }>> {
+    const credibilityByReporterId = new Map<
+      string,
+      { priorReports: number; priorDismissed: number }
+    >();
+
+    const reporterIds = [
+      ...new Set(
+        reports
+          .filter((report) => !report.anonymous && report.reporterId)
+          .map((report) => report.reporterId as string),
+      ),
+    ];
+    if (!reporterIds.length) return credibilityByReporterId;
+
+    const rows = await this.reports
+      .createQueryBuilder('r')
+      .select('r.reporterId', 'reporterId')
+      .addSelect('COUNT(*)', 'total')
+      .addSelect(
+        `COUNT(*) FILTER (WHERE r.resolutionAction = 'dismiss')`,
+        'dismissed',
+      )
+      .where('r.reporterId IN (:...reporterIds)', { reporterIds })
+      .andWhere('r.resolvedAt IS NOT NULL')
+      .groupBy('r.reporterId')
+      .getRawMany<{ reporterId: string; total: string; dismissed: string }>();
+
+    for (const row of rows) {
+      credibilityByReporterId.set(row.reporterId, {
+        priorReports: Number(row.total),
+        priorDismissed: Number(row.dismissed),
+      });
+    }
+    return credibilityByReporterId;
+  }
+
   private async describeReporter(report: Report): Promise<ModReporterDTO> {
     if (report.anonymous) return { anonymous: true };
     // An erased reporter (`reporter_id` NULLed by the erasure sweep) becomes
@@ -1191,8 +1277,34 @@ export class ModerationService {
     // the existing `{ anonymous: true }` arm keeps `ModReporterDTO.id`
     // honestly non-nullable instead of inventing a placeholder id.
     if (!report.reporterId) return { anonymous: true };
-    const name = await this.audit.nameForUserId(report.reporterId);
-    return { anonymous: false, id: report.reporterId, name };
+    // ADM-22: reporter credibility, counted over this reporter's PAST
+    // RESOLVED reports only (excluding the current one) — an open report has
+    // no verdict yet. `priorDismissed` is filtered by `resolutionAction`
+    // alone since that column is only ever set on a resolved report.
+    const [name, priorReports, priorDismissed] = await Promise.all([
+      this.audit.nameForUserId(report.reporterId),
+      this.reports.count({
+        where: {
+          reporterId: report.reporterId,
+          id: Not(report.id),
+          resolvedAt: Not(IsNull()),
+        },
+      }),
+      this.reports.count({
+        where: {
+          reporterId: report.reporterId,
+          id: Not(report.id),
+          resolutionAction: 'dismiss',
+        },
+      }),
+    ]);
+    return {
+      anonymous: false,
+      id: report.reporterId,
+      name,
+      priorReports,
+      priorDismissed,
+    };
   }
 
   // `subjectId` is a slug/uuid for `member` reports (per `reports.api.ts`'s

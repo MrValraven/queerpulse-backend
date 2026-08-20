@@ -50,6 +50,40 @@ export class PlatformSettings {
   @Column({ type: 'text', nullable: true })
   registrationClosedMessage!: string | null;
 
+  /**
+   * Sitewide banner, shown to every visitor whether signed in or not (ADM-25).
+   * Independent of the lockdown flow above — a banner is informational, not a
+   * kill switch, so it never blocks anyone from anything.
+   */
+  @Column({ type: 'boolean', default: false })
+  announcementEnabled!: boolean;
+
+  /** Admin-authored banner copy. */
+  @Column({ type: 'text', nullable: true })
+  announcementMessage!: string | null;
+
+  /**
+   * Optional auto-hide safety net for maintenance-style notices. Once past,
+   * the public projection reports the banner as disabled even though this
+   * column still says `true` — an admin should not have to remember to flip
+   * the switch back off after a scheduled maintenance window ends. The check
+   * happens where the settings are projected to the public
+   * (`PlatformStatusController`), not here: this column never mutates itself.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  announcementExpiresAt!: Date | null;
+
+  /**
+   * Bumped to a fresh UUID every time `announcementMessage` actually changes
+   * (see `PlatformSettingsService.update`). Per-member dismissal is keyed on
+   * (member, version) rather than (member, "the announcement"), so a member
+   * who dismissed the old banner still sees a genuinely new one — while an
+   * admin toggling the same message off and back on does not reset anyone's
+   * dismissal.
+   */
+  @Column({ type: 'uuid' })
+  announcementVersion!: string;
+
   @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt!: Date;
 

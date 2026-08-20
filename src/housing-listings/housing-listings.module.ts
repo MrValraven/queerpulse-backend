@@ -7,6 +7,7 @@ import { MessagingModule } from '../messaging/messaging.module';
 import { UsersModule } from '../users/users.module';
 import { VerificationModule } from '../verification/verification.module';
 import { AffirmingPledgeModule } from '../affirming-pledge/affirming-pledge.module';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { AdminHousingListingsController } from './admin-housing-listings.controller';
 import { HousingDirectoryController } from './housing-directory.controller';
 import { HousingDirectoryService } from './housing-directory.service';
@@ -17,7 +18,10 @@ import { HousingListing } from './entities/housing-listing.entity';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([HousingListing]),
+    // UserStaffRole is registered here too — `HousingModerationGuard` (on
+    // `AdminHousingListingsController`) needs it to check the additive
+    // `housing_moderator` staff role.
+    TypeOrmModule.forFeature([HousingListing, UserStaffRole]),
     // UsersModule exports the Profile repository (member-ref hydration).
     UsersModule,
     // MessagingModule exports MessagingService (enquiry delivery).

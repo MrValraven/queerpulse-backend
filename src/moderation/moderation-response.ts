@@ -14,8 +14,23 @@ import { ModAuditLog } from './entities/mod-audit-log.entity';
 // `reported`/`appellant`/`original` live in `moderation.service.ts` so this
 // file stays a plain, easily-unit-tested mapping layer.
 
+// ADM-22: a reporter credibility signal, mirroring `ModReportedDTO`'s
+// prior-history pattern but on the FILER's side rather than the subject's.
+// `priorReports`/`priorDismissed` are only ever counted over the reporter's
+// PAST RESOLVED reports (an open report has no verdict yet, so it carries no
+// signal either way) and are deliberately raw counts, not a derived score or
+// tier — an honest "N filed, M dismissed" a moderator can weigh themselves,
+// not a fabricated/opaque metric. Absent entirely on an anonymous or
+// already-erased reporter (there is no identity to attach a track record to).
 export type ModReporterDTO =
-  { anonymous: true } | { anonymous: false; id: string; name: string };
+  | { anonymous: true }
+  | {
+      anonymous: false;
+      id: string;
+      name: string;
+      priorReports: number;
+      priorDismissed: number;
+    };
 
 export interface ModReportedDTO {
   id: string;

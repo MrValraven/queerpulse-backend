@@ -25,10 +25,8 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
-import { Roles } from '../auth/decorators/roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
-import { UserRole } from '../users/entities/user.entity';
+import { HousingModerationGuard } from '../auth/guards/housing-moderation.guard';
 import { HousingGroupsService } from '../housing-groups/housing-groups.service';
 import { CreateGroupDto } from '../housing-groups/dto/create-group.dto';
 import { UpdateGroupDto } from '../housing-groups/dto/update-group.dto';
@@ -40,14 +38,17 @@ import { HideGroupListingDto } from '../housing-groups/dto/hide-group-listing.dt
  * access-gated join requests, and enforce norms by hiding listings that break
  * them (hate speech, brokers, opaque pricing). Guarded — Moderators and Admins
  * (Admin here; norms review is an admin/steward duty, matching the co-op admin
- * precedent).
+ * precedent), OR a member holding the additive `housing_moderator` staff role
+ * (see `HousingModerationGuard`).
  */
-@UseGuards(ActiveMemberGuard, RolesGuard)
-@Roles(UserRole.Moderator, UserRole.Admin)
+@UseGuards(ActiveMemberGuard, HousingModerationGuard)
 @ApiTags('Admin — Housing groups')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires the moderator or admin role.' })
+@ApiForbiddenResponse({
+  description:
+    'Requires the moderator or admin role, or the housing_moderator staff role.',
+})
 @Controller('admin/housing-groups')
 export class AdminHousingGroupsController {
   constructor(private readonly groups: HousingGroupsService) {}

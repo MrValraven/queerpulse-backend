@@ -105,6 +105,23 @@ export class AdminMagazineIssuesController {
     return this.magazinePieces.updateCover(number, dto);
   }
 
+  @Post(':number/digest/test-send')
+  @ApiOperation({
+    summary:
+      "Send a one-off preview of the issue's current members' digest to the caller's own inbox.",
+  })
+  @ApiOkResponse({
+    description:
+      'The test email was sent (or logged, if SMTP delivery is not configured).',
+  })
+  @ApiNotFoundResponse({ description: 'No issue exists for this number.' })
+  sendDigestTest(
+    @Param('number') number: string,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.magazinePieces.sendDigestTest(number, user.email);
+  }
+
   @Post(':number/ship')
   @ApiOperation({
     summary:

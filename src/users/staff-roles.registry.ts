@@ -8,7 +8,8 @@
  * this map, so NO migration is needed for a new role. Admin is always a superset
  * (see StaffRolesGuard), so admins are never granted these explicitly.
  */
-export type StaffRoleId = 'magazine_editor' | 'magazine_writer';
+export type StaffRoleId =
+  'magazine_editor' | 'magazine_writer' | 'housing_moderator';
 
 export interface StaffRoleDef {
   id: StaffRoleId;
@@ -24,6 +25,12 @@ export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
   magazine_writer: {
     id: 'magazine_writer',
     grants: ['Draft and submit magazine pieces (workspace ships in Spec 2)'],
+  },
+  housing_moderator: {
+    id: 'housing_moderator',
+    grants: [
+      'Moderate Housing listings and groups (admin/housing-listings, admin/housing-groups)',
+    ],
   },
 };
 

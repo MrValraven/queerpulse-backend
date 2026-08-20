@@ -36,5 +36,9 @@ import { UsersModule } from '../users/users.module';
     GovernanceOverviewService,
     GovernanceProposalService,
   ],
+  // `GovernanceFinanceService` is reused directly by `AdminReportsModule`
+  // (the consolidated `/admin/reports` page's finance section) so that page
+  // can never drift from the governance Finances tab's own figures.
+  exports: [GovernanceFinanceService],
 })
 export class GovernanceModule {}

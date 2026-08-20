@@ -13,7 +13,9 @@ export type MailTemplateKey =
   | 'ops_inquiry_received'
   | 'concern_update'
   | 'join_request_approved'
-  | 'join_request_declined';
+  | 'join_request_declined'
+  | 'digest_test'
+  | 'digest';
 
 /** The params each template key requires. */
 export interface MailTemplateParams {
@@ -48,6 +50,21 @@ export interface MailTemplateParams {
   join_request_declined: {
     applicantName: string;
   };
+  /** Members' digest for one issue (CNT-6 "Send test" / "Schedule with
+   *  issue"). `digest_test` goes to the requesting admin's own inbox as a
+   *  one-off preview; `digest` is the real send to every confirmed
+   *  newsletter subscriber once the issue ships. Same shape for both — only
+   *  the subject/intro line differs, see `renderDigestMail`. */
+  digest_test: DigestEmailParams;
+  digest: DigestEmailParams;
+}
+
+/** Shared params for `digest_test`/`digest` — see {@link MailTemplateParams}. */
+interface DigestEmailParams {
+  issueNumber: string;
+  issueTitle: string;
+  /** Only the curated ("on") entries, already resolved to their piece title. */
+  items: { title: string; blurb: string }[];
 }
 
 export interface RenderedMail {
@@ -64,6 +81,38 @@ function escapeHtml(value: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+/** Shared renderer for `digest_test`/`digest` — see {@link MailTemplateParams}. */
+function renderDigestMail(
+  isTest: boolean,
+  params: DigestEmailParams,
+): RenderedMail {
+  const { issueNumber, issueTitle, items } = params;
+  const subject = isTest
+    ? `[Test] The digest for issue ${issueNumber}: ${issueTitle}`
+    : `Issue ${issueNumber}: ${issueTitle}`;
+  const intro = isTest
+    ? `This is a one-off test send of the members' digest for issue ${issueNumber} (${issueTitle}) — only you are getting this copy.`
+    : `The digest for issue ${issueNumber} (${issueTitle}) is here.`;
+  const itemsText =
+    items.length > 0
+      ? items.map((item) => `${item.title}\n${item.blurb}`).join('\n\n')
+      : 'Nothing is curated for this issue yet.';
+  const itemsHtml =
+    items.length > 0
+      ? items
+          .map(
+            (item) =>
+              `<p><b>${escapeHtml(item.title)}</b><br/>${escapeHtml(item.blurb)}</p>`,
+          )
+          .join('')
+      : '<p>Nothing is curated for this issue yet.</p>';
+  return {
+    subject,
+    text: `${intro}\n\n${itemsText}`,
+    html: `<p>${escapeHtml(intro)}</p>${itemsHtml}`,
+  };
 }
 
 export function renderTemplate<K extends MailTemplateKey>(
@@ -203,6 +252,15 @@ export function renderTemplate<K extends MailTemplateKey>(
           `<p>This isn't necessarily final. You're welcome to submit a new ` +
           `request in the future.</p>`,
       };
+    }
+    case 'digest_test': {
+      return renderDigestMail(
+        true,
+        params as MailTemplateParams['digest_test'],
+      );
+    }
+    case 'digest': {
+      return renderDigestMail(false, params as MailTemplateParams['digest']);
     }
     default: {
       // Exhaustiveness guard: a new MailTemplateKey without a case above is a

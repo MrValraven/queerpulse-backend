@@ -15,6 +15,7 @@ import { MagazineArticle } from './entities/magazine-article.entity';
 import { MagazineAuthor } from './entities/magazine-author.entity';
 import { MagazineDeck } from './entities/magazine-deck.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
+import { MagazineSection } from './entities/magazine-section.entity';
 import {
   ArticleListItem,
   ArticleResponse,
@@ -23,6 +24,7 @@ import {
   DeckListItemResponse,
   DeckResponse,
   IssueResponse,
+  SectionResponse,
   toArticleListItem,
   toArticleResponse,
   toArticleSearchRow,
@@ -30,12 +32,14 @@ import {
   toDeckListItem,
   toDeckResponse,
   toIssueResponse,
+  toSectionResponse,
 } from './magazine-response';
 
 export interface ListArticlesInput {
   issue?: string;
   tag?: string;
   author?: string;
+  section?: string;
   page?: number;
 }
 
@@ -60,10 +64,22 @@ export class MagazineService {
     private readonly issues: Repository<MagazineIssue>,
     @InjectRepository(MagazineDeck)
     private readonly decks: Repository<MagazineDeck>,
+    @InjectRepository(MagazineSection)
+    private readonly sections: Repository<MagazineSection>,
     // Batched crop lookup (`MediaCropService.getMany`) for an issue's
     // `coverUrl` sibling `crop`.
     private readonly mediaCropService: MediaCropService,
   ) {}
+
+  // CNT-20 — the section/topic taxonomy (`MagazineSection`, seeded rows:
+  // Cover, Features, Reported, Interview, Essays, Service, Photo, Review,
+  // Column, "Last word"), previously only read internally
+  // (`magazine-piece.service.ts` issue-plan gap counts), now exposed for the
+  // public section browse page.
+  async listSections(): Promise<SectionResponse[]> {
+    const rows = await this.sections.find({ order: { orderIndex: 'ASC' } });
+    return rows.map(toSectionResponse);
+  }
 
   async listIssues(): Promise<IssueResponse[]> {
     // Project only what `toIssueResponse` reads — the full row also carries
@@ -144,6 +160,12 @@ export class MagazineService {
         'byline.id = article.author_id AND byline.slug = :authorSlug',
         { authorSlug: query.author },
       );
+    }
+    if (query.section) {
+      // Exact string match against the free-text `article.section` column —
+      // see the `ListArticlesQuery.section` comment for why this doesn't
+      // validate against the seeded `MagazineSection` taxonomy.
+      qb.andWhere('article.section = :section', { section: query.section });
     }
 
     // Property paths (`publishedAt`/`createdAt`), not raw DB columns: when the

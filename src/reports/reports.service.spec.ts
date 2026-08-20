@@ -169,6 +169,20 @@ describe('ReportsService', () => {
       ).resolves.toBeDefined();
       expect(reports.save).toHaveBeenCalled();
     });
+
+    it('accepts a magazine_comment subject (CNT-10 report wiring)', async () => {
+      const res = await service.create('reporter-1', {
+        subjectType: ReportSubjectType.MagazineComment,
+        subjectId: 'comment-1',
+        reasonCode: 'spam',
+      });
+      expect(res.subjectType).toBe(ReportSubjectType.MagazineComment);
+      expect(reports.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subjectType: ReportSubjectType.MagazineComment,
+        }),
+      );
+    });
   });
 
   describe('reasonsFor', () => {
@@ -182,6 +196,12 @@ describe('ReportsService', () => {
       const venue = service.reasonsFor(ReportSubjectType.Venue);
       expect(member).not.toEqual(venue);
       expect(member.every((o) => o.code && o.label)).toBe(true);
+    });
+
+    it('offers reasons for a magazine_comment subject', () => {
+      const options = service.reasonsFor(ReportSubjectType.MagazineComment);
+      expect(options.map((o) => o.code)).toContain('spam');
+      expect(options.map((o) => o.code)).toContain('other');
     });
   });
 });

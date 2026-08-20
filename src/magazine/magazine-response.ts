@@ -8,6 +8,7 @@ import {
 import { MagazineAuthor } from './entities/magazine-author.entity';
 import { DeckSlide, MagazineDeck } from './entities/magazine-deck.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
+import { MagazineSection } from './entities/magazine-section.entity';
 import {
   MagazineStorySubmission,
   SubmissionStatus,
@@ -63,6 +64,20 @@ export interface ArticleResponse extends ArticleListItem {
   standfirst: string;
   kicker: string;
   section: string;
+}
+
+/**
+ * CNT-20 — the seeded section/topic taxonomy (`MagazineSection`), exposed
+ * for the section browse page. `target`/`note` are the issue-planning
+ * fields the entity docstring describes (spec §3.5 gap counts); harmless to
+ * expose alongside `name`/`orderIndex` on this public read.
+ */
+export interface SectionResponse {
+  id: string;
+  name: string;
+  target: number;
+  note: string;
+  orderIndex: number;
 }
 
 export interface StorySubmissionResponse {
@@ -209,6 +224,16 @@ export function toDeckResponse(deck: MagazineDeck): DeckResponse {
     authorBio: deck.authorBio,
     related: deck.related,
     slides: deck.slides,
+  };
+}
+
+export function toSectionResponse(section: MagazineSection): SectionResponse {
+  return {
+    id: section.id,
+    name: section.name,
+    target: section.target,
+    note: section.note,
+    orderIndex: section.orderIndex,
   };
 }
 

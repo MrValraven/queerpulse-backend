@@ -22,6 +22,15 @@ function build() {
     findOne: jest.fn(),
     save: jest.fn().mockResolvedValue(undefined),
   };
+  // `citeMember` (ADM-9) writes `mod_audit_logs` rows directly (targetUserId/
+  // targetName), bypassing `ModAuditService.writeAuditLog` — so it needs its
+  // own repository mock, not the `audit` service stub below.
+  const auditLogs = {
+    create: jest.fn((row: Record<string, unknown>) => row),
+    save: jest.fn((row: Record<string, unknown>) =>
+      Promise.resolve({ ...row, id: 'audit-1', createdAt: now }),
+    ),
+  };
   const enforcement = { restrictMember: jest.fn() };
   const audit = { writeAuditLog: jest.fn().mockResolvedValue(undefined) };
   const notifications = { create: jest.fn().mockResolvedValue(undefined) };
@@ -29,12 +38,21 @@ function build() {
 
   const service = new AdminMemberModerationService(
     profiles as never,
+    auditLogs as never,
     enforcement as never,
     audit as never,
     notifications as never,
     auth as never,
   );
-  return { service, profiles, enforcement, audit, notifications, auth };
+  return {
+    service,
+    profiles,
+    auditLogs,
+    enforcement,
+    audit,
+    notifications,
+    auth,
+  };
 }
 
 describe('AdminMemberModerationService', () => {
@@ -84,6 +102,47 @@ describe('AdminMemberModerationService', () => {
       expect(profiles.save).not.toHaveBeenCalled();
       expect(audit.writeAuditLog).not.toHaveBeenCalled();
       expect(result.verifiedAt).toBe(now.toISOString());
+    });
+  });
+
+  describe('citeMember', () => {
+    it('404s when the member has no profile', async () => {
+      const { service, profiles } = build();
+      profiles.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.citeMember('admin-1', 'member-1', 'Vouch edge confirmed.'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('writes a report-less, target-scoped audit row and returns the citation', async () => {
+      const { service, profiles, auditLogs } = build();
+      profiles.findOne.mockResolvedValue(
+        profileRow({ firstName: 'Jamie', lastName: 'Silva' }),
+      );
+
+      const result = await service.citeMember(
+        'admin-1',
+        'member-1',
+        'Vouch edge confirmed.',
+      );
+
+      expect(auditLogs.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reportId: null,
+          actorId: 'admin-1',
+          targetUserId: 'member-1',
+          targetName: 'Jamie Silva',
+          action: 'evidence_cited',
+          note: 'Vouch edge confirmed.',
+        }),
+      );
+      expect(result).toEqual({
+        id: 'member-1',
+        slug: 'jamie',
+        note: 'Vouch edge confirmed.',
+        citedAt: now.toISOString(),
+      });
     });
   });
 

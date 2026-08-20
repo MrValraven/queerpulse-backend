@@ -250,6 +250,19 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'spam',
     'other',
   ],
+  // A public reader comment on a magazine article (CNT-10). Same shape as
+  // `Reply`: it's a small piece of user-generated text under a piece of
+  // content, so the same reason set applies unchanged.
+  [ReportSubjectType.MagazineComment]: [
+    'outing',
+    'doxxing',
+    'harassment',
+    'hate_speech',
+    'discrimination',
+    'spam',
+    'off_topic',
+    'other',
+  ],
 };
 
 /** The reason options a given subject type should offer, as `{code, label}`. */

@@ -25,6 +25,7 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminMemberModerationService } from './admin-member-moderation.service';
+import { CiteMemberDto } from './dto/cite-member.dto';
 import { RestrictMemberDto } from './dto/restrict-member.dto';
 
 /**
@@ -55,6 +56,22 @@ export class AdminMemberModerationController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.service.verifyMember(currentUser.userId, id);
+  }
+
+  @ApiOperation({
+    summary:
+      'Cite evidence against a member — a free-text note attached to their audit trail (ADM-9).',
+  })
+  @ApiOkResponse({ description: 'The recorded citation.' })
+  @ApiBadRequestResponse({ description: 'Missing or too-long note.' })
+  @ApiNotFoundResponse({ description: 'Member not found.' })
+  @Post(':id/cite')
+  cite(
+    @CurrentUser() currentUser: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CiteMemberDto,
+  ) {
+    return this.service.citeMember(currentUser.userId, id, dto.note);
   }
 
   @ApiOperation({

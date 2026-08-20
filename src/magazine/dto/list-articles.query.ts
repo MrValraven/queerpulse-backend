@@ -11,6 +11,16 @@ export class ListArticlesQuery {
   @IsString()
   tag?: string;
 
+  // `magazine_section.name` (see `MagazineSection`) — lets the section/topic
+  // browse page (`GET /magazine/articles?section=<name>`) ask for just that
+  // section's published pieces. `MagazineArticle.section` is free text, so
+  // this is an exact string match with no validation against the seeded
+  // taxonomy — a drifted section name just yields zero rows, mirroring the
+  // `tag`/`author` filters above.
+  @IsOptional()
+  @IsString()
+  section?: string;
+
   // `magazine_author.slug` — lets AuthorPage's "Selected work" grid ask for
   // just this byline's pieces (GET /magazine/articles?author=<slug>).
   @IsOptional()
