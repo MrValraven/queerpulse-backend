@@ -422,12 +422,15 @@ export class InvitesService {
   // currentMonthStart so the displayed number matches the enforced one.
   async getQuota(inviterId: string): Promise<InviteQuotaView> {
     const now = new Date();
-    const inviter = await this.usersService.findById(inviterId);
+    const [inviter, used, memberCount] = await Promise.all([
+      this.usersService.findById(inviterId),
+      this.invites.count({
+        where: { inviterId, createdAt: MoreThanOrEqual(currentMonthStart(now)) },
+      }),
+      this.usersService.countActiveMembers(),
+    ]);
     const limit = this.resolveMonthlyLimit(inviter);
-    const used = await this.invites.count({
-      where: { inviterId, createdAt: MoreThanOrEqual(currentMonthStart(now)) },
-    });
-    return toInviteQuotaView(limit, used, nextMonthStart(now));
+    return toInviteQuotaView(limit, used, nextMonthStart(now), memberCount);
   }
 
   /**

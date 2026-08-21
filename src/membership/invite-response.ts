@@ -167,17 +167,21 @@ export interface InviteQuotaView {
   used: number;
   remaining: number;
   resetsAt: string; // ISO — 00:00 UTC on the 1st of next month
+  /** Current community size, for the compose page's share preview. */
+  memberCount: number;
 }
 
 export function toInviteQuotaView(
   limit: number,
   used: number,
   resetsAt: Date,
+  memberCount: number,
 ): InviteQuotaView {
   return {
     limit,
     used,
     remaining: Math.max(0, limit - used),
     resetsAt: resetsAt.toISOString(),
+    memberCount,
   };
 }

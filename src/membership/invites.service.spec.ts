@@ -196,12 +196,15 @@ describe('InvitesService.resolveInvite', () => {
 describe('InvitesService.getQuota', () => {
   let service: InvitesService;
   let invitesRepo: { count: jest.Mock };
-  let users: { findById: jest.Mock };
+  let users: { findById: jest.Mock; countActiveMembers: jest.Mock };
   let config: { get: jest.Mock };
 
   const build = async () => {
     invitesRepo = { count: jest.fn().mockResolvedValue(0) };
-    users = { findById: jest.fn().mockResolvedValue(null) };
+    users = {
+      findById: jest.fn().mockResolvedValue(null),
+      countActiveMembers: jest.fn().mockResolvedValue(247),
+    };
     config = { get: jest.fn(() => 5) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -240,6 +243,12 @@ describe('InvitesService.getQuota', () => {
     invitesRepo.count.mockResolvedValue(3); // over the limit
     const quota = await service.getQuota('inviter');
     expect(quota.remaining).toBe(0);
+  });
+
+  it('reports the live community size alongside the allowance', async () => {
+    users.countActiveMembers.mockResolvedValue(312);
+    const quota = await service.getQuota('inviter');
+    expect(quota.memberCount).toBe(312);
   });
 
   it('resetsAt is the 1st of next month (UTC), rolling the year over in Dec', async () => {
