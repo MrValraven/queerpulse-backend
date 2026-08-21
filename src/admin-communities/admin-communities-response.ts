@@ -105,6 +105,9 @@ export interface AdminCommunityDetailDTO extends AdminCommunityCardDTO {
   requiresSecondVouch: boolean;
   /** Whether the community auto-freezes when open reports pile up. */
   autoFreezeOnReports: boolean;
+  /** Whether this is the one community the Communities Discover page's hero
+   *  card currently shows — a platform-wide singleton, see the entity. */
+  isFeatured: boolean;
   /** True while the community is currently frozen (auto-frozen pending report
    *  review, or admin-frozen). An admin can also lift it via the admin-only
    *  freeze/unfreeze endpoints, in addition to staff lifting it from the
@@ -337,6 +340,7 @@ export function toAdminCommunityDetail(
     visibility: VISIBILITY_BY_ACCESS_TIER[community.accessTier],
     requiresSecondVouch: community.requiresSecondVouch,
     autoFreezeOnReports: community.autoFreezeOnReports,
+    isFeatured: community.isFeatured,
     frozen: community.frozenAt != null,
     archived: community.archivedAt != null,
     resolvedPercentage,

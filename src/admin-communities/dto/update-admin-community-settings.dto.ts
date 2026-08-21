@@ -14,4 +14,10 @@ export class UpdateAdminCommunitySettingsDto {
   @IsOptional()
   @IsBoolean()
   autoFreezeOnReports?: boolean;
+
+  // Platform-wide singleton — setting this `true` clears every other
+  // community's `isFeatured` (see `AdminCommunitiesService.updateSettings`).
+  @IsOptional()
+  @IsBoolean()
+  isFeatured?: boolean;
 }

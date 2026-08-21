@@ -73,6 +73,14 @@ export class Community {
   @Column({ type: 'boolean', default: false })
   autoFreezeOnReports!: boolean;
 
+  // The one community the Communities Discover page's hero card shows,
+  // platform-wide. An admin toggle (`AdminCommunitiesService.updateSettings`)
+  // enforces "only one row is ever true" in application code — setting this
+  // clears every other `true` row in the same transaction. Paired migration
+  // `1793200000000-AddCommunityFeaturedFlag`.
+  @Column({ type: 'boolean', default: false })
+  isFeatured!: boolean;
+
   @Column({ type: 'text', array: true, default: '{}' })
   features!: string[];
 

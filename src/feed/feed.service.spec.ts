@@ -133,6 +133,7 @@ const baseCommunity = (overrides: Partial<Community> = {}): Community => ({
   updatedAt: t('2026-01-01T00:00:00.000Z'),
   archivedAt: null,
   frozenAt: null,
+  isFeatured: false,
   needsOwnerReviewAt: null,
   ...overrides,
 });

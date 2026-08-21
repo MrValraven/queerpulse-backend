@@ -75,6 +75,20 @@ export class CommunitiesController {
     return this.communitiesService.list(user.userId, query);
   }
 
+  // Registered before `@Get(':slug')` — Nest/Express matches routes in
+  // registration order, so this static path must come first or "featured"
+  // would be swallowed as a `:slug` value.
+  @Get('featured')
+  @ApiOperation({
+    summary: "Get the admin-chosen featured community, or null if none set.",
+  })
+  @ApiOkResponse({
+    description: 'The featured community card, or null.',
+  })
+  getFeatured(@CurrentUser() user: CurrentUserData) {
+    return this.communitiesService.getFeatured(user.userId);
+  }
+
   @Get(':slug')
   @ApiOperation({ summary: 'Get a community by slug.' })
   @ApiOkResponse({ description: 'The community detail for the viewer.' })

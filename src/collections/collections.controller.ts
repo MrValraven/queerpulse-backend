@@ -53,6 +53,19 @@ export class CollectionsController {
     return this.collectionsService.list(user.userId);
   }
 
+  // Declared before `:id` — a literal segment must be matched first, or Nest
+  // would route this into `getOne` with id="filed-refs" and 400 on the uuid pipe.
+  @ApiOperation({
+    summary: "List every saved-item ref filed in any of the member's collections.",
+  })
+  @ApiOkResponse({ description: 'The filed refs, e.g. ["article:my-slug"].' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Not an active member.' })
+  @Get('filed-refs')
+  listFiledRefs(@CurrentUser() user: CurrentUserData) {
+    return this.collectionsService.listFiledRefs(user.userId);
+  }
+
   @ApiOperation({ summary: 'Create a new (empty) collection.' })
   @ApiCreatedResponse({ description: 'The created collection.' })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })

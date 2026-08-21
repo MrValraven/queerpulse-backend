@@ -390,6 +390,11 @@ export interface DirectoryOwner {
    * where the frontend hides the profile link. Resolved by the directory
    * service from `ownerId`; never derived from a display name. */
   slug: string | null;
+  /** The owner's real profile photo, for the "Who runs it" card — same
+   * gating as `slug` (public + profile-linked only). `null` otherwise, or
+   * when the profile has no photo, and the frontend falls back to the
+   * tinted `initials` avatar. */
+  avatarUrl: string | null;
 }
 
 /**
@@ -559,6 +564,9 @@ export function toDirectoryDetail(
   /** The owner's resolved public profile slug (directory service looks it up
    * from `ownerId`), or `null` when the owner isn't linked/public. */
   ownerSlug: string | null = null,
+  /** The owner's resolved profile photo (directory service looks it up from
+   * `ownerId` alongside `ownerSlug`), or `null` when unlinked/no photo. */
+  ownerAvatarUrl: string | null = null,
   /** Normalized member-written safe-space vouches (from the
    * `safe_space_member_vouches` table), already resolved to the raw
    * `SafeSpaceVouch` shape by `DirectoryService`. Merged AFTER the curated
@@ -619,6 +627,7 @@ export function toDirectoryDetail(
         // Only a public, profile-linked owner exposes a clickable profile — the
         // caller passes null for anon/role/unlinked, matching `inQueerPulse`.
         slug: identity.inQueerPulse ? ownerSlug : null,
+        avatarUrl: identity.inQueerPulse ? ownerAvatarUrl : null,
       };
     })(),
     social: listing.social,

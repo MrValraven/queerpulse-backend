@@ -66,6 +66,7 @@ function makeCommunity(overrides: Partial<Community> = {}): Community {
     updatedAt: daysAgo(400),
     archivedAt: null,
     frozenAt: null,
+    isFeatured: false,
     needsOwnerReviewAt: null,
     ...overrides,
   };

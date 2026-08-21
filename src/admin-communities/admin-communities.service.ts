@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, In, Not, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { CommunityGovernanceLogService } from '../communities/community-governance-log.service';
 import { GovernanceLogAction } from '../communities/entities/community-governance-log.entity';
@@ -294,7 +294,24 @@ export class AdminCommunitiesService {
     if (dto.autoFreezeOnReports !== undefined) {
       community.autoFreezeOnReports = dto.autoFreezeOnReports;
     }
-    await this.communities.save(community);
+    if (dto.isFeatured !== undefined) {
+      community.isFeatured = dto.isFeatured;
+    }
+    if (dto.isFeatured === true) {
+      // `isFeatured` is a platform-wide singleton (only ever one `true` row)
+      // — clear every other featured community in the same transaction as
+      // the save below, so a concurrent read never briefly sees two.
+      await this.dataSource.transaction(async (manager) => {
+        await manager.update(
+          Community,
+          { isFeatured: true, id: Not(community.id) },
+          { isFeatured: false },
+        );
+        await manager.save(community);
+      });
+    } else {
+      await this.communities.save(community);
+    }
     return this.getCommunity(slug);
   }
 

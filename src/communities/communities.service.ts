@@ -378,6 +378,46 @@ export class CommunitiesService {
     });
   }
 
+  /**
+   * `GET /communities/featured` — the single admin-chosen community the
+   * Discover page's hero card shows (`AdminCommunitiesService.updateSettings`
+   * is the only writer of `is_featured`, enforced as a singleton there).
+   * `null` when no community is currently featured, or when the featured
+   * community is archived/moderated-away/private-to-someone-else — this
+   * reuses `list()`'s own visibility rule rather than a bare `findOne` so the
+   * hero card never leaks a private community to a non-member.
+   */
+  async getFeatured(viewerId: string): Promise<CommunityCardDTO | null> {
+    const qb = this.communities
+      .createQueryBuilder('c')
+      .leftJoin(
+        CommunityMember,
+        'm',
+        'm.community_id = c.id AND m.user_id = :viewerId',
+        { viewerId },
+      )
+      .andWhere('c.is_featured = true')
+      .andWhere('c.archived_at IS NULL')
+      .andWhere('(c.access_tier != :privateTier OR m.user_id = :viewerId)', {
+        privateTier: AccessTier.Private,
+        viewerId,
+      });
+    this.excludeModeratedCommunities(qb);
+
+    const community = await qb.getOne();
+    if (!community) return null;
+
+    const [stats, myRoles] = await Promise.all([
+      this.statsForMany([community.id]),
+      this.myRoleByCommunity([community.id], viewerId),
+    ]);
+    return toCommunityCard(
+      community,
+      stats.get(community.id) ?? EMPTY_STATS,
+      myRoles.get(community.id) ?? null,
+    );
+  }
+
   // Cross-entity global search (SearchService) — mirrors `list()`'s visibility
   // rule (private communities are only visible to their own members) and its
   // batched stats/role hydration. ILIKE over name / tagline / purpose.

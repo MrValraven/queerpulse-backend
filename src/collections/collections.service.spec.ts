@@ -56,6 +56,16 @@ function countQbStub(rows: { collectionId: string; count: string }[]) {
   return qb;
 }
 
+// Join query builder stub for `listFiledRefs`.
+function filedRefsQbStub(rows: { subjectKind: string; subjectId: string }[]) {
+  const qb: Record<string, jest.Mock> = {};
+  for (const method of ['innerJoin', 'where', 'select', 'addSelect', 'distinct']) {
+    qb[method] = jest.fn().mockReturnValue(qb);
+  }
+  qb.getRawMany = jest.fn().mockResolvedValue(rows);
+  return qb;
+}
+
 function build() {
   const collections = {
     find: jest.fn(),
@@ -270,6 +280,30 @@ describe('CollectionsService', () => {
       await expect(
         service.addItem('owner-1', 'col-1', 'article:coming-out-guide'),
       ).rejects.toThrow('connection reset');
+    });
+  });
+
+  describe('listFiledRefs', () => {
+    it('joins to the owner-scoped collections and reassembles refs', async () => {
+      const { service, collectionItems } = build();
+      collectionItems.createQueryBuilder.mockReturnValue(
+        filedRefsQbStub([
+          { subjectKind: 'article', subjectId: 'coming-out-guide' },
+          { subjectKind: 'job', subjectId: 'senior-dev' },
+        ]),
+      );
+
+      await expect(service.listFiledRefs('owner-1')).resolves.toEqual([
+        'article:coming-out-guide',
+        'job:senior-dev',
+      ]);
+    });
+
+    it('returns an empty array when nothing is filed', async () => {
+      const { service, collectionItems } = build();
+      collectionItems.createQueryBuilder.mockReturnValue(filedRefsQbStub([]));
+
+      await expect(service.listFiledRefs('owner-1')).resolves.toEqual([]);
     });
   });
 

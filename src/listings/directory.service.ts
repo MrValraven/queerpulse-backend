@@ -341,7 +341,7 @@ export class DirectoryService {
       where: { subjectType: SavedKind.Listing, subjectId: listing.slug },
     });
     const reviewAuthors = await this.resolveReviewAuthors(reviews);
-    const ownerSlug = await this.resolveOwnerSlug(listing);
+    const ownerIdentity = await this.resolveOwnerIdentity(listing);
     const memberVouches = await this.loadSafeSpaceMemberVouches(listing.id);
     const crops = await this.mediaCropService.getMany(
       listingPhotoKeys(listing.photos),
@@ -352,32 +352,39 @@ export class DirectoryService {
       upcoming,
       savedCount,
       reviewAuthors,
-      ownerSlug,
+      ownerIdentity.slug,
+      ownerIdentity.avatarUrl,
       memberVouches,
       crops,
     );
   }
 
   /**
-   * The listing owner's public profile slug for the "View profile" deep link —
-   * but only when they linked their profile (`linkToProfile`) AND their chosen
-   * visibility exposes their identity. `anon`/`role` deliberately reveal no
-   * clickable profile (mirrors `ownerIdentity`'s redaction in listing-response),
-   * and an owner whose profile no longer exists resolves to `null`.
+   * The listing owner's public profile slug + avatar for the "Who runs it"
+   * card ("View profile" deep link + real photo) — but only when they linked
+   * their profile (`linkToProfile`) AND their chosen visibility exposes their
+   * identity. `anon`/`role` deliberately reveal neither (mirrors
+   * `ownerIdentity`'s redaction in listing-response), and an owner whose
+   * profile no longer exists resolves to both `null`.
    */
-  private async resolveOwnerSlug(listing: Listing): Promise<string | null> {
+  private async resolveOwnerIdentity(
+    listing: Listing,
+  ): Promise<{ slug: string | null; avatarUrl: string | null }> {
     if (
       !listing.linkToProfile ||
       listing.visibility === 'anon' ||
       listing.visibility === 'role'
     ) {
-      return null;
+      return { slug: null, avatarUrl: null };
     }
     const profile = await this.profiles.findOne({
       where: { userId: listing.ownerId },
-      select: { slug: true },
+      select: { slug: true, avatarUrl: true },
     });
-    return profile?.slug ?? null;
+    return {
+      slug: profile?.slug ?? null,
+      avatarUrl: profile?.avatarUrl ?? null,
+    };
   }
 
   /**

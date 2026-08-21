@@ -147,6 +147,23 @@ export class CollectionsService {
     await this.collections.update(id, { updatedAt: new Date() });
   }
 
+  /**
+   * Every saved-item ref filed in any of the owner's collections, across the
+   * whole collection set — lets the frontend tell "recently saved" apart from
+   * "already filed somewhere" without fetching each collection's items.
+   */
+  async listFiledRefs(ownerId: string): Promise<string[]> {
+    const rows = await this.collectionItems
+      .createQueryBuilder('item')
+      .innerJoin(Collection, 'collection', 'collection.id = item.collectionId')
+      .where('collection.ownerId = :ownerId', { ownerId })
+      .select('item.subjectKind', 'subjectKind')
+      .addSelect('item.subjectId', 'subjectId')
+      .distinct(true)
+      .getRawMany<{ subjectKind: string; subjectId: string }>();
+    return rows.map((row) => `${row.subjectKind}:${row.subjectId}`);
+  }
+
   /** collectionId -> item count, one grouped query for the whole list. */
   private async countItemsByCollection(
     collectionIds: string[],
