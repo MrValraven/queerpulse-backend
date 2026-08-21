@@ -56,13 +56,25 @@ export class UpdateProfileDto {
   @IsOptional() @IsString() @MaxLength(100) pronouns?: string;
   // How the member's name is said aloud — a short phonetic hint, distinct from
   // `pronouns`. Same "empty string clears" pattern as `now`/`bioPt`/
-  // `notHereFor` — see ProfilesService.updateMe.
-  @IsOptional() @IsString() @MaxLength(80) pronunciation?: string;
+  // `notHereFor` — see ProfilesService.updateMe. Unlike `avatarUrl`/
+  // `hiddenUntil`, `null` is not a recognised value here (only `''`
+  // clears), so `@ValidateIf` — not `@IsOptional()` — is what makes a
+  // `null` payload 400 at the boundary instead of reaching
+  // `pronunciation.trim()` as a crash.
+  @ValidateIf((o: UpdateProfileDto) => o.pronunciation !== undefined)
+  @IsString()
+  @MaxLength(80)
+  pronunciation?: string;
   @IsOptional() @IsString() @MaxLength(160) tagline?: string;
   @IsOptional() @IsString() @MaxLength(5000) bio?: string;
   // Portuguese translation of `bio`, shown alongside it when present. Same
   // "empty string clears" pattern as `now` — see ProfilesService.updateMe.
-  @IsOptional() @IsString() @MaxLength(2000) bioPt?: string;
+  // See the `pronunciation` comment above for why this is `@ValidateIf`,
+  // not `@IsOptional()`.
+  @ValidateIf((o: UpdateProfileDto) => o.bioPt !== undefined)
+  @IsString()
+  @MaxLength(2000)
+  bioPt?: string;
   @IsOptional() @IsString() @MaxLength(120) location?: string;
 
   // `@IsOptional()` treats both `undefined` and `null` as "skip", so `null` and
@@ -71,8 +83,12 @@ export class UpdateProfileDto {
 
   // `''` is meaningful — it CLEARS the status (the frontend hides the whole Now
   // section when empty), so this is not treated as "no change". See
-  // ProfilesService.updateMe.
-  @IsOptional() @IsString() @MaxLength(MAX_NOW_LENGTH) now?: string;
+  // ProfilesService.updateMe. See the `pronunciation` comment above for why
+  // this is `@ValidateIf`, not `@IsOptional()`.
+  @ValidateIf((o: UpdateProfileDto) => o.now !== undefined)
+  @IsString()
+  @MaxLength(MAX_NOW_LENGTH)
+  now?: string;
 
   // ISO string sets a 24h-from-now-ish value chosen by the caller; `null`
   // clears it early ("bring me back"). The FE always sends
@@ -85,8 +101,13 @@ export class UpdateProfileDto {
   hiddenUntil?: string | null;
 
   // What the member is explicitly NOT here for — shown alongside `now`. Same
-  // "empty string clears" pattern — see ProfilesService.updateMe.
-  @IsOptional() @IsString() @MaxLength(280) notHereFor?: string;
+  // "empty string clears" pattern — see ProfilesService.updateMe. See the
+  // `pronunciation` comment above for why this is `@ValidateIf`, not
+  // `@IsOptional()`.
+  @ValidateIf((o: UpdateProfileDto) => o.notHereFor !== undefined)
+  @IsString()
+  @MaxLength(280)
+  notHereFor?: string;
 
   @IsOptional() @IsEnum(ProfileVisibility) visibility?: ProfileVisibility;
 

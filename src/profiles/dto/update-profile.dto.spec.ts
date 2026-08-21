@@ -23,6 +23,15 @@ describe('UpdateProfileDto — now', () => {
   it('accepts an empty string, which is the clearing write', async () => {
     expect(await check({ now: '' })).toHaveLength(0);
   });
+
+  // REGRESSION: see the identical test in the pronunciation/bioPt/notHereFor
+  // describe block below for why `null` must 400 here rather than reach
+  // `ProfilesService.updateMe`'s `now.trim()` as a crash.
+  it('rejects null instead of silently passing it through', async () => {
+    const errors = await check({ now: null });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.property).toBe('now');
+  });
 });
 
 describe('UpdateProfileDto — avatarUrl', () => {
@@ -145,6 +154,22 @@ describe('UpdateProfileDto — pronunciation/bioPt/notHereFor', () => {
 
   it('accepts an empty notHereFor, which is the clearing write', async () => {
     expect(await check({ notHereFor: '' })).toHaveLength(0);
+  });
+
+  // REGRESSION for a 500 in production: `ProfilesService.updateMe` reads a
+  // profile whose `pronunciation`/`bioPt`/`notHereFor` are `null` in Postgres
+  // (never set) into a payload that still carries them, then calls
+  // `value.trim()` on whatever isn't `undefined`. `@IsOptional()` treats
+  // `null` the same as "omitted" and lets it through unrejected, so the crash
+  // reached production instead of a 400. Unlike `avatarUrl`/`hiddenUntil`,
+  // `null` was never a documented value for these fields — only `''` clears
+  // them — so it must be rejected here, not silently passed through.
+  it('rejects null for pronunciation/bioPt/notHereFor instead of silently passing it through', async () => {
+    for (const field of ['pronunciation', 'bioPt', 'notHereFor']) {
+      const errors = await check({ [field]: null });
+      expect(errors).toHaveLength(1);
+      expect(errors[0]?.property).toBe(field);
+    }
   });
 });
 
