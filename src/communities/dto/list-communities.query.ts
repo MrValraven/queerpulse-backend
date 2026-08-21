@@ -47,4 +47,11 @@ export class ListCommunitiesQuery {
   @IsOptional()
   @IsIn(['newest', 'name'])
   sort?: CommunityListSort;
+
+  // Comma-separated curated tag ids, e.g. ?tags=trans-nonbinary,book-club.
+  // Filters `communities.tags`; see `CommunitiesService.list` and
+  // `src/communities/community-tags.ts` for the accepted vocabulary.
+  @IsOptional()
+  @IsString()
+  tags?: string;
 }

@@ -65,6 +65,14 @@ export interface CommunityCardDTO {
   activeThisWeek: number;
   postsThisWeek: number;
   myRole: RosterRole | null;
+  // Resolved (`toImageUrl`) cover-image URL, or null when the community has no
+  // cover. Discover-grid/featured cards render this; the owner's edit form
+  // seeds its `ImageUploadField` from the same field off the detail DTO.
+  coverImageUrl: string | null;
+  // Curated ids from COMMUNITY_TAGS; empty when the owner set none. Surfaced
+  // on the card (not just the detail) so `GET /communities?tags=` results can
+  // render matched tags without a second fetch.
+  tags: string[];
 }
 
 export interface CommunityDetailDTO extends CommunityCardDTO {
@@ -73,9 +81,6 @@ export interface CommunityDetailDTO extends CommunityCardDTO {
   rosterVisible: boolean;
   features: string[];
   rules: string[];
-  // Resolved (`toImageUrl`) cover-image URL, or null when the community has no
-  // cover. The owner's edit form seeds its `ImageUploadField` from this.
-  coverImageUrl: string | null;
   /** Crop rect for `coverImageUrl`, when the owner reframed it. */
   coverCrop?: CropRect;
   owner: MemberRef | null;
@@ -114,6 +119,8 @@ export function toCommunityCard(
     activeThisWeek: stats.activeThisWeek,
     postsThisWeek: stats.postsThisWeek,
     myRole,
+    coverImageUrl: toImageUrl(c.coverImageUrl),
+    tags: c.tags,
   };
 }
 
@@ -136,7 +143,6 @@ export function toCommunityDetail(
     rosterVisible: c.rosterVisible,
     features: c.features,
     rules: c.rules,
-    coverImageUrl: toImageUrl(c.coverImageUrl),
     coverCrop: cropFor(c.coverImageUrl, crops),
     owner,
     createdAt: c.createdAt.toISOString(),

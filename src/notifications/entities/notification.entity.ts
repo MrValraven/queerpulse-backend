@@ -214,6 +214,18 @@ export enum NotificationType {
   // `AddChangemakerNominationTriage1792500100000`.
   ChangemakerNominationApproved = 'changemaker_nomination_approved',
   ChangemakerNominationDismissed = 'changemaker_nomination_dismissed',
+  // Sent to the owner/mod who submitted a "suggest a tag" feedback request
+  // when an admin marks it resolved from the `admin/community-tag-requests`
+  // inbox (`AdminCommunityTagRequestsService.resolve`). System-driven — no
+  // actor and no preference toggle, mirroring `ListingEditSuggestionAccepted`/
+  // `ConcernUpdate`: it's the platform reporting on the requester's own
+  // submission, not "admin X did this". INFORMATIONAL ONLY — resolving never
+  // adds the label to the live `COMMUNITY_TAGS` vocabulary; see
+  // `CommunityTagRequest`'s docstring. Payload carries
+  // `{ source: 'community', communitySlug, label }` for the bell copy + deep
+  // link back to the community. See migration
+  // `AddCommunityTagRequestResolvedNotificationType1793400100000`.
+  CommunityTagRequestResolved = 'community_tag_request_resolved',
 }
 
 @Entity('notifications')

@@ -87,6 +87,16 @@ export class Community {
   @Column({ type: 'text', array: true, default: '{}' })
   rules!: string[];
 
+  // Curated browse/filter tags the owner picks from the fixed
+  // `COMMUNITY_TAGS` vocabulary (`src/communities/community-tags.ts`) —
+  // unlike `forum_thread.tags`, these are NOT freeform. Migration-owned GIN
+  // index (`IDX_communities_tags`, see `AddCommunityTags`) backs
+  // `c.tags && :tags` overlap filtering — TypeORM's `@Index` can't express
+  // an array/GIN operator class, so it lives in the migration, not a
+  // decorator here (same precedent as `ForumThread.tags`).
+  @Column({ type: 'text', array: true, default: () => "'{}'" })
+  tags!: string[];
+
   // Optional cover image for the community, surfaced on the public homepage
   // featured-community card and the community's own detail page. Stores a raw
   // storage key (uploaded via the `community-cover` upload kind) or an absolute

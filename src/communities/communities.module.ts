@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ConnectionsModule } from '../connections/connections.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { EventsModule } from '../events/events.module';
 import { ForumModule } from '../forum/forum.module';
@@ -33,6 +34,7 @@ import { CommunityPostReaction } from './entities/community-post-reaction.entity
 import { CommunityPostReplyEdit } from './entities/community-post-reply-edit.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { CommunityPost } from './entities/community-post.entity';
+import { CommunityTagRequest } from './entities/community-tag-request.entity';
 import { Community } from './entities/community.entity';
 import { MeCommunitiesController } from './me-communities.controller';
 
@@ -47,6 +49,12 @@ import { MeCommunitiesController } from './me-communities.controller';
       CommunityPostEdit,
       CommunityPostReplyEdit,
       CommunityJoinRequest,
+      // The owner/mod "suggest a tag" feedback inbox
+      // (`CommunitiesService.createTagRequest`) — read+written here on the
+      // member side; `AdminCommunitiesModule` registers its own `forFeature`
+      // for the admin-side review queue, same precedent as
+      // `CommunityJoinRequest`/`Community` there.
+      CommunityTagRequest,
       // The owner-erasure audit trail (`CommunityGovernanceLogService`) and,
       // via `CommunityOwnerOrphanService`, the sink for automatic owner→mod
       // promotion entries.
@@ -63,6 +71,12 @@ import { MeCommunitiesController } from './me-communities.controller';
     // to check whether a current member has vouched for an applicant.
     // `VouchModule` imports only `UsersModule`, so there is no cycle.
     VouchModule,
+    // `ConnectionsService` — `suggestedCommunities` reads the viewer's accepted
+    // connections (the real social-graph signal; see that method's doc
+    // comment) to find communities their connections have joined. `ConnectionsModule`
+    // imports only `UsersModule`/`SocialModule`/`VouchModule`, none of which
+    // import `CommunitiesModule`, so this closes no cycle.
+    ConnectionsModule,
     // `BlockFilterService` — community post feeds and their nested replies
     // exclude blocked/muted authors. Plain import (no `forwardRef`):
     // `SocialModule` pulls in only `UsersModule` + `ReportsModule`.

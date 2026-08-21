@@ -126,6 +126,7 @@ const COMMUNITY: Community = {
   autoFreezeOnReports: false,
   features: [],
   rules: [],
+  tags: [],
   coverImageUrl: null,
   ownerId: 'owner-1',
   ref: 'QP-C-0001',

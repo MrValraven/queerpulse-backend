@@ -59,6 +59,7 @@ function makeCommunity(overrides: Partial<Community> = {}): Community {
     autoFreezeOnReports: false,
     features: [],
     rules: [],
+    tags: [],
     coverImageUrl: null,
     ownerId: 'user-owner',
     ref: 'CMT-0001',

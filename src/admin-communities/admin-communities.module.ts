@@ -5,7 +5,9 @@ import { CommunityGovernanceLog } from '../communities/entities/community-govern
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
+import { CommunityTagRequest } from '../communities/entities/community-tag-request.entity';
 import { Community } from '../communities/entities/community.entity';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { ReportsModule } from '../reports/reports.module';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -13,6 +15,8 @@ import { AdminCommunitiesController } from './admin-communities.controller';
 import { AdminCommunitiesService } from './admin-communities.service';
 import { AdminCommunityModeratorsController } from './admin-community-moderators.controller';
 import { AdminCommunityModeratorsService } from './admin-community-moderators.service';
+import { AdminCommunityTagRequestsController } from './admin-community-tag-requests.controller';
+import { AdminCommunityTagRequestsService } from './admin-community-tag-requests.service';
 
 @Module({
   imports: [
@@ -37,15 +41,28 @@ import { AdminCommunityModeratorsService } from './admin-community-moderators.se
       CommunityPost,
       CommunityPostReply,
       CommunityGovernanceLog,
+      // The "suggest a tag" feedback inbox
+      // (`AdminCommunityTagRequestsService`) — own `forFeature` registration
+      // here, same precedent as the entities above; `CommunitiesModule`
+      // registers it separately for the member-facing write side.
+      CommunityTagRequest,
       Profile,
       User,
     ]),
     ReportsModule,
+    // `NotificationsService` — `AdminCommunityTagRequestsService.resolve`
+    // notifies the requester when their tag request is resolved.
+    NotificationsModule,
   ],
-  controllers: [AdminCommunitiesController, AdminCommunityModeratorsController],
+  controllers: [
+    AdminCommunitiesController,
+    AdminCommunityModeratorsController,
+    AdminCommunityTagRequestsController,
+  ],
   providers: [
     AdminCommunitiesService,
     AdminCommunityModeratorsService,
+    AdminCommunityTagRequestsService,
     CommunityGovernanceLogService,
   ],
   // `AdminOverviewService` injects `AdminCommunitiesService` directly to

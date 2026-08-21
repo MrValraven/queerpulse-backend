@@ -25,6 +25,7 @@ import { Feature } from '../common/feature.decorator';
 import { CommunitiesService } from './communities.service';
 import { CommunityPostsService } from './community-posts.service';
 import { CreateCommunityDto } from './dto/create-community.dto';
+import { CreateCommunityTagRequestDto } from './dto/create-community-tag-request.dto';
 import { CreatePostDto } from './dto/create-post.dto';
 import { JoinCommunityDto } from './dto/join-community.dto';
 import { ListCommunitiesQuery } from './dto/list-communities.query';
@@ -80,13 +81,29 @@ export class CommunitiesController {
   // would be swallowed as a `:slug` value.
   @Get('featured')
   @ApiOperation({
-    summary: "Get the admin-chosen featured community, or null if none set.",
+    summary: 'Get the admin-chosen featured community, or null if none set.',
   })
   @ApiOkResponse({
     description: 'The featured community card, or null.',
   })
   getFeatured(@CurrentUser() user: CurrentUserData) {
     return this.communitiesService.getFeatured(user.userId);
+  }
+
+  // Also registered before `@Get(':slug')` — same route-order requirement as
+  // `featured` above ("suggested" would otherwise be swallowed as a `:slug`
+  // value).
+  @Get('suggested')
+  @ApiOperation({
+    summary:
+      "Up to 6 communities the caller's connections have joined that the caller hasn't, ranked by connection overlap.",
+  })
+  @ApiOkResponse({
+    description:
+      "Suggested community cards, most-connected-in first. Empty when the caller has no connections, or none of their connections belong to any community the caller hasn't already joined.",
+  })
+  getSuggested(@CurrentUser() user: CurrentUserData) {
+    return this.communitiesService.suggestedCommunities(user.userId);
   }
 
   @Get(':slug')
@@ -98,6 +115,20 @@ export class CommunitiesController {
   })
   get(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.communitiesService.getBySlug(slug, user.userId);
+  }
+
+  @Get(':slug/related')
+  @ApiOperation({
+    summary:
+      'Up to 4 other communities sharing tags with this one, ranked by overlap.',
+  })
+  @ApiOkResponse({
+    description:
+      'Related community cards, highest tag overlap first. Empty when the community has no tags or no overlap exists.',
+  })
+  @ApiNotFoundResponse({ description: 'No community exists for this slug.' })
+  related(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
+    return this.communitiesService.relatedCommunities(slug, user.userId);
   }
 
   @Post()
@@ -126,6 +157,23 @@ export class CommunitiesController {
     @Body() dto: UpdateCommunityDto,
   ) {
     return this.communitiesService.update(slug, user.userId, dto);
+  }
+
+  @Post(':slug/tag-requests')
+  @ApiOperation({
+    summary:
+      'Suggest a tag for this community (owner/mod only, informational).',
+  })
+  @ApiCreatedResponse({ description: 'The created tag request.' })
+  @ApiBadRequestResponse({ description: 'The request payload is invalid.' })
+  @ApiForbiddenResponse({ description: 'Owner or moderator role required.' })
+  @ApiNotFoundResponse({ description: 'No community exists for this slug.' })
+  createTagRequest(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: CreateCommunityTagRequestDto,
+  ) {
+    return this.communitiesService.createTagRequest(slug, user.userId, dto);
   }
 
   @Post(':slug/archive')

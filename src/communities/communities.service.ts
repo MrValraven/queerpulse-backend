@@ -14,6 +14,7 @@ import {
 } from '../content-moderation/content-moderation.service';
 import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
+import { ConnectionsService } from '../connections/connections.service';
 import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
 import {
@@ -24,6 +25,7 @@ import {
 } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MediaCropService } from '../media-crops/media-crops.service';
+import { knownCommunityTags } from './community-tags';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -49,6 +51,12 @@ import {
   CommunityJoinRequest,
   JoinRequestStatus,
 } from './entities/community-join-request.entity';
+import { CommunityTagRequest } from './entities/community-tag-request.entity';
+import { CreateCommunityTagRequestDto } from './dto/create-community-tag-request.dto';
+import {
+  CommunityTagRequestResponseDTO,
+  toCommunityTagRequestResponse,
+} from './community-tag-request-response';
 import {
   CommunityMember,
   RosterRole,
@@ -61,12 +69,27 @@ import {
   CommunityType,
 } from './entities/community.entity';
 
+// Comma-separated query param -> trimmed, non-empty values. Mirrors
+// `ProfilesService`'s file-local helper of the same name/shape.
+function csv(raw: string | undefined): string[] {
+  return raw
+    ? raw
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean)
+    : [];
+}
+
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const EMPTY_STATS: CommunityStats = {
   memberCount: 0,
   activeThisWeek: 0,
   postsThisWeek: 0,
 };
+
+// `suggestedCommunities` caps its result the same way `relatedCommunities`
+// caps at 4 — a short shelf, not a browse list.
+const SUGGESTED_COMMUNITIES_LIMIT = 6;
 
 // Postgres unique-violation SQLSTATE. TypeORM surfaces it either directly on
 // the QueryFailedError or on the wrapped driverError depending on the path.
@@ -82,6 +105,7 @@ export interface CreateCommunityInput {
   features: string[];
   rules: string[];
   tagline: string;
+  tags?: string[]; // curated ids from COMMUNITY_TAGS; defaults to [] when omitted
   coverImageUrl?: string | null; // storage key / https URL / '' to clear
   handle: string; // desired slug
   stewards?: string[]; // member slugs -> seeded as 'mod'
@@ -122,6 +146,11 @@ export interface CommunityListQuery {
   // Defaults to 'newest' (the pre-existing, unparametrized behavior) when
   // omitted — see `list()`'s `ORDER BY`.
   sort?: CommunityListSort;
+  // Comma-separated curated tag ids, e.g. ?tags=trans-nonbinary,book-club.
+  // Filters `communities.tags` via array overlap (`&&`), same shape as
+  // `ProfilesService.searchMembers`'s `?tags=` filter over `profiles.tags`.
+  // Unknown ids are dropped before the query runs; see COMMUNITY_TAGS.
+  tags?: string;
 }
 
 export interface JoinCommunityInput {
@@ -147,6 +176,8 @@ export class CommunitiesService {
     private readonly replies: Repository<CommunityPostReply>,
     @InjectRepository(CommunityJoinRequest)
     private readonly joinRequests: Repository<CommunityJoinRequest>,
+    @InjectRepository(CommunityTagRequest)
+    private readonly tagRequests: Repository<CommunityTagRequest>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     // For the house-account guardrail on `transferOwnership` (a `User.isSystem`
     // account can never be handed a community). The repo is available via
@@ -158,6 +189,10 @@ export class CommunitiesService {
     // Second-vouch join gating reads the platform vouch graph to check whether a
     // current community member has vouched for an applicant.
     private readonly vouch: VouchService,
+    // `suggestedCommunities`'s social-graph signal: the viewer's accepted
+    // connections. See that method's doc comment for why connections (not
+    // tags) is the real signal here.
+    private readonly connectionsService: ConnectionsService,
     // Batched crop lookup (`MediaCropService.getMany`) for `coverImageUrl`'s
     // sibling `coverCrop`.
     private readonly mediaCropService: MediaCropService,
@@ -258,6 +293,7 @@ export class CommunitiesService {
               rosterVisible: dto.rosterVisible,
               features: dto.features,
               rules: dto.rules,
+              tags: dto.tags ?? [],
               coverImageUrl: dto.coverImageUrl ?? null,
               ownerId,
               ref,
@@ -346,6 +382,20 @@ export class CommunitiesService {
         '(c.name ILIKE :qPattern OR c.tagline ILIKE :qPattern OR c.purpose ILIKE :qPattern)',
         { qPattern: pattern },
       );
+    }
+    // Curated tag filter. Plain array-overlap against the GIN-indexed
+    // `communities.tags` (see `AddCommunityTags`), same shape as
+    // `ProfilesService.searchMembers`'s `?tags=`/`?disciplines=` filters.
+    // Unknown ids are dropped; if EVERY id was unknown the caller asked for a
+    // tag that cannot exist, so match nothing rather than silently returning
+    // the unfiltered list.
+    const tags = knownCommunityTags(csv(query.tags));
+    if (csv(query.tags).length) {
+      if (!tags.length) {
+        qb.andWhere('1 = 0');
+      } else {
+        qb.andWhere('c.tags && :tags', { tags });
+      }
     }
     // An archived community leaves every listing (discover AND mine) — it has
     // been taken down by its owner, so it should stop surfacing anywhere a card
@@ -462,6 +512,167 @@ export class CommunitiesService {
     );
   }
 
+  /**
+   * `GET /communities/:slug/related` — up to 4 OTHER communities sharing at
+   * least one curated tag with this one, ranked by overlap count (highest
+   * first). If the source community has no tags at all, returns `[]` rather
+   * than falling back to some other ranking — an untagged community has no
+   * tag-based notion of "related" to compute.
+   *
+   * Same visibility posture as `list()`/`searchByText`: a private community
+   * only surfaces to its own members, archived/moderated-away communities
+   * never surface. `viewerId` also drives `myRole` on each returned card,
+   * same as every other card-producing method here.
+   *
+   * The overlap count is computed with `cardinality(ARRAY(... INTERSECT
+   * ...))` rather than a bespoke intersection operator — Postgres has no
+   * built-in array-intersection operator (`&&` only tests *whether* two
+   * arrays overlap, not by how much), so the exact count needs this
+   * unnest/INTERSECT idiom. The `c.tags && :tags` filter runs first and can
+   * use the existing GIN index (`AddCommunityTags`) to narrow candidates
+   * before the per-row cardinality is computed and sorted on.
+   */
+  async relatedCommunities(
+    slug: string,
+    viewerId: string,
+  ): Promise<CommunityCardDTO[]> {
+    const community = await this.loadOr404(slug);
+    if (!community.tags.length) return [];
+
+    const qb = this.communities
+      .createQueryBuilder('c')
+      .leftJoin(
+        CommunityMember,
+        'm',
+        'm.community_id = c.id AND m.user_id = :viewerId',
+        { viewerId },
+      )
+      .where('c.id != :id', { id: community.id })
+      .andWhere('c.tags && :tags', { tags: community.tags })
+      .andWhere('c.archived_at IS NULL')
+      .andWhere('(c.access_tier != :privateTier OR m.user_id = :viewerId)', {
+        privateTier: AccessTier.Private,
+        viewerId,
+      });
+    this.excludeModeratedCommunities(qb);
+
+    qb.addSelect(
+      'cardinality(ARRAY(SELECT unnest(c.tags) INTERSECT SELECT unnest(CAST(:tags AS text[]))))',
+      'overlap',
+    )
+      .orderBy('overlap', 'DESC')
+      .addOrderBy('c.createdAt', 'DESC')
+      .take(4);
+
+    const rows = await qb.getMany();
+    if (!rows.length) return [];
+
+    const ids = rows.map((c) => c.id);
+    const [stats, myRoles] = await Promise.all([
+      this.statsForMany(ids),
+      this.myRoleByCommunity(ids, viewerId),
+    ]);
+    return rows.map((c) =>
+      toCommunityCard(
+        c,
+        stats.get(c.id) ?? EMPTY_STATS,
+        myRoles.get(c.id) ?? null,
+      ),
+    );
+  }
+
+  /**
+   * `GET /communities/suggested` — up to `SUGGESTED_COMMUNITIES_LIMIT`
+   * communities the viewer hasn't joined that people in their SOCIAL GRAPH
+   * have joined, ranked by how many of those connections are on each
+   * community's roster (most-connected-in first).
+   *
+   * The signal is the viewer's ACCEPTED `connections` graph — not
+   * `Community.tags`/`Profile.tags` (a tag-based version was investigated and
+   * rejected: there's no real vocabulary bridge between free-text profile
+   * tags and curated community tags). "Who is this member connected to" is
+   * `ConnectionsService.allAcceptedConnectionUserIds`, the same uncapped,
+   * id-only accepted-connection read `EventsService`'s `network`-visibility
+   * gate reuses — uncapped (unlike the 200-capped
+   * `getAcceptedConnectionUserIds`, fine for a rendered list but wrong here:
+   * truncating a viewer's own connections would silently under-rank or drop a
+   * community their 201st+ connection is in).
+   *
+   * If the viewer has no accepted connections, or none of those connections
+   * belong to any community the viewer hasn't already joined, this returns
+   * `[]` — no fallback ranking. Same "no signal = empty, don't guess" posture
+   * as `relatedCommunities`.
+   *
+   * Visibility mirrors `list()`/`relatedCommunities()`: archived and
+   * moderator-taken-down communities never surface (`excludeModeratedCommunities`),
+   * and since every candidate here is, by construction, a community the
+   * viewer has NOT joined (`m.user_id IS NULL`), the private-tier exclusion
+   * `list()` expresses as "`private` OR I'm a member" collapses to a flat
+   * `access_tier != private` — a private community the viewer isn't in can
+   * never be a legitimate suggestion.
+   *
+   * The connection-overlap count is a correlated-subquery `COUNT(DISTINCT
+   * ...)` over `community_members`, mirroring `relatedCommunities`'s own
+   * addSelect-a-raw-expression-then-ORDER-BY-its-alias shape (there it's
+   * `cardinality(ARRAY(... INTERSECT ...))` for tag overlap; here it's a
+   * membership-count subquery). `community_members` already carries a unique
+   * composite index on `(community_id, user_id)` (`UQ_community_members`),
+   * which backs both the `EXISTS` candidate filter and the `COUNT` — no new
+   * index needed.
+   */
+  async suggestedCommunities(userId: string): Promise<CommunityCardDTO[]> {
+    const connectionIds =
+      await this.connectionsService.allAcceptedConnectionUserIds(userId);
+    if (!connectionIds.length) return [];
+
+    const qb = this.communities
+      .createQueryBuilder('c')
+      .leftJoin(
+        CommunityMember,
+        'm',
+        'm.community_id = c.id AND m.user_id = :userId',
+        { userId },
+      )
+      .where('m.user_id IS NULL') // the viewer hasn't joined this one
+      .andWhere('c.archived_at IS NULL')
+      .andWhere('c.access_tier != :privateTier', {
+        privateTier: AccessTier.Private,
+      })
+      .andWhere(
+        `EXISTS (
+          SELECT 1 FROM "community_members" "cm"
+          WHERE "cm"."community_id" = c.id AND "cm"."user_id" IN (:...connectionIds)
+        )`,
+        { connectionIds },
+      );
+    this.excludeModeratedCommunities(qb);
+
+    qb.addSelect(
+      `(SELECT COUNT(DISTINCT "cm2"."user_id") FROM "community_members" "cm2"
+        WHERE "cm2"."community_id" = c.id AND "cm2"."user_id" IN (:...connectionIds))`,
+      'connectionCount',
+    )
+      .orderBy('"connectionCount"', 'DESC')
+      .addOrderBy('c.createdAt', 'DESC')
+      .take(SUGGESTED_COMMUNITIES_LIMIT);
+
+    const rows = await qb.getMany();
+    if (!rows.length) return [];
+
+    const ids = rows.map((c) => c.id);
+    const [stats, myRoles] = await Promise.all([
+      this.statsForMany(ids),
+      this.myRoleByCommunity(ids, userId),
+    ]);
+    return rows.map((c) =>
+      toCommunityCard(
+        c,
+        stats.get(c.id) ?? EMPTY_STATS,
+        myRoles.get(c.id) ?? null,
+      ),
+    );
+  }
+
   async getBySlug(slug: string, viewerId: string): Promise<CommunityDetailDTO> {
     const community = await this.loadOr404(slug);
     const role = await this.myRole(community.id, viewerId);
@@ -511,6 +722,7 @@ export class CommunitiesService {
         : {}),
       ...(dto.features !== undefined ? { features: dto.features } : {}),
       ...(dto.rules !== undefined ? { rules: dto.rules } : {}),
+      ...(dto.tags !== undefined ? { tags: dto.tags } : {}),
       // '' from the client (cleared field) normalizes to NULL so an empty
       // cover reads back as "no cover", not an empty string.
       ...(dto.coverImageUrl !== undefined
@@ -911,6 +1123,32 @@ export class CommunitiesService {
   // exists — a block by one mod would become an invisible, unaccountable veto.
   // A mod who cannot fairly triage a specific applicant should recuse
   // themselves; the queue must still show the work.
+  /**
+   * `POST /communities/:slug/tag-requests` — an owner/mod's free-text
+   * "I wish this tag existed" feedback. Same owner/mod gate as `update`.
+   * INFORMATIONAL ONLY: this never touches `COMMUNITY_TAGS` or
+   * `Community.tags` — see `CommunityTagRequest`'s docstring. An admin
+   * reviews the resulting inbox from `AdminCommunityTagRequestsController`.
+   */
+  async createTagRequest(
+    slug: string,
+    actorId: string,
+    dto: CreateCommunityTagRequestDto,
+  ): Promise<CommunityTagRequestResponseDTO> {
+    const community = await this.loadOr404(slug);
+    await this.assertOwnerOrMod(community.id, actorId);
+
+    const saved = await this.tagRequests.save(
+      this.tagRequests.create({
+        communityId: community.id,
+        requestedByUserId: actorId,
+        label: dto.label.trim(),
+        note: dto.note?.trim() ? dto.note.trim() : null,
+      }),
+    );
+    return toCommunityTagRequestResponse(saved);
+  }
+
   async listJoinRequests(
     slug: string,
     actorId: string,

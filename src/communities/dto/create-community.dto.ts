@@ -10,6 +10,7 @@ import {
   MinLength,
 } from 'class-validator';
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
+import { COMMUNITY_TAGS } from '../community-tags';
 import { AccessTier, CommunityType } from '../entities/community.entity';
 
 /**
@@ -47,6 +48,15 @@ export class CreateCommunityDto {
   rules!: string[];
 
   @IsString() @MinLength(1) @MaxLength(200) tagline!: string;
+
+  // Curated browse tags picked from the fixed `COMMUNITY_TAGS` vocabulary
+  // (`src/communities/community-tags.ts`) — NOT freeform, unlike
+  // `forum_thread.tags`. Optional: a community can carry no tags.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(8)
+  @IsIn(COMMUNITY_TAGS, { each: true })
+  tags?: string[];
 
   // Optional cover image. A storage key from the `community-cover` upload kind,
   // an absolute `https://` URL, or `''`/`null` to clear it. `@IsImageReference`

@@ -126,6 +126,7 @@ const baseCommunity = (overrides: Partial<Community> = {}): Community => ({
   autoFreezeOnReports: false,
   features: [],
   rules: [],
+  tags: [],
   coverImageUrl: null,
   ownerId: 'owner-1',
   ref: 'ref-1',
