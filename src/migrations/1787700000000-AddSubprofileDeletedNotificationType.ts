@@ -38,7 +38,14 @@ export class AddSubprofileDeletedNotificationType1787700000000 implements Migrat
   }
 
   public async down(): Promise<void> {
-    // No-op: Postgres cannot drop an enum value; the added value is harmless if
+    // Not reversible: Postgres cannot drop an enum value; the added value is harmless if
     // left in place.
+    // Fails loudly rather than reporting a successful revert that undid
+    // nothing: a silent no-op removes the row from the migrations ledger, so
+    // the next `migration:run` retries `ADD VALUE` and errors on the label
+    // that is still there. Postgres has no `ALTER TYPE ... DROP VALUE`.
+    throw new Error(
+      'Irreversible: Postgres cannot drop an enum value. Restore from a backup instead.',
+    );
   }
 }

@@ -83,6 +83,25 @@ export class GovernanceProposal {
   @Column({ type: 'uuid', nullable: true })
   createdByMemberId!: string | null;
 
+  /**
+   * The vote counts frozen at the moment this proposal resolved — written
+   * once by `GovernanceProposalService.resolveIfClosed`, never updated
+   * afterwards. NULL while the proposal is still `open`, in which case the
+   * live tally over `governance_votes` is what gets rendered.
+   *
+   * `governance_votes.member_id` is `ON DELETE CASCADE`, so an erased
+   * member's ballot disappears with their account — which is the right
+   * privacy behaviour for the individual row, but it used to silently move
+   * the displayed for/against of an already-decided proposal, so a
+   * "passed at 67%" could later render at 60% (BE-COM-31). The aggregate is
+   * what has to outlive the voter, not the ballot.
+   */
+  @Column({ type: 'int', nullable: true })
+  finalFor!: number | null;
+
+  @Column({ type: 'int', nullable: true })
+  finalAgainst!: number | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 

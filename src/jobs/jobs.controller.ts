@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
@@ -16,6 +17,7 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateJobApplicationDto } from './dto/create-application.dto';
 import { CreateJobDto } from './dto/create-job.dto';
+import { DecideJobApplicationDto } from './dto/decide-application.dto';
 import { ListJobsQuery } from './dto/list-jobs.query';
 import { UpdateJobDto } from './dto/update-job.dto';
 import { JobsService } from './jobs.service';
@@ -140,6 +142,37 @@ export class JobsController {
     @Param('slug') slug: string,
   ) {
     return this.jobsService.listApplications(slug, user.userId);
+  }
+
+  // BE-HSG-16: the poster acts on an application. Before this route existed the
+  // `reviewing`/`accepted`/`declined` states were unreachable outside the seed,
+  // so `JobApplicationDTO.status` was permanently `submitted` for both sides.
+  // Mirrors the sibling volunteering domain's decide route.
+  @Patch(':slug/applications/:id')
+  @ApiOperation({
+    summary: 'Decide on a job application (poster only)',
+  })
+  @ApiOkResponse({ description: 'The updated application.' })
+  @ApiNotFoundResponse({ description: 'No job or application with that id.' })
+  @ApiConflictResponse({ description: 'This application was already decided.' })
+  @ApiForbiddenResponse({
+    description: 'Only the poster can decide on applications.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  decideApplication(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: DecideJobApplicationDto,
+  ) {
+    return this.jobsService.decideApplication(
+      slug,
+      id,
+      user.userId,
+      dto.status,
+    );
   }
 }
 

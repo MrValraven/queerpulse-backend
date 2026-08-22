@@ -38,7 +38,14 @@ export class EventRemindersService {
     private readonly push: PushService,
   ) {}
 
-  @Cron(CronExpression.EVERY_30_MINUTES)
+  // Every 5 minutes, not every 30. The sweep fires a reminder once `now` has
+  // passed the attendee's `fireAt`, so the tick interval is pure LATENESS: on a
+  // 30 minute cadence the shortest selectable lead (60 minutes) could arrive
+  // barely half an hour before the doors, which is too late to be worth
+  // sending for an in-person gathering. The query is bounded to a one week
+  // horizon and claims in one batched UPDATE, so running it six times as often
+  // costs a cheap indexed scan that usually claims nothing.
+  @Cron(CronExpression.EVERY_5_MINUTES)
   async sendDueReminders(): Promise<void> {
     // @nestjs/schedule does not wrap handlers, so an escaping rejection becomes
     // an unhandledRejection — which, absent a Sentry listener, takes the process
@@ -158,25 +165,69 @@ export class EventRemindersService {
       .andWhere('reminder_sent_at IS NULL')
       .returning('*')
       .execute();
-    const remindedUserIds = (claimResult.raw as ClaimedReminderRow[]).map(
-      (row) => row.user_id,
-    );
+    const claimedRows = claimResult.raw as ClaimedReminderRow[];
+    const remindedUserIds = claimedRows.map((row) => row.user_id);
     if (remindedUserIds.length === 0) {
       return;
     }
 
     // In-app notification for everyone whose reminder just fired (one batched
     // write), then a best-effort phone push on top.
-    await this.notifications.createForRecipients(
-      remindedUserIds,
-      NotificationType.EventReminder,
-      { eventId: event.id, startAt: event.startAt.toISOString() },
-    );
+    //
+    // At-most-once is enforced by claiming BEFORE sending, but that only
+    // holds up if the claim is RELEASED when the send never happens. Without
+    // this rollback a DB blip inside `createForRecipients` left every attendee
+    // in the batch permanently stamped as reminded and silently un-notified:
+    // the outer `try/catch` in `fanOutDueReminders` only logs, and
+    // `reminder_sent_at` is never reset anywhere else. Releasing the claim
+    // hands the batch back to the next tick, restoring the retry half of the
+    // at-most-once contract without ever risking a duplicate (a row is only
+    // released if nothing was delivered for it).
+    try {
+      await this.notifications.createForRecipients(
+        remindedUserIds,
+        NotificationType.EventReminder,
+        { eventId: event.id, startAt: event.startAt.toISOString() },
+      );
+    } catch (error) {
+      await this.releaseReminderClaims(claimedRows.map((row) => row.id));
+      throw error;
+    }
+    // Push is deliberately OUTSIDE the rollback: it is best-effort by design
+    // (`pushReminders` swallows per-recipient failures), and the in-app
+    // notification the member actually relies on has already landed — undoing
+    // the claim here would re-deliver that notification on the next tick.
     await this.pushReminders(event, remindedUserIds);
 
     this.logger.log(
       `Sent ${remindedUserIds.length} reminder(s) for event ${event.slug}`,
     );
+  }
+
+  /**
+   * Undo a reminder claim so the next tick can retry it. Best-effort itself: if
+   * the release ALSO fails (the same DB trouble that broke the send), the
+   * original error still propagates to the caller's logger — swallowing it here
+   * would hide the real failure behind a secondary one.
+   */
+  private async releaseReminderClaims(rsvpIds: string[]): Promise<void> {
+    if (!rsvpIds.length) {
+      return;
+    }
+    try {
+      await this.rsvps
+        .createQueryBuilder()
+        .update(EventRsvp)
+        .set({ reminderSentAt: null })
+        .where('id IN (:...rsvpIds)', { rsvpIds })
+        .execute();
+    } catch (error) {
+      this.logger.error(
+        `Failed to release ${rsvpIds.length} reminder claim(s); they will not retry: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   // Web push is fire-and-forget and must never fail the sweep: a member with no

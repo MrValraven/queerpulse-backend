@@ -326,6 +326,59 @@ describe('CompaniesService', () => {
         expect.objectContaining({ tagline: 'New tagline' }),
       );
     });
+
+    // Finding M1: `CompaniesController.update` keeps the interceptor's
+    // foreign-upload exemption (co-managed company pages have more than one
+    // editor), so the service is the line that stops a member introducing a
+    // NEW work-item image that is not theirs while still letting a co-manager
+    // re-save one a different collaborator uploaded.
+    describe('foreign work-item image ownership (M1)', () => {
+      const OWNER_ID = 'owner-1';
+      const OTHER_ID = '22222222-2222-2222-2222-222222222222';
+      const FILE_SEGMENT = '33333333-3333-3333-3333-333333333333';
+      // A well-formed key whose embedded owner segment is NOT the requester.
+      const FOREIGN_KEY = `work/${OTHER_ID}/${FILE_SEGMENT}.jpg`;
+
+      const makeCompany = (
+        work: { label: string; imageUrl: string | null }[],
+      ) => ({
+        id: 'co-1',
+        slug: 'x',
+        nameText: 'Name',
+        tagline: 'tagline',
+        about: 'about',
+        queerRun: false,
+        queerLed: false,
+        verified: false,
+        values: [],
+        info: [],
+        teamCount: 0,
+        hiringContact: null,
+        work,
+        ownerId: OWNER_ID,
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+
+      it('allows re-saving a work-item image the company already carries', async () => {
+        companies.findOne.mockResolvedValue(
+          makeCompany([{ label: 'Old', imageUrl: FOREIGN_KEY }]),
+        );
+        await expect(
+          service.update('x', OWNER_ID, {
+            work: [{ label: 'Renamed', imageUrl: FOREIGN_KEY }],
+          }),
+        ).resolves.toBeDefined();
+      });
+
+      it('rejects a new foreign work-item image the company does not carry', async () => {
+        companies.findOne.mockResolvedValue(makeCompany([]));
+        await expect(
+          service.update('x', OWNER_ID, {
+            work: [{ label: 'New', imageUrl: FOREIGN_KEY }],
+          }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+      });
+    });
   });
 
   describe('createReview', () => {

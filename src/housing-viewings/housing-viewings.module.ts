@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { UsersModule } from '../users/users.module';
 import { VerificationModule } from '../verification/verification.module';
+import { AffirmingPledgeModule } from '../affirming-pledge/affirming-pledge.module';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { HousingViewing } from './entities/housing-viewing.entity';
 import { HousingViewingsController } from './housing-viewings.controller';
@@ -20,6 +21,10 @@ import { HousingViewingsService } from './housing-viewings.service';
     UsersModule,
     // Step-up gate: requesting a viewing needs a phone-verified account.
     VerificationModule,
+    // Baseline gate: requesting a viewing is a contact action, so it needs the
+    // mandatory LGBTQ+ affirming pledge on record (BE-HSG-06). Imports only
+    // `UsersModule`, so no cycle with this module.
+    AffirmingPledgeModule,
   ],
   controllers: [HousingViewingsController],
   providers: [HousingViewingsService],

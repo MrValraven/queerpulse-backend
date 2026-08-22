@@ -67,6 +67,14 @@ export class HousingGroup {
   @Column({ type: 'jsonb', default: () => "'[]'" })
   screeningQuestions!: GroupScreeningQuestion[];
 
+  /**
+   * DERIVED, never client-supplied: the number of `group_join_requests` rows
+   * for this group with status `approved`. Maintained by
+   * `HousingGroupsService.refreshMemberCount` on every triage decision and
+   * deliberately absent from `CreateGroupDto`/`UpdateGroupDto` — it used to be
+   * an admin-typed integer, which made the public "N members" figure disagree
+   * with the roster the admin queue reads.
+   */
   @Column({ type: 'int', default: 0 })
   memberCount!: number;
 

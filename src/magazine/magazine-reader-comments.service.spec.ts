@@ -53,7 +53,12 @@ function build() {
   return { service, comments, articles, contentModeration };
 }
 
-const viewer = { userId: 'user-1', email: '', status: 'active', role: 'member' };
+const viewer = {
+  userId: 'user-1',
+  email: '',
+  status: 'active',
+  role: 'member',
+};
 
 describe('MagazineReaderCommentsService.list', () => {
   it('404s on an unpublished/unknown article slug', async () => {
@@ -72,14 +77,19 @@ describe('MagazineReaderCommentsService.list', () => {
 });
 
 describe('MagazineReaderCommentsService.create', () => {
-  const author = { userId: 'author-1', email: '', status: 'active', role: 'member' };
+  const author = {
+    userId: 'author-1',
+    email: '',
+    status: 'active',
+    role: 'member',
+  };
 
   it('404s on an unpublished/unknown article slug', async () => {
     const { service, articles } = build();
     articles.findOne.mockResolvedValueOnce(null);
-    await expect(
-      service.create('nope', author, 'hi'),
-    ).rejects.toBeInstanceOf(NotFoundException);
+    await expect(service.create('nope', author, 'hi')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
   });
 
   it('rejects replying to a reply (one level deep only)', async () => {
@@ -124,7 +134,12 @@ describe('MagazineReaderCommentsService.create', () => {
 });
 
 describe('MagazineReaderCommentsService.update/remove', () => {
-  const author = { userId: 'author-1', email: '', status: 'active', role: 'member' };
+  const author = {
+    userId: 'author-1',
+    email: '',
+    status: 'active',
+    role: 'member',
+  };
   const stranger = { userId: 'x', email: '', status: 'active', role: 'member' };
 
   it('update: non-author is forbidden', async () => {
@@ -135,9 +150,9 @@ describe('MagazineReaderCommentsService.update/remove', () => {
       body: 'orig',
       deletedAt: null,
     });
-    await expect(
-      service.update('c1', stranger, 'hack'),
-    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(service.update('c1', stranger, 'hack')).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
   });
 
   it('update: editing a deleted comment 404s', async () => {
@@ -148,9 +163,9 @@ describe('MagazineReaderCommentsService.update/remove', () => {
       body: 'orig',
       deletedAt: new Date(),
     });
-    await expect(
-      service.update('c1', author, 'new'),
-    ).rejects.toBeInstanceOf(NotFoundException);
+    await expect(service.update('c1', author, 'new')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
   });
 
   it('update: author edits their own comment, stamping editedAt', async () => {
@@ -180,9 +195,9 @@ describe('MagazineReaderCommentsService.update/remove', () => {
       body: 'orig',
       deletedAt: null,
     });
-    await expect(
-      service.remove('c1', stranger),
-    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(service.remove('c1', stranger)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
   });
 
   it('remove: author soft-deletes their own comment, blanking the response', async () => {

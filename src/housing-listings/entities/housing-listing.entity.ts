@@ -149,7 +149,17 @@ export class HousingListing {
   @Column({ type: 'boolean', default: false })
   billsIncluded!: boolean;
 
-  @Column({ type: 'boolean', default: false })
+  /**
+   * Always `true` (BE-HSG-07). Posting a home requires the mandatory LGBTQ+
+   * affirming pledge, so affirmation is a universal baseline, never a
+   * per-listing opt-in. `HousingListingsService` hard-sets it on create and
+   * `applyUpdate` no longer reads it; the default here matches so a row
+   * inserted outside the service cannot reintroduce a `false`. Kept as a column
+   * rather than dropped because the public DTO still emits it (dropping it is a
+   * breaking wire change, and a follow-up for when no client reads it). See
+   * migration `BackfillHousingListingAffirmingBaseline1793530400000`.
+   */
+  @Column({ type: 'boolean', default: true })
   lgbtqFriendly!: boolean;
 
   // ── Transparency + broker disclosure (Wave B1 P2.6) ────────────────────────

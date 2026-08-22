@@ -38,6 +38,15 @@ export interface IdentityVerificationProvider {
   parseCallback(payload: unknown): IdentityCallbackResult;
 }
 
+/**
+ * The dev stub's provider name. Exported so consumers can tell the unsigned
+ * local stub apart from a real, signature-verifying provider WITHOUT importing
+ * the stub class (which would drag a dev-only implementation into production
+ * code paths). `VerificationService` refuses to honour identity callbacks, and
+ * refuses automatic elevation, when this provider is bound in production.
+ */
+export const STUB_IDENTITY_PROVIDER_NAME = 'stub_identity';
+
 /** DI token — an interface has no runtime value to inject against. */
 export const IDENTITY_VERIFICATION_PROVIDER = Symbol(
   'IDENTITY_VERIFICATION_PROVIDER',

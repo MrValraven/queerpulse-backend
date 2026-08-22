@@ -1,4 +1,6 @@
-import { IsNotEmpty, IsString } from 'class-validator';
+import { IsNotEmpty, IsString, MaxLength } from 'class-validator';
+
+import { DESK_BODY_MAX } from './desk-text-limits';
 
 /**
  * Body of `POST /magazine/admin/comments/:commentId/reply` (Magazine Desk
@@ -7,5 +9,6 @@ import { IsNotEmpty, IsString } from 'class-validator';
  * `MagazinePieceService.replyToArticleComment`.
  */
 export class ReplyArticleCommentDto {
-  @IsString() @IsNotEmpty() body!: string;
+  // Capped (CNT-14), same ceiling as the note it replies to.
+  @IsString() @IsNotEmpty() @MaxLength(DESK_BODY_MAX) body!: string;
 }

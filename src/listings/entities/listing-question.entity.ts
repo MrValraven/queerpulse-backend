@@ -12,7 +12,7 @@ import { User } from '../../users/entities/user.entity';
 /**
  * One moderator question — and the submitter's optional answer — in a
  * listing's Q&A conversation thread (item #17), surfaced in the admin
- * drawer via `GET /listings/admin/:ref/history`.
+ * drawer via `GET /admin/listings/:ref/history`.
  *
  * A row is created by `ListingsService.askQuestion` alongside the existing
  * DM delivery to the submitter (the DM stays the actual notification

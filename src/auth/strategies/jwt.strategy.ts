@@ -13,10 +13,34 @@ const cookieExtractor: JwtFromRequestFunction = (req: Request) =>
     'access_token'
   ] ?? null;
 
+/**
+ * The claims `AuthService.issueTokensWithRow` signs into an access token.
+ *
+ * ⚠️ `status` and `role` are ADVISORY ONLY. They are a snapshot taken when the
+ * token was minted and can be up to one access-token TTL (15m by default) out
+ * of date: a member banned, suspended, promoted or demoted a minute ago still
+ * carries the old values. NOTHING may authorise on them.
+ *
+ * They exist for exactly two reasons, neither of which is authorisation:
+ *   - the shape check below and in `AuthService.verifyAccessToken`, which
+ *     rejects a token minted for a different purpose (a refresh token carries
+ *     only `{ sub, jti }`) from ever being replayed as an access token;
+ *   - `ChatGateway.authenticate`, which has no request to hang `req.user` off
+ *     and reads `status` at the handshake. That is safe only because every
+ *     moderation path calls `revokeAllForUser`, whose `USER_SESSION_REVOKED`
+ *     event force-drops the member's sockets. Removing that emit would reopen
+ *     a 15-minute stale-privilege window on the socket path.
+ *
+ * The authoritative read is `validate()` below: one indexed PK lookup per
+ * request, so a ban takes effect on the very next request. Any new consumer
+ * must do the same rather than trusting these claims.
+ */
 export interface AccessTokenPayload {
   sub: string;
   email: string;
+  /** Advisory snapshot. Re-read `users.status` before acting on it. */
   status: string;
+  /** Advisory snapshot. Re-read `users.role` before acting on it. */
   role: string;
 }
 
@@ -31,6 +55,12 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       jwtFromRequest: ExtractJwt.fromExtractors([cookieExtractor]),
       ignoreExpiration: false,
       secretOrKey: config.getOrThrow<string>('auth.jwtAccessSecret'),
+      // Pin verification to the algorithm we sign access tokens with (HS256).
+      // Without an allowlist passport-jwt accepts whatever `alg` the token
+      // header names — the JWT algorithm-confusion class of bug. Our secret is
+      // a symmetric string so only the HMAC family is reachable, but pinning is
+      // cheap defence in depth and future-proofs against a key-type change.
+      algorithms: ['HS256'],
     });
   }
 

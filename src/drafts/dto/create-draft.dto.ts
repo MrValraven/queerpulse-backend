@@ -5,6 +5,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -36,7 +37,32 @@ export class CreateDraftDto {
 
   @IsOptional() @IsEnum(DraftStatus) status?: DraftStatus;
 
-  @IsOptional() @IsString() @MaxLength(2000) href?: string;
+  /**
+   * Where the draft card's "Resume" navigates. Restricted to an APP-RELATIVE
+   * path (CNT-15).
+   *
+   * This was `@IsString() @MaxLength(2000)`, so any scheme validated —
+   * `javascript:`, `data:` — and `toDraftDTO` echoes the value back verbatim
+   * into an `href` the client renders. Only the owner can read their own
+   * drafts today, so that is self-XSS; the moment a draft is shared with a
+   * collaborator or linked from a notification it becomes a stored-XSS and
+   * open-redirect sink. Every value the frontend actually sends is a
+   * `routeMap` path (`/work/jobs`, `/magazine/submit-story`, …), so nothing
+   * legitimate is refused.
+   *
+   * The pattern also rejects a leading `//` and `/\`, which browsers resolve
+   * as PROTOCOL-RELATIVE (`//evil.example` navigates off-site), and any
+   * whitespace, which would let a scheme be smuggled past a naive prefix
+   * check. An empty string is allowed: forms send `''` for an unset field and
+   * `@IsOptional()` only skips `undefined`/`null`.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  @Matches(/^(?:|\/(?![/\\])\S*)$/, {
+    message: 'href must be an app-relative path starting with "/"',
+  })
+  href?: string;
 
   @IsOptional() @IsInt() @Min(0) editedMinutes?: number;
 

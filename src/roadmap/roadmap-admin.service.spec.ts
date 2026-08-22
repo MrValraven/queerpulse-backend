@@ -814,12 +814,18 @@ describe('RoadmapAdminService', () => {
     });
   });
 
+  // NOTE the `actorId: null` on every fixture below. Since BE-COM-28 the
+  // export resolves a row's "who" from `profiles` whenever the row carries an
+  // `actorId` (rows written before that fix hold the acting admin's EMAIL in
+  // `actorLabel`, which must never reach a Moderator's download). Only a
+  // system-attributed row — `actorId === null` — still renders the stored
+  // label, which is exactly the path these CSV-escaping specs exercise.
   describe('getAuditCsv', () => {
     it('quotes every field and doubles embedded quotes', async () => {
       auditLog.find.mockResolvedValue([
         {
           id: 'audit-1',
-          actorId: 'admin-1',
+          actorId: null,
           actorLabel: 'Ash (admin)',
           action: 'Said "hello, world" to the team',
           createdAt: new Date('2026-08-01T12:00:00.000Z'),
@@ -839,14 +845,14 @@ describe('RoadmapAdminService', () => {
       auditLog.find.mockResolvedValue([
         {
           id: 'audit-1',
-          actorId: 'admin-1',
+          actorId: null,
           actorLabel: "=cmd|'/c calc'!A1",
           action: '+HYPERLINK("http://evil.example")',
           createdAt: new Date('2026-08-01T12:00:00.000Z'),
         },
         {
           id: 'audit-2',
-          actorId: 'admin-2',
+          actorId: null,
           actorLabel: '-2+3',
           action: '@SUM(1,2)',
           createdAt: new Date('2026-08-01T12:01:00.000Z'),

@@ -8,7 +8,12 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, In, Repository } from 'typeorm';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
-import { normalizePage, paginate, Paginated } from '../common/pagination';
+import {
+  DEFAULT_LIST_LIMIT,
+  normalizePage,
+  paginate,
+  Paginated,
+} from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -455,9 +460,12 @@ export class VolunteeringService {
       );
     }
 
+    // Bounded: a popular posting can carry thousands of signups, each with a
+    // full `answers` jsonb blob, and this had no `take` at all.
     const rows = await this.signups.find({
       where: { opportunityId: opportunity.id },
       order: { createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     if (!rows.length) return [];
 
@@ -529,6 +537,7 @@ export class VolunteeringService {
     const rows = await this.opportunities.find({
       where: { posterId },
       order: { createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     if (!rows.length) return [];
 

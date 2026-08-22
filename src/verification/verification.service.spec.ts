@@ -10,7 +10,6 @@ import { MemberVerification } from './entities/member-verification.entity';
 import { VerificationEvent } from './entities/verification-event.entity';
 import { VerificationRequest } from './entities/verification-request.entity';
 import { IDENTITY_VERIFICATION_PROVIDER } from './providers/identity-verification.provider';
-import { PHONE_VERIFICATION_PROVIDER } from './providers/phone-verification.provider';
 import { VerificationRequestStatus } from './verification-request-status';
 import {
   VerificationEventAction,
@@ -192,10 +191,6 @@ describe('VerificationService', () => {
         },
         { provide: getRepositoryToken(Profile), useValue: profileRepo },
         { provide: getRepositoryToken(User), useValue: userRepo },
-        {
-          provide: PHONE_VERIFICATION_PROVIDER,
-          useValue: { checkChallenge: jest.fn().mockResolvedValue(true) },
-        },
         {
           provide: IDENTITY_VERIFICATION_PROVIDER,
           useValue: {
@@ -1120,29 +1115,6 @@ describe('VerificationService', () => {
   // --- Task 6: dormant the automated seams ---
 
   describe('automated elevation flag (Task 6)', () => {
-    describe('verifyPhone', () => {
-      it('does NOT raise the level when the flag is false (default)', async () => {
-        configValues.VERIFICATION_AUTOMATED_ELEVATION = undefined;
-        repo.findOne.mockResolvedValue(null);
-
-        const status = await service.verifyPhone(userId, { code: '123456' });
-
-        expect(repo.save).not.toHaveBeenCalled();
-        expect(status.level).toBe(VerificationLevel.Email);
-      });
-
-      it('raises the level when the flag is true', async () => {
-        configValues.VERIFICATION_AUTOMATED_ELEVATION = 'true';
-        repo.findOne.mockResolvedValue(null);
-
-        await service.verifyPhone(userId, { code: '123456' });
-
-        expect(repo.save).toHaveBeenCalledWith(
-          expect.objectContaining({ level: VerificationLevel.Phone }),
-        );
-      });
-    });
-
     describe('handleIdentityCallback', () => {
       const pendingIdentityRow = () => ({
         userId,

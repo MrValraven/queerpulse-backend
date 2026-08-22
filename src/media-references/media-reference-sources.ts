@@ -6,7 +6,10 @@ import type {
 } from './media-reference.types';
 import { Profile } from '../users/entities/profile.entity';
 import { WorkItem } from '../profiles/entities/work-item.entity';
+import { MagazineArticle } from '../magazine/entities/magazine-article.entity';
+import { MagazineDeck } from '../magazine/entities/magazine-deck.entity';
 import { MagazineIssue } from '../magazine/entities/magazine-issue.entity';
+import { Message } from '../messaging/entities/message.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { Conversation } from '../messaging/entities/conversation.entity';
 import { Event } from '../events/entities/event.entity';
@@ -218,6 +221,24 @@ export const PLAIN_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
     slugColumn: 'slug',
   }),
   plainSource({
+    type: 'magazine-article',
+    field: 'MagazineArticle.socialImage',
+    entity: MagazineArticle,
+    column: 'socialImage',
+    idColumn: 'id',
+    labelColumns: ['title'],
+    slugColumn: 'slug',
+  }),
+  plainSource({
+    type: 'magazine-deck',
+    field: 'MagazineDeck.cover',
+    entity: MagazineDeck,
+    column: 'cover',
+    idColumn: 'id',
+    labelColumns: ['title'],
+    slugColumn: 'slug',
+  }),
+  plainSource({
     type: 'collection',
     field: 'Collection.cover',
     entity: Collection,
@@ -289,6 +310,10 @@ function arraySource(config: {
   idColumn: string;
   labelColumns: string[];
   slugColumn?: string;
+  /** Extra SQL predicate ANDed onto the prefilter, written against
+   *  `<tableAlias>`. Use it to skip rows that cannot hold an upload key at all
+   *  (e.g. every message that is not a photo). */
+  additionalWhere?: string;
   extractRefs: ExtractRefs;
 }): MediaReferenceSource {
   return {
@@ -300,12 +325,15 @@ function arraySource(config: {
       const patterns = [...candidateBareKeys].map((bareKey) => `%${bareKey}%`);
       const tableAlias = repository.metadata.tableName;
       // Prefilter: rows whose column text mentions any candidate bare key.
-      const rows = await repository
+      const queryBuilder = repository
         .createQueryBuilder(tableAlias)
         .where(`${tableAlias}.${config.column}::text LIKE ANY(:patterns)`, {
           patterns,
-        })
-        .getMany();
+        });
+      if (config.additionalWhere) {
+        queryBuilder.andWhere(config.additionalWhere);
+      }
+      const rows = await queryBuilder.getMany();
       const storedFormSet = new Set(candidateStoredForms);
       const pairs: Array<[string, MediaReference]> = [];
       for (const row of rows) {
@@ -378,6 +406,79 @@ export const ARRAY_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
         (value): value is string => typeof value === 'string',
       ),
   }),
+  arraySource({
+    type: 'magazine-article',
+    field: 'MagazineArticle.blocks[].src',
+    entity: MagazineArticle,
+    column: 'blocks',
+    idColumn: 'id',
+    labelColumns: ['title'],
+    slugColumn: 'slug',
+    // Only the `image` block kind carries a storage ref (`src`); every other
+    // kind's strings are prose. A published article's photos were the largest
+    // blind spot in this table — a member tidying "unused" uploads could break
+    // a live piece with no warning at all.
+    extractRefs: (row) =>
+      ((row.blocks ?? []) as Array<{ kind?: unknown; src?: unknown }>)
+        .filter((block) => block?.kind === 'image')
+        .map((block) => block.src)
+        .filter((value): value is string => typeof value === 'string'),
+  }),
+  arraySource({
+    type: 'magazine-deck',
+    field: 'MagazineDeck.slides[].src',
+    entity: MagazineDeck,
+    column: 'slides',
+    idColumn: 'id',
+    labelColumns: ['title'],
+    slugColumn: 'slug',
+    // `image` slides hold one `src`; a `before-after` interactive slide holds
+    // two nested ones (`before.src`/`after.src`). Every other slide layout is
+    // text or a stat.
+    extractRefs: (row) =>
+      ((row.slides ?? []) as Array<Record<string, unknown>>).flatMap(
+        (slide) => {
+          const nested = [slide.before, slide.after]
+            .map((side) => (side as { src?: unknown } | undefined)?.src)
+            .filter((value): value is string => typeof value === 'string');
+          const src = slide.src;
+          return typeof src === 'string' ? [src, ...nested] : nested;
+        },
+      ),
+  }),
+  arraySource({
+    type: 'message-photo',
+    field: 'Message.attachment.url',
+    entity: Message,
+    column: 'attachment',
+    idColumn: 'conversationId',
+    // A message has no title, and the conversation's does not belong in the
+    // uploader's media list — the reference is deliberately label-less. It
+    // exists to say "this photo is still in a conversation", nothing more.
+    labelColumns: [],
+    // `messages` is the largest table in the app and no index can serve a
+    // `LIKE ANY` over a jsonb column, so narrow the scan to the only rows that
+    // can possibly hold one of our keys: a photo message with an attachment.
+    // A picked GIF stores an absolute provider URL, not a key.
+    additionalWhere: `messages.attachment IS NOT NULL AND messages.kind = 'image'`,
+    // A `kind:'gif'` attachment holds an absolute provider URL, never one of
+    // our keys; the exact-membership check below filters those out anyway.
+    // `previewUrl` is the same value as `url` for an uploaded image, but it is
+    // read too so a future separate thumbnail key is not silently orphaned.
+    extractRefs: (row) => {
+      const attachment = row.attachment as
+        { url?: unknown; previewUrl?: unknown } | null | undefined;
+      // De-duplicated: for an uploaded photo `previewUrl` IS `url`, and the
+      // same message must not be listed twice as two separate references.
+      return [
+        ...new Set(
+          [attachment?.url, attachment?.previewUrl].filter(
+            (value): value is string => typeof value === 'string',
+          ),
+        ),
+      ];
+    },
+  }),
 ];
 
 export const MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
@@ -392,9 +493,12 @@ export const MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
  *  image field but absent from BOTH MEDIA_REFERENCE_SOURCES and this list
  *  fails the coverage tripwire (`media-reference-source-coverage.spec.ts`). */
 export const RULED_OUT_IMAGE_FIELDS: string[] = [
-  'MagazineDeck.cover',
-  'MagazineDeck.slides',
-  'MagazineArticle.blocks',
+  // `MagazineArticleVersion.blocks` is a frozen SNAPSHOT of an article's blocks
+  // taken at a point in time. It is deliberately not a source: a key referenced
+  // only by a superseded version is not live anywhere a reader can reach, and
+  // counting history as "in use" would make every image an editor ever swapped
+  // out permanently undeletable. The CURRENT blocks are covered by
+  // `MagazineArticle.blocks[].src`.
   'MagazineArticleVersion.blocks',
   'Partner.logo',
   'PressContact.avatarUrl',

@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsEnum,
@@ -18,6 +19,7 @@ export class CreateOrgTierDto {
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(20)
   @IsString({ each: true })
   @MaxLength(300, { each: true })
   bullets?: string[];
@@ -31,5 +33,5 @@ export class CreateOrgTierDto {
   @IsOptional() @Type(() => Number) @IsInt() sortOrder?: number;
   @IsOptional() @IsBoolean() published?: boolean;
   /** Desired slug source; defaults to `name`. */
-  @IsOptional() @IsString() handle?: string;
+  @IsOptional() @IsString() @MaxLength(120) handle?: string;
 }

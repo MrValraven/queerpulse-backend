@@ -1,4 +1,5 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
@@ -62,6 +63,7 @@ describe('SocialService', () => {
     delete: jest.Mock;
   };
   let dataSource: { transaction: jest.Mock };
+  let eventEmitter: { emit: jest.Mock };
 
   // Resolves any slug to a userId equal to the slug prefixed with `user-`,
   // via the same createQueryBuilder().getMany() path `MemberLookup` uses.
@@ -99,6 +101,7 @@ describe('SocialService', () => {
       update: jest.fn().mockResolvedValue({ affected: 0 }),
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
     };
+    eventEmitter = { emit: jest.fn() };
     dataSource = {
       transaction: jest
         .fn()
@@ -119,6 +122,7 @@ describe('SocialService', () => {
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: ReportsService, useValue: reportsService },
         { provide: DataSource, useValue: dataSource },
+        { provide: EventEmitter2, useValue: eventEmitter },
       ],
     }).compile();
     service = module.get(SocialService);
@@ -242,6 +246,24 @@ describe('SocialService', () => {
       expect(set).toMatchObject({ status: 'blocked', blockedBy: 'me' });
     });
 
+    it('emits MEMBER_BLOCKED so the gateway evicts the pair from their DM room (BE-MSG-01)', async () => {
+      stubSlugResolution({ them: 'them' });
+      blocks.findOneOrFail.mockResolvedValue({
+        id: 'b1',
+        blockerId: 'me',
+        blockedId: 'them',
+        reason: null,
+        createdAt: new Date(),
+      });
+
+      await service.blockMember('me', 'them');
+
+      expect(eventEmitter.emit).toHaveBeenCalledWith('member.blocked', {
+        blockerId: 'me',
+        blockedId: 'them',
+      });
+    });
+
     it('files a companion report when alsoReport is true', async () => {
       stubSlugResolution({ them: 'them' });
       blocks.findOneOrFail.mockResolvedValue({
@@ -337,21 +359,26 @@ describe('SocialService', () => {
   });
 
   describe('getBlockStatus', () => {
-    it('reports blocking without revealing anything else', async () => {
+    it('reports the block the caller placed themselves', async () => {
       stubSlugResolution({ them: 'them' });
-      blocks.exist.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+      blocks.exist.mockResolvedValueOnce(true);
       await expect(service.getBlockStatus('me', 'them')).resolves.toEqual({
         blocking: true,
-        blockedBy: false,
       });
     });
 
-    it('reports blockedBy', async () => {
+    it('never discloses that the other member blocked the caller', async () => {
       stubSlugResolution({ them: 'them' });
-      blocks.exist.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+      // Only ONE lookup, in the caller's own direction: the inbound block is
+      // not read at all, so it cannot leak. Parity with
+      // `ConnectionsService.request`, which returns the same 409 for a block
+      // as for a pending request precisely so the two are indistinguishable.
       await expect(service.getBlockStatus('me', 'them')).resolves.toEqual({
         blocking: false,
-        blockedBy: true,
+      });
+      expect(blocks.exist).toHaveBeenCalledTimes(1);
+      expect(blocks.exist).toHaveBeenCalledWith({
+        where: { blockerId: 'me', blockedId: 'them' },
       });
     });
 
@@ -359,7 +386,6 @@ describe('SocialService', () => {
       stubSlugResolution({ me: 'me' });
       await expect(service.getBlockStatus('me', 'me')).resolves.toEqual({
         blocking: false,
-        blockedBy: false,
       });
     });
   });

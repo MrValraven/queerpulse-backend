@@ -94,7 +94,10 @@ export class MemberRecognitionController {
   @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
   @ApiNotFoundResponse({ description: 'No profile with that slug.' })
   @Get(':slug/recognition')
-  getForMember(@Param('slug') slug: string) {
-    return this.recognitionService.getBySlug(slug);
+  getForMember(
+    @Param('slug') slug: string,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.recognitionService.getBySlug(slug, user.userId, user.role);
   }
 }

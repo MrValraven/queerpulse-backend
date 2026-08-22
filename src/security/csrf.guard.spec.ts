@@ -4,12 +4,22 @@ import { ConfigService } from '@nestjs/config';
 import { CsrfGuard } from './csrf.guard';
 import { SKIP_CSRF_KEY } from './skip-csrf.decorator';
 
-/** A ConfigService stub whose only key that matters here is `app.nodeEnv`. */
-function configFor(nodeEnv: string): { get: jest.Mock } {
+const ALLOWED_ORIGIN = 'https://app.queerpulse.test';
+
+/**
+ * A ConfigService stub for the two keys the guard reads: `app.nodeEnv` (which
+ * cookie name to expect) and `app.frontendOrigins` (the Origin allowlist).
+ */
+function configFor(
+  nodeEnv: string,
+  origins: string[] = [ALLOWED_ORIGIN],
+): { get: jest.Mock } {
   return {
-    get: jest.fn((key: string) =>
-      key === 'app.nodeEnv' ? nodeEnv : undefined,
-    ),
+    get: jest.fn((key: string, fallback?: unknown) => {
+      if (key === 'app.nodeEnv') return nodeEnv;
+      if (key === 'app.frontendOrigins') return origins;
+      return fallback;
+    }),
   };
 }
 
@@ -99,6 +109,30 @@ describe('CsrfGuard', () => {
         ),
       ),
     ).toBe(true);
+  });
+
+  it('allows a matching pair carrying an allowlisted Origin', () => {
+    expect(
+      guard.canActivate(
+        httpContext(
+          'POST',
+          { csrf_token: 'match' },
+          { 'x-csrf-token': 'match', origin: ALLOWED_ORIGIN },
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects an off-allowlist Origin even when the tokens match', () => {
+    expect(() =>
+      guard.canActivate(
+        httpContext(
+          'POST',
+          { csrf_token: 'match' },
+          { 'x-csrf-token': 'match', origin: 'https://evil.example' },
+        ),
+      ),
+    ).toThrow(ForbiddenException);
   });
 
   it('allows token-less mutating requests on @SkipCsrf routes', () => {

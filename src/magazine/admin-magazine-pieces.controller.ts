@@ -71,8 +71,15 @@ export class AdminMagazinePiecesController {
   constructor(private readonly magazinePieces: MagazinePieceService) {}
 
   @Get('pieces')
-  @ApiOperation({ summary: 'List magazine pieces on the desk, with filters.' })
-  @ApiOkResponse({ description: 'Matching pieces, newest first.' })
+  @ApiOperation({
+    summary: 'List magazine pieces on the desk, with filters (paginated).',
+  })
+  @ApiOkResponse({
+    description:
+      'One page of matching pieces, newest first, as `{items,total,page,pageSize}`. ' +
+      'Send `page` (1-based) and optionally `pageSize` (default 50, max 200). ' +
+      '`total` counts every row matching the filters AND the saved view.',
+  })
   listPieces(@Query() query: ListPiecesQuery) {
     return this.magazinePieces.listPieces(query);
   }
@@ -119,6 +126,10 @@ export class AdminMagazinePiecesController {
   @ApiNoContentResponse({ description: 'The piece was deleted.' })
   @ApiBadRequestResponse({ description: 'Malformed piece id.' })
   @ApiNotFoundResponse({ description: 'No piece exists for this id.' })
+  @ApiConflictResponse({
+    description:
+      'The piece owns a PUBLISHED article or deck. Unpublish it first — deleting the piece deletes its content, and live content is never removed as a side effect.',
+  })
   deletePiece(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,
@@ -211,6 +222,10 @@ export class AdminMagazinePiecesController {
   @ApiOkResponse({ description: 'The updated article draft.' })
   @ApiBadRequestResponse({ description: 'Malformed id or invalid payload.' })
   @ApiNotFoundResponse({ description: 'No piece exists for this id.' })
+  @ApiConflictResponse({
+    description:
+      'The draft moved on since this client read it (another editor saved, the writer filed, or a version was restored). Send the `version` from the latest read as `expectedVersion`; reload before saving again.',
+  })
   updateArticleDraft(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateArticleDto,

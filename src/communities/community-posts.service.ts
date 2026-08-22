@@ -166,6 +166,20 @@ export class CommunityPostsService {
     this.blockFilter.excludeHidden(qb, viewerId, '"p"."author_id"');
 
     const viewerRole = await this.viewerRoleIn(community.id, viewerId);
+    // Moderator-hidden posts leave the query for a non-staff viewer, for the
+    // same reason the block filter above does. `toPostDTOs` used to drop them
+    // in Node AFTER `paginate` had already counted them into `total` and spent
+    // page slots on them, so a page could come back short (or empty) while
+    // `total` insisted there was content — infinite scroll and the counters
+    // both broke after a moderation sweep (BE-COM-12). Replies have used the
+    // in-query filter all along (see `listReplies`).
+    if (!CommunityPostsService.isStaffRole(viewerRole)) {
+      this.contentModeration.excludeHidden(
+        qb,
+        CommunityPostsService.SUBJECT_TYPES,
+        '"p"."id"',
+      );
+    }
     return paginate(qb, normalizedPage, (rows) =>
       this.toPostDTOs(rows, viewerId, viewerRole),
     );
@@ -179,6 +193,7 @@ export class CommunityPostsService {
     const community = await this.loadCommunityOr404(slug);
     const membership = await this.assertMember(community.id, authorId);
     this.assertNotFrozen(community, membership);
+    CommunityPostsService.assertKindAllowed(dto.kind, membership.role);
 
     const saved = await this.posts.save(
       this.posts.create({
@@ -229,6 +244,9 @@ export class CommunityPostsService {
       }
       post.pinned = dto.pinned;
     }
+    // An author must not be able to post a plain `post` and then PATCH it into
+    // an `announcement` — see `assertKindAllowed` (BE-COM-16).
+    CommunityPostsService.assertKindAllowed(dto.kind, membership.role);
 
     const saved = await this.applyPostFieldEdit(post, actorId, dto);
     return this.buildPostDTO(saved, actorId, membership.role);
@@ -248,6 +266,15 @@ export class CommunityPostsService {
     dto: UpdateFlatPostInput,
   ): Promise<CommunityPostDTO> {
     const post = await this.loadPostByIdOr404(postId);
+    // Same announcement gate as the nested route (BE-COM-16). A GLOBAL post
+    // (`communityId: null`) has no community to speak for, so there is no
+    // staff voice to impersonate and `viewerRoleIn` is not consulted.
+    if (dto.kind !== undefined && post.communityId) {
+      CommunityPostsService.assertKindAllowed(
+        dto.kind,
+        await this.viewerRoleIn(post.communityId, actorId),
+      );
+    }
     const saved = await this.applyPostFieldEdit(post, actorId, dto);
     return this.buildPostDTO(
       saved,
@@ -286,7 +313,8 @@ export class CommunityPostsService {
     );
   }
 
-  // POST /communities/:slug/posts/:id/restore — clear the tombstone.
+  // POST /communities/:slug/posts/:id/restore — clear the tombstone. Only the
+  // actor who set it, or a community owner/mod (see `assertCanRestore`).
   async restorePost(
     slug: string,
     postId: string,
@@ -296,22 +324,37 @@ export class CommunityPostsService {
     const post = await this.loadPostOr404(community.id, postId);
     const membership = await this.assertMember(community.id, actorId);
     this.assertAuthorOrOwnerMod(post.authorId, membership);
+    this.assertCanRestore(post.deletedById, actorId, membership.role);
 
     return this.restorePostCore(post, actorId, membership.role);
   }
 
-  // POST /community-posts/:id/restore — the flat alias's own restore:
-  // author-only. Shares `restorePostCore` with the nested route above.
+  // POST /community-posts/:id/restore — the flat alias's own restore.
+  //
+  // This used to be `assertAuthorOnly` against a post loaded WITHOUT its
+  // community, which made it the bypass for the nested route's moderation:
+  // a community mod tombstoned a post through `/communities/:slug/posts/:id`
+  // and its author cleared the tombstone here, roster unread (BE-COM-01). The
+  // post's community is now resolved so the SAME `assertCanRestore` rule
+  // applies on both routes — a moderator tombstone needs a moderator to lift.
+  // A global post (`communityId: null`) has no roster, so the actor's role is
+  // null and only "you set this tombstone" can authorize.
   async restoreFlatPost(
     postId: string,
     actorId: string,
   ): Promise<CommunityPostDTO> {
     const post = await this.loadPostByIdOr404(postId);
-    this.assertAuthorOnly(post.authorId, actorId);
+    const viewerRole = post.communityId
+      ? await this.viewerRoleIn(post.communityId, actorId)
+      : null;
+    if (!CommunityPostsService.isStaffRole(viewerRole)) {
+      this.assertAuthorOnly(post.authorId, actorId);
+    }
+    this.assertCanRestore(post.deletedById, actorId, viewerRole);
     return this.restorePostCore(
       post,
       actorId,
-      CommunityPostsService.FLAT_VIEWER_ROLE,
+      viewerRole ?? CommunityPostsService.FLAT_VIEWER_ROLE,
     );
   }
 
@@ -426,12 +469,14 @@ export class CommunityPostsService {
     const reply = await this.loadReplyOr404(post.id, replyId);
     const membership = await this.assertMember(community.id, actorId);
     this.assertAuthorOrOwnerMod(reply.authorId, membership);
+    this.assertCanRestore(reply.deletedById, actorId, membership.role);
 
     return this.restoreReplyCore(reply, actorId, membership.role);
   }
 
-  // POST /community-posts/:id/replies/:replyId/restore — the flat alias's
-  // own reply restore: author-only. Shares `restoreReplyCore`.
+  // POST /community-posts/:id/replies/:replyId/restore — the flat alias's own
+  // reply restore. Same community resolution + `assertCanRestore` rule as
+  // `restoreFlatPost` above, for the same reason (BE-COM-01).
   async restoreFlatReply(
     postId: string,
     replyId: string,
@@ -439,11 +484,17 @@ export class CommunityPostsService {
   ): Promise<CommunityReplyDTO> {
     const post = await this.loadPostByIdOr404(postId);
     const reply = await this.loadReplyOr404(post.id, replyId);
-    this.assertAuthorOnly(reply.authorId, actorId);
+    const viewerRole = post.communityId
+      ? await this.viewerRoleIn(post.communityId, actorId)
+      : null;
+    if (!CommunityPostsService.isStaffRole(viewerRole)) {
+      this.assertAuthorOnly(reply.authorId, actorId);
+    }
+    this.assertCanRestore(reply.deletedById, actorId, viewerRole);
     return this.restoreReplyCore(
       reply,
       actorId,
-      CommunityPostsService.FLAT_VIEWER_ROLE,
+      viewerRole ?? CommunityPostsService.FLAT_VIEWER_ROLE,
     );
   }
 
@@ -509,30 +560,37 @@ export class CommunityPostsService {
       );
     }
 
-    const postRows = await this.posts.find({
-      where: { communityId: community.id },
-      select: { id: true },
-    });
-    const postIds = postRows.map((post) => post.id);
-    const replyIds = postIds.length
-      ? (
-          await this.replies
-            .createQueryBuilder('reply')
-            .select('reply.id', 'id')
-            .where('reply.post_id IN (:...postIds)', { postIds })
-            .getRawMany<{ id: string }>()
-        ).map((row) => row.id)
-      : [];
-    const contentIds = [...postIds, ...replyIds];
-    if (!contentIds.length) return [];
-
+    // Joined, not an `IN (...)` list. This used to load every post id AND
+    // every reply id of the community into Node and bind them as one
+    // parameter list, which Postgres rejects past 65535 parameters — the same
+    // failure `AdminCommunitiesService.loadReportScope` documents and was
+    // rewritten to avoid (BE-COM-13). The uuid side is cast to text because
+    // `reports.subject_id` is a varchar that carries slugs as well as uuids,
+    // so casting IT to uuid would throw on a non-uuid row.
     const rows = await this.reports
       .createQueryBuilder('report')
       .where('report.status = :open', { open: ReportStatus.Open })
-      .andWhere('report.subject_type IN (:...types)', {
-        types: [ReportSubjectType.Post, ReportSubjectType.Reply],
-      })
-      .andWhere('report.subject_id IN (:...contentIds)', { contentIds })
+      .andWhere(
+        `(
+          (report.subject_type = :postType AND EXISTS (
+            SELECT 1 FROM "community_posts" "__scoped_post"
+            WHERE "__scoped_post"."id"::text = report.subject_id
+              AND "__scoped_post"."community_id" = :communityId
+          ))
+          OR (report.subject_type = :replyType AND EXISTS (
+            SELECT 1 FROM "community_post_replies" "__scoped_reply"
+            JOIN "community_posts" "__scoped_reply_post"
+              ON "__scoped_reply_post"."id" = "__scoped_reply"."post_id"
+            WHERE "__scoped_reply"."id"::text = report.subject_id
+              AND "__scoped_reply_post"."community_id" = :communityId
+          ))
+        )`,
+        {
+          postType: ReportSubjectType.Post,
+          replyType: ReportSubjectType.Reply,
+          communityId: community.id,
+        },
+      )
       .orderBy('report.created_at', 'DESC')
       .take(DEFAULT_LIST_LIMIT)
       .getMany();
@@ -659,6 +717,12 @@ export class CommunityPostsService {
     page?: number,
   ): Promise<Paginated<CommunityReplyDTO>> {
     const community = await this.loadCommunityOr404(slug);
+    // A private community's replies are 404 to a non-member, exactly like
+    // `listPosts` above — `viewerRoleIn` below returns null for a non-member
+    // rather than throwing, so without this an ex-member (or any member of
+    // another community) who still holds a post id could read the whole
+    // private thread. Mirrors the sibling read's gate.
+    await this.assertViewable(community, viewerId);
     const post = await this.loadPostOr404(community.id, postId);
     const viewerRole = await this.viewerRoleIn(community.id, viewerId);
     const viewerIsStaff = CommunityPostsService.isStaffRole(viewerRole);
@@ -734,7 +798,12 @@ export class CommunityPostsService {
     let communityId: string | null = null;
     if (dto.communitySlug) {
       const community = await this.loadCommunityOr404(dto.communitySlug);
-      await this.assertMember(community.id, authorId);
+      const membership = await this.assertMember(community.id, authorId);
+      // Same archive/freeze gate as `createPost`'s slug-scoped path — see
+      // `assertFlatWriteAllowed` (the community is already resolved here, so
+      // the two checks are applied directly rather than re-resolving it).
+      this.assertNotArchived(community);
+      this.assertNotFrozen(community, membership);
       communityId = community.id;
     }
 
@@ -771,7 +840,14 @@ export class CommunityPostsService {
     liked: boolean,
   ): Promise<{ liked: boolean; likeCount: number }> {
     const post = await this.loadPostByIdOr404(postId);
-    if (post.communityId) {
+    if (liked) {
+      // Adding a reaction is new activity, so it takes the full archive +
+      // freeze gate (BE-COM-02).
+      await this.assertFlatWriteAllowed(post.communityId, userId);
+    } else if (post.communityId) {
+      // Taking your OWN reaction back is not new activity — the slug-scoped
+      // `removeReaction` has never been freeze-gated either, so this stays a
+      // plain roster check rather than trapping a like inside a freeze.
       await this.assertMember(post.communityId, userId);
     }
 
@@ -808,16 +884,12 @@ export class CommunityPostsService {
     text: string,
   ): Promise<{ id: string }> {
     const post = await this.loadPostByIdOr404(postId);
-    if (post.communityId) {
-      await this.assertMember(post.communityId, userId);
-    }
+    const gate = await this.assertFlatWriteAllowed(post.communityId, userId);
 
     const saved = await this.replies.save(
       this.replies.create({ postId: post.id, authorId: userId, text }),
     );
-    const community = post.communityId
-      ? await this.communities.findOne({ where: { id: post.communityId } })
-      : null;
+    const community = gate?.community ?? null;
     const replyPayload = {
       actorId: userId,
       source: 'community',
@@ -971,6 +1043,10 @@ export class CommunityPostsService {
   ): Promise<CommunityPostDTO> {
     if (!post.deletedAt) {
       post.deletedAt = new Date();
+      // Stamped together with the marker: `assertCanRestore` reads this to
+      // decide whether clearing the tombstone is the author undoing their own
+      // delete or someone undoing a moderator's.
+      post.deletedById = actorId;
       await this.posts.save(post);
     }
     return this.buildPostDTO(post, actorId, viewerRole);
@@ -984,6 +1060,9 @@ export class CommunityPostsService {
   ): Promise<CommunityPostDTO> {
     if (post.deletedAt) {
       post.deletedAt = null;
+      // Cleared with the marker so a later delete/restore pair is judged on
+      // its own actor, never a stale one.
+      post.deletedById = null;
       await this.posts.save(post);
     }
     return this.buildPostDTO(post, actorId, viewerRole);
@@ -1052,6 +1131,7 @@ export class CommunityPostsService {
   ): Promise<CommunityReplyDTO> {
     if (!reply.deletedAt) {
       reply.deletedAt = new Date();
+      reply.deletedById = actorId;
       await this.replies.save(reply);
     }
     return this.mapReply(reply, actorId, viewerRole);
@@ -1065,6 +1145,7 @@ export class CommunityPostsService {
   ): Promise<CommunityReplyDTO> {
     if (reply.deletedAt) {
       reply.deletedAt = null;
+      reply.deletedById = null;
       await this.replies.save(reply);
     }
     return this.mapReply(reply, actorId, viewerRole);
@@ -1107,6 +1188,48 @@ export class CommunityPostsService {
       throw new ForbiddenException('Only roster members can do that');
     }
     return membership;
+  }
+
+  /**
+   * The community gate every flat (`/community-posts*`) WRITE runs, for a post
+   * that belongs to a community: roster membership, the archive check, and the
+   * freeze check — the same three the slug-scoped routes have always applied.
+   * The flat aliases previously ran `assertMember` only, so a frozen community
+   * (including one auto-frozen over an outing/doxxing report) still took new
+   * posts, replies and reactions through `POST /community-posts*`, which is
+   * exactly what a freeze exists to stop (BE-COM-02).
+   *
+   * A global post (`communityId: null`) has no community to be frozen, so this
+   * is a no-op returning `null`.
+   */
+  private async assertFlatWriteAllowed(
+    communityId: string | null,
+    userId: string,
+  ): Promise<{ community: Community; membership: CommunityMember } | null> {
+    if (!communityId) return null;
+    const community = await this.communities.findOne({
+      where: { id: communityId },
+    });
+    if (!community) {
+      throw new NotFoundException('Community not found');
+    }
+    const membership = await this.assertMember(community.id, userId);
+    this.assertNotArchived(community);
+    this.assertNotFrozen(community, membership);
+    return { community, membership };
+  }
+
+  /**
+   * An archived community is down for everyone but its own owner/mods (see
+   * `Community.archivedAt`), so it takes no new content at all. Checked on the
+   * flat write paths alongside the freeze: the nested routes reach it through
+   * `CommunitiesService.getBySlug`'s own archived filter, the flat ones had no
+   * equivalent.
+   */
+  private assertNotArchived(community: Community): void {
+    if (community.archivedAt != null) {
+      throw new ForbiddenException('This community has been archived');
+    }
   }
 
   /**
@@ -1159,6 +1282,61 @@ export class CommunityPostsService {
     if (!isAuthor && !isOwnerMod) {
       throw new ForbiddenException(
         'Only the author or a community owner/mod can do that',
+      );
+    }
+  }
+
+  /**
+   * `PostKind.Announcement` reads as the community's official voice, so only
+   * its owner/mod may publish one — on create AND on edit (an author could
+   * otherwise post a plain `post` and immediately PATCH it to
+   * `announcement`). `pinned` was previously the only staff-gated field, which
+   * left members able to publish posts styled as staff announcements inside a
+   * community: an impersonation vector (BE-COM-16).
+   *
+   * `undefined` means "unchanged"/"default" and is always allowed;
+   * `PostKind.Post` is always allowed, including a staff member downgrading
+   * their own announcement back to an ordinary post.
+   */
+  private static assertKindAllowed(
+    kind: PostKind | undefined,
+    viewerRole: RosterRole | null,
+  ): void {
+    if (kind !== PostKind.Announcement) return;
+    if (!CommunityPostsService.isStaffRole(viewerRole)) {
+      throw new ForbiddenException(
+        'Only a community owner/mod can post an announcement',
+      );
+    }
+  }
+
+  /**
+   * Restore authz, on top of whichever delete-tier check the caller already
+   * ran (`assertAuthorOrOwnerMod` on the nested routes, `assertAuthorOnly` on
+   * the flat ones).
+   *
+   * The rule: a tombstone may only be cleared by the actor who SET it, or by
+   * the community's owner/mod. Before `deleted_by_id` existed, delete and
+   * restore shared one author-OR-owner/mod check, so the author of a post a
+   * community moderator had removed simply undid the removal — community
+   * moderation via the delete button was cosmetic (BE-COM-01).
+   *
+   * `deletedById === null` is the LEGACY case: a tombstone written before
+   * `AddContentTombstoneActor1793520000000`, or a row that isn't tombstoned at
+   * all (restore is then a no-op anyway). There is no actor to compare
+   * against, so it falls through to the caller's own author-or-staff check
+   * rather than locking legacy content out of restore entirely.
+   */
+  private assertCanRestore(
+    deletedById: string | null,
+    actorId: string,
+    viewerRole: RosterRole | null,
+  ): void {
+    if (CommunityPostsService.isStaffRole(viewerRole)) return;
+    if (deletedById === null) return;
+    if (deletedById !== actorId) {
+      throw new ForbiddenException(
+        'Only a community owner/mod can restore content a moderator removed',
       );
     }
   }
@@ -1246,6 +1424,7 @@ export class CommunityPostsService {
       .addSelect('ranked."createdAt"', 'createdAt')
       .addSelect('ranked."editedAt"', 'editedAt')
       .addSelect('ranked."deletedAt"', 'deletedAt')
+      .addSelect('ranked."deletedById"', 'deletedById')
       .from((subQuery) => {
         const inner = subQuery
           .select('r.id', 'id')
@@ -1255,6 +1434,7 @@ export class CommunityPostsService {
           .addSelect('r.created_at', 'createdAt')
           .addSelect('r.edited_at', 'editedAt')
           .addSelect('r.deleted_at', 'deletedAt')
+          .addSelect('r.deleted_by_id', 'deletedById')
           .addSelect(
             'ROW_NUMBER() OVER (PARTITION BY r.post_id ORDER BY r.created_at ASC, r.id ASC)',
             'rn',
@@ -1282,6 +1462,7 @@ export class CommunityPostsService {
         createdAt: Date;
         editedAt: Date | null;
         deletedAt: Date | null;
+        deletedById: string | null;
       }>();
 
     for (const row of rankedRows) {
@@ -1293,6 +1474,7 @@ export class CommunityPostsService {
         createdAt: new Date(row.createdAt),
         editedAt: row.editedAt ? new Date(row.editedAt) : null,
         deletedAt: row.deletedAt ? new Date(row.deletedAt) : null,
+        deletedById: row.deletedById ?? null,
       };
       const list = repliesByPost.get(reply.postId);
       if (list) list.push(reply);

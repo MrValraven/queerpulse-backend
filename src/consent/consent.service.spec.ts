@@ -99,6 +99,23 @@ describe('ConsentService', () => {
       );
     });
 
+    it('echoes the stored record instead of appending when nothing changed', async () => {
+      repo.findOne.mockResolvedValue({
+        ...priorRecord(true, false),
+        policyVersion: '3.3',
+      });
+
+      const result = await service.record('u1', dtoWith(true, false));
+
+      expect(repo.save).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        categories: { necessary: true, analytics: true, monitoring: false },
+        policyVersion: '3.3',
+        action: ConsentAction.Granted,
+        createdAt: now.toISOString(),
+      });
+    });
+
     describe('action derivation', () => {
       it("no prior record → 'granted'", async () => {
         repo.findOne.mockResolvedValue(null);
@@ -124,7 +141,7 @@ describe('ConsentService', () => {
         expect(r.action).toBe(ConsentAction.Updated);
       });
 
-      it("re-submitting the identical decision → 'updated'", async () => {
+      it("re-affirming the same categories against a NEW policy version → 'updated'", async () => {
         repo.findOne.mockResolvedValue(priorRecord(true, false));
         const r = await service.record('u1', dtoWith(true, false));
         expect(r.action).toBe(ConsentAction.Updated);

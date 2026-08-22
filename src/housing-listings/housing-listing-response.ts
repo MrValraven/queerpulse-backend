@@ -58,6 +58,13 @@ export interface HousingListingDTO {
   /** Bedroom count (0 = studio), or null when the lister didn't set it. */
   bedrooms: number | null;
   billsIncluded: boolean;
+  /**
+   * Always `true` (BE-HSG-07). Posting a home requires the mandatory LGBTQ+
+   * affirming pledge, so this is a constant, not a distinguishing attribute of
+   * one listing versus another. Kept on the wire so existing clients do not
+   * break; it must NOT be rendered as a per-listing chip or offered as a browse
+   * filter, because both restate affirmation as optional.
+   */
   lgbtqFriendly: boolean;
   // Transparency (P2.6) — public-safe: every listing discloses its access line
   // and whether it's listed by a member or an agent/broker.

@@ -33,18 +33,26 @@ import { ListAdminReadingGroupProposalsQuery } from './dto/list-admin-reading-gr
 /**
  * Admin oversight of reading-group proposals: every "Start your own group" a
  * member has submitted, paginated and optionally filtered by format. Guarded
- * with `ActiveMemberGuard` + `RolesGuard`; the class-level `@Roles(Admin)`
- * covers the read-only list, while the approve/decline/archive transitions
- * widen to `@Roles(Moderator, Admin)` at the handler (method-level `@Roles`
- * overrides the class via `Reflector.getAllAndOverride`). The member-facing
- * write stays on `ReadingGroupProposalsController`.
+ * with `ActiveMemberGuard` + `RolesGuard`.
+ *
+ * One class-level `@Roles(Moderator, Admin)` covers the whole surface. It
+ * previously read `@Roles(Admin)` with a per-handler `@Roles(Moderator, Admin)`
+ * on approve/decline/archive; because `RolesGuard` resolves roles with
+ * `Reflector.getAllAndOverride`, the method decorator *replaced* the class one,
+ * so moderators could decide a proposal but got 403 on the `GET` that lists the
+ * queue they were deciding from (BE-COM-29). Deciding is the wider permission,
+ * so the read is widened to match rather than the decisions narrowed.
+ *
+ * The member-facing write stays on `ReadingGroupProposalsController`.
  */
 @UseGuards(ActiveMemberGuard, RolesGuard)
-@Roles(UserRole.Admin)
+@Roles(UserRole.Moderator, UserRole.Admin)
 @ApiTags('Admin — Reading-group proposals')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires the admin role.' })
+@ApiForbiddenResponse({
+  description: 'Requires the moderator or admin role.',
+})
 @Controller('admin/reading-group-proposals')
 export class AdminReadingGroupProposalsController {
   constructor(
@@ -60,7 +68,6 @@ export class AdminReadingGroupProposalsController {
   }
 
   @Post(':id/approve')
-  @Roles(UserRole.Moderator, UserRole.Admin)
   @ApiOperation({ summary: 'Approve a reading-group proposal.' })
   @ApiOkResponse({ description: 'The proposal, now approved.' })
   @ApiBadRequestResponse({ description: 'Malformed id or note.' })
@@ -74,7 +81,6 @@ export class AdminReadingGroupProposalsController {
   }
 
   @Post(':id/decline')
-  @Roles(UserRole.Moderator, UserRole.Admin)
   @ApiOperation({ summary: 'Decline a reading-group proposal.' })
   @ApiOkResponse({ description: 'The proposal, now declined.' })
   @ApiBadRequestResponse({ description: 'Malformed id or note.' })
@@ -88,7 +94,6 @@ export class AdminReadingGroupProposalsController {
   }
 
   @Post(':id/archive')
-  @Roles(UserRole.Moderator, UserRole.Admin)
   @ApiOperation({ summary: 'Archive a reading-group proposal.' })
   @ApiOkResponse({ description: 'The proposal, now archived.' })
   @ApiBadRequestResponse({ description: 'Malformed id or note.' })

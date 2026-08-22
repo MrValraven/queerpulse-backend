@@ -85,11 +85,18 @@ export class BlocksController {
     return this.social.unblockMember(user.userId, slug);
   }
 
-  /** `{ blocking, blockedBy }` — never leaks who blocked whom beyond that. */
+  /**
+   * `{ blocking }` — ONLY the block the caller placed. It deliberately does
+   * not report whether that member blocked the caller: this endpoint is
+   * pollable for any slug, and an inbound block must stay indistinguishable
+   * (see `SocialService.getBlockStatus` and `ConnectionsService.request`).
+   */
   @Get(':slug')
-  @ApiOperation({ summary: 'Directional block status with a member' })
+  @ApiOperation({ summary: 'Whether you have blocked this member' })
   @ApiOkResponse({
-    description: '`{ blocking, blockedBy }` for the actor and that member.',
+    description:
+      '`{ blocking }` — whether the ACTOR blocked that member. Never reports ' +
+      'a block in the other direction.',
   })
   @ApiNotFoundResponse({ description: 'No member with that slug.' })
   @ApiUnauthorizedResponse({

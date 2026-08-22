@@ -22,6 +22,7 @@ import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { MetricsModule } from './metrics/metrics.module';
+import { MembershipCardsModule } from './membership-cards/membership-cards.module';
 import { MembershipModule } from './membership/membership.module';
 import { PlatformSettingsModule } from './platform-settings/platform-settings.module';
 import { ProfilesModule } from './profiles/profiles.module';
@@ -69,6 +70,7 @@ import { StorageModule } from './storage/storage.module';
 import { StorageKeyOwnershipInterceptor } from './storage/storage-key-ownership.interceptor';
 import { UsersModule } from './users/users.module';
 import { VolunteeringModule } from './volunteering/volunteering.module';
+import { BarterModule } from './barter/barter.module';
 import { CsrfGuard } from './security/csrf.guard';
 import { HttpThrottlerGuard } from './security/http-throttler.guard';
 import { SecurityModule } from './security/security.module';
@@ -213,6 +215,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     PlatformSettingsModule,
     UsersModule,
     AuthModule,
+    MembershipCardsModule,
     MembershipModule,
     ProfilesModule,
     PublicProfilesModule,
@@ -235,6 +238,7 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     InquiriesModule,
     OrgTiersModule,
     VolunteeringModule,
+    BarterModule,
     NotificationsModule,
     PushModule,
     StorageModule,

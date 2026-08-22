@@ -13,6 +13,7 @@ import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
 import { ConversationPinnedMessage } from './entities/conversation-pinned-message.entity';
@@ -49,6 +50,13 @@ interface MockQb {
   withDeleted: jest.Mock;
   getMany: jest.Mock;
   getRawMany: jest.Mock;
+  getRawOne: jest.Mock;
+  getExists: jest.Mock;
+  // `markRead` advances both watermarks through an UPDATE builder so the
+  // GREATEST(...) expression is evaluated by Postgres.
+  update: jest.Mock;
+  set: jest.Mock;
+  execute: jest.Mock;
 }
 
 function makeQb(): MockQb {
@@ -70,6 +78,13 @@ function makeQb(): MockQb {
   qb.withDeleted = jest.fn(self);
   qb.getMany = jest.fn().mockResolvedValue([]);
   qb.getRawMany = jest.fn().mockResolvedValue([]);
+  qb.getRawOne = jest.fn().mockResolvedValue(undefined);
+  // `MessagingCoreService.requireActiveParticipant` (BE-MSG-09) probes for a
+  // blocked DM counterpart with a single `getExists()`; default: not blocked.
+  qb.getExists = jest.fn().mockResolvedValue(false);
+  qb.update = jest.fn(self);
+  qb.set = jest.fn(self);
+  qb.execute = jest.fn().mockResolvedValue({ affected: 1 });
   return qb;
 }
 
@@ -129,7 +144,7 @@ describe('MessagingService', () => {
   // `MessagingCoreService.toMessageResponses` now reads the shared
   // `content_moderation` table to tombstone moderator-taken-down messages; the
   // repo only needs `find` (default: no takedowns) for these tests.
-  let moderationStates: { find: jest.Mock };
+  let moderationStates: { find: jest.Mock; exist: jest.Mock };
 
   beforeEach(async () => {
     conversations = {
@@ -206,8 +221,21 @@ describe('MessagingService', () => {
       delete: jest.fn().mockResolvedValue({ affected: 0 }),
       createQueryBuilder: jest.fn(() => orIgnoreInsert),
     };
-    usersService = { findById: jest.fn().mockResolvedValue(null) };
-    moderationStates = { find: jest.fn().mockResolvedValue([]) };
+    // `sendMessage` asserts the sender is still an ACTIVE member (BE-MSG-02),
+    // so the default row has to be one. `deleteMessage`'s staff check reads
+    // `role` off the same row and a plain member is not staff, exactly as the
+    // previous `null` default behaved there.
+    usersService = {
+      findById: jest
+        .fn()
+        .mockResolvedValue({ id: 'me', status: UserStatus.Active }),
+    };
+    moderationStates = {
+      find: jest.fn().mockResolvedValue([]),
+      // `editMessage` refuses to edit a moderator-taken-down message
+      // (BE-MSG-07); default: no takedown.
+      exist: jest.fn().mockResolvedValue(false),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -523,11 +551,16 @@ describe('MessagingService', () => {
       expect(qbDefault.take).toHaveBeenCalledWith(30);
     });
 
-    it('uses a plain created_at cursor when only `before` is given', async () => {
+    // INCLUSIVE (`<=`), deliberately: without `beforeId` this is a single-column
+    // keyset on a timestamptz several messages routinely share (a burst send, or
+    // the system pills a group transaction inserts together), and a strict `<`
+    // dropped every one of them. Repeating the boundary message is free — history
+    // pages are merged by id.
+    it('uses an inclusive created_at cursor when only `before` is given', async () => {
       const qb = makeQb();
       messages.createQueryBuilder.mockReturnValueOnce(qb);
       await service.getMessages('c1', 'me', { before: '2026-01-01T00:00:00Z' });
-      expect(qb.andWhere).toHaveBeenCalledWith('m.created_at < :before', {
+      expect(qb.andWhere).toHaveBeenCalledWith('m.created_at <= :before', {
         before: '2026-01-01T00:00:00Z',
       });
     });
@@ -607,7 +640,7 @@ describe('MessagingService', () => {
         cursor,
       });
 
-      expect(qb.andWhere).toHaveBeenCalledWith('m.created_at < :before', {
+      expect(qb.andWhere).toHaveBeenCalledWith('m.created_at <= :before', {
         before: '2026-01-01T00:00:00Z',
       });
     });
@@ -882,7 +915,19 @@ describe('MessagingService', () => {
   });
 
   describe('markRead', () => {
-    it('stamps lastReadAt with the DB clock (now()) and emits with the DB value', async () => {
+    // `requireActiveParticipant` runs its blocked-counterpart probe on its own
+    // builder before `markRead` builds the UPDATE, so the update builder is the
+    // SECOND one handed out. Pin both so the assertions below read the right one.
+    function stubMarkReadBuilders(): { probe: MockQb; update: MockQb } {
+      const probe = makeQb();
+      const update = makeQb();
+      participants.createQueryBuilder
+        .mockReturnValueOnce(probe)
+        .mockReturnValueOnce(update);
+      return { probe, update };
+    }
+
+    it('stamps both watermarks with a DB-side expression and emits the DB value', async () => {
       const dbTime = new Date('2026-06-30T12:00:00Z');
       participants.findOne
         // requireParticipant
@@ -893,24 +938,68 @@ describe('MessagingService', () => {
           userId: 'me',
           lastReadAt: dbTime,
         });
+      const { update } = stubMarkReadBuilders();
 
       const result = await service.markRead('c1', 'me');
 
       expect(result).toEqual({ ok: true });
-      const [where, values] = participants.update.mock.calls[0] as [
-        Record<string, string>,
-        { lastReadAt: () => string },
+      const [values] = update.set.mock.calls[0] as [
+        { lastReadAt: () => string; deliveredAt: () => string },
       ];
-      expect(where).toEqual({ conversationId: 'c1', userId: 'me' });
-      // Value is a raw-SQL function so Postgres, not the app server, sets the time.
-      expect(typeof values.lastReadAt).toBe('function');
-      expect(values.lastReadAt()).toBe('now()');
+      // Both values are raw SQL, so Postgres (not the app server) resolves the
+      // time, and GREATEST keeps the watermark monotonic.
+      expect(values.lastReadAt()).toBe('GREATEST(last_read_at, now())');
+      expect(values.deliveredAt()).toBe('GREATEST(delivered_at, now())');
+      expect(update.execute).toHaveBeenCalled();
       // Does NOT save the participant entity with an app-server Date.
       expect(participants.save).not.toHaveBeenCalled();
       expect(emitter.emit).toHaveBeenCalledWith(
         'message.read',
         expect.objectContaining({ lastReadAt: dbTime }),
       );
+    });
+
+    // REGRESSION (BE-MSG-20): the watermark used to be `now()` unconditionally,
+    // so a message that arrived between the client's last fetch and its `read`
+    // frame was marked read without ever being rendered.
+    it("stamps the named message's own created_at when `upToMessageId` is given", async () => {
+      const messageTime = new Date('2026-06-30T11:59:00Z');
+      participants.findOne
+        .mockResolvedValueOnce({ conversationId: 'c1', userId: 'me' })
+        .mockResolvedValueOnce({
+          conversationId: 'c1',
+          userId: 'me',
+          lastReadAt: messageTime,
+        });
+      messages.findOne.mockResolvedValueOnce({
+        id: 'm1',
+        createdAt: messageTime,
+      });
+      const { update } = stubMarkReadBuilders();
+
+      await service.markRead('c1', 'me', { upToMessageId: 'm1' });
+
+      const [values] = update.set.mock.calls[0] as [
+        { lastReadAt: () => string },
+      ];
+      expect(values.lastReadAt()).toBe(
+        'GREATEST(last_read_at, LEAST(:watermark::timestamptz, now()))',
+      );
+      expect(update.setParameter).toHaveBeenCalledWith(
+        'watermark',
+        messageTime.toISOString(),
+      );
+    });
+
+    it('404s when `upToMessageId` is not a message in this conversation', async () => {
+      participants.findOne.mockResolvedValueOnce({
+        conversationId: 'c1',
+        userId: 'me',
+      });
+      messages.findOne.mockResolvedValueOnce(null);
+      await expect(
+        service.markRead('c1', 'me', { upToMessageId: 'm-elsewhere' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
 
     it('rejects a non-participant before touching the DB', async () => {
@@ -996,6 +1085,20 @@ describe('MessagingService', () => {
         service.sendMessage('c1', 'me', 'hi'),
       ).rejects.toBeInstanceOf(ForbiddenException);
       expect(blockFilter.isBlockedEitherWay).toHaveBeenCalledWith('me', 'them');
+    });
+
+    it('rejects a sender whose account is no longer active (BE-MSG-02)', async () => {
+      // A moderator suspension goes dark on HTTP immediately (JwtStrategy
+      // re-reads the row per request) but the websocket only checked `status`
+      // in the handshake claim — this is the shared write-path assertion.
+      usersService.findById.mockResolvedValue({
+        id: 'me',
+        status: UserStatus.Suspended,
+      });
+      await expect(
+        service.sendMessage('c1', 'me', 'hi'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(participants.findOne).not.toHaveBeenCalled();
     });
 
     it('persists and emits message.created on a valid send', async () => {

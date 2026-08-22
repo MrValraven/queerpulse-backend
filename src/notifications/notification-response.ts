@@ -74,6 +74,9 @@ const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   // The posting member — `TopicFollowNotificationsListener` writes this
   // alongside `topicSlug`/`topicLabel`/`threadSlug`/`threadTitle`.
   [NotificationType.TopicNewPost]: 'actorId',
+  // The member proposing the swap — `BarterService.createProposal` writes this
+  // alongside `barterListingId`/`listingOffer`.
+  [NotificationType.BarterProposalReceived]: 'actorId',
 };
 
 /** The acting member's user id for a notification, or `null` when its type
@@ -85,6 +88,140 @@ export function actorIdOf(notification: Notification): string | null {
   return typeof value === 'string' ? value : null;
 }
 
+/**
+ * Routing + branch keys the client reads on almost every notification type:
+ * `sourceHrefFromPayload` (frontend) reads `source` then one slug field to
+ * build the deep-link. A type's own allowlist entry is UNIONED with these, and
+ * a type with no entry forwards ONLY these — so a newly-added notification
+ * type is safe-by-default (structural keys only) until someone lists the
+ * display fields its copy needs.
+ */
+const COMMON_PAYLOAD_KEYS: readonly string[] = [
+  'source',
+  'threadSlug',
+  'communitySlug',
+  'postId',
+  'eventSlug',
+  'inviteId',
+  'jobSlug',
+  'listingSlug',
+];
+
+/**
+ * The exact payload keys each notification type is rendered from on the client
+ * (its i18n copy tokens + deep-link fields), UNIONED with `COMMON_PAYLOAD_KEYS`
+ * at map time.
+ *
+ * This is the M6 fix: the notification `payload` is opaque jsonb written by
+ * many listeners, and forwarding it verbatim (as `toNotificationResponse` once
+ * did) shipped whatever any writer put there straight to the client. That is
+ * what let a community post/reply `excerpt` — up to 140 chars of gated-space
+ * body — reach a mention recipient (finding H3). Content-bearing keys
+ * (`excerpt`, `body`, `text`, `message`, …) appear in NO entry here, so they
+ * are dropped at this boundary for every type. Raw acting-member user ids are
+ * likewise not forwarded: the actor is resolved into `actor` separately.
+ */
+const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
+  {
+    [NotificationType.Mention]: ['entityKind', 'entityRef'],
+    [NotificationType.ForumReply]: ['threadTitle'],
+    [NotificationType.ForumThreadReply]: ['threadTitle'],
+    [NotificationType.TopicNewPost]: ['topicSlug', 'topicLabel', 'threadTitle'],
+    [NotificationType.ModerationOutcome]: ['action', 'note'],
+    [NotificationType.ConcernUpdate]: ['status', 'category'],
+    [NotificationType.VerificationUpdate]: [
+      'fromLevel',
+      'toLevel',
+      'requestedLevel',
+      'decision',
+      'reason',
+    ],
+    [NotificationType.EventUpdated]: ['changes', 'title'],
+    [NotificationType.EventCohostInvite]: ['title'],
+    [NotificationType.XpLevelUp]: ['level', 'name'],
+    [NotificationType.BadgeEarned]: ['badgeName'],
+    [NotificationType.SubprofileCredit]: [
+      'subprofileName',
+      'subprofileSlugOrHandle',
+      'itemTitle',
+      'deepLink',
+    ],
+    [NotificationType.SubprofileInvite]: [
+      'subprofileName',
+      'subprofileSlugOrHandle',
+      'deepLink',
+    ],
+    [NotificationType.SubprofileCoOwnerJoined]: [
+      'subprofileName',
+      'subprofileSlugOrHandle',
+      'deepLink',
+    ],
+    [NotificationType.SubprofileDeleted]: ['subprofileName'],
+    [NotificationType.SubprofileMemberRemoved]: ['subprofileName'],
+    [NotificationType.SafeSpaceVouch]: ['spaceName', 'spaceSlug'],
+    [NotificationType.HousingListingMatch]: ['title', 'area', 'slug'],
+    [NotificationType.WriterApplicationApproved]: ['reviewNote'],
+    [NotificationType.WriterApplicationDeclined]: ['reviewNote'],
+    [NotificationType.ChangemakerNominationApproved]: [
+      'nomineeName',
+      'reviewNote',
+    ],
+    [NotificationType.ChangemakerNominationDismissed]: [
+      'nomineeName',
+      'reviewNote',
+    ],
+    [NotificationType.VolunteerApplicationReceived]: ['opportunitySlug'],
+    [NotificationType.VolunteerApplicationDecided]: [
+      'status',
+      'opportunitySlug',
+    ],
+    [NotificationType.ListingReview]: ['field'],
+    [NotificationType.ListingEditSuggestionAccepted]: ['field'],
+    [NotificationType.CommunityTagRequestResolved]: ['label'],
+    [NotificationType.CommunityRoleChanged]: ['communityName', 'role'],
+    [NotificationType.CommunityMemberRemoved]: ['communityName'],
+    [NotificationType.CommunityOwnershipTransferred]: ['communityName'],
+    [NotificationType.CommunityArchived]: ['communityName'],
+    [NotificationType.CommunityFrozen]: ['communityName'],
+    [NotificationType.CommunityUnfrozen]: ['communityName'],
+    [NotificationType.CommunityInviteReceived]: ['communityName'],
+    // The listing id the bell deep-links to, plus the listing's OWN public
+    // headline for the copy — the same kind of field as `ForumReply`'s
+    // `threadTitle`. The proposal's `message` is deliberately NOT listed: it
+    // is member-authored private text, it lives in the DM thread the proposal
+    // also opened, and this allowlist is what guarantees it can never reach
+    // the bell even if a future writer puts it in the payload.
+    [NotificationType.BarterProposalReceived]: [
+      'barterListingId',
+      'listingOffer',
+    ],
+  };
+
+/**
+ * The client-safe projection of a notification's opaque `payload` jsonb: only
+ * the per-type allowlisted keys (plus `COMMON_PAYLOAD_KEYS`) that are actually
+ * present. Everything else — content-bearing fields like `excerpt`, raw user
+ * ids, and any future field a listener adds — is stripped, so the raw blob can
+ * never reach the client through `payload`. Shared by the HTTP response mapper
+ * and the socket relay so both go through the same allowlist.
+ */
+export function toClientPayload(
+  notification: Notification,
+): Record<string, unknown> {
+  const payload = notification.payload ?? {};
+  const allowedKeys = new Set<string>([
+    ...COMMON_PAYLOAD_KEYS,
+    ...(PAYLOAD_ALLOWLIST[notification.type] ?? []),
+  ]);
+  const projected: Record<string, unknown> = {};
+  for (const key of allowedKeys) {
+    if (payload[key] !== undefined) {
+      projected[key] = payload[key];
+    }
+  }
+  return projected;
+}
+
 export function toNotificationResponse(
   notification: Notification,
   actorProfile: Profile | undefined,
@@ -93,7 +230,7 @@ export function toNotificationResponse(
     id: notification.id,
     userId: notification.userId,
     type: notification.type,
-    payload: notification.payload,
+    payload: toClientPayload(notification),
     read: notification.read,
     createdAt: notification.createdAt,
     actor: actorProfile

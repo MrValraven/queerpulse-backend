@@ -142,7 +142,16 @@ export class AdminMembersController {
 
   // Resource-limits lever, not a moderation action — no self-change or
   // house-account guardrail (unlike updateRole/grantStaffRole), just the
-  // class-level Admin-only guard already on this controller.
+  // class-level Admin-only guard already on this controller. It IS audited
+  // (`invite_quota_changed`, old → new) — see the service.
+  //
+  // NOTE the deliberately missing `ParseUUIDPipe`, unlike every sibling route
+  // above. `AdminMembersService.resolveMemberProfile` accepts a profile slug
+  // OR a raw userId, and the admin invites UI calls this one with the
+  // member's SLUG (`PATCH /admin/members/:memberSlug/invite-quota`), so a
+  // UUID pipe here would 400 every real request (BE-COM-34 read the
+  // inconsistency the other way round). The param is named `idOrSlug` to make
+  // that contract visible at the call site.
   @ApiOperation({
     summary: "Set or clear a member's monthly invite quota override.",
   })
@@ -151,9 +160,14 @@ export class AdminMembersController {
   @ApiNotFoundResponse({ description: 'Member not found.' })
   @Patch(':id/invite-quota')
   updateInviteQuota(
-    @Param('id') id: string,
+    @CurrentUser() currentUser: CurrentUserData,
+    @Param('id') idOrSlug: string,
     @Body() body: UpdateInviteQuotaDto,
   ) {
-    return this.adminMembers.updateInviteQuota(id, body.quota);
+    return this.adminMembers.updateInviteQuota(
+      idOrSlug,
+      body.quota,
+      currentUser.userId,
+    );
   }
 }

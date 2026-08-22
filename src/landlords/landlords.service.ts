@@ -14,6 +14,7 @@ import {
   Paginated,
 } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
+import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
@@ -114,26 +115,9 @@ export class LandlordsService {
     if (!landlord) {
       throw new NotFoundException('Landlord not found');
     }
-    const recs = await this.recommendations.find({
-      where: { landlordId: landlord.id },
-      order: { createdAt: 'DESC' },
-    });
-    const members = await new MemberLookup(this.profiles).byUserIds(
-      recs.map((rec) => rec.authorUserId),
-    );
-    const levels = await this.recLevels(recs.map((rec) => rec.authorUserId));
-    const recDTOs: RecommendationDTO[] = recs.map((rec) =>
-      toRecommendationDTO(
-        rec,
-        members.get(rec.authorUserId) ?? null,
-        levels.get(rec.authorUserId) ?? VerificationLevel.Email,
-      ),
-    );
-    return toLandlordDetailDTO(
-      landlord,
-      recDTOs,
-      ratingFromRecommendations(recs),
-    );
+    // Identical to the private builder below, which is the one place the
+    // recommendation cap and the rating aggregate are maintained.
+    return this.detailFromEntity(landlord);
   }
 
   async suggest(
@@ -150,11 +134,33 @@ export class LandlordsService {
     return this.detailFromEntity(saved);
   }
 
+  /**
+   * Create or update the caller's rating of a landlord.
+   *
+   * BE-HSG-18: a recommendation is a public, named rating of a real third party
+   * who is not a member here and has no right of reply on this surface, and it
+   * feeds `ratingFromRecommendations` on every landlord card. It carried none of
+   * the gates `createIntroRequest` two methods below has always had, so an
+   * account with only an email on file and no affirming pledge could rate a
+   * named person. It now carries both: the mandatory pledge and the same
+   * phone-verification step-up.
+   *
+   * Still open (a follow-up, not something to fake here): there is no proof the
+   * recommender ever rented from this landlord. Tying a recommendation to an
+   * accepted `landlord_intro_requests` row is the natural interaction gate, but
+   * it needs a product decision about the members who found their home through
+   * a landlord they met off-platform.
+   */
   async recommend(
     slug: string,
     authorUserId: string,
     dto: CreateRecommendationDto,
   ): Promise<RecommendationDTO> {
+    // Baseline gate: rating a landlord is a housing action like any other.
+    await this.affirmingPledge.requireAccepted(authorUserId);
+    // Step-up gate: a public rating of a named person needs a real phone behind
+    // it, matching the intro-request path.
+    await this.verification.requireLevel(authorUserId, VerificationLevel.Phone);
     const landlord = await this.loadLiveOr404(slug);
     const rec = await this.recommendations.findOne({
       where: { landlordId: landlord.id, authorUserId },
@@ -195,6 +201,26 @@ export class LandlordsService {
     return toRecommendationDTO(saved, members.get(authorUserId) ?? null, level);
   }
 
+  /**
+   * The author withdraws their own recommendation (BE-HSG-18). Until this
+   * existed, `removeRecommendation` lived only on the admin controller, so a
+   * member who regretted what they wrote about a named real person could not
+   * take it down without finding a moderator.
+   *
+   * Idempotent: no row means there is nothing to withdraw, which is the state
+   * the caller asked for, so it succeeds rather than 404s.
+   */
+  async removeMyRecommendation(
+    slug: string,
+    authorUserId: string,
+  ): Promise<void> {
+    const landlord = await this.loadLiveOr404(slug);
+    await this.recommendations.delete({
+      landlordId: landlord.id,
+      authorUserId,
+    });
+  }
+
   async createIntroRequest(
     slug: string,
     userId: string,
@@ -231,7 +257,15 @@ export class LandlordsService {
     );
   }
 
-  async adminCreate(dto: CreateLandlordDto): Promise<LandlordDetailDTO> {
+  async adminCreate(
+    requesterUserId: string,
+    dto: CreateLandlordDto,
+  ): Promise<LandlordDetailDTO> {
+    // No stored baseline on create, so any foreign photo key is refused (see
+    // `assertNoForeignUploadIntroduced`). The admin create form presigns its
+    // own upload in the acting admin's session, so `owner === requester` and a
+    // legitimate create passes; only a copied foreign key is blocked.
+    assertNoForeignUploadIntroduced(requesterUserId, dto.photo, []);
     const saved = await this.createWithUniqueSlug(
       dto,
       LandlordStatus.Live,
@@ -240,8 +274,17 @@ export class LandlordsService {
     return this.detailFromEntity(saved);
   }
 
-  async update(id: string, dto: UpdateLandlordDto): Promise<LandlordDetailDTO> {
+  async update(
+    requesterUserId: string,
+    id: string,
+    dto: UpdateLandlordDto,
+  ): Promise<LandlordDetailDTO> {
     const landlord = await this.loadByIdOr404(id);
+    // Runs BEFORE mutating: a moderator/admin may re-save the photo whichever
+    // staffer sourced it uploaded, but may not point it at a NEW foreign key.
+    assertNoForeignUploadIntroduced(requesterUserId, dto.photo, [
+      landlord.photo,
+    ]);
     applyLandlord(landlord, dto);
     const saved = await this.landlords.save(landlord);
     return this.detailFromEntity(saved);
@@ -333,26 +376,48 @@ export class LandlordsService {
   private async detailFromEntity(
     landlord: Landlord,
   ): Promise<LandlordDetailDTO> {
+    // Newest `DEFAULT_LIST_LIMIT` recommendations, not every one ever written:
+    // this was an unbounded read whose cost grew with the landlord's history,
+    // and it also drove a member lookup and a verification-level lookup per row.
     const recs = await this.recommendations.find({
       where: { landlordId: landlord.id },
       order: { createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     const members = await new MemberLookup(this.profiles).byUserIds(
       recs.map((rec) => rec.authorUserId),
     );
     const levels = await this.recLevels(recs.map((rec) => rec.authorUserId));
-    const recDTOs = recs.map((rec) =>
+    const recDTOs: RecommendationDTO[] = recs.map((rec) =>
       toRecommendationDTO(
         rec,
         members.get(rec.authorUserId) ?? null,
         levels.get(rec.authorUserId) ?? VerificationLevel.Email,
       ),
     );
+    // The headline rating has to be computed over EVERY recommendation, so it
+    // is aggregated in Postgres rather than derived from the capped page above
+    // — capping the list must not quietly change the score.
     return toLandlordDetailDTO(
       landlord,
       recDTOs,
-      ratingFromRecommendations(recs),
+      await this.rating(landlord.id),
     );
+  }
+
+  /** Average stars + count for one landlord, aggregated in SQL. */
+  private async rating(
+    landlordId: string,
+  ): Promise<{ score: string; count: number }> {
+    const row = await this.recommendations
+      .createQueryBuilder('r')
+      .select('AVG(r.stars)', 'average')
+      .addSelect('COUNT(*)', 'count')
+      .where('r.landlord_id = :landlordId', { landlordId })
+      .getRawOne<{ average: string | null; count: string }>();
+    const count = Number(row?.count ?? 0);
+    if (!count || row?.average == null) return { score: '0', count: 0 };
+    return { score: Number(row.average).toFixed(1), count };
   }
 
   private async ratingsFor(

@@ -25,6 +25,7 @@ import {
 import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { storageKeyOwnerId } from '../storage/storage-key';
 import { CreateSubprofileDTO } from './dto/create-subprofile.dto';
 import { ListDirectoryQuery } from './dto/list-directory.query';
 import { SubprofileItemInputDTO } from './dto/replace-items.dto';
@@ -547,12 +548,54 @@ export class SubprofilesService {
     return toSubprofileDTO(sp, [], [], 0, 0, [], new Map(), 1);
   }
 
+  /**
+   * The co-owner half of the storage-key ownership rule.
+   *
+   * `StorageKeyOwnershipInterceptor` rejects a write body that names an upload
+   * belonging to somebody else, in either the bare-key or the resolved
+   * `/files/<key>` form — that is what stops a member attaching another
+   * member's photo to their own entity. A persona is CO-OWNED, though, so its
+   * edit form is seeded with an image a DIFFERENT collaborator may have
+   * uploaded and re-sends it verbatim on save; a blanket rule would 403 that
+   * no-op. So these two handlers are listed in `SHARED_UPLOAD_HANDLERS`, which
+   * hands the decision here: a foreign upload is allowed ONLY when it is
+   * ALREADY the stored value (nothing changed). A foreign upload the persona
+   * does not already carry is a new reference and is refused, exactly as the
+   * interceptor would have.
+   */
+  private assertNoForeignUploadIntroduced(
+    requesterUserId: string,
+    incoming: string | null | undefined,
+    alreadyStored: readonly (string | null | undefined)[],
+  ): void {
+    if (!incoming) {
+      return;
+    }
+    // The interceptor already collapsed any `/files/<key>` URL to its bare key
+    // before this ran, so both sides of the comparison are canonical keys.
+    const ownerUserId = storageKeyOwnerId(incoming);
+    if (ownerUserId === null || ownerUserId === requesterUserId) {
+      return;
+    }
+    if (alreadyStored.includes(incoming)) {
+      return;
+    }
+    // Same wording as the interceptor's, and deliberately free of the owner's
+    // id — a 403 must not confirm who uploaded a key.
+    throw new ForbiddenException('Referenced upload does not belong to you');
+  }
+
   async update(
     userId: string,
     id: string,
     dto: UpdateSubprofileDTO,
   ): Promise<SubprofileView> {
     const sp = await this.getOwned(userId, id);
+    // Runs BEFORE any mutation: a collaborator may re-save the persona's
+    // existing avatar/cover whoever uploaded it, but may not point either
+    // field at a new upload that is not theirs.
+    this.assertNoForeignUploadIntroduced(userId, dto.avatarUrl, [sp.avatarUrl]);
+    this.assertNoForeignUploadIntroduced(userId, dto.coverUrl, [sp.coverUrl]);
     const prevLink = sp.linkVisibility;
     const prevHandle = sp.handle;
     // Creator vs. non-creator co-owner (Task 4): the creator is the persona's
@@ -851,6 +894,19 @@ export class SubprofilesService {
         where: { subprofileId: id, section: sectionEnum },
         order: { position: 'ASC' },
       });
+
+      // Co-owner upload rule (see `assertNoForeignUploadIntroduced`): a
+      // collaborator may keep an item image another collaborator uploaded, but
+      // may not introduce a foreign upload this section does not already hold.
+      // Runs before the first write in this transaction.
+      const storedItemImages = existingRows.map((row) => row.imageUrl);
+      for (const item of items) {
+        this.assertNoForeignUploadIntroduced(
+          userId,
+          item.imageUrl,
+          storedItemImages,
+        );
+      }
 
       const candidateFieldsByIndex: Omit<SubprofileItem, 'id' | 'createdAt'>[] =
         items.map((it, index) => ({

@@ -24,6 +24,25 @@ import { MatchResult, scoreMatch } from './flatmate-match';
 // board is small. Revisit with a materialized score if it ever isn't.
 const MATCH_CANDIDATE_CAP = 500;
 
+/** One ranked candidate: the row id and the score that placed it. The rows are
+ * deliberately NOT retained (see `browse`). */
+interface RankedEntry {
+  id: string;
+  match: MatchResult | null;
+}
+
+interface RankingCacheEntry {
+  ordering: RankedEntry[];
+  expiresAt: number;
+}
+
+// Short enough that a new or edited profile shows up in the ranking almost
+// immediately, long enough to cover a member paging through the board. Bounded
+// by entry count so a burst of distinct filter combinations cannot grow the
+// process's memory without limit.
+const RANKING_CACHE_TTL_MS = 30 * 1000;
+const RANKING_CACHE_MAX_ENTRIES = 500;
+
 /**
  * Member-only browse over flatmate profiles. When the viewer has their own
  * profile, opposite-type candidates are scored + ranked (best match first) and
@@ -32,6 +51,10 @@ const MATCH_CANDIDATE_CAP = 500;
  */
 @Injectable()
 export class FlatmateDirectoryService {
+  /** Per-(viewer, filter set) ranked ordering, held for `RANKING_CACHE_TTL_MS`
+   * so paging the board does not re-score the whole candidate set each time. */
+  private readonly rankingCache = new Map<string, RankingCacheEntry>();
+
   constructor(
     @InjectRepository(FlatmateProfile)
     private readonly flatmates: Repository<FlatmateProfile>,
@@ -65,41 +88,49 @@ export class FlatmateDirectoryService {
       return { items, total, page, pageSize: PAGE_SIZE };
     }
 
-    // Ranked path: pull a bounded set, score opposite-type candidates, sort
-    // (opposite-type by score desc; same-type after, newest-first), paginate.
-    const candidates = await qb.take(MATCH_CANDIDATE_CAP).getMany();
-    const scored = candidates.map((row) => {
-      if (row.type === viewer.type) return { row, match: null };
-      // Score with THIS viewer's permission to see the candidate's identity, so
-      // the engine redacts special-category reason specifics it may not reveal.
-      const revealCandidateIdentity = canRevealIdentity(row, {
-        isOwner: false,
-        viewerProfileType: viewer.type,
-      });
-      return {
-        row,
-        match: scoreMatch(viewer, row, { revealCandidateIdentity }),
-      };
-    });
-    scored.sort((a, b) => {
-      const left = a.match?.score ?? null;
-      const right = b.match?.score ?? null;
-      if (left === null && right === null) return 0;
-      if (left === null) return 1;
-      if (right === null) return -1;
-      return right - left;
-    });
-    // Only the top MATCH_CANDIDATE_CAP candidates are ranked, but `total`
-    // must reflect the full filtered count, not the capped/scored set — recount
-    // over the same filters (unlimited) rather than using scored.length.
-    const total = await this.filteredQb(viewerId, query).getCount();
+    // Ranked path: the ORDER is computed once per (viewer, filter set) and
+    // cached for a few seconds, then each page reads its slice out of it. The
+    // score is a JS function, so ranking means pulling up to
+    // `MATCH_CANDIDATE_CAP` rows and scoring every one; doing that again for
+    // page 2, 3, 4 was the same 500-row fetch and 500 score computations per
+    // page view, which made paging the board the most expensive read in the
+    // module.
+    const cacheKey = this.rankingCacheKey(viewerId, viewer, query);
+    const ordering =
+      this.readRanking(cacheKey) ??
+      this.writeRanking(cacheKey, await this.rankCandidates(viewer, qb));
+
+    // `total` is the size of the RANKED set, not the full filtered count. The
+    // previous unlimited `getCount()` (a second query on every page) could
+    // report a total above the cap while only `MATCH_CANDIDATE_CAP` rows were
+    // ever reachable, so the pager offered pages that came back empty.
+    const total = ordering.length;
     const start = (page - 1) * PAGE_SIZE;
-    const pageSlice = scored.slice(start, start + PAGE_SIZE);
-    const items = await this.mapRows(
-      pageSlice.map((scoredRow) => scoredRow.row),
-      pageSlice.map((scoredRow) => scoredRow.match),
-      viewer.type,
-    );
+    const pageSlice = ordering.slice(start, start + PAGE_SIZE);
+    if (!pageSlice.length) {
+      return { items: [], total, page, pageSize: PAGE_SIZE };
+    }
+
+    // Re-read the page's rows through the SAME filtered query rather than
+    // serving them out of the cache. That keeps the cache to ids + scores
+    // (cheap to hold) and, more importantly, re-applies block/mute severance
+    // and any profile edit at read time — a member blocked after the ranking
+    // was computed drops out of the page instead of lingering for the TTL.
+    const rows = await this.filteredQb(viewerId, query)
+      .andWhere('p.id IN (:...pageIds)', {
+        pageIds: pageSlice.map((entry) => entry.id),
+      })
+      .getMany();
+    const rowById = new Map(rows.map((row) => [row.id, row]));
+    const orderedRows: FlatmateProfile[] = [];
+    const orderedMatches: (MatchResult | null)[] = [];
+    for (const entry of pageSlice) {
+      const row = rowById.get(entry.id);
+      if (!row) continue;
+      orderedRows.push(row);
+      orderedMatches.push(entry.match);
+    }
+    const items = await this.mapRows(orderedRows, orderedMatches, viewer.type);
     return { items, total, page, pageSize: PAGE_SIZE };
   }
 
@@ -141,6 +172,95 @@ export class FlatmateDirectoryService {
       { isOwner, viewerProfileType },
       level,
     );
+  }
+
+  // --- ranking ---
+
+  /** Pull a bounded candidate set, score the opposite-type ones and sort
+   * (opposite-type by score desc; same-type after, newest-first). Returns just
+   * the ids + scores — the rows themselves are re-read per page. */
+  private async rankCandidates(
+    viewer: FlatmateProfile,
+    qb: SelectQueryBuilder<FlatmateProfile>,
+  ): Promise<RankedEntry[]> {
+    const candidates = await qb.take(MATCH_CANDIDATE_CAP).getMany();
+    const scored = candidates.map((row) => {
+      if (row.type === viewer.type) return { row, match: null };
+      // Score with THIS viewer's permission to see the candidate's identity, so
+      // the engine redacts special-category reason specifics it may not reveal.
+      const revealCandidateIdentity = canRevealIdentity(row, {
+        isOwner: false,
+        viewerProfileType: viewer.type,
+      });
+      return {
+        row,
+        match: scoreMatch(viewer, row, { revealCandidateIdentity }),
+      };
+    });
+    scored.sort((a, b) => {
+      const left = a.match?.score ?? null;
+      const right = b.match?.score ?? null;
+      if (left === null && right === null) return 0;
+      if (left === null) return 1;
+      if (right === null) return -1;
+      return right - left;
+    });
+    return scored.map(({ row, match }) => ({ id: row.id, match }));
+  }
+
+  /**
+   * Cache identity for one ranked ordering. Every input the ranking depends on
+   * has to be in here or a stale order would be served: the viewer, their own
+   * profile's `updatedAt` (the score is computed FROM it, so editing a
+   * preference must re-rank immediately rather than after the TTL), and every
+   * filter — `tags` sorted, because `?tags=a&tags=b` and `?tags=b&tags=a` are
+   * the same query.
+   */
+  private rankingCacheKey(
+    viewerId: string,
+    viewer: FlatmateProfile,
+    query: BrowseFlatmateProfilesQuery,
+  ): string {
+    return JSON.stringify([
+      viewerId,
+      viewer.updatedAt instanceof Date
+        ? viewer.updatedAt.getTime()
+        : viewer.updatedAt,
+      query.type ?? null,
+      query.neighbourhood?.toLowerCase() ?? null,
+      query.budgetMax ?? null,
+      query.moveInBy ?? null,
+      [...(query.tags ?? [])].sort(),
+    ]);
+  }
+
+  private readRanking(cacheKey: string): RankedEntry[] | null {
+    const entry = this.rankingCache.get(cacheKey);
+    if (!entry) return null;
+    if (entry.expiresAt <= Date.now()) {
+      this.rankingCache.delete(cacheKey);
+      return null;
+    }
+    return entry.ordering;
+  }
+
+  private writeRanking(
+    cacheKey: string,
+    ordering: RankedEntry[],
+  ): RankedEntry[] {
+    // Cheap bound: when full, evict the oldest insertion (Map preserves order).
+    // Same shape as `GeocodeService`'s in-process TTL cache.
+    if (this.rankingCache.size >= RANKING_CACHE_MAX_ENTRIES) {
+      for (const oldest of this.rankingCache.keys()) {
+        this.rankingCache.delete(oldest);
+        break;
+      }
+    }
+    this.rankingCache.set(cacheKey, {
+      ordering,
+      expiresAt: Date.now() + RANKING_CACHE_TTL_MS,
+    });
+    return ordering;
   }
 
   // --- internals ---

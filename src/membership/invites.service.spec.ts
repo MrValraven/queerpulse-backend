@@ -388,6 +388,19 @@ describe('InvitesService.createInvite', () => {
     expect(manager.save).not.toHaveBeenCalled();
   });
 
+  it('carries the typed INVITE_QUOTA_EXCEEDED code in the 403 body', async () => {
+    await build(1);
+    manager.count.mockResolvedValue(1);
+
+    await expect(service.createInvite('inviter')).rejects.toMatchObject({
+      response: {
+        statusCode: 403,
+        error: 'Forbidden',
+        code: 'INVITE_QUOTA_EXCEEDED',
+      },
+    });
+  });
+
   it('locks the inviter row and uses its per-user quota override', async () => {
     await build(1); // global default is 1
     userRepo.findOne.mockResolvedValue({ inviteMonthlyQuota: 3 });

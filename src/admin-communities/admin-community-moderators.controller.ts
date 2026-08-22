@@ -21,6 +21,10 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -69,8 +73,16 @@ export class AdminCommunityModeratorsController {
   @ApiOkResponse({ description: 'The promoted moderator.' })
   @ApiBadRequestResponse({ description: 'The target cannot be a moderator.' })
   @Post()
-  addModerator(@Param('slug') slug: string, @Body() body: AddModeratorDto) {
-    return this.moderators.addModerator(slug, body.memberId);
+  addModerator(
+    @CurrentUser() currentUser: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() body: AddModeratorDto,
+  ) {
+    return this.moderators.addModerator(
+      slug,
+      body.memberId,
+      currentUser.userId,
+    );
   }
 
   @ApiOperation({ summary: 'Demote a moderator back to a plain member.' })
@@ -81,9 +93,10 @@ export class AdminCommunityModeratorsController {
   @Delete(':memberId')
   @HttpCode(HttpStatus.NO_CONTENT)
   removeModerator(
+    @CurrentUser() currentUser: CurrentUserData,
     @Param('slug') slug: string,
     @Param('memberId', ParseUUIDPipe) memberId: string,
   ): Promise<void> {
-    return this.moderators.removeModerator(slug, memberId);
+    return this.moderators.removeModerator(slug, memberId, currentUser.userId);
   }
 }

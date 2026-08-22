@@ -7,6 +7,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import {
   DataSource,
+  EntityManager,
   FindOptionsWhere,
   In,
   IsNull,
@@ -16,7 +17,7 @@ import {
 } from 'typeorm';
 import { AuthService } from '../auth/auth.service';
 import { isUniqueViolation } from '../common/db-errors';
-import { cursorPaginate } from '../common/cursor-pagination';
+import { CursorKeyset, cursorPaginate } from '../common/cursor-pagination';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -29,11 +30,12 @@ import {
 } from '../reports/entities/report.entity';
 import { Listing } from '../listings/entities/listing.entity';
 import { Profile } from '../users/entities/profile.entity';
-import { UserRole, UserStatus } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { AccountEnforcementService } from './account-enforcement.service';
 import { LiftSuspensionDto } from './dto/lift-suspension.dto';
 import {
   ListModReportsQuery,
+  ModReportsSort,
   ModReportsTab,
 } from './dto/list-mod-reports.query';
 import { AuditFeedQuery } from './dto/audit-feed.query';
@@ -41,7 +43,6 @@ import { CreateAppealDto } from './dto/create-appeal.dto';
 import { ModActionCode, ModActionDto } from './dto/mod-action.dto';
 import { ModBulkActionDto } from './dto/mod-bulk-action.dto';
 import { ReasonCode } from '../reports/reason-catalogue';
-import { ReportAssignmentDto } from './dto/report-assignment.dto';
 import { ReviewAppealDto } from './dto/review-appeal.dto';
 import { Appeal, AppealStatus } from './entities/appeal.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
@@ -189,17 +190,21 @@ export class ModerationService {
         actorId: actorId ?? null,
       });
     }
-    // `sort: 'priority'` is accepted but not distinctly honored —
-    // `cursorPaginate` hardcodes `(createdAt, id)` keyset ordering (see
-    // connect-FINAL-review.md C1, a separate cross-cutting bug this task
-    // doesn't touch) — it falls back to the default age ordering rather than
-    // rejecting the request, which is what C4 requires.
-
+    // `sort` is now actually honoured (BE-COM-11): it was validated by the
+    // DTO and then never read, so every listing came back newest-first
+    // whatever the queue asked for — and newest-first is the one ordering the
+    // "emergency within 1h" SLA can't be worked from. `undefined` keeps the
+    // default `(created_at, id) DESC` page.
     const { rows, nextCursor, hasMore } = await cursorPaginate(
       qb,
       query.cursor,
       query.limit ?? DEFAULT_LIMIT,
       'r',
+      // `reports.created_at` is `timestamptz(3)` since
+      // `NarrowReportCursorPrecision1793520300000`, so the default path can
+      // order on the raw column instead of a non-indexable `date_trunc`.
+      true,
+      ModerationService.keysetForSort(query.sort),
     );
 
     const [items, counts] = await Promise.all([
@@ -208,6 +213,43 @@ export class ModerationService {
     ]);
 
     return { data: items, pageInfo: { nextCursor, hasMore }, counts };
+  }
+
+  /**
+   * The alternate cursor keyset for a requested `sort`, or `undefined` for the
+   * default newest-first page.
+   *
+   * `priority` pages on `sla_due_at` ASC — soonest-due first. That column is
+   * derived from `severity` at creation (`report-severity.ts`: emergency is
+   * +1h, low is days out), so ordering by it IS "most severe, then oldest"
+   * without a `CASE severity WHEN ...` expression no index could serve.
+   * `age` pages on `created_at` ASC — oldest first.
+   *
+   * Both columns are `timestamptz(3)` and both have a matching `(column, id)`
+   * ASC index (see `NarrowReportCursorPrecision1793520300000`); the precision
+   * is what makes the raw-column keyset safe against duplicate rows at a page
+   * boundary.
+   */
+  private static keysetForSort(
+    sort: ModReportsSort | undefined,
+  ): CursorKeyset<Report> | undefined {
+    if (sort === 'priority') {
+      return {
+        columnExpr: '"r"."sla_due_at"',
+        direction: 'ASC',
+        kind: 'date',
+        getValue: (row) => row.slaDueAt,
+      };
+    }
+    if (sort === 'age') {
+      return {
+        columnExpr: '"r"."created_at"',
+        direction: 'ASC',
+        kind: 'date',
+        getValue: (row) => row.createdAt,
+      };
+    }
+    return undefined;
   }
 
   // GET /mod/reports/:id — includes the `detail{...}` block the drawer
@@ -234,13 +276,42 @@ export class ModerationService {
     dto: ModActionDto,
   ): Promise<ModReportDTO> {
     const report = await this.findReportOrThrow(id);
-    await this.assertCanActOnReport(report, actorId, actorRole, dto.action);
+    const hasFullReportVisibility = await this.assertCanActOnReport(
+      report,
+      actorId,
+      actorRole,
+      dto.action,
+    );
+    // The report's own state machine (BE-COM-03): `open -> resolved |
+    // escalated`, `escalated -> resolved`, and `resolved` is TERMINAL. Nothing
+    // used to read `report.status` here at all, so a resolved report could be
+    // acted on again — re-running `enforceAgainstUser` (a second suspension,
+    // another `revokeAllForUser`), overwriting the resolution block with a new
+    // actor/action, appending another audit row and re-notifying the reporter.
+    const expectedStatus = ModerationService.assertActionableStatus(report);
 
     // Report status, enforcement against the member, and the audit row commit
     // together or not at all. A resolved report whose suspension failed to
     // write is exactly the bug this method exists to fix, in a subtler form.
     const { saved, enforceResult } = await this.dataSource.transaction(
       async (manager) => {
+        // Claim the transition with a conditional UPDATE before doing anything
+        // consequential — the same race-safe pattern
+        // `CommunitiesService.triageJoinRequest` uses. Two moderators acting on
+        // the same report concurrently both reach here; the second blocks on
+        // this row lock, then sees the committed status and loses with
+        // `affected === 0`, so enforcement runs exactly once.
+        const claimed = await manager.update(
+          Report,
+          { id: report.id, status: expectedStatus },
+          { status: statusForAction(dto.action) },
+        );
+        if (claimed.affected !== 1) {
+          throw new ConflictException(
+            'This report has already been actioned by someone else.',
+          );
+        }
+
         const enforceResult = await this.accountEnforcement.enforceAgainstUser(
           manager,
           report,
@@ -318,48 +389,121 @@ export class ModerationService {
       await this.resolveOutcomeTarget(report, dto, enforceResult),
     );
 
-    return this.toRow(saved);
+    // `hasFullReportVisibility` is false exactly when the caller authorized
+    // through the community-mod carve-out below (never through the platform
+    // Moderator/Admin fast path) — `toRow` uses it to withhold the
+    // reporter/reported/assigned-moderator detail a community mod has no
+    // business seeing (see `assertCanActOnReport`'s doc comment: "This grants
+    // no report visibility").
+    return this.toRow(saved, false, hasFullReportVisibility);
   }
 
   /**
    * Authorization for `actOnReport`, called after the report is resolved so a
    * community mod's own community can be checked against the real subject.
+   * Returns whether the caller authorized as platform staff — `actOnReport`
+   * uses this to decide how much of the report `toRow` may disclose back to
+   * them.
    *
-   * A platform Moderator/Admin may take any action on any report, unchanged.
-   * Everything else is a narrow, community-scoped carve-out: a community
-   * owner/mod may only `dismiss` (never warn/suspend/ban/hide_content/
-   * remove_content/restrict/shield/escalate — those are account- or
-   * platform-wide consequences, not a community queue action) a report whose
-   * subject resolves to a post or reply in the community they own or
-   * moderate. Everyone else — including a community mod acting outside their
-   * own community, or against a non-community-post/reply report (member,
+   * A platform Moderator/Admin may take any action on any report, unchanged,
+   * and gets the full response (`true`). Everything else is a narrow,
+   * community-scoped carve-out: a community owner/mod may only `dismiss`
+   * (never warn/suspend/ban/hide_content/remove_content/restrict/shield/
+   * escalate — those are account- or platform-wide consequences, not a
+   * community queue action) a report whose subject resolves to a post or
+   * reply in the community they own or moderate — and gets back `false`.
+   * Everyone else — including a community mod acting outside their own
+   * community, or against a non-community-post/reply report (member,
    * message, venue, ...) — is forbidden. This grants no report *visibility*:
    * `GET /mod/reports` and `GET /mod/reports/:id` are untouched and still
-   * require the platform role.
+   * require the platform role, and the community-mod carve-out's own PATCH
+   * response is redacted by `toRow` using the `false` returned here.
    */
   private async assertCanActOnReport(
     report: Report,
     actorId: string,
     actorRole: string,
     action: ModActionCode,
-  ): Promise<void> {
-    if (actorRole === UserRole.Moderator || actorRole === UserRole.Admin) {
-      return;
+  ): Promise<boolean> {
+    // `actorRole` arrives as the JWT claim's plain `string` (see
+    // `CurrentUserData.role`) — cast once here to compare against the enum,
+    // same pattern as `HousingModerationGuard`/`PlatformLockdownGuard`.
+    const role = actorRole as UserRole;
+    if (role === UserRole.Moderator || role === UserRole.Admin) {
+      return true;
     }
 
     if (action === 'dismiss') {
+      // The carve-out is narrower than the role check above in three ways
+      // (BE-COM-03):
+      //  - only while the report is still OPEN. A report a PLATFORM moderator
+      //    escalated is out of a community mod's hands by definition —
+      //    `escalated` means "send this up", and letting the community it came
+      //    from close it undoes that decision.
+      //  - never on their OWN content. `isOwnerOrMod` says the actor moderates
+      //    the community, not that they are impartial about this report; a
+      //    community moderator reported for their own post could otherwise
+      //    close the report about themselves in one call, platform-wide.
+      //  - unchanged: only for a post/reply inside a community they moderate.
+      if (report.status !== ReportStatus.Open) {
+        throw new ForbiddenException(
+          'This report is no longer open to a community moderator. Platform staff will decide it.',
+        );
+      }
       const communityId = await this.communityIdForReportSubject(report);
       if (
         communityId &&
         (await this.communityMembership.isOwnerOrMod(communityId, actorId))
       ) {
-        return;
+        const subjectAuthorId = await this.authorIdForReportSubject(report);
+        if (subjectAuthorId === actorId) {
+          throw new ForbiddenException(
+            'You cannot dismiss a report about your own post. Platform staff will decide it.',
+          );
+        }
+        return false;
       }
     }
 
     throw new ForbiddenException(
       "Requires a moderator or admin role, or ownership/moderation of the report's community to dismiss it.",
     );
+  }
+
+  /**
+   * The status a report must still be in for an action to land on it, or a
+   * 409 when it is already terminal.
+   *
+   * `resolved` is the end of the line: acting again would re-run enforcement,
+   * overwrite the recorded resolution with a different actor and action, and
+   * re-notify the reporter about a decision that was already communicated.
+   * `open` and `escalated` are both actionable — `escalated -> resolved` is
+   * how an escalated report is finally decided — and the value returned here
+   * becomes the `WHERE status = ...` guard on the claiming UPDATE, so a
+   * concurrent action can't slip between this read and that write.
+   */
+  private static assertActionableStatus(report: Report): ReportStatus {
+    if (report.status === ReportStatus.Resolved) {
+      throw new ConflictException('This report has already been resolved.');
+    }
+    return report.status;
+  }
+
+  // The member who wrote the reported post/reply, for the conflict-of-interest
+  // check on the community-mod dismiss carve-out. Null for any other subject
+  // type, an unresolvable id, or an erased author — none of which can equal a
+  // live `actorId`, so the check fails open to "not your own content" only
+  // when there genuinely is no author to match.
+  private async authorIdForReportSubject(
+    report: Report,
+  ): Promise<string | null> {
+    if (report.subjectType === ReportSubjectType.Post) {
+      return this.communityMembership.authorIdForPost(report.subjectId);
+    }
+    if (report.subjectType === ReportSubjectType.Reply) {
+      return this.communityMembership.authorIdForReply(report.subjectId);
+    }
+    return null;
   }
 
   // Resolves a report's `subjectType`/`subjectId` to the community it belongs
@@ -417,8 +561,26 @@ export class ModerationService {
 
     for (const report of rows) {
       try {
+        // Same state machine as the single-report path (BE-COM-03). A report
+        // already `resolved` is terminal, and a mixed selection that happens
+        // to include one must not silently re-enforce against its subject —
+        // it lands in `failed` with a reason, which is exactly what this
+        // method's continue-on-error contract is for.
+        const expectedStatus = ModerationService.assertActionableStatus(report);
         const enforceResult = await this.dataSource.transaction(
           async (manager) => {
+            // Race-safe claim before any consequence — see `actOnReport`.
+            const claimed = await manager.update(
+              Report,
+              { id: report.id, status: expectedStatus },
+              { status },
+            );
+            if (claimed.affected !== 1) {
+              throw new ConflictException(
+                'This report has already been actioned by someone else.',
+              );
+            }
+
             const enforceResult =
               await this.accountEnforcement.enforceAgainstUser(
                 manager,
@@ -859,14 +1021,11 @@ export class ModerationService {
         throw new ConflictException('Appeal has already been decided');
       }
 
-      // An overturned appeal that leaves the member suspended is the same
-      // class of bug as a suspension that never applied: a moderation decision
-      // that does not take effect. Restore them as part of the same decision.
+      // An overturned appeal that leaves the sanction in place is the same
+      // class of bug as a sanction that never applied: a moderation decision
+      // that does not take effect. Undo it as part of the same decision.
       if (dto.decision === 'overturn') {
-        await this.accountEnforcement.restoreSuspensionForAppeal(
-          manager,
-          appeal.reportId,
-        );
+        await this.revertOriginalAction(manager, appeal, actorId);
       }
 
       if (appeal.reportId) {
@@ -907,6 +1066,94 @@ export class ModerationService {
     return this.toAppealRow(saved);
   }
 
+  /**
+   * Undoes the sanction an OVERTURNED appeal was filed against, branching on
+   * the original audit row's action (`appeal.actionId`).
+   *
+   * Appeals are accepted for every `APPEALABLE_ACTIONS` code, but an overturn
+   * used to call `restoreSuspensionForAppeal` and nothing else — which only
+   * flips a `Suspended` account back to `Active` (BE-COM-08). So a member
+   * whose post was hidden and who WON their appeal still had the post hidden,
+   * and a restricted member who won still could not post until the timer
+   * lapsed; admin saw "overturned" while nothing had changed for the member.
+   * `ContentModerationService.revert` was written for exactly this and had
+   * zero callers.
+   *
+   *  - `hide_content` / `remove_content` -> drop the `content_moderation` row
+   *    for the report's subject, restoring the content to fully visible, and
+   *    record a `content_restored` audit entry.
+   *  - `restrict` -> clear `users.restricted` / `restrictedUntil` on the
+   *    reported member (the flags `NotRestrictedGuard` reads), and record a
+   *    `restriction_lifted` entry. Deliberately does NOT touch `status`: a
+   *    restriction never changed it (see
+   *    `AccountEnforcementService.enforceAgainstUser`).
+   *  - `suspend` / `ban`, `warn`, or a cold appeal with no resolvable original
+   *    action -> the pre-existing account-restore path, which is a silent
+   *    no-op when the member is not actually suspended.
+   *
+   * Runs inside `reviewAppeal`'s transaction, so the reversal, the appeal's
+   * new status and the `appeal_overturned` audit row commit together.
+   */
+  private async revertOriginalAction(
+    manager: EntityManager,
+    appeal: Appeal,
+    actorId: string,
+  ): Promise<void> {
+    const originalAction = appeal.actionId
+      ? await manager.findOne(ModAuditLog, { where: { id: appeal.actionId } })
+      : null;
+    const action = originalAction?.action ?? null;
+    const report = appeal.reportId
+      ? await manager.findOne(Report, { where: { id: appeal.reportId } })
+      : null;
+
+    if (report && (action === 'hide_content' || action === 'remove_content')) {
+      await this.contentModeration.revert(
+        manager,
+        report.subjectType,
+        report.subjectId,
+      );
+      await this.audit.writeAuditLog(
+        appeal.reportId,
+        actorId,
+        'content_restored',
+        undefined,
+        undefined,
+        undefined,
+        manager,
+      );
+      return;
+    }
+
+    if (action === 'restrict') {
+      const profile = report
+        ? await this.accountEnforcement.resolveReportedProfile(report)
+        : null;
+      if (profile) {
+        await manager.update(
+          User,
+          { id: profile.userId },
+          { restricted: false, restrictedUntil: null },
+        );
+        await this.audit.writeAuditLog(
+          appeal.reportId,
+          actorId,
+          'restriction_lifted',
+          undefined,
+          undefined,
+          undefined,
+          manager,
+        );
+      }
+      return;
+    }
+
+    await this.accountEnforcement.restoreSuspensionForAppeal(
+      manager,
+      appeal.reportId,
+    );
+  }
+
   // PATCH /mod/users/:userId/suspension — lift a suspension or ban. Delegates
   // to `AccountEnforcementService`.
   liftSuspension(
@@ -917,20 +1164,81 @@ export class ModerationService {
     return this.accountEnforcement.liftSuspension(userId, actorId, dto);
   }
 
-  // PATCH /mod/reports/:id/assignment — self-assign or unassign a report
-  // (COM-5). No audit-log row: claiming/releasing a report is workflow
-  // bookkeeping, not a moderation decision — the immutable trail stays
-  // reserved for actions that change a report's outcome.
+  /**
+   * PATCH /mod/reports/:id/assignment — claim or release a report (COM-5).
+   *
+   * Assignment is a claim, not a free-for-all: it used to write
+   * `assignedModeratorId = assign ? actorId : null` unconditionally, so any
+   * moderator could silently take over or drop a report another moderator was
+   * already working (BE-COM-32). Now:
+   *
+   *   - claiming a report someone else holds is a 409 (Admins may take over),
+   *   - releasing a report is only allowed for its current holder (Admins may
+   *     release anyone's),
+   *   - re-claiming a report you already hold stays an idempotent no-op 200.
+   *
+   * The write is a conditional `UPDATE ... WHERE assigned_moderator_id IS [NOT]
+   * DISTINCT FROM :expected` (the same race-safe claim shape
+   * `triageJoinRequest` uses), so two moderators clicking "claim" at the same
+   * instant cannot both win: the loser's update affects no row and gets the
+   * 409 rather than quietly overwriting the winner.
+   *
+   * Still no audit-log row: claiming/releasing is workflow bookkeeping, not a
+   * moderation decision — the immutable trail stays reserved for actions that
+   * change a report's outcome.
+   */
   async setAssignment(
     id: string,
     actorId: string,
+    actorRole: string,
     assign: boolean,
   ): Promise<ModReportDTO> {
     const report = await this.findReportOrThrow(id);
-    report.assignedModeratorId = assign ? actorId : null;
-    report.assignedAt = assign ? new Date() : null;
-    const saved = await this.reports.save(report);
-    return this.toRow(saved);
+    const currentAssignee = report.assignedModeratorId;
+    const isAdmin = actorRole === UserRole.Admin;
+
+    if (assign) {
+      if (currentAssignee === actorId) {
+        return this.toRow(report);
+      }
+      if (currentAssignee !== null && !isAdmin) {
+        throw new ConflictException(
+          'That report is already assigned to another moderator.',
+        );
+      }
+    } else {
+      if (currentAssignee === null) {
+        return this.toRow(report);
+      }
+      if (currentAssignee !== actorId && !isAdmin) {
+        throw new ForbiddenException(
+          'Only the assigned moderator can release that report.',
+        );
+      }
+    }
+
+    const result = await this.reports
+      .createQueryBuilder()
+      .update(Report)
+      .set({
+        assignedModeratorId: assign ? actorId : null,
+        assignedAt: assign ? new Date() : null,
+      })
+      .where('id = :id', { id })
+      // `IS NOT DISTINCT FROM` rather than `=`: the expected value is NULL on
+      // an unclaimed report, and `NULL = NULL` is NULL, not true.
+      .andWhere('assigned_moderator_id IS NOT DISTINCT FROM :expected', {
+        expected: currentAssignee,
+      })
+      .execute();
+
+    if (!result.affected) {
+      throw new ConflictException(
+        'That report’s assignment changed while you were acting on it. Reload and try again.',
+      );
+    }
+
+    return this.toRow(await this.findReportOrThrow(id));
   }
 
   // --- internals ---
@@ -968,24 +1276,44 @@ export class ModerationService {
     return { open, resolved, appeals };
   }
 
+  // `hasFullReportVisibility` defaults to `true` for every caller EXCEPT
+  // `actOnReport`'s community-mod carve-out (see `assertCanActOnReport`):
+  // `list`/`getById`/`setAssignment` all sit behind the class-level platform
+  // `@Roles(Moderator, Admin)` guard, so they never need to pass `false`.
+  // When it is `false`, the reporter/reported blocks are replaced with the
+  // same withheld shapes the anonymous-reporter case already uses (mirrors
+  // `ModReporterDTO`'s `{ anonymous: true }` arm) instead of the fully
+  // resolved name, real-name-bearing profile, and platform-wide prior-report
+  // counts `describeReporter`/`describeReported` would otherwise return —
+  // and the assigned-moderator id/name are withheld the same way.
   private async toRow(
     report: Report,
     withDetail = false,
+    hasFullReportVisibility = true,
   ): Promise<ModReportDTO> {
     const [reporter, reported, assignedModeratorName, resolutionActorName] =
       await Promise.all([
-        this.describeReporter(report),
-        this.describeReported(report),
-        report.assignedModeratorId
+        hasFullReportVisibility
+          ? this.describeReporter(report)
+          : Promise.resolve<ModReporterDTO>({ anonymous: true }),
+        hasFullReportVisibility
+          ? this.describeReported(report)
+          : Promise.resolve<ModReportedDTO>({
+              id: report.subjectId,
+              handle: report.subjectId,
+              priorReports: 0,
+            }),
+        hasFullReportVisibility && report.assignedModeratorId
           ? this.audit.nameForUserId(report.assignedModeratorId)
           : undefined,
         report.resolvedAt
           ? this.audit.nameForUserId(report.resolutionActorId)
           : undefined,
       ]);
-    const detail = withDetail
-      ? await this.buildDetail(report, reporter, reported)
-      : undefined;
+    const detail =
+      withDetail && hasFullReportVisibility
+        ? await this.buildDetail(report, reporter, reported)
+        : undefined;
     const resolution = resolutionActorName
       ? toResolutionDTO(report, resolutionActorName)
       : undefined;
@@ -996,6 +1324,7 @@ export class ModerationService {
       detail,
       assignedModeratorName,
       resolution,
+      hasFullReportVisibility,
     );
   }
 
@@ -1397,7 +1726,17 @@ export class ModerationService {
     const listingEvidence = listing?.evidence ? listing.evidence : undefined;
     // Read straight off the report row — `findReportOrThrow` loads the full
     // entity (no column `select`), so `contactEmail` is already present.
-    const contactEmail = report.contactEmail ? report.contactEmail : undefined;
+    // When the disputer filed ANONYMOUSLY, this off-account email is an
+    // identifying detail: the detail view already stamps "Reporter identity
+    // withheld." for an anonymous report, so surfacing their contact email
+    // alongside it would contradict that promise and deanonymize a reporter who
+    // trusted "anonymous" to mean fully shielded. Suppress it for an anonymous
+    // report; a NON-anonymous dispute still exposes it so a moderator can reach a
+    // disputer with no account.
+    const contactEmail =
+      !report.anonymous && report.contactEmail
+        ? report.contactEmail
+        : undefined;
 
     return {
       ...(disputeReason ? { disputeReason } : {}),

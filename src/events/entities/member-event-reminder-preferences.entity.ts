@@ -45,7 +45,7 @@ export const DEFAULT_EVENT_EMAILS_ENABLED = true;
  */
 @Entity('member_event_reminder_preferences')
 export class MemberEventReminderPreferences {
-  @PrimaryColumn({ name: 'user_id', type: 'uuid' })
+  @PrimaryColumn({ type: 'uuid' })
   userId!: string;
 
   @Column({ type: 'int', default: DEFAULT_REMINDER_LEAD_MINUTES })

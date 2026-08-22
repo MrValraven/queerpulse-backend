@@ -14,5 +14,12 @@ export class AddMentionNotificationType1785000500000 implements MigrationInterfa
   public async down(): Promise<void> {
     // Postgres has no DROP VALUE — rebuilding the enum without this value is
     // a manual revert path (would fail if any row still uses it). No-op here.
+    // Fails loudly rather than reporting a successful revert that undid
+    // nothing: a silent no-op removes the row from the migrations ledger, so
+    // the next `migration:run` retries `ADD VALUE` and errors on the label
+    // that is still there. Postgres has no `ALTER TYPE ... DROP VALUE`.
+    throw new Error(
+      'Irreversible: Postgres cannot drop an enum value. Restore from a backup instead.',
+    );
   }
 }

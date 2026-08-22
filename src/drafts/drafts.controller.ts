@@ -22,6 +22,7 @@ import { DraftsService } from './drafts.service';
 import { CreateDraftDto } from './dto/create-draft.dto';
 import { UpdateDraftDto } from './dto/update-draft.dto';
 import {
+  ApiConflictResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
   ApiNoContentResponse,
@@ -55,6 +56,10 @@ export class DraftsController {
   @Post()
   @ApiOperation({ summary: 'Create a draft.' })
   @ApiCreatedResponse({ description: 'The created draft.' })
+  @ApiConflictResponse({
+    description:
+      'A draft with this id already exists for the caller. Ids are client-minted, so a reused one is a bug or a retry — it never overwrites the existing draft.',
+  })
   create(@CurrentUser() user: CurrentUserData, @Body() dto: CreateDraftDto) {
     return this.draftsService.create(user.userId, dto);
   }
@@ -65,6 +70,10 @@ export class DraftsController {
   @ApiOperation({ summary: 'Update a draft.' })
   @ApiOkResponse({ description: 'The updated draft.' })
   @ApiNotFoundResponse({ description: 'No draft with that id for the caller.' })
+  @ApiConflictResponse({
+    description:
+      'The draft changed since this client read it (another tab saved). Send the `version` from the latest read as `expectedVersion`; reload before saving again.',
+  })
   update(
     @CurrentUser() user: CurrentUserData,
     @Param('id') id: string,

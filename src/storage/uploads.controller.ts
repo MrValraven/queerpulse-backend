@@ -73,6 +73,7 @@ export class UploadsController {
       kind: 'avatar',
       userId: user.userId,
       contentType: dto.contentType,
+      byteSize: dto.byteSize,
     });
   }
 
@@ -98,6 +99,7 @@ export class UploadsController {
       kind: 'work-image',
       userId: user.userId,
       contentType: dto.contentType,
+      byteSize: dto.byteSize,
     });
   }
 

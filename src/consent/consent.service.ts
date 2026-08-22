@@ -26,6 +26,16 @@ export class ConsentService {
   //                                → 'updated'
   async record(userId: string, dto: ConsentDto): Promise<ConsentRecordDTO> {
     const prior = await this.latest(userId);
+
+    // A re-post of the decision already on file (same categories, same policy
+    // version) adds nothing to the audit trail, so echo the stored record
+    // instead of appending a duplicate row. Anything that differs is a fresh
+    // decision and is still appended: a category flip, or the same categories
+    // re-affirmed against a NEW policy version.
+    if (this.isUnchanged(prior, dto)) {
+      return toConsentRecordDTO(prior);
+    }
+
     const action = this.deriveAction(prior, dto);
 
     const saved = await this.records.save(
@@ -65,6 +75,20 @@ export class ConsentService {
       where: { userId },
       order: { createdAt: 'DESC' },
     });
+  }
+
+  // Narrowing helper: true only when `prior` exists and records exactly the
+  // decision `dto` is asking to store.
+  private isUnchanged(
+    prior: ConsentRecord | null,
+    dto: ConsentDto,
+  ): prior is ConsentRecord {
+    return (
+      prior !== null &&
+      prior.analytics === dto.categories.analytics &&
+      prior.monitoring === dto.categories.monitoring &&
+      prior.policyVersion === dto.policyVersion
+    );
   }
 
   private deriveAction(

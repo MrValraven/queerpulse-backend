@@ -1,6 +1,11 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import { DraftDTO, toDraftDTO } from './draft-response';
 import { CreateDraftDto } from './dto/create-draft.dto';
@@ -11,6 +16,7 @@ import { Draft, DraftPayload } from './entities/draft.entity';
 export class DraftsService {
   constructor(
     @InjectRepository(Draft) private readonly drafts: Repository<Draft>,
+    private readonly dataSource: DataSource,
   ) {}
 
   // Page-based envelope (`{items,total,page,pageSize}`), matching the FE's
@@ -27,18 +33,52 @@ export class DraftsService {
     return paginate(qb, normalizedPage, (rows) => rows.map(toDraftDTO));
   }
 
+  /**
+   * Creates a draft under the CALLER-SUPPLIED id (see the `Draft` entity doc).
+   *
+   * `insert`, never `save`. TypeORM's `save` on an entity whose primary key
+   * already exists performs an UPDATE, so a POST that reused an id — a client
+   * that regenerates ids, or a retry after a create whose response was lost —
+   * silently replaced a DIFFERENT draft's whole payload with this one's. An
+   * INSERT lets the composite `(id, user_id)` primary key do its job, and the
+   * unique violation becomes an honest 409 the client can react to.
+   */
   async create(userId: string, dto: CreateDraftDto): Promise<DraftDTO> {
-    const saved = await this.drafts.save(
-      this.drafts.create({
-        id: dto.id,
-        userId,
-        kind: dto.kind,
-        payload: toPayload(dto),
-      }),
-    );
-    return toDraftDTO(saved);
+    const draft = this.drafts.create({
+      id: dto.id,
+      userId,
+      kind: dto.kind,
+      payload: toPayload(dto),
+      // Set explicitly rather than left to the column default, so the returned
+      // DTO carries the base version the client will send back on its first
+      // patch instead of `undefined`.
+      version: 0,
+    });
+    try {
+      await this.drafts.insert(draft);
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new ConflictException('You already have a draft with this id.');
+      }
+      throw error;
+    }
+    return toDraftDTO(draft);
   }
 
+  /**
+   * Patches a draft under an optimistic-concurrency precondition.
+   *
+   * The patch MERGES onto the stored payload, so two tabs autosaving the same
+   * draft used to interleave last-write-wins with no signal to either. The
+   * write now claims the row with `UPDATE ... WHERE version = :baseVersion`
+   * inside the same transaction as the save: a concurrent request blocks on
+   * that row lock and, once through, no longer matches — so it gets a 409
+   * instead of quietly winning.
+   *
+   * A client that sends no `expectedVersion` is still not refused (the field is
+   * staged in — see `UpdateDraftDto`); it gets the load→write race closed
+   * within the request, just not the read→edit→write one across requests.
+   */
   async update(
     userId: string,
     id: string,
@@ -46,10 +86,39 @@ export class DraftsService {
   ): Promise<DraftDTO> {
     const draft = await this.loadOr404(userId, id);
 
-    if (dto.kind !== undefined) draft.kind = dto.kind;
-    draft.payload = mergePayload(draft.payload, dto);
+    const baseVersion = draft.version;
+    const isStaleExpectation =
+      dto.expectedVersion !== undefined && dto.expectedVersion !== baseVersion;
+    if (isStaleExpectation) {
+      throw new ConflictException({
+        message:
+          'This draft changed since you loaded it. Reload before saving again.',
+        currentVersion: baseVersion,
+      });
+    }
 
-    const saved = await this.drafts.save(draft);
+    const nextKind = dto.kind !== undefined ? dto.kind : draft.kind;
+    const nextPayload = mergePayload(draft.payload, dto);
+
+    const saved = await this.dataSource.transaction(async (manager) => {
+      const draftRepository = manager.getRepository(Draft);
+      const claim = await draftRepository.update(
+        { id, userId, version: baseVersion },
+        { version: baseVersion + 1 },
+      );
+      if (claim.affected === 0) return null;
+      draft.kind = nextKind;
+      draft.payload = nextPayload;
+      draft.version = baseVersion + 1;
+      return await draftRepository.save(draft);
+    });
+
+    if (saved === null) {
+      throw new ConflictException({
+        message:
+          'This draft changed while you were saving. Reload before saving again.',
+      });
+    }
     return toDraftDTO(saved);
   }
 

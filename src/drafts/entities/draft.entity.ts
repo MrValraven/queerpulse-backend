@@ -84,6 +84,18 @@ export class Draft {
   @Column({ type: 'jsonb' })
   payload!: DraftPayload;
 
+  /**
+   * Optimistic-concurrency counter. A draft is an autosaving surface that a
+   * member can legitimately have open in two tabs (or on a phone and a laptop
+   * at once), and `update` merges a partial patch onto the STORED payload — so
+   * two interleaved saves used to resolve last-write-wins, with the loser's
+   * edits gone and nothing to say so. `DraftsService.update` now writes under
+   * an `UPDATE ... WHERE version = :expected` precondition when the client
+   * declares the version it read.
+   */
+  @Column({ type: 'int', default: 0 })
+  version!: number;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 

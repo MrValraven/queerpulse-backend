@@ -13,9 +13,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
-export class AddCommunityFeaturedFlag1793200000000
-  implements MigrationInterface
-{
+export class AddCommunityFeaturedFlag1793200000000 implements MigrationInterface {
   name = 'AddCommunityFeaturedFlag1793200000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

@@ -56,6 +56,7 @@ describe('ChatGateway', () => {
     sendMessage: jest.Mock;
     markRead: jest.Mock;
     canJoinConversationLive: jest.Mock;
+    directConversationIdsBetween: jest.Mock;
   };
   let connections: { getAcceptedConnectionUserIds: jest.Mock };
   let users: { findById: jest.Mock };
@@ -64,6 +65,7 @@ describe('ChatGateway', () => {
   let roomEmit: jest.Mock;
   let namespaceTo: jest.Mock;
   let namespaceIn: jest.Mock;
+  let socketsLeave: jest.Mock;
   let disconnectSockets: jest.Mock;
   let disconnectAllSockets: jest.Mock;
 
@@ -73,6 +75,7 @@ describe('ChatGateway', () => {
       sendMessage: jest.fn().mockResolvedValue({ id: 'm1' }),
       markRead: jest.fn().mockResolvedValue({ ok: true }),
       canJoinConversationLive: jest.fn().mockResolvedValue(true),
+      directConversationIdsBetween: jest.fn().mockResolvedValue([]),
     };
     connections = {
       getAcceptedConnectionUserIds: jest.fn().mockResolvedValue([]),
@@ -117,7 +120,10 @@ describe('ChatGateway', () => {
     disconnectSockets = jest.fn();
     disconnectAllSockets = jest.fn();
     namespaceTo = jest.fn().mockReturnValue({ emit: roomEmit });
-    namespaceIn = jest.fn().mockReturnValue({ disconnectSockets });
+    socketsLeave = jest.fn();
+    namespaceIn = jest
+      .fn()
+      .mockReturnValue({ disconnectSockets, socketsLeave });
     // @ts-expect-error assigning the injected namespace for the test
     gateway.namespace = {
       to: namespaceTo,
@@ -466,7 +472,9 @@ describe('ChatGateway', () => {
     it('delegates to messaging.markRead with the caller identity', async () => {
       const client = makeClient({ data: { userId: 'u1' } });
       await gateway.handleRead(client as never, { conversationId: 'c1' });
-      expect(messaging.markRead).toHaveBeenCalledWith('c1', 'u1');
+      expect(messaging.markRead).toHaveBeenCalledWith('c1', 'u1', {
+        upToMessageId: undefined,
+      });
     });
   });
 
@@ -493,6 +501,54 @@ describe('ChatGateway', () => {
       gateway.handleSessionRevoked({ userId: 'u9' });
       expect(namespaceIn).toHaveBeenCalledWith('user:u9');
       expect(disconnectSockets).toHaveBeenCalledWith(true);
+    });
+  });
+
+  describe('room eviction (BE-MSG-01)', () => {
+    // Room authorisation happens ONCE, at `conversation:join`; every later
+    // broadcast is a blind room emit. Losing access therefore has to actively
+    // push the member's sockets out of the room.
+    it('evicts a removed/left member from the conversation room, without dropping their other sockets', () => {
+      gateway.handleConversationMembershipRevoked({
+        conversationId: 'c1',
+        userIds: ['u9'],
+      });
+      expect(namespaceIn).toHaveBeenCalledWith('user:u9');
+      expect(socketsLeave).toHaveBeenCalledWith('c1');
+      // Only this room is cut: their notifications, presence and other
+      // conversations stay live.
+      expect(disconnectSockets).not.toHaveBeenCalled();
+    });
+
+    it('evicts BOTH sides of a blocked pair from every DM room they share', async () => {
+      messaging.directConversationIdsBetween.mockResolvedValue(['c1', 'c2']);
+
+      await gateway.handleMemberBlocked({
+        blockerId: 'blocker',
+        blockedId: 'blocked',
+      });
+
+      expect(messaging.directConversationIdsBetween).toHaveBeenCalledWith(
+        'blocker',
+        'blocked',
+      );
+      expect(namespaceIn).toHaveBeenCalledWith('user:blocker');
+      expect(namespaceIn).toHaveBeenCalledWith('user:blocked');
+      expect(socketsLeave).toHaveBeenCalledWith('c1');
+      expect(socketsLeave).toHaveBeenCalledWith('c2');
+      expect(socketsLeave).toHaveBeenCalledTimes(4);
+    });
+
+    it('swallows a lookup failure rather than rejecting a block that already committed', async () => {
+      messaging.directConversationIdsBetween.mockRejectedValue(
+        new Error('db down'),
+      );
+      await expect(
+        gateway.handleMemberBlocked({
+          blockerId: 'blocker',
+          blockedId: 'blocked',
+        }),
+      ).resolves.toBeUndefined();
     });
   });
 
@@ -529,20 +585,55 @@ describe('ChatGateway', () => {
       // The user room, not a conversation room — a notification is addressed to
       // one member, and reaches every tab they have open.
       expect(namespaceTo).toHaveBeenCalledWith('user:u9');
-      expect(roomEmit).toHaveBeenCalledWith('notification:new', notification);
+      // The mapped response DTO (M6), never the raw entity: the socket payload
+      // matches what GET /notifications serves, and its `payload` is the
+      // allowlist projection — `voucherId` (a raw user id) is not a
+      // `vouch_received` display field, so it is stripped.
+      expect(roomEmit).toHaveBeenCalledWith('notification:new', {
+        id: 'n1',
+        userId: 'u9',
+        type: 'vouch_received',
+        payload: {},
+        read: false,
+        createdAt: new Date(0),
+        actor: null,
+      });
     });
 
-    it('emits the notification row itself, not the internal event envelope', () => {
-      const notification = { id: 'n1', userId: 'u9', read: false };
+    it('emits the mapped notification row, not the internal event envelope', () => {
+      const notification = {
+        id: 'n1',
+        userId: 'u9',
+        type: 'mention',
+        // A community-post mention carries the gated body as `excerpt`; it must
+        // never cross the wire (M6 backstops H3).
+        payload: {
+          actorId: 'u2',
+          source: 'community',
+          communitySlug: 'private-support',
+          entityKind: 'member',
+          excerpt: 'a private thing said inside a private community',
+        },
+        read: false,
+        createdAt: new Date(0),
+      };
       gateway.handleNotificationCreated({
         userId: 'u9',
         notification,
       } as never);
-      const [, payload] = roomEmit.mock.calls[0] as [string, unknown];
-      // The socket payload must match what GET /notifications serves, so the
-      // client can treat a pushed and a fetched notification identically.
+      const [, payload] = roomEmit.mock.calls[0] as [
+        string,
+        { payload: Record<string, unknown> },
+      ];
+      // Not the internal `{ userId, notification }` envelope — the row itself,
+      // so the client treats a pushed and a fetched notification identically.
       expect(payload).not.toHaveProperty('notification');
-      expect(payload).toEqual(notification);
+      expect(payload.payload).not.toHaveProperty('excerpt');
+      expect(payload.payload).toEqual({
+        source: 'community',
+        communitySlug: 'private-support',
+        entityKind: 'member',
+      });
     });
 
     it('does not throw before the namespace is assigned', () => {

@@ -1,9 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { IdentityCallbackDto } from './dto/identity-callback.dto';
-import { StartPhoneVerificationDto } from './dto/start-phone-verification.dto';
 import { SubmitVerificationRequestDto } from './dto/submit-verification-request.dto';
-import { VerifyPhoneDto } from './dto/verify-phone.dto';
 import { VerificationRequestStatus } from './verification-request-status';
 import { VerificationLevel, VerificationType } from './verification-level';
 import { VerificationController } from './verification.controller';
@@ -17,8 +15,6 @@ describe('VerificationController', () => {
     submitRequest: jest.Mock;
     withdrawRequest: jest.Mock;
     appealRequest: jest.Mock;
-    startPhone: jest.Mock;
-    verifyPhone: jest.Mock;
     startIdentity: jest.Mock;
     handleIdentityCallback: jest.Mock;
   };
@@ -67,8 +63,6 @@ describe('VerificationController', () => {
       submitRequest: jest.fn(),
       withdrawRequest: jest.fn(),
       appealRequest: jest.fn(),
-      startPhone: jest.fn(),
-      verifyPhone: jest.fn(),
       startIdentity: jest.fn(),
       handleIdentityCallback: jest.fn(),
     };
@@ -179,25 +173,7 @@ describe('VerificationController', () => {
     });
   });
 
-  describe('GET /verification/phone/... and identity/... (unchanged Phase 1 wiring)', () => {
-    it('startPhone forwards the authed member id + dto', async () => {
-      const dto: StartPhoneVerificationDto = { phoneNumber: '+1 555 0100' };
-      service.startPhone.mockResolvedValue({ started: true });
-
-      await controller.startPhone(currentUser, dto);
-
-      expect(service.startPhone).toHaveBeenCalledWith('member-1', dto);
-    });
-
-    it('verifyPhone forwards the authed member id + dto', async () => {
-      const dto: VerifyPhoneDto = { code: '123456' };
-      service.verifyPhone.mockResolvedValue(status);
-
-      await controller.verifyPhone(currentUser, dto);
-
-      expect(service.verifyPhone).toHaveBeenCalledWith('member-1', dto);
-    });
-
+  describe('GET /verification/identity/... (unchanged Phase 1 wiring)', () => {
     it('startIdentity forwards the authed member id', async () => {
       service.startIdentity.mockResolvedValue({
         redirectUrl: 'https://provider.test/session',

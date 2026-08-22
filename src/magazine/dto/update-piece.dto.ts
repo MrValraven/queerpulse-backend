@@ -6,11 +6,13 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  MaxLength,
   ValidateIf,
 } from 'class-validator';
 
 import { PieceStage } from '../entities/magazine-piece.entity';
 import { CreatePieceDto } from './create-piece.dto';
+import { DESK_SHORT_TEXT_MAX } from './desk-text-limits';
 
 const PIECE_STAGES: PieceStage[] = [
   'commissioned',
@@ -60,7 +62,8 @@ export class UpdatePieceDto extends PartialType(
 
   @IsOptional() @IsInt() orderIndex?: number;
 
-  @IsOptional() @IsString() pages?: string;
+  // Capped (CNT-14): a page range like `18–23`, never prose.
+  @IsOptional() @IsString() @MaxLength(DESK_SHORT_TEXT_MAX) pages?: string;
 
   @IsOptional() @IsBoolean() laidOut?: boolean;
 }

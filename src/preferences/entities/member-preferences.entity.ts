@@ -35,7 +35,7 @@ export const DEFAULT_PUBLIC_PROFILE_ENABLED = false;
  */
 @Entity('member_preferences')
 export class MemberPreferences {
-  @PrimaryColumn({ name: 'user_id', type: 'uuid' })
+  @PrimaryColumn({ type: 'uuid' })
   userId!: string;
 
   // --- Work-profile safety (GET/PUT /me/work-preferences) -------------------

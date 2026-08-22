@@ -49,6 +49,40 @@ export interface OAuthState {
    * with it just fails the check.
    */
   nonce?: string;
+  /**
+   * Marks this round trip as a step-up RE-authentication (see
+   * `AccountService`'s reauth token, minted only via this flow) rather than an
+   * ordinary sign-in. `GoogleAuthGuard` sets `prompt=login` on the outbound
+   * leg so returning here proves the browser could complete a fresh Google
+   * login right now — not just that it still holds a valid session cookie.
+   * The callback branches on this BEFORE `validateOrCreateGoogleUser`: it
+   * never creates/updates an account or touches session cookies, it only
+   * verifies the returned Google account matches the CURRENTLY signed-in
+   * member and mints a reauth token. Tampering buys an attacker nothing: the
+   * callback independently re-checks the caller's own access-token cookie
+   * against the Google account that just authenticated, so a forged
+   * `reauth: true` with no real re-login still fails that comparison.
+   */
+  reauth?: boolean;
+}
+
+/**
+ * The only shape a `termsVersion` may take: the value is copied from a query
+ * param the caller controls and written straight into `users.terms_version`,
+ * declared `varchar(32)`. A longer or stranger value made the INSERT fail with
+ * SQLSTATE 22001 AFTER Google consent — i.e. a crafted invite link
+ * (`/auth/google?invite=…&ageAttested=1&termsVersion=<40 chars>`) turned
+ * someone else's signup into an unrecoverable 500. Anything that does not
+ * match is dropped (recorded as NULL), which is the same state every account
+ * predating the attestation already has.
+ */
+const TERMS_VERSION_PATTERN = /^[0-9A-Za-z.-]{1,32}$/;
+
+/** The `termsVersion` if it is storable, otherwise `undefined`. */
+export function sanitizeTermsVersion(value: unknown): string | undefined {
+  return typeof value === 'string' && TERMS_VERSION_PATTERN.test(value)
+    ? value
+    : undefined;
 }
 
 /**
@@ -61,7 +95,9 @@ export function encodeOAuthState(state: OAuthState): string | undefined {
   if (state.redirect) payload.redirect = state.redirect;
   if (state.nonce) payload.nonce = state.nonce;
   if (state.ageAttested) payload.ageAttested = true;
-  if (state.termsVersion) payload.termsVersion = state.termsVersion;
+  const termsVersion = sanitizeTermsVersion(state.termsVersion);
+  if (termsVersion) payload.termsVersion = termsVersion;
+  if (state.reauth) payload.reauth = true;
   if (Object.keys(payload).length === 0) {
     return undefined;
   }
@@ -87,9 +123,14 @@ export function decodeOAuthState(raw: string | undefined | null): OAuthState {
       if (typeof obj.nonce === 'string') out.nonce = obj.nonce;
       // Strictly `=== true`: a truthy string like "false" must not attest.
       if (obj.ageAttested === true) out.ageAttested = true;
-      if (typeof obj.termsVersion === 'string') {
-        out.termsVersion = obj.termsVersion;
+      // Bounded on the way back in too: `state` round-trips through the
+      // browser, so the encode-side clamp above is not a guarantee.
+      const decodedTermsVersion = sanitizeTermsVersion(obj.termsVersion);
+      if (decodedTermsVersion) {
+        out.termsVersion = decodedTermsVersion;
       }
+      // Strictly `=== true`, same reasoning as `ageAttested` above.
+      if (obj.reauth === true) out.reauth = true;
       return out;
     }
   } catch {

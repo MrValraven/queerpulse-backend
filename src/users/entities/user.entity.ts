@@ -148,6 +148,26 @@ export class User {
   termsVersion!: string | null;
 
   /**
+   * When the member told us they are NOT 18 yet — the onboarding wizard's
+   * "I'm not 18" branch, recorded by `POST /auth/under-18-disclosure`
+   * (`UnderAgeDisclosureService`). The counterpart to `ageAttestedAt`: one is
+   * an affirmative "I am 18+", this is the retraction of it.
+   *
+   * Stamped ONCE and never cleared. Nothing on the platform lifts it, and it is
+   * deliberately not a self-expiring "until their birthday" clock: we have no
+   * date of birth, only a declaration. Reaching 18 is handled by a human
+   * through the contact link the notice shows, never by a timer.
+   *
+   * Always written together with `status = Suspended` and `suspendedUntil =
+   * null` (permanent, the same shape a ban takes — see `suspendedUntil`), so
+   * the account is out of an adults-only space rather than merely annotated.
+   * NULL for everyone who has made no such declaration; never backfilled (see
+   * `AddUnderAgeDisclosure1793700000000`).
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  underAgeDisclosedAt!: Date | null;
+
+  /**
    * When the member finished the one-time post-signup onboarding wizard. NULL
    * means they haven't yet; a timestamp means done and is stamped once (never
    * overwritten) by `UsersService.markOnboarded`. Surfaced as

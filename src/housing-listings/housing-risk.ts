@@ -28,6 +28,18 @@ export interface HousingRiskInput {
   accessibilityInfo: string;
   gallery: string[];
   features: string[];
+  /**
+   * The lister's free-text "ideal for" chips. Scanned as text (BE-HSG-08): this
+   * is the field literally labelled "ideal for", so it is where "ideal for a
+   * Christian family" or "straight couples only" gets typed. It used not to be
+   * passed to the scorer at all, which meant a listing with a clean description
+   * and a discriminatory `idealFor` chip scored 0 on `discriminatory_language`,
+   * could satisfy `VERIFIED_LISTING_MAX_RISK` and earn the verified chip, and
+   * sorted to the BOTTOM of the moderation queue.
+   *
+   * Optional so existing callers that genuinely have no chips can omit it.
+   */
+  idealFor?: string[];
   listerVerificationLevel: VerificationLevel;
 }
 
@@ -102,8 +114,20 @@ export function assessHousingRisk(
   }
 
   // ── Signal 2 & 3: contact info / off-platform payment language ──────────────
-  const text =
-    `${input.title} ${input.blurb} ${input.description}`.toLowerCase();
+  // EVERY member-typed string on the listing is scanned, not just the long-form
+  // copy (BE-HSG-08). `features` was previously accepted on the input and used
+  // only for its `.length`, and `idealFor` was never passed in at all, so the
+  // two free-text arrays where "ideal for"-style exclusion actually lands were
+  // invisible to all three regexes below.
+  const text = [
+    input.title,
+    input.blurb,
+    input.description,
+    ...input.features,
+    ...(input.idealFor ?? []),
+  ]
+    .join(' ')
+    .toLowerCase();
   if (
     EMAIL_RE.test(text) ||
     PHONE_RE.test(text) ||

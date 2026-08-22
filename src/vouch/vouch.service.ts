@@ -13,12 +13,12 @@ import {
   EntityManager,
   In,
   IsNull,
-  MoreThanOrEqual,
+  Not,
   Repository,
 } from 'typeorm';
 import { toImageUrl } from '../common/image-url';
 import { Profile } from '../users/entities/profile.entity';
-import { User } from '../users/entities/user.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import {
   Vouch,
   VOUCH_RELATIONSHIPS,
@@ -144,9 +144,21 @@ export class VouchService {
       anonymous?: boolean;
     },
   ): Promise<{ vouchCount: number }> {
-    const vouchee = await this.profiles.findOne({
-      where: { slug: voucheeSlug },
-    });
+    // Resolved through an ACTIVE-user join, not `profiles.findOne({ slug })`.
+    // A bare profile lookup happily returned deactivated, suspended, banned and
+    // grace-period accounts, so a member could vouch for someone every other
+    // surface treats as invisible: it incremented their `vouch_count` and fired
+    // a `VOUCH_CREATED` notification at an account that is not supposed to be
+    // reachable. Same `u.status = active` join `MemberLookup.userIdsForSlugs`
+    // and `ProfilesService.searchMembers` use, so "who can be addressed by
+    // slug" means one thing across the app.
+    const vouchee = await this.profiles
+      .createQueryBuilder('p')
+      .innerJoin('p.user', 'u', 'u.status = :active', {
+        active: UserStatus.Active,
+      })
+      .where('p.slug = :slug', { slug: voucheeSlug })
+      .getOne();
     if (!vouchee) {
       throw new NotFoundException('Member not found');
     }
@@ -189,12 +201,21 @@ export class VouchService {
         where: { id: voucherId },
         lock: { mode: 'pessimistic_write' },
       });
-      const givenToday = await manager.count(Vouch, {
-        where: {
-          voucherId,
-          createdAt: MoreThanOrEqual(currentDayStart(new Date())),
-        },
-      });
+      // Counts `COALESCE(reactivated_at, created_at)`, not `created_at` alone.
+      // A re-vouch updates the existing (voucher, vouchee) row in place and
+      // keeps its original `created_at`, so counting only `created_at` meant a
+      // withdraw-and-re-vouch cycle never touched the cap: once a member had a
+      // row for someone, they could re-fire that vouch (and its notification)
+      // as often as they liked. `reactivated_at` is stamped below on every
+      // reinstatement, which makes a reactivation cost a slot like a first
+      // vouch does.
+      const givenToday = await manager
+        .createQueryBuilder(Vouch, 'v')
+        .where('v.voucherId = :voucherId', { voucherId })
+        .andWhere('COALESCE(v.reactivatedAt, v.createdAt) >= :dayStart', {
+          dayStart: currentDayStart(new Date()),
+        })
+        .getCount();
       if (givenToday >= DAILY_VOUCH_LIMIT) {
         throw new ForbiddenException(
           `You can vouch for up to ${DAILY_VOUCH_LIMIT} members per day. Try again tomorrow.`,
@@ -209,12 +230,31 @@ export class VouchService {
         lock: { mode: 'pessimistic_write' },
       });
       if (existing) {
-        // Withdrawn → reactivate in place.
-        await manager.update(
+        // Withdrawn → reactivate in place. CONDITIONAL on the row still being
+        // withdrawn: `existing` was read BEFORE the transaction, so two
+        // concurrent re-vouches both saw a withdrawn row. An unconditional
+        // update let both "reactivate" it and both increment `vouch_count`,
+        // leaving the denormalized column permanently one too high with no
+        // reconciliation job to catch it. Exactly one claim can now win; the
+        // loser is the duplicate it always was.
+        const claim = await manager.update(
           Vouch,
-          { id: existing.id },
-          { withdrawnAt: null, note: cleanNote, relationships, anonymous },
+          { id: existing.id, withdrawnAt: Not(IsNull()) },
+          {
+            withdrawnAt: null,
+            // Stamped so the daily cap can see this reinstatement; `created_at`
+            // stays as it was, since the relationship really did start then.
+            reactivatedAt: new Date(),
+            note: cleanNote,
+            relationships,
+            anonymous,
+          },
         );
+        if (claim.affected !== 1) {
+          throw new ConflictException(
+            'You have already vouched for this member',
+          );
+        }
       } else {
         try {
           await manager.insert(Vouch, {
@@ -309,11 +349,20 @@ export class VouchService {
       throw new NotFoundException('No vouch to withdraw');
     }
     await this.dataSource.transaction(async (manager) => {
-      await manager.update(
+      // CONDITIONAL claim on the row still being active. `active` was read
+      // BEFORE the transaction, so a double-click (or two tabs) both saw it
+      // live; an unconditional update let both stamp `withdrawnAt` and both
+      // decrement, driving `profiles.vouch_count` below the real count.
+      // Losing the claim means someone else already withdrew it — idempotent,
+      // not an error, so the caller still sees `{ ok: true }`.
+      const claim = await manager.update(
         Vouch,
-        { id: active.id },
+        { id: active.id, withdrawnAt: IsNull() },
         { withdrawnAt: new Date() },
       );
+      if (claim.affected !== 1) {
+        return;
+      }
       // Same denormalized-counter upkeep as `createVouch`, mirrored for the
       // withdraw direction — atomic `vouch_count = vouch_count - 1` in the
       // same transaction as the soft-delete, so the column never drifts from

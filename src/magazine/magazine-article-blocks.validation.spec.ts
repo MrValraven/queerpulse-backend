@@ -58,6 +58,63 @@ describe('validateArticleBlocks', () => {
     expect(() => validateArticleBlocks({})).toThrow(BadRequestException);
   });
 
+  it('throws when an image block src is neither an upload key nor https', () => {
+    // `blocks` is a bare `unknown` on the DTO, so class-validator never reaches
+    // this field — an unchecked `src` was the one image reference in the app
+    // that could carry a `javascript:` URI into a reader's browser.
+    expect(() =>
+      validateArticleBlocks([
+        {
+          id: 'b1',
+          kind: 'image',
+          alt: 'A crowd cheering.',
+          caption: '',
+          credit: 'Sara Pinheiro',
+          rights: 'courtesy',
+          tint: 'coral',
+          crop: '16:9',
+          focal: { x: 0.5, y: 0.5 },
+          src: 'javascript:alert(1)',
+        },
+      ]),
+    ).toThrow(BadRequestException);
+  });
+
+  it('accepts an empty image src (a freshly inserted image block)', () => {
+    const blocks = [
+      {
+        id: 'b1',
+        kind: 'image',
+        alt: 'A crowd cheering.',
+        caption: '',
+        credit: 'Sara Pinheiro',
+        rights: 'courtesy',
+        tint: 'coral',
+        crop: '16:9',
+        focal: { x: 0.5, y: 0.5 },
+        src: '',
+      },
+    ];
+    expect(validateArticleBlocks(blocks)).toBe(blocks);
+  });
+
+  it('throws when a paragraph html exceeds the size cap', () => {
+    expect(() =>
+      validateArticleBlocks([
+        { id: 'b1', kind: 'paragraph', html: 'x'.repeat(20_001) },
+      ]),
+    ).toThrow(BadRequestException);
+  });
+
+  it('throws when the block count exceeds the per-article cap', () => {
+    const blocks = Array.from({ length: 401 }, (unused, index) => ({
+      id: `b${index}`,
+      kind: 'paragraph',
+      html: 'A line.',
+    }));
+    expect(() => validateArticleBlocks(blocks)).toThrow(BadRequestException);
+  });
+
   it('throws for an unknown kind', () => {
     expect(() =>
       validateArticleBlocks([{ id: 'b1', kind: 'carousel' }]),

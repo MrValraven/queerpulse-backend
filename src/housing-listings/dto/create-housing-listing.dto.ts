@@ -40,6 +40,14 @@ export class CreateHousingListingDto {
 
   @IsOptional() @IsBoolean() billsIncluded?: boolean;
 
+  /**
+   * @deprecated Accepted and IGNORED (BE-HSG-07). Posting a home requires the
+   * mandatory LGBTQ+ affirming pledge, so every listing is affirming by
+   * definition and the service hard-sets the column to `true`. Kept on the DTO
+   * only because the global ValidationPipe runs `forbidNonWhitelisted` and
+   * would 400 a client still sending the field. Never model affirmation as an
+   * opt-in per-listing flag or a browse filter.
+   */
   @IsOptional() @IsBoolean() lgbtqFriendly?: boolean;
 
   // Transparency (P2.6): required on create so every listing carries an honest

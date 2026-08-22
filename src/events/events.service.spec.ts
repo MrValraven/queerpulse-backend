@@ -29,7 +29,14 @@ import { RsvpService } from './rsvp.service';
 
 describe('EventsService', () => {
   let service: EventsService;
-  let events: { findOne: jest.Mock; save: jest.Mock; exists: jest.Mock };
+  let events: {
+    findOne: jest.Mock;
+    save: jest.Mock;
+    exists: jest.Mock;
+    find: jest.Mock;
+    update: jest.Mock;
+    manager: { transaction: jest.Mock };
+  };
   let cohosts: { exists: jest.Mock; find: jest.Mock };
   let rsvps: {
     count: jest.Mock;
@@ -95,6 +102,27 @@ describe('EventsService', () => {
       findOne: jest.fn(),
       save: jest.fn((event: unknown) => event),
       exists: jest.fn().mockResolvedValue(false),
+      // Series scope (`update`/`cancel` with `scope: 'future'`) resolves the
+      // later occurrences with `find`; no test here exercises a series, so the
+      // default is "this event has no siblings".
+      find: jest.fn().mockResolvedValue([]),
+      // `cancel` flips every occurrence in ONE statement rather than saving
+      // them one at a time.
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+      // `update` runs its patch inside a transaction so a series edit is
+      // all-or-nothing. The stub just runs the callback with a manager whose
+      // `save` delegates to the same repository mock the non-transactional
+      // path uses, so assertions on `events.save` still hold.
+      manager: {
+        transaction: jest.fn(
+          async (runInTransaction: (manager: unknown) => Promise<unknown>) =>
+            runInTransaction({
+              save: (_entity: unknown, entityLike: unknown) =>
+                events.save(entityLike),
+              getRepository: () => events,
+            }),
+        ),
+      },
     };
     cohosts = {
       exists: jest.fn().mockResolvedValue(false),
@@ -389,6 +417,45 @@ describe('EventsService', () => {
     });
     await service.update('x', 'u1', { capacity: 2 });
     expect(rsvpService.reconcileWaitlist).not.toHaveBeenCalled();
+  });
+
+  // M1 (storage-key impersonation): the event cover is a shared-upload surface
+  // (cohosts edit the same event), so the interceptor exempts it and the service
+  // draws the line — a foreign cover key is allowed only when it is already the
+  // stored value (a cohost's no-op re-save); pointing the field at a NEW foreign
+  // upload is refused.
+  describe('foreign cover ownership (M1)', () => {
+    const OTHER_ID = '22222222-2222-2222-2222-222222222222';
+    const FILE_SEGMENT = '33333333-3333-3333-3333-333333333333';
+    const FOREIGN_COVER = `story-covers/${OTHER_ID}/${FILE_SEGMENT}.jpg`;
+    const baseEvent = (coverImageUrl: string | null) => ({
+      id: 'e1',
+      slug: 'x',
+      hostId: 'host',
+      status: EventStatus.Published,
+      visibility: EventVisibility.Public,
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
+      capacity: null,
+      communityId: null,
+      coverImageUrl,
+    });
+
+    it('lets a cohost re-save the unchanged foreign cover already stored', async () => {
+      events.findOne.mockResolvedValue(baseEvent(FOREIGN_COVER));
+      cohosts.exists.mockResolvedValue(true);
+      await expect(
+        service.update('x', 'cohost-1', { coverImageUrl: FOREIGN_COVER }),
+      ).resolves.toBeDefined();
+    });
+
+    it('rejects a cohost introducing a new foreign cover key', async () => {
+      events.findOne.mockResolvedValue(baseEvent(null));
+      cohosts.exists.mockResolvedValue(true);
+      await expect(
+        service.update('x', 'cohost-1', { coverImageUrl: FOREIGN_COVER }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
   });
 
   // Fix round 2 (Task C): `update()` can now resolve/detach a community via

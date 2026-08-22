@@ -20,9 +20,32 @@ describe('GenesisService', () => {
   let usersService: { createGoogleUser: jest.Mock };
   let invitesService: { createInviteForApproval: jest.Mock };
   let configuredEmail: string | null;
+  // The one-way `genesis_bootstrap` marker is read/written by raw SQL. The
+  // transaction manager carries the consume-INSERT (`query`) and the admin
+  // promotion (`update`); the top-level `dataSource.query` backs the
+  // `isGenesisConsumed` read on the mint + claim entry paths.
+  let txManager: { query: jest.Mock; update: jest.Mock };
+  let dataSource: {
+    query: jest.Mock;
+    manager: { query: jest.Mock };
+    transaction: jest.Mock;
+  };
 
   beforeEach(async () => {
     configuredEmail = GENESIS_EMAIL;
+    txManager = {
+      // Won the consume-insert by default (RETURNING yields the row).
+      query: jest.fn().mockResolvedValue([{ id: 1 }]),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+    dataSource = {
+      // Not yet consumed by default (empty result).
+      query: jest.fn().mockResolvedValue([]),
+      manager: { query: jest.fn().mockResolvedValue([]) },
+      transaction: jest.fn((runInTransaction: (manager: unknown) => unknown) =>
+        runInTransaction(txManager),
+      ),
+    };
     users = {
       findOne: jest.fn().mockResolvedValue(null),
       count: jest.fn().mockResolvedValue(0),
@@ -50,10 +73,7 @@ describe('GenesisService', () => {
         { provide: InvitesService, useValue: invitesService },
         {
           provide: DataSource,
-          useValue: {
-            transaction: (runInTransaction: (manager: unknown) => unknown) =>
-              runInTransaction({}),
-          },
+          useValue: dataSource,
         },
         {
           provide: ConfigService,
@@ -78,6 +98,16 @@ describe('GenesisService', () => {
       await expect(service.mintGenesisInvite()).rejects.toThrow(
         NotFoundException,
       );
+    });
+
+    it('404s once genesis has been consumed, even with no real members', async () => {
+      // The one-way marker is present: mint stays shut regardless of the live
+      // member count (finding L5).
+      dataSource.query.mockResolvedValue([{ id: 1 }]);
+      await expect(service.mintGenesisInvite()).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(invitesService.createInviteForApproval).not.toHaveBeenCalled();
     });
 
     it('counts real members excluding the house account itself', async () => {
@@ -199,26 +229,52 @@ describe('GenesisService', () => {
 
     it('matches the genesis email case-insensitively', async () => {
       await service.claimAdmin('user-1', 'AkaTiago@Gmail.com');
-      expect(users.update).toHaveBeenCalledWith(
+      // Promotion happens inside the transaction, via the transaction manager.
+      expect(txManager.update).toHaveBeenCalledWith(
+        User,
         { id: 'user-1' },
         { role: UserRole.Admin },
       );
     });
 
-    it('rejects once any admin already exists', async () => {
+    it('rejects once any admin already exists, and marks genesis consumed', async () => {
       users.count.mockResolvedValue(1);
       await expect(service.claimAdmin('user-1', GENESIS_EMAIL)).rejects.toThrow(
         ForbiddenException,
       );
-      expect(users.update).not.toHaveBeenCalled();
+      expect(txManager.update).not.toHaveBeenCalled();
+      // A pre-existing admin permanently closes genesis, so a later admin
+      // removal can't reopen the claim path.
+      expect(dataSource.manager.query).toHaveBeenCalled();
     });
 
-    it('promotes the caller to admin', async () => {
+    it('rejects once genesis has already been consumed', async () => {
+      dataSource.query.mockResolvedValue([{ id: 1 }]);
+      await expect(service.claimAdmin('user-1', GENESIS_EMAIL)).rejects.toThrow(
+        ForbiddenException,
+      );
+      expect(txManager.update).not.toHaveBeenCalled();
+    });
+
+    it('promotes the caller to admin and consumes the one-way marker', async () => {
       await service.claimAdmin('user-1', GENESIS_EMAIL);
-      expect(users.update).toHaveBeenCalledWith(
+      // The consume-insert ran, then the promotion — both in one transaction.
+      expect(txManager.query).toHaveBeenCalled();
+      expect(txManager.update).toHaveBeenCalledWith(
+        User,
         { id: 'user-1' },
         { role: UserRole.Admin },
       );
+    });
+
+    it('does not promote if it loses the consume race', async () => {
+      // The conditional insert returned nothing: another claim consumed the
+      // marker first.
+      txManager.query.mockResolvedValue([]);
+      await expect(service.claimAdmin('user-1', GENESIS_EMAIL)).rejects.toThrow(
+        ForbiddenException,
+      );
+      expect(txManager.update).not.toHaveBeenCalled();
     });
   });
 });

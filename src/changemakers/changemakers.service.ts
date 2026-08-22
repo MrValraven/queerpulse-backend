@@ -6,7 +6,9 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { Repository } from 'typeorm';
+import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
+import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { Changemaker, ChangemakerStatus } from './entities/changemaker.entity';
 import {
   CHANGEMAKER_SETTINGS_ID,
@@ -17,7 +19,6 @@ import {
   ChangemakerListResponseDTO,
   DirectoryStatsDTO,
   toChangemakerDTO,
-  toDirectoryStatsDTO,
 } from './changemakers-response';
 import { CreateChangemakerDto } from './dto/create-changemaker.dto';
 import { UpdateChangemakerDto } from './dto/update-changemaker.dto';
@@ -36,18 +37,41 @@ export class ChangemakersService {
   ) {}
 
   async listPublic(): Promise<ChangemakerListResponseDTO> {
+    // Bounded: this was an unbounded `find()` on a `@Public()`, CDN-cached
+    // route, so the response size was whatever the directory had grown to.
     const published = await this.changemakers.find({
       where: { status: ChangemakerStatus.Published },
       order: { isFeatured: 'DESC', sortOrder: 'ASC', publishedAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     const settings = await this.loadSettings();
     return {
       profiles: published.map(toChangemakerDTO),
-      stats: toDirectoryStatsDTO(
-        published,
-        settings.peopleHelped,
-        settings.activeCampaigns,
-      ),
+      // Counted in SQL over EVERY published profile, not over the page above:
+      // the headline "N profiled / N cause areas" figures must not silently
+      // stop counting once the directory outgrows one page.
+      stats: {
+        ...(await this.publishedTotals()),
+        peopleHelped: settings.peopleHelped,
+        activeCampaigns: settings.activeCampaigns,
+      },
+    };
+  }
+
+  /** `profiled` + `causeAreas` across every published profile. */
+  private async publishedTotals(): Promise<{
+    profiled: number;
+    causeAreas: number;
+  }> {
+    const row = await this.changemakers
+      .createQueryBuilder('c')
+      .select('COUNT(*)', 'profiled')
+      .addSelect('COUNT(DISTINCT LOWER(TRIM(c.cause)))', 'causeAreas')
+      .where('c.status = :status', { status: ChangemakerStatus.Published })
+      .getRawOne<{ profiled: string; causeAreas: string }>();
+    return {
+      profiled: Number(row?.profiled ?? 0),
+      causeAreas: Number(row?.causeAreas ?? 0),
     };
   }
 
@@ -64,17 +88,35 @@ export class ChangemakersService {
   async listAdmin(): Promise<ChangemakerDTO[]> {
     const all = await this.changemakers.find({
       order: { isFeatured: 'DESC', sortOrder: 'ASC', createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     return all.map(toChangemakerDTO);
   }
 
-  async create(dto: CreateChangemakerDto): Promise<ChangemakerDTO> {
+  async create(
+    requesterUserId: string,
+    dto: CreateChangemakerDto,
+  ): Promise<ChangemakerDTO> {
+    // No stored baseline on create, so any foreign image key is refused (see
+    // `assertNoForeignUploadIntroduced`). The admin create form presigns its
+    // own upload in the acting admin's session, so `owner === requester` and a
+    // legitimate create passes; only a copied foreign key is blocked.
+    assertNoForeignUploadIntroduced(requesterUserId, dto.imageUrl, []);
     const saved = await this.createWithUniqueSlug(dto);
     return toChangemakerDTO(saved);
   }
 
-  async update(id: string, dto: UpdateChangemakerDto): Promise<ChangemakerDTO> {
+  async update(
+    requesterUserId: string,
+    id: string,
+    dto: UpdateChangemakerDto,
+  ): Promise<ChangemakerDTO> {
     const profile = await this.requireById(id);
+    // Runs BEFORE mutating: any admin may re-save the image another admin
+    // sourced, but may not point it at a NEW foreign key.
+    assertNoForeignUploadIntroduced(requesterUserId, dto.imageUrl, [
+      profile.imageUrl,
+    ]);
     Object.assign(profile, dto);
     const saved = await this.changemakers.save(profile);
     return toChangemakerDTO(saved);
@@ -102,14 +144,13 @@ export class ChangemakersService {
     settings.peopleHelped = dto.peopleHelped;
     settings.activeCampaigns = dto.activeCampaigns;
     await this.settings.save(settings);
-    const published = await this.changemakers.find({
-      where: { status: ChangemakerStatus.Published },
-    });
-    return toDirectoryStatsDTO(
-      published,
-      settings.peopleHelped,
-      settings.activeCampaigns,
-    );
+    // Same SQL aggregate `listPublic` uses — this used to load every published
+    // row just to count them.
+    return {
+      ...(await this.publishedTotals()),
+      peopleHelped: settings.peopleHelped,
+      activeCampaigns: settings.activeCampaigns,
+    };
   }
 
   private async requireById(id: string): Promise<Changemaker> {

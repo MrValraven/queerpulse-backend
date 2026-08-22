@@ -558,6 +558,7 @@ describe('JoinRequestsService', () => {
         'r1',
         'admin-1',
         PlatformJoinRequestStatus.Declined,
+        'spam_pattern',
       );
       expect(invites.createInviteForApproval).not.toHaveBeenCalled();
       expect(result.inviteCode).toBeNull();
@@ -565,6 +566,30 @@ describe('JoinRequestsService', () => {
         expect.anything(),
         expect.objectContaining({ inviteId: null }),
       );
+    });
+
+    // The reason is enforced in the SERVICE, not just by the frontend always
+    // sending one: a decline with no recorded reason leaves the applicant with
+    // an unexplainable outcome and the reviewer with nothing to appeal against.
+    it('refuses a decline with no reason', async () => {
+      txRepo.findOne.mockResolvedValue(pendingRow());
+      await expect(
+        service.review('r1', 'admin-1', PlatformJoinRequestStatus.Declined),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(txRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses a decline whose reason is only whitespace', async () => {
+      txRepo.findOne.mockResolvedValue(pendingRow());
+      await expect(
+        service.review(
+          'r1',
+          'admin-1',
+          PlatformJoinRequestStatus.Declined,
+          '   ',
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(txRepo.update).not.toHaveBeenCalled();
     });
 
     it('404s on an unknown request', async () => {

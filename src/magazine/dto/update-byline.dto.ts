@@ -1,4 +1,6 @@
-import { IsString, MinLength } from 'class-validator';
+import { IsString, MaxLength, MinLength } from 'class-validator';
+
+import { DESK_SHORT_TEXT_MAX } from './desk-text-limits';
 
 /**
  * Body of `PATCH /magazine/writer/pieces/:id/byline` (Magazine Desk Phase 6,
@@ -7,5 +9,6 @@ import { IsString, MinLength } from 'class-validator';
  * before applying this.
  */
 export class UpdateBylineDto {
-  @IsString() @MinLength(1) byline!: string;
+  // Capped (CNT-14): a byline line, not a bio.
+  @IsString() @MinLength(1) @MaxLength(DESK_SHORT_TEXT_MAX) byline!: string;
 }

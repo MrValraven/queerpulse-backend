@@ -6,11 +6,18 @@ import {
   PrimaryGeneratedColumn,
 } from 'typeorm';
 
-// A short-lived, single-purpose step-up token minted by `POST
-// /account/reauth`. Auth is OAuth-only — there is no password to re-verify —
-// so this simply records that the caller re-confirmed their session
-// recently. The destructive/export routes below require a live (unexpired)
-// token belonging to the caller.
+// A short-lived, single-purpose step-up token.
+//
+// Minted ONLY by `AuthService.mintReauthToken`, reached through the Google
+// OAuth callback's `reauth` branch. There is no plain `POST /account/reauth`
+// route: one existed, and it handed out a step-up token to anyone holding the
+// session cookie, which is exactly the thing step-up auth is supposed to be
+// independent of. Requiring a completed OAuth round trip (`prompt=login`) is
+// what makes the token mean "this person can sign in RIGHT NOW".
+//
+// The `token` column holds a SHA-256 hash, never the value handed to the
+// client. The destructive/export routes require a live (unexpired, unconsumed)
+// token belonging to the caller; `AccountService.assertReauth` consumes it.
 @Entity('account_reauth_token')
 export class AccountReauthToken {
   @PrimaryGeneratedColumn('uuid')

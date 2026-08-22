@@ -169,7 +169,7 @@ export class EventsController {
   @Patch(':slug/rsvp/details')
   @ApiOperation({
     summary:
-      "Update your own RSVP details (\"Anything we should know?\"): guest " +
+      'Update your own RSVP details ("Anything we should know?"): guest ' +
       'count, access/dietary needs, and who can see them.',
   })
   @ApiOkResponse({ description: 'The updated RSVP details.' })
@@ -189,7 +189,7 @@ export class EventsController {
     summary: 'Cancel your RSVP to an event.',
     description:
       'For a recurring occurrence, `?scope=future` (MSG-10) also cancels ' +
-      "your own RSVP (if any) on every later occurrence in its series — " +
+      'your own RSVP (if any) on every later occurrence in its series — ' +
       "never anyone else's. `?scope=this` (the default) cancels only this " +
       'occurrence.',
   })

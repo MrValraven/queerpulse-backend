@@ -236,7 +236,16 @@ export function toForumPostResponse(
     canDelete: canModerate && !blanked,
     // Only an author's own tombstone is restorable through the forum route; a
     // moderator takedown is lifted through the moderation/appeal path, not here.
-    canRestore: canModerate && authorTombstoned && !moderationRemoved,
+    // Mirrors `ForumPostsService.assertCanRestore`, which is what actually
+    // enforces it — a null `deletedById` is a legacy tombstone the author may
+    // still clear.
+    canRestore:
+      canModerate &&
+      authorTombstoned &&
+      !moderationRemoved &&
+      (viewer.isModerator ||
+        post.deletedById == null ||
+        post.deletedById === viewer.userId),
     canViewHistory: canModerate && post.editedAt != null,
     moderationRemoved,
     moderationHidden,

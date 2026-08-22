@@ -6,12 +6,8 @@ import { ResourceListingCategory } from '../entities/resource-listing.entity';
 
 describe('hasAtLeastOneContactField', () => {
   it('is true when at least one contact field is a non-blank string', () => {
-    expect(hasAtLeastOneContactField({ phone: '+351 912 345 678' })).toBe(
-      true,
-    );
-    expect(hasAtLeastOneContactField({ email: 'help@example.org' })).toBe(
-      true,
-    );
+    expect(hasAtLeastOneContactField({ phone: '+351 912 345 678' })).toBe(true);
+    expect(hasAtLeastOneContactField({ email: 'help@example.org' })).toBe(true);
     expect(hasAtLeastOneContactField({ website: 'example.org' })).toBe(true);
   });
 

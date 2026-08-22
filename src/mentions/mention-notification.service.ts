@@ -5,7 +5,10 @@ import { MemberLookup } from '../common/member-ref';
 import { extractMentions } from '../common/mentions';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
-import { Community } from '../communities/entities/community.entity';
+import {
+  AccessTier,
+  Community,
+} from '../communities/entities/community.entity';
 import {
   CommunityMember,
   RosterRole,
@@ -62,7 +65,18 @@ export class MentionNotificationService {
         const bySlug = await new MemberLookup(this.profiles).userIdsForSlugs(
           mentions.members,
         );
+        // When the mention originates INSIDE a non-public community, an
+        // @-member mention must not leak the post/reply body — the payload
+        // carries up to 140 chars of it as `excerpt` — to a member who cannot
+        // see that community. Restrict the mentioned recipients to the
+        // community's own roster. A public community, a forum thread, or a
+        // global post (no community) stays unrestricted.
+        const allowedMemberRecipients = await this.recipientsAllowedForSource(
+          payloadBase,
+          Array.from(bySlug.values()),
+        );
         for (const [slug, userId] of bySlug) {
+          if (!allowedMemberRecipients.has(userId)) continue;
           groups.push({ kind: 'member', ref: slug, recipients: [userId] });
         }
       }
@@ -258,5 +272,49 @@ export class MentionNotificationService {
     } catch {
       // Intentionally ignored — best-effort, same as `notify()` above.
     }
+  }
+
+  /**
+   * The subset of `candidateUserIds` allowed to receive an `@`-member mention,
+   * given where the mention was written (`payloadBase.source` +
+   * `communitySlug`). For a non-public community source (request/invite/private
+   * tier) that resolves to a real community, this is the community's own roster
+   * — a mention `excerpt` carries gated-space content a non-member must never
+   * see (finding H3). For a public community, a forum thread, or a global post
+   * with no community, every candidate passes through unchanged.
+   *
+   * Fails open on an unresolvable community slug: the fan-out runs synchronously
+   * right after the post/reply is saved, so the source community is present in
+   * practice; a miss means a data race we can't classify, and dropping a
+   * public-community notification on that basis would be worse than the
+   * (vanishingly rare) edge it guards.
+   */
+  private async recipientsAllowedForSource(
+    payloadBase: Record<string, unknown>,
+    candidateUserIds: string[],
+  ): Promise<Set<string>> {
+    if (!candidateUserIds.length) {
+      return new Set();
+    }
+    const source = payloadBase.source;
+    const communitySlug = payloadBase.communitySlug;
+    if (
+      source !== 'community' ||
+      typeof communitySlug !== 'string' ||
+      !communitySlug
+    ) {
+      return new Set(candidateUserIds);
+    }
+    const community = await this.communities.findOne({
+      where: { slug: communitySlug },
+    });
+    if (!community || community.accessTier === AccessTier.Public) {
+      return new Set(candidateUserIds);
+    }
+    const memberships = await this.members.find({
+      where: { communityId: community.id, userId: In(candidateUserIds) },
+      select: { userId: true },
+    });
+    return new Set(memberships.map((membership) => membership.userId));
   }
 }

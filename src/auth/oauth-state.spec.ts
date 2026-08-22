@@ -37,6 +37,19 @@ describe('oauth-state codec', () => {
       });
     });
 
+    it('round-trips the step-up reauth flag', () => {
+      const encoded = encodeOAuthState({ redirect: '/settings', reauth: true });
+      expect(decodeOAuthState(encoded)).toEqual({
+        redirect: '/settings',
+        reauth: true,
+      });
+    });
+
+    it('omits reauth entirely when false (mirrors ageAttested)', () => {
+      const encoded = encodeOAuthState({ redirect: '/feed', reauth: false });
+      expect(decodeOAuthState(encoded)).toEqual({ redirect: '/feed' });
+    });
+
     it('produces a single opaque token (no raw path leakage)', () => {
       const encoded = encodeOAuthState({ redirect: '/feed' })!;
       expect(encoded).not.toContain('/');
@@ -63,6 +76,14 @@ describe('oauth-state codec', () => {
         'utf8',
       ).toString('base64url');
       expect(decodeOAuthState(encoded)).toEqual({});
+    });
+
+    it('only a strict `true` sets reauth (a truthy string does not attest)', () => {
+      const encoded = Buffer.from(
+        JSON.stringify({ redirect: '/feed', reauth: 'yes' }),
+        'utf8',
+      ).toString('base64url');
+      expect(decodeOAuthState(encoded)).toEqual({ redirect: '/feed' });
     });
   });
 });

@@ -28,6 +28,16 @@ interface PromotedRsvpRow {
   user_id: string;
 }
 
+/** One occurrence's cancel result, carried back out of the series transaction
+ *  so the promotion notices can be emitted after it commits. */
+interface CancelledRsvpOutcome {
+  eventId: string;
+  eventSlug: string;
+  promoted: string[];
+  seriesId: string | null;
+  seriesIndex: number | null;
+}
+
 @Injectable()
 export class RsvpService {
   constructor(
@@ -199,17 +209,41 @@ export class RsvpService {
     userId: string,
     scope: 'this' | 'future' = 'this',
   ): Promise<{ ok: true }> {
-    const primary = await this.cancelRsvpOne(slug, userId);
-    if (scope === 'future' && primary.seriesId && primary.seriesIndex !== null) {
-      const siblings = await this.events.find({
-        where: {
-          seriesId: primary.seriesId,
-          seriesIndex: MoreThan(primary.seriesIndex),
-        },
-      });
-      for (const sibling of siblings) {
-        await this.cancelRsvpOne(sibling.slug, userId);
+    // ONE transaction for the whole series. Each occurrence used to get its
+    // own, so a throw part-way through a `'future'` cancel left the member
+    // still on the roster for the rest of the series (and any waitlist
+    // promotions those cancels had already triggered stood), with an error and
+    // no way to tell which occurrences went through. Siblings are locked in
+    // `seriesIndex` order so two members leaving the same series concurrently
+    // take the row locks in the same order rather than deadlocking.
+    const outcomes = await this.dataSource.transaction(async (manager) => {
+      const results: CancelledRsvpOutcome[] = [];
+      const primary = await this.cancelRsvpOne(manager, slug, userId);
+      results.push(primary);
+      if (
+        scope === 'future' &&
+        primary.seriesId &&
+        primary.seriesIndex !== null
+      ) {
+        const siblings = await manager.find(Event, {
+          where: {
+            seriesId: primary.seriesId,
+            seriesIndex: MoreThan(primary.seriesIndex),
+          },
+          order: { seriesIndex: 'ASC' },
+        });
+        for (const sibling of siblings) {
+          results.push(await this.cancelRsvpOne(manager, sibling.slug, userId));
+        }
       }
+      return results;
+    });
+
+    // Promotion notices ride out only once the cancels they follow from have
+    // actually committed — a rolled-back transaction must not leave someone
+    // told they got a seat.
+    for (const outcome of outcomes) {
+      this.emitPromotions(outcome.eventId, outcome.eventSlug, outcome.promoted);
     }
     return { ok: true };
   }
@@ -217,52 +251,48 @@ export class RsvpService {
   // The actual single-event RSVP cancel — everything `cancelRsvp()` did
   // before MSG-10 added series scope, plus the event's own series linkage so
   // the public method above can find later siblings without a second lookup.
+  // Runs on the CALLER'S transaction (see `cancelRsvp`) and emits nothing
+  // itself, so the whole series commits or rolls back as one.
   private async cancelRsvpOne(
+    manager: EntityManager,
     slug: string,
     userId: string,
-  ): Promise<{ seriesId: string | null; seriesIndex: number | null }> {
-    const result = await this.dataSource.transaction(async (manager) => {
-      const event = await manager.findOne(Event, {
-        where: { slug },
-        lock: { mode: 'pessimistic_write' },
-      });
-      if (!event) {
-        throw new NotFoundException('Event not found');
-      }
+  ): Promise<CancelledRsvpOutcome> {
+    const event = await manager.findOne(Event, {
+      where: { slug },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (!event) {
+      throw new NotFoundException('Event not found');
+    }
 
-      const rsvpRepo = manager.getRepository(EventRsvp);
-      const mine = await rsvpRepo.findOne({
-        where: { eventId: event.id, userId },
-      });
-      if (!mine || mine.status === RsvpStatus.Cancelled) {
-        return {
-          eventId: event.id,
-          eventSlug: event.slug,
-          promoted: [] as string[],
-          seriesId: event.seriesId,
-          seriesIndex: event.seriesIndex,
-        };
-      }
-      const wasGoing = mine.status === RsvpStatus.Going;
-      mine.status = RsvpStatus.Cancelled;
-      mine.waitlistPosition = null;
-      await rsvpRepo.save(mine);
-
-      // A freed 'going' seat pulls the head(s) of the waitlist up.
-      const promoted = wasGoing
-        ? await this.promoteWaitlist(manager, event)
-        : [];
+    const rsvpRepo = manager.getRepository(EventRsvp);
+    const mine = await rsvpRepo.findOne({
+      where: { eventId: event.id, userId },
+    });
+    if (!mine || mine.status === RsvpStatus.Cancelled) {
       return {
         eventId: event.id,
         eventSlug: event.slug,
-        promoted,
+        promoted: [],
         seriesId: event.seriesId,
         seriesIndex: event.seriesIndex,
       };
-    });
+    }
+    const wasGoing = mine.status === RsvpStatus.Going;
+    mine.status = RsvpStatus.Cancelled;
+    mine.waitlistPosition = null;
+    await rsvpRepo.save(mine);
 
-    this.emitPromotions(result.eventId, result.eventSlug, result.promoted);
-    return { seriesId: result.seriesId, seriesIndex: result.seriesIndex };
+    // A freed 'going' seat pulls the head(s) of the waitlist up.
+    const promoted = wasGoing ? await this.promoteWaitlist(manager, event) : [];
+    return {
+      eventId: event.id,
+      eventSlug: event.slug,
+      promoted,
+      seriesId: event.seriesId,
+      seriesIndex: event.seriesIndex,
+    };
   }
 
   // Re-runs waitlist promotion for an event out of band — e.g. after its
@@ -411,7 +441,9 @@ export class RsvpService {
       where: { eventId: event.id, userId },
     });
     if (!rsvp || rsvp.status === RsvpStatus.Cancelled) {
-      throw new NotFoundException('You do not have an active RSVP to this event');
+      throw new NotFoundException(
+        'You do not have an active RSVP to this event',
+      );
     }
     Object.assign(rsvp, {
       ...(dto.guestCount !== undefined ? { guestCount: dto.guestCount } : {}),

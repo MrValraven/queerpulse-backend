@@ -1,50 +1,27 @@
-import {
-  Body,
-  Controller,
-  Get,
-  HttpCode,
-  HttpStatus,
-  Param,
-  ParseUUIDPipe,
-  Patch,
-  Post,
-  Query,
-  UseGuards,
-} from '@nestjs/common';
+import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { seconds, Throttle } from '@nestjs/throttler';
-import {
-  CurrentUser,
-  CurrentUserData,
-} from '../auth/decorators/current-user.decorator';
 import { Public } from '../auth/decorators/public.decorator';
-import { Roles } from '../auth/decorators/roles.decorator';
-import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
-import { UserRole } from '../users/entities/user.entity';
-import { BulkReviewJoinRequestsDto } from './dto/bulk-review-join-requests.dto';
 import { CreateJoinRequestDto } from './dto/create-join-request.dto';
-import { ListJoinRequestsQuery } from './dto/list-join-requests.query';
-import { ReviewJoinRequestDto } from './dto/review-join-request.dto';
-import { SampleJoinRequestsQuery } from './dto/sample-join-requests.query';
-import {
-  JoinRequestView,
-  SubmittedJoinRequestView,
-} from './join-request-response';
+import { SubmittedJoinRequestView } from './join-request-response';
 import { JoinRequestsService } from './join-requests.service';
 import {
   ApiConflictResponse,
-  ApiCookieAuth,
   ApiCreatedResponse,
   ApiForbiddenResponse,
-  ApiNotFoundResponse,
-  ApiOkResponse,
   ApiOperation,
   ApiTags,
-  ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
+/**
+ * The PUBLIC side of invite requests: one unauthenticated route where a
+ * stranger asks to be let in.
+ *
+ * The moderator/admin review queue that used to share this class now lives in
+ * `AdminJoinRequestsController`, guarded at class level. Keeping the two apart
+ * means a route added here is public because someone put `@Public()` on it, not
+ * because they forgot the guards.
+ */
 @ApiTags('Membership')
-@ApiCookieAuth()
 @Controller('join-requests')
 export class JoinRequestsController {
   constructor(private readonly joinRequestsService: JoinRequestsService) {}
@@ -81,90 +58,5 @@ export class JoinRequestsController {
   })
   submit(@Body() dto: CreateJoinRequestDto): Promise<SubmittedJoinRequestView> {
     return this.joinRequestsService.submit(dto);
-  }
-
-  @Get()
-  @UseGuards(ActiveMemberGuard, RolesGuard)
-  @Roles(UserRole.Moderator, UserRole.Admin)
-  @ApiOperation({ summary: 'List invite requests for the review queue' })
-  @ApiOkResponse({ description: 'The invite request queue.' })
-  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({
-    description: 'Requires a moderator or admin role.',
-  })
-  list(@Query() query: ListJoinRequestsQuery): Promise<JoinRequestView[]> {
-    return this.joinRequestsService.list(query.status, {
-      source: query.source,
-      cursor: query.cursor,
-      limit: query.limit,
-      sort: query.sort,
-    });
-  }
-
-  @Post('bulk')
-  @UseGuards(ActiveMemberGuard, RolesGuard)
-  @Roles(UserRole.Moderator, UserRole.Admin)
-  @ApiOperation({
-    summary: 'Approve, decline, or waitlist multiple invite requests',
-  })
-  @ApiOkResponse({ description: 'Per-item bulk review result.' })
-  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({
-    description: 'Requires a moderator or admin role.',
-  })
-  bulk(
-    @CurrentUser() user: CurrentUserData,
-    @Body() dto: BulkReviewJoinRequestsDto,
-  ): Promise<{
-    succeeded: string[];
-    failed: { id: string; reason: string }[];
-  }> {
-    return this.joinRequestsService.bulkReview(
-      dto.ids,
-      user.userId,
-      dto.status,
-      dto.declineReason,
-    );
-  }
-
-  @Get('sample')
-  @UseGuards(ActiveMemberGuard, RolesGuard)
-  @Roles(UserRole.Moderator, UserRole.Admin)
-  @ApiOperation({
-    summary: 'A random sample of past decisions, for peer quality review',
-  })
-  @ApiOkResponse({ description: 'Sampled past invite-request decisions.' })
-  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({
-    description: 'Requires a moderator or admin role.',
-  })
-  sample(@Query() query: SampleJoinRequestsQuery): Promise<JoinRequestView[]> {
-    return this.joinRequestsService.sample(query.n ?? 10);
-  }
-
-  @Patch(':id')
-  @UseGuards(ActiveMemberGuard, RolesGuard)
-  @Roles(UserRole.Moderator, UserRole.Admin)
-  @ApiOperation({ summary: 'Approve or decline an invite request' })
-  @ApiOkResponse({ description: 'The updated invite request.' })
-  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({
-    description: 'Requires a moderator or admin role.',
-  })
-  @ApiNotFoundResponse({ description: 'The invite request does not exist.' })
-  @ApiConflictResponse({
-    description: 'The invite request has already been reviewed.',
-  })
-  review(
-    @Param('id', ParseUUIDPipe) id: string,
-    @CurrentUser() user: CurrentUserData,
-    @Body() dto: ReviewJoinRequestDto,
-  ): Promise<JoinRequestView> {
-    return this.joinRequestsService.review(
-      id,
-      user.userId,
-      dto.status,
-      dto.declineReason,
-    );
   }
 }

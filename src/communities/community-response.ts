@@ -336,8 +336,18 @@ export function toCommunityReply(
     canEdit: isAuthor && isMember && !blanked, // edit is author-only (owner/mod excluded)
     canDelete: canManage && !blanked,
     // Only an author's own tombstone is restorable here; a moderator takedown
-    // is lifted through the moderation/appeal path.
-    canRestore: canManage && authorTombstoned && !moderationRemoved,
+    // is lifted through the moderation/appeal path. A tombstone set by the
+    // community's owner/mod is likewise only clearable BY an owner/mod — the
+    // flag mirrors `CommunityPostsService.assertCanRestore` so the button is
+    // absent rather than 403-ing on click (a null `deletedById` is a legacy
+    // tombstone, which that check lets the author restore).
+    canRestore:
+      canManage &&
+      authorTombstoned &&
+      !moderationRemoved &&
+      (isOwnerOrMod(viewerRole) ||
+        reply.deletedById == null ||
+        reply.deletedById === viewerId),
     canViewHistory: canManage && reply.editedAt != null,
     moderationRemoved,
     moderationHidden,
@@ -383,7 +393,15 @@ export function toCommunityPost(
     deleted: authorTombstoned || moderationRemoved,
     canEdit: isAuthor && isMember && !blanked, // edit is author-only (owner/mod excluded)
     canDelete: canManage && !blanked,
-    canRestore: canManage && authorTombstoned && !moderationRemoved,
+    // See `toCommunityReply`'s note: mirrors
+    // `CommunityPostsService.assertCanRestore`.
+    canRestore:
+      canManage &&
+      authorTombstoned &&
+      !moderationRemoved &&
+      (isOwnerOrMod(viewerRole) ||
+        post.deletedById == null ||
+        post.deletedById === viewerId),
     canViewHistory: canManage && post.editedAt != null,
     reactions: toReactionSummaries(reactions),
     replies,

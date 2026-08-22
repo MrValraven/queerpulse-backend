@@ -4,12 +4,17 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { CreateListingDto } from './dto/create-listing.dto';
 import { ListingStatus } from './entities/listing.entity';
+import { AdminListingsController } from './admin-listings.controller';
+import { ListingClaimsService } from './listing-claims.service';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
 import { ListingsController } from './listings.controller';
 import { ListingsService } from './listings.service';
 
 describe('ListingsController', () => {
   let controller: ListingsController;
+  // The moderator/admin routes moved to their own controller (BE-HSG-29); the
+  // four tests below drive it through the same mocked service.
+  let adminController: AdminListingsController;
   let service: {
     create: jest.Mock;
     listMine: jest.Mock;
@@ -46,10 +51,11 @@ describe('ListingsController', () => {
       answerQuestion: jest.fn(),
     };
     const module: TestingModule = await Test.createTestingModule({
-      controllers: [ListingsController],
+      controllers: [ListingsController, AdminListingsController],
       providers: [
         { provide: ListingsService, useValue: service },
         { provide: ListingEditSuggestionsService, useValue: {} },
+        { provide: ListingClaimsService, useValue: {} },
       ],
     })
       .overrideGuard(ActiveMemberGuard)
@@ -58,6 +64,7 @@ describe('ListingsController', () => {
       .useValue({ canActivate: () => true })
       .compile();
     controller = module.get(ListingsController);
+    adminController = module.get(AdminListingsController);
   });
 
   it('POST / creates a listing owned by the caller', async () => {
@@ -114,11 +121,11 @@ describe('ListingsController', () => {
     expect(service.remove).toHaveBeenCalledWith('QPL-2026-0001', 'owner-1');
   });
 
-  it('PATCH /:ref/status forwards the status transition and the acting moderator', async () => {
+  it('PATCH /admin/listings/:ref/status forwards the status transition and the acting moderator', async () => {
     const updated = { ref: 'QPL-2026-0001', status: ListingStatus.Live };
     service.setStatus.mockResolvedValue(updated);
 
-    const result = await controller.setStatus(user, 'QPL-2026-0001', {
+    const result = await adminController.setStatus(user, 'QPL-2026-0001', {
       status: ListingStatus.Live,
     });
 
@@ -131,11 +138,11 @@ describe('ListingsController', () => {
     expect(result).toBe(updated);
   });
 
-  it('PATCH admin/bulk-status forwards refs/status/actor/reason', async () => {
+  it('PATCH /admin/listings/bulk-status forwards refs/status/actor/reason', async () => {
     const summary = { updated: ['QPL-2026-0001'], failed: [] };
     service.bulkSetStatus.mockResolvedValue(summary);
 
-    const result = await controller.bulkSetStatus(user, {
+    const result = await adminController.bulkSetStatus(user, {
       refs: ['QPL-2026-0001'],
       status: ListingStatus.Live,
       reason: 'looks good',
@@ -150,11 +157,11 @@ describe('ListingsController', () => {
     expect(result).toBe(summary);
   });
 
-  it('POST admin/bulk-remove forwards refs/actor/reason', async () => {
+  it('POST /admin/listings/bulk-remove forwards refs/actor/reason', async () => {
     const summary = { updated: ['QPL-2026-0001'], failed: ['QPL-2026-9999'] };
     service.bulkRemove.mockResolvedValue(summary);
 
-    const result = await controller.bulkRemove(user, {
+    const result = await adminController.bulkRemove(user, {
       refs: ['QPL-2026-0001', 'QPL-2026-9999'],
     });
 
@@ -166,11 +173,11 @@ describe('ListingsController', () => {
     expect(result).toBe(summary);
   });
 
-  it('GET admin/:ref/history forwards the ref', async () => {
+  it('GET /admin/listings/:ref/history forwards the ref', async () => {
     const history = { events: [], questions: [] };
     service.getListingHistory.mockResolvedValue(history);
 
-    const result = await controller.getHistory('QPL-2026-0001');
+    const result = await adminController.getHistory('QPL-2026-0001');
 
     expect(service.getListingHistory).toHaveBeenCalledWith('QPL-2026-0001');
     expect(result).toBe(history);

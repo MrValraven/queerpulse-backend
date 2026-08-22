@@ -73,4 +73,13 @@ export class ForumPost {
   // edit history stays readable (see `ForumPostsService.tombstonePost`).
   @Column({ type: 'timestamptz', nullable: true })
   deletedAt!: Date | null;
+
+  // WHO set the tombstone above. A platform moderator's takedown used to be
+  // undoable by the author in one request, because delete and restore shared
+  // the same author-OR-moderator check (BE-COM-01). Only the actor who set the
+  // tombstone — or a platform Moderator/Admin — may clear it now; see
+  // `ForumPostsService.assertCanRestore`. NULL is "not tombstoned" or a legacy
+  // tombstone predating `AddContentTombstoneActor1793520000000`.
+  @Column({ type: 'uuid', nullable: true })
+  deletedById!: string | null;
 }

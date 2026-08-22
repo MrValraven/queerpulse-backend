@@ -8,6 +8,10 @@ import {
   Put,
   UseGuards,
 } from '@nestjs/common';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -62,10 +66,11 @@ export class AdminBotsController {
   @ApiNotFoundResponse({ description: 'System account not found.' })
   @Patch(':userId')
   updateBotProfile(
+    @CurrentUser() actingAdmin: CurrentUserData,
     @Param('userId', ParseUUIDPipe) userId: string,
     @Body() dto: UpdateProfileDto,
   ) {
-    return this.adminBots.updateBotProfile(userId, dto);
+    return this.adminBots.updateBotProfile(actingAdmin.userId, userId, dto);
   }
 
   @ApiOperation({ summary: "Replace a system account's username." })
@@ -102,10 +107,11 @@ export class AdminBotsController {
   @ApiNotFoundResponse({ description: 'System account not found.' })
   @Put(':userId/work')
   replaceBotWork(
+    @CurrentUser() actingAdmin: CurrentUserData,
     @Param('userId', ParseUUIDPipe) userId: string,
     @Body() dto: ReplaceWorkDto,
   ) {
-    return this.adminBots.replaceBotWork(userId, dto);
+    return this.adminBots.replaceBotWork(actingAdmin.userId, userId, dto);
   }
 
   @ApiOperation({ summary: "Replace a system account's skills." })

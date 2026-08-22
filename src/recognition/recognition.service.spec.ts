@@ -9,6 +9,7 @@ import { RecognitionPerkClaim } from './entities/recognition-perk-claim.entity';
 import { RecognitionStat } from './entities/recognition-stat.entity';
 import { RecognitionAwardingService } from './recognition-awarding.service';
 import { RecognitionService } from './recognition.service';
+import { ProfilesService } from '../profiles/profiles.service';
 
 describe('RecognitionService', () => {
   let service: RecognitionService;
@@ -17,6 +18,7 @@ describe('RecognitionService', () => {
   let perkClaimsRepo: { find: jest.Mock };
   let ledgerRepo: { find: jest.Mock };
   let profilesRepo: { findOne: jest.Mock };
+  let profilesService: { findBySlugOrThrow: jest.Mock };
   let awardingService: { gatherSignalsForUser: jest.Mock };
 
   beforeEach(async () => {
@@ -25,6 +27,7 @@ describe('RecognitionService', () => {
     perkClaimsRepo = { find: jest.fn().mockResolvedValue([]) };
     ledgerRepo = { find: jest.fn().mockResolvedValue([]) };
     profilesRepo = { findOne: jest.fn() };
+    profilesService = { findBySlugOrThrow: jest.fn() };
     // Non-null signals so buildRecognition's owner-gated fields (xpBreakdown,
     // xpLedger) populate — mirrors a real `includePerks: true` call.
     awardingService = {
@@ -63,6 +66,7 @@ describe('RecognitionService', () => {
         },
         { provide: getRepositoryToken(Profile), useValue: profilesRepo },
         { provide: RecognitionAwardingService, useValue: awardingService },
+        { provide: ProfilesService, useValue: profilesService },
       ],
     }).compile();
     service = module.get(RecognitionService);
@@ -171,15 +175,22 @@ describe('RecognitionService', () => {
   });
 
   describe('getBySlug', () => {
-    it('resolves the slug to a userId via the Profile repository, then builds recognition for that user', async () => {
-      profilesRepo.findOne.mockResolvedValue({ userId: 'u3', slug: 'jamie' });
+    it('resolves the slug through the visibility-gated profile read, then builds recognition for that user', async () => {
+      profilesService.findBySlugOrThrow.mockResolvedValue({
+        userId: 'u3',
+        slug: 'jamie',
+      });
       statsRepo.findOne.mockResolvedValue({ userId: 'u3', xp: 200 });
 
-      const dto = await service.getBySlug('jamie');
+      const dto = await service.getBySlug('jamie', 'viewer-1', 'member');
 
-      expect(profilesRepo.findOne).toHaveBeenCalledWith({
-        where: { slug: 'jamie' },
-      });
+      // (L10) the slug is resolved through the same block / hidden-from /
+      // takedown gate the profile read applies, not a raw repository lookup.
+      expect(profilesService.findBySlugOrThrow).toHaveBeenCalledWith(
+        'jamie',
+        'viewer-1',
+        'member',
+      );
       expect(statsRepo.findOne).toHaveBeenCalledWith({
         where: { userId: 'u3' },
       });
@@ -187,7 +198,10 @@ describe('RecognitionService', () => {
     });
 
     it('(I9) omits perks for the by-slug path — another member cannot see perk state', async () => {
-      profilesRepo.findOne.mockResolvedValue({ userId: 'u3', slug: 'jamie' });
+      profilesService.findBySlugOrThrow.mockResolvedValue({
+        userId: 'u3',
+        slug: 'jamie',
+      });
       statsRepo.findOne.mockResolvedValue({ userId: 'u3', xp: 1000 });
       perkClaimsRepo.find.mockResolvedValue([
         {
@@ -197,7 +211,7 @@ describe('RecognitionService', () => {
         },
       ]);
 
-      const dto = await service.getBySlug('jamie');
+      const dto = await service.getBySlug('jamie', 'viewer-1');
 
       // The perk-claims table is never even queried for a non-owner lookup.
       expect(perkClaimsRepo.find).not.toHaveBeenCalled();
@@ -206,9 +220,11 @@ describe('RecognitionService', () => {
       expect(dto.level.level).toBe(4);
     });
 
-    it('throws NotFoundException when the slug does not resolve to a profile', async () => {
-      profilesRepo.findOne.mockResolvedValue(null);
-      await expect(service.getBySlug('ghost')).rejects.toThrow(
+    it('(L10) propagates the 404 when the viewer cannot see the profile (blocked, hidden, taken down, or nonexistent)', async () => {
+      profilesService.findBySlugOrThrow.mockRejectedValue(
+        new NotFoundException('Profile not found'),
+      );
+      await expect(service.getBySlug('ghost', 'viewer-1')).rejects.toThrow(
         NotFoundException,
       );
     });

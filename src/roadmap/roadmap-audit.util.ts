@@ -12,7 +12,7 @@ export interface AuditLogEntry {
 
 /**
  * Inserts one `RoadmapAuditLog` row backing every admin mutation's audit
- * trail (`GET /roadmap/admin/audit` + its CSV export).
+ * trail (`GET /admin/roadmap/audit` + its CSV export).
  *
  * Pure write — this helper does NOT swallow errors. Best-effort semantics
  * ("an audit-log failure must never fail the mutation it documents") are the

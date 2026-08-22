@@ -104,6 +104,20 @@ export class AccountExportService {
   }
 
   /**
+   * Every category id `build` knows how to produce — the six core ones plus
+   * whatever domains registered a contribution. `AccountService.requestExport`
+   * range-checks the caller's `categories` against this before building, so an
+   * arbitrary string can neither be persisted on the job row nor silently
+   * produce an archive with nothing in it. It is a method rather than a
+   * constant because the contributor list is assembled by DI at boot.
+   */
+  knownCategories(): string[] {
+    return [...this.coreContributions(), ...this.extraContributors].map(
+      (contribution) => contribution.category,
+    );
+  }
+
+  /**
    * Build the whole archive in memory and return it for inline `jsonb` storage.
    *
    * SIZE RISK — read before adding a category. Every row for every requested

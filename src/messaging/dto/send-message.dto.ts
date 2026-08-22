@@ -12,6 +12,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { TrimMessageBody } from './trim-message-body';
 
 /**
  * A picked GIF's `url`/`previewUrl` are absolute provider URLs (`@IsUrl`); an
@@ -32,6 +33,7 @@ export class GifAttachmentDto {
 }
 
 export class SendMessageDto {
+  @TrimMessageBody()
   @IsString()
   @MinLength(1)
   @MaxLength(5000)
@@ -49,7 +51,13 @@ export class SendMessageDto {
 
   /** True when this send is a FORWARD of another message's content. Persisted so
    *  the recipient's bubble can render a subtle "Forwarded" label. The message
-   *  still goes through the ordinary idempotent send path. */
+   *  still goes through the ordinary idempotent send path.
+   *
+   *  DISPLAY HINT ONLY — never trusted for authorization. For a `kind:'image'`
+   *  send, whether the attachment may skip the "must be your own upload"
+   *  ownership check is DERIVED server-side from a message the sender provably
+   *  had access to (see `MessagingCoreService.senderCanForwardAttachment`), not
+   *  from this boolean; a client cannot bypass the check by setting it. */
   @IsOptional()
   @IsBoolean()
   forwarded?: boolean;

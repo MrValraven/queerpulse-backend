@@ -24,6 +24,8 @@ import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { OptionalJwtAuthGuard } from './optional-jwt-auth.guard';
 import { PRESIGN_EXPIRY_SECONDS, StorageService } from './storage.service';
 import { parseStorageKey, storageKeyOwnerId } from './storage-key';
+import { UPLOAD_KIND_SPECS } from './upload-kinds';
+import { Message } from '../messaging/entities/message.entity';
 import {
   ApiNotFoundResponse,
   ApiOperation,
@@ -67,7 +69,81 @@ export class FilesController {
   constructor(
     private readonly storage: StorageService,
     @InjectRepository(User) private readonly users: Repository<User>,
+    // Registered via `StorageModule`'s own `forFeature([Message])` (mirroring
+    // the `User` copy above) purely so this route can answer "is the requester a
+    // participant of a conversation that references this `message-image` key?"
+    // — a direct repository query, NOT an import of `MessagingModule`, so no
+    // module cycle is introduced.
+    @InjectRepository(Message) private readonly messages: Repository<Message>,
   ) {}
+
+  // Per-process memo of keys that have already passed the magic-byte check
+  // (security review M2). Validation reads the object's first bytes once; every
+  // later serve of the same key skips the read. Only PASSES are cached: a
+  // `mismatch` re-checks (cheap, and it will keep failing) and a transient
+  // `indeterminate` never poisons the cache. Bounded so a long-lived process
+  // that serves many distinct keys can't grow it without limit — at the cap the
+  // whole set is cleared (a simple, allocation-free eviction; the worst case is
+  // that recently-validated keys pay one more read).
+  private static readonly VALIDATED_KEY_CACHE_LIMIT = 5000;
+  private static readonly validatedKeys = new Set<string>();
+
+  // True when a message referencing this `message-image` key lives in a
+  // conversation the requester participates in. A left member keeps a
+  // participant row (see `ConversationParticipant.leftAt`) and retains read
+  // access to history, so mere row existence is the correct grant; a
+  // soft-deleted message is excluded (its image is gone from the timeline). The
+  // stored `attachment.url` is the BARE key (the send path normalises it via
+  // `storageKeyFromImageUrl`); the `/files/<key>` form is matched too as a
+  // defensive belt against any legacy row that stored the resolved URL.
+  private async isMessageImageParticipant(
+    storageKey: string,
+    userId: string,
+  ): Promise<boolean> {
+    const attachmentForms = [storageKey, `/files/${storageKey}`];
+    // `message.<property>` uses entity property names so TypeORM maps them to
+    // the snake_case columns; `participant.*` references the raw joined table's
+    // real column names (that alias is a table name, not a registered entity).
+    return this.messages
+      .createQueryBuilder('message')
+      .innerJoin(
+        'conversation_participants',
+        'participant',
+        'participant.conversation_id = message.conversationId AND participant.user_id = :userId',
+        { userId },
+      )
+      .where("message.attachment ->> 'url' IN (:...attachmentForms)", {
+        attachmentForms,
+      })
+      .andWhere('message.deletedAt IS NULL')
+      .getExists();
+  }
+
+  // Verify the object's real bytes match the image type its key declares before
+  // it is ever served (security review M2), memoising passes. On a definite
+  // `mismatch` the object is refused with the same 404 as any other unresolvable
+  // key (no existence leak). On `indeterminate` (a transient storage/read error)
+  // this FAILS OPEN and serves: the bytes are inert, the presigned GET already
+  // forces the correct `image/*` content type, and blanking every image on a
+  // blip of the bucket is a worse failure than deferring one validation.
+  private async assertServableBytes(storageKey: string): Promise<void> {
+    if (FilesController.validatedKeys.has(storageKey)) {
+      return;
+    }
+    const verdict = await this.storage.validateImageMagicBytes(storageKey);
+    if (verdict === 'mismatch') {
+      throw new NotFoundException();
+    }
+    if (verdict === 'valid') {
+      if (
+        FilesController.validatedKeys.size >=
+        FilesController.VALIDATED_KEY_CACHE_LIMIT
+      ) {
+        FilesController.validatedKeys.clear();
+      }
+      FilesController.validatedKeys.add(storageKey);
+    }
+  }
 
   // The owner status whose media is withheld from ordinary viewers — the
   // moderation-imposed suspend/ban state (both set `Suspended`). A member the
@@ -124,16 +200,28 @@ export class FilesController {
       if (!user) {
         throw new UnauthorizedException();
       }
-      // A session alone is NOT enough for a session-gated kind. The key embeds
-      // the id of the member who uploaded it (`storageKeyOwnerId`), and there
-      // is no photo↔event table yet that could scope a gathering photo to an
-      // event's participants — so without an ownership check any logged-in
-      // member could walk `gathering-photos/<anyUserId>/<uuid>.<ext>` and pull
-      // identifiable photos of people at events they never attended (IDOR).
-      // Restrict a session-gated photo to its uploader; 404 (not 403) so the
-      // route still never reveals which keys exist. Widen this to event
-      // participants once gathering photos are linked to an event.
-      if (storageKeyOwnerId(storageKey) !== user.userId) {
+      if (kindSpec === UPLOAD_KIND_SPECS['message-image']) {
+        // A DM image attachment (security review M7). Unlike the uploader-only
+        // kinds below, its whole point is that the RECIPIENT must load it too,
+        // so it is scoped to conversation PARTICIPANTS: serve only when the
+        // requester participates in a conversation holding a (non-deleted)
+        // message that references this key. A caller who merely holds the URL
+        // (leaked via referrer, proxy log, forwarded link) is not a participant
+        // and gets the same 404 as any unresolvable key.
+        if (!(await this.isMessageImageParticipant(storageKey, user.userId))) {
+          throw new NotFoundException();
+        }
+      } else if (storageKeyOwnerId(storageKey) !== user.userId) {
+        // A session alone is NOT enough for the uploader-only session-gated
+        // kinds. The key embeds the id of the member who uploaded it
+        // (`storageKeyOwnerId`), and there is no photo↔event table yet that
+        // could scope a gathering photo to an event's participants — so without
+        // an ownership check any logged-in member could walk
+        // `gathering-photos/<anyUserId>/<uuid>.<ext>` and pull identifiable
+        // photos of people at events they never attended (IDOR). Restrict such a
+        // photo to its uploader; 404 (not 403) so the route still never reveals
+        // which keys exist. Widen this to event participants once gathering
+        // photos are linked to an event.
         throw new NotFoundException();
       }
     }
@@ -159,6 +247,11 @@ export class FilesController {
         throw new NotFoundException();
       }
     }
+    // Content-type backstop (M2): verify the object's real bytes match the
+    // image type its key declares before handing back a download URL. Runs after
+    // authorization so an unauthorized caller never triggers a bucket read, and
+    // memoises passes so a hot avatar is validated once per process.
+    await this.assertServableBytes(storageKey);
     const downloadUrl = await this.storage.createPresignedDownload(storageKey);
     // Railway's edge cache once served authenticated responses to the wrong
     // users (incident 2026-03-30), so shared/CDN caches are refused on every
@@ -174,6 +267,15 @@ export class FilesController {
         ? 'private, no-store'
         : `private, max-age=${PUBLIC_IMAGE_MAX_AGE_SECONDS}`,
     );
+    // Best-effort `nosniff` on the 302 (security review L12). The bytes are
+    // fetched from the bucket by the browser following this redirect, so the
+    // bucket's own response headers are what ultimately govern sniffing; S3
+    // exposes no way to sign `X-Content-Type-Options` into a presigned GET. The
+    // authoritative defense is therefore the forced `ResponseContentType` on the
+    // presigned URL (see `createPresignedDownload`) plus the magic-byte check
+    // above; this header hardens the redirect response itself as defense in
+    // depth for any client that honours it on the 302.
+    response.setHeader('X-Content-Type-Options', 'nosniff');
     response.redirect(302, downloadUrl);
   }
 }

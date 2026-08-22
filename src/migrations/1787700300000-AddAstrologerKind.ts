@@ -16,7 +16,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * existing freeform `skin_data` jsonb column, so they need no schema change —
  * only the `SkinData` interface on the entity gained the optional fields.
  *
- * `down()` is a documented no-op: Postgres has no `ALTER TYPE ... DROP VALUE`,
+ * `down()` now throws instead of pretending to revert: Postgres has no `ALTER TYPE ... DROP VALUE`,
  * and the added values are harmless if left in place once no rows reference
  * them.
  */
@@ -38,7 +38,14 @@ export class AddAstrologerKind1787700300000 implements MigrationInterface {
   }
 
   public async down(): Promise<void> {
-    // No-op: Postgres cannot drop enum values. Leaving the new kind/sections
+    // Not reversible: Postgres cannot drop enum values. Leaving the new kind/sections
     // in place is harmless once no rows reference them.
+    // Fails loudly rather than reporting a successful revert that undid
+    // nothing: a silent no-op removes the row from the migrations ledger, so
+    // the next `migration:run` retries `ADD VALUE` and errors on the label
+    // that is still there. Postgres has no `ALTER TYPE ... DROP VALUE`.
+    throw new Error(
+      'Irreversible: Postgres cannot drop an enum value. Restore from a backup instead.',
+    );
   }
 }

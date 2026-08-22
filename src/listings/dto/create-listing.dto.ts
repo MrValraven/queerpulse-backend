@@ -4,6 +4,7 @@ import {
   ArrayMinSize,
   IsArray,
   IsBoolean,
+  IsEmail,
   IsIn,
   IsLatitude,
   IsLongitude,
@@ -37,7 +38,16 @@ export class ListingSocialDto {
   @IsSafeExternalUrl()
   @MaxLength(300)
   website?: string;
-  @IsOptional() @IsString() @MaxLength(200) email?: string;
+  // Rendered as a `mailto:` on the public directory detail page
+  // (`listing-response.ts`), so it has to actually be an address. `''` is
+  // deliberately allowed: the wizard treats every social as optional and sends
+  // an empty string rather than omitting the key, and `@IsOptional()` only
+  // skips `undefined`/`null`. Same shape as `@IsImageReference`'s empty-string
+  // carve-out.
+  @ValidateIf((dto: ListingSocialDto) => (dto.email ?? '') !== '')
+  @IsEmail()
+  @MaxLength(200)
+  email?: string;
   @IsOptional() @IsString() @MaxLength(60) phone?: string;
 }
 
@@ -306,7 +316,13 @@ export class CreateListingDto {
   @IsOptional() @IsString() @MaxLength(2000) ownerBio?: string;
   @IsOptional() @IsIn(['public', 'role', 'anon']) visibility?: string;
   @IsOptional() @IsBoolean() linkToProfile?: boolean;
-  @IsOptional() @IsString() @MaxLength(200) contactEmail?: string;
+  // Moderators mail this address when they need to reach the owner, so a
+  // garbage string here is a dead outreach path. Empty string allowed for the
+  // same reason as `ListingSocialDto.email` above.
+  @ValidateIf((dto: CreateListingDto) => (dto.contactEmail ?? '') !== '')
+  @IsEmail()
+  @MaxLength(200)
+  contactEmail?: string;
 
   @IsOptional()
   @IsArray()

@@ -24,9 +24,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
-export class AddMagazineReaderComments1793100000000
-  implements MigrationInterface
-{
+export class AddMagazineReaderComments1793100000000 implements MigrationInterface {
   name = 'AddMagazineReaderComments1793100000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

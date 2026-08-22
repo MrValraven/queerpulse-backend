@@ -42,6 +42,90 @@ describe('env validate()', () => {
     expect(() => validate(base)).not.toThrow();
   });
 
+  it('rejects an unparseable JWT TTL by name', () => {
+    expect(() => validate({ ...base, JWT_REFRESH_TTL: '1 month' })).toThrow(
+      /JWT_REFRESH_TTL/,
+    );
+    expect(() => validate({ ...base, JWT_ACCESS_TTL: '15m' })).not.toThrow();
+  });
+
+  // A wildcard cookie Domain lets any subdomain plant the session cookie.
+  // Asserted on the message rather than on throw/not-throw, so this stays
+  // meaningful as other production requirements are added to `validate`.
+  it('refuses COOKIE_DOMAIN in production unless explicitly acknowledged', () => {
+    const errorFor = (env: Record<string, string>): string => {
+      try {
+        validate(env);
+        return '';
+      } catch (err) {
+        return (err as Error).message;
+      }
+    };
+    const production = {
+      ...base,
+      NODE_ENV: 'production',
+      FRONTEND_URL: 'https://queerpulse.com',
+      API_URL: 'https://api.queerpulse.com',
+      METRICS_TOKEN: 'metrics-token-sixteen-plus-chars',
+      AWS_ENDPOINT_URL: 'https://bucket.example',
+      AWS_DEFAULT_REGION: 'auto',
+      AWS_S3_BUCKET_NAME: 'bucket',
+      AWS_ACCESS_KEY_ID: 'key',
+      AWS_SECRET_ACCESS_KEY: 'secret',
+      CARD_SIGNING_PRIVATE_KEY: 'card-signing-private-pem',
+      CARD_SIGNING_PUBLIC_KEY: 'card-signing-public-pem',
+    };
+
+    expect(errorFor(production)).not.toMatch(/COOKIE_DOMAIN/);
+    expect(
+      errorFor({ ...production, COOKIE_DOMAIN: '.queerpulse.com' }),
+    ).toMatch(/COOKIE_DOMAIN/);
+    expect(
+      errorFor({
+        ...production,
+        COOKIE_DOMAIN: '.queerpulse.com',
+        ALLOW_COOKIE_DOMAIN: 'true',
+      }),
+    ).not.toMatch(/COOKIE_DOMAIN/);
+  });
+
+  // Left unset in production, CardTokenService.mint() throws a raw Error at
+  // request time (a 500 on every QR mint) rather than failing at boot.
+  it('requires CARD_SIGNING_* keys in production', () => {
+    const errorFor = (env: Record<string, string>): string => {
+      try {
+        validate(env);
+        return '';
+      } catch (err) {
+        return (err as Error).message;
+      }
+    };
+    const production = {
+      ...base,
+      NODE_ENV: 'production',
+      FRONTEND_URL: 'https://queerpulse.com',
+      API_URL: 'https://api.queerpulse.com',
+      METRICS_TOKEN: 'metrics-token-sixteen-plus-chars',
+      AWS_ENDPOINT_URL: 'https://bucket.example',
+      AWS_DEFAULT_REGION: 'auto',
+      AWS_S3_BUCKET_NAME: 'bucket',
+      AWS_ACCESS_KEY_ID: 'key',
+      AWS_SECRET_ACCESS_KEY: 'secret',
+      CARD_SIGNING_PRIVATE_KEY: 'card-signing-private-pem',
+      CARD_SIGNING_PUBLIC_KEY: 'card-signing-public-pem',
+    };
+
+    expect(errorFor(production)).toBe('');
+
+    const withoutPrivate: Record<string, string> = { ...production };
+    delete withoutPrivate.CARD_SIGNING_PRIVATE_KEY;
+    expect(errorFor(withoutPrivate)).toMatch(/CARD_SIGNING_PRIVATE_KEY/);
+
+    const withoutPublic: Record<string, string> = { ...production };
+    delete withoutPublic.CARD_SIGNING_PUBLIC_KEY;
+    expect(errorFor(withoutPublic)).toMatch(/CARD_SIGNING_PUBLIC_KEY/);
+  });
+
   it('accepts all five MUX_* vars as strings', () => {
     expect(() =>
       validate({

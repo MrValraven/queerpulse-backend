@@ -7,6 +7,7 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
 import { AuthService } from '../auth/auth.service';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import {
@@ -114,11 +115,14 @@ describe('ModerationService', () => {
   let revokeAllForUser: jest.Mock;
   let notificationsCreate: jest.Mock;
   let applyContentAction: jest.Mock;
+  let revertContent: jest.Mock;
   let managerUpdate: jest.Mock;
   let communityMembership: {
     isOwnerOrMod: jest.Mock;
     communityIdForPost: jest.Mock;
     communityIdForReply: jest.Mock;
+    authorIdForPost: jest.Mock;
+    authorIdForReply: jest.Mock;
   };
 
   beforeEach(async () => {
@@ -153,6 +157,8 @@ describe('ModerationService', () => {
     revokeAllForUser = jest.fn().mockResolvedValue(undefined);
     notificationsCreate = jest.fn().mockResolvedValue(null);
     applyContentAction = jest.fn().mockResolvedValue(undefined);
+    // An OVERTURNED appeal now undoes the original takedown (BE-COM-08).
+    revertContent = jest.fn().mockResolvedValue(undefined);
     managerUpdate = jest.fn().mockResolvedValue({ affected: 1 });
     // Defaults to "no community, not staff" so every pre-existing test below
     // (all acting as a platform Moderator/Admin) never touches this path, and
@@ -162,6 +168,11 @@ describe('ModerationService', () => {
       isOwnerOrMod: jest.fn().mockResolvedValue(false),
       communityIdForPost: jest.fn().mockResolvedValue(null),
       communityIdForReply: jest.fn().mockResolvedValue(null),
+      // The dismiss carve-out also refuses a community mod acting on their OWN
+      // post/reply, so the author of the reported subject is resolved too.
+      // Defaults to "someone else wrote it".
+      authorIdForPost: jest.fn().mockResolvedValue('author-1'),
+      authorIdForReply: jest.fn().mockResolvedValue('author-1'),
     };
 
     // `actOnReport`/`bulkActOnReports`/`reviewAppeal` now run inside
@@ -179,10 +190,15 @@ describe('ModerationService', () => {
           : (appeals.save(e) as Promise<unknown>);
       },
       update: managerUpdate,
-      findOne: (entity: unknown, opts: unknown): Promise<unknown> =>
-        entity === User
-          ? (users.findOne(opts) as Promise<unknown>)
-          : (reports.findOne(opts) as Promise<unknown>),
+      findOne: (entity: unknown, opts: unknown): Promise<unknown> => {
+        if (entity === User) return users.findOne(opts) as Promise<unknown>;
+        // `revertOriginalAction` resolves the appealed action through the
+        // manager, so ModAuditLog reads must not fall through to the reports
+        // stub.
+        if (entity === ModAuditLog)
+          return auditLogs.findOne(opts) as Promise<unknown>;
+        return reports.findOne(opts) as Promise<unknown>;
+      },
       getRepository: (entity: unknown) =>
         entity === ModAuditLog ? auditLogs : reports,
     };
@@ -212,7 +228,7 @@ describe('ModerationService', () => {
         { provide: AuthService, useValue: { revokeAllForUser } },
         {
           provide: ContentModerationService,
-          useValue: { applyAction: applyContentAction },
+          useValue: { applyAction: applyContentAction, revert: revertContent },
         },
         {
           provide: NotificationsService,
@@ -549,6 +565,103 @@ describe('ModerationService', () => {
     // `ModerationService.assertCanActOnReport` is the actual authorization —
     // platform Moderator/Admin unchanged, OR a community owner/mod
     // `dismiss`-ing a report on a post/reply in the community they moderate.
+    // BE-COM-03: reports now have a real state machine. `open` and `escalated`
+    // are actionable, `resolved` is terminal, and the transition is CLAIMED
+    // with a conditional `UPDATE ... WHERE status = <expected>` inside the
+    // transaction before anything consequential runs. Nothing used to read
+    // `report.status` here at all.
+    describe('report state machine', () => {
+      it('409s a second action on an already-resolved report', async () => {
+        reports.findOne.mockResolvedValue(
+          baseReport({ status: ReportStatus.Resolved }),
+        );
+
+        await expect(
+          service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+            action: 'suspend',
+            reasonCode: 'harassment',
+            note: 'Again.',
+            duration: '7d',
+          }),
+        ).rejects.toBeInstanceOf(ConflictException);
+        // Acting twice would re-run enforcement, overwrite the recorded
+        // resolution with a different actor, and re-notify the reporter.
+        expect(managerUpdate).not.toHaveBeenCalled();
+        expect(reports.save).not.toHaveBeenCalled();
+        expect(auditLogs.save).not.toHaveBeenCalled();
+        expect(notificationsCreate).not.toHaveBeenCalled();
+      });
+
+      it('claims the transition with a conditional UPDATE before enforcing', async () => {
+        reports.findOne.mockResolvedValue(baseReport());
+
+        await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+          action: 'dismiss',
+          reasonCode: 'spam',
+          note: 'Not a violation.',
+        });
+
+        expect(managerUpdate).toHaveBeenNthCalledWith(
+          1,
+          Report,
+          { id: 'report-1', status: ReportStatus.Open },
+          { status: ReportStatus.Resolved },
+        );
+      });
+
+      it('still lets an escalated report be decided', async () => {
+        reports.findOne.mockResolvedValue(
+          baseReport({ status: ReportStatus.Escalated }),
+        );
+
+        const res = await service.actOnReport(
+          'report-1',
+          'actor-1',
+          UserRole.Moderator,
+          { action: 'dismiss', reasonCode: 'spam', note: 'Closed.' },
+        );
+
+        expect(res.status).toBe(ReportStatus.Resolved);
+        expect(managerUpdate).toHaveBeenNthCalledWith(
+          1,
+          Report,
+          { id: 'report-1', status: ReportStatus.Escalated },
+          { status: ReportStatus.Resolved },
+        );
+      });
+
+      it('409s and enforces nothing when a concurrent moderator won the claim', async () => {
+        reports.findOne.mockResolvedValue(
+          baseReport({
+            subjectType: ReportSubjectType.Member,
+            subjectId: 'reported-member',
+          }),
+        );
+        profiles.findOne.mockResolvedValue({
+          userId: 'user-1',
+          slug: 'reported-member',
+        });
+        users.findOne.mockResolvedValue({
+          id: 'user-1',
+          role: UserRole.Member,
+          status: UserStatus.Active,
+        });
+        // The losing side of the race: the row was already moved on.
+        managerUpdate.mockResolvedValue({ affected: 0 });
+
+        await expect(
+          service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+            action: 'ban',
+            reasonCode: 'harassment',
+            note: 'Out.',
+          }),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(userUpdates()).toHaveLength(0);
+        expect(revokeAllForUser).not.toHaveBeenCalled();
+        expect(auditLogs.save).not.toHaveBeenCalled();
+      });
+    });
+
     describe('authorization', () => {
       it('lets a platform Moderator/Admin act on any report without consulting community roster at all', async () => {
         reports.findOne.mockResolvedValue(baseReport());
@@ -564,13 +677,28 @@ describe('ModerationService', () => {
         // The platform-role path short-circuits before any community lookup.
         expect(communityMembership.communityIdForPost).not.toHaveBeenCalled();
         expect(communityMembership.isOwnerOrMod).not.toHaveBeenCalled();
+        // A genuine platform Moderator/Admin still gets the fully resolved
+        // report back — this fix must not touch that path.
+        expect(res.reporter).toEqual({
+          anonymous: false,
+          id: 'reporter-1',
+          name: 'Member',
+          priorReports: 0,
+          priorDismissed: 0,
+        });
+        expect(res.reported).toEqual({
+          id: 'post-1',
+          handle: 'post-1',
+          priorReports: 0,
+        });
       });
 
-      it('lets a community owner/mod dismiss a report on a post/reply in the community they moderate', async () => {
+      it('lets a community owner/mod dismiss a report on a post/reply in the community they moderate, but withholds the report/reporter detail from the response', async () => {
         reports.findOne.mockResolvedValue(
           baseReport({
             subjectType: ReportSubjectType.Post,
             subjectId: 'post-1',
+            assignedModeratorId: 'other-moderator-1',
           }),
         );
         communityMembership.communityIdForPost.mockResolvedValue('community-1');
@@ -591,6 +719,20 @@ describe('ModerationService', () => {
           'community-1',
           'community-mod-1',
         );
+        // This carve-out grants no report *visibility* (see
+        // `assertCanActOnReport`'s doc comment): the reporter's real name and
+        // platform-wide prior-report history must not reach a community mod
+        // who only authorized through the dismiss carve-out, and neither
+        // should which platform moderator (if any) is assigned to the report.
+        expect(res.reporter).toEqual({ anonymous: true });
+        expect(res.reported).toEqual({
+          id: 'post-1',
+          handle: 'post-1',
+          priorReports: 0,
+        });
+        expect(res.assignedModeratorId).toBeNull();
+        expect(res).not.toHaveProperty('assignedModeratorName');
+        expect(res).not.toHaveProperty('detail');
       });
 
       it('forbids a community owner/mod from dismissing a report in a community they do not moderate', async () => {
@@ -643,6 +785,55 @@ describe('ModerationService', () => {
         expect(reports.save).not.toHaveBeenCalled();
       });
 
+      // `isOwnerOrMod` says the actor moderates the community, not that they
+      // are impartial about THIS report. Without this they could close the
+      // report about their own post in one call, platform-wide.
+      it('forbids a community owner/mod from dismissing a report about their own post', async () => {
+        reports.findOne.mockResolvedValue(
+          baseReport({
+            subjectType: ReportSubjectType.Post,
+            subjectId: 'post-1',
+          }),
+        );
+        communityMembership.communityIdForPost.mockResolvedValue('community-1');
+        communityMembership.isOwnerOrMod.mockResolvedValue(true);
+        communityMembership.authorIdForPost.mockResolvedValue(
+          'community-mod-1',
+        );
+
+        await expect(
+          service.actOnReport('report-1', 'community-mod-1', UserRole.Member, {
+            action: 'dismiss',
+            reasonCode: 'spam',
+            note: 'Nothing to see here.',
+          }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(reports.save).not.toHaveBeenCalled();
+      });
+
+      // `escalated` means "send this up" — letting the community it came from
+      // close it undoes a platform moderator's decision.
+      it('forbids a community owner/mod from dismissing a report that is no longer open', async () => {
+        reports.findOne.mockResolvedValue(
+          baseReport({
+            subjectType: ReportSubjectType.Post,
+            subjectId: 'post-1',
+            status: ReportStatus.Escalated,
+          }),
+        );
+        communityMembership.communityIdForPost.mockResolvedValue('community-1');
+        communityMembership.isOwnerOrMod.mockResolvedValue(true);
+
+        await expect(
+          service.actOnReport('report-1', 'community-mod-1', UserRole.Member, {
+            action: 'dismiss',
+            reasonCode: 'spam',
+            note: 'Not a violation.',
+          }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(reports.save).not.toHaveBeenCalled();
+      });
+
       it('forbids a community owner/mod from taking any action other than dismiss, even within their own community', async () => {
         reports.findOne.mockResolvedValue(
           baseReport({
@@ -673,7 +864,9 @@ describe('ModerationService', () => {
         action: 'dismiss',
         reasonCode: 'spam',
       });
-      expect(res).toEqual({ updated: [] });
+      // Continue-on-error (P0-16): the response reports both halves of the
+      // batch, so an empty run is `{ updated: [], failed: [] }`.
+      expect(res).toEqual({ updated: [], failed: [] });
       expect(auditLogs.save).not.toHaveBeenCalled();
     });
 
@@ -691,16 +884,25 @@ describe('ModerationService', () => {
       });
 
       expect(res.updated).toEqual(['report-1', 'report-2']);
-      expect(reports.save).toHaveBeenCalledWith([
+      expect(res.failed).toEqual([]);
+      // One transaction (and so one save) PER report, rather than a single
+      // batched `save([...])`: each report is applied on its own so one
+      // failure can no longer roll the whole selection back.
+      expect(reports.save).toHaveBeenCalledTimes(2);
+      expect(reports.save).toHaveBeenNthCalledWith(
+        1,
         expect.objectContaining({
           id: 'report-1',
           status: ReportStatus.Resolved,
         }),
+      );
+      expect(reports.save).toHaveBeenNthCalledWith(
+        2,
         expect.objectContaining({
           id: 'report-2',
           status: ReportStatus.Resolved,
         }),
-      ]);
+      );
       expect(auditLogs.save).toHaveBeenCalledTimes(2);
     });
 
@@ -714,9 +916,31 @@ describe('ModerationService', () => {
       });
 
       expect(res.updated).toEqual(['report-1']);
-      expect(reports.save).toHaveBeenCalledWith([
+      expect(reports.save).toHaveBeenCalledWith(
         expect.objectContaining({ status: ReportStatus.Escalated }),
+      );
+    });
+
+    // Same state machine as the single-report path: a resolved report swept
+    // into a bulk selection must not be silently re-enforced against.
+    it('lands an already-resolved report in failed instead of re-actioning it', async () => {
+      reports.find.mockResolvedValue([
+        baseReport({ id: 'report-1' }),
+        baseReport({ id: 'report-2', status: ReportStatus.Resolved }),
       ]);
+
+      const res = await service.bulkActOnReports('actor-1', {
+        ids: ['report-1', 'report-2'],
+        action: 'dismiss',
+        reasonCode: 'spam',
+      });
+
+      expect(res.updated).toEqual(['report-1']);
+      expect(res.failed).toEqual([
+        { id: 'report-2', reason: expect.stringContaining('already') },
+      ]);
+      expect(reports.save).toHaveBeenCalledTimes(1);
+      expect(auditLogs.save).toHaveBeenCalledTimes(1);
     });
 
     it('notifies each sanctioned member — one row per report', async () => {
@@ -763,6 +987,126 @@ describe('ModerationService', () => {
           expiresAt: expect.any(String),
         }),
       ]);
+    });
+  });
+
+  /**
+   * COM-5: assignment is a CLAIM, not a free-for-all. It used to write
+   * `assignedModeratorId = assign ? actorId : null` unconditionally, so any
+   * moderator could take a report off a colleague mid-investigation or release
+   * anyone's. The write is now a conditional `UPDATE ... WHERE
+   * assigned_moderator_id IS NOT DISTINCT FROM <expected>`.
+   */
+  describe('setAssignment', () => {
+    // `.createQueryBuilder().update().set().where().andWhere().execute()`.
+    function updateQbStub(affected = 1) {
+      const qb: Record<string, jest.Mock> = {};
+      for (const method of ['update', 'set', 'where', 'andWhere']) {
+        qb[method] = jest.fn().mockReturnValue(qb);
+      }
+      qb.execute = jest.fn().mockResolvedValue({ affected });
+      return qb;
+    }
+
+    it('claims an unassigned report', async () => {
+      reports.findOne.mockResolvedValue(baseReport());
+      const qb = updateQbStub();
+      reports.createQueryBuilder.mockReturnValue(qb);
+
+      await service.setAssignment(
+        'report-1',
+        'moderator-1',
+        UserRole.Moderator,
+        true,
+      );
+
+      expect(qb.set).toHaveBeenCalledWith(
+        expect.objectContaining({ assignedModeratorId: 'moderator-1' }),
+      );
+      // NULL is the expected value on an unclaimed report, and `NULL = NULL` is
+      // NULL rather than true — hence `IS NOT DISTINCT FROM`.
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        'assigned_moderator_id IS NOT DISTINCT FROM :expected',
+        { expected: null },
+      );
+    });
+
+    it('is idempotent when re-claiming a report you already hold', async () => {
+      reports.findOne.mockResolvedValue(
+        baseReport({ assignedModeratorId: 'moderator-1' }),
+      );
+
+      await expect(
+        service.setAssignment(
+          'report-1',
+          'moderator-1',
+          UserRole.Moderator,
+          true,
+        ),
+      ).resolves.toBeDefined();
+      expect(reports.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('409s a moderator taking a report already assigned to someone else', async () => {
+      reports.findOne.mockResolvedValue(
+        baseReport({ assignedModeratorId: 'other-moderator' }),
+      );
+
+      await expect(
+        service.setAssignment(
+          'report-1',
+          'moderator-1',
+          UserRole.Moderator,
+          true,
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(reports.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('lets an Admin take over another moderator’s report', async () => {
+      reports.findOne.mockResolvedValue(
+        baseReport({ assignedModeratorId: 'other-moderator' }),
+      );
+      const qb = updateQbStub();
+      reports.createQueryBuilder.mockReturnValue(qb);
+
+      await expect(
+        service.setAssignment('report-1', 'admin-1', UserRole.Admin, true),
+      ).resolves.toBeDefined();
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        'assigned_moderator_id IS NOT DISTINCT FROM :expected',
+        { expected: 'other-moderator' },
+      );
+    });
+
+    it('403s a moderator releasing someone else’s report', async () => {
+      reports.findOne.mockResolvedValue(
+        baseReport({ assignedModeratorId: 'other-moderator' }),
+      );
+
+      await expect(
+        service.setAssignment(
+          'report-1',
+          'moderator-1',
+          UserRole.Moderator,
+          false,
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(reports.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('409s when the assignment changed under the claim', async () => {
+      reports.findOne.mockResolvedValue(baseReport());
+      reports.createQueryBuilder.mockReturnValue(updateQbStub(0));
+
+      await expect(
+        service.setAssignment(
+          'report-1',
+          'moderator-1',
+          UserRole.Moderator,
+          true,
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
     });
   });
 
@@ -895,6 +1239,109 @@ describe('ModerationService', () => {
           action: 'appeal_upheld',
         }),
       );
+    });
+
+    // BE-COM-08: an overturn used to flip the appeal's status (and, for a
+    // suspension, restore the account) and nothing else — a member whose post
+    // was hidden and who WON their appeal still had the post hidden, and admin
+    // saw "overturned" while nothing had changed for them.
+    describe('an overturn reverts the original action', () => {
+      it('restores hidden/removed content and logs content_restored', async () => {
+        appeals.findOne.mockResolvedValue(baseAppeal());
+        auditLogs.findOne.mockResolvedValue({
+          id: 'log-1',
+          reportId: 'report-1',
+          actorId: 'actor-2',
+          action: 'hide_content',
+          reasonCode: 'hate_speech',
+          note: null,
+          duration: null,
+          createdAt: new Date('2026-01-01T12:00:00.000Z'),
+        });
+        reports.findOne.mockResolvedValue(baseReport());
+
+        await service.reviewAppeal('appeal-1', 'actor-1', {
+          decision: 'overturn',
+          note: 'The post was fine.',
+        });
+
+        expect(revertContent).toHaveBeenCalledWith(
+          expect.anything(),
+          ReportSubjectType.Post,
+          'post-1',
+        );
+        expect(auditLogs.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            reportId: 'report-1',
+            actorId: 'actor-1',
+            action: 'content_restored',
+          }),
+        );
+      });
+
+      it('clears the restriction flags and logs restriction_lifted', async () => {
+        appeals.findOne.mockResolvedValue(baseAppeal());
+        auditLogs.findOne.mockResolvedValue({
+          id: 'log-1',
+          reportId: 'report-1',
+          actorId: 'actor-2',
+          action: 'restrict',
+          reasonCode: 'harassment',
+          note: null,
+          duration: '7d',
+          createdAt: new Date('2026-01-01T12:00:00.000Z'),
+        });
+        reports.findOne.mockResolvedValue(
+          baseReport({
+            subjectType: ReportSubjectType.Member,
+            subjectId: 'reported-member',
+          }),
+        );
+        profiles.findOne.mockResolvedValue({
+          userId: 'user-1',
+          slug: 'reported-member',
+        });
+
+        await service.reviewAppeal('appeal-1', 'actor-1', {
+          decision: 'overturn',
+          note: 'Overturned.',
+        });
+
+        // `status` is deliberately untouched — a restriction never changed it.
+        expect(managerUpdate).toHaveBeenCalledWith(
+          User,
+          { id: 'user-1' },
+          { restricted: false, restrictedUntil: null },
+        );
+        expect(auditLogs.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            actorId: 'actor-1',
+            action: 'restriction_lifted',
+          }),
+        );
+      });
+
+      it('leaves the content alone when the appeal is upheld', async () => {
+        appeals.findOne.mockResolvedValue(baseAppeal());
+        auditLogs.findOne.mockResolvedValue({
+          id: 'log-1',
+          reportId: 'report-1',
+          actorId: 'actor-2',
+          action: 'hide_content',
+          reasonCode: 'hate_speech',
+          note: null,
+          duration: null,
+          createdAt: new Date('2026-01-01T12:00:00.000Z'),
+        });
+        reports.findOne.mockResolvedValue(baseReport());
+
+        await service.reviewAppeal('appeal-1', 'actor-1', {
+          decision: 'uphold',
+          note: 'The original call stands.',
+        });
+
+        expect(revertContent).not.toHaveBeenCalled();
+      });
     });
 
     it('overturns and skips the audit log when there is no linked report', async () => {
@@ -1113,10 +1560,37 @@ describe('ModerationService', () => {
 
       // Otherwise the member deactivates, signs back in, is restored to
       // `active`, and the ban is laundered away in one click.
+      // Matched on `AccountDeactivation` specifically: the transaction now
+      // opens with a conditional `manager.update(Report, { id, status }, ...)`
+      // claiming the state transition, which is also a non-`User` update and
+      // would otherwise be the row this assertion picked up.
       const call = (managerUpdate.mock.calls as UpdateCall[]).find(
-        ([entity]) => entity !== User,
+        ([entity]) => entity === AccountDeactivation,
       );
       expect(call?.[2]).toEqual({ previousStatus: UserStatus.Suspended });
+    });
+
+    // BE-COM-33: the house account carries `role = member` with
+    // `is_system = true`, so the staff-role check below does not catch it — a
+    // ban resolved from a report against its slug would suspend the platform's
+    // own account and revoke its sessions.
+    it('refuses to enforce against the system/house account', async () => {
+      users.findOne.mockResolvedValue({
+        id: 'user-1',
+        role: UserRole.Member,
+        status: UserStatus.Active,
+        isSystem: true,
+      });
+
+      await expect(
+        service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+          action: 'ban',
+          reasonCode: 'harassment',
+          note: 'Out.',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(userUpdates()).toHaveLength(0);
+      expect(revokeAllForUser).not.toHaveBeenCalled();
     });
 
     it('rejects a suspension with no duration rather than making it permanent', async () => {
@@ -1248,28 +1722,64 @@ describe('ModerationService', () => {
       expect(patch).not.toHaveProperty('status');
       expect(patch.suspendedUntil).toBeNull();
       const deactivationCall = (managerUpdate.mock.calls as UpdateCall[]).find(
-        ([entity]) => entity !== User,
+        ([entity]) => entity === AccountDeactivation,
       );
       expect(deactivationCall?.[2]).toEqual({
         previousStatus: UserStatus.Suspended,
       });
     });
 
-    it('bulk suspend fails the whole batch when one subject is unenforceable', async () => {
+    // Continue-on-error (P0-16): a bulk action used to run in ONE transaction,
+    // so a single unenforceable report (a `post` slipped into a suspend
+    // selection) rolled back every other report the moderator had picked and
+    // told them nothing about which one was at fault. Each report now applies
+    // in its own transaction and the unenforceable one is reported per-item.
+    it('bulk suspend applies the enforceable reports and reports the rest per item', async () => {
       reports.find.mockResolvedValue([
         memberReport(),
         baseReport({ id: 'report-2' }), // a Post — unenforceable
       ]);
 
-      await expect(
-        service.bulkActOnReports('actor-1', {
-          ids: ['report-1', 'report-2'],
-          action: 'suspend',
-          reasonCode: 'harassment',
-          note: 'n',
-          duration: '7d',
-        }),
-      ).rejects.toBeInstanceOf(BadRequestException);
+      const res = await service.bulkActOnReports('actor-1', {
+        ids: ['report-1', 'report-2'],
+        action: 'suspend',
+        reasonCode: 'harassment',
+        note: 'n',
+        duration: '7d',
+      });
+
+      expect(res.updated).toEqual(['report-1']);
+      expect(res.failed).toEqual([
+        {
+          id: 'report-2',
+          reason: expect.stringContaining('post'),
+        },
+      ]);
+      // The report that DID commit still enforces in full — the failed sibling
+      // must not suppress it.
+      expect(revokeAllForUser).toHaveBeenCalledWith('user-1');
+      expect(revokeAllForUser).toHaveBeenCalledTimes(1);
+    });
+
+    // The unenforceable report is left exactly as it was: the claiming UPDATE
+    // is inside the per-report transaction, so its rollback takes the status
+    // change with it rather than leaving a `resolved` report nobody acted on.
+    it('does not enforce against anyone for the failed half of the batch', async () => {
+      reports.find.mockResolvedValue([
+        baseReport({ id: 'report-2' }), // a Post — unenforceable
+      ]);
+
+      const res = await service.bulkActOnReports('actor-1', {
+        ids: ['report-2'],
+        action: 'suspend',
+        reasonCode: 'harassment',
+        note: 'n',
+        duration: '7d',
+      });
+
+      expect(res.updated).toEqual([]);
+      expect(res.failed).toHaveLength(1);
+      expect(userUpdates()).toHaveLength(0);
       expect(revokeAllForUser).not.toHaveBeenCalled();
     });
   });

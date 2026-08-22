@@ -14,6 +14,21 @@ import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
 const MAX_SLUG_ATTEMPTS = 5;
 
 /**
+ * How long a counted "N active members" figure is trusted.
+ *
+ * `countActiveMembers` is a `COUNT(*)` over `users` with no index on `status`,
+ * and the public, unauthenticated `GET /invites/:code` runs it on every resolve
+ * to render "join N members". At 20 requests/min/IP that was a sequential scan
+ * of the whole table per request, growing linearly with the community.
+ *
+ * A minute of staleness is invisible on every surface that reads it: an invite
+ * landing page, the press kit, the admin overview, and governance quorum math
+ * (which is a threshold, not an exact tally). If a surface ever needs the
+ * to-the-second number, it should count for itself rather than shortening this.
+ */
+const ACTIVE_MEMBER_COUNT_TTL_MS = 60_000;
+
+/**
  * The community-guidelines revision a member agrees to when they finish
  * onboarding, used when the client does not send an explicit version. Bump this
  * whenever the guidelines change materially so the stamped `guidelinesVersion`
@@ -46,6 +61,10 @@ export interface CreateGoogleUserInput {
 
 @Injectable()
 export class UsersService {
+  /** Backing store for `countActiveMembers`'s TTL cache. */
+  private cachedActiveMemberCount: number | null = null;
+  private cachedActiveMemberCountAt = 0;
+
   constructor(
     @InjectRepository(User) private readonly usersRepo: Repository<User>,
   ) {}
@@ -59,6 +78,27 @@ export class UsersService {
       .addSelect('user.email')
       .where('user.googleId = :googleId', { googleId })
       .getOne();
+  }
+
+  /**
+   * Does an account already hold this verified Google address? Signup looks a
+   * returning member up by `googleId`; a MISS there with the same email still
+   * exists (a re-created Workspace account presenting a new Google subject, a
+   * seeded fixture, the documented HOUSE_EMAIL collision), and the insert then
+   * violates the `email` unique constraint. `AuthService` checks this first so
+   * that case becomes a sign-in error page instead of a raw 500 landing
+   * mid-OAuth-redirect.
+   *
+   * Returns only the id: the caller needs existence, not the row, and `email`
+   * stays `select: false` everywhere it is not explicitly needed.
+   */
+  async existsByEmail(email: string): Promise<boolean> {
+    const found = await this.usersRepo
+      .createQueryBuilder('user')
+      .select('user.id')
+      .where('user.email = :email', { email })
+      .getOne();
+    return found !== null;
   }
 
   findById(id: string): Promise<User | null> {
@@ -151,9 +191,29 @@ export class UsersService {
     return { onboardedAt: now, guidelinesAcceptedAt: now, guidelinesVersion };
   }
 
-  // Current community size — active members only (pending/suspended excluded).
-  countActiveMembers(): Promise<number> {
-    return this.usersRepo.count({ where: { status: UserStatus.Active } });
+  /**
+   * Current community size — active members only (suspended/deactivated
+   * excluded). Cached for `ACTIVE_MEMBER_COUNT_TTL_MS`; see that constant for
+   * why, and why the staleness is acceptable.
+   *
+   * In-process cache, like `PlatformSettingsService.get`. The app is
+   * single-replica (enforced at boot by the REPLICA_COUNT check in
+   * env.validation.ts), so there is no cross-process copy to invalidate.
+   */
+  async countActiveMembers(): Promise<number> {
+    const now = Date.now();
+    if (
+      this.cachedActiveMemberCount !== null &&
+      now - this.cachedActiveMemberCountAt < ACTIVE_MEMBER_COUNT_TTL_MS
+    ) {
+      return this.cachedActiveMemberCount;
+    }
+    const count = await this.usersRepo.count({
+      where: { status: UserStatus.Active },
+    });
+    this.cachedActiveMemberCount = count;
+    this.cachedActiveMemberCountAt = now;
+    return count;
   }
 
   // NOTE: `promoteToActive` used to live here. It has been removed along with

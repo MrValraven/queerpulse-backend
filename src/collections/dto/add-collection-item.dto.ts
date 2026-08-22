@@ -1,4 +1,11 @@
-import { IsNotEmpty, IsString } from 'class-validator';
+import { IsNotEmpty, IsString, MaxLength } from 'class-validator';
+
+/**
+ * `<kind>:<subjectId>` where the subject id is a slug or uuid. 200 is well
+ * clear of the longest real ref and stops an unbounded string reaching
+ * `parseSavedRef` and the `collection_item` row (CNT-19).
+ */
+export const COLLECTION_REF_MAX_LENGTH = 200;
 
 /**
  * Body for `POST /me/collections/:id/items`. `ref` is the frontend's composite
@@ -9,5 +16,6 @@ import { IsNotEmpty, IsString } from 'class-validator';
 export class AddCollectionItemDto {
   @IsString()
   @IsNotEmpty()
+  @MaxLength(COLLECTION_REF_MAX_LENGTH)
   ref!: string;
 }

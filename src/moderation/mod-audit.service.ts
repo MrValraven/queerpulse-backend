@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, In, Repository, SelectQueryBuilder } from 'typeorm';
+import { escapeLikeTerm } from '../common/like-escape';
 import { Report } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -166,8 +167,12 @@ export class ModAuditService {
       builder.andWhere('log.createdAt >= :floor', { floor });
     }
     if (query.q && query.q.trim()) {
+      // `escapeLikeTerm` (BE-COM-30): without it a `%` or `_` typed into the
+      // audit feed's search box is a LIKE wildcard, so `q=%` returned every
+      // row and a literal underscore matched any character. Same treatment
+      // the communities/forum/admin-media searches already give their terms.
       builder.andWhere('log.note ILIKE :search', {
-        search: `%${query.q.trim()}%`,
+        search: `%${escapeLikeTerm(query.q.trim())}%`,
       });
     }
     return builder;
@@ -297,22 +302,24 @@ export class ModAuditService {
     if (!userId) return 'Deleted member';
     const profile = await this.profiles.findOne({ where: { userId } });
     if (profile) return `${profile.firstName} ${profile.lastName}`.trim();
-    // `addSelect('user.email')` re-includes the `select: false` email column —
-    // it is the last-resort display name for a member with no profile row.
-    const user = await this.users
-      .createQueryBuilder('user')
-      .addSelect('user.email')
-      .where('user.id = :userId', { userId })
-      .getOne();
-    return user?.email ?? 'Member';
+    // A member with no profile row (rare — profiles are created at
+    // onboarding) still needs *some* display name, but their email is not
+    // it: this name is surfaced to other moderators/community mods, not just
+    // the account holder, so it falls back to the same neutral 'Member'
+    // label an unresolved id already gets, rather than re-selecting the
+    // normally `select: false` email column and showing it as if it were a
+    // chosen display name.
+    return 'Member';
   }
 
   /**
    * Batched sibling of `nameForUserId` — resolves many non-null user ids to
-   * display names in two queries total (profiles, then a users fallback for the
-   * ids with no profile), keeping the single-id contract of `nameForUserId`
-   * untouched. Every requested id resolves by the exact same rules: a profile's
-   * `firstName lastName`, else the user's email, else 'Member'.
+   * display names in one query (profiles only), keeping the single-id
+   * contract of `nameForUserId` untouched. Every requested id resolves by
+   * the exact same rules: a profile's `firstName lastName`, else the
+   * neutral 'Member' label — a member with no profile row is not looked up
+   * by email (that column is normally `select: false` and is not a display
+   * name), matching `nameForUserId`'s no-profile fallback.
    *
    * The `null` (erased) case is deliberately NOT handled here — callers pass
    * only non-null ids and map `null` to 'Deleted member' via `resolveActorName`,
@@ -333,25 +340,8 @@ export class ModAuditService {
       );
     }
 
-    // Only ids without a profile need the email fallback (mirrors the single
-    // resolver's profile-first, user-email-second order).
-    const userIdsWithoutProfile = uniqueUserIds.filter(
-      (userId) => !names.has(userId),
-    );
-    if (userIdsWithoutProfile.length) {
-      const users = await this.users
-        .createQueryBuilder('user')
-        .addSelect('user.email')
-        .where('user.id IN (:...userIdsWithoutProfile)', {
-          userIdsWithoutProfile,
-        })
-        .getMany();
-      for (const user of users) {
-        names.set(user.id, user.email ?? 'Member');
-      }
-    }
-
-    // Neither a profile nor a user row: `user?.email ?? 'Member'` → 'Member'.
+    // No profile row: fall back to the same neutral 'Member' label
+    // `nameForUserId` uses for an unresolved/profile-less id.
     for (const userId of uniqueUserIds) {
       if (!names.has(userId)) names.set(userId, 'Member');
     }

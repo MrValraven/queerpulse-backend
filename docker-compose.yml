@@ -1,5 +1,11 @@
 # Local stack: the API plus its Postgres. For development/demo — inject real
 # secrets and enable TLS for anything internet-facing.
+#
+# It runs the PRODUCTION image (`target: runtime`) with `NODE_ENV=development`,
+# which is deliberate: see the note on that variable below. Flipping it to
+# `production` means also supplying API_URL, all five AWS_* bucket variables
+# (env validation refuses to boot without them) and serving over https, or the
+# container will crash-loop straight after a green migration step.
 services:
   postgres:
     image: postgres:16
@@ -27,8 +33,23 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      NODE_ENV: production
+      # NOT `production`. This stack serves the API over plain http on
+      # localhost, and `NODE_ENV=production` makes two things impossible at
+      # once: env validation demands API_URL plus all five AWS_* bucket
+      # variables (absent here, so the container crash-looped right after a
+      # green migration step), and every auth/CSRF cookie is issued `Secure`,
+      # which a browser drops over http. Supplying placeholder AWS_* values
+      # would not help either — `storage:cors` below then tries to reach a
+      # bogus endpoint and exits non-zero, breaking the `&&` start chain.
+      NODE_ENV: development
+      # pino-pretty is a devDependency and is absent from the runtime image, so
+      # the development default (pretty logging) would throw at boot before a
+      # logger exists to say why. Opt out explicitly.
+      LOG_PRETTY: 'false'
       PORT: '3000'
+      # Where a browser reaches this API for `GET /files/*` — image URLs are
+      # built from it.
+      API_URL: http://localhost:3000
       DATABASE_URL: postgres://queerpulse:queerpulse@postgres:5432/queerpulse
       # The bundled Postgres speaks plaintext, so disable TLS explicitly here.
       # For a managed/prod database, remove this and provide DATABASE_SSL_CA.
@@ -46,10 +67,14 @@ services:
       FRONTEND_URL: http://localhost:5173
     ports:
       - '3000:3000'
-    # Deploy order: run migrations, apply the bucket CORS policy, then start the
-    # server. `storage:cors` is idempotent and reads its origins from
-    # FRONTEND_URL; it's a no-op unless the AWS_* bucket vars are also set.
-    command: sh -c "npm run migration:run:prod && npm run storage:cors && node dist/main"
+    # Deploy order: preflight, run migrations, apply the bucket CORS policy,
+    # then start the server — the order README "Deployment" documents.
+    # `migration:preflight` drops a leftover INVALID index from an interrupted
+    # `CREATE INDEX CONCURRENTLY` build, which would otherwise collide by name
+    # with the retry and wedge every later deploy. `storage:cors` is idempotent
+    # and reads its origins from FRONTEND_URL; it's a no-op unless the AWS_*
+    # bucket vars are also set. All three steps are safe to re-run.
+    command: sh -c "npm run migration:preflight && npm run migration:run:prod && npm run storage:cors && node dist/main"
 
 volumes:
   pgdata:

@@ -10,6 +10,7 @@ import { ForumPost } from '../forum/entities/forum-post.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { Listing } from '../listings/entities/listing.entity';
+import { MembershipCardsModule } from '../membership-cards/membership-cards.module';
 import { Message } from '../messaging/entities/message.entity';
 import { Notification } from '../notifications/entities/notification.entity';
 import { Activity } from '../profiles/entities/activity.entity';
@@ -55,6 +56,12 @@ import { EmailPreference } from './entities/email-preference.entity';
     // (`assertNotSoleAdmin`) — the same helper `AdminMembersService.updateRole`
     // uses against role-demotion.
     UsersModule,
+    // `MyCardsService` — `MembershipCardsExportContributor`
+    // (data-export-contributors.ts) delegates the `membershipCards` Art. 20
+    // category to `forUser(userId)` rather than re-querying the cards tables
+    // directly. Plain import, no `forwardRef`: `MembershipCardsModule` does
+    // not import `AccountModule`, directly or transitively.
+    MembershipCardsModule,
     TypeOrmModule.forFeature([
       DeletionRequest,
       DsarRequest,

@@ -8,6 +8,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -19,6 +20,7 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminCommunitiesService } from './admin-communities.service';
+import { ListCommunityGovernanceLogQuery } from './dto/list-community-governance-log.query';
 import { ReassignOwnerDto } from './dto/reassign-owner.dto';
 import { UpdateAdminCommunitySettingsDto } from './dto/update-admin-community-settings.dto';
 import {
@@ -74,14 +76,32 @@ export class AdminCommunitiesController {
     return this.adminCommunities.getCommunity(slug);
   }
 
+  @ApiOperation({
+    summary: "Read a community's governance audit trail (paginated).",
+  })
+  @ApiOkResponse({
+    description:
+      'Governance entries newest first, with actor/target resolved to a ' +
+      'compact member ref.',
+  })
+  @ApiBadRequestResponse({ description: 'Malformed query parameters.' })
+  @Get(':slug/governance-log')
+  getGovernanceLog(
+    @Param('slug') slug: string,
+    @Query() query: ListCommunityGovernanceLogQuery,
+  ) {
+    return this.adminCommunities.getGovernanceLog(slug, query);
+  }
+
   @ApiOperation({ summary: "Update a community's safety-policy settings." })
   @ApiOkResponse({ description: 'The updated community detail.' })
   @Patch(':slug')
   updateSettings(
+    @CurrentUser() currentUser: CurrentUserData,
     @Param('slug') slug: string,
     @Body() dto: UpdateAdminCommunitySettingsDto,
   ) {
-    return this.adminCommunities.updateSettings(slug, dto);
+    return this.adminCommunities.updateSettings(slug, dto, currentUser.userId);
   }
 
   @ApiOperation({

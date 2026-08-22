@@ -4,7 +4,10 @@ import { MoreThanOrEqual, Repository } from 'typeorm';
 import { AdminCommunitiesService } from '../admin-communities/admin-communities.service';
 import { reasonCodeToCategoryIndex } from '../admin-overview/admin-overview-response';
 import { toCsvRow } from '../common/csv';
-import { buildEmptyWeeklyBuckets, weekBucketIndex } from '../common/weekly-buckets';
+import {
+  buildEmptyWeeklyBuckets,
+  weekBucketIndex,
+} from '../common/weekly-buckets';
 import { AdminFinanceResponseDTO } from '../governance/admin-finance-response';
 import { GovernanceFinanceService } from '../governance/governance-finance.service';
 import { Report } from '../reports/entities/report.entity';
@@ -123,8 +126,7 @@ export class AdminReportsService {
     ).length;
     const averageScore = items.length
       ? Math.round(
-          items.reduce((sum, item) => sum + item.healthScore, 0) /
-            items.length,
+          items.reduce((sum, item) => sum + item.healthScore, 0) / items.length,
         )
       : null;
     return {

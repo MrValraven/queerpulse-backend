@@ -9,6 +9,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
   MinLength,
@@ -17,6 +18,12 @@ import {
 import { IsSafeExternalUrl } from '../../common/validators/is-safe-external-url.decorator';
 import { CreateCompanyDto } from '../../companies/dto/create-company.dto';
 import { JobFormat } from '../entities/job.entity';
+import { IsNotBelowRateMin } from './rate-range.validator';
+
+// A ceiling, not a policy: high enough for an annual salary in any currency the
+// board realistically carries, low enough that a typo cannot produce scientific
+// notation on a job card.
+const MAX_JOB_RATE = 100_000_000;
 
 export class JobDetailBodyDto {
   @IsArray()
@@ -63,8 +70,29 @@ export class CreateJobDto {
   @IsOptional() @IsString() @MaxLength(100) startDate?: string;
 
   @IsOptional() @IsString() @MaxLength(200) salary?: string;
-  @IsOptional() @IsNumber() @Min(0) rateMin?: number;
-  @IsOptional() @IsNumber() @Min(0) rateMax?: number;
+
+  // Money, in whole currency units with at most cents of precision. Previously
+  // a bare `@IsNumber() @Min(0)`, which accepted `1.005` (renders as either
+  // "1.00" or "1.01" depending on the formatter) and `1e21` (renders as
+  // "1e+21"). The `numeric` column is exact decimal, so bounding the input is
+  // all that is needed to keep pay readable.
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(MAX_JOB_RATE)
+  rateMin?: number;
+
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(MAX_JOB_RATE)
+  @IsNotBelowRateMin()
+  rateMax?: number;
+
+  // NOTE: still a free string because the "Post a job" form sends a currency
+  // SYMBOL (`€`/`£`/`$`, `CURRENCIES` in the frontend's `postJob.data.ts`), not
+  // an ISO 4217 code. Tightening this to `@Length(3, 3)` uppercase requires the
+  // form to send codes first, otherwise every job post 400s.
   @IsOptional() @IsString() @MaxLength(10) currency?: string;
   @IsOptional() @IsString() @MaxLength(50) ratePer?: string;
   @IsOptional() @IsBoolean() hidePay?: boolean;

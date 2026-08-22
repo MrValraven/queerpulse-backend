@@ -6,10 +6,16 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  MaxLength,
   MinLength,
 } from 'class-validator';
 
 import { ArtState, PieceFormat } from '../entities/magazine-piece.entity';
+import {
+  DESK_BLURB_MAX,
+  DESK_SHORT_TEXT_MAX,
+  DESK_TITLE_MAX,
+} from './desk-text-limits';
 
 const PIECE_FORMATS: PieceFormat[] = ['article', 'deck'];
 const ART_STATES: ArtState[] = ['none', 'brief', 'in', 'na'];
@@ -24,9 +30,11 @@ const ART_STATES: ArtState[] = ['none', 'brief', 'in', 'na'];
 export class CreatePieceDto {
   @IsIn(PIECE_FORMATS) format!: PieceFormat;
 
-  @IsString() @MinLength(1) title!: string;
+  // Capped (CNT-14). See `DESK_TITLE_MAX` for why the headline is looser than
+  // the other one-line fields.
+  @IsString() @MinLength(1) @MaxLength(DESK_TITLE_MAX) title!: string;
 
-  @IsString() @MinLength(1) section!: string;
+  @IsString() @MinLength(1) @MaxLength(DESK_SHORT_TEXT_MAX) section!: string;
 
   @IsUUID() editorId!: string;
 
@@ -42,9 +50,9 @@ export class CreatePieceDto {
 
   @IsOptional() @IsBoolean() fresh?: boolean;
 
-  @IsOptional() @IsString() byline?: string;
+  @IsOptional() @IsString() @MaxLength(DESK_SHORT_TEXT_MAX) byline?: string;
 
-  @IsOptional() @IsString() kind?: string;
+  @IsOptional() @IsString() @MaxLength(DESK_SHORT_TEXT_MAX) kind?: string;
 
   @IsOptional() @IsUUID() issueId?: string;
 
@@ -62,5 +70,5 @@ export class CreatePieceDto {
    * /magazine/admin/pieces/:id`) from the CoverContentsTab, not at
    * commission time.
    */
-  @IsOptional() @IsString() contentsBlurb?: string;
+  @IsOptional() @IsString() @MaxLength(DESK_BLURB_MAX) contentsBlurb?: string;
 }

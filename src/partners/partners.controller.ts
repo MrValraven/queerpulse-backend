@@ -66,19 +66,20 @@ export class PartnersController {
   }
 }
 
-// Split from `PartnersController` because its three routes have three
-// different guard shapes: any active member may submit an application, but
-// only admins may list or triage the queue (mirrors `AdminTitlesController`
-// being split out from `CinemaController` for the same reason).
+// Submission only. Any active member may apply to become a partner; listing
+// and triaging that queue is admin work and lives on `AdminPartnersController`
+// under `/admin/partners/applications` (BE-HSG-29). Keeping the two apart
+// means this class has one guard shape rather than two, so a route added here
+// later cannot accidentally inherit "member" reach for an admin action.
 @Feature('partners')
 @ApiTags('Partners')
 @ApiCookieAuth()
 @Controller('partner-applications')
+@UseGuards(ActiveMemberGuard)
 export class PartnerApplicationsController {
   constructor(private readonly partnersService: PartnersService) {}
 
   @Post()
-  @UseGuards(ActiveMemberGuard)
   @ApiOperation({ summary: 'Submit a partner application' })
   @ApiCreatedResponse({ description: 'The submitted partner application.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
@@ -91,34 +92,6 @@ export class PartnerApplicationsController {
     @Body() dto: CreatePartnerApplicationDto,
   ) {
     return this.partnersService.submitApplication(user.userId, dto);
-  }
-
-  @Get()
-  @UseGuards(ActiveMemberGuard, RolesGuard)
-  @Roles(UserRole.Admin)
-  @ApiOperation({ summary: 'List pending partner applications' })
-  @ApiOkResponse({ description: 'The pending-triage application queue.' })
-  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
-  listApplications() {
-    return this.partnersService.listApplications();
-  }
-
-  @Patch(':id')
-  @UseGuards(ActiveMemberGuard, RolesGuard)
-  @Roles(UserRole.Admin)
-  @ApiOperation({ summary: 'Approve or reject a partner application' })
-  @ApiOkResponse({ description: 'The triaged partner application.' })
-  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
-  @ApiNotFoundResponse({
-    description: 'The partner application does not exist.',
-  })
-  triage(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: TriagePartnerApplicationDto,
-  ) {
-    return this.partnersService.triage(id, dto.action, dto.note);
   }
 }
 
@@ -141,6 +114,32 @@ export class AdminPartnersController {
   @ApiForbiddenResponse({ description: 'Requires an admin role.' })
   list() {
     return this.partnersService.listApproved();
+  }
+
+  // The application queue. Declared before `PATCH :id` so Nest matches the
+  // literal `applications` segment rather than binding it as an `id`.
+  @Get('applications')
+  @ApiOperation({ summary: 'List pending partner applications' })
+  @ApiOkResponse({ description: 'The pending-triage application queue.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  listApplications() {
+    return this.partnersService.listApplications();
+  }
+
+  @Patch('applications/:id')
+  @ApiOperation({ summary: 'Approve or reject a partner application' })
+  @ApiOkResponse({ description: 'The triaged partner application.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiNotFoundResponse({
+    description: 'The partner application does not exist.',
+  })
+  triage(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: TriagePartnerApplicationDto,
+  ) {
+    return this.partnersService.triage(id, dto.action, dto.note);
   }
 
   @Patch(':id')

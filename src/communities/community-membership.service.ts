@@ -158,6 +158,36 @@ export class CommunityMembershipService {
   }
 
   /**
+   * The author of a community post, or `null` for an unknown id, an id that
+   * can't be a post at all, or a post whose author erased their account
+   * (`author_id` is `SET NULL` on erasure).
+   *
+   * Backs moderation's conflict-of-interest check on the community-mod
+   * `dismiss` carve-out (`ModerationService.assertCanActOnReport`): a
+   * community moderator must not be able to close a report filed about their
+   * OWN post (BE-COM-03). Same uuid-guard + null-soft shape as
+   * `communityIdForPost`, so a garbage `subjectId` can't 500 a uuid lookup.
+   */
+  async authorIdForPost(postId: string): Promise<string | null> {
+    if (!UUID_RE.test(postId)) return null;
+    const post = await this.posts.findOne({
+      where: { id: postId },
+      select: { authorId: true },
+    });
+    return post?.authorId ?? null;
+  }
+
+  /** Author of a community reply. Same contract as `authorIdForPost`. */
+  async authorIdForReply(replyId: string): Promise<string | null> {
+    if (!UUID_RE.test(replyId)) return null;
+    const reply = await this.replies.findOne({
+      where: { id: replyId },
+      select: { authorId: true },
+    });
+    return reply?.authorId ?? null;
+  }
+
+  /**
    * Every community id the given user is on the roster of — backs the
    * `community` OR-in predicate on the gatherings browse/search queries
    * (`EventsService.list`/`searchByText`), computed once per request via the

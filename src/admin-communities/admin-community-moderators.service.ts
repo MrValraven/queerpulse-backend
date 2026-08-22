@@ -7,11 +7,15 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
+import { CommunityGovernanceLogService } from '../communities/community-governance-log.service';
+import { GovernanceLogAction } from '../communities/entities/community-governance-log.entity';
 import {
   CommunityMember,
   RosterRole,
 } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
   AdminCommunityModeratorDTO,
@@ -50,6 +54,14 @@ export class AdminCommunityModeratorsService {
     private readonly communityMembers: Repository<CommunityMember>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
+    // BE-COM-19 — a platform-staff promotion/demotion mutates the same roster
+    // column the community-owned path writes, so it belongs in the same
+    // `community_governance_log` trail (with `adminOverride: true`) and owes
+    // the member the same `CommunityRoleChanged` notification. Both were
+    // missing entirely: only the member-facing `CommunitiesService.setMemberRole`
+    // logged and notified.
+    private readonly governanceLog: CommunityGovernanceLogService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /** The community's current moderation staff (owner + mods), oldest first. */
@@ -99,6 +111,7 @@ export class AdminCommunityModeratorsService {
   async addModerator(
     slug: string,
     memberId: string,
+    actorUserId: string,
   ): Promise<AdminCommunityModeratorDTO> {
     const community = await this.loadOr404(slug);
     const membership = await this.membershipOr404(community.id, memberId);
@@ -110,8 +123,19 @@ export class AdminCommunityModeratorsService {
     }
 
     if (membership.role !== RosterRole.Mod) {
+      const fromRole = membership.role;
       membership.role = RosterRole.Mod;
       await this.communityMembers.save(membership);
+      // Only on a real transition — re-adding an existing moderator is an
+      // idempotent no-op, and a no-op belongs in neither the audit trail nor
+      // the member's notification feed.
+      await this.logRoleChange(
+        community,
+        actorUserId,
+        memberId,
+        fromRole,
+        RosterRole.Mod,
+      );
     }
 
     return this.moderatorDtoFor(membership);
@@ -127,7 +151,11 @@ export class AdminCommunityModeratorsService {
    *    `Community.ownerId`, and it is never touched here).
    *  - 400 if the target is a plain member — there is no moderator to remove.
    */
-  async removeModerator(slug: string, memberId: string): Promise<void> {
+  async removeModerator(
+    slug: string,
+    memberId: string,
+    actorUserId: string,
+  ): Promise<void> {
     const community = await this.loadOr404(slug);
     const membership = await this.membershipOr404(community.id, memberId);
 
@@ -142,6 +170,65 @@ export class AdminCommunityModeratorsService {
 
     membership.role = RosterRole.Member;
     await this.communityMembers.save(membership);
+    await this.logRoleChange(
+      community,
+      actorUserId,
+      memberId,
+      RosterRole.Mod,
+      RosterRole.Member,
+    );
+  }
+
+  /**
+   * Records a platform-staff role change in `community_governance_log` and
+   * tells the member, mirroring what `CommunitiesService.setMemberRole` does
+   * on the community-owned path. `adminOverride: true` is what distinguishes
+   * the two in the trail.
+   *
+   * Both writes are best-effort: the role change itself has already
+   * committed, so neither a log failure nor a notification failure should
+   * turn a successful mutation into a 500 (same posture as
+   * `CommunitiesService.notifyRoleChanged`). A log failure is at least
+   * surfaced in the server log rather than lost.
+   */
+  private async logRoleChange(
+    community: Community,
+    actorUserId: string,
+    targetUserId: string,
+    fromRole: RosterRole,
+    toRole: RosterRole,
+  ): Promise<void> {
+    try {
+      await this.governanceLog.log({
+        communityId: community.id,
+        actorUserId,
+        action: GovernanceLogAction.RoleChanged,
+        targetUserId,
+        metadata: { adminOverride: true, fromRole, toRole },
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Failed to write the governance-log row for the ${fromRole} to ${toRole} change on ${community.slug}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    try {
+      await this.notifications.create(
+        targetUserId,
+        NotificationType.CommunityRoleChanged,
+        {
+          actorId: actorUserId,
+          source: 'community',
+          communitySlug: community.slug,
+          fromRole,
+          toRole,
+        },
+        actorUserId,
+      );
+    } catch {
+      // Intentionally ignored — best-effort; the role change already committed.
+    }
   }
 
   // --- internals ---

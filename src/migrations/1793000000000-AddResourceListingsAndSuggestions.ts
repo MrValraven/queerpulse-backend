@@ -16,9 +16,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
-export class AddResourceListingsAndSuggestions1793000000000
-  implements MigrationInterface
-{
+export class AddResourceListingsAndSuggestions1793000000000 implements MigrationInterface {
   name = 'AddResourceListingsAndSuggestions1793000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

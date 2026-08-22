@@ -4,7 +4,9 @@
  * The global HTTP `ThrottlerGuard` deliberately skips WS contexts, so the chat
  * gateway must enforce its own abuse limits. This is intentionally in-memory and
  * process-local (MVP, single instance) — mirror the presence swap-to-Redis note
- * when scaling past one node.
+ * when scaling past one node. On a second replica every budget here silently
+ * doubles, which is why `ChatSingleInstanceGuard` asserts the assumption at
+ * boot rather than leaving it to a comment.
  */
 export interface RateLimitConfig {
   /** Maximum burst — the bucket's full capacity. */

@@ -1,5 +1,12 @@
-import { Controller, Param, Post, UseGuards } from '@nestjs/common';
 import {
+  Controller,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
+import {
+  ApiBadRequestResponse,
   ApiCookieAuth,
   ApiForbiddenResponse,
   ApiOkResponse,
@@ -29,16 +36,21 @@ import { AnnouncementDismissalService } from './announcement-dismissal.service';
 export class AnnouncementController {
   constructor(private readonly dismissals: AnnouncementDismissalService) {}
 
-  // Idempotent upsert; any string is accepted as a version — dismissing a
-  // version that is no longer the current one is harmless (it just never
-  // gets read back by `PlatformStatusController`).
+  // Idempotent upsert. The version is the announcement's uuid, and it is
+  // parsed as one: `announcement_dismissal.announcement_version` is a `uuid`
+  // column, so an arbitrary string reached Postgres and raised 22P02 —
+  // a 500 (logged at error level, shipped to Sentry) that any member could
+  // produce at will. Dismissing a version that is no longer the current one is
+  // still harmless; it just never gets read back by
+  // `PlatformStatusController`.
   @Post(':version/dismiss')
   @ApiOperation({ summary: 'Dismiss the announcement banner for good.' })
   @ApiOkResponse({ description: 'The banner is dismissed for this member.' })
+  @ApiBadRequestResponse({ description: 'Malformed announcement version.' })
   @ApiForbiddenResponse({ description: 'Not an active member.' })
   async dismiss(
     @CurrentUser() user: CurrentUserData,
-    @Param('version') version: string,
+    @Param('version', ParseUUIDPipe) version: string,
   ): Promise<{ dismissed: true }> {
     await this.dismissals.dismiss(user.userId, version);
     return { dismissed: true };

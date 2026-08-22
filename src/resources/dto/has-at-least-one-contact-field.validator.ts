@@ -14,8 +14,8 @@ interface ContactFieldsShape {
 function hasContactField(candidate: ContactFieldsShape): boolean {
   return Boolean(
     candidate.phone?.trim() ||
-      candidate.email?.trim() ||
-      candidate.website?.trim(),
+    candidate.email?.trim() ||
+    candidate.website?.trim(),
   );
 }
 
@@ -51,7 +51,7 @@ export function HasAtLeastOneContactField(options?: ValidationOptions) {
       options,
       validator: {
         validate(_value: unknown, args: ValidationArguments): boolean {
-          return hasContactField(args.object as ContactFieldsShape);
+          return hasContactField(args.object);
         },
         defaultMessage(): string {
           return 'A resource listing needs at least one of phone, email or website.';

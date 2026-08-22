@@ -14,10 +14,25 @@ export enum GovernanceLogAction {
   Unarchived = 'unarchived',
   Frozen = 'frozen',
   Unfrozen = 'unfrozen',
+  // Written by `CommunitiesService.update` for a `PATCH /communities/:slug`
+  // that actually changed something, with the field-by-field diff in
+  // `metadata`. `accessTier` in particular is the community's most
+  // consequential setting (private -> public exposes the roster and every
+  // post) and used to change with nothing recorded at all (BE-COM-22).
+  SettingsChanged = 'settings_changed',
   // Written by `CommunityOwnerOrphanService.handleOwnerErasure` when a
   // community's owner account is erased and the longest-tenured `mod` on the
   // roster is auto-promoted to owner in their place.
   OwnerAutoPromoted = 'owner_auto_promoted',
+  // Written by `CardProgramsService.upsert` when an owner/mod turns a
+  // community's membership-card programme on or off.
+  CardProgramEnabled = 'card_program_enabled',
+  CardProgramDisabled = 'card_program_disabled',
+  // Written by `MembershipCardsService.setStatus` when an owner/mod
+  // suspends, revokes, or reinstates one member's card.
+  CardRevoked = 'card_revoked',
+  CardSuspended = 'card_suspended',
+  CardReinstated = 'card_reinstated',
 }
 
 /**
@@ -34,6 +49,17 @@ export enum GovernanceLogAction {
  * gone there is nothing left for the log to be an audit trail of.
  */
 @Entity('community_governance_log')
+// Backs the paginated reader (`GET /admin/communities/:slug/governance-log`,
+// BE-COM-15): `community_id` filter + `created_at DESC, id DESC` sort. The
+// migration (`1793620000000-AddCommunityGovernanceLogCommunityCreatedAtIndex`)
+// creates it with the explicit `DESC` ordering — the TypeORM decorator API
+// doesn't express column sort order, so the exact DDL lives there, not here
+// (same caveat as `RoadmapAuditLog`'s created_at index).
+@Index('IDX_community_governance_log_community_id_created_at', [
+  'communityId',
+  'createdAt',
+  'id',
+])
 export class CommunityGovernanceLog {
   @PrimaryGeneratedColumn('uuid')
   id!: string;

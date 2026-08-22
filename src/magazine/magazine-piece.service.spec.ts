@@ -17,7 +17,10 @@ import { UpdateBylineDto } from './dto/update-byline.dto';
 import { UpdatePaymentDto } from './dto/update-payment.dto';
 import { UpdatePieceDto } from './dto/update-piece.dto';
 import { UpdateRunOrderDto } from './dto/update-run-order.dto';
-import { MagazineArticle } from './entities/magazine-article.entity';
+import {
+  ArticleBlock,
+  MagazineArticle,
+} from './entities/magazine-article.entity';
 import { MagazineArticleComment } from './entities/magazine-article-comment.entity';
 import { MagazineArticleVersion } from './entities/magazine-article-version.entity';
 import { MagazineAuthor } from './entities/magazine-author.entity';
@@ -33,6 +36,7 @@ import { MagazinePiece, PieceCare } from './entities/magazine-piece.entity';
 import { MagazinePitch } from './entities/magazine-pitch.entity';
 import { MagazineSection } from './entities/magazine-section.entity';
 import { MagazinePieceService } from './magazine-piece.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { MailerService } from '../mailer/mailer.service';
 import { NewsletterSubscription } from '../newsletter/entities/newsletter-subscription.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -49,6 +53,10 @@ type RepositoryMock = {
   remove: jest.Mock;
   count: jest.Mock;
   createQueryBuilder: jest.Mock;
+  /** `saveArticleDraftGuarded`'s optimistic-concurrency claim
+   *  (`UPDATE ... WHERE id = :id AND version = :baseVersion`). Defaults to
+   *  "claimed"; a test that wants the stale-write 409 makes it affect 0 rows. */
+  update: jest.Mock;
 };
 
 function makeRepositoryMock(): RepositoryMock {
@@ -60,6 +68,7 @@ function makeRepositoryMock(): RepositoryMock {
     remove: jest.fn((entity: unknown) => Promise.resolve(entity)),
     count: jest.fn().mockResolvedValue(0),
     createQueryBuilder: jest.fn(),
+    update: jest.fn().mockResolvedValue({ affected: 1 }),
   };
 }
 
@@ -131,6 +140,7 @@ const ARTICLE: MagazineArticle = {
   tags: [],
   readMinutes: 1,
   publishedAt: null,
+  version: 0,
   createdAt: new Date('2026-08-01T00:00:00.000Z'),
   updatedAt: new Date('2026-08-01T00:00:00.000Z'),
 };
@@ -204,6 +214,7 @@ describe('MagazinePieceService', () => {
   let users: RepositoryMock;
   let profiles: RepositoryMock;
   let newsletterSubscriptions: RepositoryMock;
+  let eventEmitter: { emitAsync: jest.Mock };
   let transactionManager: { getRepository: jest.Mock };
   let dataSource: { transaction: jest.Mock };
   let notifications: { create: jest.Mock };
@@ -229,6 +240,7 @@ describe('MagazinePieceService', () => {
     users = makeRepositoryMock();
     profiles = makeRepositoryMock();
     newsletterSubscriptions = makeRepositoryMock();
+    eventEmitter = { emitAsync: jest.fn().mockResolvedValue([]) };
 
     // The commission/ship flows run inside `dataSource.transaction`,
     // resolving per-entity repos off the transactional `EntityManager` —
@@ -306,6 +318,9 @@ describe('MagazinePieceService', () => {
         { provide: DataSource, useValue: dataSource },
         { provide: NotificationsService, useValue: notifications },
         { provide: MailerService, useValue: mailer },
+        // Shipping an issue announces `newsletter.digest_due` and returns; the
+        // newsletter module queues and mails it (BE-MSG-14).
+        { provide: EventEmitter2, useValue: eventEmitter },
       ],
     }).compile();
 
@@ -691,6 +706,91 @@ describe('MagazinePieceService', () => {
       expect(result.readMinutes).toBeGreaterThan(0);
     });
 
+    it('stores the headline as plain text, stripping the contentEditable markup', async () => {
+      // `RichText` hands the server the headline's raw `innerHTML`. The column
+      // is plain text — the reader, the archive list, search and the digest
+      // email all render it as text — so the markup is stripped once, here, on
+      // write.
+      const piece = { ...PIECE, articleId: 'article-1' };
+      pieces.findOne.mockResolvedValue(piece);
+      const article = { ...ARTICLE, title: 'Old headline', publishedAt: null };
+      // A title change re-derives the slug, and `allocateUniqueSlug` loops
+      // while its `exists` predicate keeps saying "taken" — so the slug probe
+      // (`where.slug`) must answer "free", separately from the by-id load.
+      articles.findOne.mockImplementation(
+        (options: { where?: { slug?: string } }) =>
+          Promise.resolve(options?.where?.slug === undefined ? article : null),
+      );
+
+      const dto: UpdateArticleDto = {
+        title: '<div>A <em>bold</em>&nbsp;claim</div>',
+      };
+      const result = await service.updateArticleDraft(
+        'piece-1',
+        dto,
+        'editor-1',
+      );
+
+      expect(result.title).toBe('A bold claim');
+      expect(article.title).toBe('A bold claim');
+      // The plain-text mirror on the piece matches it exactly.
+      expect(piece.title).toBe('A bold claim');
+    });
+
+    it('bumps the version and returns it so the client can round-trip it', async () => {
+      const piece = { ...PIECE, articleId: 'article-1' };
+      pieces.findOne.mockResolvedValue(piece);
+      articles.findOne.mockResolvedValue({ ...ARTICLE, version: 3 });
+
+      const result = await service.updateArticleDraft(
+        'piece-1',
+        { standfirst: 'Updated lede.' },
+        'editor-1',
+      );
+
+      expect(articles.update).toHaveBeenCalledWith(
+        { id: 'article-1', version: 3 },
+        { version: 4 },
+      );
+      expect(result.version).toBe(4);
+    });
+
+    it('refuses a save whose expectedVersion is behind the stored row', async () => {
+      const piece = { ...PIECE, articleId: 'article-1' };
+      pieces.findOne.mockResolvedValue(piece);
+      articles.findOne.mockResolvedValue({ ...ARTICLE, version: 7 });
+
+      await expect(
+        service.updateArticleDraft(
+          'piece-1',
+          { expectedVersion: 5, blocks: [] },
+          'editor-1',
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      // Nothing is written and no audit noise is left behind by the loser.
+      expect(articles.save).not.toHaveBeenCalled();
+      expect(pieceEvents.create).not.toHaveBeenCalled();
+    });
+
+    it('refuses a save that loses the row claim to a concurrent writer', async () => {
+      // The precondition that actually matters: another request committed
+      // between this one's load and its write, so the conditional UPDATE
+      // matches no row.
+      const piece = { ...PIECE, articleId: 'article-1' };
+      pieces.findOne.mockResolvedValue(piece);
+      articles.findOne.mockResolvedValue({ ...ARTICLE, version: 2 });
+      articles.update.mockResolvedValue({ affected: 0 });
+
+      await expect(
+        service.updateArticleDraft(
+          'piece-1',
+          { blocks: [{ id: 'b1', kind: 'paragraph', html: 'Mine.' }] },
+          'editor-1',
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(articles.save).not.toHaveBeenCalled();
+    });
+
     it('merges a rapid second article_edited event into the existing row instead of creating a new one', async () => {
       const piece = { ...PIECE, articleId: 'article-1' };
       pieces.findOne.mockResolvedValue(piece);
@@ -798,6 +898,81 @@ describe('MagazinePieceService', () => {
         expect.objectContaining({ action: 'article_edited' }),
       );
       expect(result.standfirst).toBe('A new lede.');
+    });
+
+    // M1 foreign-upload backstop: the article-draft handler keeps the
+    // interceptor's shared-upload exemption, so the service must refuse a NEW
+    // foreign storage key (social image or image-block src) while allowing an
+    // UNCHANGED one to be re-saved.
+    describe('image ownership (M1)', () => {
+      const REQUESTER_ID = '11111111-2222-3333-4444-555555555555';
+      const OTHER_EDITOR_ID = '99999999-8888-7777-6666-555555555555';
+      const keyOf = (ownerId: string): string =>
+        `avatars/${ownerId}/66666666-7777-8888-9999-000000000000.jpg`;
+      const FOREIGN_KEY = keyOf(OTHER_EDITOR_ID);
+
+      const imageBlock = (src: string): ArticleBlock => ({
+        id: 'img-1',
+        kind: 'image',
+        alt: 'An alt',
+        caption: '',
+        credit: 'A credit',
+        rights: 'commissioned',
+        tint: 'coral',
+        crop: '16:9',
+        focal: { x: 0.5, y: 0.5 },
+        src,
+      });
+
+      it('rejects a NEW foreign social image without saving', async () => {
+        pieces.findOne.mockResolvedValue({ ...PIECE, articleId: 'article-1' });
+        articles.findOne.mockResolvedValue({
+          ...ARTICLE,
+          socialImage: '',
+          blocks: [],
+        });
+
+        await expect(
+          service.updateArticleDraft(
+            'piece-1',
+            { socialImage: FOREIGN_KEY },
+            REQUESTER_ID,
+          ),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(articles.save).not.toHaveBeenCalled();
+        expect(pieceEvents.create).not.toHaveBeenCalled();
+      });
+
+      it('rejects a NEW foreign image-block src without saving', async () => {
+        pieces.findOne.mockResolvedValue({ ...PIECE, articleId: 'article-1' });
+        articles.findOne.mockResolvedValue({ ...ARTICLE, blocks: [] });
+
+        await expect(
+          service.updateArticleDraft(
+            'piece-1',
+            { blocks: [imageBlock(FOREIGN_KEY)] },
+            REQUESTER_ID,
+          ),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(articles.save).not.toHaveBeenCalled();
+      });
+
+      it('allows re-saving an image whose foreign src is already stored', async () => {
+        pieces.findOne.mockResolvedValue({ ...PIECE, articleId: 'article-1' });
+        articles.findOne.mockResolvedValue({
+          ...ARTICLE,
+          blocks: [imageBlock(FOREIGN_KEY)],
+        });
+
+        await expect(
+          service.updateArticleDraft(
+            'piece-1',
+            { blocks: [imageBlock(FOREIGN_KEY)] },
+            REQUESTER_ID,
+          ),
+        ).resolves.toBeDefined();
+        expect(articles.save).toHaveBeenCalled();
+      });
     });
   });
 
@@ -979,6 +1154,31 @@ describe('MagazinePieceService', () => {
       await expect(service.getIssueProduction('99')).rejects.toBeInstanceOf(
         NotFoundException,
       );
+    });
+  });
+
+  // M1 foreign-upload backstop for the issue cover: the handler keeps the
+  // interceptor's shared-upload exemption, so the service must refuse a NEW
+  // foreign cover key while allowing an UNCHANGED one to be re-saved.
+  describe('updateCover image ownership (M1)', () => {
+    const REQUESTER_ID = '11111111-2222-3333-4444-555555555555';
+    const OTHER_EDITOR_ID = '99999999-8888-7777-6666-555555555555';
+    const FOREIGN_KEY = `avatars/${OTHER_EDITOR_ID}/66666666-7777-8888-9999-000000000000.jpg`;
+
+    it('rejects pointing the cover at a NEW foreign key without saving', async () => {
+      issues.findOne.mockResolvedValue({ ...ISSUE, coverUrl: null });
+      await expect(
+        service.updateCover('05', { coverUrl: FOREIGN_KEY }, REQUESTER_ID),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(issues.save).not.toHaveBeenCalled();
+    });
+
+    it('allows re-saving the existing (foreign-uploaded) cover unchanged', async () => {
+      issues.findOne.mockResolvedValue({ ...ISSUE, coverUrl: FOREIGN_KEY });
+      await expect(
+        service.updateCover('05', { coverUrl: FOREIGN_KEY }, REQUESTER_ID),
+      ).resolves.toBeDefined();
+      expect(issues.save).toHaveBeenCalled();
     });
   });
 
@@ -1383,24 +1583,60 @@ describe('MagazinePieceService', () => {
   });
 
   describe('listPieces saved view v-art', () => {
-    it('filters to pieces whose art is none or brief (still needs art)', async () => {
-      const queryBuilder = {
+    // The saved view is SQL now (CNT-09) — it narrows before the LIMIT rather
+    // than filtering `getMany()`'s full result set — so the assertion is on the
+    // predicate handed to the query builder, not on rows discarded afterwards.
+    function makeListQueryBuilder(rows: unknown[], total: number) {
+      return {
         andWhere: jest.fn().mockReturnThis(),
         orderBy: jest.fn().mockReturnThis(),
-        getMany: jest.fn().mockResolvedValue([
+        addOrderBy: jest.fn().mockReturnThis(),
+        offset: jest.fn().mockReturnThis(),
+        limit: jest.fn().mockReturnThis(),
+        getManyAndCount: jest.fn().mockResolvedValue([rows, total]),
+      };
+    }
+
+    it('narrows to pieces whose art is none or brief (still needs art) in SQL', async () => {
+      const queryBuilder = makeListQueryBuilder(
+        [
           { ...PIECE, id: 'piece-none', art: 'none' as const },
           { ...PIECE, id: 'piece-brief', art: 'brief' as const },
-          { ...PIECE, id: 'piece-in', art: 'in' as const },
-          { ...PIECE, id: 'piece-na', art: 'na' as const },
-        ]),
-      };
+        ],
+        2,
+      );
       pieces.createQueryBuilder.mockReturnValue(queryBuilder);
 
       const result = await service.listPieces({ savedView: 'v-art' });
 
-      expect(result.map((item) => item.id).sort()).toEqual(
+      expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+        "piece.art IN ('none', 'brief')",
+      );
+      expect(result.items.map((item) => item.id).sort()).toEqual(
         ['piece-brief', 'piece-none'].sort(),
       );
+    });
+
+    it('returns the paginated envelope and defaults to page 1', async () => {
+      const queryBuilder = makeListQueryBuilder([{ ...PIECE, id: 'p1' }], 137);
+      pieces.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      const result = await service.listPieces({});
+
+      expect(queryBuilder.offset).toHaveBeenCalledWith(0);
+      expect(queryBuilder.limit).toHaveBeenCalledWith(50);
+      expect(result).toMatchObject({ total: 137, page: 1, pageSize: 50 });
+      expect(result.items).toHaveLength(1);
+    });
+
+    it('offsets by the requested page and honours pageSize', async () => {
+      const queryBuilder = makeListQueryBuilder([], 0);
+      pieces.createQueryBuilder.mockReturnValue(queryBuilder);
+
+      await service.listPieces({ page: 3, pageSize: 10 });
+
+      expect(queryBuilder.offset).toHaveBeenCalledWith(20);
+      expect(queryBuilder.limit).toHaveBeenCalledWith(10);
     });
   });
 

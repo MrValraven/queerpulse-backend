@@ -23,5 +23,12 @@ export class AddImageMessages1792100000000 implements MigrationInterface {
     // Postgres cannot drop a single enum value; leaving 'image' is harmless —
     // mirrors AddGifMessages1785001800000's down() (nothing to reverse here
     // since this migration adds no column, only the enum value).
+    // Fails loudly rather than reporting a successful revert that undid
+    // nothing: a silent no-op removes the row from the migrations ledger, so
+    // the next `migration:run` retries `ADD VALUE` and errors on the label
+    // that is still there. Postgres has no `ALTER TYPE ... DROP VALUE`.
+    throw new Error(
+      'Irreversible: Postgres cannot drop an enum value. Restore from a backup instead.',
+    );
   }
 }

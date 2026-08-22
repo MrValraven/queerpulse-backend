@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiCookieAuth,
   ApiCreatedResponse,
@@ -49,7 +57,10 @@ export class HousingReviewsController {
   })
   forViewing(
     @CurrentUser() user: CurrentUserData,
-    @Param('viewingId') viewingId: string,
+    // BE-HSG-10: a non-UUID segment used to reach a `uuid` column comparison
+    // and surface as a 500 (Postgres 22P02 through TypeORM's QueryFailedError,
+    // which `AllExceptionsFilter` cannot map). Now a 400.
+    @Param('viewingId', ParseUUIDPipe) viewingId: string,
   ) {
     return this.service.forViewing(viewingId, user.userId);
   }

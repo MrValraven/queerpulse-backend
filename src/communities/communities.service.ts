@@ -8,12 +8,14 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
   ContentModerationService,
   ContentModerationState,
 } from '../content-moderation/content-moderation.service';
 import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
+import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { ConnectionsService } from '../connections/connections.service';
 import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
@@ -30,7 +32,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
-import { VouchService } from '../vouch/vouch.service';
+import { CommunityAutoFreezeService } from './community-auto-freeze.service';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
 import { GovernanceLogAction } from './entities/community-governance-log.entity';
 import {
@@ -61,11 +63,18 @@ import {
   CommunityMember,
   RosterRole,
 } from './entities/community-member.entity';
+import {
+  CommunityMemberJoinedEvent,
+  CommunityMemberLeftEvent,
+  COMMUNITY_MEMBER_JOINED,
+  COMMUNITY_MEMBER_LEFT,
+} from './community.events';
 import { CommunityPost } from './entities/community-post.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import {
   AccessTier,
   Community,
+  CommunityFrozenReason,
   CommunityType,
 } from './entities/community.entity';
 
@@ -108,17 +117,22 @@ export interface CreateCommunityInput {
   tags?: string[]; // curated ids from COMMUNITY_TAGS; defaults to [] when omitted
   coverImageUrl?: string | null; // storage key / https URL / '' to clear
   handle: string; // desired slug
-  stewards?: string[]; // member slugs -> seeded as 'mod'
-  invites?: string[]; // member slugs -> sent a CommunityInviteReceived notification, never force-added to the roster (see `seedExtraRoster`)
+  // Member slugs -> sent a CommunityInviteReceived notification carrying
+  // `proposedRole: 'mod'`. NOT a roster add: nobody is made a moderator
+  // without consent (see `resolveInvitees`).
+  stewards?: string[];
+  // Member slugs -> sent a CommunityInviteReceived notification, never
+  // force-added to the roster (see `resolveInvitees`)
+  invites?: string[];
 }
 
 // `handle` only ever applies at creation time (spec: "handle ignored on
-// patch"). `stewards`/`invites` are creation-time roster seeding, not a
-// patchable field either — there's no PATCH-time re-seeding semantics in the
-// spec's endpoint table, so `update()` simply never reads them even though
-// the type carries them (mirrors `PartialType(CreateCommunityDto)`).
+// patch"). `stewards`/`invites` are creation-time invitations with no
+// PATCH-time re-send semantics either. All three are omitted from the input
+// type AND from `UpdateCommunityDto`, so sending one is a 400 that names the
+// field rather than a silent drop the client reads as success (BE-COM-22).
 export type UpdateCommunityInput = Partial<
-  Omit<CreateCommunityInput, 'handle'>
+  Omit<CreateCommunityInput, 'handle' | 'stewards' | 'invites'>
 >;
 
 export type CommunityListFilter = 'discover' | 'mine';
@@ -186,9 +200,6 @@ export class CommunitiesService {
     private readonly dataSource: DataSource,
     private readonly contentModeration: ContentModerationService,
     private readonly notifications: NotificationsService,
-    // Second-vouch join gating reads the platform vouch graph to check whether a
-    // current community member has vouched for an applicant.
-    private readonly vouch: VouchService,
     // `suggestedCommunities`'s social-graph signal: the viewer's accepted
     // connections. See that method's doc comment for why connections (not
     // tags) is the real signal here.
@@ -200,6 +211,18 @@ export class CommunitiesService {
     // lifecycle action this service performs (role change, removal,
     // ownership transfer, archive, freeze/unfreeze) writes one entry.
     private readonly governanceLog: CommunityGovernanceLogService,
+    // The freeze side of `unfreeze`'s gate: an AUTOMATIC freeze may only be
+    // lifted once this service's own open-report count for the community
+    // reaches zero (BE-COM-04). Same provider, same module — no cycle
+    // (`CommunityAutoFreezeService` depends only on repos, the governance log
+    // and notifications).
+    private readonly autoFreeze: CommunityAutoFreezeService,
+    // Fires `COMMUNITY_MEMBER_JOINED`/`COMMUNITY_MEMBER_LEFT` off every roster
+    // add/remove path below, for `MembershipCardListener` (membership cards)
+    // to keep a community's card programme in step with who is actually on
+    // the roster. Same fire-and-forget `emit` idiom as `COMMUNITY_POST_CREATED`
+    // in `CommunityPostsService`.
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   private readonly logger = new Logger(CommunitiesService.name);
@@ -237,32 +260,50 @@ export class CommunitiesService {
     ownerId: string,
     dto: CreateCommunityInput,
   ): Promise<CommunityDetailDTO> {
-    const { community: saved, invitedUserIds } = await this.createWithUniqueRef(
+    // Resolved BEFORE the create transaction opens: neither list writes
+    // anything any more (see `resolveInvitees`), so there is no reason to
+    // re-resolve them on each retry of that transaction.
+    const { stewardUserIds, invitedUserIds } = await this.resolveInvitees(
       ownerId,
-      dto,
+      dto.stewards ?? [],
+      dto.invites ?? [],
     );
+
+    const saved = await this.createWithUniqueRef(ownerId, dto);
+
+    // The owner's own roster row is written inside `createWithUniqueRef`'s
+    // transaction (see that method) — this fires only after it has
+    // committed, same "after the create transaction has committed" timing as
+    // `notifyInvitees` below.
+    this.eventEmitter.emit(COMMUNITY_MEMBER_JOINED, {
+      communityId: saved.id,
+      userId: ownerId,
+    } satisfies CommunityMemberJoinedEvent);
 
     // Best-effort, after the create transaction has committed — see
     // `notifyInvitees`.
-    await this.notifyInvitees(saved, ownerId, invitedUserIds);
+    await this.notifyInvitees(saved, ownerId, invitedUserIds, stewardUserIds);
 
     // The creator is always 'owner' right after creation — skip the extra
     // roster lookup `buildDetail` would otherwise do.
     return this.buildDetail(saved, ownerId, RosterRole.Owner);
   }
 
-  // `ref = QP-C-<count()+1>` (and, like it, the slug pre-check) can lose a
-  // race to a concurrent create landing between the read and this INSERT;
-  // the unique indexes on `ref`/`slug` are the real backstop and turn that
-  // race into a 23505. A 23505 aborts the whole transaction (Postgres poisons
-  // it on any statement error), so the retry has to re-run the *entire*
-  // transaction with freshly recomputed values, not just the failed insert.
-  // Mirrors `EventsService.saveWithUniqueSlug`'s retry loop, generalized from
-  // a single `.save()` to the whole create transaction.
+  // The slug pre-check can lose a race to a concurrent create landing between
+  // the read and this INSERT; the unique index on `slug` is the real backstop
+  // and turns that race into a 23505. A 23505 aborts the whole transaction
+  // (Postgres poisons it on any statement error), so the retry has to re-run
+  // the *entire* transaction with a freshly allocated slug, not just the
+  // failed insert. Mirrors `EventsService.saveWithUniqueSlug`'s retry loop,
+  // generalized from a single `.save()` to the whole create transaction.
+  //
+  // `ref` no longer participates in that race at all: it comes from the
+  // `communities_ref_seq` sequence (BE-COM-23), which is concurrency-safe by
+  // construction.
   private async createWithUniqueRef(
     ownerId: string,
     dto: CreateCommunityInput,
-  ): Promise<{ community: Community; invitedUserIds: string[] }> {
+  ): Promise<Community> {
     const MAX_ATTEMPTS = 5;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const slug = await allocateUniqueSlug(
@@ -275,11 +316,31 @@ export class CommunitiesService {
           const communitiesRepo = manager.getRepository(Community);
           const membersRepo = manager.getRepository(CommunityMember);
 
-          // Best-effort sequential ref (`QP-C-0004`, ...), per the brief.
-          // Computed inside the transaction so it sees the latest committed
-          // count; the enclosing retry loop is what covers the race.
-          const count = await communitiesRepo.count();
-          const ref = `QP-C-${String(count + 1).padStart(4, '0')}`;
+          // Sequential ref (`QP-C-0004`, ...), per the brief — allocated from
+          // `communities_ref_seq`
+          // (`1793620200000-AddCommunitiesRefSequence`) rather than
+          // `COUNT(*) + 1` (BE-COM-23). `nextval` never hands the same number
+          // to two concurrent creates, and it is independent of how many rows
+          // exist, so a hard-deleted community can no longer make every future
+          // create collide on `UQ_communities_ref`.
+          //
+          // The trade-off is gaps: sequence advancement is deliberately not
+          // rolled back, so a create that fails after this point burns its
+          // number. A ref is an opaque handle, not a count of communities.
+          //
+          // `nextval` returns bigint, which the pg driver hands back as a
+          // string — `padStart` takes it as-is, no Number round-trip.
+          const [refRow] = await manager.query<{ refNumber: string }[]>(
+            `SELECT nextval('communities_ref_seq') AS "refNumber"`,
+          );
+          // `nextval` always returns exactly one row, but the destructure is
+          // typed as possibly-undefined, and silently falling back to a
+          // hardcoded ref would reintroduce the collision this sequence
+          // exists to prevent. Fail instead.
+          if (!refRow) {
+            throw new Error('communities_ref_seq returned no row');
+          }
+          const ref = `QP-C-${refRow.refNumber.padStart(4, '0')}`;
 
           const community = await communitiesRepo.save(
             communitiesRepo.create({
@@ -300,6 +361,9 @@ export class CommunitiesService {
             }),
           );
 
+          // The creator's own roster row is the ONLY membership this
+          // transaction writes. `stewards`/`invites` are both invitations now
+          // (see `resolveInvitees`), never consent-less roster adds.
           await membersRepo.save(
             membersRepo.create({
               communityId: community.id,
@@ -308,16 +372,7 @@ export class CommunitiesService {
             }),
           );
 
-          const invitedUserIds = await this.seedExtraRoster(
-            manager.getRepository(Profile),
-            membersRepo,
-            community.id,
-            ownerId,
-            dto.stewards ?? [],
-            dto.invites ?? [],
-          );
-
-          return { community, invitedUserIds };
+          return community;
         });
       } catch (err) {
         if (isUniqueViolation(err)) {
@@ -702,15 +757,60 @@ export class CommunitiesService {
     return this.buildDetail(community, viewerId, role, moderation);
   }
 
+  /**
+   * `PATCH /communities/:slug` — edit the community's settings.
+   *
+   * Owner/mod for most fields, OWNER-ONLY for `accessTier` and
+   * `rosterVisible` (BE-COM-22). Those two are the community's privacy
+   * promise: flipping `private` to `public` exposes the roster and every post
+   * at once, which is the same class of act as archiving or transferring it,
+   * and those are already owner-only. An archived community takes no edits at
+   * all — it is down for everyone but its own staff, and editing it would
+   * quietly reshape something no member can see.
+   *
+   * Every effective change is written to `community_governance_log` with its
+   * before/after diff. This was the only mutating community route with no
+   * audit entry, so an access-tier change left nothing behind for a member
+   * asking "who made this public?".
+   */
   async update(
     slug: string,
     userId: string,
     dto: UpdateCommunityInput,
   ): Promise<CommunityDetailDTO> {
     const community = await this.loadOr404(slug);
-    await this.assertOwnerOrMod(community.id, userId);
+    const actorMembership = await this.assertOwnerOrMod(community.id, userId);
 
-    Object.assign(community, {
+    if (community.archivedAt != null) {
+      throw new ConflictException(
+        'An archived community cannot be edited. Unarchive it first.',
+      );
+    }
+
+    // Shared-upload backstop (see `assertNoForeignUploadIntroduced`): this
+    // community is edited by every owner/moderator, so the interceptor exempts
+    // it and lets a co-editor re-save the currently stored cover whoever
+    // uploaded it. Runs BEFORE any mutation and draws the line the interceptor
+    // cannot: a foreign cover is allowed only when it is already the stored
+    // value, so a co-editor cannot point the field at a new foreign upload.
+    assertNoForeignUploadIntroduced(userId, dto.coverImageUrl, [
+      community.coverImageUrl,
+    ]);
+
+    const isOwner = actorMembership.role === RosterRole.Owner;
+    if (
+      !isOwner &&
+      ((dto.accessTier !== undefined &&
+        dto.accessTier !== community.accessTier) ||
+        (dto.rosterVisible !== undefined &&
+          dto.rosterVisible !== community.rosterVisible))
+    ) {
+      throw new ForbiddenException(
+        'Only the owner can change who can see or join this community',
+      );
+    }
+
+    const next = {
       ...(dto.name !== undefined ? { name: dto.name } : {}),
       ...(dto.purpose !== undefined ? { purpose: dto.purpose } : {}),
       ...(dto.type !== undefined ? { type: dto.type } : {}),
@@ -728,10 +828,49 @@ export class CommunitiesService {
       ...(dto.coverImageUrl !== undefined
         ? { coverImageUrl: dto.coverImageUrl || null }
         : {}),
-    });
+    };
+    // Diffed BEFORE the assign, against the loaded row, so the log records
+    // what actually changed rather than every field the client happened to
+    // echo back unchanged.
+    const changes = CommunitiesService.diffSettings(community, next);
 
+    Object.assign(community, next);
     const saved = await this.communities.save(community);
+
+    if (Object.keys(changes).length) {
+      await this.logGovernanceAction(
+        community.id,
+        userId,
+        GovernanceLogAction.SettingsChanged,
+        null,
+        { changes },
+      );
+    }
     return this.buildDetail(saved, userId);
+  }
+
+  /**
+   * Field-by-field `{ from, to }` diff of a settings patch against the row it
+   * is about to be applied to — the `metadata` body of the
+   * `settings_changed` governance-log entry. Array fields (`features`,
+   * `rules`, `tags`) compare by contents, in order, which is how they are
+   * stored and sent.
+   */
+  private static diffSettings(
+    community: Community,
+    next: Record<string, unknown>,
+  ): Record<string, { from: unknown; to: unknown }> {
+    const changes: Record<string, { from: unknown; to: unknown }> = {};
+    for (const [field, to] of Object.entries(next)) {
+      const from = (community as unknown as Record<string, unknown>)[field];
+      const unchanged = Array.isArray(from)
+        ? Array.isArray(to) &&
+          from.length === to.length &&
+          from.every((value, index) => value === to[index])
+        : from === to;
+      if (!unchanged) changes[field] = { from, to };
+    }
+    return changes;
   }
 
   /**
@@ -792,11 +931,18 @@ export class CommunitiesService {
       const result = await this.communities
         .createQueryBuilder()
         .update(Community)
-        .set({ frozenAt: () => 'now()' })
+        .set({
+          frozenAt: () => 'now()',
+          // Stamped with the marker so `unfreeze` can let the owner/mod lift
+          // THEIR OWN freeze freely, while an automatic one stays gated on the
+          // reports actually being handled (BE-COM-04).
+          frozenReason: CommunityFrozenReason.Manual,
+        })
         .where('id = :id AND frozen_at IS NULL', { id: community.id })
         .execute();
       if (result.affected) {
         community.frozenAt = new Date();
+        community.frozenReason = CommunityFrozenReason.Manual;
         await this.logGovernanceAction(
           community.id,
           userId,
@@ -816,10 +962,28 @@ export class CommunitiesService {
   }
 
   /**
-   * `POST /communities/:slug/unfreeze` — an owner or mod lifts a freeze
-   * (automatic or manual) once they've handled whatever triggered it.
+   * `POST /communities/:slug/unfreeze` — an owner or mod lifts a freeze.
    * Idempotent — unfreezing a community that isn't frozen is a no-op 200
    * that just returns the current detail.
+   *
+   * The role check alone is not the whole gate (BE-COM-04). A freeze set by
+   * `CommunityAutoFreezeService` is the platform's response to an
+   * outing/doxxing report or a pile-up of open ones; letting the community's
+   * own owner clear it in the next request made that control advisory, which
+   * is the opposite of what it is for. So:
+   *
+   *  - `manual` — the owner/mod set it themselves; they may lift it whenever
+   *    they like, no further condition.
+   *  - `emergency_report` / `report_pileup` (and any legacy freeze with no
+   *    recorded reason, treated as automatic — the conservative direction) —
+   *    lifting requires the community's open reports to actually be at zero,
+   *    which is what the Swagger text has always claimed ("once reports are
+   *    handled") without anything enforcing it. Otherwise 409, and the freeze
+   *    stands until a moderator resolves the reports or platform staff lifts
+   *    it through `AdminCommunitiesService`.
+   *
+   * The count is `CommunityAutoFreezeService.openReportCount` — literally the
+   * same query that decided to freeze, so the two sides can't drift apart.
    */
   async unfreeze(slug: string, userId: string): Promise<CommunityDetailDTO> {
     const community = await this.loadOr404(slug);
@@ -830,7 +994,16 @@ export class CommunitiesService {
       );
     }
     if (community.frozenAt != null) {
+      if (community.frozenReason !== CommunityFrozenReason.Manual) {
+        const openReports = await this.autoFreeze.openReportCount(community);
+        if (openReports > 0) {
+          throw new ConflictException(
+            'This community was frozen by moderation. It can be unfrozen once its open reports have been resolved.',
+          );
+        }
+      }
       community.frozenAt = null;
+      community.frozenReason = null;
       await this.communities.save(community);
       await this.logGovernanceAction(
         community.id,
@@ -972,6 +1145,29 @@ export class CommunitiesService {
       return { outcome: 'joined', role: RosterRole.Member, request: null };
     }
 
+    // Everything `getBySlug` 404s, this route must 404 too (BE-COM-17). It
+    // used to check `frozenAt` and nothing else, so a caller could confirm a
+    // private community exists purely from the status code (201 here vs 404
+    // there), and staff of a private or archived community received
+    // join-request notifications from people who should never have known it
+    // was there. Existing members short-circuit above, so none of this
+    // touches someone already on the roster.
+    if (community.archivedAt != null) {
+      throw new NotFoundException('Community not found');
+    }
+    if (community.accessTier === AccessTier.Private) {
+      // No membership (checked above) and the tier is invitation-only —
+      // exactly the case `getBySlug` refuses to confirm the existence of.
+      throw new NotFoundException('Community not found');
+    }
+    const moderation = await this.contentModeration.stateFor(
+      CommunitiesService.SUBJECT_TYPE,
+      community.slug,
+    );
+    if (moderation.hidden || moderation.removed) {
+      throw new NotFoundException('Community not found');
+    }
+
     // A frozen community stays visible but takes no new members until an
     // owner/mod lifts the freeze (see `Community.frozenAt`). Existing members
     // short-circuit above, so this only blocks a genuinely new join.
@@ -1003,6 +1199,10 @@ export class CommunitiesService {
         .values({ communityId: community.id, userId, role: RosterRole.Member })
         .orIgnore()
         .execute();
+      this.eventEmitter.emit(COMMUNITY_MEMBER_JOINED, {
+        communityId: community.id,
+        userId,
+      } satisfies CommunityMemberJoinedEvent);
       return { outcome: 'joined', role: RosterRole.Member, request: null };
     }
 
@@ -1060,14 +1260,27 @@ export class CommunitiesService {
     communityId: string,
     applicantId: string,
   ): Promise<boolean> {
-    const rows = await this.members.find({
-      where: { communityId },
-      select: { userId: true },
-    });
-    return this.vouch.hasActiveVouchFrom(
-      rows.map((row) => row.userId),
-      applicantId,
-    );
+    // One bounded `EXISTS` rather than loading every roster user id into
+    // memory and passing them to `VouchService.hasActiveVouchFrom` as an
+    // `IN (...)` list (BE-COM-36): that second query's parameter list grew
+    // with the community, and a large community made every join attempt read
+    // its whole roster first. Postgres can stop at the first matching pair.
+    const match = await this.members
+      .createQueryBuilder('m')
+      .select('1', 'one')
+      .where('m.community_id = :communityId', { communityId })
+      .andWhere(
+        `EXISTS (
+           SELECT 1 FROM "vouches" v
+           WHERE v.voucher_id = m.user_id
+             AND v.vouchee_id = :applicantId
+             AND v.withdrawn_at IS NULL
+         )`,
+        { applicantId },
+      )
+      .limit(1)
+      .getRawOne<{ one: number }>();
+    return match !== undefined && match !== null;
   }
 
   // Private + non-member -> 404, not 403, so existence isn't leaked — mirrors
@@ -1159,6 +1372,12 @@ export class CommunitiesService {
     const rows = await this.joinRequests.find({
       where: { communityId: community.id, status: JoinRequestStatus.Pending },
       order: { createdAt: 'ASC' },
+      // Bounded (BE-COM-36): the pending queue had no `take` at all, and each
+      // row fans out into a member lookup. The response stays a plain array,
+      // so the cap is invisible to today's callers; a community with a
+      // 200-deep pending queue has a moderation problem this endpoint isn't
+      // the place to solve.
+      take: DEFAULT_LIST_LIMIT,
     });
     if (!rows.length) return [];
 
@@ -1256,6 +1475,16 @@ export class CommunitiesService {
       return request;
     });
 
+    // Fired only after the transaction above has committed the roster
+    // insert, and only on the branch that actually wrote one — mirrors the
+    // `action === 'approve'` gate on the insert itself.
+    if (action === 'approve') {
+      this.eventEmitter.emit(COMMUNITY_MEMBER_JOINED, {
+        communityId: community.id,
+        userId: saved.userId,
+      } satisfies CommunityMemberJoinedEvent);
+    }
+
     // Tell the applicant the outcome — they always have an account (a
     // `CommunityJoinRequest.userId` is a real member), so this in-app
     // notification always reaches them. No actor: it's the community telling
@@ -1299,9 +1528,24 @@ export class CommunitiesService {
     }
   }
 
-  // Self-leave or mod-remove; the owner is never removable (they'd orphan
-  // the community) — that check runs after authorization so an unauthorized
-  // stranger gets Forbidden rather than a hint about who owns it.
+  /**
+   * Self-leave or staff-remove.
+   *
+   * Guardrails, in the order enforced below:
+   *  1. Anyone may remove THEMSELVES (leaving); removing anyone else requires
+   *     owner/mod. Authorization runs before the owner check so an
+   *     unauthorized stranger gets Forbidden rather than a hint about who owns
+   *     the community.
+   *  2. Only the OWNER may remove another moderator. `setMemberRole` already
+   *     refuses to let a mod demote a peer ("only the owner can change a
+   *     moderator's role"), but `removeMember` used to block only the owner —
+   *     so a mod could simply kick a peer mod off the roster instead, which is
+   *     strictly stronger than the demotion the other rule forbids (BE-COM-07).
+   *     The two now agree: a mod's standing in a community can only be taken
+   *     away by its owner, whichever route is used. A mod removing THEMSELVES
+   *     is still a self-leave and stays allowed.
+   *  3. The owner is never removable — they'd orphan the community.
+   */
   async removeMember(
     slug: string,
     actorId: string,
@@ -1323,7 +1567,17 @@ export class CommunitiesService {
     }
 
     if (actorId !== targetUserId) {
-      await this.assertOwnerOrMod(community.id, actorId);
+      const actorMembership = await this.assertOwnerOrMod(
+        community.id,
+        actorId,
+      );
+      // Mirrors `setMemberRole`'s rule 5 — see this method's doc comment.
+      if (
+        targetMembership.role === RosterRole.Mod &&
+        actorMembership.role !== RosterRole.Owner
+      ) {
+        throw new ForbiddenException('Only the owner can remove a moderator');
+      }
     }
 
     if (targetMembership.role === RosterRole.Owner) {
@@ -1331,6 +1585,12 @@ export class CommunitiesService {
     }
 
     await this.members.delete({ id: targetMembership.id });
+    // Self-leave or staff-removal, either way the roster row is gone — the
+    // card programme must not keep a former member's card working.
+    this.eventEmitter.emit(COMMUNITY_MEMBER_LEFT, {
+      communityId: community.id,
+      userId: targetUserId,
+    } satisfies CommunityMemberLeftEvent);
 
     const removedBySelf = actorId === targetUserId;
     await this.logGovernanceAction(
@@ -1439,12 +1699,11 @@ export class CommunitiesService {
    *     a peer. Otherwise any single mod could unilaterally dismantle the rest
    *     of the mod team and become the sole moderator — a takeover from
    *     inside the mod tier, quietly and with nothing on the roster to show
-   *     for it. (Note the deliberate asymmetry with `removeMember`, which does
-   *     let a mod remove a peer mod outright. Removing is loud — the target
-   *     vanishes from the roster and notices at once, and getting back in
-   *     needs a fresh request plus an approval. A silent demotion is not, and
-   *     "the same end is reachable by a noisier route" is not a reason to add
-   *     a quiet one.)
+   *     for it. `removeMember` enforces the same rule (BE-COM-07). It used to
+   *     let a mod remove a peer mod outright, on the reasoning that removal is
+   *     loud where a demotion is quiet — but loud does not make it weaker, and
+   *     it left the exact takeover this rule forbids reachable through the
+   *     next endpoint over. Both routes now require the owner.
    *
    * The rules are evaluated against the *current* roles only, never against
    * the role being requested, so authorization can't be steered by the body.
@@ -1598,62 +1857,70 @@ export class CommunitiesService {
   }
 
   /**
-   * Seeds the roster's `mod` rows from `stewards`, and resolves (but never
-   * roster-adds) `invites`. Returns the resolved invitee user ids so the
-   * caller (`create`, after this transaction commits) can send each of them
-   * a `CommunityInviteReceived` notification — closing the gap where invites
-   * were accepted by the create form but silently discarded. Still no
-   * `CommunityInvite`/accept entity: force-adding members without consent is
-   * unsafe, so an invite never becomes a `CommunityMember` row here, only a
-   * notification. The slugs are resolved in one batched lookup alongside
-   * `stewards` so an unknown/typo'd invite slug doesn't silently behave
-   * differently from a valid one — it just resolves to nothing.
+   * Resolves the create form's `stewards` and `invites` slugs to user ids.
+   * Writes NOTHING — both lists are invitations, and the only roster row
+   * `create` writes is the creator's own `owner`.
+   *
+   * `stewards` used to be seeded straight into the roster as `mod` inside the
+   * create transaction: no notification, no accept step, no way to decline
+   * (BE-COM-06). Any member could therefore create a community under any name
+   * and make up to 50 other members its moderators, who would then appear as
+   * `mod` on the roster, in `myCommunities`, in the admin moderators list and
+   * in admin trust-network derivation — a misattribution and harassment vector
+   * on a safety platform. A steward is now told they were asked (the
+   * notification carries `proposedRole: 'mod'`) and the owner promotes them
+   * with `setMemberRole` once they have actually joined, which is the existing
+   * consented path for handing someone moderator standing.
+   *
+   * Both lists are resolved in ONE batched lookup so an unknown/typo'd slug in
+   * either behaves identically — it just resolves to nothing.
+   *
+   * System/house accounts (`User.isSystem`) are dropped: they are non-human
+   * platform accounts nobody signs in as, so an invitation to one can never be
+   * answered. Mirrors the house-account guardrail on `transferOwnership`.
+   * `MemberLookup.userIdsForSlugs` already restricts to `active` users.
    */
-  private async seedExtraRoster(
-    profilesRepo: Repository<Profile>,
-    membersRepo: Repository<CommunityMember>,
-    communityId: string,
+  private async resolveInvitees(
     ownerId: string,
     stewards: string[],
     invites: string[],
-  ): Promise<string[]> {
+  ): Promise<{ stewardUserIds: string[]; invitedUserIds: string[] }> {
     const slugs = [...stewards, ...invites];
-    if (!slugs.length) return [];
+    if (!slugs.length) return { stewardUserIds: [], invitedUserIds: [] };
 
-    const lookup = new MemberLookup(profilesRepo);
-    const idBySlug = await lookup.userIdsForSlugs(slugs);
+    const idBySlug = await new MemberLookup(this.profiles).userIdsForSlugs(
+      slugs,
+    );
+    const resolvedIds = [...new Set(idBySlug.values())];
+    const systemUserIds = resolvedIds.length
+      ? new Set(
+          (
+            await this.users.find({
+              where: { id: In(resolvedIds), isSystem: true },
+              select: { id: true },
+            })
+          ).map((user) => user.id),
+        )
+      : new Set<string>();
+
+    // The creator is trivially already on the roster, and nobody is invited
+    // twice — a slug listed as BOTH a steward and an invite is only ever the
+    // steward invitation (the stronger of the two).
     const seen = new Set<string>([ownerId]);
-    const rows: CommunityMember[] = [];
-
-    for (const slug of stewards) {
-      const uid = idBySlug.get(slug);
-      if (uid && !seen.has(uid)) {
-        seen.add(uid);
-        rows.push(
-          membersRepo.create({
-            communityId,
-            userId: uid,
-            role: RosterRole.Mod,
-          }),
-        );
+    const take = (slugList: string[]): string[] => {
+      const out: string[] = [];
+      for (const slug of slugList) {
+        const userId = idBySlug.get(slug);
+        if (!userId || seen.has(userId) || systemUserIds.has(userId)) continue;
+        seen.add(userId);
+        out.push(userId);
       }
-    }
+      return out;
+    };
 
-    if (rows.length) {
-      await membersRepo.save(rows);
-    }
-
-    // A steward is already rostered as mod (and the owner is trivially
-    // already in `seen`) — never also "invite" someone who's already on the
-    // roster.
-    const invitedUserIds: string[] = [];
-    for (const slug of invites) {
-      const uid = idBySlug.get(slug);
-      if (uid && !seen.has(uid) && !invitedUserIds.includes(uid)) {
-        invitedUserIds.push(uid);
-      }
-    }
-    return invitedUserIds;
+    const stewardUserIds = take(stewards);
+    const invitedUserIds = take(invites);
+    return { stewardUserIds, invitedUserIds };
   }
 
   private async buildDetail(
@@ -1965,29 +2232,45 @@ export class CommunitiesService {
   }
 
   /**
-   * Best-effort "you were invited" fan-out for `create`'s resolved `invites`.
-   * NOT a roster add — see `seedExtraRoster`'s "no consent-less roster adds"
-   * note. Runs after the create transaction has committed (notification
-   * writes aren't part of it), so a failure here can never roll back a
-   * successful community creation.
+   * Best-effort "you were invited" fan-out for `create`'s resolved `invites`
+   * and `stewards`. NEITHER is a roster add — see `resolveInvitees`'s "no
+   * consent-less roster adds" note. Runs after the create transaction has
+   * committed (notification writes aren't part of it), so a failure here can
+   * never roll back a successful community creation.
+   *
+   * Two fan-outs, not one: a steward's notification carries
+   * `proposedRole: 'mod'` so the client can say "asked you to help moderate"
+   * rather than a plain invite, and so the owner's intent survives to the
+   * moment the steward joins and is promoted through `setMemberRole`.
    */
   private async notifyInvitees(
     community: Community,
     inviterId: string,
     invitedUserIds: string[],
+    stewardUserIds: string[],
   ): Promise<void> {
-    if (!invitedUserIds.length) return;
+    const payload = {
+      actorId: inviterId,
+      source: 'community',
+      communitySlug: community.slug,
+    };
     try {
-      await this.notifications.createForRecipients(
-        invitedUserIds,
-        NotificationType.CommunityInviteReceived,
-        {
-          actorId: inviterId,
-          source: 'community',
-          communitySlug: community.slug,
-        },
-        inviterId,
-      );
+      if (invitedUserIds.length) {
+        await this.notifications.createForRecipients(
+          invitedUserIds,
+          NotificationType.CommunityInviteReceived,
+          payload,
+          inviterId,
+        );
+      }
+      if (stewardUserIds.length) {
+        await this.notifications.createForRecipients(
+          stewardUserIds,
+          NotificationType.CommunityInviteReceived,
+          { ...payload, proposedRole: RosterRole.Mod },
+          inviterId,
+        );
+      }
     } catch {
       // Intentionally ignored — best-effort; the community already exists.
     }

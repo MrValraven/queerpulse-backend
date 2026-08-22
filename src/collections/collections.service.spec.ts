@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { POSTGRES_UNIQUE_VIOLATION } from '../common/db-errors';
 import { SavedItem, SavedKind } from '../saved/entities/saved-item.entity';
 import { CollectionsService } from './collections.service';
@@ -59,7 +59,13 @@ function countQbStub(rows: { collectionId: string; count: string }[]) {
 // Join query builder stub for `listFiledRefs`.
 function filedRefsQbStub(rows: { subjectKind: string; subjectId: string }[]) {
   const qb: Record<string, jest.Mock> = {};
-  for (const method of ['innerJoin', 'where', 'select', 'addSelect', 'distinct']) {
+  for (const method of [
+    'innerJoin',
+    'where',
+    'select',
+    'addSelect',
+    'distinct',
+  ]) {
     qb[method] = jest.fn().mockReturnValue(qb);
   }
   qb.getRawMany = jest.fn().mockResolvedValue(rows);
@@ -78,6 +84,9 @@ function build() {
   const collectionItems = {
     find: jest.fn().mockResolvedValue([]),
     count: jest.fn().mockResolvedValue(0),
+    // `addItem` checks "already filed?" before counting toward the cap
+    // (CNT-19), so a re-add of an existing item stays a no-op at the ceiling.
+    exists: jest.fn().mockResolvedValue(false),
     create: jest.fn((value: unknown) => value),
     save: jest.fn().mockResolvedValue(undefined),
     delete: jest.fn().mockResolvedValue({ affected: 0 }),
@@ -280,6 +289,35 @@ describe('CollectionsService', () => {
       await expect(
         service.addItem('owner-1', 'col-1', 'article:coming-out-guide'),
       ).rejects.toThrow('connection reset');
+    });
+  });
+
+  describe('addItem per-collection cap (CNT-19)', () => {
+    it('refuses a new item once the collection is full', async () => {
+      const { service, collections, collectionItems } = build();
+      collections.findOne.mockResolvedValue(collectionRow());
+      collectionItems.exists.mockResolvedValue(false);
+      collectionItems.count.mockResolvedValue(500);
+
+      await expect(
+        service.addItem('owner-1', 'col-1', 'article:coming-out-guide'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(collectionItems.save).not.toHaveBeenCalled();
+    });
+
+    it('still no-ops a re-add of an already filed item at the cap', async () => {
+      const { service, collections, collectionItems } = build();
+      collections.findOne.mockResolvedValue(collectionRow());
+      collectionItems.exists.mockResolvedValue(true);
+      collectionItems.count.mockResolvedValue(500);
+      collectionItems.save.mockRejectedValue({
+        code: POSTGRES_UNIQUE_VIOLATION,
+        constraint: 'UQ_collection_item_subject',
+      });
+
+      await expect(
+        service.addItem('owner-1', 'col-1', 'article:coming-out-guide'),
+      ).resolves.toBeUndefined();
     });
   });
 

@@ -11,6 +11,7 @@ import {
   setImageUrlBase,
 } from '../common/image-url';
 import { MediaCropService } from '../media-crops/media-crops.service';
+import { UnderAgeDisclosureService } from './under-age-disclosure.service';
 
 const FRONTEND = 'https://app.example.com';
 
@@ -22,6 +23,8 @@ interface AuthServiceMock {
   revokeAllForUser: jest.Mock;
   suspensionInfoFor: jest.Mock;
   staffRolesFor: jest.Mock;
+  verifyAccessToken: jest.Mock;
+  mintReauthToken: jest.Mock;
 }
 
 function makeRes() {
@@ -50,6 +53,9 @@ function makeConfig(nodeEnv = 'test', domain?: string) {
     }),
     getOrThrow: jest.fn((key: string) => {
       if (key === 'app.frontendUrl') return FRONTEND;
+      // Cookie max-ages are derived from the configured JWT TTLs.
+      if (key === 'auth.jwtAccessTtlMs') return 15 * 60 * 1000;
+      if (key === 'auth.jwtRefreshTtlMs') return 30 * 24 * 60 * 60 * 1000;
       return 'x';
     }),
   };
@@ -66,17 +72,36 @@ function build(configNodeEnv = 'test', domain?: string) {
       .fn()
       .mockResolvedValue({ suspendedUntil: null, suspension: null }),
     staffRolesFor: jest.fn().mockResolvedValue([]),
+    verifyAccessToken: jest.fn(),
+    mintReauthToken: jest.fn(),
   };
-  const usersService = { findByIdWithProfile: jest.fn() };
+  const usersService = {
+    findByIdWithProfile: jest.fn(),
+    findByGoogleId: jest.fn(),
+  };
   const config = makeConfig(configNodeEnv, domain);
   const mediaCropService = { getMany: jest.fn().mockResolvedValue(new Map()) };
+  const underAgeDisclosure = {
+    record: jest.fn().mockResolvedValue({
+      disclosedAt: '2026-01-01T00:00:00.000Z',
+      status: 'suspended',
+    }),
+  };
   const controller = new AuthController(
     authService as unknown as AuthService,
     usersService as unknown as UsersService,
     config as unknown as ConfigService,
     mediaCropService as unknown as MediaCropService,
+    underAgeDisclosure as unknown as UnderAgeDisclosureService,
   );
-  return { controller, authService, usersService, config, mediaCropService };
+  return {
+    controller,
+    authService,
+    usersService,
+    config,
+    mediaCropService,
+    underAgeDisclosure,
+  };
 }
 
 describe('AuthController.googleCallback', () => {
@@ -174,6 +199,115 @@ describe('AuthController.googleCallback', () => {
     expect(res.redirect).toHaveBeenCalledWith(
       `${FRONTEND}/auth/sign-in?error=invite_required`,
     );
+  });
+});
+
+describe('AuthController.googleCallback (step-up reauth)', () => {
+  it('mints a reauth token and redirects with it in the URL fragment when the returning Google account matches the current session', async () => {
+    const { controller, authService, usersService } = build();
+    authService.verifyAccessToken.mockResolvedValue({
+      sub: 'u1',
+      email: 'a@b.c',
+      status: 'active',
+      role: 'member',
+    });
+    usersService.findByGoogleId.mockResolvedValue({ id: 'u1' });
+    authService.mintReauthToken.mockResolvedValue({
+      reauthToken: 'fresh-token',
+      expiresAt: '2026-01-01T00:05:00.000Z',
+    });
+    const req = makeReq({
+      query: {
+        state: encodeOAuthState({
+          nonce: 'match',
+          redirect: '/settings',
+          reauth: true,
+        }),
+      },
+      cookies: { oauth_state: 'match', access_token: 'live-access-token' },
+      user: { googleId: 'g', email: 'a@b.c' },
+    });
+    const res = makeRes();
+
+    await controller.googleCallback(req, res as unknown as Response);
+
+    expect(authService.verifyAccessToken).toHaveBeenCalledWith(
+      'live-access-token',
+    );
+    expect(usersService.findByGoogleId).toHaveBeenCalledWith('g');
+    expect(authService.mintReauthToken).toHaveBeenCalledWith('u1');
+    // Never touches ordinary sign-in: no account created/updated, no session
+    // cookies set.
+    expect(authService.validateOrCreateGoogleUser).not.toHaveBeenCalled();
+    expect(res.cookie).not.toHaveBeenCalled();
+    const redirectedTo = new URL(res.redirect.mock.calls[0][0] as string);
+    expect(redirectedTo.origin + redirectedTo.pathname).toBe(
+      `${FRONTEND}/settings`,
+    );
+    const hashParams = new URLSearchParams(redirectedTo.hash.slice(1));
+    expect(hashParams.get('reauthToken')).toBe('fresh-token');
+    expect(hashParams.get('reauthExpiresAt')).toBe('2026-01-01T00:05:00.000Z');
+  });
+
+  it('fails closed when there is no live session to step up (missing/expired access token)', async () => {
+    const { controller, authService, usersService } = build();
+    authService.verifyAccessToken.mockResolvedValue(null);
+    const req = makeReq({
+      query: {
+        state: encodeOAuthState({
+          nonce: 'match',
+          redirect: '/settings',
+          reauth: true,
+        }),
+      },
+      cookies: { oauth_state: 'match' }, // no access_token cookie
+      user: { googleId: 'g', email: 'a@b.c' },
+    });
+    const res = makeRes();
+
+    await controller.googleCallback(req, res as unknown as Response);
+
+    expect(usersService.findByGoogleId).not.toHaveBeenCalled();
+    expect(authService.mintReauthToken).not.toHaveBeenCalled();
+    const redirectedTo = new URL(res.redirect.mock.calls[0][0] as string);
+    expect(redirectedTo.origin + redirectedTo.pathname).toBe(
+      `${FRONTEND}/settings`,
+    );
+    expect(
+      new URLSearchParams(redirectedTo.hash.slice(1)).get('reauthError'),
+    ).toBe('reauth_failed');
+  });
+
+  it('fails closed when the Google account that logged back in belongs to a DIFFERENT member than the current session', async () => {
+    const { controller, authService, usersService } = build();
+    authService.verifyAccessToken.mockResolvedValue({
+      sub: 'u1',
+      email: 'a@b.c',
+      status: 'active',
+      role: 'member',
+    });
+    // The Google account that just re-authenticated belongs to someone else.
+    usersService.findByGoogleId.mockResolvedValue({ id: 'u2' });
+    const req = makeReq({
+      query: {
+        state: encodeOAuthState({
+          nonce: 'match',
+          redirect: '/settings',
+          reauth: true,
+        }),
+      },
+      cookies: { oauth_state: 'match', access_token: 'live-access-token' },
+      user: { googleId: 'someone-elses-google-id', email: 'other@b.c' },
+    });
+    const res = makeRes();
+
+    await controller.googleCallback(req, res as unknown as Response);
+
+    expect(authService.mintReauthToken).not.toHaveBeenCalled();
+    const redirectedTo = new URL(res.redirect.mock.calls[0][0] as string);
+    expect(
+      new URLSearchParams(redirectedTo.hash.slice(1)).get('reauthError'),
+    ).toBe('reauth_failed');
   });
 });
 
@@ -324,6 +458,26 @@ describe('AuthController.logoutAll', () => {
   });
 });
 
+describe('AuthController.underEighteenDisclosure', () => {
+  it("records the disclosure and clears this device's cookies", async () => {
+    const { controller, underAgeDisclosure } = build();
+    const res = makeRes();
+    const out = await controller.underEighteenDisclosure(
+      { userId: 'u1', email: 'a@b.c', status: 'active', role: 'member' },
+      res as unknown as Response,
+    );
+    expect(underAgeDisclosure.record).toHaveBeenCalledWith('u1');
+    expect(res.clearCookie).toHaveBeenCalledWith(
+      'csrf_token',
+      expect.objectContaining({ path: '/' }),
+    );
+    expect(out).toEqual({
+      disclosedAt: '2026-01-01T00:00:00.000Z',
+      status: 'suspended',
+    });
+  });
+});
+
 describe('AuthController.me', () => {
   beforeEach(() => {
     resetImageUrlBaseForTesting();
@@ -340,7 +494,16 @@ describe('AuthController.me', () => {
       email: 'a@b.c',
       status: 'active',
       role: 'member',
-      profile: { displayName: 'Ada', avatarUrl: null },
+      profile: {
+        slug: 'ada',
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+        pronouns: 'she/her',
+        avatarUrl: null,
+        // Internal columns the hand-mapped shape must NOT echo back.
+        verifiedBy: 'admin-1',
+        vouchCount: 3,
+      },
     });
     const out = await controller.me({
       userId: 'u1',
@@ -358,7 +521,16 @@ describe('AuthController.me', () => {
       ageAttestedAt: null,
       // Likewise null for a fixture with no onboardedAt.
       onboardedAt: null,
-      profile: { displayName: 'Ada', avatarUrl: null },
+      // Hand-mapped allowlist, not a spread of the entity: `verifiedBy` and
+      // `vouchCount` above are deliberately absent.
+      profile: {
+        slug: 'ada',
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+        pronouns: 'she/her',
+        avatarUrl: null,
+        avatarCrop: undefined,
+      },
       // Mocked `staffRolesFor` — no staff-role grants for this fixture.
       staffRoles: [],
       // Suspension detail — null for an active member (mocked `suspensionInfoFor`).
@@ -376,7 +548,13 @@ describe('AuthController.me', () => {
       email: 'a@b.c',
       status: 'active',
       role: 'member',
-      profile: { displayName: 'Ada', avatarUrl: key },
+      profile: {
+        slug: 'ada',
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+        pronouns: null,
+        avatarUrl: key,
+      },
     });
     const out = await controller.me({
       userId: 'u1',
@@ -387,8 +565,12 @@ describe('AuthController.me', () => {
     // The bare key would render as a broken relative image on the frontend; it
     // must come back as an absolute URL to the authorizing /files route.
     expect(out.profile).toEqual({
-      displayName: 'Ada',
+      slug: 'ada',
+      firstName: 'Ada',
+      lastName: 'Lovelace',
+      pronouns: null,
       avatarUrl: `https://api.test/files/${key}`,
+      avatarCrop: undefined,
     });
   });
 
@@ -400,7 +582,13 @@ describe('AuthController.me', () => {
       email: 'a@b.c',
       status: 'active',
       role: 'member',
-      profile: { displayName: 'Ada', avatarUrl: googleUrl },
+      profile: {
+        slug: 'ada',
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+        pronouns: null,
+        avatarUrl: googleUrl,
+      },
     });
     const out = await controller.me({
       userId: 'u1',

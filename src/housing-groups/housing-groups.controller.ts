@@ -1,15 +1,22 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Header,
+  HttpCode,
+  HttpStatus,
   Param,
+  ParseUUIDPipe,
+  Patch,
   Post,
   UseGuards,
 } from '@nestjs/common';
 import { Throttle, seconds } from '@nestjs/throttler';
 import {
   ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiNoContentResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
@@ -25,6 +32,7 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateGroupJoinRequestDto } from './dto/create-group-join-request.dto';
 import { CreateGroupListingDto } from './dto/create-group-listing.dto';
+import { UpdateGroupListingDto } from './dto/update-group-listing.dto';
 import { HousingGroupsService } from './housing-groups.service';
 
 /**
@@ -64,10 +72,18 @@ export class HousingGroupsController {
     return this.groups.getPublishedBySlug(slug);
   }
 
+  // Member-submitted housing content, so the CDN window is deliberately much
+  // tighter than the group metadata above and carries NO
+  // `stale-while-revalidate` (BE-HSG-01): with a 30s freshness plus a 120s
+  // stale window, a listing a moderator had just taken down kept being served
+  // for up to another two and a half minutes. 15s with no stale tail caps the
+  // takedown-propagation delay while still absorbing a burst on a busy group.
   @Public()
   @Get(':slug/listings')
-  @Header('Cache-Control', 'public, s-maxage=30, stale-while-revalidate=120')
-  @ApiOperation({ summary: "A group's visible (non-hidden) listings" })
+  @Header('Cache-Control', 'public, s-maxage=15')
+  @ApiOperation({
+    summary: "A group's public listings (approved, non-hidden)",
+  })
   @ApiOkResponse({ description: 'The listings.' })
   @ApiNotFoundResponse({ description: 'No published group with that slug.' })
   listListings(@Param('slug') slug: string) {
@@ -93,12 +109,20 @@ export class HousingGroupsController {
   }
 
   // Sharing a listing into a group requires an active member. Norms (price +
-  // accessibility transparency) are enforced by `CreateGroupListingDto`.
+  // accessibility transparency) are enforced by `CreateGroupListingDto`, and
+  // the service adds the three gates the sibling member-listing surface has
+  // always had (BE-HSG-01): the affirming pledge, a phone-verification step-up
+  // and the deterministic risk pass. The result lands in `review` — a 201 here
+  // means "submitted", never "published".
   @UseGuards(ActiveMemberGuard)
   @Throttle({ default: { limit: 10, ttl: seconds(60) } })
   @Post(':slug/listings')
-  @ApiOperation({ summary: 'Share a listing into a group (member only)' })
-  @ApiCreatedResponse({ description: 'The created listing.' })
+  @ApiOperation({
+    summary: 'Submit a listing to a group for review (member only)',
+  })
+  @ApiCreatedResponse({
+    description: 'The submitted listing, awaiting moderator review.',
+  })
   @ApiNotFoundResponse({ description: 'No published group with that slug.' })
   createListing(
     @Param('slug') slug: string,
@@ -106,5 +130,44 @@ export class HousingGroupsController {
     @CurrentUser() user: CurrentUserData,
   ) {
     return this.groups.createListing(slug, dto, user.userId);
+  }
+
+  // BE-HSG-20: the poster corrects their own listing. Until this existed the
+  // create was the ONLY member write on a group listing, so a wrong price could
+  // not be fixed. An edit that changes what the group page shows re-opens the
+  // review, so a listing cannot be approved clean and then rewritten in place.
+  @UseGuards(ActiveMemberGuard)
+  @Patch(':slug/listings/:id')
+  @ApiOperation({ summary: 'Correct your own group listing (poster only)' })
+  @ApiOkResponse({ description: 'The updated listing.' })
+  @ApiNotFoundResponse({ description: 'No such group or listing.' })
+  @ApiForbiddenResponse({ description: 'Only the poster can edit a listing.' })
+  updateListing(
+    @Param('slug') slug: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateGroupListingDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.groups.updateListing(slug, id, dto, user.userId);
+  }
+
+  // BE-HSG-20: the poster withdraws their own listing once the room is let.
+  // Distinct from the moderator's `hidden` takedown, which records a norm
+  // violation and a reason.
+  @UseGuards(ActiveMemberGuard)
+  @Delete(':slug/listings/:id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Withdraw your own group listing (poster only)' })
+  @ApiNoContentResponse({ description: 'Listing withdrawn.' })
+  @ApiNotFoundResponse({ description: 'No such group or listing.' })
+  @ApiForbiddenResponse({
+    description: 'Only the poster can withdraw a listing.',
+  })
+  removeListing(
+    @Param('slug') slug: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.groups.removeListing(slug, id, user.userId);
   }
 }

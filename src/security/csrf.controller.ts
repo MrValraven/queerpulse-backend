@@ -1,11 +1,11 @@
-import { Controller, Get, Res, VERSION_NEUTRAL } from '@nestjs/common';
+import { Controller, Get, Req, Res, VERSION_NEUTRAL } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { randomBytes } from 'node:crypto';
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { Public } from '../auth/decorators/public.decorator';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
-import { csrfCookieName } from './csrf-cookie';
+import { csrfCookieName, isWellFormedCsrfToken } from './csrf-cookie';
 
 // Outlive the 30d refresh token, so the CSRF cookie is never the reason a
 // still-authenticated session starts failing. Previously this was a session
@@ -27,7 +27,22 @@ const CSRF_MAX_AGE = 31 * 24 * 60 * 60 * 1000; // 31d
 export class CsrfController {
   constructor(private readonly config: ConfigService) {}
 
-  // GET is a safe method, so CsrfGuard lets it through; @Public skips JwtAuthGuard.
+  /**
+   * GET is a safe method, so CsrfGuard lets it through; @Public skips
+   * JwtAuthGuard.
+   *
+   * IDEMPOTENT. When the caller already presents a well-formed token cookie we
+   * echo THAT value instead of minting a new one. Rotating on every call broke
+   * every other tab: the double-submit check compares the header a tab is
+   * holding in memory against the current cookie, so a second tab bootstrapping
+   * its own token invalidated the first tab's, whose next mutation 403'd. That
+   * is the desync behind the spurious "session expired" the SPA now self-heals
+   * from, and this removes the cause rather than relying on the retry.
+   *
+   * The cookie is still re-set so its 31-day expiry slides forward. Rotation
+   * happens where it actually matters: `logout` / `logout-all` clear the cookie
+   * (`clearCsrfCookie`), so the next fetch after a sign-out mints a fresh one.
+   */
   @Get()
   @ApiOperation({
     summary: 'Issue a CSRF token (also set as the csrf_token cookie)',
@@ -36,16 +51,23 @@ export class CsrfController {
     description:
       'The CSRF token to echo in the X-CSRF-Token header on state-changing requests.',
   })
-  issue(@Res({ passthrough: true }) res: Response): { csrfToken: string } {
-    const token = randomBytes(32).toString('hex');
+  issue(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): { csrfToken: string } {
     const isProduction =
       this.config.get<string>('app.nodeEnv') === 'production';
+    const cookieName = csrfCookieName(this.config.get<string>('app.nodeEnv'));
+    const existing: unknown = req.cookies?.[cookieName];
+    const token = isWellFormedCsrfToken(existing)
+      ? existing
+      : randomBytes(32).toString('hex');
     // In production the `__Host-` prefix hardens this against cookie fixation
     // (see csrf-cookie.ts). The prefix's own rules — Secure, Path=/, host-only —
     // are exactly the attributes we already set, so the name switch is the only
     // change: `secure` is already tied to production, `path` is '/', and we
     // never attach a Domain.
-    res.cookie(csrfCookieName(this.config.get<string>('app.nodeEnv')), token, {
+    res.cookie(cookieName, token, {
       httpOnly: false, // the SPA must read it to echo in the X-CSRF-Token header
       secure: isProduction,
       sameSite: 'lax',

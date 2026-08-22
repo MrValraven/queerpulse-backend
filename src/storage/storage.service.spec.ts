@@ -76,7 +76,7 @@ describe('StorageService', () => {
       expect(signedHeaders).toContain('content-length');
     });
 
-    it('omits the content-length binding for the legacy sizeless routes', async () => {
+    it('omits the content-length binding when no size is given (defensive path — every current route always sends one)', async () => {
       const service = buildService();
       const result = await service.createPresignedUpload(
         'avatars/user-1/abc.jpg',
@@ -216,7 +216,7 @@ describe('StorageService', () => {
       expect(signedHeaders).toContain('content-length');
     });
 
-    it('omits the content-length binding for the legacy sizeless routes', async () => {
+    it('omits the content-length binding when no size is given (defensive path — every current route always sends one)', async () => {
       const service = buildService();
       const result = await service.presignImageUpload({
         kind: 'avatar',

@@ -136,7 +136,7 @@ export class GovernanceFinanceReport {
   @Column({ type: 'jsonb' })
   expense!: FinanceLine[];
 
-  @Column({ type: 'jsonb', name: 'event_notes' })
+  @Column({ type: 'jsonb' })
   eventNotes!: FinanceEventNote[];
 
   // Reserve progress + disclosed partners render inside `FinancesSection`
@@ -156,7 +156,6 @@ export class GovernanceFinanceReport {
   // every historical quarter.
   @Column({
     type: 'numeric',
-    name: 'income_total',
     nullable: true,
     transformer: numericTransformer,
   })
@@ -164,7 +163,6 @@ export class GovernanceFinanceReport {
 
   @Column({
     type: 'numeric',
-    name: 'expense_total',
     nullable: true,
     transformer: numericTransformer,
   })
@@ -184,12 +182,11 @@ export class GovernanceFinanceReport {
   })
   mrr!: number | null;
 
-  @Column({ type: 'int', name: 'sustainer_count', nullable: true })
+  @Column({ type: 'int', nullable: true })
   sustainerCount!: number | null;
 
   @Column({
     type: 'numeric',
-    name: 'solidarity_rate',
     nullable: true,
     transformer: numericTransformer,
   })
@@ -205,7 +202,6 @@ export class GovernanceFinanceReport {
     type: 'enum',
     enum: FinanceMetricSource,
     enumName: 'governance_finance_report_source_enum',
-    name: 'mrr_source',
     default: FinanceMetricSource.Seeded,
   })
   mrrSource!: FinanceMetricSource;
@@ -214,7 +210,6 @@ export class GovernanceFinanceReport {
     type: 'enum',
     enum: FinanceMetricSource,
     enumName: 'governance_finance_report_source_enum',
-    name: 'sustainer_count_source',
     default: FinanceMetricSource.Seeded,
   })
   sustainerCountSource!: FinanceMetricSource;
@@ -223,7 +218,6 @@ export class GovernanceFinanceReport {
     type: 'enum',
     enum: FinanceMetricSource,
     enumName: 'governance_finance_report_source_enum',
-    name: 'solidarity_rate_source',
     default: FinanceMetricSource.Seeded,
   })
   solidarityRateSource!: FinanceMetricSource;
@@ -232,7 +226,6 @@ export class GovernanceFinanceReport {
     type: 'enum',
     enum: FinanceMetricSource,
     enumName: 'governance_finance_report_source_enum',
-    name: 'income_total_source',
     default: FinanceMetricSource.Seeded,
   })
   incomeTotalSource!: FinanceMetricSource;
@@ -241,7 +234,6 @@ export class GovernanceFinanceReport {
     type: 'enum',
     enum: FinanceMetricSource,
     enumName: 'governance_finance_report_source_enum',
-    name: 'expense_total_source',
     default: FinanceMetricSource.Seeded,
   })
   expenseTotalSource!: FinanceMetricSource;
@@ -251,14 +243,14 @@ export class GovernanceFinanceReport {
   // pointer survives erasure of the editor's account. The precise per-field
   // trail lives in `governance_finance_changes`; this is only the badge's
   // "last edited by X on <date>".
-  @Column({ type: 'uuid', name: 'metrics_edited_by', nullable: true })
+  @Column({ type: 'uuid', nullable: true })
   metricsEditedBy!: string | null;
 
-  @Column({ type: 'timestamptz', name: 'metrics_edited_at', nullable: true })
+  @Column({ type: 'timestamptz', nullable: true })
   metricsEditedAt!: Date | null;
 
   @Index('IDX_governance_finance_report_published_at')
-  @Column({ type: 'timestamptz', name: 'published_at' })
+  @Column({ type: 'timestamptz' })
   publishedAt!: Date;
 
   @CreateDateColumn({ type: 'timestamptz' })

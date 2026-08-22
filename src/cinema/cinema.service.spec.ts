@@ -84,8 +84,12 @@ describe('CinemaService', () => {
 
   const savedTitle = (): CinemaTitle =>
     (titles.save.mock.calls as [CinemaTitle][])[0]![0];
-  const findArg = (): { where?: { status?: TitleStatus } } =>
-    (titles.find.mock.calls as [{ where?: { status?: TitleStatus } }][])[0]![0];
+  type FindArg = {
+    where?: { status?: TitleStatus };
+    skip?: number;
+    take?: number;
+  };
+  const findArg = (): FindArg => (titles.find.mock.calls as [FindArg][])[0]![0];
 
   beforeEach(async () => {
     titles = {
@@ -255,6 +259,22 @@ describe('CinemaService', () => {
       progress.find.mockResolvedValue([]);
       const result = await service.listTitles(member, false);
       expect(result[0]!.myProgress).toBeNull();
+    });
+
+    // CNT-17: the list was capped but never offset, so the tail of a growing
+    // catalog was unreachable.
+    it('defaults to the first page at the previous hard cap', async () => {
+      titles.find.mockResolvedValue([]);
+      await service.listTitles(member, false);
+      expect(findArg().skip).toBe(0);
+      expect(findArg().take).toBe(200);
+    });
+
+    it('offsets by the requested page and honours pageSize', async () => {
+      titles.find.mockResolvedValue([]);
+      await service.listTitles(member, false, 3, 25);
+      expect(findArg().skip).toBe(50);
+      expect(findArg().take).toBe(25);
     });
   });
 
@@ -751,7 +771,7 @@ describe('CinemaService', () => {
         makeTitle({ status: TitleStatus.Processing, publishedAt: null }),
       );
       await expect(
-        service.updateTitle('title-1', { published: true }),
+        service.updateTitle('mod-1', 'title-1', { published: true }),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(titles.save).not.toHaveBeenCalled();
     });
@@ -761,35 +781,82 @@ describe('CinemaService', () => {
         makeTitle({ publishedAt: null, muxPlaybackId: null }),
       );
       await expect(
-        service.updateTitle('title-1', { published: true }),
+        service.updateTitle('mod-1', 'title-1', { published: true }),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(titles.save).not.toHaveBeenCalled();
     });
 
     it('publishes a ready title', async () => {
       titles.findOne.mockResolvedValue(makeTitle({ publishedAt: null }));
-      const detail = await service.updateTitle('title-1', { published: true });
+      const detail = await service.updateTitle('mod-1', 'title-1', {
+        published: true,
+      });
       expect(detail.publishedAt).toBeInstanceOf(Date);
     });
 
     it('keeps the original publish date when re-publishing', async () => {
       const original = new Date('2026-07-01T00:00:00Z');
       titles.findOne.mockResolvedValue(makeTitle({ publishedAt: original }));
-      const detail = await service.updateTitle('title-1', { published: true });
+      const detail = await service.updateTitle('mod-1', 'title-1', {
+        published: true,
+      });
       expect(detail.publishedAt).toEqual(original);
     });
 
     it('unpublishes a title', async () => {
       titles.findOne.mockResolvedValue(makeTitle());
-      const detail = await service.updateTitle('title-1', { published: false });
+      const detail = await service.updateTitle('mod-1', 'title-1', {
+        published: false,
+      });
       expect(detail.publishedAt).toBeNull();
     });
 
     it('404s when updating an unknown title', async () => {
       titles.findOne.mockResolvedValue(null);
       await expect(
-        service.updateTitle('nope', { title: 'x' }),
+        service.updateTitle('mod-1', 'nope', { title: 'x' }),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    // M1 (storage-key impersonation): the cover field is exempt from the strict
+    // interceptor rule (staff-curated, multi-editor), so the service draws the
+    // line — a foreign cover key is allowed ONLY when it is already stored.
+    describe('foreign cover upload (M1)', () => {
+      const OTHER_ID = '22222222-2222-2222-2222-222222222222';
+      const FILE_SEGMENT = '33333333-3333-3333-3333-333333333333';
+      const FOREIGN_COVER = `story-covers/${OTHER_ID}/${FILE_SEGMENT}.jpg`;
+
+      it('rejects a new foreign cover on create', async () => {
+        await expect(
+          service.createTitle(moderator, {
+            kind: TitleKind.Short,
+            title: 'New Short',
+            coverImageUrl: FOREIGN_COVER,
+          }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(titles.save).not.toHaveBeenCalled();
+      });
+
+      it('rejects a foreign cover the title does not already carry on update', async () => {
+        titles.findOne.mockResolvedValue(makeTitle({ coverImageUrl: null }));
+        await expect(
+          service.updateTitle('mod-1', 'title-1', {
+            coverImageUrl: FOREIGN_COVER,
+          }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(titles.save).not.toHaveBeenCalled();
+      });
+
+      it('allows re-saving the foreign cover already stored on update', async () => {
+        titles.findOne.mockResolvedValue(
+          makeTitle({ coverImageUrl: FOREIGN_COVER }),
+        );
+        await expect(
+          service.updateTitle('mod-1', 'title-1', {
+            coverImageUrl: FOREIGN_COVER,
+          }),
+        ).resolves.toBeDefined();
+      });
     });
 
     it('deletes the row and both Mux assets', async () => {

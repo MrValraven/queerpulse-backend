@@ -13,6 +13,7 @@ import {
   extractCoordsFromUrl,
   isAllowedGoogleMapsHost,
 } from './google-maps-link';
+import { nominatimRateLimiter } from './nominatim-rate-limiter';
 
 const FETCH_TIMEOUT_MS = 5000;
 const MAX_REDIRECTS = 5;
@@ -126,6 +127,13 @@ export class GeocodeService {
     (requestInit as { dispatcher?: unknown }).dispatcher =
       pinnedDispatcher(validated);
 
+    // Process-wide 1 req/s gate in front of the outbound call — Nominatim's
+    // policy is per application, not per member, and the cache above only
+    // absorbs REPEAT lookups. Taken after the cache read and the SSRF checks so
+    // a cached or malformed request never burns a slot. Throws a 503 carrying
+    // `Retry-After` when the queue is saturated.
+    await nominatimRateLimiter.acquire();
+
     let response: Response;
     try {
       response = await fetch(validated.url.toString(), requestInit);
@@ -202,6 +210,14 @@ export class GeocodeService {
     // make this server issue a request to a non-allowlisted (e.g. internal)
     // host. Using `redirect: 'follow'` here would be an SSRF hole, since
     // fetch would auto-follow to an unvalidated intermediate host.
+    //
+    // On top of the Google-host allowlist, every hop is also run through the
+    // shared `assertPublicUrl` guard + pinned dispatcher — exactly what
+    // `resolveAddress` and `safeFetchHtml` do. The allowlist alone trusts DNS
+    // to keep resolving an allowlisted host to a public IP; pinning the socket
+    // to the vetted address closes the resolve-vs-connect rebinding window so a
+    // hostile resolver for an allowlisted host can't redirect the socket to an
+    // internal address between the check and the connect.
     let currentUrl = url;
     for (
       let redirectCount = 0;
@@ -214,12 +230,28 @@ export class GeocodeService {
         );
       }
 
+      let validated: ValidatedTarget;
+      try {
+        validated = await assertPublicUrl(currentUrl);
+      } catch {
+        throw new ServiceUnavailableException(
+          "Couldn't reach Google Maps to read that link.",
+        );
+      }
+
+      // Pin the socket to the vetted IP. `dispatcher` is set on a narrowly-cast
+      // field because Node's fetch honours it at runtime even where the DOM
+      // `RequestInit` type omits it (mirrors `resolveAddress`).
+      const requestInit: RequestInit = {
+        redirect: 'manual',
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      };
+      (requestInit as { dispatcher?: unknown }).dispatcher =
+        pinnedDispatcher(validated);
+
       let response: Response;
       try {
-        response = await fetch(currentUrl, {
-          redirect: 'manual',
-          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-        });
+        response = await fetch(validated.url.toString(), requestInit);
       } catch {
         throw new ServiceUnavailableException(
           "Couldn't reach Google Maps to read that link.",

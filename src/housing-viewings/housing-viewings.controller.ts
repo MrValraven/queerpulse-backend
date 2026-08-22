@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiCookieAuth,
   ApiCreatedResponse,
@@ -25,6 +33,13 @@ import { HousingViewingsService } from './housing-viewings.service';
  * Viewing scheduling for member housing listings. All routes are active-member
  * gated; every transition additionally checks the caller is a participant and
  * the viewing is in the right state (in the service).
+ *
+ * Every `:id` runs through `ParseUUIDPipe` (BE-HSG-10). Without it a non-UUID
+ * segment reached `findOne({ where: { id } })`, Postgres rejected the
+ * comparison against a `uuid` column with SQLSTATE 22P02, and TypeORM's
+ * `QueryFailedError` (not an `HttpException`) fell through
+ * `AllExceptionsFilter` as a 500 logged as a server error. Now it is a 400,
+ * matching `HousingSavedSearchesController.remove`'s existing precedent.
  */
 @Feature('housingListings')
 @ApiTags('Housing viewings')
@@ -59,7 +74,7 @@ export class HousingViewingsController {
   @ApiOkResponse({ description: 'The accepted viewing.' })
   accept(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: AcceptHousingViewingDto,
   ) {
     return this.service.accept(id, user.userId, dto);
@@ -70,7 +85,7 @@ export class HousingViewingsController {
   @ApiOkResponse({ description: 'The viewing with the new proposed times.' })
   propose(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ProposeHousingViewingDto,
   ) {
     return this.service.propose(id, user.userId, dto);
@@ -81,7 +96,7 @@ export class HousingViewingsController {
   @ApiOkResponse({ description: 'The declined viewing.' })
   decline(
     @CurrentUser() user: CurrentUserData,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: DeclineHousingViewingDto,
   ) {
     return this.service.decline(id, user.userId, dto);
@@ -90,14 +105,20 @@ export class HousingViewingsController {
   @Post(':id/cancel')
   @ApiOperation({ summary: 'Cancel a pending viewing' })
   @ApiOkResponse({ description: 'The cancelled viewing.' })
-  cancel(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
+  cancel(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     return this.service.cancel(id, user.userId);
   }
 
   @Post(':id/complete')
   @ApiOperation({ summary: 'Mark an accepted viewing as completed' })
   @ApiOkResponse({ description: 'The completed viewing.' })
-  complete(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
+  complete(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     return this.service.complete(id, user.userId);
   }
 }

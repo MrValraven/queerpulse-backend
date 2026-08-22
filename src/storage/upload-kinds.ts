@@ -92,24 +92,21 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
     maxBytes: 10 * MB,
     requiresSession: false,
   },
-  // A message-composer image attachment (MSG-8). `requiresSession: false` is
-  // deliberate, not an oversight: `requiresSession: true` in `FilesController`
-  // restricts a key to its UPLOADER ONLY (see `serve()`'s ownership check) —
-  // fine for a private one-person surface like an avatar draft, but wrong here,
-  // since the whole point is the RECIPIENT must be able to load the image too,
-  // and there is no participant-scoped serving path (no message-attachment ↔
-  // conversation lookup) to grant them access under `requiresSession: true`.
-  // This mirrors every other multi-viewer image kind (avatar, listing-photo,
-  // community-cover): privacy rests on the unguessable key, not a session
-  // check. A DM photo is therefore only as private as its URL, same as those
-  // kinds — a real (if consistent-with-the-rest-of-the-app) limit; scoping
-  // `GET /files/*` to a message's actual conversation participants would need
-  // a message-attachment lookup this route doesn't have and is a follow-up,
-  // not something this change silently papers over.
+  // A message-composer image attachment (MSG-8). `requiresSession: true`, but
+  // unlike the other session-gated kind (gathering-photo, which restricts to
+  // the UPLOADER), a DM photo is served to every PARTICIPANT of a conversation
+  // that holds a message referencing this key. `FilesController.serve()`
+  // special-cases the `message-image` kind: it does a message-attachment ↔
+  // conversation-participant lookup instead of the uploader-only ownership
+  // check, so the recipient can load the image while a bystander who merely
+  // holds the URL (referrer, proxy log, forwarded link) cannot. Before this
+  // the kind was `requiresSession: false`, so `GET /files/<key>` served DM
+  // attachments to ANY caller — even unauthenticated — who held the URL
+  // (security review M7). Privacy no longer rests on the unguessable key alone.
   'message-image': {
     prefix: 'message-images',
     maxBytes: 8 * MB,
-    requiresSession: false,
+    requiresSession: true,
   },
 };
 

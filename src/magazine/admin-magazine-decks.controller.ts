@@ -78,8 +78,8 @@ export class AdminMagazineDecksController {
   @ApiCreatedResponse({ description: 'The created draft deck.' })
   @ApiBadRequestResponse({ description: 'The deck payload is invalid.' })
   @ApiConflictResponse({ description: 'A deck with this slug already exists.' })
-  create(@Body() dto: CreateDeckDto) {
-    return this.magazine.createDeck(dto);
+  create(@Body() dto: CreateDeckDto, @CurrentUser() user: CurrentUserData) {
+    return this.magazine.createDeck(dto, user.userId);
   }
 
   @Patch(':id')
@@ -87,8 +87,12 @@ export class AdminMagazineDecksController {
   @ApiOkResponse({ description: 'The updated deck.' })
   @ApiBadRequestResponse({ description: 'Malformed id or invalid payload.' })
   @ApiNotFoundResponse({ description: 'No deck exists for this id.' })
-  update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateDeckDto) {
-    return this.magazine.updateDeck(id, dto);
+  update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateDeckDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.magazine.updateDeck(id, dto, user.userId);
   }
 
   @Delete(':id')

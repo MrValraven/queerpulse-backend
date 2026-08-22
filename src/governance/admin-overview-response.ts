@@ -19,7 +19,7 @@ export interface AdminOverviewSectionMeta {
   editedAt: string | null;
 }
 
-// Backs `GET /governance/admin/overview` — the admin Policy tab. Same content
+// Backs `GET /admin/governance/overview` — the admin Policy tab. Same content
 // as the public `GET /governance/overview`, plus per-section "last edited by
 // X on Y" metadata computed from `governance_overview_changes`.
 export interface AdminOverviewResponseDTO {

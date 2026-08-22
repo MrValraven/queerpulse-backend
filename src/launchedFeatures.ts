@@ -34,6 +34,7 @@ export const launchedFeatures = {
   workshops: { launched: true },
   partners: { launched: true },
   volunteering: { launched: true },
+  barter: { launched: true },
   events: { launched: true },
   connections: { launched: true },
   messaging: { launched: true },

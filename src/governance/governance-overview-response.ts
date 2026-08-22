@@ -18,7 +18,7 @@ export interface GovernanceOverviewResponseDTO {
   publishedAt: string | null;
 }
 
-/** Response for `POST /governance/admin/publish` (P3-7). */
+/** Response for `POST /admin/governance/publish` (P3-7). */
 export interface GovernancePublishResponseDTO {
   publishedAt: string;
 }

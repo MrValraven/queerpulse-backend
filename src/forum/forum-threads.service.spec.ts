@@ -9,6 +9,9 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { CommunityMembershipService } from '../communities/community-membership.service';
+import { TopicPostLinkService } from '../content/topic-post-link.service';
+import { ModAuditService } from '../moderation/mod-audit.service';
+import { AccessTier } from '../communities/entities/community.entity';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -36,6 +39,19 @@ function qbStub(rows: ForumThread[] = []) {
   }
   qb.getMany = jest.fn().mockResolvedValue(rows);
   qb.getRawMany = jest.fn().mockResolvedValue([]);
+  return qb;
+}
+
+// A chainable `Community` query-builder stub for `isCommunityHiddenFrom`'s
+// existence probe (`this.threads.manager.createQueryBuilder(Community, 'com')`):
+// its terminal `getExists()` resolves to whether the thread's Private community
+// hides itself from the viewer (H1).
+function communityAccessQbStub(hidden: boolean) {
+  const qb: Record<string, jest.Mock> = {};
+  for (const method of ['where', 'andWhere']) {
+    qb[method] = jest.fn().mockReturnValue(qb);
+  }
+  qb.getExists = jest.fn().mockResolvedValue(hidden);
   return qb;
 }
 
@@ -100,6 +116,7 @@ describe('ForumThreadsService', () => {
     update: jest.Mock;
     save: jest.Mock;
     createQueryBuilder: jest.Mock;
+    manager: { createQueryBuilder: jest.Mock };
   };
   let posts: {
     createQueryBuilder: jest.Mock;
@@ -129,6 +146,12 @@ describe('ForumThreadsService', () => {
       update: jest.fn().mockResolvedValue(undefined),
       save: jest.fn((thread: unknown) => Promise.resolve(thread)),
       createQueryBuilder: jest.fn(() => qbStub()),
+      // Backs `isCommunityHiddenFrom`'s `Community` existence probe. Default:
+      // not hidden (community-scoped threads pass the access gate) so tests
+      // that don't opt into a Private community aren't affected.
+      manager: {
+        createQueryBuilder: jest.fn(() => communityAccessQbStub(false)),
+      },
     };
     posts = {
       createQueryBuilder: jest.fn(() => qbStub()),
@@ -220,6 +243,15 @@ describe('ForumThreadsService', () => {
           provide: CommunityMembershipService,
           useValue: { assertMemberBySlug: jest.fn() },
         },
+        // `TopicPostLinkService` (thread-create tag reconciliation) and
+        // `ModAuditService` (BE-COM-19's lock/pin/official audit rows) are
+        // constructor dependencies of the service under test — stubbed here
+        // so Nest can instantiate it; neither is exercised by these specs.
+        {
+          provide: TopicPostLinkService,
+          useValue: { linkThread: jest.fn() },
+        },
+        { provide: ModAuditService, useValue: { writeAuditLog: jest.fn() } },
       ],
     }).compile();
     service = module.get(ForumThreadsService);
@@ -351,6 +383,71 @@ describe('ForumThreadsService', () => {
       await service.loadOr404('hello-world');
 
       expect(blockFilter.isBlockedEitherWay).not.toHaveBeenCalled();
+    });
+
+    it('skips the community access probe for a flat/global thread (H1)', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ communityId: null }));
+
+      await service.loadOr404('hello-world', 'viewer-1');
+
+      expect(threads.manager.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('404s a non-member reading a Private-community thread (H1)', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ communityId: 'com-1' }));
+      threads.manager.createQueryBuilder.mockReturnValue(
+        communityAccessQbStub(true),
+      );
+
+      await expect(
+        service.loadOr404('hello-world', 'outsider-1'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('returns the thread for a roster member of the community (H1)', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ communityId: 'com-1' }));
+      threads.manager.createQueryBuilder.mockReturnValue(
+        communityAccessQbStub(false),
+      );
+
+      const thread = await service.loadOr404('hello-world', 'member-1');
+
+      expect(thread.slug).toBe('hello-world');
+    });
+
+    it('bypasses the community access gate for a privileged caller (H1)', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ communityId: 'com-1' }));
+      // Even though the probe would report the community hidden, the bypass
+      // skips it entirely so a moderator can still act on the thread.
+      threads.manager.createQueryBuilder.mockReturnValue(
+        communityAccessQbStub(true),
+      );
+
+      const thread = await service.loadOr404('hello-world', 'mod-1', {
+        bypassCommunityAccess: true,
+      });
+
+      expect(thread.slug).toBe('hello-world');
+      expect(threads.manager.createQueryBuilder).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('list community access (H1)', () => {
+    it('gates the browse list on the community access predicate', async () => {
+      const qb = qbStub([baseThread()]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('viewer-1', undefined, undefined, undefined);
+
+      const accessCall = qb.andWhere!.mock.calls.find(
+        (call) =>
+          typeof call[0] === 'string' && call[0].includes('access_tier'),
+      );
+      expect(accessCall).toBeDefined();
+      expect(accessCall?.[1]).toEqual({
+        privateTier: AccessTier.Private,
+        viewerId: 'viewer-1',
+      });
     });
   });
 

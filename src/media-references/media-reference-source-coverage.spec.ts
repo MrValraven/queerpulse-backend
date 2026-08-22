@@ -42,6 +42,9 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   'UpdateConversationDto.avatarUrl': 'Conversation.avatarUrl',
   'CompanyWorkItemDto.imageUrl': 'Company.work[].imageUrl',
   'CreateChangemakerDto.imageUrl': 'Changemaker.imageUrl',
+  'UpdateArticleDto.socialImage': 'MagazineArticle.socialImage',
+  'UpdateCoverDto.coverUrl': 'MagazineIssue.coverUrl',
+  'CreateDeckDto.cover': 'MagazineDeck.cover',
 };
 
 /** Recursively lists every `.ts` file under a `dto/` directory beneath `root`

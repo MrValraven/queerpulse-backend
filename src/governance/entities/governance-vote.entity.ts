@@ -13,9 +13,11 @@ export enum GovernanceVoteChoice {
 
 /**
  * One member's vote on a `GovernanceProposal`. The unique constraint enforces
- * one vote per member per proposal — casting again is an idempotent no-op
- * (the original choice sticks; there is no vote-changing), mirroring
- * `RoadmapVote`'s cast-twice-is-a-no-op pattern.
+ * one ROW per member per proposal; voting again while the window is open
+ * UPDATES that row's `choice` (`GovernanceProposalService.castVote` upserts on
+ * this constraint). The unique violation used to be swallowed instead, so a
+ * member who voted `for` and then sent `against` got a 201 with their original
+ * choice and an unmoved tally — success reported for a no-op (BE-COM-09).
  *
  * Unlike `RoadmapVote` (whose unique constraint leads with `memberId`, so a
  * separate `(targetType, targetId)` index is needed for the live tally),

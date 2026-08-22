@@ -101,3 +101,44 @@ export function resolvePostLoginRedirect(
     return frontendUrl;
   }
 }
+
+/**
+ * Absolute URL to land the browser on after a successful step-up REAUTH round
+ * trip (`AuthController.googleCallback`'s `reauth` branch) — the same
+ * same-origin validation `resolvePostLoginRedirect` applies, plus the fresh
+ * `reauthToken`/`expiresAt` carried in the URL FRAGMENT rather than the query
+ * string or a cookie: a fragment is never sent to the server (so it can't leak
+ * into access logs the way a query param would) and needs no new cookie
+ * plumbing. The SPA reads `window.location.hash` once on landing and clears
+ * it (`history.replaceState`).
+ */
+export function resolveReauthCompletionUrl(
+  redirect: unknown,
+  frontendUrl: string,
+  reauthToken: string,
+  expiresAt: string,
+): string {
+  const target = new URL(resolvePostLoginRedirect(redirect, frontendUrl));
+  target.hash = new URLSearchParams({
+    reauthToken,
+    reauthExpiresAt: expiresAt,
+  }).toString();
+  return target.toString();
+}
+
+/**
+ * Absolute URL to land the browser on after a FAILED step-up reauth round
+ * trip (wrong Google account, no live session to step up, OAuth error). Sent
+ * back to the same page the member started from — never to the sign-in page,
+ * since a failed reauth does not touch their existing session — carrying an
+ * error code in the fragment for the SPA to toast.
+ */
+export function reauthFailureUrl(
+  redirect: unknown,
+  frontendUrl: string,
+  code: string,
+): string {
+  const target = new URL(resolvePostLoginRedirect(redirect, frontendUrl));
+  target.hash = new URLSearchParams({ reauthError: code }).toString();
+  return target.toString();
+}

@@ -1,4 +1,8 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
@@ -342,7 +346,7 @@ describe('LandlordsService', () => {
         Promise.resolve(makeLandlord({ ...(row as object) })),
       );
 
-      await service.adminCreate({ name: 'Studio Owner' });
+      await service.adminCreate('admin-1', { name: 'Studio Owner' });
 
       expect(landlords.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -356,9 +360,26 @@ describe('LandlordsService', () => {
       landlords.exists.mockResolvedValue(false);
       landlords.save.mockRejectedValue(uniqueViolation());
 
-      await expect(service.adminCreate({ name: 'Clash' })).rejects.toThrow(
-        ConflictException,
-      );
+      await expect(
+        service.adminCreate('admin-1', { name: 'Clash' }),
+      ).rejects.toThrow(ConflictException);
+    });
+
+    // M1 (storage-key impersonation): the photo field is exempt from the strict
+    // interceptor rule (staff-curated, multi-editor), so the service refuses a
+    // foreign photo key on create (no stored baseline to match).
+    it('rejects a new foreign photo key on create', async () => {
+      const OTHER_ID = '22222222-2222-2222-2222-222222222222';
+      const FILE_SEGMENT = '33333333-3333-3333-3333-333333333333';
+      const foreignPhoto = `listing-photos/${OTHER_ID}/${FILE_SEGMENT}.jpg`;
+
+      await expect(
+        service.adminCreate('admin-1', {
+          name: 'Studio Owner',
+          photo: foreignPhoto,
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(landlords.save).not.toHaveBeenCalled();
     });
   });
 
@@ -366,18 +387,48 @@ describe('LandlordsService', () => {
     it('update 404s an unknown id', async () => {
       landlords.findOne.mockResolvedValue(null);
 
-      await expect(service.update('x', { name: 'Y' })).rejects.toThrow(
-        NotFoundException,
-      );
+      await expect(
+        service.update('admin-1', 'x', { name: 'Y' }),
+      ).rejects.toThrow(NotFoundException);
     });
 
     it('update applies only the present fields', async () => {
       landlords.findOne.mockResolvedValue(makeLandlord({ name: 'Old' }));
       landlords.save.mockImplementation((row: unknown) => Promise.resolve(row));
 
-      const result = await service.update('landlord-1', { name: 'New Name' });
+      const result = await service.update('admin-1', 'landlord-1', {
+        name: 'New Name',
+      });
 
       expect(result.name).toBe('New Name');
+    });
+
+    // M1 (storage-key impersonation): a foreign photo key is allowed on update
+    // ONLY when it is already the stored value.
+    it('update rejects a foreign photo the landlord does not already carry', async () => {
+      const OTHER_ID = '22222222-2222-2222-2222-222222222222';
+      const FILE_SEGMENT = '33333333-3333-3333-3333-333333333333';
+      const foreignPhoto = `listing-photos/${OTHER_ID}/${FILE_SEGMENT}.jpg`;
+      landlords.findOne.mockResolvedValue(makeLandlord({ photo: '' }));
+
+      await expect(
+        service.update('admin-1', 'landlord-1', { photo: foreignPhoto }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(landlords.save).not.toHaveBeenCalled();
+    });
+
+    it('update allows re-saving the foreign photo already stored', async () => {
+      const OTHER_ID = '22222222-2222-2222-2222-222222222222';
+      const FILE_SEGMENT = '33333333-3333-3333-3333-333333333333';
+      const foreignPhoto = `listing-photos/${OTHER_ID}/${FILE_SEGMENT}.jpg`;
+      landlords.findOne.mockResolvedValue(
+        makeLandlord({ photo: foreignPhoto }),
+      );
+      landlords.save.mockImplementation((row: unknown) => Promise.resolve(row));
+
+      await expect(
+        service.update('admin-1', 'landlord-1', { photo: foreignPhoto }),
+      ).resolves.toBeDefined();
     });
 
     it('setStatus flips the moderation status', async () => {

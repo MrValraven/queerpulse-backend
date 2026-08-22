@@ -1,5 +1,9 @@
 import { MemberRef } from '../common/member-ref';
 import {
+  CommunityGovernanceLog,
+  GovernanceLogAction,
+} from '../communities/entities/community-governance-log.entity';
+import {
   AccessTier,
   Community,
   CommunityType,
@@ -364,5 +368,64 @@ export function toAdminModerator(
     avatarUrl: memberRef.avatarUrl,
     role,
     joinedAt: joinedAt.toISOString(),
+  };
+}
+
+/**
+ * One row of `GET /admin/communities/:slug/governance-log` — a single
+ * governance action taken against this community's roster or lifecycle.
+ *
+ * `actor`/`target` are compact `MemberRef`-derived display shapes, never the
+ * raw user rows, and are `null` for a system-driven action (auto-freeze,
+ * owner-erasure auto-promotion) or once the person has erased their account
+ * (the FK is `ON DELETE SET NULL` precisely so the entry outlives them).
+ */
+export interface AdminGovernanceLogEntryDTO {
+  id: string;
+  action: GovernanceLogAction;
+  actor: AdminGovernanceLogMemberDTO | null;
+  target: AdminGovernanceLogMemberDTO | null;
+  /** Free-form context for the action (`{ fromRole, toRole }`, a settings
+   *  diff, `{ adminOverride: true }`). Written only by
+   *  `CommunityGovernanceLogService.log()` call sites, never by a client. */
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface AdminGovernanceLogMemberDTO {
+  slug: string;
+  name: string;
+  initials: string;
+  avatarUrl: string | null;
+}
+
+export function toAdminGovernanceLogMember(
+  memberRef: MemberRef | undefined,
+): AdminGovernanceLogMemberDTO | null {
+  if (!memberRef) return null;
+  const name = `${memberRef.firstName} ${memberRef.lastName}`.trim();
+  return {
+    slug: memberRef.slug,
+    name,
+    initials: initialsFor(name),
+    avatarUrl: memberRef.avatarUrl,
+  };
+}
+
+export function toAdminGovernanceLogEntry(
+  entry: CommunityGovernanceLog,
+  memberRefs: Map<string, MemberRef>,
+): AdminGovernanceLogEntryDTO {
+  return {
+    id: entry.id,
+    action: entry.action,
+    actor: toAdminGovernanceLogMember(
+      entry.actorUserId ? memberRefs.get(entry.actorUserId) : undefined,
+    ),
+    target: toAdminGovernanceLogMember(
+      entry.targetUserId ? memberRefs.get(entry.targetUserId) : undefined,
+    ),
+    metadata: entry.metadata,
+    createdAt: entry.createdAt.toISOString(),
   };
 }

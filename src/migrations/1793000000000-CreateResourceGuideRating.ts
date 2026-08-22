@@ -35,9 +35,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
-export class CreateResourceGuideRating1793000000000
-  implements MigrationInterface
-{
+export class CreateResourceGuideRating1793000000000 implements MigrationInterface {
   name = 'CreateResourceGuideRating1793000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

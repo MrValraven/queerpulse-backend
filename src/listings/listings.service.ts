@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   ConflictException,
-  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -20,6 +19,7 @@ import { MemberLookup, toMemberRef } from '../common/member-ref';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { StorageService } from '../storage/storage.service';
+import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ReportsService } from '../reports/reports.service';
@@ -254,6 +254,86 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
       ? { consentGuide: dto.consentGuide }
       : {}),
   });
+}
+
+/**
+ * The fields a moderator actually reviewed before a listing went `live`: what
+ * the business claims to BE (name, categories, the queer-owned/friendly badge
+ * and the self-reported ownership link), where it IS (address, pin, city,
+ * neighbourhood), how it PRESENTS (photos, copy, tags, social links) and the
+ * evidence behind all of it. An owner PATCH that changes any of them re-opens
+ * the review (`update()` below).
+ *
+ * Before BE-HSG-03 moderation happened exactly once, at create time: a listing
+ * could be approved as a benign "friendly" suggestion and then renamed,
+ * relocated, re-photographed and re-badged as queer-OWNED while staying live
+ * and CDN-cached, with no moderator in the loop on any of it.
+ *
+ * Deliberately EXCLUDED so the routine edits an owner makes weekly never cost
+ * them their listing's visibility, because none of them can restate what the
+ * business is: `hours`, `hoursNote`, `timezone` (opening times — the single
+ * most-edited field on any directory listing), `contactEmail`, `notify`,
+ * `visibility`, `consentOuting`, `consentGuide` (the owner's own contact and
+ * consent preferences, which are not public directory content), `geocoded` (a
+ * derived flag, not a claim), and `alt` (photo alt text: it is accessibility
+ * copy for the images already reviewed, and putting an accessibility fix behind
+ * a re-review would discourage the fix).
+ */
+const MODERATED_LISTING_FIELDS = [
+  'path',
+  'verify',
+  'name',
+  'cats',
+  'hood',
+  'city',
+  'badge',
+  'evidence',
+  'price',
+  'blurb',
+  'tagline',
+  'whatItIs',
+  'tags',
+  'goodFor',
+  'langs',
+  'online',
+  'address',
+  'latitude',
+  'longitude',
+  'social',
+  'photos',
+  'rel',
+  'ownerName',
+  'ownerRole',
+  'ownerBio',
+  'linkToProfile',
+] as const satisfies readonly (keyof Listing)[];
+
+/**
+ * The subset of the above that restates WHO the business is, as opposed to how
+ * it is described. A moderator's independent `queerOwnedVerified` confirmation
+ * was made against a specific name, badge and ownership claim; once any of the
+ * three changes, that confirmation is about a listing that no longer exists, so
+ * `update()` clears it and a moderator re-confirms alongside the re-review.
+ */
+const IDENTITY_LISTING_FIELDS = [
+  'name',
+  'badge',
+  'linkToProfile',
+] as const satisfies readonly (keyof Listing)[];
+
+/**
+ * A stable fingerprint of the given fields, so `update()` can tell a real
+ * change from a PATCH that re-sends the same values (which must not bounce a
+ * live listing out of the directory for nothing). `JSON.stringify` is total
+ * over these column types (scalars, string arrays, and the flat `social`/
+ * `photos`/`whatItIs` JSON shapes) and key order within them is fixed by
+ * `applyUpdate`'s spread-merge, so equal content always fingerprints equal.
+ */
+function listingFingerprint(
+  listing: Listing,
+  fields: readonly (keyof Listing)[],
+): string {
+  return JSON.stringify(fields.map((field) => listing[field]));
 }
 
 export interface ListMyListingsQueryInput {
@@ -700,8 +780,7 @@ export class ListingsService {
   }
 
   async getByRef(ref: string, userId: string): Promise<ListingDTO> {
-    const listing = await this.loadOr404(ref);
-    this.assertOwner(listing, userId);
+    const listing = await this.loadOwnedOr404(ref, userId);
     return this.buildDTO(listing);
   }
 
@@ -710,15 +789,92 @@ export class ListingsService {
     userId: string,
     dto: UpdateListingDto,
   ): Promise<ListingDTO> {
-    const listing = await this.loadOr404(ref);
-    this.assertOwner(listing, userId);
+    const listing = await this.loadOwnedOr404(ref, userId);
+
+    // Runs BEFORE any mutation (`ListingsController.update` is on
+    // `SHARED_UPLOAD_HANDLERS`, so the interceptor's foreign-upload check is
+    // exempted for this handler): a co-editor of a claimed listing may re-save
+    // one of the four photo slots whoever uploaded it, but may not point any
+    // slot at a NEW upload that is not theirs. The comparison set is every
+    // photo key the listing currently carries, so any stored slot re-sent
+    // verbatim passes while a brand-new foreign key is refused.
+    if (dto.photos) {
+      const alreadyStoredPhotoKeys = [
+        listing.photos?.wide,
+        listing.photos?.d1,
+        listing.photos?.d2,
+        listing.photos?.vibe,
+      ];
+      for (const incomingPhotoKey of [
+        dto.photos.wide,
+        dto.photos.d1,
+        dto.photos.d2,
+        dto.photos.vibe,
+      ]) {
+        assertNoForeignUploadIntroduced(
+          userId,
+          incomingPhotoKey,
+          alreadyStoredPhotoKeys,
+        );
+      }
+    }
 
     // Snapshot the gallery keys BEFORE the merge so any photo the edit replaces
     // or clears can be deleted from the bucket once the new set has committed.
     const previousImageKeys = this.collectListingImageKeys(listing);
+    // Snapshot the moderated + identity fields for the same reason (BE-HSG-03):
+    // only a listing that is live AND actually changed gets sent back.
+    const wasLive = listing.status === ListingStatus.Live;
+    const previousStatus = listing.status;
+    const moderatedBefore = wasLive
+      ? listingFingerprint(listing, MODERATED_LISTING_FIELDS)
+      : null;
+    const identityBefore = wasLive
+      ? listingFingerprint(listing, IDENTITY_LISTING_FIELDS)
+      : null;
     applyUpdate(listing, dto);
 
-    const saved = await this.listings.save(listing);
+    // BE-HSG-03: an owner editing anything a moderator reviewed re-opens that
+    // review, so the listing leaves the public directory until a human clears
+    // it again. Without this, moderation happened exactly once at create time
+    // and every public field stayed owner-writable forever afterwards.
+    const reopensReview =
+      moderatedBefore !== null &&
+      listingFingerprint(listing, MODERATED_LISTING_FIELDS) !== moderatedBefore;
+    const identityChanged =
+      identityBefore !== null &&
+      listingFingerprint(listing, IDENTITY_LISTING_FIELDS) !== identityBefore;
+    if (reopensReview) {
+      listing.status = ListingStatus.Review;
+    }
+    if (identityChanged) {
+      // The moderator confirmed queer ownership of a listing that no longer
+      // presents itself the same way — drop that confirmation and let them
+      // re-make it on the re-review, rather than let a renamed or re-badged
+      // listing inherit a badge it was never granted.
+      listing.queerOwnedVerified = false;
+    }
+
+    // The listing save and its audit event are two writes with no external I/O
+    // between them, so they run in one transaction — the same shape `setStatus`
+    // uses for the moderator-initiated equivalent. `actorId` is the OWNER here,
+    // not a moderator: the event records who caused the re-review.
+    const saved = reopensReview
+      ? await this.dataSource.transaction(async (manager) => {
+          const savedListing = await manager.save(listing);
+          await manager.save(ListingModerationEvent, {
+            listingId: savedListing.id,
+            actorId: userId,
+            action: ListingModerationAction.StatusChanged,
+            fromStatus: previousStatus,
+            toStatus: ListingStatus.Review,
+            reason: identityChanged
+              ? 'Owner edited moderated fields on a live listing, including how the business identifies itself. Queer-owned verification was cleared; re-review required.'
+              : 'Owner edited moderated fields on a live listing. Re-review required.',
+          });
+          return savedListing;
+        })
+      : await this.listings.save(listing);
     // Delete-on-replace: any photo object no longer referenced by the saved
     // listing is now orphaned. Best-effort + post-commit — a storage failure
     // must never fail the edit.
@@ -731,8 +887,7 @@ export class ListingsService {
   }
 
   async remove(ref: string, userId: string): Promise<void> {
-    const listing = await this.loadOr404(ref);
-    this.assertOwner(listing, userId);
+    const listing = await this.loadOwnedOr404(ref, userId);
     const imageKeys = this.collectListingImageKeys(listing);
     await this.listings.remove(listing);
     // The row (and its cascade) is gone — its photo objects live outside
@@ -742,7 +897,7 @@ export class ListingsService {
 
   /**
    * Moderator/admin hard-deletes any listing, regardless of owner. Distinct
-   * from `remove(ref, userId)` above, which is owner-gated via `assertOwner`;
+   * from `remove(ref, userId)` above, which is owner-gated via `loadOwnedOr404`;
    * this path is reached only through the role-guarded moderation route.
    * `actorId`/`reason` back the audit event (item #16) and the best-effort
    * submitter DM (item #15).
@@ -976,8 +1131,7 @@ export class ListingsService {
     reviewId: string,
     dto: ReplyToReviewDto,
   ): Promise<ReviewDTO> {
-    const listing = await this.loadOr404(ref);
-    this.assertOwner(listing, userId);
+    const listing = await this.loadOwnedOr404(ref, userId);
 
     const review = await this.reviews.findOne({
       where: { id: reviewId, listingId: listing.id },
@@ -1214,8 +1368,7 @@ export class ListingsService {
     userId: string,
     answer: string,
   ): Promise<ListingQuestionDTO> {
-    const listing = await this.loadOr404(ref);
-    this.assertOwner(listing, userId);
+    const listing = await this.loadOwnedOr404(ref, userId);
 
     const question = await this.questions.findOne({
       where: { id: questionId, listingId: listing.id },
@@ -1443,10 +1596,23 @@ export class ListingsService {
     return listing;
   }
 
-  private assertOwner(listing: Listing, userId: string): void {
-    if (listing.ownerId !== userId) {
-      throw new ForbiddenException('Only the owner can do that');
+  /**
+   * Owner-scoped load: folds ownership into the query so a valid `ref` owned by
+   * someone else 404s exactly like a non-existent one, instead of loading it and
+   * then 403-ing. Refs are a monotonic sequence (`QPL-<year>-NNNN`), so a
+   * 403-vs-404 split would be an existence oracle a member could enumerate. Use
+   * this for every owner-management read/update/remove path; keep `loadOr404`
+   * only where a non-owner is legitimately allowed to load (public detail /
+   * moderator paths).
+   */
+  private async loadOwnedOr404(ref: string, userId: string): Promise<Listing> {
+    const listing = await this.listings.findOne({
+      where: { ref, ownerId: userId },
+    });
+    if (!listing) {
+      throw new NotFoundException('Listing not found');
     }
+    return listing;
   }
 
   private async buildDTO(listing: Listing): Promise<ListingDTO> {

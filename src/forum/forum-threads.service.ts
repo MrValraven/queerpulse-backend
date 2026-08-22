@@ -2,6 +2,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -26,6 +27,11 @@ import { MemberLookup } from '../common/member-ref';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { CommunityMembershipService } from '../communities/community-membership.service';
+import { ModAuditService } from '../moderation/mod-audit.service';
+import {
+  AccessTier,
+  Community,
+} from '../communities/entities/community.entity';
 import { TopicPostLinkService } from '../content/topic-post-link.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -47,6 +53,19 @@ const MAX_TAGS = 5;
 // `ConversationsService.MAX_PINNED_CONVERSATIONS`, enforced the same way (an
 // application-code count check in `setPinned`, not a DB constraint).
 const MAX_PINNED_THREADS = 3;
+
+// `mod_audit_logs.action` values for the staff thread actions (BE-COM-19).
+// Free-form `varchar` on the entity, matching the existing platform actions
+// (`suspension_lifted`, `role_changed`, …); the audit feed's `action` filter
+// takes the exact string, so these are the contract the admin UI filters on.
+const THREAD_AUDIT_ACTIONS = {
+  locked: 'thread_locked',
+  unlocked: 'thread_unlocked',
+  pinned: 'thread_pinned',
+  unpinned: 'thread_unpinned',
+  officialSet: 'thread_official_set',
+  officialCleared: 'thread_official_cleared',
+} as const;
 
 // A `GET /forum/threads` sort mode (mirrors `ListThreadsQuery.sort`). `new`
 // (default) and `unanswered` both page the `(createdAt, id)` keyset; `top` and
@@ -104,6 +123,8 @@ export interface CreateThreadInput {
 
 @Injectable()
 export class ForumThreadsService {
+  private readonly logger = new Logger(ForumThreadsService.name);
+
   constructor(
     @InjectRepository(ForumThread)
     private readonly threads: Repository<ForumThread>,
@@ -123,6 +144,12 @@ export class ForumThreadsService {
     // DISC-5 — reconciles a newly created thread's tags against the topics
     // directory (`ContentModule`, imported by `ForumModule`).
     private readonly topicPostLink: TopicPostLinkService,
+    // BE-COM-19 — lock/pin/official are staff actions that mutate a thread
+    // every member can see; they append a `mod_audit_logs` row so `GET
+    // /mod/audit` and its CSV export (the governance audit trail) are not
+    // silently missing them. Exported by `ModerationModule`, imported by
+    // `ForumModule`.
+    private readonly modAudit: ModAuditService,
   ) {}
 
   // GET /forum/threads?category=&cursor=&sort=&tag=&q= — a cursor page ordered
@@ -144,6 +171,10 @@ export class ForumThreadsService {
     // post-query filtering (`FeedService.dropBlocked`) returns short pages.
     // `t`'s author column is `author_id` under `SnakeNamingStrategy`.
     this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
+    // A Private community's threads never enter a non-member's browse list
+    // (H1) — same gate `loadOr404`/the feed apply, so the list can't leak a
+    // thread the detail read would 404.
+    this.applyCommunityAccessFilter(qb, viewerId);
     if (category) {
       qb.andWhere('t.category = :category', { category });
     }
@@ -199,6 +230,9 @@ export class ForumThreadsService {
       .addSelect('COUNT(*)', 'count')
       .groupBy('t.category');
     this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
+    // Same Private-community gate as `list` (H1) so the category badges never
+    // count threads the viewer can't open.
+    this.applyCommunityAccessFilter(qb, viewerId);
     this.applyTextAndTagFilters(qb, q, tag);
 
     const rows = await qb.getRawMany<{ category: string; count: string }>();
@@ -213,6 +247,48 @@ export class ForumThreadsService {
       all += count;
     }
     return { ...perCategory, all };
+  }
+
+  /**
+   * Appends one `mod_audit_logs` row for a staff thread action (BE-COM-19).
+   *
+   * These actions carry no report and no target member, so the audit feed's
+   * `subjectFor()` would render them as the generic "Platform action". The
+   * thread's title and slug therefore go into `note`, which is both the
+   * column the feed shows as the reason and the one its `q` free-text filter
+   * searches — so a moderator can find "who locked this thread" by pasting
+   * the slug.
+   *
+   * Best-effort: the thread mutation this documents has already committed, so
+   * a failed audit write is logged and swallowed rather than turned into a
+   * 500 for an action that actually succeeded (same posture as
+   * `RoadmapAdminService.audit`). It is deliberately the caller's
+   * responsibility to only call this on a real state transition.
+   */
+  private async auditThreadAction(
+    user: CurrentUserData,
+    action: string,
+    thread: ForumThread,
+    reason?: string,
+  ): Promise<void> {
+    const note = reason
+      ? `Thread "${thread.title}" (${thread.slug}) — ${reason}`
+      : `Thread "${thread.title}" (${thread.slug})`;
+    try {
+      await this.modAudit.writeAuditLog(
+        null,
+        user.userId,
+        action,
+        undefined,
+        note,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Failed to write the ${action} audit row for forum thread ${thread.slug}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   // POST /forum/threads/:slug/lock|unlock — moderator-only lock toggle. The
@@ -230,12 +306,25 @@ export class ForumThreadsService {
     if (!isModeratorRole(user.role)) {
       throw new ForbiddenException('Only a moderator can lock threads');
     }
-    const thread = await this.loadOr404(slug, user.userId);
+    // The role gate above proved a platform moderator — let them act on a
+    // thread in any community, including a Private one they aren't a member of
+    // (the community access gate is for non-member READS, not moderation).
+    const thread = await this.loadOr404(slug, user.userId, {
+      bypassCommunityAccess: true,
+    });
     if (thread.isLocked !== locked) {
       thread.isLocked = locked;
       const trimmedReason = reason?.trim();
       thread.lockReason = locked && trimmedReason ? trimmedReason : null;
       await this.threads.save(thread);
+      // Only on an actual transition: re-locking an already-locked thread is
+      // a no-op write, and a no-op does not belong in an audit trail.
+      await this.auditThreadAction(
+        user,
+        locked ? THREAD_AUDIT_ACTIONS.locked : THREAD_AUDIT_ACTIONS.unlocked,
+        thread,
+        locked && trimmedReason ? trimmedReason : undefined,
+      );
     }
     const [authors, op] = await Promise.all([
       new MemberLookup(this.profiles).byUserIds([thread.authorId]),
@@ -265,7 +354,11 @@ export class ForumThreadsService {
     if (!isModeratorRole(user.role)) {
       throw new ForbiddenException('Only a moderator can pin threads');
     }
-    const thread = await this.loadOr404(slug, user.userId);
+    // See `setLocked`: a platform moderator may pin a thread regardless of the
+    // community's access tier.
+    const thread = await this.loadOr404(slug, user.userId, {
+      bypassCommunityAccess: true,
+    });
     if (thread.isPinned !== pinned) {
       if (pinned) {
         const pinnedCount = await this.threads.count({
@@ -280,6 +373,11 @@ export class ForumThreadsService {
       thread.isPinned = pinned;
       thread.pinnedAt = pinned ? new Date() : null;
       await this.threads.save(thread);
+      await this.auditThreadAction(
+        user,
+        pinned ? THREAD_AUDIT_ACTIONS.pinned : THREAD_AUDIT_ACTIONS.unpinned,
+        thread,
+      );
     }
     const [authors, op] = await Promise.all([
       new MemberLookup(this.profiles).byUserIds([thread.authorId]),
@@ -310,6 +408,13 @@ export class ForumThreadsService {
     if (thread.isOfficial !== official) {
       thread.isOfficial = official;
       await this.threads.save(thread);
+      await this.auditThreadAction(
+        user,
+        official
+          ? THREAD_AUDIT_ACTIONS.officialSet
+          : THREAD_AUDIT_ACTIONS.officialCleared,
+        thread,
+      );
     }
     const [authors, op] = await Promise.all([
       new MemberLookup(this.profiles).byUserIds([thread.authorId]),
@@ -338,6 +443,9 @@ export class ForumThreadsService {
       .createQueryBuilder('t')
       .andWhere('t.is_pinned = true');
     this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
+    // Same Private-community gate as `list` (H1): a pinned thread in a Private
+    // community stays out of a non-member's sticky bucket.
+    this.applyCommunityAccessFilter(qb, viewerId);
     if (category) {
       qb.andWhere('t.category = :category', { category });
     }
@@ -362,6 +470,9 @@ export class ForumThreadsService {
       .createQueryBuilder('t')
       .where('t.title ILIKE :pattern', { pattern });
     this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
+    // Same Private-community gate as `list` (H1): global search must not
+    // surface a Private community's thread titles to a non-member.
+    this.applyCommunityAccessFilter(qb, viewerId);
     const rows = await qb
       .orderBy('t.last_activity_at', 'DESC')
       .take(limit)
@@ -377,7 +488,11 @@ export class ForumThreadsService {
     viewerId: string,
     viewerIsModerator = false,
   ): Promise<ForumThreadResponse> {
-    const thread = await this.loadOr404(slug, viewerId);
+    // A non-member reading a Private community's thread by slug 404s (H1); a
+    // platform moderator bypasses so they can still open a reported thread.
+    const thread = await this.loadOr404(slug, viewerId, {
+      bypassCommunityAccess: viewerIsModerator,
+    });
     const [authors, op] = await Promise.all([
       new MemberLookup(this.profiles).byUserIds([thread.authorId]),
       this.resolveOp(thread.id, viewerId),
@@ -460,12 +575,27 @@ export class ForumThreadsService {
    * `CommunityPostsService.assertViewable` uses for private communities, so a
    * blocked author's thread can't be reached by guessing its slug either.
    *
+   * Also gates community access: a thread scoped to a Private community 404s
+   * for a viewer who isn't on that community's roster (again mirroring
+   * `CommunityPostsService.assertViewable`), so a private community's threads
+   * and their posts can't be read by a non-member who guesses or holds the
+   * slug. Because `ForumPostsService.reply`/read paths load through here with
+   * the viewer's id, this closes the thread-detail AND post-list leak in one
+   * place. Threads with a null `communityId` (flat/global) and threads in
+   * non-Private communities stay reachable by everyone. Privileged callers
+   * (moderator lock/pin) pass `bypassCommunityAccess` so they can still act on
+   * a thread in a community they don't happen to be a member of.
+   *
    * Deliberately checks blocks only, not mutes: a mute is a soft silence that
    * keeps content out of feeds and lists (see `BlockFilterService.isMutedBy`),
    * not a hard severance — a muted member's thread stays reachable if the
    * viewer navigates to it directly.
    */
-  async loadOr404(slug: string, viewerId?: string): Promise<ForumThread> {
+  async loadOr404(
+    slug: string,
+    viewerId?: string,
+    options?: { bypassCommunityAccess?: boolean },
+  ): Promise<ForumThread> {
     const thread = await this.threads.findOne({ where: { slug } });
     if (!thread) {
       throw new NotFoundException('Thread not found');
@@ -476,7 +606,42 @@ export class ForumThreadsService {
     ) {
       throw new NotFoundException('Thread not found');
     }
+    if (
+      viewerId &&
+      !options?.bypassCommunityAccess &&
+      thread.communityId &&
+      (await this.isCommunityHiddenFrom(thread.communityId, viewerId))
+    ) {
+      throw new NotFoundException('Thread not found');
+    }
     return thread;
+  }
+
+  /**
+   * Shared with `ForumPostsService.reply` — a thread scoped to a community
+   * takes replies from that community's ROSTER only.
+   *
+   * `create` has always required membership (`assertMemberBySlug`), and
+   * `loadOr404`'s access gate keeps a Private community's threads out of a
+   * non-member's reach entirely. This closes the remaining half (BE-COM-05):
+   * on a `request`/`invite` tier the thread is readable platform-wide, but
+   * writing into it is a roster action, exactly as it is for the community's
+   * own post feed (`CommunityPostsService.assertMember` on every write while
+   * `listPosts` stays open to non-members).
+   *
+   * A flat/global thread (`communityId: null`) has no roster, so this is a
+   * no-op for the forum's ordinary threads.
+   */
+  async assertCanReplyInThread(
+    thread: ForumThread,
+    userId: string,
+  ): Promise<void> {
+    if (!thread.communityId) return;
+    if (!(await this.membership.isMember(thread.communityId, userId))) {
+      throw new ForbiddenException(
+        'Only members of this community can reply in its threads',
+      );
+    }
   }
 
   /**
@@ -686,6 +851,67 @@ export class ForumThreadsService {
     if (normalizedTag) {
       qb.andWhere(':tag = ANY(t.tags)', { tag: normalizedTag });
     }
+  }
+
+  // Narrows a thread list/count query to the threads a given viewer may see by
+  // community access tier: a thread scoped to a Private community only stays
+  // in the result set for a viewer on that community's roster. Threads with a
+  // null `community_id` (flat/global) and threads in non-Private communities
+  // (public/request/invite) stay visible to everyone — the same set
+  // `CommunityPostsService.assertViewable` and the `community_post` feed branch
+  // admit. Expressed as correlated EXISTS subqueries (not a join) so it stacks
+  // cleanly onto `cursorPaginate`'s keyset ORDER BY, mirroring
+  // `FeedService.fetchCandidates`. Shared by `list`/`counts`/`listPinned`/
+  // `searchByText` so every browse/search surface hides the same threads.
+  private applyCommunityAccessFilter(
+    qb: SelectQueryBuilder<ForumThread>,
+    viewerId: string,
+  ): void {
+    qb.andWhere(
+      `(
+        t.community_id IS NULL
+        OR EXISTS (
+          SELECT 1 FROM "communities" "com"
+          WHERE "com"."id" = t.community_id
+            AND "com"."access_tier" != :privateTier
+        )
+        OR EXISTS (
+          SELECT 1 FROM "community_members" "mem"
+          WHERE "mem"."community_id" = t.community_id
+            AND "mem"."user_id" = :viewerId
+        )
+      )`,
+      { privateTier: AccessTier.Private, viewerId },
+    );
+  }
+
+  // Single-thread counterpart to `applyCommunityAccessFilter`, used by
+  // `loadOr404`: true only when the thread's community is Private AND the
+  // viewer isn't on its roster — the exact condition
+  // `CommunityPostsService.assertViewable` 404s on. Non-Private tiers
+  // (public/request/invite) are readable by non-members, same as community
+  // posts, so they never hide a thread. Runs against the `communities` entity
+  // via the thread repo's shared entity manager, so `ForumModule` needs no
+  // extra `Community` repository registration.
+  private async isCommunityHiddenFrom(
+    communityId: string,
+    viewerId: string,
+  ): Promise<boolean> {
+    return this.threads.manager
+      .createQueryBuilder(Community, 'com')
+      .where('com.id = :communityId', { communityId })
+      .andWhere('com.accessTier = :privateTier', {
+        privateTier: AccessTier.Private,
+      })
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1 FROM "community_members" "mem"
+          WHERE "mem"."community_id" = com.id
+            AND "mem"."user_id" = :viewerId
+        )`,
+        { viewerId },
+      )
+      .getExists();
   }
 
   // Maps a `sort` to its `cursorPaginate` keyset. `top`/`active` swap the

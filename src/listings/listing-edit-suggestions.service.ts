@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -10,7 +11,10 @@ import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
-import { CreateEditSuggestionDto } from './dto/create-edit-suggestion.dto';
+import {
+  CreateEditSuggestionDto,
+  EditSuggestionField,
+} from './dto/create-edit-suggestion.dto';
 import { ResolveEditSuggestionDto } from './dto/resolve-edit-suggestion.dto';
 import {
   ListingEditSuggestion,
@@ -18,6 +22,10 @@ import {
 } from './entities/listing-edit-suggestion.entity';
 import { Listing, ListingStatus } from './entities/listing.entity';
 import { EditSuggestionDTO, toEditSuggestionDTO } from './listing-response';
+import {
+  AcceptedSuggestionTarget,
+  isAcceptedSuggestionValueValid,
+} from './accepted-suggestion-value';
 
 export interface ListEditSuggestionsQueryInput {
   status?: ListingEditSuggestionStatus;
@@ -33,6 +41,38 @@ export interface EditSuggestionResult {
 }
 
 /**
+ * Maps a suggestion's `field` onto the `Listing` column an accepted value is
+ * written to, or `null` when there is no safe column to apply it to. Kept as a
+ * plain function so the mapping is stated once and shared by the validation and
+ * the write below (they must never disagree about which column is being
+ * targeted). See `applyAcceptedBestEffort`'s doc comment for why `hours` lands
+ * on `hoursNote` and `description` on `tagline`.
+ */
+// Takes a plain `string`, not `EditSuggestionField`: the entity stores `field`
+// as a varchar on purpose so the frontend's picker can grow without a
+// migration, so a row can legitimately carry a value this build has never
+// heard of. Those fall through to `default` and apply to no column, which is
+// the same handling `'other'` gets.
+function resolveSuggestionTarget(
+  field: string,
+): AcceptedSuggestionTarget | null {
+  switch (field) {
+    case 'address':
+      return 'address';
+    case 'phone':
+      return 'phone';
+    case 'website':
+      return 'website';
+    case 'hours':
+      return 'hoursNote';
+    case 'description':
+      return 'tagline';
+    default:
+      return null;
+  }
+}
+
+/**
  * "Suggest an edit" — a non-owner member's proposed correction to a business
  * listing (spec: `field` + free-text `message`), landing in a
  * moderator-reviewable queue. Mirrors `StorySubmissionsService`'s
@@ -42,6 +82,8 @@ export interface EditSuggestionResult {
  */
 @Injectable()
 export class ListingEditSuggestionsService {
+  private readonly logger = new Logger(ListingEditSuggestionsService.name);
+
   constructor(
     @InjectRepository(Listing) private readonly listings: Repository<Listing>,
     @InjectRepository(ListingEditSuggestion)
@@ -193,7 +235,7 @@ export class ListingEditSuggestionsService {
    * appear to undo that decision.
    *
    * Only 3 of the 6 `EDIT_SUGGESTION_FIELDS` map onto a plain string column
-   * the free-text `message` can safely become verbatim: `address` ->
+   * the free-text `message` can be applied to: `address` ->
    * `Listing.address`, `phone`/`website` -> the matching key in
    * `Listing.social`. `hours` has no safe auto-apply target — `Listing.hours`
    * is a structured per-weekday interval map (`ListingDayHours`), and a
@@ -207,6 +249,21 @@ export class ListingEditSuggestionsService {
    * accepting it still resolves the queue row and still notifies the owner
    * with the suggested message, it just leaves every listing column
    * untouched (there's nothing safe to overwrite).
+   *
+   * BE-HSG-04: the value is NEVER written verbatim any more. Every target runs
+   * through `isAcceptedSuggestionValueValid`, which re-applies that column's
+   * own create-path rules, most importantly the real `@IsSafeExternalUrl()`
+   * decorator on `website`. The create path carries that decorator precisely so
+   * a `javascript:`/`data:` URL can never be stored, and this path used to
+   * bypass it entirely: `message` is 2000 chars of unvalidated free text, so a
+   * phishing or scripting URL, or a 2000-char blob in the `address` a map pin
+   * and JSON-LD are built from, reached the CDN-cached public detail page the
+   * moment a moderator clicked accept on a plausible-looking row.
+   *
+   * A rejected value skips the column write and is logged; the queue row still
+   * resolves and the owner is still notified with the raw message, so the
+   * moderator's own decision stands and a human can follow up. Refusing the
+   * accept outright would instead leave the row stuck in the queue forever.
    */
   private async applyAcceptedBestEffort(
     suggestion: ListingEditSuggestion,
@@ -219,31 +276,30 @@ export class ListingEditSuggestionsService {
       // correct or notify about.
       if (!listing) return;
 
-      switch (suggestion.field) {
-        case 'address':
-          listing.address = suggestion.message;
-          await this.listings.save(listing);
-          break;
-        case 'phone':
+      // The suggestion's `field` resolved to the column the value actually
+      // lands on. `null` is 'other' (or any future field): no column to apply
+      // to, so nothing is overwritten and the owner still gets notified below
+      // with the raw message.
+      const target = resolveSuggestionTarget(suggestion.field);
+
+      if (target !== null) {
+        if (!isAcceptedSuggestionValueValid(target, suggestion.message)) {
+          this.logger.warn(
+            `Edit suggestion ${suggestion.id} was accepted but not applied: ` +
+              `the suggested value fails the validation the create path ` +
+              `enforces on "${target}". Listing ${listing.ref} left unchanged.`,
+          );
+        } else if (target === 'phone') {
           listing.social = { ...listing.social, phone: suggestion.message };
           await this.listings.save(listing);
-          break;
-        case 'website':
+        } else if (target === 'website') {
           listing.social = { ...listing.social, website: suggestion.message };
           await this.listings.save(listing);
-          break;
-        case 'hours':
-          listing.hoursNote = suggestion.message;
+        } else {
+          // 'address' | 'hoursNote' | 'tagline' — all plain string columns.
+          listing[target] = suggestion.message;
           await this.listings.save(listing);
-          break;
-        case 'description':
-          listing.tagline = suggestion.message;
-          await this.listings.save(listing);
-          break;
-        default:
-          // 'other' (or any future field): no column to apply to — the
-          // owner still gets notified below with the raw message.
-          break;
+        }
       }
 
       await this.notifications.create(

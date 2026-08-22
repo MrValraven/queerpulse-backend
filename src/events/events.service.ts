@@ -8,9 +8,11 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
+import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { normalizePage, paginate } from '../common/pagination';
 import { randomBytes } from 'node:crypto';
 import {
+  EntityManager,
   In,
   MoreThan,
   MoreThanOrEqual,
@@ -61,6 +63,24 @@ import { RsvpService } from './rsvp.service';
 
 /** Edit/cancel scope for a recurring occurrence — see `SeriesScopeQuery`'s doc. */
 export type SeriesScope = 'this' | 'future';
+
+/**
+ * What one occurrence's patch changed, handed back by `applyUpdate` so its
+ * caller can run the side effects AFTER the transaction commits.
+ *
+ * `applyUpdate` used to reconcile the waitlist and notify attendees inline. In
+ * a `scope: 'future'` series edit that meant both fired per occurrence, mid
+ * loop, before the rest of the series was written — and waitlist reconciliation
+ * opens its own transaction with a `pessimistic_write` lock, which must never
+ * nest inside the one doing the writes.
+ */
+interface AppliedEventUpdate {
+  event: Event;
+  /** Capacity grew on a published event, so seats may have opened up. */
+  shouldReconcileWaitlist: boolean;
+  /** `startAt` / location fields that moved, empty when nothing notifiable did. */
+  materialChanges: string[];
+}
 
 export interface LineupEntryInput {
   memberSlug: string;
@@ -311,7 +331,10 @@ export class EventsService {
         );
       }
       const until = new Date(recurrence.endUntil);
-      if (Number.isNaN(until.getTime()) || until.getTime() <= startAt.getTime()) {
+      if (
+        Number.isNaN(until.getTime()) ||
+        until.getTime() <= startAt.getTime()
+      ) {
         throw new BadRequestException(
           "endUntil must be after the gathering's start",
         );
@@ -381,22 +404,55 @@ export class EventsService {
   ): Promise<EventDetail> {
     const event = await this.loadEventOr404(slug);
     await this.assertOrganizer(event.id, userId);
-    const saved = await this.applyUpdate(event, userId, dto);
 
-    if (scope === 'future' && saved.seriesId && saved.seriesIndex !== null) {
-      const { startAt: _startAt, endAt: _endAt, ...seriesPatch } = dto;
-      const futureSiblings = await this.events.find({
-        where: {
-          seriesId: saved.seriesId,
-          seriesIndex: MoreThan(saved.seriesIndex),
-          status: Not(EventStatus.Cancelled),
-        },
-      });
+    // `seriesId`/`seriesIndex` are never patchable, so the sibling set can be
+    // resolved from the unpatched row and the whole series written in ONE
+    // transaction. The loop this replaced saved each occurrence on its own and
+    // fanned notifications out as it went, so a throw part-way through left the
+    // series half edited with no rollback, and attendees had already been told
+    // about occurrences that no longer matched the ones behind them.
+    const { startAt: _startAt, endAt: _endAt, ...seriesPatch } = dto;
+    const futureSiblings =
+      scope === 'future' && event.seriesId && event.seriesIndex !== null
+        ? await this.events.find({
+            where: {
+              seriesId: event.seriesId,
+              seriesIndex: MoreThan(event.seriesIndex),
+              status: Not(EventStatus.Cancelled),
+            },
+          })
+        : [];
+
+    const applied: AppliedEventUpdate[] = [];
+    await this.events.manager.transaction(async (manager) => {
+      applied.push(await this.applyUpdate(event, userId, dto, manager));
       for (const sibling of futureSiblings) {
-        await this.applyUpdate(sibling, userId, seriesPatch);
+        applied.push(
+          await this.applyUpdate(sibling, userId, seriesPatch, manager),
+        );
+      }
+    });
+
+    // Everything with an effect OUTSIDE this transaction runs after it commits:
+    // waitlist promotion takes its own transaction with a `pessimistic_write`
+    // lock (nesting that inside ours would be a deadlock waiting to happen),
+    // and a notification cannot be un-sent if the write it describes rolls back.
+    for (const outcome of applied) {
+      if (outcome.shouldReconcileWaitlist) {
+        await this.rsvpService.reconcileWaitlist(outcome.event.slug);
+      }
+    }
+    for (const outcome of applied) {
+      if (outcome.materialChanges.length > 0) {
+        await this.notifyEventUpdated(
+          outcome.event,
+          userId,
+          outcome.materialChanges,
+        );
       }
     }
 
+    const saved = applied[0]?.event ?? event;
     return this.buildDetail(saved, userId);
   }
 
@@ -407,13 +463,30 @@ export class EventsService {
     event: Event,
     userId: string,
     dto: UpdateEventInput,
-  ): Promise<Event> {
+    // Present when this patch is part of a series edit: the save has to join
+    // the caller's transaction so every occurrence lands together. The
+    // side effects this method used to perform inline (waitlist reconciliation,
+    // the attendee notification) are REPORTED back instead of run here, so the
+    // caller can run them once the transaction has actually committed.
+    manager?: EntityManager,
+  ): Promise<AppliedEventUpdate> {
     // A cancelled event is terminal: cancel() is the only way in and there is no
     // way back out. The update DTO only allows Draft | Published for status, so
     // any provided status is a reopen attempt and must be rejected.
     if (event.status === EventStatus.Cancelled && dto.status !== undefined) {
       throw new ConflictException('A cancelled event cannot be reopened');
     }
+
+    // Shared-upload backstop (see `assertNoForeignUploadIntroduced`): an event
+    // is edited by its cohosts, so the interceptor exempts it and lets a cohost
+    // re-save the currently stored cover whoever uploaded it. Runs BEFORE any
+    // mutation, once per occurrence (a `scope: 'future'` series edit calls this
+    // for each sibling against ITS own stored cover): a foreign cover is allowed
+    // only when it is already this occurrence's stored value, so a cohost cannot
+    // point the field at a new foreign upload.
+    assertNoForeignUploadIntroduced(userId, dto.coverImageUrl, [
+      event.coverImageUrl,
+    ]);
 
     // Resolve the EFFECTIVE community for this patch. `communitySlug`
     // (fix round 2 — was create()-only before) mirrors `create()`'s handling
@@ -519,16 +592,15 @@ export class EventsService {
       event.reminderSentAt = null;
     }
 
-    const saved = await this.events.save(event);
+    const saved = manager
+      ? await manager.save(Event, event)
+      : await this.events.save(event);
 
     // Growing capacity (or lifting it entirely) can free seats — pull the
     // waitlist head(s) up. Skip on non-published events (nothing to admit into).
-    if (
+    const shouldReconcileWaitlist =
       saved.status === EventStatus.Published &&
-      capacityIncreased(oldCapacity, saved.capacity)
-    ) {
-      await this.rsvpService.reconcileWaitlist(saved.slug);
-    }
+      capacityIncreased(oldCapacity, saved.capacity);
 
     // Material change → tell the people counting on this event. "Material" is
     // when (start time) or where (venue / online flag / online URL) — the two
@@ -548,11 +620,12 @@ export class EventsService {
     ) {
       materialChanges.push('location');
     }
-    if (materialChanges.length > 0 && saved.status === EventStatus.Published) {
-      await this.notifyEventUpdated(saved, userId, materialChanges);
-    }
-
-    return saved;
+    return {
+      event: saved,
+      shouldReconcileWaitlist,
+      materialChanges:
+        saved.status === EventStatus.Published ? materialChanges : [],
+    };
   }
 
   /**
@@ -615,35 +688,49 @@ export class EventsService {
   ): Promise<EventDetail> {
     const event = await this.loadEventOr404(slug);
     await this.assertOrganizer(event.id, userId);
-    const saved = await this.cancelOne(event, userId);
 
-    if (scope === 'future' && saved.seriesId && saved.seriesIndex !== null) {
-      const futureSiblings = await this.events.find({
-        where: {
-          seriesId: saved.seriesId,
-          seriesIndex: MoreThan(saved.seriesIndex),
-          status: Not(EventStatus.Cancelled),
-        },
-      });
-      for (const sibling of futureSiblings) {
-        await this.cancelOne(sibling, userId);
-      }
+    // Resolve the whole set FIRST, then flip it in one statement. The loop this
+    // replaced saved each occurrence and fanned its notifications out before
+    // moving to the next, so a throw part-way through left the series half
+    // cancelled with no rollback: some attendees had already been told the
+    // gathering was off while later occurrences still read as published, and
+    // the host got an error with no way to tell which was which.
+    const futureSiblings =
+      scope === 'future' && event.seriesId && event.seriesIndex !== null
+        ? await this.events.find({
+            where: {
+              seriesId: event.seriesId,
+              seriesIndex: MoreThan(event.seriesIndex),
+              status: Not(EventStatus.Cancelled),
+            },
+          })
+        : [];
+    const cancelled = [event, ...futureSiblings];
+    await this.events.update(
+      { id: In(cancelled.map((occurrence) => occurrence.id)) },
+      { status: EventStatus.Cancelled },
+    );
+    for (const occurrence of cancelled) {
+      occurrence.status = EventStatus.Cancelled;
     }
 
-    return this.buildDetail(saved, userId);
+    // Fan out AFTER the status is committed; mirrors EventRemindersService.
+    for (const occurrence of cancelled) {
+      await this.notifyEventCancelled(occurrence, userId);
+    }
+
+    return this.buildDetail(event, userId);
   }
 
-  // The actual single-event cancel — everything `cancel()` did before MSG-10
-  // added series scope.
-  private async cancelOne(event: Event, userId: string): Promise<Event> {
-    event.status = EventStatus.Cancelled;
-    const saved = await this.events.save(event);
-    // Tell attendees the event is off. Fan out AFTER the status is persisted;
-    // mirrors EventRemindersService. Recipients = anyone with a live RSVP
-    // (going/maybe/waitlisted), minus the organizer who just cancelled it.
+  // Tell attendees one occurrence is off. Recipients = anyone with a live RSVP
+  // (going/maybe/waitlisted), minus the organizer who just cancelled it.
+  private async notifyEventCancelled(
+    event: Event,
+    userId: string,
+  ): Promise<void> {
     const rsvps = await this.rsvps.find({
       where: {
-        eventId: saved.id,
+        eventId: event.id,
         status: In([RsvpStatus.Going, RsvpStatus.Maybe, RsvpStatus.Waitlisted]),
       },
     });
@@ -654,14 +741,13 @@ export class EventsService {
       recipientIds,
       NotificationType.EventCancelled,
       {
-        eventId: saved.id,
+        eventId: event.id,
         // Carried so the MyEvents panel can deep-link the row (client keys by slug).
-        eventSlug: saved.slug,
-        title: saved.title,
-        startAt: saved.startAt.toISOString(),
+        eventSlug: event.slug,
+        title: event.title,
+        startAt: event.startAt.toISOString(),
       },
     );
-    return saved;
   }
 
   async list(
@@ -820,15 +906,29 @@ export class EventsService {
    * that writes the roster row. Idempotent (`ON CONFLICT DO NOTHING`): a
    * no-op for the host, who is already an implicit organizer.
    */
-  async addCohostByUserId(eventId: string, userId: string): Promise<void> {
-    const event = await this.events.findOne({ where: { id: eventId } });
+  async addCohostByUserId(
+    eventId: string,
+    userId: string,
+    // Optional so the invite-accept path can run this insert inside the SAME
+    // transaction that flips the invite to `accepted` — the two writes have to
+    // land together or not at all, or an accepted invite can end up with no
+    // roster row and no way to retry (accepting twice 409s).
+    manager?: EntityManager,
+  ): Promise<void> {
+    const eventRepository = manager
+      ? manager.getRepository(Event)
+      : this.events;
+    const cohostRepository = manager
+      ? manager.getRepository(EventCohost)
+      : this.cohosts;
+    const event = await eventRepository.findOne({ where: { id: eventId } });
     if (!event) {
       throw new NotFoundException('Event not found');
     }
     if (userId === event.hostId) {
       return;
     }
-    await this.cohosts
+    await cohostRepository
       .createQueryBuilder()
       .insert()
       .into(EventCohost)

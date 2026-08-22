@@ -1,8 +1,14 @@
-import { Injectable } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository, SelectQueryBuilder } from 'typeorm';
+import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import { Invite, InviteStatus } from '../membership/entities/invite.entity';
+import { resolveInviteStatus } from '../membership/invite-response';
+import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import {
@@ -35,6 +41,7 @@ export class AdminInvitesService {
     @InjectRepository(Invite) private readonly invites: Repository<Invite>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     @InjectRepository(User) private readonly users: Repository<User>,
+    private readonly dataSource: DataSource,
   ) {}
 
   async list(query: ListAdminInvitesQuery): Promise<AdminInvitesPageDTO> {
@@ -158,6 +165,114 @@ export class AdminInvitesService {
       })
       .filter((inviter): inviter is AdminInviteInviterDTO => inviter !== null)
       .sort((first, second) => first.name.localeCompare(second.name));
+  }
+
+  /**
+   * Revoke any still-valid invite platform-wide — `DELETE /admin/invites/:id`.
+   *
+   * The member-facing `DELETE /invites/:code` is scoped to `{ code, inviterId }`,
+   * so an admin had no way at all to pull someone else's live invite link. This
+   * is that missing lever: addressed by the internal `id` the admin list already
+   * carries (never the shared `code`), and deliberately NOT scoped to an owner.
+   *
+   * Semantics, mirroring `InvitesService.revokeInvite`'s guards without its
+   * ownership scoping:
+   *  - 404 when no invite carries that id;
+   *  - 409 when the invite is not revocable, keyed off the RESOLVED status the
+   *    admin list shows (`resolveInviteStatus`) rather than the stored column —
+   *    a `pending` row past its `expiresAt` reads as 'expired' in the UI and
+   *    must answer the same way here, or the drawer would offer an action that
+   *    reports a state nobody can see. Already-revoked is a conflict too, not a
+   *    silent success: the admin surface only offers this on a valid invite, so
+   *    a second call means the row moved underneath them and they should be
+   *    told.
+   *
+   * The flip is a conditional `status = Pending` update (the same single-consume
+   * guard `claimInvite` uses), so a redemption racing the revoke cannot both
+   * win. The loser re-reads and reports the real terminal state.
+   *
+   * AUDITED, like every neighbouring admin action that changes another member's
+   * standing (`AdminMembersService.updateRole` / `grantStaffRole` /
+   * `updateInviteQuota`): a `mod_audit_logs` row with `action =
+   * 'invite_revoked'`, the inviter as `targetUserId` + `targetName`, and the
+   * invite code in `note`. Written in the SAME transaction as the status flip,
+   * so the trail can never disagree with the column.
+   */
+  async revoke(inviteId: string, actorUserId: string): Promise<AdminInviteDTO> {
+    const now = new Date();
+    const invite = await this.invites.findOne({ where: { id: inviteId } });
+    if (!invite) {
+      throw new NotFoundException('Invite not found');
+    }
+    this.assertRevocable(invite, now);
+
+    const inviterRef =
+      (await new MemberLookup(this.profiles).byUserIds([invite.inviterId])).get(
+        invite.inviterId,
+      ) ?? null;
+
+    await this.dataSource.transaction(async (manager) => {
+      const result = await manager.update(
+        Invite,
+        { id: invite.id, status: InviteStatus.Pending },
+        { status: InviteStatus.Revoked },
+      );
+      if (result.affected !== 1) {
+        // Lost a race with a redemption, the expiry sweeper, or a concurrent
+        // revoke — re-read and report the state that actually won.
+        const current = await manager.findOne(Invite, {
+          where: { id: invite.id },
+        });
+        if (!current) {
+          throw new NotFoundException('Invite not found');
+        }
+        this.assertRevocable(current, new Date());
+        throw new ConflictException('Only a valid invite can be revoked.');
+      }
+
+      const auditLogs = manager.getRepository(ModAuditLog);
+      await auditLogs.save(
+        auditLogs.create({
+          reportId: null,
+          actorId: actorUserId,
+          targetUserId: invite.inviterId,
+          targetName: inviterRef
+            ? `${inviterRef.firstName} ${inviterRef.lastName}`.trim()
+            : null,
+          action: 'invite_revoked',
+          reasonCode: null,
+          note: invite.code,
+          duration: null,
+        }),
+      );
+    });
+
+    const revoked = await this.invites.findOne({ where: { id: invite.id } });
+    if (!revoked) {
+      throw new NotFoundException('Invite not found');
+    }
+    // A revoked invite was never redeemed, so there is no invitee to resolve —
+    // `acceptedBy` is null by construction on this path.
+    return toAdminInviteDTO(revoked, inviterRef, null, now);
+  }
+
+  /** 409 with the reason an invite cannot be revoked, or return quietly when it
+   *  can. Reads the RESOLVED status so a lapsed-but-unswept `pending` row is
+   *  reported as expired, exactly as the admin list renders it. */
+  private assertRevocable(invite: Invite, now: Date): void {
+    const status = resolveInviteStatus(invite, now);
+    if (status === 'valid') return;
+    if (status === 'used') {
+      throw new ConflictException(
+        'This invite has already been accepted, so there is nothing to revoke.',
+      );
+    }
+    if (status === 'revoked') {
+      throw new ConflictException('This invite was already revoked.');
+    }
+    throw new ConflictException(
+      'This invite has already expired, so there is nothing to revoke.',
+    );
   }
 
   /**

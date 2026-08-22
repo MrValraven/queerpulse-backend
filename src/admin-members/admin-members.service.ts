@@ -70,6 +70,12 @@ const CONTRIBUTION_LIMIT = 6;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Scan cap for the flagged-members tab's two platform-wide reads (open
+ *  member reports, suspended accounts). Sized like
+ *  `AdminCommunitiesService`'s `MAX_SCANNED_REPORTS`: well above real scale,
+ *  purely so neither query can ever be unbounded. */
+const MAX_FLAGGED_SCAN = 2000;
+
 // Mirrors the (small, closed) set of `ModAuditLog.action` codes written by
 // `ModerationService` — `MOD_ACTION_CODES` in `dto/mod-action.dto.ts`
 // (`dismiss`, `warn`, `hide_content`, `remove_content`, `restrict`,
@@ -202,16 +208,24 @@ export class AdminMembersService {
 
   async listFlagged(): Promise<FlaggedMemberDTO[]> {
     const [openMemberReports, suspendedUsers] = await Promise.all([
+      // Both scans are bounded (BE-COM-36): neither carried a `take`, so the
+      // flagged tab read every open member report and every suspended account
+      // on the platform into memory on each load, and the report set then fans
+      // out into a profile lookup. Newest-first, so the cap keeps the most
+      // recent reports. `MAX_FLAGGED_SCAN` is far above the platform's current
+      // scale; the flagged tab is a triage surface, not an exhaustive export.
       this.reports.find({
         where: {
           subjectType: ReportSubjectType.Member,
           status: In([ReportStatus.Open, ReportStatus.Escalated]),
         },
         order: { createdAt: 'DESC' },
+        take: MAX_FLAGGED_SCAN,
       }),
       this.users.find({
         where: { status: UserStatus.Suspended },
         select: ['id'],
+        take: MAX_FLAGGED_SCAN,
       }),
     ]);
 
@@ -825,13 +839,24 @@ export class AdminMembersService {
    * `grantStaffRole`, this is a resource-limits lever rather than a
    * moderation action, so there is deliberately no self-change or
    * house-account guardrail — the class-level Admin-only guard is the only
-   * gate. No audit-log entry either, mirroring how the column itself has
-   * always been a silent, direct-DB-edit affordance up to now — this
-   * endpoint just gives that same lever a UI.
+   * gate.
+   *
+   * It IS audited (BE-COM-34). On an invite-only platform, how many people a
+   * member may bring in is a consequential lever, and every neighbouring
+   * admin action on this service (`updateRole`, `grantStaffRole`,
+   * `revokeStaffRole`) already writes a `mod_audit_logs` row; this one wrote
+   * nothing, so a raised quota left no trace of who raised it. The row
+   * carries the old and new value in `note` and is written in the same
+   * transaction as the update, so the trail can never disagree with the
+   * column.
+   *
+   * A no-op (the quota already holds the requested value) writes no row,
+   * matching `updateRole`.
    */
   async updateInviteQuota(
     idOrSlug: string,
     quota: number | null,
+    actorUserId: string,
   ): Promise<{
     userId: string;
     slug: string;
@@ -840,10 +865,38 @@ export class AdminMembersService {
     const profile = await this.resolveMemberProfile(idOrSlug);
     const targetUserId = profile.userId;
 
-    await this.users.update(
-      { id: targetUserId },
-      { inviteMonthlyQuota: quota },
-    );
+    await this.dataSource.transaction(async (manager) => {
+      const users = manager.getRepository(User);
+      const targetUser = await users.findOne({
+        where: { id: targetUserId },
+        select: ['id', 'inviteMonthlyQuota'],
+      });
+      if (!targetUser) {
+        throw new NotFoundException('Member not found');
+      }
+      const previousQuota = targetUser.inviteMonthlyQuota;
+      if (previousQuota === quota) return;
+
+      await users.update({ id: targetUserId }, { inviteMonthlyQuota: quota });
+
+      const auditLogs = manager.getRepository(ModAuditLog);
+      await auditLogs.save(
+        auditLogs.create({
+          reportId: null,
+          actorId: actorUserId,
+          targetUserId,
+          targetName: `${profile.firstName} ${profile.lastName}`.trim(),
+          action: 'invite_quota_changed',
+          reasonCode: null,
+          // `null` renders as "default" rather than an empty string so the
+          // audit feed reads as "default → 12" / "12 → default", matching what
+          // clearing the override actually means (fall back to the
+          // platform-wide `INVITE_MONTHLY_QUOTA`).
+          note: `${previousQuota ?? 'default'} → ${quota ?? 'default'}`,
+          duration: null,
+        }),
+      );
+    });
 
     return {
       userId: targetUserId,

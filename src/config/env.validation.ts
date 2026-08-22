@@ -11,6 +11,7 @@ import {
   validateSync,
 } from 'class-validator';
 import { missingLaunchedFeatureEnv } from '../launchedFeatures';
+import { parseDurationMs } from './duration';
 import { invalidFrontendOrigins } from './frontend-origins';
 
 /**
@@ -146,6 +147,12 @@ export class EnvironmentVariables {
   @IsOptional() @IsString() VAPID_PRIVATE_KEY?: string;
   @IsOptional() @IsString() VAPID_SUBJECT?: string;
 
+  // Membership card token signing (Ed25519). Optional: unset disables card
+  // tokens with a startup warning (see CardTokenService). See
+  // src/membership-cards/card-token.service.ts.
+  @IsOptional() @IsString() CARD_SIGNING_PRIVATE_KEY?: string;
+  @IsOptional() @IsString() CARD_SIGNING_PUBLIC_KEY?: string;
+
   // Transactional email (SMTP). All optional: with none set the mailer runs
   // log-only (dev/test). Set SMTP_URL (a connection string) OR the discrete
   // SMTP_HOST/PORT/USER/PASSWORD fields to deliver for real. SMTP_SECURE is the
@@ -243,6 +250,13 @@ export class EnvironmentVariables {
   @IsOptional()
   @IsString()
   ALLOW_MULTI_REPLICA?: string;
+
+  // Explicit override acknowledging that a wildcard COOKIE_DOMAIN hands every
+  // sibling subdomain the ability to plant the session cookie. Only the exact
+  // string `true` enables it; see the cross-field rule below.
+  @IsOptional()
+  @IsString()
+  ALLOW_COOKIE_DOMAIN?: string;
 }
 
 export function validate(
@@ -299,6 +313,26 @@ export function validate(
     }
   }
 
+  // Membership card token signing is not optional in production either: left
+  // unset, `CardTokenService` boots with a warning and `mint()` throws a raw
+  // Error at request time, which surfaces as a 500 on every QR mint. Fail at
+  // boot instead, matching the storage-credential block above.
+  if (validated.NODE_ENV === NodeEnv.Production) {
+    const missingCardSigning = (
+      [
+        ['CARD_SIGNING_PRIVATE_KEY', validated.CARD_SIGNING_PRIVATE_KEY],
+        ['CARD_SIGNING_PUBLIC_KEY', validated.CARD_SIGNING_PUBLIC_KEY],
+      ] as const
+    )
+      .filter(([, value]) => !value)
+      .map(([name]) => name);
+    if (missingCardSigning.length > 0) {
+      problems.push(
+        `${missingCardSigning.join(', ')} ${missingCardSigning.length === 1 ? 'is' : 'are'} required when NODE_ENV=production (membership card QR minting fails at runtime otherwise)`,
+      );
+    }
+  }
+
   // Web Push (VAPID) is optional overall, but all-or-nothing: a partially set
   // trio would boot healthy and fail to send pushes at runtime instead of
   // failing fast at boot.
@@ -339,6 +373,42 @@ export function validate(
     );
   }
 
+  // Setting COOKIE_DOMAIN widens `access_token` / `refresh_token` from
+  // host-only to the whole domain tree, which means ANY subdomain that can
+  // serve attacker-influenced content can set a session cookie the apex will
+  // honour: login-CSRF and session fixation. The CSRF cookie is already immune
+  // (it carries the `__Host-` prefix, which forbids a Domain attribute), the
+  // session cookies are not. Unset is the correct value for a single-origin
+  // SPA and is what the README recommends, so a production deploy that really
+  // does span subdomains has to say so out loud.
+  if (
+    validated.NODE_ENV === NodeEnv.Production &&
+    validated.COOKIE_DOMAIN &&
+    validated.ALLOW_COOKIE_DOMAIN !== 'true'
+  ) {
+    problems.push(
+      `COOKIE_DOMAIN=${validated.COOKIE_DOMAIN} widens the session cookies to every subdomain, so any subdomain serving attacker-influenced content can log a visitor into another account (login-CSRF / session fixation). Leave COOKIE_DOMAIN unset unless the SPA and the API really are on different subdomains, in which case set ALLOW_COOKIE_DOMAIN=true to acknowledge the risk`,
+    );
+  }
+
+  // The JWT TTLs are handed to `jsonwebtoken` as strings AND parsed to numbers
+  // for the cookie max-ages and the refresh-row retention sweep (see
+  // `config/auth.config.ts`). An unparseable value falls back silently to the
+  // shipped default on the number side while `jsonwebtoken` throws on the
+  // string side, so a typo like `JWT_REFRESH_TTL=1 month` (`ms` has no month
+  // unit) breaks sign-in at the first request instead of at boot. Name the bad
+  // value at boot instead.
+  for (const [name, value] of [
+    ['JWT_ACCESS_TTL', validated.JWT_ACCESS_TTL],
+    ['JWT_REFRESH_TTL', validated.JWT_REFRESH_TTL],
+  ] as const) {
+    if (value !== undefined && parseDurationMs(value) === null) {
+      problems.push(
+        `${name} must be a positive duration such as 15m, 12h or 30d (or a bare number of milliseconds); got: ${value}`,
+      );
+    }
+  }
+
   // Mux is all-or-nothing: if any credential is set, the core trio must be too,
   // otherwise webhooks 500 at runtime instead of failing fast at boot.
   const muxVars = [
@@ -368,10 +438,27 @@ export function validate(
     }
   }
 
-  // /metrics is guarded by METRICS_TOKEN when set (see MetricsTokenGuard).
-  // It is optional in every environment: we rely on Railway's private network
-  // for observability, so an unset token leaves the endpoint open to the
-  // internal network rather than being a hard boot failure in production.
+  // /metrics is guarded by METRICS_TOKEN when set (see MetricsTokenGuard) and
+  // fails open when it is unset. It is intentionally NOT required in production:
+  // /metrics is reached over Railway's private network and operational
+  // visibility is served by the built-in admin metrics + Railway's own logs, so
+  // the Prometheus endpoint stays optional and network-isolated by deployment.
+  // Set METRICS_TOKEN (min 16 chars) if the endpoint is ever exposed publicly.
+
+  // Automated identity elevation raises a member straight to `id_verified` from
+  // a provider callback (see VerificationService.handleIdentityCallback). The
+  // ONLY identity provider bound today is the unsigned development stub
+  // (StubIdentityVerificationProvider), whose parseCallback trusts an unsigned
+  // request body — so with elevation on, anyone could POST a forged
+  // /verification/identity/callback and self-grant `id_verified`, which gates
+  // trust-sensitive surfaces such as housing. Refuse to boot with elevation on
+  // until a real provider that verifies an HMAC signature over the raw body is
+  // wired in VerificationModule (which enforces the same guard at binding time).
+  if (validated.VERIFICATION_AUTOMATED_ELEVATION === 'true') {
+    problems.push(
+      'VERIFICATION_AUTOMATED_ELEVATION=true is refused: the only bound identity provider is the unsigned development stub, so automated elevation would let a forged callback self-grant id_verified. Bind a real provider that verifies a webhook signature over the raw body before enabling this.',
+    );
+  }
 
   // Single-replica gate. The throttler store, socket.io fan-out and presence
   // map all live in process memory (see the ThrottlerModule + ChatGateway

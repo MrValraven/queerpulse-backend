@@ -226,6 +226,22 @@ export enum NotificationType {
   // link back to the community. See migration
   // `AddCommunityTagRequestResolvedNotificationType1793400100000`.
   CommunityTagRequestResolved = 'community_tag_request_resolved',
+  // Sent to a barter listing's OWNER when a member proposes a swap on it
+  // (`BarterService.createProposal`). Before this, a proposal reached the
+  // owner ONLY as a DM through `MessagingService.deliverEnquiry`, so the bell
+  // showed nothing at all. Both channels are kept: the DM is the conversation
+  // (and the channel that carries push), this is the bell.
+  //
+  // Carries the proposer as `payload.actorId` so block/mute filtering applies
+  // like any member-driven type. The payload deliberately carries only
+  // `barterListingId` + `listingOffer` (the listing's OWN public headline,
+  // directly analogous to `ForumReply`'s allowed `threadTitle`) — the
+  // proposal's `message` is member-authored private text and belongs in the DM
+  // thread, never in the notification payload. No preference toggle: a swap
+  // proposal on your own listing is need-to-know, like
+  // `VolunteerApplicationReceived`. See migration
+  // `AddBarterProposalReceivedNotificationType1793720000000`.
+  BarterProposalReceived = 'barter_proposal_received',
 }
 
 @Entity('notifications')

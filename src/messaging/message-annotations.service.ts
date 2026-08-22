@@ -88,7 +88,10 @@ export class MessageAnnotationsService {
     userId: string,
     key: MessageReactionKey,
   ): Promise<{ ok: true }> {
-    await this.core.requireParticipant(conversationId, userId);
+    // Active participation, not mere participation: a removed group member or
+    // a blocked DM counterpart must not be able to fire a live `reaction`
+    // frame into a room they can no longer read (BE-MSG-09).
+    await this.core.requireActiveParticipant(conversationId, userId);
     await this.requireMessageInConversation(conversationId, messageId);
 
     // Idempotent per (message,user,key): `ON CONFLICT DO NOTHING` absorbs a
@@ -117,7 +120,9 @@ export class MessageAnnotationsService {
     userId: string,
     key: MessageReactionKey,
   ): Promise<{ ok: true }> {
-    await this.core.requireParticipant(conversationId, userId);
+    // Un-reacting broadcasts the same `reaction` frame as reacting, so it is
+    // gated identically (BE-MSG-09).
+    await this.core.requireActiveParticipant(conversationId, userId);
     await this.requireMessageInConversation(conversationId, messageId);
 
     await this.reactions.delete({ messageId, userId, key });
@@ -170,7 +175,9 @@ export class MessageAnnotationsService {
     messageId: string,
     userId: string,
   ): Promise<{ ok: true }> {
-    await this.core.requireParticipant(conversationId, userId);
+    // Pins are SHARED and broadcast to the whole room, so only an active
+    // participant may place one (BE-MSG-09).
+    await this.core.requireActiveParticipant(conversationId, userId);
     await this.requireMessageInConversation(conversationId, messageId);
     await this.pins
       .createQueryBuilder()
@@ -197,7 +204,9 @@ export class MessageAnnotationsService {
     messageId: string,
     userId: string,
   ): Promise<{ ok: true }> {
-    await this.core.requireParticipant(conversationId, userId);
+    // Unpinning mutates SHARED state and broadcasts, exactly like pinning
+    // (BE-MSG-09).
+    await this.core.requireActiveParticipant(conversationId, userId);
     await this.pins.delete({ conversationId, messageId });
     this.eventEmitter.emit(MESSAGE_PINNED, {
       conversationId,
@@ -248,6 +257,11 @@ export class MessageAnnotationsService {
       if (participant.clearedAt && message.createdAt <= participant.clearedAt) {
         continue;
       }
+      // leftAt ceiling, mirroring `MessagesService.getMessages`: a pin placed
+      // after a member left the group is not theirs to read.
+      if (participant.leftAt && message.createdAt > participant.leftAt) {
+        continue;
+      }
       ordered.push(message);
     }
     return this.core.toMessageResponses(ordered, userId);
@@ -266,7 +280,10 @@ export class MessageAnnotationsService {
     messageId: string,
     userId: string,
   ): Promise<{ ok: true }> {
-    await this.core.requireParticipant(conversationId, userId);
+    // Private, but still a write into a conversation the caller may no longer
+    // act in (BE-MSG-09). `unstarMessage` deliberately keeps the lenient check
+    // below: removing your own bookmark emits nothing and must stay possible.
+    await this.core.requireActiveParticipant(conversationId, userId);
     await this.requireMessageInConversation(conversationId, messageId);
     await this.stars
       .createQueryBuilder()
@@ -327,6 +344,14 @@ export class MessageAnnotationsService {
         { userId },
       )
       .where('(p.cleared_at IS NULL OR m.created_at > p.cleared_at)')
+      // leftAt ceiling, mirroring `MessagesService.searchMessages` and
+      // `getMessages`: a member removed from (or who left) a group stops at the
+      // moment they left. A star can only be placed on a message that was
+      // visible at the time, so this mostly guards the re-add case
+      // (`GroupsService.addMembers` used to null `leftAt` out) — but the
+      // invariant must hold identically on every listing path, not only most
+      // of them.
+      .andWhere('(p.left_at IS NULL OR m.created_at <= p.left_at)')
       // A moderator-taken-down message (hidden OR removed, keyed by the message
       // uuid) is dropped from the starred list too — its snippet below would
       // otherwise leak the withheld body. In-query so the capped page isn't

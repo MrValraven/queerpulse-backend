@@ -49,8 +49,10 @@ import { ModerationService } from './moderation.service';
     UsersModule,
     // `AuthService.revokeAllForUser` — a suspended member's live refresh
     // tokens are killed so they cannot mint fresh access tokens. Not circular:
-    // nothing imports `ModerationModule` except `app.module.ts`, and
-    // `AuthModule`'s own imports never reach moderation. No `forwardRef`.
+    // `AuthModule`'s own imports never reach moderation, and neither does the
+    // import graph of the only other module that pulls this one in
+    // (`ForumModule`, for the exported `ModAuditService` below). No
+    // `forwardRef`.
     AuthModule,
     // `ContentModerationService.applyAction` — a `hide_content`/`remove_content`
     // action now writes the target content's takedown state in the SAME
@@ -84,12 +86,21 @@ import { ModerationService } from './moderation.service';
   ],
   // The extracted concerns are registered so Nest owns them as singletons and
   // injects them into `ModerationService`/`AdminMemberModerationService`.
-  // Nothing outside this module consumes them, so they are not exported.
   providers: [
     ModerationService,
     ModAuditService,
     AccountEnforcementService,
     AdminMemberModerationService,
   ],
+  // `ModAuditService` is the single writer into `mod_audit_logs` and the
+  // reader behind `GET /mod/audit` + its CSV export. `ForumModule` imports
+  // this module for it so staff thread actions (lock/unlock, pin/unpin, the
+  // "QueerPulse Official" byline toggle) land in the same global audit feed as
+  // every other moderator action instead of mutating state with no trail
+  // (BE-COM-19). No cycle: `ForumModule` is not in this module's import graph.
+  // `ModerationService`/`AccountEnforcementService`/
+  // `AdminMemberModerationService` stay unexported — nothing outside consumes
+  // them.
+  exports: [ModAuditService],
 })
 export class ModerationModule {}

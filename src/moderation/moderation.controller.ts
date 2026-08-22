@@ -159,6 +159,11 @@ export class ModerationController {
       'community owner/mod may also apply to a report on their own ' +
       "community's post or reply.",
   })
+  @ApiConflictResponse({
+    description:
+      'The report is already resolved (a terminal state), or another ' +
+      'moderator actioned it first.',
+  })
   @ApiNotFoundResponse({ description: 'The report does not exist.' })
   updateReport(
     @CurrentUser() user: CurrentUserData,
@@ -202,12 +207,20 @@ export class ModerationController {
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
   @ApiNotFoundResponse({ description: 'The report does not exist.' })
+  @ApiConflictResponse({
+    description: 'The report is already assigned to another moderator.',
+  })
   setAssignment(
     @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ReportAssignmentDto,
   ) {
-    return this.moderationService.setAssignment(id, user.userId, dto.assign);
+    return this.moderationService.setAssignment(
+      id,
+      user.userId,
+      user.role,
+      dto.assign,
+    );
   }
 
   @Get('appeals')

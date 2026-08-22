@@ -20,3 +20,22 @@ export interface CommunityPostCreatedEvent {
   postId: string;
   excerpt: string;
 }
+
+export const COMMUNITY_MEMBER_JOINED = 'community.member_joined';
+export const COMMUNITY_MEMBER_LEFT = 'community.member_left';
+
+/** Emitted after a roster row is created, by any join path. */
+export interface CommunityMemberJoinedEvent {
+  communityId: string;
+  userId: string;
+}
+
+/**
+ * Emitted after a roster row is deleted, whether the member left themselves
+ * or a mod removed them. Membership cards listen for this and revoke: a
+ * former member must not keep proving a membership they no longer hold.
+ */
+export interface CommunityMemberLeftEvent {
+  communityId: string;
+  userId: string;
+}

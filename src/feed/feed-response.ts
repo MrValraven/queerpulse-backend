@@ -4,6 +4,7 @@ import { CommunityPost } from '../communities/entities/community-post.entity';
 import { Community } from '../communities/entities/community.entity';
 import { Event } from '../events/entities/event.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
+import { matchNeighbourhood } from '../profiles/neighbourhoods';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 
 // ── Frontend-contract shapes ─────────────────────────────────────────────
@@ -36,6 +37,10 @@ export function toAuthorSummary(
     handle: ref.slug,
     displayName: `${ref.firstName} ${ref.lastName}`.trim(),
     pronouns: ref.pronouns,
+    // `ref.avatarUrl` is already `photoVisible`-gated at its single source
+    // (`toMemberRef`), so a member who hid their photo arrives here with a
+    // `null` avatar and it stays null — the gate isn't re-applied here because
+    // this shape has no `photoVisible`/viewer signal to re-derive it from.
     avatarUrl: toImageUrl(ref.avatarUrl),
   };
 }
@@ -50,9 +55,11 @@ export interface FeedItem {
   actor: AuthorSummary | null;
   // `new_member` (People tab) enrichment the member card renders — omitted
   // (undefined) for every other item type. `neighbourhood` HONOURS the
-  // member's profile visibility: it is null unless their profile is `open`,
-  // mirroring `toMemberCard`'s gate so the feed can't leak a location the
-  // profile detail deliberately hides. `interests` are the member's public
+  // member's privacy choices exactly as `toMemberCard` does: it is null unless
+  // the profile is `open` AND the member left `hoodVisible` on, and it carries
+  // the COARSENED neighbourhood (`matchNeighbourhood`), never the raw exact
+  // location — so the feed can't leak a location the profile detail
+  // deliberately hides or coarsens. `interests` are the member's public
   // `tags` (ungated, same as `toProfileCard`).
   neighbourhood?: string | null;
   interests?: string[];
@@ -151,8 +158,15 @@ export function newMemberToFeedItem(
     summary: profile.tagline ?? profile.bio ?? '',
     link: `/profile/${profile.slug}`,
     actor: toAuthorSummary(actor),
+    // Mirrors `toMemberCard`'s gate exactly: only an `open` profile that also
+    // left `hoodVisible` on exposes a neighbourhood, and it's the coarsened
+    // `matchNeighbourhood(location)`, never the raw exact string. A member who
+    // is `open` but hid their neighbourhood (`hoodVisible = false`) gets null
+    // here, same as everywhere else.
     neighbourhood:
-      profile.visibility === ProfileVisibility.Open ? profile.location : null,
+      profile.visibility === ProfileVisibility.Open && profile.hoodVisible
+        ? matchNeighbourhood(profile.location)
+        : null,
     interests: profile.tags,
   };
 }

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { UsersModule } from '../users/users.module';
+import { ProfilesModule } from '../profiles/profiles.module';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { PublicEligibilityModule } from '../public-eligibility/public-eligibility.module';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -40,6 +41,7 @@ import { RecognitionListener } from './recognition.listener';
       MemberPreferences,
     ]),
     UsersModule,
+    ProfilesModule,
     PublicEligibilityModule,
     NotificationsModule,
   ],

@@ -13,6 +13,7 @@ import {
   CurrentUser,
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
+import { Throttle, seconds } from '@nestjs/throttler';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { CommunityPostsService } from './community-posts.service';
@@ -39,10 +40,17 @@ import {
  * serves. Reuses `CommunityPostsService`'s by-id methods — see that file for
  * how `communitySlug` optional and the reserved `like` reaction key work.
  *
- * The update/delete/restore/history routes below are author-only: a flat
- * post/reply has no community, so there's no owner/mod concept to fall back
- * to the way the nested routes do (see `CommunityPostsService`'s
- * `assertAuthorOnly`).
+ * The update/delete/history routes below are author-only: a flat post/reply
+ * has no community, so there's no owner/mod concept to fall back to the way
+ * the nested routes do (see `CommunityPostsService`'s `assertAuthorOnly`).
+ * Restore is the one exception — it resolves the post's community when it has
+ * one, because a tombstone set by a community moderator must not be clearable
+ * by the author through this route (see `assertCanRestore`).
+ *
+ * The write routes carry the same `20 per 60s` per-route throttle the
+ * slug-scoped `/communities/:slug/posts*` writes do. Without it these aliases
+ * fell through to the global limit only, which made the flat path the cheaper
+ * one to spam (BE-COM-02).
  */
 @Feature('communities')
 @ApiTags('Communities')
@@ -53,6 +61,7 @@ import {
 export class CommunityPostsController {
   constructor(private readonly communityPostsService: CommunityPostsService) {}
 
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Post()
   @ApiOperation({
     summary: 'Create a post, optionally scoped to a community by slug.',
@@ -60,7 +69,8 @@ export class CommunityPostsController {
   @ApiCreatedResponse({ description: 'The created post id (`{ id }`).' })
   @ApiBadRequestResponse({ description: 'The post payload is invalid.' })
   @ApiForbiddenResponse({
-    description: 'Not a member of the target community.',
+    description:
+      'Not a member of the target community, or that community is frozen or archived.',
   })
   @ApiNotFoundResponse({ description: 'The target community was not found.' })
   create(@CurrentUser() user: CurrentUserData, @Body() dto: CreateFlatPostDto) {
@@ -103,12 +113,15 @@ export class CommunityPostsController {
 
   @Post(':id/restore')
   @ApiOperation({
-    summary: 'Restore a soft-deleted post by id (author-only).',
+    summary:
+      'Restore a soft-deleted post by id (whoever deleted it, or a moderator of its community).',
   })
   @ApiCreatedResponse({ description: 'The post, tombstone cleared.' })
   @ApiBadRequestResponse({ description: 'Malformed post id.' })
   @ApiForbiddenResponse({
-    description: 'Only the author may restore this post.',
+    description:
+      'Only the actor who deleted this post may restore it. A tombstone set ' +
+      "by the community's owner/mod needs an owner/mod to lift.",
   })
   @ApiNotFoundResponse({ description: 'No post exists for this id.' })
   restore(
@@ -135,6 +148,7 @@ export class CommunityPostsController {
     return this.communityPostsService.listFlatPostHistory(id, user.userId);
   }
 
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Post(':id/like')
   @ApiOperation({ summary: 'Like or unlike a post by id (idempotent toggle).' })
   @ApiCreatedResponse({
@@ -144,7 +158,8 @@ export class CommunityPostsController {
     description: 'Malformed post id or invalid payload.',
   })
   @ApiForbiddenResponse({
-    description: "Not a member of the post's community.",
+    description:
+      "Not a member of the post's community, or that community is frozen or archived.",
   })
   @ApiNotFoundResponse({ description: 'No post exists for this id.' })
   like(
@@ -155,6 +170,7 @@ export class CommunityPostsController {
     return this.communityPostsService.likeFlatPost(id, user.userId, dto.liked);
   }
 
+  @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Post(':id/replies')
   @ApiOperation({ summary: 'Reply to a post by id.' })
   @ApiCreatedResponse({ description: 'The created reply id (`{ id }`).' })
@@ -162,7 +178,8 @@ export class CommunityPostsController {
     description: 'Malformed post id or invalid payload.',
   })
   @ApiForbiddenResponse({
-    description: "Not a member of the post's community.",
+    description:
+      "Not a member of the post's community, or that community is frozen or archived.",
   })
   @ApiNotFoundResponse({ description: 'No post exists for this id.' })
   reply(
@@ -215,12 +232,15 @@ export class CommunityPostsController {
 
   @Post(':id/replies/:replyId/restore')
   @ApiOperation({
-    summary: 'Restore a soft-deleted reply to a post by id (author-only).',
+    summary:
+      'Restore a soft-deleted reply by id (whoever deleted it, or a moderator of its community).',
   })
   @ApiCreatedResponse({ description: 'The reply, tombstone cleared.' })
   @ApiBadRequestResponse({ description: 'Malformed id.' })
   @ApiForbiddenResponse({
-    description: 'Only the author may restore this reply.',
+    description:
+      'Only the actor who deleted this reply may restore it. A tombstone set ' +
+      "by the community's owner/mod needs an owner/mod to lift.",
   })
   @ApiNotFoundResponse({ description: 'No such post or reply.' })
   restoreReply(

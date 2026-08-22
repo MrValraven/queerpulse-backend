@@ -11,15 +11,25 @@ export const DSAR_DUE_DAYS = 30;
 // days after the archive was built (mirrors `account.api.ts`'s doc comment).
 export const EXPORT_LINK_EXPIRY_DAYS = 7;
 
+// How long a READY export job is reused instead of rebuilt. `requestExport`
+// builds the whole archive synchronously and stores it as jsonb, so an
+// identical repeat request inside this window (a double-click, a retry, a
+// second tab) returns the job that already exists rather than persisting a
+// second full copy of the member's data. Paired with the per-route throttle on
+// `POST /account/export`.
+export const EXPORT_REUSE_WINDOW_MS = 60 * 60 * 1000;
+
 // Categories always present in `GET /account/email-preferences`, even before
 // the member has ever touched a toggle. `email_preference` rows are overrides
 // layered on top of this default matrix.
 //
-// ⚠️ NOT-YET-ACTIVE. There is no transactional mailer at launch (no provider,
-// no dependency, no sender) — see `docs/ops/no-email-at-launch.md`. These
-// toggles are PERSISTED but never acted on; every response item carries
-// `comingSoon: true`. This matrix stays here so it is ready the day the mailer
-// lands — do not read it as evidence that email is delivered.
+// ⚠️ NOT-YET-ACTIVE. `MailerService` exists and delivers (the join-request
+// approve/decline emails go through it), but NO sender consults these
+// categories: nothing reads `email_preference` before sending, and there is no
+// digest/reminder/product-update job at all. The toggles are PERSISTED and
+// never acted on; every response item carries `comingSoon: true`. This matrix
+// stays here ready for the day a sender honours it. Do not read it as evidence
+// that these emails are delivered.
 export const DEFAULT_EMAIL_PREFERENCES: Record<string, boolean> = {
   productUpdates: true,
   communityDigest: true,

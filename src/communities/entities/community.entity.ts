@@ -16,6 +16,19 @@ export enum CommunityType {
   Professional = 'professional',
 }
 
+// Why a community is currently frozen. Set alongside `frozenAt` by every
+// freeze path (manual owner/mod freeze, or `CommunityAutoFreezeService`'s two
+// automatic triggers) and cleared with it. Drives who may LIFT the freeze —
+// see `CommunitiesService.unfreeze`: an owner/mod may lift their own `manual`
+// freeze at will, but an automatic one only once the community's open reports
+// are actually handled. Values match the `reason` string the governance log
+// and the staff notification payload already carry.
+export enum CommunityFrozenReason {
+  Manual = 'manual',
+  EmergencyReport = 'emergency_report',
+  ReportPileup = 'report_pileup',
+}
+
 export enum AccessTier {
   Public = 'public',
   Request = 'request',
@@ -155,6 +168,19 @@ export class Community {
   // paired migration `1789000000000-AddCommunityFrozenAt`.
   @Column({ type: 'timestamptz', nullable: true })
   frozenAt!: Date | null;
+
+  // Why the freeze above was applied (see `CommunityFrozenReason`). NULL means
+  // "not frozen", and also covers any row frozen before
+  // `AddCommunityFrozenReason1793520100000` added this column — `unfreeze`
+  // treats that legacy case as an AUTOMATIC freeze (the conservative
+  // direction: a manual freeze is the one an owner may always lift).
+  @Column({
+    type: 'enum',
+    enum: CommunityFrozenReason,
+    enumName: 'communities_frozen_reason_enum',
+    nullable: true,
+  })
+  frozenReason!: CommunityFrozenReason | null;
 
   // Set by `CommunityOwnerOrphanService.handleOwnerErasure` when the owner's
   // account is erased and the roster has no `mod` to promote, leaving

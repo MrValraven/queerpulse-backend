@@ -28,7 +28,11 @@ describe('VouchService', () => {
     count: jest.Mock;
     update: jest.Mock;
   };
-  let profiles: { findOne: jest.Mock; find: jest.Mock };
+  let profiles: {
+    findOne: jest.Mock;
+    find: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
   let manager: {
     findOne: jest.Mock;
     insert: jest.Mock;
@@ -36,9 +40,14 @@ describe('VouchService', () => {
     count: jest.Mock;
     increment: jest.Mock;
     decrement: jest.Mock;
+    createQueryBuilder: jest.Mock;
   };
   let dataSource: { transaction: jest.Mock };
   let emitter: { emit: jest.Mock };
+  // What the daily-cap query returns. `createVouch` counts
+  // COALESCE(reactivated_at, created_at) through a query builder, so it can no
+  // longer be driven by `manager.count`.
+  let vouchesGivenToday: number;
 
   beforeEach(async () => {
     vouches = {
@@ -50,16 +59,34 @@ describe('VouchService', () => {
     profiles = {
       findOne: jest.fn(),
       find: jest.fn().mockResolvedValue([]),
+      // `createVouch` resolves the vouchee through an ACTIVE-user join, so it
+      // goes via a query builder while `withdrawVouch`/`listVouchers` still use
+      // `findOne`. Delegating `getOne()` to the same `findOne` mock keeps every
+      // `profiles.findOne.mockResolvedValue(...)` below meaningful for both.
+      createQueryBuilder: jest.fn(() => ({
+        innerJoin: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        getOne: jest.fn(() => profiles.findOne() as Promise<unknown>),
+      })),
     };
+    vouchesGivenToday = 0;
     manager = {
       findOne: jest.fn().mockResolvedValue(null), // the pessimistic-lock read
       insert: jest.fn().mockResolvedValue(undefined),
-      update: jest.fn().mockResolvedValue(undefined),
+      // Every in-transaction update is a CONDITIONAL claim whose `affected` the
+      // service reads to decide whether it won the race.
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
       count: jest.fn().mockResolvedValue(0),
       // The denormalized profiles.vouch_count is kept in sync inside the same
       // transaction (see B3): createVouch increments, withdrawVouch decrements.
       increment: jest.fn().mockResolvedValue(undefined),
       decrement: jest.fn().mockResolvedValue(undefined),
+      // The daily-cap count.
+      createQueryBuilder: jest.fn(() => ({
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        getCount: jest.fn(() => Promise.resolve(vouchesGivenToday)),
+      })),
     };
     dataSource = {
       transaction: jest
@@ -151,10 +178,11 @@ describe('VouchService', () => {
 
     it('behaves identically at a high vouch count (no threshold effect)', async () => {
       profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
-      // First `manager.count` call is the daily-cap pre-check (kept under the
-      // limit); the second is the post-insert active-vouchCount tally being
-      // asserted here — the two are unrelated counts (COM-26).
-      manager.count.mockResolvedValueOnce(2).mockResolvedValueOnce(99);
+      // The daily-cap pre-check is its own query (`vouchesGivenToday`, kept
+      // under the limit); `manager.count` is only the post-insert
+      // active-vouchCount tally asserted here. Two unrelated counts (COM-26).
+      vouchesGivenToday = 2;
+      manager.count.mockResolvedValue(99);
       const result = await service.createVouch('u1', 'them');
       expect(result).toEqual({ vouchCount: 99 });
       expect(emitter.emit).toHaveBeenCalledTimes(1);
@@ -184,19 +212,55 @@ describe('VouchService', () => {
 
       it('allows the vouch when under the daily limit', async () => {
         profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
-        manager.count.mockResolvedValueOnce(19).mockResolvedValueOnce(1);
+        vouchesGivenToday = 19;
+        manager.count.mockResolvedValue(1);
         await expect(service.createVouch('u1', 'them')).resolves.toBeDefined();
         expect(manager.insert).toHaveBeenCalled();
       });
 
       it('rejects with 403 once the daily limit is reached, without inserting', async () => {
         profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
-        manager.count.mockResolvedValueOnce(20);
+        vouchesGivenToday = 20;
         await expect(service.createVouch('u1', 'them')).rejects.toBeInstanceOf(
           ForbiddenException,
         );
         expect(manager.insert).not.toHaveBeenCalled();
         expect(emitter.emit).not.toHaveBeenCalled();
+      });
+
+      // The cap counts COALESCE(reactivated_at, created_at), so a
+      // withdraw-and-re-vouch cycle costs a slot instead of being free.
+      it('counts reactivations, not just first-time vouches', async () => {
+        profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
+        vouchesGivenToday = 20;
+        vouches.findOne.mockResolvedValue({
+          id: 'v9',
+          withdrawnAt: new Date('2026-01-01'),
+        });
+        await expect(service.createVouch('u1', 'them')).rejects.toBeInstanceOf(
+          ForbiddenException,
+        );
+        expect(manager.update).not.toHaveBeenCalled();
+      });
+
+      it('counts by COALESCE(reactivated_at, created_at) for this voucher', async () => {
+        profiles.findOne.mockResolvedValue({ userId: 'u2', slug: 'them' });
+        const builder = {
+          where: jest.fn().mockReturnThis(),
+          andWhere: jest.fn().mockReturnThis(),
+          getCount: jest.fn().mockResolvedValue(0),
+        };
+        manager.createQueryBuilder.mockReturnValue(builder);
+
+        await service.createVouch('u1', 'them');
+
+        expect(builder.where).toHaveBeenCalledWith('v.voucherId = :voucherId', {
+          voucherId: 'u1',
+        });
+        expect(builder.andWhere).toHaveBeenCalledWith(
+          'COALESCE(v.reactivatedAt, v.createdAt) >= :dayStart',
+          expect.objectContaining({ dayStart: expect.any(Date) as unknown }),
+        );
       });
     });
   });
@@ -251,11 +315,15 @@ describe('VouchService', () => {
       // The re-vouch/un-withdraw path updates the row via the transaction's
       // EntityManager (not the `vouches` repository), so it commits or rolls
       // back atomically with the pessimistic-lock read and the count below.
+      // Conditional on the row still being withdrawn, so two concurrent
+      // re-vouches can't both "reactivate" it and both increment vouch_count.
       expect(manager.update).toHaveBeenCalledWith(
         Vouch,
-        { id: 'v9' },
+        { id: 'v9', withdrawnAt: expect.anything() as unknown },
         expect.objectContaining({
           withdrawnAt: null,
+          // Stamped so the daily cap sees the reinstatement.
+          reactivatedAt: expect.any(Date) as unknown,
           relationships: ['friends'],
         }),
       );
@@ -300,9 +368,11 @@ describe('VouchService', () => {
       // The soft-delete now runs inside the transaction via the EntityManager
       // (so the withdraw and the denormalized-counter decrement commit or roll
       // back atomically), not through the `vouches` repository.
+      // Conditional on the row still being active, so a double-click can't
+      // decrement vouch_count twice.
       expect(manager.update).toHaveBeenCalledWith(
         Vouch,
-        { id: 'v1' },
+        { id: 'v1', withdrawnAt: expect.anything() as unknown },
         expect.objectContaining({ withdrawnAt: expect.any(Date) as unknown }),
       );
       // And the denormalized profiles.vouch_count is decremented in the same

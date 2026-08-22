@@ -57,13 +57,24 @@ describe('MemberRecognitionController', () => {
     controller = module.get(MemberRecognitionController);
   });
 
-  it('GET /profiles/:slug/recognition delegates to getBySlug with the path param', async () => {
+  it('GET /profiles/:slug/recognition delegates to getBySlug with the path param and the viewer identity', async () => {
     const dto = { level: { level: 3 } };
     service.getBySlug.mockResolvedValue(dto);
+    const viewer = {
+      userId: 'viewer-1',
+      role: 'member',
+    } as CurrentUserData;
 
-    const result = await controller.getForMember('jamie');
+    const result = await controller.getForMember('jamie', viewer);
 
-    expect(service.getBySlug).toHaveBeenCalledWith('jamie');
+    // (L10) the viewer id + role are forwarded so the service can apply the
+    // block / hidden-from / takedown gate before returning another member's
+    // recognition.
+    expect(service.getBySlug).toHaveBeenCalledWith(
+      'jamie',
+      'viewer-1',
+      'member',
+    );
     expect(result).toBe(dto);
   });
 });

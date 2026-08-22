@@ -21,6 +21,16 @@ export enum DeletionRequestStatus {
   Cancelled = 'cancelled',
 }
 
+// At most one OPEN (`grace`/`processing`) request per member — a partial unique
+// index, created by `AddDeletionRequestOpenUniqueIndex1793500200000`. Without
+// it two concurrent `POST /account/deletion-request` calls both inserted a
+// `grace` row and cancelling only cleared one, leaving the member to be erased
+// 30 days after they cancelled. `AccountService.requestDeletion` maps the 23505
+// to the same 409 its in-transaction pre-check raises.
+@Index('UQ_deletion_request_open_user', ['userId'], {
+  unique: true,
+  where: `"status" IN ('grace', 'processing')`,
+})
 @Entity('deletion_request')
 export class DeletionRequest {
   @PrimaryGeneratedColumn('uuid')

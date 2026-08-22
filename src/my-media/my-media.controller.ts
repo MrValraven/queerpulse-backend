@@ -7,10 +7,12 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import {
+  ApiConflictResponse,
   ApiCookieAuth,
   ApiForbiddenResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiServiceUnavailableResponse,
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
@@ -39,6 +41,14 @@ export class MyMediaController {
   @ApiOkResponse({ description: 'The object was deleted.' })
   @ApiForbiddenResponse({
     description: 'The key is not the caller-owned upload.',
+  })
+  @ApiConflictResponse({
+    description:
+      'The upload is still referenced. The body carries `references` — every place it is used — so the caller can detach it there first.',
+  })
+  @ApiServiceUnavailableResponse({
+    description:
+      'Reference checking is degraded, so the upload could not be proven unused. Deleting is refused rather than risking a live image.',
   })
   @Delete()
   @HttpCode(200)

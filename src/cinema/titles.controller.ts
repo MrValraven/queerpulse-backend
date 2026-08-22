@@ -48,13 +48,21 @@ export class TitlesController {
   })
   @ApiOkResponse({
     description:
-      "Visible titles with the caller's watch progress; admin fields when all=true.",
+      "One page of visible titles with the caller's watch progress; admin fields when all=true. " +
+      'Still a bare array: send `page` (1-based) and optionally `pageSize` ' +
+      '(default 200, max 200) to walk the catalog; a page shorter than ' +
+      '`pageSize` is the last one.',
   })
   @ApiForbiddenResponse({
     description: 'all=true requires a moderator or admin role.',
   })
   list(@CurrentUser() user: CurrentUserData, @Query() query: ListTitlesQuery) {
-    return this.cinema.listTitles(user, query.all === 'true');
+    return this.cinema.listTitles(
+      user,
+      query.all === 'true',
+      query.page,
+      query.pageSize,
+    );
   }
 
   @Get(':id')

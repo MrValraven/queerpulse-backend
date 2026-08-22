@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, ObjectLiteral, Repository, SelectQueryBuilder } from 'typeorm';
 import {
   CursorPage,
   cursorPaginate,
@@ -128,6 +128,74 @@ export class FeedService {
     private readonly blockFilter: BlockFilterService,
     private readonly connectionsService: ConnectionsService,
   ) {}
+
+  /**
+   * Takedown subject codes, matching what each domain's OWN read path already
+   * filters on so the feed can never disagree with the surface it links to:
+   * `event` (`EventsService.SUBJECT_TYPE`), and `post`/`reply` for community
+   * posts and forum OPs (`CommunityPostsService.SUBJECT_TYPES` /
+   * `ForumPostsService.SUBJECT_TYPES` — a forum thread is reported through its
+   * OP *post*, keyed by that post's uuid, which is why the thread predicate
+   * below goes through `forum_post` rather than the thread id).
+   */
+  private static readonly EVENT_SUBJECT_TYPES = ['event'];
+  private static readonly POST_SUBJECT_TYPES = ['post', 'reply'];
+
+  /**
+   * Drops rows whose subject carries a moderator takedown — hidden OR removed.
+   *
+   * BOTH states are excluded, unlike `ContentModerationService.excludeHidden`
+   * (which keeps removed rows so a thread can render them as `[removed]`): the
+   * aggregated feed has no tombstone rendering, so a removed item would surface
+   * with its real title, summary and deep link. Same shape and same reasoning as
+   * `EventsService.excludeModeratedEvents`, applied in-query so a fixed-size
+   * candidate page isn't under-filled and the merge boundary stays exact.
+   *
+   * `subjectIdColumn` is spliced verbatim into raw SQL — pass a literal alias
+   * reference, never user input. It is cast to `text` because
+   * `content_moderation.subject_id` is `varchar` while every candidate id is a
+   * `uuid`. Call at most once per query builder (fixed bound-parameter name).
+   */
+  private excludeModerated<E extends ObjectLiteral>(
+    qb: SelectQueryBuilder<E>,
+    subjectTypes: readonly string[],
+    subjectIdColumn: string,
+  ): void {
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "content_moderation" "feed_cm"
+        WHERE "feed_cm"."subject_type" IN (:...feedModerationSubjectTypes)
+          AND "feed_cm"."subject_id" = ${subjectIdColumn}::text
+          AND ("feed_cm"."hidden_at" IS NOT NULL OR "feed_cm"."removed_at" IS NOT NULL)
+      )`,
+      { feedModerationSubjectTypes: [...subjectTypes] },
+    );
+  }
+
+  /**
+   * The forum variant of {@link excludeModerated}: a thread has no
+   * `content_moderation` row of its own — moderators take down its OPENING
+   * POST (`forum_post.is_op`), which is what the client reports and what
+   * `ForumPostsService` reads. A thread whose OP is hidden or removed is
+   * therefore dropped from the feed, where only its title and category would
+   * have shown anyway (with a deep link straight into the withheld body).
+   */
+  private excludeModeratedForumThreads(
+    qb: SelectQueryBuilder<ForumThread>,
+  ): void {
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "forum_post" "feed_op"
+        JOIN "content_moderation" "feed_cm"
+          ON "feed_cm"."subject_type" IN (:...feedModerationSubjectTypes)
+         AND "feed_cm"."subject_id" = "feed_op"."id"::text
+        WHERE "feed_op"."thread_id" = t.id
+          AND "feed_op"."is_op" = true
+          AND ("feed_cm"."hidden_at" IS NOT NULL OR "feed_cm"."removed_at" IS NOT NULL)
+      )`,
+      { feedModerationSubjectTypes: [...FeedService.POST_SUBJECT_TYPES] },
+    );
+  }
 
   async getFeed(
     viewerId: string,
@@ -259,6 +327,11 @@ export class FeedService {
         const qb = this.communityPosts
           .createQueryBuilder('cp')
           .where('cp.deletedAt IS NULL');
+        // A moderator takedown outranks every visibility rule below it: a
+        // hidden/removed post must not reach the feed, which has no tombstone
+        // rendering and would surface its real title, 220-char body excerpt
+        // and deep link.
+        this.excludeModerated(qb, FeedService.POST_SUBJECT_TYPES, '"cp"."id"');
         if (membershipScoped) {
           // `communities` tab (Task 6): drop the access-tier gate entirely
           // and restrict to communities the viewer belongs to — this also
@@ -315,6 +388,8 @@ export class FeedService {
       }
       case 'forum_thread': {
         const qb = this.forumThreads.createQueryBuilder('t');
+        // Takedown of the thread's OP — see `excludeModeratedForumThreads`.
+        this.excludeModeratedForumThreads(qb);
         if (membershipScoped) {
           // `communities` tab (Task 6): restrict to threads posted in
           // communities the viewer belongs to.
@@ -323,6 +398,30 @@ export class FeedService {
                SELECT 1 FROM "community_members" "mem"
                WHERE "mem"."community_id" = t.community_id AND "mem"."user_id" = :viewerId)`,
             { viewerId },
+          );
+        } else {
+          // Access-tier / membership gate, mirroring the `community_post`
+          // branch above (and `ForumThreadsService`'s read paths): a thread
+          // scoped to a Private community only surfaces when the viewer is on
+          // its roster — otherwise a private community's thread titles and deep
+          // links would leak to non-members via the general feed. A
+          // flat/global thread (`community_id IS NULL`) and threads in
+          // non-Private communities stay visible to everyone.
+          qb.andWhere(
+            `(
+              t.community_id IS NULL
+              OR EXISTS (
+                SELECT 1 FROM "communities" "com"
+                WHERE "com"."id" = t.community_id
+                  AND "com"."access_tier" != :privateTier
+              )
+              OR EXISTS (
+                SELECT 1 FROM "community_members" "mem"
+                WHERE "mem"."community_id" = t.community_id
+                  AND "mem"."user_id" = :viewerId
+              )
+            )`,
+            { privateTier: AccessTier.Private, viewerId },
           );
         }
         if (connectionAuthorIds !== null) {
@@ -333,12 +432,13 @@ export class FeedService {
           });
         }
         // `true`: `ForumThread.createdAt` is migrated to `timestamptz(3)`
-        // (see `1785001400000-NarrowCursorCreatedAtPrecision.ts`), so this
-        // unfiltered "no WHERE at all" scan can finally use the existing
-        // `IDX_forum_thread_created_at_id` (`1782800210000-AddForum.ts`) —
-        // that index was already shaped correctly but unusable while this
-        // query's ORDER BY/WHERE went through the non-indexable
-        // `date_trunc(...)` wrapper.
+        // (see `1785001400000-NarrowCursorCreatedAtPrecision.ts`), so the
+        // keyset ORDER BY can use the existing `IDX_forum_thread_created_at_id`
+        // (`1782800210000-AddForum.ts`) instead of the non-indexable
+        // `date_trunc(...)` wrapper. The access-tier gate above narrows the
+        // scan with correlated EXISTS subqueries rather than a join, keeping
+        // the single-query keyset-pagination path (same reasoning as the
+        // `community_post` branch).
         const { rows } = await cursorPaginate(qb, cursor, limit, 't', true);
         return rows.map((row) => ({
           id: row.id,
@@ -377,6 +477,10 @@ export class FeedService {
           .createQueryBuilder('e')
           .where('e.status = :status', { status: EventStatus.Published })
           .andWhere('e.visibility IN (:...visibilities)', { visibilities });
+        // Same takedown exclusion `EventsService.excludeModeratedEvents`
+        // applies to browse + search, so a moderator-hidden gathering can no
+        // longer be reached through the feed instead.
+        this.excludeModerated(qb, FeedService.EVENT_SUBJECT_TYPES, '"e"."id"');
         if (membershipScoped) {
           // `communities` tab (Task 6): restrict to gatherings hosted by
           // communities the viewer belongs to.

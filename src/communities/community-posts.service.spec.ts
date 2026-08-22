@@ -149,6 +149,10 @@ const POST: CommunityPost = {
   createdAt: new Date('2026-01-02T00:00:00.000Z'),
   editedAt: null,
   deletedAt: null,
+  // Live post, so nobody set a tombstone (BE-COM-01). `assertCanRestore`
+  // reads this column, and `undefined` would be judged as "someone else
+  // deleted it" rather than "not tombstoned".
+  deletedById: null,
 };
 
 const REPLY: CommunityPostReply = {
@@ -159,6 +163,7 @@ const REPLY: CommunityPostReply = {
   createdAt: new Date('2026-01-02T12:00:00.000Z'),
   editedAt: null,
   deletedAt: null,
+  deletedById: null,
 };
 
 describe('CommunityPostsService', () => {
@@ -563,12 +568,32 @@ describe('CommunityPostsService', () => {
       expect(res.editedAt).not.toBeNull();
     });
 
+    // BE-COM-16: `announcement` reads as the community's official voice, so
+    // it is owner/mod-only on edit as well as on create — an author could
+    // otherwise post a plain `post` and immediately PATCH it into a staff
+    // announcement. The actor here is therefore the post's author AND a mod.
     it('does not snapshot a revision when the body is unchanged (kind-only edit)', async () => {
-      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Mod,
+      });
       await service.updatePost('queer-devs', 'p1', 'author-1', {
         kind: PostKind.Announcement,
       });
       expect(postEdits.save).not.toHaveBeenCalled();
+    });
+
+    it('rejects a plain member promoting their own post to an announcement', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      await expect(
+        service.updatePost('queer-devs', 'p1', 'author-1', {
+          kind: PostKind.Announcement,
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(posts.save).not.toHaveBeenCalled();
     });
   });
 
@@ -590,8 +615,13 @@ describe('CommunityPostsService', () => {
         role: RosterRole.Member,
       });
       const res = await service.deletePost('queer-devs', 'p1', 'author-1');
+      // The tombstone records WHO set it — `assertCanRestore` reads it to
+      // tell an author's own delete apart from a moderator takedown.
       expect(posts.save).toHaveBeenCalledWith(
-        expect.objectContaining({ deletedAt: expect.any(Date) as unknown }),
+        expect.objectContaining({
+          deletedAt: expect.any(Date) as unknown,
+          deletedById: 'author-1',
+        }),
       );
       expect(res.deleted).toBe(true);
     });
@@ -603,7 +633,10 @@ describe('CommunityPostsService', () => {
       });
       await service.deletePost('queer-devs', 'p1', 'mod-1');
       expect(posts.save).toHaveBeenCalledWith(
-        expect.objectContaining({ deletedAt: expect.any(Date) as unknown }),
+        expect.objectContaining({
+          deletedAt: expect.any(Date) as unknown,
+          deletedById: 'mod-1',
+        }),
       );
     });
 
@@ -617,17 +650,79 @@ describe('CommunityPostsService', () => {
       expect(posts.save).not.toHaveBeenCalled();
     });
 
-    it('restorePost allows the author to clear their own tombstone', async () => {
+    it('restorePost allows the author to clear a tombstone they set themselves', async () => {
       members.findOne.mockResolvedValue({
         userId: 'author-1',
         role: RosterRole.Member,
       });
-      posts.findOne.mockResolvedValue({ ...POST, deletedAt: new Date() });
+      posts.findOne.mockResolvedValue({
+        ...POST,
+        deletedAt: new Date(),
+        deletedById: 'author-1',
+      });
       const res = await service.restorePost('queer-devs', 'p1', 'author-1');
+      // The actor marker is cleared with the tombstone, so a later
+      // delete/restore pair is judged on its own actor.
+      expect(posts.save).toHaveBeenCalledWith(
+        expect.objectContaining({ deletedAt: null, deletedById: null }),
+      );
+      expect(res.deleted).toBe(false);
+    });
+
+    // BE-COM-01: delete and restore used to share one author-OR-owner/mod
+    // check, so the author of a post a community moderator had removed simply
+    // undid the removal — community moderation via the delete button was
+    // cosmetic. A tombstone may now only be cleared by the actor who SET it,
+    // or by the community's owner/mod.
+    it('restorePost refuses to let the author undo a moderator tombstone', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      posts.findOne.mockResolvedValue({
+        ...POST,
+        deletedAt: new Date(),
+        deletedById: 'mod-1',
+      });
+      await expect(
+        service.restorePost('queer-devs', 'p1', 'author-1'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(posts.save).not.toHaveBeenCalled();
+    });
+
+    it('restorePost lets an owner/mod lift a tombstone somebody else set', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'mod-2',
+        role: RosterRole.Mod,
+      });
+      posts.findOne.mockResolvedValue({
+        ...POST,
+        deletedAt: new Date(),
+        deletedById: 'mod-1',
+      });
+      await service.restorePost('queer-devs', 'p1', 'mod-2');
+      expect(posts.save).toHaveBeenCalledWith(
+        expect.objectContaining({ deletedAt: null, deletedById: null }),
+      );
+    });
+
+    // A tombstone written before `AddContentTombstoneActor1793520000000` has
+    // no actor to compare against, so restore falls back to the caller's own
+    // author-or-staff check rather than locking legacy content out entirely.
+    it('restorePost still lets the author clear a legacy (actor-less) tombstone', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      posts.findOne.mockResolvedValue({
+        ...POST,
+        deletedAt: new Date(),
+        deletedById: null,
+      });
+      await service.restorePost('queer-devs', 'p1', 'author-1');
       expect(posts.save).toHaveBeenCalledWith(
         expect.objectContaining({ deletedAt: null }),
       );
-      expect(res.deleted).toBe(false);
     });
 
     it('restorePost rejects a plain member who is not the author', async () => {
@@ -823,12 +918,16 @@ describe('CommunityPostsService', () => {
       expect(replies.save).not.toHaveBeenCalled();
     });
 
-    it('restoreReply allows the author to clear their own tombstone', async () => {
+    it('restoreReply allows the author to clear a tombstone they set themselves', async () => {
       members.findOne.mockResolvedValue({
         userId: 'author-1',
         role: RosterRole.Member,
       });
-      replies.findOne.mockResolvedValue({ ...REPLY, deletedAt: new Date() });
+      replies.findOne.mockResolvedValue({
+        ...REPLY,
+        deletedAt: new Date(),
+        deletedById: 'author-1',
+      });
       const res = await service.restoreReply(
         'queer-devs',
         'p1',
@@ -836,9 +935,26 @@ describe('CommunityPostsService', () => {
         'author-1',
       );
       expect(replies.save).toHaveBeenCalledWith(
-        expect.objectContaining({ deletedAt: null }),
+        expect.objectContaining({ deletedAt: null, deletedById: null }),
       );
       expect(res.deleted).toBe(false);
+    });
+
+    // Same BE-COM-01 rule as `restorePost`, on the reply tier.
+    it('restoreReply refuses to let the author undo a moderator tombstone', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      replies.findOne.mockResolvedValue({
+        ...REPLY,
+        deletedAt: new Date(),
+        deletedById: 'mod-1',
+      });
+      await expect(
+        service.restoreReply('queer-devs', 'p1', 'r1', 'author-1'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(replies.save).not.toHaveBeenCalled();
     });
 
     it('listReplyHistory rejects a plain member who is not the author', async () => {
@@ -1002,6 +1118,55 @@ describe('CommunityPostsService', () => {
       );
     });
 
+    // The DTO flag mirrors `assertCanRestore` so the restore button is absent
+    // rather than 403-ing on click (BE-COM-01).
+    it('canRestore is false for the author of a post a moderator tombstoned', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      const qb = qbStub();
+      qb.getManyAndCount!.mockResolvedValue([
+        [
+          {
+            ...POST,
+            deletedAt: new Date('2026-02-01T00:00:00.000Z'),
+            deletedById: 'mod-1',
+          },
+        ],
+        1,
+      ]);
+      posts.createQueryBuilder.mockReturnValue(qb);
+
+      const page = await service.listPosts('queer-devs', 'author-1');
+
+      expect(page.items[0]!.deleted).toBe(true);
+      expect(page.items[0]!.canRestore).toBe(false);
+    });
+
+    it('canRestore is true for the author of a tombstone they set themselves', async () => {
+      members.findOne.mockResolvedValue({
+        userId: 'author-1',
+        role: RosterRole.Member,
+      });
+      const qb = qbStub();
+      qb.getManyAndCount!.mockResolvedValue([
+        [
+          {
+            ...POST,
+            deletedAt: new Date('2026-02-01T00:00:00.000Z'),
+            deletedById: 'author-1',
+          },
+        ],
+        1,
+      ]);
+      posts.createQueryBuilder.mockReturnValue(qb);
+
+      const page = await service.listPosts('queer-devs', 'author-1');
+
+      expect(page.items[0]!.canRestore).toBe(true);
+    });
+
     // Blocked/muted reply authors are excluded IN-QUERY by
     // `topRepliesByPost`'s inner subquery (mirrors `listPosts`'s own posts
     // filter), so a bounded reply preview fills with visible rows instead of
@@ -1047,6 +1212,37 @@ describe('CommunityPostsService', () => {
       await expect(
         service.listPosts('queer-devs', 'stranger'),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('listReplies', () => {
+    // H2: `listReplies` must gate on `assertViewable` exactly like `listPosts`
+    // above — a non-member of a PRIVATE community who still holds a post id
+    // (e.g. from an old mention notification, or after being removed from the
+    // roster) must not be able to read the thread.
+    it("404s a private community's replies for a non-member", async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue(null);
+      await expect(
+        service.listReplies('queer-devs', 'p1', 'stranger'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('serves replies to a member of a private community', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        accessTier: AccessTier.Private,
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      // `listReplies` paginates via `.skip().take().getManyAndCount()`, so it
+      // needs the page-shaped builder (default empty), not the raw-aggregate
+      // one this file's `replies` mock returns for the window/count queries.
+      replies.createQueryBuilder.mockReturnValue(qbStub());
+      const page = await service.listReplies('queer-devs', 'p1', 'member-1');
+      expect(page.items).toEqual([]);
     });
   });
 
@@ -1099,6 +1295,54 @@ describe('CommunityPostsService', () => {
       await expect(
         service.createFlatPost('u1', { body: 'x', communitySlug: 'nope' }),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    // BE-COM-02: the flat aliases used to run `assertMember` only, so a frozen
+    // community (including one auto-frozen over an outing/doxxing report)
+    // still took new posts through `POST /community-posts` — exactly what a
+    // freeze exists to stop.
+    it('rejects a plain member posting into a frozen community', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        frozenAt: new Date('2026-02-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      await expect(
+        service.createFlatPost('author-1', {
+          body: 'hi',
+          communitySlug: 'queer-devs',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(posts.save).not.toHaveBeenCalled();
+    });
+
+    it('still lets an owner/mod post into a frozen community', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        frozenAt: new Date('2026-02-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Mod });
+      await expect(
+        service.createFlatPost('mod-1', {
+          body: 'a moderation note',
+          communitySlug: 'queer-devs',
+        }),
+      ).resolves.toEqual({ id: 'post-id' });
+    });
+
+    it('rejects posting into an archived community, even for an owner/mod', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        archivedAt: new Date('2026-02-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Mod });
+      await expect(
+        service.createFlatPost('mod-1', {
+          body: 'hi',
+          communitySlug: 'queer-devs',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(posts.save).not.toHaveBeenCalled();
     });
   });
 
@@ -1197,6 +1441,34 @@ describe('CommunityPostsService', () => {
       await expect(
         service.addFlatReply('missing', 'u1', 'hi'),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    // Same `assertFlatWriteAllowed` gate as `createFlatPost` (BE-COM-02) —
+    // the flat reply route resolves the post's community and applies the
+    // roster/archive/freeze trio the slug-scoped routes always had.
+    it('rejects a plain member replying inside a frozen community', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        frozenAt: new Date('2026-02-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      await expect(
+        service.addFlatReply('p1', 'u1', 'hi'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(replies.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('likeFlatPost (community gate)', () => {
+    it('rejects a plain member reacting inside a frozen community', async () => {
+      communities.findOne.mockResolvedValue({
+        ...COMMUNITY,
+        frozenAt: new Date('2026-02-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      await expect(
+        service.likeFlatPost('p1', 'u1', true),
+      ).rejects.toBeInstanceOf(ForbiddenException);
     });
   });
 });

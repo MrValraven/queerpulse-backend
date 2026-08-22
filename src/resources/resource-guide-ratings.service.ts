@@ -29,28 +29,39 @@ function assertValidContentKey(contentKey: string): void {
   }
 }
 
-function toResult(
-  contentKey: string,
-  rows: ResourceGuideRating[],
-  myVote: GuideRatingValue | null,
-): GuideRatingResult {
-  return {
-    contentKey,
-    helpfulCount: rows.filter((r) => r.value === 'helpful').length,
-    notHelpfulCount: rows.filter((r) => r.value === 'not_helpful').length,
-    myVote,
-  };
+interface RatingTallyRow {
+  helpfulCount: string | number | null;
+  notHelpfulCount: string | number | null;
+}
+
+/** `COUNT(*)` comes back as a bigint string from `pg`; `null` when no rows. */
+function toCount(value: string | number | null): number {
+  return value === null ? 0 : Number(value);
 }
 
 /**
  * Member-facing guide rating: upsert-toggle (CNT-18). One row per
  * `(contentKey, memberId)` — voting the same value again clears the row,
  * voting a different value changes it, matching `forum-post-vote.entity.ts`'s
- * toggle-vote UX. Small, low-contention feature (one rating per member per
- * guide, cast rarely) — the find-then-write below is not wrapped in a
- * transaction the way `ForumPostsService.vote()` is; a genuine concurrent
- * double-submit from the same member would surface as a unique-constraint
- * violation on the create branch, which the caller can just retry.
+ * toggle-vote UX.
+ *
+ * Both entry points used to `find({ where: { contentKey } })` — EVERY vote row
+ * for the guide — and tally them in JS, which is O(votes) per read on the
+ * exact sections that get the most votes. `rate()` also decided insert vs
+ * update from that in-memory list, so two concurrent first votes from one
+ * member both took the insert branch and the loser hit
+ * `UQ_resource_guide_rating_content_key_member_id` as an uncaught 500 — a
+ * plain double-click was enough.
+ *
+ * Now: the tally is one aggregate query (`COUNT(*) FILTER (WHERE …)`), and the
+ * write is an `INSERT … ON CONFLICT (content_key, member_id) DO UPDATE`, so
+ * the unique index resolves the race instead of raising on it. Clearing a vote
+ * is still a plain delete — it is idempotent by nature.
+ *
+ * The reviewer also flagged "no index on `content_key` alone". That premise is
+ * wrong: `content_key` is the LEADING column of the composite unique index, so
+ * Postgres already uses it for a `WHERE content_key = $1` lookup. No extra
+ * index is warranted.
  */
 @Injectable()
 export class ResourceGuideRatingsService {
@@ -65,27 +76,32 @@ export class ResourceGuideRatingsService {
     value: GuideRatingValue,
   ): Promise<GuideRatingResult> {
     assertValidContentKey(contentKey);
-    const rows = await this.ratings.find({ where: { contentKey } });
-    const existing = rows.find((r) => r.memberId === memberId);
+
+    // Read only THIS member's row, not the whole guide's votes, to decide
+    // between "same value again -> clear" and "set/change".
+    const existing = await this.ratings.findOne({
+      where: { contentKey, memberId },
+    });
 
     let myVote: GuideRatingValue | null;
     if (existing && existing.value === value) {
-      await this.ratings.delete({ id: existing.id });
-      rows.splice(rows.indexOf(existing), 1);
+      await this.ratings.delete({ contentKey, memberId });
       myVote = null;
-    } else if (existing) {
-      existing.value = value;
-      await this.ratings.save(existing);
-      myVote = value;
     } else {
-      const created = await this.ratings.save(
-        this.ratings.create({ contentKey, memberId, value }),
+      // `upsert` compiles to INSERT ... ON CONFLICT DO UPDATE, so a concurrent
+      // first vote from the same member converges on one row instead of
+      // raising a unique violation.
+      await this.ratings.upsert(
+        { contentKey, memberId, value },
+        {
+          conflictPaths: ['contentKey', 'memberId'],
+          skipUpdateIfNoValuesChanged: true,
+        },
       );
-      rows.push(created);
       myVote = value;
     }
 
-    return toResult(contentKey, rows, myVote);
+    return this.tally(contentKey, myVote);
   }
 
   async getForContentKey(
@@ -93,8 +109,38 @@ export class ResourceGuideRatingsService {
     memberId: string,
   ): Promise<GuideRatingResult> {
     assertValidContentKey(contentKey);
-    const rows = await this.ratings.find({ where: { contentKey } });
-    const mine = rows.find((r) => r.memberId === memberId);
-    return toResult(contentKey, rows, mine?.value ?? null);
+    const mine = await this.ratings.findOne({
+      where: { contentKey, memberId },
+    });
+    return this.tally(contentKey, mine?.value ?? null);
+  }
+
+  /**
+   * Both counts in one aggregate pass over the index, instead of shipping
+   * every vote row to the app to be counted there.
+   */
+  private async tally(
+    contentKey: string,
+    myVote: GuideRatingValue | null,
+  ): Promise<GuideRatingResult> {
+    const row = await this.ratings
+      .createQueryBuilder('rating')
+      .select(
+        "COUNT(*) FILTER (WHERE rating.value = 'helpful')",
+        'helpfulCount',
+      )
+      .addSelect(
+        "COUNT(*) FILTER (WHERE rating.value = 'not_helpful')",
+        'notHelpfulCount',
+      )
+      .where('rating.contentKey = :contentKey', { contentKey })
+      .getRawOne<RatingTallyRow>();
+
+    return {
+      contentKey,
+      helpfulCount: toCount(row?.helpfulCount ?? null),
+      notHelpfulCount: toCount(row?.notHelpfulCount ?? null),
+      myVote,
+    };
   }
 }

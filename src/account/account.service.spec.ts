@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   NotFoundException,
   UnauthorizedException,
@@ -6,6 +7,7 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { createHash } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
@@ -24,11 +26,16 @@ import {
 import { DsarRequest } from './entities/dsar-request.entity';
 import { EmailPreference } from './entities/email-preference.entity';
 
+const sha256 = (value: string) =>
+  createHash('sha256').update(value).digest('hex');
+
 describe('AccountService', () => {
   let service: AccountService;
   let deletionRequests: {
+    find: jest.Mock;
     findOne: jest.Mock;
     save: jest.Mock;
+    update: jest.Mock;
   };
   let dsarRequests: { find: jest.Mock; save: jest.Mock };
   let exportJobs: { findOne: jest.Mock; save: jest.Mock };
@@ -37,9 +44,13 @@ describe('AccountService', () => {
     findOne: jest.Mock;
     save: jest.Mock;
   };
-  let reauthTokens: { save: jest.Mock; findOne: jest.Mock };
+  let reauthTokens: {
+    save: jest.Mock;
+    findOne: jest.Mock;
+    delete: jest.Mock;
+  };
   let deactivations: { findOne: jest.Mock; save: jest.Mock };
-  let exportService: { build: jest.Mock };
+  let exportService: { build: jest.Mock; knownCategories: jest.Mock };
   let refreshTokens: {
     find: jest.Mock;
     findOne: jest.Mock;
@@ -60,6 +71,10 @@ describe('AccountService', () => {
 
   beforeEach(async () => {
     deletionRequests = {
+      // `cancelDeletionRequest` cancels EVERY open grace row, so it reads the
+      // set (not one row) and writes through a conditional `update`.
+      find: jest.fn().mockResolvedValue([]),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
       findOne: jest.fn().mockResolvedValue(null),
       save: jest.fn((v: Partial<DeletionRequest>) =>
         Promise.resolve({
@@ -95,6 +110,8 @@ describe('AccountService', () => {
     reauthTokens = {
       save: jest.fn().mockResolvedValue(undefined),
       findOne: jest.fn().mockResolvedValue(null),
+      // Single-use consume of a reauth token; wins the claim by default.
+      delete: jest.fn().mockResolvedValue({ affected: 1 }),
     };
     deactivations = {
       findOne: jest.fn().mockResolvedValue(null),
@@ -108,6 +125,18 @@ describe('AccountService', () => {
       build: jest
         .fn()
         .mockResolvedValue({ manifest: { schemaVersion: '1.0' } }),
+      // Range-check source for `requestExport` — the real service derives this
+      // from its core contributions plus the registered contributors.
+      knownCategories: jest
+        .fn()
+        .mockReturnValue([
+          'profile',
+          'messages',
+          'forumPosts',
+          'events',
+          'connections',
+          'activityLog',
+        ]),
     };
     refreshTokens = {
       find: jest.fn().mockResolvedValue([]),
@@ -129,6 +158,12 @@ describe('AccountService', () => {
     // through a manager.
     type Where = Record<string, unknown>;
     const manager = {
+      find: jest.fn((entity: unknown, options: unknown): Promise<unknown> => {
+        if (entity === DeletionRequest) {
+          return deletionRequests.find(options) as Promise<unknown>;
+        }
+        throw new Error('unexpected entity in manager.find');
+      }),
       findOne: jest.fn(
         (
           entity: unknown,
@@ -164,6 +199,9 @@ describe('AccountService', () => {
           criteria: { id: string; status?: UserStatus },
           patch: { status: UserStatus },
         ) => {
+          if (entity === DeletionRequest) {
+            return deletionRequests.update(criteria, patch) as Promise<unknown>;
+          }
           if (entity !== User) {
             return Promise.resolve({ affected: 1 });
           }
@@ -214,22 +252,6 @@ describe('AccountService', () => {
     }).compile();
 
     service = module.get(AccountService);
-  });
-
-  describe('reauth', () => {
-    it('mints a token and records its expiry timestamp', async () => {
-      const result = await service.reauth('u1');
-
-      expect(result.reauthToken).toEqual(expect.any(String));
-      expect(new Date(result.expiresAt).getTime()).toBeGreaterThan(Date.now());
-      expect(reauthTokens.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userId: 'u1',
-          token: result.reauthToken,
-          expiresAt: expect.any(Date) as unknown,
-        }),
-      );
-    });
   });
 
   describe('deletion-request lifecycle', () => {
@@ -308,26 +330,53 @@ describe('AccountService', () => {
     });
 
     it('cancelDeletionRequest 404s when there is nothing to cancel', async () => {
+      deletionRequests.find.mockResolvedValue([]);
       deletionRequests.findOne.mockResolvedValue(null);
       await expect(service.cancelDeletionRequest('u1')).rejects.toBeInstanceOf(
         NotFoundException,
       );
     });
 
-    it('cancelDeletionRequest flips status to cancelled', async () => {
-      const row = {
-        id: 'del-1',
-        userId: 'u1',
-        status: DeletionRequestStatus.Grace,
-        previousStatus: UserStatus.Active,
-      };
-      deletionRequests.findOne.mockResolvedValue(row);
+    it('cancelDeletionRequest cancels EVERY open grace row, not just one', async () => {
+      // The data-loss shape this guards: a member who double-submitted holds
+      // two grace rows, and a survivor would still be erased 30 days later.
+      deletionRequests.find.mockResolvedValue([
+        {
+          id: 'del-1',
+          userId: 'u1',
+          status: DeletionRequestStatus.Grace,
+          previousStatus: UserStatus.Active,
+        },
+        {
+          id: 'del-2',
+          userId: 'u1',
+          status: DeletionRequestStatus.Grace,
+          previousStatus: UserStatus.Active,
+        },
+      ]);
+      deletionRequests.findOne.mockResolvedValue(null);
       users.u1.status = UserStatus.Deactivated;
 
       await service.cancelDeletionRequest('u1');
 
-      expect(deletionRequests.save).toHaveBeenCalledWith(
-        expect.objectContaining({ status: DeletionRequestStatus.Cancelled }),
+      // One set-based conditional update, addressed by (userId, status) —
+      // never by the id of whichever row `findOne` happened to return.
+      expect(deletionRequests.update).toHaveBeenCalledWith(
+        { userId: 'u1', status: DeletionRequestStatus.Grace },
+        { status: DeletionRequestStatus.Cancelled },
+      );
+    });
+
+    it('cancelDeletionRequest refuses once the erasure sweep has claimed it', async () => {
+      deletionRequests.find.mockResolvedValue([]);
+      deletionRequests.findOne.mockResolvedValue({
+        id: 'del-1',
+        userId: 'u1',
+        status: DeletionRequestStatus.Processing,
+      });
+
+      await expect(service.cancelDeletionRequest('u1')).rejects.toBeInstanceOf(
+        ConflictException,
       );
     });
 
@@ -352,12 +401,15 @@ describe('AccountService', () => {
     it('cancelDeletionRequest restores the recorded status, not a hardcoded Active', async () => {
       // 🔴 A suspended member must not launder their suspension by opening a
       // deletion request and immediately cancelling it.
-      deletionRequests.findOne.mockResolvedValue({
-        id: 'del-1',
-        userId: 'u1',
-        status: DeletionRequestStatus.Grace,
-        previousStatus: UserStatus.Suspended,
-      });
+      deletionRequests.find.mockResolvedValue([
+        {
+          id: 'del-1',
+          userId: 'u1',
+          status: DeletionRequestStatus.Grace,
+          previousStatus: UserStatus.Suspended,
+        },
+      ]);
+      deletionRequests.findOne.mockResolvedValue(null);
       deactivations.findOne.mockResolvedValue(null);
       users.u1.status = UserStatus.Deactivated;
 
@@ -367,12 +419,15 @@ describe('AccountService', () => {
     });
 
     it('cancelDeletionRequest leaves a separately-deactivated member hidden', async () => {
-      deletionRequests.findOne.mockResolvedValue({
-        id: 'del-1',
-        userId: 'u1',
-        status: DeletionRequestStatus.Grace,
-        previousStatus: UserStatus.Active,
-      });
+      deletionRequests.find.mockResolvedValue([
+        {
+          id: 'del-1',
+          userId: 'u1',
+          status: DeletionRequestStatus.Grace,
+          previousStatus: UserStatus.Active,
+        },
+      ]);
+      deletionRequests.findOne.mockResolvedValue(null);
       // They paused their account first, then asked to be erased. Cancelling
       // the erasure cancels only the erasure.
       deactivations.findOne.mockResolvedValue({
@@ -386,6 +441,47 @@ describe('AccountService', () => {
       await service.cancelDeletionRequest('u1');
 
       expect(users.u1.status).toBe(UserStatus.Deactivated);
+    });
+  });
+
+  // Step-up reauth is single-use and hashed-at-rest (finding L1). Exercised
+  // through `deactivate` since `assertReauth` is private.
+  describe('step-up reauth token (single-use, hashed)', () => {
+    const liveReauthRow = () => ({
+      id: 'reauth-1',
+      userId: 'u1',
+      token: sha256('tok'),
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+
+    it('looks the row up by the HASH of the presented token', async () => {
+      reauthTokens.findOne.mockResolvedValue(liveReauthRow());
+
+      await service.deactivate('u1', { reauthToken: 'tok' });
+
+      expect(reauthTokens.findOne).toHaveBeenCalledWith({
+        where: { userId: 'u1', token: sha256('tok') },
+      });
+    });
+
+    it('consumes the token on first successful use (single-use)', async () => {
+      reauthTokens.findOne.mockResolvedValue(liveReauthRow());
+
+      await service.deactivate('u1', { reauthToken: 'tok' });
+
+      // The row is deleted, so the same token cannot authorize a second
+      // destructive action within its TTL.
+      expect(reauthTokens.delete).toHaveBeenCalledWith({ id: 'reauth-1' });
+    });
+
+    it('rejects when the token was already consumed by a concurrent action', async () => {
+      reauthTokens.findOne.mockResolvedValue(liveReauthRow());
+      // Lost the delete race: another request consumed the row first.
+      reauthTokens.delete.mockResolvedValue({ affected: 0 });
+
+      await expect(
+        service.deactivate('u1', { reauthToken: 'tok' }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
     });
   });
 
@@ -489,6 +585,53 @@ describe('AccountService', () => {
       expect(exportJobs.save).toHaveBeenCalledWith(
         expect.objectContaining({ userId: 'u1', status: 'ready' }),
       );
+    });
+
+    it('requestExport rejects a category the builder does not know', async () => {
+      reauthTokens.findOne.mockResolvedValue({
+        userId: 'u1',
+        token: 'tok',
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+
+      await expect(
+        service.requestExport('u1', {
+          categories: ['profile', 'not-a-category'],
+          format: 'json',
+          reauthToken: 'tok',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      // Nothing arbitrary is persisted on the job row.
+      expect(exportJobs.save).not.toHaveBeenCalled();
+    });
+
+    it('requestExport reuses a ready job instead of rebuilding an identical archive', async () => {
+      reauthTokens.findOne.mockResolvedValue({
+        userId: 'u1',
+        token: 'tok',
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      exportJobs.findOne.mockResolvedValue({
+        id: 'job-earlier',
+        userId: 'u1',
+        status: 'ready',
+        categories: ['profile'],
+        format: DataExportFormat.Json,
+        requestedAt: new Date(),
+        generatedAt: new Date(),
+        data: { manifest: {} },
+      });
+
+      const result = await service.requestExport('u1', {
+        categories: ['profile'],
+        format: 'json',
+        reauthToken: 'tok',
+      });
+
+      expect(result.jobId).toBe('job-earlier');
+      // No second full copy of the member's data.
+      expect(exportService.build).not.toHaveBeenCalled();
+      expect(exportJobs.save).not.toHaveBeenCalled();
     });
 
     it('requestExport rejects a missing or stale step-up token and builds nothing', async () => {
@@ -774,6 +917,23 @@ describe('AccountService', () => {
       );
     });
 
+    // The revoked device keeps a valid access token for the rest of its TTL and
+    // ChatGateway accepts it, so without this event "sign out this device" left
+    // that device's socket receiving messages and presence for up to 15 minutes.
+    it('revokeSession drops the member live sockets', async () => {
+      refreshTokens.findOne.mockResolvedValue({
+        id: 'rt-1',
+        userId: 'u1',
+        revokedAt: null,
+      });
+
+      await service.revokeSession('u1', 'rt-1');
+
+      expect(events.emit).toHaveBeenCalledWith('user.session.revoked', {
+        userId: 'u1',
+      });
+    });
+
     it('revokeOtherSessions revokes every live session EXCEPT the presenting one', async () => {
       // The cookie resolves to rt-current.
       refreshTokens.findOne.mockResolvedValue({ id: 'rt-current' });
@@ -800,6 +960,20 @@ describe('AccountService', () => {
       }
     });
 
+    it('revokeOtherSessions drops live sockets too', async () => {
+      refreshTokens.findOne.mockResolvedValue({ id: 'rt-current' });
+      refreshTokens.find.mockResolvedValue([
+        { id: 'rt-current', userId: 'u1', revokedAt: null },
+        { id: 'rt-other-1', userId: 'u1', revokedAt: null },
+      ]);
+
+      await service.revokeOtherSessions('u1', 'raw-refresh');
+
+      expect(events.emit).toHaveBeenCalledWith('user.session.revoked', {
+        userId: 'u1',
+      });
+    });
+
     it('revokeOtherSessions with no live others is a no-op', async () => {
       refreshTokens.findOne.mockResolvedValue({ id: 'rt-current' });
       refreshTokens.find.mockResolvedValue([
@@ -808,6 +982,8 @@ describe('AccountService', () => {
 
       await service.revokeOtherSessions('u1', 'raw-refresh');
       expect(refreshTokens.save).not.toHaveBeenCalled();
+      // Nothing was revoked, so nothing should be disconnected either.
+      expect(events.emit).not.toHaveBeenCalled();
     });
 
     it('revokeAllSessions updates every live token for the user (used by deactivate/deletion)', async () => {

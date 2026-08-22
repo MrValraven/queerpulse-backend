@@ -30,14 +30,21 @@ export interface MuteDTO {
 }
 
 /**
- * Directional block status between the actor and one member (`BlockStatus`
- * in social.api.ts). MUST carry nothing beyond these two booleans — no id,
- * no timestamp, no reason — so neither side can infer *who* blocked whom
- * beyond their own action.
+ * Block status between the actor and one member (`BlockStatus` in
+ * social.api.ts). Carries ONLY the actor's own action — no id, no timestamp,
+ * no reason, and deliberately no `blockedBy`.
+ *
+ * `blockedBy` used to be here, and it told a member the moment the other
+ * person blocked them — the classic escalation trigger a block exists to
+ * avoid, and pollable across the whole directory via `GET /blocks/:slug`. It
+ * also contradicted `ConnectionsService.request`, which goes out of its way to
+ * make an inbound block INDISTINGUISHABLE from a pending request ("Don't
+ * disclose that the *other* member blocked you"). The two paths now agree: a
+ * member learns only what they themselves did, and everything else is the same
+ * uniform 403/409 whether they were blocked or not.
  */
 export interface BlockStatus {
   blocking: boolean;
-  blockedBy: boolean;
 }
 
 export function toBlockDTO(

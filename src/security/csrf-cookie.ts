@@ -18,3 +18,15 @@ export const CSRF_COOKIE_LEGACY = 'csrf_token';
 export function csrfCookieName(nodeEnv: string | undefined): string {
   return nodeEnv === 'production' ? CSRF_COOKIE_HOST : CSRF_COOKIE_LEGACY;
 }
+
+/**
+ * The shape `CsrfController` mints: 32 random bytes as lowercase hex.
+ *
+ * Used to decide whether an incoming cookie is worth echoing back rather than
+ * rotating (see `CsrfController.issue`). Deliberately strict: anything that is
+ * not exactly what we mint is replaced, so a truncated, padded or
+ * subdomain-planted value never survives a token fetch.
+ */
+export function isWellFormedCsrfToken(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+}

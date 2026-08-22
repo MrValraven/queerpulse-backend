@@ -3,6 +3,9 @@ import { Injectable } from '@nestjs/common';
 /**
  * In-memory presence (single instance, MVP). Isolated so a Redis-backed
  * implementation is a one-file swap when scaling past one process (spec §9).
+ *
+ * The single-instance assumption is asserted at boot by
+ * `ChatSingleInstanceGuard`, whose doc lists everything a real scale-out needs.
  */
 @Injectable()
 export class PresenceService {
@@ -35,5 +38,17 @@ export class PresenceService {
 
   isOnline(userId: string): boolean {
     return this.online.has(userId);
+  }
+
+  /**
+   * Every member with at least one live socket on THIS instance.
+   *
+   * Backs `ChatSessionEnforcementService`'s periodic re-authorisation sweep,
+   * which needs the set of members to re-check rather than a per-socket lookup.
+   * A snapshot array (not the live map) so a caller iterating it can't be
+   * tripped by a connect/disconnect landing mid-iteration.
+   */
+  onlineUserIds(): string[] {
+    return [...this.online.keys()];
   }
 }

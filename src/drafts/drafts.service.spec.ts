@@ -1,6 +1,7 @@
-import { NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
 import { DraftsService } from './drafts.service';
 import { CreateDraftDto } from './dto/create-draft.dto';
 import {
@@ -43,6 +44,7 @@ function makeDraft(overrides: Partial<Draft> = {}): Draft {
       sortTitle: 'Application · Communications Manager',
       searchText: 'application communications manager',
     },
+    version: 0,
     createdAt: now,
     updatedAt: now,
     ...overrides,
@@ -54,7 +56,9 @@ describe('DraftsService', () => {
   let repo: {
     createQueryBuilder: jest.Mock;
     create: jest.Mock;
+    insert: jest.Mock;
     save: jest.Mock;
+    update: jest.Mock;
     findOne: jest.Mock;
     remove: jest.Mock;
   };
@@ -63,16 +67,33 @@ describe('DraftsService', () => {
     repo = {
       createQueryBuilder: jest.fn(),
       create: jest.fn((v: Partial<Draft>) => v as Draft),
+      insert: jest.fn().mockResolvedValue({ identifiers: [] }),
       save: jest.fn((v: Partial<Draft>) =>
         Promise.resolve({ createdAt: now, updatedAt: now, ...v } as Draft),
       ),
+      // The optimistic-concurrency claim (`WHERE version = :baseVersion`).
+      // Defaults to "claimed"; a test that wants the 409 makes it affect 0.
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
       findOne: jest.fn(),
       remove: jest.fn(),
+    };
+    // `update` runs its claim + save inside one transaction, resolving the
+    // draft repository off the transactional manager — route it back to the
+    // same mock so the assertions above still see every call.
+    type TransactionManager = { getRepository: () => typeof repo };
+    const transactionManager: TransactionManager = {
+      getRepository: () => repo,
+    };
+    const dataSource = {
+      transaction: jest.fn((run: (manager: TransactionManager) => unknown) =>
+        run(transactionManager),
+      ),
     };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         DraftsService,
         { provide: getRepositoryToken(Draft), useValue: repo },
+        { provide: DataSource, useValue: dataSource },
       ],
     }).compile();
     service = module.get(DraftsService);
@@ -107,6 +128,7 @@ describe('DraftsService', () => {
             deadlineDays: 9,
             sortTitle: 'Application · Communications Manager',
             searchText: 'application communications manager',
+            version: 0,
           },
         ],
         total: 1,
@@ -166,9 +188,23 @@ describe('DraftsService', () => {
           sortTitle: 'Application · Communications Manager',
           searchText: 'application communications manager',
         },
+        version: 0,
       });
+      // INSERT, never `save` — `save` on an existing primary key is an UPDATE,
+      // which silently replaced a different draft's payload when an id was
+      // reused.
+      expect(repo.insert).toHaveBeenCalled();
+      expect(repo.save).not.toHaveBeenCalled();
       expect(result.id).toBe('invite-1720000000');
       expect(result.kindVariant).toBe(DraftKindVariant.Job);
+    });
+
+    it('409s instead of overwriting when the caller reuses an existing draft id', async () => {
+      repo.insert.mockRejectedValue({ code: '23505' });
+
+      await expect(service.create('u1', dto)).rejects.toBeInstanceOf(
+        ConflictException,
+      );
     });
   });
 
@@ -212,6 +248,37 @@ describe('DraftsService', () => {
       const result = await service.update('u1', 'd1', { progress: 61 });
 
       expect(result.deadlineDays).toBe(9);
+    });
+
+    it('refuses a patch whose expectedVersion is behind the stored draft', async () => {
+      repo.findOne.mockResolvedValue(makeDraft({ version: 4 }));
+
+      await expect(
+        service.update('u1', 'd1', { progress: 90, expectedVersion: 2 }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses a patch that loses the row claim to a concurrent save', async () => {
+      repo.findOne.mockResolvedValue(makeDraft({ version: 4 }));
+      repo.update.mockResolvedValue({ affected: 0 });
+
+      await expect(
+        service.update('u1', 'd1', { progress: 90 }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('bumps the version so the next stale patch is refused', async () => {
+      repo.findOne.mockResolvedValue(makeDraft({ version: 4 }));
+
+      const result = await service.update('u1', 'd1', { progress: 90 });
+
+      expect(repo.update).toHaveBeenCalledWith(
+        { id: 'd1', userId: 'u1', version: 4 },
+        { version: 5 },
+      );
+      expect(result.version).toBe(5);
     });
 
     it('updates the `kind` column when provided', async () => {

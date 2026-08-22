@@ -897,7 +897,7 @@ export function toRemovedSpaceDetail(listing: Listing): RemovedSpaceDetailDTO {
 
 /**
  * Admin queue row for a member-submitted "suggest an edit" correction
- * (`GET /listings/admin/edit-suggestions`). Carries the target listing's
+ * (`GET /admin/listings/edit-suggestions`). Carries the target listing's
  * `ref`/`name` (not just its id) so the moderation UI can render/link the
  * row without a second lookup, mirroring `ListingDTO.submittedBy`'s
  * denormalized-for-display convention.

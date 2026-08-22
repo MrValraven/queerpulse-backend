@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -505,6 +506,15 @@ export class DirectoryService {
     dto: CreateReviewDto,
   ): Promise<ReviewDTO> {
     const listing = await this.loadLiveOr404(slug);
+    // BE-HSG-14: the owner cannot review their own listing. A five-star
+    // self-review counted toward the public card's `rating` and the Safe Spaces
+    // hero stats. The self-review case was already known here (the notification
+    // below skips it) but was allowed through; the sibling surfaces have always
+    // blocked the equivalent (`ListingEditSuggestionsService.submit` blocks the
+    // owner, and a member cannot request a viewing on their own home).
+    if (listing.ownerId === userId) {
+      throw new BadRequestException('You cannot review your own listing');
+    }
     const profile = await this.profiles.findOne({ where: { userId } });
     const reviewerName = profile
       ? `${profile.firstName} ${profile.lastName}`.trim()

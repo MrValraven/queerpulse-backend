@@ -115,6 +115,14 @@ export class PushService implements OnModuleInit {
         `Push endpoint reassigned from user ${existing.userId} to ${userId}`,
       );
     }
+    // A (re)subscribe is the device telling us it is alive, so it refreshes
+    // `last_used_at` the same way a successful delivery does. Without this the
+    // only thing that ever moved that column was a successful send, and the
+    // 90-day retention purge deletes on `COALESCE(last_used_at, created_at)`:
+    // a device that stays online (the DM push listener skips online recipients
+    // entirely) or simply gets no qualifying notifications was unsubscribed
+    // server-side while the browser still believed it was subscribed, and the
+    // first push that mattered went nowhere.
     await this.subscriptions.upsert(
       {
         userId,
@@ -122,6 +130,7 @@ export class PushService implements OnModuleInit {
         p256dh: input.keys.p256dh,
         auth: input.keys.auth,
         userAgent: userAgent ?? null,
+        lastUsedAt: new Date(),
       },
       ['endpoint'],
     );

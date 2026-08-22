@@ -1,5 +1,7 @@
 import { RecognitionAwardingService } from './recognition-awarding.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
+import { RecognitionAward } from './entities/recognition-award.entity';
+import { RecognitionLedgerEntry } from './entities/recognition-ledger-entry.entity';
 import {
   RecognitionSignals,
   scoreSignals,
@@ -27,15 +29,22 @@ function makeService(opts: {
     payload: Record<string, unknown>;
   }[] = [];
 
-  const statsRepo = {
-    findOne: () => Promise.resolve(opts.stat ?? null),
-    save: (row: { userId: string; xp: number }) => {
-      savedStats.push({ ...row, updatedAt: new Date(0) });
-      return Promise.resolve(row);
-    },
-    // Mirrors the real atomic GREATEST upsert: resolves the max of the
-    // currently stored xp and the computed xp passed as the 2nd param.
-    query: (_sql: string, params: unknown[]) => {
+  // `recompute` runs its whole read-modify-write inside
+  // `stats.manager.transaction(...)` under a per-member advisory lock
+  // (BE-COM-24), so awards/ledger/stat writes all go through the
+  // transaction's `EntityManager` rather than through injected repositories.
+  // This stub routes the three raw queries the service issues and hands back
+  // the same award/ledger doubles the assertions below inspect.
+  const managerStub = {
+    query: (sql: string, params: unknown[]) => {
+      if (sql.includes('pg_advisory_xact_lock')) {
+        return Promise.resolve([{ pg_advisory_xact_lock: '' }]);
+      }
+      if (sql.includes('SELECT xp FROM recognition_stats')) {
+        return Promise.resolve(opts.stat ? [{ xp: opts.stat.xp }] : []);
+      }
+      // Mirrors the real atomic GREATEST upsert: resolves the max of the
+      // currently stored xp and the computed xp passed as the 2nd param.
       const storedXp = opts.stat?.xp ?? 0;
       const computedXp = Number(params[1]);
       const resolvedXp = Math.max(storedXp, computedXp);
@@ -45,6 +54,23 @@ function makeService(opts: {
         updatedAt: new Date(0),
       });
       return Promise.resolve([{ xp: resolvedXp }]);
+    },
+    getRepository: (entity: unknown) => {
+      if (entity === RecognitionAward) return awardsRepo;
+      if (entity === RecognitionLedgerEntry) return ledgerRepo;
+      throw new Error(`unexpected entity in getRepository: ${String(entity)}`);
+    },
+  };
+
+  const statsRepo = {
+    findOne: () => Promise.resolve(opts.stat ?? null),
+    save: (row: { userId: string; xp: number }) => {
+      savedStats.push({ ...row, updatedAt: new Date(0) });
+      return Promise.resolve(row);
+    },
+    manager: {
+      transaction: (cb: (m: typeof managerStub) => Promise<unknown>) =>
+        cb(managerStub),
     },
   };
   const awardsRepo = {
@@ -107,8 +133,6 @@ function makeService(opts: {
 
   const service = new RecognitionAwardingService(
     statsRepo as never,
-    awardsRepo as never,
-    ledgerRepo as never,
     profilesRepo as never,
     communityMembersRepo as never,
     savedItemsRepo as never,

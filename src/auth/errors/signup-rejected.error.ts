@@ -15,6 +15,14 @@ export type SignupRejectedReason =
   // account, and letting a fresh Google sign-in re-create it would quietly
   // undo that. See `../../account/entities/email-suppression.entity.ts`.
   | 'account_suppressed'
+  // A DIFFERENT Google subject is presenting an address an account already
+  // holds (a re-created Workspace account, a seeded fixture, the documented
+  // HOUSE_EMAIL collision in genesis.constants.ts). The `users.email` unique
+  // constraint would reject the insert, which used to surface as a raw JSON
+  // 500 on a top-level browser navigation. The frontend has no dedicated copy
+  // for this reason yet, so it falls through to the generic sign-in notice —
+  // that is still a recoverable page instead of an error body.
+  | 'email_in_use'
   // An admin has switched registration off (`platform_settings`). Existing
   // members are unaffected — this is only reachable on the new-account path.
   | 'registration_disabled';

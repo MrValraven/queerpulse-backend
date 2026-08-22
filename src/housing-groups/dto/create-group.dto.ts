@@ -3,12 +3,10 @@ import {
   ArrayMaxSize,
   IsArray,
   IsBoolean,
-  IsInt,
   IsOptional,
   IsString,
   Matches,
   MaxLength,
-  Min,
   MinLength,
   ValidateNested,
 } from 'class-validator';
@@ -56,10 +54,11 @@ export class CreateGroupDto {
   @ArrayMaxSize(12)
   screeningQuestions?: ScreeningQuestionDto[];
 
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  memberCount?: number;
+  // NOTE: `memberCount` is deliberately NOT accepted here. It used to be an
+  // admin-typed integer while `computeMutualConnections` already treated
+  // approved join requests as the real roster, so the public "N members" figure
+  // was whatever a steward last typed. It is now derived from the roster in
+  // `HousingGroupsService.refreshMemberCount`.
 
   @IsOptional()
   @IsBoolean()

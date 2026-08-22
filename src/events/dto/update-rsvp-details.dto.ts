@@ -1,4 +1,12 @@
-import { IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
+import {
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsString,
+  Max,
+  MaxLength,
+  Min,
+} from 'class-validator';
 import {
   RSVP_DETAILS_VISIBILITY_OPTIONS,
   RsvpDetailsVisibility,

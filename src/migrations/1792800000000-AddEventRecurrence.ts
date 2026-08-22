@@ -46,12 +46,8 @@ export class AddEventRecurrence1792800000000 implements MigrationInterface {
       `ALTER TABLE "event_series" ADD CONSTRAINT "FK_event_series_host_id" FOREIGN KEY ("host_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
     );
 
-    await queryRunner.query(
-      `ALTER TABLE "events" ADD "series_id" uuid`,
-    );
-    await queryRunner.query(
-      `ALTER TABLE "events" ADD "series_index" integer`,
-    );
+    await queryRunner.query(`ALTER TABLE "events" ADD "series_id" uuid`);
+    await queryRunner.query(`ALTER TABLE "events" ADD "series_index" integer`);
     await queryRunner.query(
       `CREATE INDEX "IDX_events_series_id" ON "events" ("series_id")`,
     );

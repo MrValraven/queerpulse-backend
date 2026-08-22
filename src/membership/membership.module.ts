@@ -8,6 +8,7 @@ import { PlatformJoinRequest } from './entities/join-request.entity';
 import { InvitesController } from './invites.controller';
 import { InvitesService } from './invites.service';
 import { InviteExpirySweeperService } from './invite-expiry-sweeper.service';
+import { AdminJoinRequestsController } from './admin-join-requests.controller';
 import { JoinRequestsController } from './join-requests.controller';
 import { JoinRequestsService } from './join-requests.service';
 
@@ -18,7 +19,11 @@ import { JoinRequestsService } from './join-requests.service';
     PlatformSettingsModule,
     MailerModule,
   ],
-  controllers: [InvitesController, JoinRequestsController],
+  controllers: [
+    InvitesController,
+    JoinRequestsController,
+    AdminJoinRequestsController,
+  ],
   providers: [InvitesService, InviteExpirySweeperService, JoinRequestsService],
   exports: [InvitesService],
 })

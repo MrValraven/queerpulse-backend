@@ -13,7 +13,6 @@ import { StorageModule } from '../storage/storage.module';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersModule } from '../users/users.module';
 import { VolunteeringModule } from '../volunteering/volunteering.module';
-import { VouchModule } from '../vouch/vouch.module';
 import { CommunitiesController } from './communities.controller';
 import { CommunitiesService } from './communities.service';
 import { CommunityAutoFreezeService } from './community-auto-freeze.service';
@@ -67,10 +66,6 @@ import { MeCommunitiesController } from './me-communities.controller';
       Report,
     ]),
     UsersModule,
-    // `VouchService` — second-vouch join gating reads the platform vouch graph
-    // to check whether a current member has vouched for an applicant.
-    // `VouchModule` imports only `UsersModule`, so there is no cycle.
-    VouchModule,
     // `ConnectionsService` — `suggestedCommunities` reads the viewer's accepted
     // connections (the real social-graph signal; see that method's doc
     // comment) to find communities their connections have joined. `ConnectionsModule`
@@ -142,6 +137,16 @@ import { MeCommunitiesController } from './me-communities.controller';
   // own docstring for why the call has to land there. No circular dependency:
   // nothing this module imports (directly or transitively) imports
   // `AccountModule`.
-  exports: [CommunitiesService, CommunityOwnerOrphanService],
+  //
+  // `CommunityGovernanceLogService` is exported so `MembershipCardsModule`
+  // can write to the same owner/mod audit trail from `CardProgramsService`
+  // (programme enable/disable) and `MembershipCardsService` (card
+  // suspend/revoke/reinstate). Same no-cycle argument: nothing this module
+  // imports, directly or transitively, imports `MembershipCardsModule`.
+  exports: [
+    CommunitiesService,
+    CommunityOwnerOrphanService,
+    CommunityGovernanceLogService,
+  ],
 })
 export class CommunitiesModule {}

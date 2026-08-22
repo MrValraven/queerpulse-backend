@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { UsersModule } from '../users/users.module';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { HousingViewingsModule } from '../housing-viewings/housing-viewings.module';
@@ -19,6 +20,10 @@ import { HousingReviewsService } from './housing-reviews.service';
     UsersModule,
     // The completed-viewing gate + participation checks.
     HousingViewingsModule,
+    // Read-only: the public reviews block honours a moderator takedown on the
+    // listing (`housing` subject) and on an individual review (`review`
+    // subject), matching every other public housing read (BE-HSG-13).
+    ContentModerationModule,
   ],
   controllers: [HousingReviewsController],
   providers: [HousingReviewsService],

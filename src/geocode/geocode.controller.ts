@@ -1,9 +1,17 @@
-import { Body, Controller, HttpCode, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  HttpCode,
+  Post,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
 import { Throttle, seconds } from '@nestjs/throttler';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { GeocodeAddressDto } from './dto/geocode-address.dto';
 import { ResolveLinkDto } from './dto/resolve-link.dto';
 import { GeocodeService } from './geocode.service';
+import { RetryAfterInterceptor } from './retry-after.interceptor';
 import {
   ApiBadRequestResponse,
   ApiCookieAuth,
@@ -22,6 +30,8 @@ import {
 })
 @Controller('geocode')
 @UseGuards(ActiveMemberGuard)
+// Adds `Retry-After` to the 503 the process-wide Nominatim queue raises.
+@UseInterceptors(RetryAfterInterceptor)
 export class GeocodeController {
   constructor(private readonly geocodeService: GeocodeService) {}
 

@@ -46,6 +46,14 @@ export enum HousingViewingParty {
  */
 @Entity('housing_viewings')
 export class HousingViewing {
+  // NOTE: a PARTIAL unique index `UQ_housing_viewings_open` on
+  // (listing_id, requester_id) WHERE status IN ('requested','accepted') backs
+  // `HousingViewingsService.request`'s one-open-viewing-per-listing rule
+  // (BE-HSG-09). TypeORM's `@Index` has no `where` option on this version, so
+  // it is declared in migration
+  // `AddHousingViewingAndReviewUniqueness1793530600000` only, exactly like the
+  // `UQ_listing_claims_pending_claimant` precedent in the listings domain.
+
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 

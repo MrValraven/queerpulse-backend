@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
@@ -16,6 +20,14 @@ import {
 } from './collections-response';
 import { CollectionItem } from './entities/collection-item.entity';
 import { Collection } from './entities/collection.entity';
+
+/**
+ * Per-collection item ceiling (CNT-19). Sized well above any real folder and
+ * above `DEFAULT_LIST_LIMIT`, which is what `getOne` will actually hydrate —
+ * this exists so `collection_item` cannot grow without bound, not to police
+ * how members organise their saves.
+ */
+const MAX_ITEMS_PER_COLLECTION = 500;
 
 @Injectable()
 export class CollectionsService {
@@ -104,10 +116,36 @@ export class CollectionsService {
    * Files a saved subject into the collection. Idempotent: re-adding the same
    * subject is a no-op (converges on the unique constraint) rather than a 409.
    * Touches the collection's `updatedAt` so the list re-sorts to the top.
+   *
+   * Refuses once the collection is full (CNT-19). `collection_item` had no
+   * per-collection ceiling at all, so one member could grow a single folder
+   * without bound while `getOne` hydrates every row it returns. The cap makes
+   * the ceiling explicit and says so to the member, rather than accepting rows
+   * nothing will ever show. (Separately, `getOne` still only returns the first
+   * `DEFAULT_LIST_LIMIT` items — paginating a single collection's contents is
+   * its own change, not this one.)
    */
   async addItem(ownerId: string, id: string, ref: string): Promise<void> {
     await this.mustOwn(ownerId, id);
     const { subjectType, subjectId } = parseSavedRef(ref);
+
+    // Counted before the insert, and only for a subject not already filed, so
+    // re-adding an existing item at the cap stays the documented no-op rather
+    // than turning into a 409.
+    const isAlreadyFiled = await this.collectionItems.exists({
+      where: { collectionId: id, subjectKind: subjectType, subjectId },
+    });
+    if (!isAlreadyFiled) {
+      const itemCount = await this.collectionItems.count({
+        where: { collectionId: id },
+      });
+      if (itemCount >= MAX_ITEMS_PER_COLLECTION) {
+        throw new ConflictException(
+          `A collection holds at most ${MAX_ITEMS_PER_COLLECTION} items. Remove something first, or start another collection.`,
+        );
+      }
+    }
+
     try {
       await this.collectionItems.save(
         this.collectionItems.create({

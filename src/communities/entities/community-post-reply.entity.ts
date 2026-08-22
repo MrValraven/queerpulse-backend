@@ -42,4 +42,11 @@ export class CommunityPostReply {
   // above is preserved for restore + history.
   @Column({ type: 'timestamptz', nullable: true })
   deletedAt!: Date | null;
+
+  // WHO set the tombstone above — same contract as
+  // `CommunityPost.deletedById` (BE-COM-01): only that actor, or the
+  // community's owner/mod, may clear it. NULL is "not tombstoned" or a legacy
+  // tombstone predating `AddContentTombstoneActor1793520000000`.
+  @Column({ type: 'uuid', nullable: true })
+  deletedById!: string | null;
 }

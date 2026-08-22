@@ -171,6 +171,15 @@ export function toModReportDTO(
   detail?: ModReportDetail,
   assignedModeratorName?: string,
   resolution?: ModReportResolutionDTO,
+  // `false` only for `PATCH /mod/reports/:id`'s community-owner/mod
+  // `dismiss` carve-out (`ModerationService.assertCanActOnReport`) — every
+  // other caller sits behind the platform `@Roles(Moderator, Admin)` guard
+  // and always passes (or defaults to) `true`. When `false`, `reporter`/
+  // `reported` already arrive pre-redacted from `toRow`; this additionally
+  // withholds `assignedModeratorId`/`assignedModeratorName` — which platform
+  // moderator (if any) is working the report is still report visibility, and
+  // this carve-out was never meant to grant any.
+  hasFullReportVisibility = true,
 ): ModReportDTO {
   return {
     id: report.id,
@@ -192,8 +201,12 @@ export function toModReportDTO(
     createdAt: report.createdAt.toISOString(),
     slaDueAt: report.slaDueAt.toISOString(),
     status: report.status,
-    assignedModeratorId: report.assignedModeratorId,
-    ...(assignedModeratorName ? { assignedModeratorName } : {}),
+    assignedModeratorId: hasFullReportVisibility
+      ? report.assignedModeratorId
+      : null,
+    ...(hasFullReportVisibility && assignedModeratorName
+      ? { assignedModeratorName }
+      : {}),
     ...(resolution ? { resolution } : {}),
     ...(detail ? { detail } : {}),
   };

@@ -70,8 +70,12 @@ export class AdminTitlesController {
       'Malformed id, invalid payload, or the title is not ready to publish.',
   })
   @ApiNotFoundResponse({ description: 'No title exists for this id.' })
-  update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateTitleDto) {
-    return this.cinema.updateTitle(id, dto);
+  update(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateTitleDto,
+  ) {
+    return this.cinema.updateTitle(user.userId, id, dto);
   }
 
   @Delete(':id')

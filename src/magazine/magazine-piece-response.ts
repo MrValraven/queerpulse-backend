@@ -447,6 +447,10 @@ export interface ArticleDraftResponse {
   blocks: ArticleBlock[];
   readMinutes: number;
   publishedAt: string | null;
+  /** Optimistic-concurrency counter. Round-trip it as `expectedVersion` on the
+   *  next save so a stale tab gets a 409 instead of silently overwriting
+   *  somebody else's blocks. See `MagazineArticle.version`. */
+  version: number;
 }
 
 const WORDS_PER_MINUTE = 220;
@@ -454,6 +458,65 @@ const WORDS_PER_MINUTE = 220;
 /** Strips HTML tags (`<...>`) from a fragment, leaving plain text behind. */
 export function stripHtmlTags(html: string): string {
   return html.replace(/<[^>]*>/g, ' ');
+}
+
+// The named character references a contentEditable actually emits. `&nbsp;`
+// becomes an ordinary space (the whitespace collapse below then folds it into
+// its neighbours), which is what a reader sees anyway.
+const NAMED_HTML_ENTITIES: Readonly<Record<string, string>> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  nbsp: ' ',
+};
+
+/**
+ * Collapses a rich-text fragment to the PLAIN TEXT a reader sees: tags removed,
+ * character references resolved, whitespace collapsed, trimmed.
+ *
+ * Used at the WRITE boundary for every field that is declared plain text and
+ * rendered as text (`MagazineArticle.title`, the `MagazinePiece.title` mirror,
+ * the slug source). A contentEditable headline hands the server its raw
+ * `innerHTML` — `<div>A <em>bold</em> claim</div>` — and storing that verbatim
+ * means every consumer has to strip it again on read: the article page, the
+ * archive list, search results, the digest email, OG tags. Some of them do not,
+ * so readers see literal `<em>` in a headline. Normalising ONCE here keeps the
+ * column honest for every reader, including ones that do not exist yet.
+ *
+ * Decoding `&lt;`/`&gt;` yields real `<`/`>` CHARACTERS in a plain-text column,
+ * which is correct — the value is text, and every HTML consumer escapes it
+ * (`mail-templates.ts`'s `escapeHtml`, React's JSX text nodes). Leaving them
+ * encoded would print a literal `&lt;` to the reader instead.
+ */
+export function toPlainText(html: string): string {
+  return stripHtmlTags(html)
+    .replace(
+      /&(#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-zA-Z]{2,31});/g,
+      (match, reference: string) => {
+        if (reference.startsWith('#')) {
+          const isHex = reference[1] === 'x' || reference[1] === 'X';
+          const codePoint = isHex
+            ? Number.parseInt(reference.slice(2), 16)
+            : Number.parseInt(reference.slice(1), 10);
+          // Surrogates and out-of-range code points would throw; leave those
+          // (and anything unrecognised) exactly as they arrived.
+          if (
+            !Number.isFinite(codePoint) ||
+            codePoint <= 0 ||
+            codePoint > 0x10ffff ||
+            (codePoint >= 0xd800 && codePoint <= 0xdfff)
+          ) {
+            return match;
+          }
+          return String.fromCodePoint(codePoint);
+        }
+        return NAMED_HTML_ENTITIES[reference.toLowerCase()] ?? match;
+      },
+    )
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /** Counts the whitespace-delimited words in a (possibly HTML) fragment. */
@@ -527,6 +590,7 @@ export function toArticleDraftResponse(
     ),
     publishedAt:
       article.publishedAt === null ? null : article.publishedAt.toISOString(),
+    version: article.version,
   };
 }
 

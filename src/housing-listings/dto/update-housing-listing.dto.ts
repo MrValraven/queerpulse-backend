@@ -30,6 +30,8 @@ export class UpdateHousingListingDto {
   @IsOptional() @IsInt() @Min(0) rentEuros?: number;
   @IsOptional() @IsInt() @Min(0) @Max(20) bedrooms?: number;
   @IsOptional() @IsBoolean() billsIncluded?: boolean;
+  /** @deprecated Accepted and IGNORED — see `CreateHousingListingDto`
+   * (BE-HSG-07). `applyUpdate` no longer reads it. */
   @IsOptional() @IsBoolean() lgbtqFriendly?: boolean;
   @IsOptional()
   @IsString()

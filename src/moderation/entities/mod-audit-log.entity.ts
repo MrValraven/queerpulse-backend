@@ -13,6 +13,15 @@ import {
  * `reportId`, when present).
  */
 @Entity('mod_audit_logs')
+// The global audit feed (`GET /mod/audit` + its CSV) sorts newest-first and
+// filters on `action`; the admin overview filters `action IN (...)` inside a
+// `created_at` window. Both indexes are created with the explicit
+// `created_at DESC` ordering in
+// `1793620100000-AddModAuditLogsCreatedAtIndexes` — the TypeORM decorator API
+// doesn't express column sort order, so the exact DDL lives there, not here
+// (same caveat as `RoadmapAuditLog`'s created_at index).
+@Index('IDX_mod_audit_logs_created_at', ['createdAt'])
+@Index('IDX_mod_audit_logs_action_created_at', ['action', 'createdAt'])
 export class ModAuditLog {
   @PrimaryGeneratedColumn('uuid')
   id!: string;

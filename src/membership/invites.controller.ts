@@ -53,7 +53,10 @@ export class InvitesController {
   @Throttle({ default: { limit: 10, ttl: seconds(60) } })
   @ApiOperation({ summary: 'Mint a personal invite for the current member' })
   @ApiCreatedResponse({ description: 'The newly created invite.' })
-  @ApiForbiddenResponse({ description: 'Monthly invite quota exceeded.' })
+  @ApiForbiddenResponse({
+    description:
+      'Monthly invite quota exceeded — body carries code "INVITE_QUOTA_EXCEEDED".',
+  })
   @ApiConflictResponse({
     description: 'The email address is on the erasure suppression list.',
   })
@@ -92,20 +95,20 @@ export class InvitesController {
 
   // Cancel one of the member's own still-pending invites, addressed by the code
   // its invite list already exposes. Idempotent for an already-revoked invite;
-  // 403 if it isn't theirs; 409 once it has been accepted or expired. Returns
-  // the updated invite row (same shape as GET /). Shares the `:code` path with
-  // the public GET resolve route, but the DELETE verb + ActiveMemberGuard keep
-  // the two apart.
+  // 404 if it isn't theirs OR doesn't exist (deliberately the same answer, so
+  // the route can't be used to test whether a code exists); 409 once it has
+  // been accepted or expired. Returns the updated invite row (same shape as
+  // GET /). Shares the `:code` path with the public GET resolve route, but the
+  // DELETE verb + ActiveMemberGuard keep the two apart.
   @Delete(':code')
   @UseGuards(ActiveMemberGuard)
   @ApiOperation({
     summary: "Revoke one of the current member's pending invites",
   })
   @ApiOkResponse({ description: 'The revoked invite.' })
-  @ApiForbiddenResponse({
-    description: 'The invite belongs to another member.',
+  @ApiNotFoundResponse({
+    description: 'No invite with that code belongs to the caller.',
   })
-  @ApiNotFoundResponse({ description: 'No invite with that code.' })
   @ApiConflictResponse({
     description: 'The invite has already been accepted or expired.',
   })
@@ -122,9 +125,10 @@ export class InvitesController {
   // Re-mint one of the member's OWN expired invites, addressed by the code its
   // invite list exposes: refreshes the same row's expiry and flips it back to
   // pending so the original link works again. Quota-neutral (the same
-  // invitation, not a new slot). 403 if it isn't theirs; 404 if unknown; 409 if
-  // it was accepted, revoked, or is still valid — only an expired invite is
-  // resendable. Returns the updated invite row (same shape as GET /). Throttled
+  // invitation, not a new slot). 404 if it isn't theirs or is unknown (one
+  // answer for both, so the route reveals nothing about other members' codes);
+  // 409 if it was accepted, revoked, or is still valid — only an expired invite
+  // is resendable. Returns the updated invite row (same shape as GET /). Throttled
   // per IP to match the create route's write posture.
   @Post(':code/resend')
   @HttpCode(HttpStatus.OK)
@@ -134,10 +138,9 @@ export class InvitesController {
     summary: "Resend (re-mint) one of the current member's expired invites",
   })
   @ApiOkResponse({ description: 'The refreshed invite.' })
-  @ApiForbiddenResponse({
-    description: 'The invite belongs to another member.',
+  @ApiNotFoundResponse({
+    description: 'No invite with that code belongs to the caller.',
   })
-  @ApiNotFoundResponse({ description: 'No invite with that code.' })
   @ApiConflictResponse({
     description:
       'The invite was accepted or revoked, or is still valid — only an expired invite is resendable.',

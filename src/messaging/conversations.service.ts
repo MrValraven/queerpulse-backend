@@ -81,6 +81,48 @@ export class ConversationsService {
     const myParts = await this.participants
       .createQueryBuilder('participant')
       .where('participant.user_id = :userId', { userId })
+      // The two "this thread is invisible to me" rules run in SQL, BEFORE the
+      // cap, not in the loop below. They are still applied there as the exact
+      // authority (the preview also skips moderator-withheld messages, which
+      // this can't see), but pushing them down is what stops a cleared or
+      // blocked thread from spending one of the DEFAULT_LIST_LIMIT slots and
+      // pushing a live conversation off the end of a long-tenured member's
+      // inbox.
+      //
+      // Cleared ("delete for me"): the thread exists for this member only if
+      // some message landed after their clear point.
+      .andWhere(
+        `(
+          participant.cleared_at IS NULL
+          OR EXISTS (
+            SELECT 1 FROM messages message
+            WHERE message.conversation_id = participant.conversation_id
+              AND message.deleted_at IS NULL
+              AND message.created_at > participant.cleared_at
+          )
+        )`,
+      )
+      // Blocked counterpart, either direction, on a 1:1 thread. Group and
+      // official threads are exempt for the same reason as the loop below: they
+      // have no single counterpart, and one block must not erase a whole group
+      // from the member's inbox.
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1
+          FROM conversation_participants other
+          JOIN conversations convo ON convo.id = other.conversation_id
+          WHERE other.conversation_id = participant.conversation_id
+            AND other.user_id <> :userId
+            AND convo.kind <> :groupKind
+            AND convo.is_official = false
+            AND EXISTS (
+              SELECT 1 FROM blocks block
+              WHERE (block.blocker_id = :userId AND block.blocked_id = other.user_id)
+                 OR (block.blocked_id = :userId AND block.blocker_id = other.user_id)
+            )
+        )`,
+        { groupKind: ConversationKind.Group },
+      )
       .orderBy(lastActivityExpression, 'DESC')
       .take(DEFAULT_LIST_LIMIT)
       .getMany();
@@ -254,22 +296,82 @@ export class ConversationsService {
     return this.core.unreadConversationCount(userId);
   }
 
+  /**
+   * Advance the caller's read watermark on a conversation.
+   *
+   * `upToMessageId` names the NEWEST message the client actually rendered, and
+   * is the accurate form: the watermark becomes that message's own
+   * `created_at`, read straight from the row. Without it the watermark was
+   * always `now()`, so a message that landed between the client's last fetch
+   * and its `read` frame was marked read without ever being shown — the unread
+   * count under-reported and the sender saw "seen" on a message the recipient
+   * never saw.
+   *
+   * `lastReadAt` is the older, client-clock form the web app still sends. It is
+   * honoured but clamped to `now()`, so a device whose clock runs fast can
+   * never stamp a watermark into the future; a device running slow simply
+   * leaves more messages unread, which is the safe direction.
+   *
+   * With neither, the watermark stays `now()` — the previous behaviour.
+   */
   async markRead(
     conversationId: string,
     userId: string,
+    options?: { upToMessageId?: string; lastReadAt?: string },
   ): Promise<{ ok: true }> {
-    await this.core.requireParticipant(conversationId, userId);
-    // Stamp the read watermark with the DB clock (now()) so it is directly
-    // comparable to DB-generated message timestamps — using the app server's
-    // new Date() risks clock skew that skips or double-counts unread messages.
+    // Active participation (BE-MSG-09): a read receipt is BROADCAST to the
+    // room, so a blocked DM counterpart could otherwise keep telling the
+    // blocker "I read your message", and a removed group member could keep
+    // firing `read` frames into a thread they can no longer see.
+    await this.core.requireActiveParticipant(conversationId, userId);
+    let watermark: Date | string | null = null;
+    if (options?.upToMessageId) {
+      watermark = await this.core.messageCreatedAt(
+        conversationId,
+        options.upToMessageId,
+      );
+      if (!watermark) {
+        throw new NotFoundException('Message not found in this conversation');
+      }
+    } else if (options?.lastReadAt) {
+      watermark = options.lastReadAt;
+    }
     // Read implies delivered, so advance the delivered watermark in the same
     // write — a reader who opens the thread (and never sent an explicit socket
     // ack) still lets the sender see at least a "delivered" tick, and the two
     // watermarks can never cross (delivered can't lag read for the same view).
-    await this.participants.update(
-      { conversationId, userId },
-      { lastReadAt: () => 'now()', deliveredAt: () => 'now()' },
-    );
+    //
+    // Both stamps go through GREATEST so the watermark only ever moves forward:
+    // an out-of-order `read` frame (or a stale queued one from a reconnect)
+    // can't walk a member's unread count backwards. GREATEST ignores a NULL
+    // side, so a first-ever read still lands. Timestamps are compared in the
+    // DB, against DB-generated message timestamps — never against the app
+    // server's own clock.
+    const update = this.participants
+      .createQueryBuilder()
+      .update(ConversationParticipant);
+    if (watermark) {
+      update
+        .set({
+          lastReadAt: () =>
+            'GREATEST(last_read_at, LEAST(:watermark::timestamptz, now()))',
+          deliveredAt: () =>
+            'GREATEST(delivered_at, LEAST(:watermark::timestamptz, now()))',
+        })
+        .setParameter(
+          'watermark',
+          watermark instanceof Date ? watermark.toISOString() : watermark,
+        );
+    } else {
+      update.set({
+        lastReadAt: () => 'GREATEST(last_read_at, now())',
+        deliveredAt: () => 'GREATEST(delivered_at, now())',
+      });
+    }
+    await update
+      .where('conversation_id = :conversationId', { conversationId })
+      .andWhere('user_id = :userId', { userId })
+      .execute();
     const updated = await this.participants.findOne({
       where: { conversationId, userId },
     });
@@ -300,7 +402,8 @@ export class ConversationsService {
     conversationId: string,
     userId: string,
   ): Promise<{ ok: true }> {
-    await this.core.requireParticipant(conversationId, userId);
+    // Broadcast like `markRead`, gated identically (BE-MSG-09).
+    await this.core.requireActiveParticipant(conversationId, userId);
     await this.participants.update(
       { conversationId, userId },
       { deliveredAt: () => 'now()' },
@@ -438,6 +541,42 @@ export class ConversationsService {
       }
     }
     return true;
+  }
+
+  /**
+   * Ids of every DIRECT, non-official conversation the two members share.
+   *
+   * Backs the live-room eviction a block triggers (`ChatGateway`'s
+   * `MEMBER_BLOCKED` handler): a block severs the pair for BOTH directions, and
+   * `canJoinConversationLive` already refuses a fresh join from either side, so
+   * the sockets already inside the room have to be pushed out of it. Group and
+   * official threads are excluded for the same reason they are excluded from
+   * the block gate in `canJoinConversationLive`/`sendMessage`: a block between
+   * two members of a group does not dissolve the group, and nobody is blocked
+   * out of the platform's own official thread.
+   *
+   * Returns ids only (never conversation rows) — the caller needs socket-room
+   * names, nothing more.
+   */
+  async directConversationIdsBetween(
+    userId: string,
+    otherUserId: string,
+  ): Promise<string[]> {
+    const rows = await this.participants
+      .createQueryBuilder('p')
+      .select('p.conversation_id', 'conversationId')
+      .innerJoin(Conversation, 'c', 'c.id = p.conversation_id')
+      .innerJoin(
+        ConversationParticipant,
+        'other',
+        'other.conversation_id = p.conversation_id AND other.user_id = :otherUserId',
+        { otherUserId },
+      )
+      .where('p.user_id = :userId', { userId })
+      .andWhere('c.kind != :group', { group: ConversationKind.Group })
+      .andWhere('c.is_official = false')
+      .getRawMany<{ conversationId: string }>();
+    return [...new Set(rows.map((row) => row.conversationId))];
   }
 
   /**

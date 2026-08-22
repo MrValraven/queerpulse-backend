@@ -180,13 +180,23 @@ export class EventCohostInvitesService {
       action === 'accept'
         ? EventCohostInviteStatus.Accepted
         : EventCohostInviteStatus.Declined;
-    const saved = await this.invites.save(invite);
-    if (action === 'accept') {
-      await this.eventsService.addCohostByUserId(
-        invite.eventId,
-        invite.inviteeId,
-      );
-    }
+    // ONE transaction for both writes. Accepting used to save the invite and
+    // then insert the roster row separately, so a failure in between left an
+    // `accepted` invite with no `event_cohosts` row — and because a non-pending
+    // invite 409s above, the invitee could never retry their way out of it.
+    // The roster insert is idempotent (`orIgnore`), so a retry after a rollback
+    // is safe.
+    const saved = await this.invites.manager.transaction(async (manager) => {
+      const persisted = await manager.save(EventCohostInvite, invite);
+      if (action === 'accept') {
+        await this.eventsService.addCohostByUserId(
+          invite.eventId,
+          invite.inviteeId,
+          manager,
+        );
+      }
+      return persisted;
+    });
     return { id: saved.id, status: saved.status };
   }
 }

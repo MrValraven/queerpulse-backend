@@ -1,5 +1,9 @@
 import { Test } from '@nestjs/testing';
-import { ForbiddenException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { MyMediaService } from './my-media.service';
 import { StorageService } from '../storage/storage.service';
 import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
@@ -184,8 +188,20 @@ describe('MyMediaService.listMine', () => {
 describe('MyMediaService.deleteMine', () => {
   const userId = '11111111-1111-1111-1111-111111111111';
   const otherId = '22222222-2222-2222-2222-222222222222';
+  const FILE = '66666666-7777-8888-9999-000000000000';
+  const ownKey = `avatars/${userId}/${FILE}.jpg`;
+  const foreignKey = `avatars/${otherId}/${FILE}.jpg`;
 
-  function makeService(deleteObjectByReference: jest.Mock) {
+  const unreferenced = () =>
+    jest.fn().mockResolvedValue({
+      references: new Map<string, MediaReference[]>(),
+      degraded: false,
+    });
+
+  function makeService(
+    deleteObjectByReference: jest.Mock,
+    resolveReferences: jest.Mock = unreferenced(),
+  ) {
     return Test.createTestingModule({
       providers: [
         MyMediaService,
@@ -195,21 +211,19 @@ describe('MyMediaService.deleteMine', () => {
         },
         {
           provide: MediaReferenceResolver,
-          useValue: { resolve: jest.fn() },
+          useValue: { resolve: resolveReferences },
         },
       ],
     }).compile();
   }
 
-  it('deletes an object the caller owns', async () => {
+  it('deletes an object the caller owns that nothing references', async () => {
     const deleteObjectByReference = jest.fn().mockResolvedValue(true);
     const service = (await makeService(deleteObjectByReference)).get(
       MyMediaService,
     );
-    await service.deleteMine(userId, `avatars/${userId}/mine.jpg`);
-    expect(deleteObjectByReference).toHaveBeenCalledWith(
-      `avatars/${userId}/mine.jpg`,
-    );
+    await service.deleteMine(userId, ownKey);
+    expect(deleteObjectByReference).toHaveBeenCalledWith(ownKey);
   });
 
   it('refuses a key owned by someone else', async () => {
@@ -217,9 +231,9 @@ describe('MyMediaService.deleteMine', () => {
     const service = (await makeService(deleteObjectByReference)).get(
       MyMediaService,
     );
-    await expect(
-      service.deleteMine(userId, `avatars/${otherId}/theirs.jpg`),
-    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(service.deleteMine(userId, foreignKey)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
     expect(deleteObjectByReference).not.toHaveBeenCalled();
   });
 
@@ -232,5 +246,58 @@ describe('MyMediaService.deleteMine', () => {
       service.deleteMine(userId, '../../etc/passwd'),
     ).rejects.toBeInstanceOf(ForbiddenException);
     expect(deleteObjectByReference).not.toHaveBeenCalled();
+  });
+
+  it('refuses to delete an object that is still referenced, and names where', async () => {
+    const deleteObjectByReference = jest.fn();
+    const reference: MediaReference = {
+      type: 'community-cover',
+      entityId: '33333333-3333-3333-3333-333333333333',
+      label: 'Trans Joy Lisbon',
+      slug: 'trans-joy-lisbon',
+    };
+    const resolveReferences = jest.fn().mockResolvedValue({
+      references: new Map<string, MediaReference[]>([[ownKey, [reference]]]),
+      degraded: false,
+    });
+    const service = (
+      await makeService(deleteObjectByReference, resolveReferences)
+    ).get(MyMediaService);
+
+    await expect(service.deleteMine(userId, ownKey)).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(deleteObjectByReference).not.toHaveBeenCalled();
+  });
+
+  it('refuses to delete when reference checking is degraded', async () => {
+    // "No references" is not authoritative while a source query is failing, and
+    // a bucket delete cannot be undone — so this fails closed.
+    const deleteObjectByReference = jest.fn();
+    const resolveReferences = jest.fn().mockResolvedValue({
+      references: new Map<string, MediaReference[]>(),
+      degraded: true,
+    });
+    const service = (
+      await makeService(deleteObjectByReference, resolveReferences)
+    ).get(MyMediaService);
+
+    await expect(service.deleteMine(userId, ownKey)).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+    expect(deleteObjectByReference).not.toHaveBeenCalled();
+  });
+
+  it('never resolves references for a key the caller does not own', async () => {
+    const deleteObjectByReference = jest.fn();
+    const resolveReferences = unreferenced();
+    const service = (
+      await makeService(deleteObjectByReference, resolveReferences)
+    ).get(MyMediaService);
+
+    await expect(service.deleteMine(userId, foreignKey)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(resolveReferences).not.toHaveBeenCalled();
   });
 });

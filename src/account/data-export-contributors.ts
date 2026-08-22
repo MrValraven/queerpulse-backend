@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { ConsentRecord } from '../consent/entities/consent-record.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { Listing } from '../listings/entities/listing.entity';
+import { MyCardsService } from '../membership-cards/my-cards.service';
 import { Notification } from '../notifications/entities/notification.entity';
 import { SavedItem } from '../saved/entities/saved-item.entity';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
@@ -179,6 +180,26 @@ export class ConsentExportContributor implements DataExportContribution {
   }
 }
 
+/**
+ * Membership cards (spec §K.3) are personal data: a card ties a member to a
+ * community and carries a serial that proves that membership at a door.
+ * Delegates to `MyCardsService.forUser` rather than re-querying the tables
+ * directly, so the archive's shape (status resolution against the
+ * programme/community, holder name from `Profile`) always matches exactly
+ * what the member sees on `GET /me/cards`.
+ */
+@Injectable()
+export class MembershipCardsExportContributor implements DataExportContribution {
+  readonly category = 'membershipCards';
+  readonly archiveKey = 'membershipCards';
+
+  constructor(private readonly myCards: MyCardsService) {}
+
+  async buildContribution(userId: string): Promise<unknown> {
+    return this.myCards.forUser(userId);
+  }
+}
+
 /** Every newer-domain contributor, in archive order. */
 export const NEW_DOMAIN_EXPORT_CONTRIBUTORS = [
   SubprofilesExportContributor,
@@ -187,4 +208,5 @@ export const NEW_DOMAIN_EXPORT_CONTRIBUTORS = [
   SavedExportContributor,
   NotificationsExportContributor,
   ConsentExportContributor,
+  MembershipCardsExportContributor,
 ] as const;

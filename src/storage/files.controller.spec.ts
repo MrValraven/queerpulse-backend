@@ -2,6 +2,7 @@ import { NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { Response } from 'express';
 import { Repository } from 'typeorm';
 import { User } from '../users/entities/user.entity';
+import { Message } from '../messaging/entities/message.entity';
 import { FilesController } from './files.controller';
 import { StorageService } from './storage.service';
 
@@ -15,6 +16,7 @@ const AVATAR_KEY = `avatars/${USER_SEGMENT}/${FILE_SEGMENT}.jpg`;
 const WORK_KEY = `work/${USER_SEGMENT}/${FILE_SEGMENT}.png`;
 const STORY_COVER_KEY = `story-covers/${USER_SEGMENT}/${FILE_SEGMENT}.webp`;
 const GATHERING_KEY = `gathering-photos/${USER_SEGMENT}/${FILE_SEGMENT}.jpg`;
+const MESSAGE_IMAGE_KEY = `message-images/${USER_SEGMENT}/${FILE_SEGMENT}.jpg`;
 
 const LOGGED_IN = { userId: USER_SEGMENT, email: 'member@example.com' };
 // A logged-in member who did NOT upload the gathering photo (their id differs
@@ -26,22 +28,52 @@ const OTHER_MEMBER = {
 
 describe('FilesController', () => {
   let controller: FilesController;
-  let storage: { createPresignedDownload: jest.Mock };
+  let storage: {
+    createPresignedDownload: jest.Mock;
+    validateImageMagicBytes: jest.Mock;
+  };
   let users: { findOne: jest.Mock };
+  let messageQueryBuilder: {
+    innerJoin: jest.Mock;
+    where: jest.Mock;
+    andWhere: jest.Mock;
+    getExists: jest.Mock;
+  };
+  let messages: { createQueryBuilder: jest.Mock };
   let response: { redirect: jest.Mock; setHeader: jest.Mock };
 
   beforeEach(() => {
+    // The per-process validated-key memo is static, so isolate it between tests
+    // (an earlier `'valid'` verdict would otherwise let a later test skip the
+    // magic-byte check for the same key).
+    (
+      FilesController as unknown as { validatedKeys: Set<string> }
+    ).validatedKeys.clear();
     storage = {
       createPresignedDownload: jest.fn().mockResolvedValue(PRESIGNED_DOWNLOAD),
+      // Default: bytes match the declared image type, so serving proceeds.
+      validateImageMagicBytes: jest.fn().mockResolvedValue('valid'),
     };
     // Default: the key owner is not a withheld (suspended) member, so serving
     // proceeds. `null` stands in for "no matching owner row" — the gate only
     // withholds on a resolved Suspended owner.
     users = { findOne: jest.fn().mockResolvedValue(null) };
+    // Default: the requester is NOT a participant of any conversation holding
+    // the message-image key; individual tests flip `getExists` to true.
+    messageQueryBuilder = {
+      innerJoin: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      getExists: jest.fn().mockResolvedValue(false),
+    };
+    messages = {
+      createQueryBuilder: jest.fn().mockReturnValue(messageQueryBuilder),
+    };
     response = { redirect: jest.fn(), setHeader: jest.fn() };
     controller = new FilesController(
       storage as unknown as StorageService,
       users as unknown as Repository<User>,
+      messages as unknown as Repository<Message>,
     );
   });
 
@@ -93,6 +125,67 @@ describe('FilesController', () => {
         NotFoundException,
       );
       expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('message images (participant-gated, M7)', () => {
+    it('rejects an anonymous request (no longer world-readable by URL)', async () => {
+      await expect(serve(MESSAGE_IMAGE_KEY, null)).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+    });
+
+    it('redirects for a conversation participant', async () => {
+      messageQueryBuilder.getExists.mockResolvedValue(true);
+      await serve(MESSAGE_IMAGE_KEY, OTHER_MEMBER);
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('404s for a logged-in member who participates in no such conversation', async () => {
+      messageQueryBuilder.getExists.mockResolvedValue(false);
+      await expect(serve(MESSAGE_IMAGE_KEY, OTHER_MEMBER)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+    });
+
+    it('does not fall back to the uploader-only check (participant path, not owner path)', async () => {
+      // The uploader (their id is the key's owner segment) is still refused when
+      // they are not a participant — proof the branch is participant-scoped, not
+      // uploader-scoped.
+      messageQueryBuilder.getExists.mockResolvedValue(false);
+      await expect(serve(MESSAGE_IMAGE_KEY, LOGGED_IN)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('content-type validation (magic bytes, M2)', () => {
+    it('404s when the stored bytes do not match the declared image type', async () => {
+      storage.validateImageMagicBytes.mockResolvedValue('mismatch');
+      await expect(serve(AVATAR_KEY, null)).rejects.toThrow(NotFoundException);
+      expect(storage.createPresignedDownload).not.toHaveBeenCalled();
+    });
+
+    it('serves (fail-open) when validation is indeterminate (transient read error)', async () => {
+      storage.validateImageMagicBytes.mockResolvedValue('indeterminate');
+      await serve(AVATAR_KEY, null);
+      expect(response.redirect).toHaveBeenCalledWith(302, PRESIGNED_DOWNLOAD);
+    });
+
+    it('memoises a passing key so it is only validated once per process', async () => {
+      await serve(AVATAR_KEY, null);
+      await serve(AVATAR_KEY, null);
+      expect(storage.validateImageMagicBytes).toHaveBeenCalledTimes(1);
+    });
+
+    it('sets X-Content-Type-Options: nosniff on the redirect (L12)', async () => {
+      await serve(AVATAR_KEY, null);
+      expect(response.setHeader).toHaveBeenCalledWith(
+        'X-Content-Type-Options',
+        'nosniff',
+      );
     });
   });
 

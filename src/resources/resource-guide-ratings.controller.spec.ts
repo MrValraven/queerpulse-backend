@@ -21,9 +21,7 @@ describe('ResourceGuideRatingsController', () => {
     };
     const module: TestingModule = await Test.createTestingModule({
       controllers: [ResourceGuideRatingsController],
-      providers: [
-        { provide: ResourceGuideRatingsService, useValue: service },
-      ],
+      providers: [{ provide: ResourceGuideRatingsService, useValue: service }],
     }).compile();
     controller = module.get(ResourceGuideRatingsController);
   });

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -7,8 +8,15 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash, randomBytes } from 'node:crypto';
-import { DataSource, EntityManager, IsNull, Repository } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  IsNull,
+  MoreThan,
+  Repository,
+} from 'typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
+import { isUniqueViolation } from '../common/db-errors';
 import {
   USER_SESSION_REVOKED,
   UserSessionRevokedEvent,
@@ -21,7 +29,6 @@ import {
   DsarResponse,
   EmailPreferenceResponse,
   ExportJobResponse,
-  ReauthResult,
   SessionResponse,
   toDeletionRequestResponse,
   toDsarResponse,
@@ -33,8 +40,8 @@ import {
   DEFAULT_EMAIL_PREFERENCES,
   DELETION_GRACE_DAYS,
   DSAR_DUE_DAYS,
+  EXPORT_REUSE_WINDOW_MS,
   LOCKED_EMAIL_CATEGORIES,
-  REAUTH_TTL_MS,
 } from './account.constants';
 import { DeactivateDto } from './dto/deactivate.dto';
 import { RequestDeletionDto } from './dto/request-deletion.dto';
@@ -59,6 +66,15 @@ import { ExportDownload, describeExportDownload } from './export-archive';
 // Re-exported for tests/consumers that historically imported the default
 // matrix from this module.
 export { DEFAULT_EMAIL_PREFERENCES };
+
+/** Order-insensitive comparison of two already-de-duplicated category lists. */
+function sameCategorySet(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  const seen = new Set(left);
+  return right.every((category) => seen.has(category));
+}
 
 @Injectable()
 export class AccountService {
@@ -93,15 +109,18 @@ export class AccountService {
   // --- Step-up re-authentication -------------------------------------------
 
   // Auth is OAuth-only, so there is nothing to verify a password against —
-  // this simply records that the caller re-confirmed their session right now
-  // and mints a short-lived token the destructive/export routes require.
-  async reauth(userId: string): Promise<ReauthResult> {
-    const token = randomBytes(24).toString('hex');
-    const expiresAt = new Date(Date.now() + REAUTH_TTL_MS);
-    await this.reauthTokens.save({ userId, token, expiresAt });
-    return { reauthToken: token, expiresAt: expiresAt.toISOString() };
-  }
-
+  // the token itself is minted only by `AuthService.mintReauthToken`, reached
+  // by completing a real Google OAuth round trip with `prompt=login` as the
+  // SAME already-signed-in member (`AuthController.googleCallback`'s `reauth`
+  // branch). This just validates whatever token the caller presents.
+  //
+  // The stored copy is SHA-256 hashed (see `AuthService.mintReauthToken`), so
+  // the presented plaintext is hashed the same way before the lookup. On a
+  // match the row is CONSUMED — deleted in the same step — making a reauth
+  // token strictly single-use: one step-up authorizes exactly one destructive
+  // or export action, never several within the 5-minute TTL. The conditional
+  // delete doubles as the concurrency guard, so two requests racing the same
+  // token can never both pass (exactly one wins the `affected` claim).
   private async assertReauth(
     userId: string,
     token: string | undefined,
@@ -109,8 +128,16 @@ export class AccountService {
     if (!token) {
       throw new UnauthorizedException('Recent re-authentication required');
     }
-    const row = await this.reauthTokens.findOne({ where: { userId, token } });
+    const tokenHash = createHash('sha256').update(token).digest('hex');
+    const row = await this.reauthTokens.findOne({
+      where: { userId, token: tokenHash },
+    });
     if (!row || row.expiresAt.getTime() < Date.now()) {
+      throw new UnauthorizedException('Recent re-authentication required');
+    }
+    const consumed = await this.reauthTokens.delete({ id: row.id });
+    if (!consumed.affected) {
+      // Lost the race — another concurrent action already consumed this token.
       throw new UnauthorizedException('Recent re-authentication required');
     }
   }
@@ -233,12 +260,6 @@ export class AccountService {
     dto: RequestDeletionDto,
   ): Promise<DeletionRequestResponse> {
     await this.assertReauth(userId, dto.reauthToken);
-    const active = await this.deletionRequests.findOne({
-      where: { userId, status: DeletionRequestStatus.Grace },
-    });
-    if (active) {
-      throw new ConflictException('A deletion request is already scheduled');
-    }
     const scheduledFor = new Date(Date.now() + DELETION_GRACE_DAYS * DAY_MS);
     // The delete-account UI says "everything is hidden now and will be
     // permanently erased on {date}". The erasure half was already true; the
@@ -248,14 +269,42 @@ export class AccountService {
     // exist everywhere.
     const saved = await this.dataSource.transaction(async (manager) => {
       await this.assertNotSoleAdmin(manager, userId);
-      const previousStatus = await this.resolveRestoreStatus(manager, userId);
-      const row = await manager.save(DeletionRequest, {
-        userId,
-        status: DeletionRequestStatus.Grace,
-        scheduledFor,
-        reason: dto.reason ?? null,
-        previousStatus,
+      // The duplicate check lives INSIDE the transaction, and the partial
+      // unique index (`UQ_deletion_request_open_user`, migration
+      // 1793500200000) is what actually makes it hold: two overlapping calls
+      // used to pass an out-of-transaction pre-check and insert two `grace`
+      // rows, after which cancelling cleared only one and the erasure sweep
+      // deleted the account of a member who had cancelled. `processing` counts
+      // as open too — an erasure already in flight is not a fresh request.
+      const open = await manager.findOne(DeletionRequest, {
+        where: [
+          { userId, status: DeletionRequestStatus.Grace },
+          { userId, status: DeletionRequestStatus.Processing },
+        ],
       });
+      if (open) {
+        throw new ConflictException('A deletion request is already scheduled');
+      }
+      const previousStatus = await this.resolveRestoreStatus(manager, userId);
+      let row: DeletionRequest;
+      try {
+        row = await manager.save(DeletionRequest, {
+          userId,
+          status: DeletionRequestStatus.Grace,
+          scheduledFor,
+          reason: dto.reason ?? null,
+          previousStatus,
+        });
+      } catch (err) {
+        // Lost the race to a concurrent request: the index rejected the second
+        // insert. Same 409 the pre-check above raises.
+        if (isUniqueViolation(err, 'UQ_deletion_request_open_user')) {
+          throw new ConflictException(
+            'A deletion request is already scheduled',
+          );
+        }
+        throw err;
+      }
       await manager.update(
         User,
         { id: userId },
@@ -285,14 +334,44 @@ export class AccountService {
 
   async cancelDeletionRequest(userId: string): Promise<void> {
     await this.dataSource.transaction(async (manager) => {
-      const active = await manager.findOne(DeletionRequest, {
+      // Cancel EVERY open `grace` row, not just the first one found. A member
+      // who double-submitted (or whose request predates
+      // `UQ_deletion_request_open_user`) could hold more than one, and a
+      // survivor is not inert — the erasure sweep acts on any due `grace` row,
+      // so leaving one behind erases an account the member just rescued.
+      const open = await manager.find(DeletionRequest, {
         where: { userId, status: DeletionRequestStatus.Grace },
+        order: { createdAt: 'ASC' },
       });
-      if (!active) {
+      // An erasure the sweep has already claimed cannot be called back: the
+      // account is being deleted right now. Say so instead of reporting a
+      // cancellation that will not hold.
+      const processing = await manager.findOne(DeletionRequest, {
+        where: { userId, status: DeletionRequestStatus.Processing },
+      });
+      if (processing) {
+        throw new ConflictException(
+          'Your account deletion is already being processed and can no longer be cancelled',
+        );
+      }
+      if (open.length === 0) {
         throw new NotFoundException('No pending deletion request');
       }
-      active.status = DeletionRequestStatus.Cancelled;
-      await manager.save(DeletionRequest, active);
+      const cancelled = await manager.update(
+        DeletionRequest,
+        { userId, status: DeletionRequestStatus.Grace },
+        { status: DeletionRequestStatus.Cancelled },
+      );
+      if (cancelled.affected === 0) {
+        // The sweep claimed the row between the read and the write.
+        throw new ConflictException(
+          'Your account deletion is already being processed and can no longer be cancelled',
+        );
+      }
+      // The earliest open row holds the status recorded BEFORE any of this
+      // hiding happened — later rows only ever read it back through
+      // `resolveRestoreStatus`.
+      const active = open.find((row) => row.previousStatus !== null) ?? open[0];
 
       // Changing your mind about erasure un-hides you — UNLESS you were also
       // separately deactivated. Someone who paused their account and *then*
@@ -313,7 +392,7 @@ export class AccountService {
       await manager.update(
         User,
         { id: userId, status: UserStatus.Deactivated },
-        { status: active.previousStatus ?? UserStatus.Active },
+        { status: active?.previousStatus ?? UserStatus.Active },
       );
     });
   }
@@ -340,15 +419,44 @@ export class AccountService {
     // it. The frontend mints the token inside `useExportFlow.start()` (live
     // branch only), so no page has to know this route needs one.
     await this.assertReauth(userId, dto.reauthToken);
+    // Range-check the requested categories against what the builder actually
+    // knows, and de-duplicate them. Unknown strings used to be persisted
+    // verbatim on the job row and then quietly produce nothing.
+    const known = new Set(this.exportService.knownCategories());
+    const categories = [...new Set(dto.categories)];
+    const unknown = categories.filter((category) => !known.has(category));
+    if (unknown.length > 0) {
+      throw new BadRequestException(
+        `Unknown export categories: ${unknown.join(', ')}`,
+      );
+    }
     const now = new Date();
+    // Reuse an identical archive built moments ago instead of building and
+    // storing a second full copy. `requestExport` runs the whole build inline
+    // and writes it into `data_export_job.data` (jsonb), so a repeat request —
+    // double-click, retry after a slow response, a second tab — was pure
+    // storage and CPU amplification. Paired with the per-route throttle on the
+    // controller.
+    const reusable = await this.exportJobs.findOne({
+      where: {
+        userId,
+        status: DataExportStatus.Ready,
+        generatedAt: MoreThan(new Date(now.getTime() - EXPORT_REUSE_WINDOW_MS)),
+        format: dto.format as DataExportFormat,
+      },
+      order: { generatedAt: 'DESC' },
+    });
+    if (reusable && sameCategorySet(reusable.categories, categories)) {
+      return toExportJobResponse(reusable);
+    }
     const job = await this.exportJobs.save({
       userId,
       status: DataExportStatus.Ready,
-      categories: dto.categories,
+      categories,
       format: dto.format as DataExportFormat,
       requestedAt: now,
       generatedAt: now,
-      data: await this.exportService.build(userId, dto.categories),
+      data: await this.exportService.build(userId, categories),
       error: null,
     });
     return toExportJobResponse(job);
@@ -458,6 +566,23 @@ export class AccountService {
     return rows.map((t) => toSessionResponse(t, t.id === currentId));
   }
 
+  /**
+   * "Sign out this device": revoke one named session row.
+   *
+   * Emits `USER_SESSION_REVOKED` for the same reason `revokeAllSessions` does.
+   * Revoking the refresh row only stops the NEXT rotation; the access token
+   * already issued to that device stays valid for its full TTL, and
+   * `ChatGateway.authenticate` accepts it, so without this the "signed out"
+   * device kept a live socket (messages, presence) for up to 15 minutes.
+   *
+   * The drop is per-MEMBER, not per-session: the access token carries no
+   * session id, so the gateway can only empty the whole `user:${userId}` room.
+   * The member's other devices reconnect immediately with their own still-valid
+   * cookies, so the visible cost is a socket reconnect, and the revoked device
+   * cannot come back because its refresh row is gone. Narrowing this to the one
+   * device needs a `sessionId` claim on the access token plus a filtered drop
+   * in the gateway.
+   */
   async revokeSession(userId: string, sessionId: string): Promise<void> {
     const row = await this.refreshTokens.findOne({
       where: { id: sessionId, userId },
@@ -467,10 +592,15 @@ export class AccountService {
     }
     row.revokedAt = new Date();
     await this.refreshTokens.save(row);
+    this.eventEmitter.emit(USER_SESSION_REVOKED, {
+      userId,
+    } satisfies UserSessionRevokedEvent);
   }
 
   // "Log out other devices": revoke every live session EXCEPT the presenting
   // one, so the caller stays signed in on this device. FE `revokeOtherSessions`.
+  // Emits `USER_SESSION_REVOKED` on the same reasoning as `revokeSession`; the
+  // caller's own socket reconnects on the cookie it still holds.
   async revokeOtherSessions(
     userId: string,
     rawRefreshToken?: string,
@@ -488,6 +618,9 @@ export class AccountService {
       row.revokedAt = now;
     }
     await this.refreshTokens.save(toRevoke);
+    this.eventEmitter.emit(USER_SESSION_REVOKED, {
+      userId,
+    } satisfies UserSessionRevokedEvent);
   }
 
   /**
@@ -531,8 +664,8 @@ export class AccountService {
           // rows.
           email: locked ? true : (overrides.get(category) ?? defaultEnabled),
           ...(locked ? { locked: true } : {}),
-          // No mailer at launch — the stored toggle is never acted on. See
-          // EmailPreferenceResponse.comingSoon + docs/ops/no-email-at-launch.md.
+          // No sender consults these categories yet, so the stored toggle is
+          // never acted on. See EmailPreferenceResponse.comingSoon.
           comingSoon: true,
         };
       },

@@ -8,6 +8,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { SavedItem } from '../saved/entities/saved-item.entity';
 import { StorageModule } from '../storage/storage.module';
 import { UsersModule } from '../users/users.module';
+import { AdminListingsController } from './admin-listings.controller';
 import { DirectoryController } from './directory.controller';
 import { DirectoryService } from './directory.service';
 import { ListingClaim } from './entities/listing-claim.entity';
@@ -72,7 +73,13 @@ import { ListingsService } from './listings.service';
     // `DirectoryService`.
     MediaCropsModule,
   ],
-  controllers: [ListingsController, DirectoryController],
+  controllers: [
+    ListingsController,
+    // Every moderator/admin route over listings, split out so the whole class
+    // shares one `ActiveMemberGuard + RolesGuard` pair (BE-HSG-29).
+    AdminListingsController,
+    DirectoryController,
+  ],
   providers: [
     ListingsService,
     ListingEditSuggestionsService,

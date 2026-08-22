@@ -265,9 +265,11 @@ export class InvitesService {
    *
    * Ownership + terminal-state guards, all returning a mapped view (never the
    * raw entity):
-   *  - 404 if no invite with that code exists;
-   *  - 403 if the invite belongs to another member (never act on, or confirm
-   *    the existence of, another member's invite);
+   *  - 404 if no invite with that code exists FOR THIS MEMBER. The lookup is
+   *    scoped to `{ code, inviterId }` so "not yours" and "does not exist" are
+   *    the same response. Answering 403 for someone else's code confirmed it
+   *    exists, which is the enumeration this route's contract said it refused
+   *    to do;
    *  - 409 if it was already accepted (redeemed — nothing to cancel) or is
    *    already expired (a terminal state a revoke can't meaningfully change);
    *  - already-revoked is an idempotent no-op: returns the current view.
@@ -279,12 +281,9 @@ export class InvitesService {
    */
   async revokeInvite(inviterId: string, code: string): Promise<MyInviteView> {
     const now = new Date();
-    const invite = await this.invites.findOne({ where: { code } });
+    const invite = await this.invites.findOne({ where: { code, inviterId } });
     if (!invite) {
       throw new NotFoundException('Invite not found');
-    }
-    if (invite.inviterId !== inviterId) {
-      throw new ForbiddenException('This invite belongs to another member.');
     }
     if (invite.status === InviteStatus.Accepted) {
       throw new ConflictException(
@@ -342,8 +341,9 @@ export class InvitesService {
    * reclaimed — it stays counted exactly once, in the month it was first minted.
    *
    * Only an EXPIRED invite is resendable. Guards, all returning a mapped view:
-   *  - 404 if no invite with that code exists;
-   *  - 403 if it belongs to another member;
+   *  - 404 if no invite with that code exists FOR THIS MEMBER (the lookup is
+   *    scoped to `{ code, inviterId }`, so another member's code is
+   *    indistinguishable from a code that does not exist);
    *  - 409 if it was accepted (redeemed — resending would re-open a used invite),
    *    revoked (a revoke is deliberate and stays revoked), or still valid
    *    (nothing to resend yet).
@@ -356,12 +356,9 @@ export class InvitesService {
    */
   async resendInvite(inviterId: string, code: string): Promise<MyInviteView> {
     const now = new Date();
-    const invite = await this.invites.findOne({ where: { code } });
+    const invite = await this.invites.findOne({ where: { code, inviterId } });
     if (!invite) {
       throw new NotFoundException('Invite not found');
-    }
-    if (invite.inviterId !== inviterId) {
-      throw new ForbiddenException('This invite belongs to another member.');
     }
     const status = resolveInviteStatus(invite, now);
     if (status === 'used') {
@@ -425,7 +422,10 @@ export class InvitesService {
     const [inviter, used, memberCount] = await Promise.all([
       this.usersService.findById(inviterId),
       this.invites.count({
-        where: { inviterId, createdAt: MoreThanOrEqual(currentMonthStart(now)) },
+        where: {
+          inviterId,
+          createdAt: MoreThanOrEqual(currentMonthStart(now)),
+        },
       }),
       this.usersService.countActiveMembers(),
     ]);
@@ -543,9 +543,17 @@ export class InvitesService {
       where: { inviterId, createdAt: MoreThanOrEqual(monthStart) },
     });
     if (used >= limit) {
-      throw new ForbiddenException(
-        'Monthly invite limit reached. Try again next month.',
-      );
+      // TYPED refusal, matching the shape `JoinRequestsService` already uses for
+      // its `UNDER_18` rejection: `{ statusCode, error, code, message }`. The
+      // frontend used to branch on a regex against the English sentence below
+      // (`isInviteQuotaError`), which breaks the moment this copy is reworded or
+      // localized. `code` is the contract now; `message` is a human fallback.
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Forbidden',
+        code: 'INVITE_QUOTA_EXCEEDED',
+        message: 'Monthly invite limit reached. Try again next month.',
+      });
     }
   }
 

@@ -31,6 +31,12 @@ export enum PlatformJoinRequestStatus {
  * admin approves them and the resulting invite is redeemed through Google
  * sign-up. See `PublicJoinRequests1782800730000`.
  */
+// Backs `list()`: it filters on `status` and keyset-paginates on `created_at`,
+// and neither column carried an index. Created by
+// `AddJoinRequestEmailStatusIndexes1793500100000`, which also adds the
+// `lower("email"), "status"` expression index the public submit path needs —
+// that one has no decorator form (TypeORM cannot express a function index).
+@Index('IDX_join_requests_status_created_at', ['status', 'createdAt'])
 @Entity('join_requests')
 export class PlatformJoinRequest {
   @PrimaryGeneratedColumn('uuid')

@@ -9,7 +9,10 @@ import { ReplaceSocialsDto } from '../profiles/dto/replace-socials.dto';
 import { ReplaceWorkDto } from '../profiles/dto/replace-work.dto';
 import { UpdateProfileDto } from '../profiles/dto/update-profile.dto';
 import { UpdateUsernameDto } from '../profiles/dto/update-username.dto';
+import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
+import { WorkItem } from '../profiles/entities/work-item.entity';
+import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { AdminBotSummary, toBotSummary } from './admin-bots-response';
 
 /**
@@ -24,6 +27,10 @@ import { AdminBotSummary, toBotSummary } from './admin-bots-response';
 export class AdminBotsService {
   constructor(
     @InjectRepository(User) private readonly users: Repository<User>,
+    @InjectRepository(Profile)
+    private readonly profileRows: Repository<Profile>,
+    @InjectRepository(WorkItem)
+    private readonly workItems: Repository<WorkItem>,
     private readonly profiles: ProfilesService,
   ) {}
 
@@ -46,8 +53,24 @@ export class AdminBotsService {
     return target.id;
   }
 
-  async updateBotProfile(userId: string, dto: UpdateProfileDto) {
-    return this.profiles.updateMe(await this.requireSystemAccount(userId), dto);
+  async updateBotProfile(
+    requesterUserId: string,
+    userId: string,
+    dto: UpdateProfileDto,
+  ) {
+    const botUserId = await this.requireSystemAccount(userId);
+    // Runs BEFORE delegating the write: any admin may re-save the avatar
+    // another admin sourced for the shared house account, but may not point it
+    // at a NEW foreign upload (see `assertNoForeignUploadIntroduced`). The
+    // interceptor has already collapsed any `/files/<key>` URL to its bare key,
+    // matching the bare key stored on the profile row.
+    const storedProfile = await this.profileRows.findOne({
+      where: { userId: botUserId },
+    });
+    assertNoForeignUploadIntroduced(requesterUserId, dto.avatarUrl, [
+      storedProfile?.avatarUrl,
+    ]);
+    return this.profiles.updateMe(botUserId, dto);
   }
 
   async updateBotUsername(userId: string, dto: UpdateUsernameDto) {
@@ -64,11 +87,29 @@ export class AdminBotsService {
     );
   }
 
-  async replaceBotWork(userId: string, dto: ReplaceWorkDto) {
-    return this.profiles.replaceWork(
-      await this.requireSystemAccount(userId),
-      dto.items,
-    );
+  async replaceBotWork(
+    requesterUserId: string,
+    userId: string,
+    dto: ReplaceWorkDto,
+  ) {
+    const botUserId = await this.requireSystemAccount(userId);
+    // Runs BEFORE the replace: an admin may keep a work-item image another
+    // admin sourced, but may not introduce a foreign upload the account does
+    // not already hold. Each incoming item is checked against the whole set of
+    // currently stored work-item images (a full replace, so order is
+    // irrelevant to whether an image is "already stored").
+    const storedWorkItems = await this.workItems.find({
+      where: { userId: botUserId },
+    });
+    const storedImages = storedWorkItems.map((workItem) => workItem.imageUrl);
+    for (const item of dto.items) {
+      assertNoForeignUploadIntroduced(
+        requesterUserId,
+        item.imageUrl,
+        storedImages,
+      );
+    }
+    return this.profiles.replaceWork(botUserId, dto.items);
   }
 
   async replaceBotSkills(userId: string, dto: ReplaceSkillsDto) {

@@ -48,26 +48,30 @@ describe('UploadsController', () => {
   // and the `${prefix}/${userId}/${uuid}${ext}` key layout — now lives in the
   // service and is exercised in storage.service.spec.ts.
   describe('pass-through to StorageService.presignImageUpload', () => {
-    it('avatar route forwards kind "avatar" with the caller and content type', async () => {
+    it('avatar route forwards kind "avatar" with the caller, content type, and byteSize', async () => {
       const result = await controller.avatar(user, {
         contentType: 'image/png',
+        byteSize: 2048,
       });
       expect(storage.presignImageUpload).toHaveBeenCalledWith({
         kind: 'avatar',
         userId: 'user-1',
         contentType: 'image/png',
+        byteSize: 2048,
       });
       expect(result).toBe(PRESIGNED);
     });
 
-    it('work-image route forwards kind "work-image"', async () => {
+    it('work-image route forwards kind "work-image" and byteSize', async () => {
       const result = await controller.workImage(user, {
         contentType: 'image/jpeg',
+        byteSize: 2048,
       });
       expect(storage.presignImageUpload).toHaveBeenCalledWith({
         kind: 'work-image',
         userId: 'user-1',
         contentType: 'image/jpeg',
+        byteSize: 2048,
       });
       expect(result).toBe(PRESIGNED);
     });
@@ -91,7 +95,10 @@ describe('UploadsController', () => {
   describe('content-type gate (PresignUploadDto — legacy routes)', () => {
     it('accepts every whitelisted image type', async () => {
       for (const contentType of ALLOWED_IMAGE_TYPES) {
-        const dto = plainToInstance(PresignUploadDto, { contentType });
+        const dto = plainToInstance(PresignUploadDto, {
+          contentType,
+          byteSize: 1024,
+        });
         expect(await validate(dto)).toHaveLength(0);
       }
     });
@@ -99,6 +106,7 @@ describe('UploadsController', () => {
     it('rejects a non-image content type', async () => {
       const dto = plainToInstance(PresignUploadDto, {
         contentType: 'application/pdf',
+        byteSize: 1024,
       });
       const errors = await validate(dto);
       expect(errors).toHaveLength(1);
@@ -108,12 +116,47 @@ describe('UploadsController', () => {
     it('rejects a video content type (the gate defends the presign)', async () => {
       const dto = plainToInstance(PresignUploadDto, {
         contentType: 'video/mp4',
+        byteSize: 1024,
       });
       expect(await validate(dto)).not.toHaveLength(0);
     });
 
     it('rejects a missing content type', async () => {
-      const dto = plainToInstance(PresignUploadDto, {});
+      const dto = plainToInstance(PresignUploadDto, { byteSize: 1024 });
+      expect(await validate(dto)).not.toHaveLength(0);
+    });
+  });
+
+  // Mirrors the byteSize gate already covered for PresignRequestDto below —
+  // this is the actual fix for the unbounded-upload bug: the legacy routes
+  // now reject an oversize/missing declared size the same way `/presign` does.
+  describe('byteSize gate (PresignUploadDto — legacy routes)', () => {
+    it('rejects a non-integer byteSize', async () => {
+      const dto = plainToInstance(PresignUploadDto, {
+        contentType: 'image/png',
+        byteSize: 1.5,
+      });
+      expect(await validate(dto)).not.toHaveLength(0);
+    });
+
+    it('rejects a zero or negative byteSize', async () => {
+      const zero = plainToInstance(PresignUploadDto, {
+        contentType: 'image/png',
+        byteSize: 0,
+      });
+      expect(await validate(zero)).not.toHaveLength(0);
+
+      const negative = plainToInstance(PresignUploadDto, {
+        contentType: 'image/png',
+        byteSize: -10,
+      });
+      expect(await validate(negative)).not.toHaveLength(0);
+    });
+
+    it('rejects a missing byteSize', async () => {
+      const dto = plainToInstance(PresignUploadDto, {
+        contentType: 'image/png',
+      });
       expect(await validate(dto)).not.toHaveLength(0);
     });
   });

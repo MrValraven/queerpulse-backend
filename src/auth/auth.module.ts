@@ -4,6 +4,7 @@ import { JwtModule, JwtSignOptions } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
+import { AccountReauthToken } from '../account/entities/account-reauth-token.entity';
 import { DeletionRequest } from '../account/entities/deletion-request.entity';
 import { EmailSuppression } from '../account/entities/email-suppression.entity';
 import { Notification } from '../notifications/entities/notification.entity';
@@ -19,6 +20,7 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { AuthMaintenanceService } from './auth-maintenance.service';
 import { RefreshToken } from './entities/refresh-token.entity';
+import { UnderAgeDisclosureService } from './under-age-disclosure.service';
 import { GoogleStrategy } from './strategies/google.strategy';
 import { JwtStrategy } from './strategies/jwt.strategy';
 
@@ -69,6 +71,11 @@ import { JwtStrategy } from './strategies/jwt.strategy';
       DeletionRequest,
       Notification,
       UserStaffRole,
+      // Write-side here (unlike the read-only entities above): the step-up
+      // reauth OAuth round trip (`AuthController.googleCallback`'s `reauth`
+      // branch, via `AuthService.mintReauthToken`) is what writes this row.
+      // `AccountService.assertReauth` still owns reading it back.
+      AccountReauthToken,
     ]),
     JwtModule.registerAsync({
       inject: [ConfigService],
@@ -84,7 +91,18 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, AuthMaintenanceService, GoogleStrategy, JwtStrategy],
+  providers: [
+    AuthService,
+    AuthMaintenanceService,
+    // `POST /auth/under-18-disclosure`. Lives here rather than with the
+    // moderation services because `ModerationModule` imports THIS module —
+    // injecting `AccountEnforcementService` would close that cycle. It reuses
+    // `AuthService.revokeAllForUser` (and so `USER_SESSION_REVOKED`) plus the
+    // `AccountDeactivation` registration already declared above.
+    UnderAgeDisclosureService,
+    GoogleStrategy,
+    JwtStrategy,
+  ],
   exports: [AuthService],
 })
 export class AuthModule {}

@@ -21,6 +21,10 @@ export interface DraftDTO {
   deadlineDays?: number | null;
   sortTitle?: string;
   searchText?: string;
+  /** Optimistic-concurrency counter — send it back as `expectedVersion` on the
+   *  next PATCH so an interleaved save from another tab gets a 409 instead of
+   *  silently discarding this one's edits. */
+  version: number;
 }
 
 export function toDraftDTO(draft: Draft): DraftDTO {
@@ -40,5 +44,6 @@ export function toDraftDTO(draft: Draft): DraftDTO {
     deadlineDays: payload.deadlineDays,
     sortTitle: payload.sortTitle,
     searchText: payload.searchText,
+    version: draft.version,
   };
 }

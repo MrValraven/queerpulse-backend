@@ -78,8 +78,11 @@ function isPrivateIpv4(ip: string): boolean {
   );
 }
 
-/** True when an IPv6 address is loopback, link-local, ULA, multicast, or an
- *  IPv4-mapped/NAT64 form wrapping a private IPv4. */
+/** True when an IPv6 address is anything other than plain global unicast: an
+ *  IPv4-mapped/NAT64 form wrapping a private IPv4, a 6to4 or Teredo tunnel
+ *  address (both of which carry an arbitrary IPv4 inside), the documentation
+ *  block, or anything at all outside the 2000::/3 global-unicast allocation
+ *  (loopback, link-local, ULA, multicast, discard-only). */
 function isPrivateIpv6(ip: string): boolean {
   const address = ip.toLowerCase().split('%')[0] ?? ip; // strip any zone id
   if (address === '::1' || address === '::') return true;
@@ -94,13 +97,35 @@ function isPrivateIpv6(ip: string): boolean {
     return isPrivateIpv4(embedded);
   }
 
-  const firstHextet = address.split(':')[0] ?? '';
+  const hextets = address.split(':');
+  const firstHextet = hextets[0] ?? '';
   const leading = parseInt(firstHextet || '0', 16);
   if (Number.isNaN(leading)) return true;
-  // fc00::/7 unique-local, fe80::/10 link-local, ff00::/8 multicast.
-  if ((leading & 0xfe00) === 0xfc00) return true; // fc00::/7
-  if ((leading & 0xffc0) === 0xfe80) return true; // fe80::/10
-  if ((leading & 0xff00) === 0xff00) return true; // ff00::/8
+
+  // ALLOW-LIST, not a block-list: every address IANA has allocated for global
+  // unicast lives in 2000::/3, so anything outside it is refused outright
+  // rather than enumerated. That covers ::1 and :: (handled above anyway),
+  // fc00::/7 unique-local, fe80::/10 link-local, ff00::/8 multicast, 100::/64
+  // discard-only, and the hex-form 64:ff9b::/96 NAT64 addresses the dotted-quad
+  // branch above only catches when they are written with an embedded IPv4.
+  if ((leading & 0xe000) !== 0x2000) return true;
+
+  // Inside 2000::/3, the tunnelling and documentation blocks. These are the
+  // holes the previous prefix list left open: 6to4 and Teredo both carry an
+  // arbitrary IPv4 address inside an address that otherwise reads as ordinary
+  // global unicast, so `2002:0a00:0001::` is a route to 10.0.0.1 that passed
+  // every check above.
+  if (leading === 0x2002) return true; // 2002::/16 — 6to4
+  // The second hextet decides between the special-purpose 2001:0::/32 (Teredo)
+  // and 2001:db8::/32 (documentation) and ordinary 2001: allocations such as
+  // Google's 2001:4860::/32. An omitted hextet ('2001::…' after compression)
+  // parses as 0, which is exactly the Teredo case.
+  const secondHextet = hextets[1] ?? '';
+  const second = parseInt(secondHextet || '0', 16);
+  if (leading === 0x2001 && !Number.isNaN(second)) {
+    if (second === 0x0000) return true; // 2001:0::/32 — Teredo
+    if (second === 0x0db8) return true; // 2001:db8::/32 — documentation
+  }
   return false;
 }
 

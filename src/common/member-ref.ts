@@ -18,6 +18,17 @@ export interface MemberRef {
  * Maps a `Profile` row to a `MemberRef`, or `null` when there isn't one
  * (e.g. an optional join came back empty) — lets callers `?? null` through
  * without a separate null check.
+ *
+ * `avatarUrl` honours the member's `photoVisible` toggle: it is `null` once
+ * the member has turned their photo off, mirroring `gateAvatarUrl` in
+ * `profiles/profile-response.ts` so the member's face can't render next to a
+ * feed post or as an event host after they hid it. This is the single choke
+ * point every cross-domain `MemberRef` flows through (feed authors, event
+ * hosts, `new_member` actors), so the gate lives here rather than at each
+ * caller. There is deliberately no owner-self exception: these compact refs
+ * carry no viewer identity, so a hidden photo is hidden even from its own
+ * member on these surfaces (the owner still sees it on their full profile,
+ * which uses the `isOwner`-aware `gateAvatarUrl`).
  */
 export function toMemberRef(
   profile: Profile | undefined | null,
@@ -28,7 +39,7 @@ export function toMemberRef(
     firstName: profile.firstName,
     lastName: profile.lastName,
     pronouns: profile.pronouns,
-    avatarUrl: toImageUrl(profile.avatarUrl),
+    avatarUrl: profile.photoVisible ? toImageUrl(profile.avatarUrl) : null,
   };
 }
 

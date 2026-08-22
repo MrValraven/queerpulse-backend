@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { GovernanceController } from './governance.controller';
+import { AdminGovernanceController } from './admin-governance.controller';
 import { GovernanceFinanceService } from './governance-finance.service';
 import { GovernanceOverviewService } from './governance-overview.service';
 import { GovernanceProposalService } from './governance-proposal.service';
@@ -30,7 +31,11 @@ import { UsersModule } from '../users/users.module';
     ]),
     UsersModule,
   ],
-  controllers: [GovernanceController],
+  // `AdminGovernanceController` (`/admin/governance/*`) carries the staff
+  // routes that used to live on `GovernanceController` under an `admin/*`
+  // path prefix — see BE-COM-14. It reuses this module's services, so it is
+  // registered here rather than in a separate top-level module.
+  controllers: [GovernanceController, AdminGovernanceController],
   providers: [
     GovernanceFinanceService,
     GovernanceOverviewService,

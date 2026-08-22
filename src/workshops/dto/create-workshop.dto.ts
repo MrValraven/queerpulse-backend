@@ -8,6 +8,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -16,11 +17,20 @@ import {
 } from 'class-validator';
 import { WorkshopHeroTint, WorkshopMode } from '../entities/workshop.entity';
 
+// A ceiling, not a policy: above any realistic course fee, below the point
+// where a number formats as scientific notation on a card.
+const MAX_WORKSHOP_AMOUNT = 1_000_000;
+
 export class WorkshopTierDto {
   @IsString() @MinLength(1) @MaxLength(120) label!: string;
 
   // Numeric, not the frontend's formatted "€180" — the client formats it.
-  @IsNumber() @Min(0) amount!: number;
+  // Bounded to cents so `Intl.NumberFormat` never has to round a third decimal
+  // away, and capped so a typo cannot render as scientific notation.
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(MAX_WORKSHOP_AMOUNT)
+  amount!: number;
 
   @IsOptional() @IsBoolean() sliding?: boolean;
 }
@@ -66,9 +76,16 @@ export class CreateWorkshopDto {
   @Type(() => Number) @IsInt() @Min(1) @Max(52) weeks!: number;
   @Type(() => Number) @IsInt() @Min(2) @Max(40) spotsTotal!: number;
 
-  @IsNumber() @Min(0) price!: number;
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(MAX_WORKSHOP_AMOUNT)
+  price!: number;
 
-  @IsOptional() @IsString() @MaxLength(10) currency?: string;
+  // ISO 4217, uppercase. Unlike the jobs board (whose form still sends a
+  // currency symbol), the workshops client already hands this straight to
+  // `Intl.NumberFormat` and defaults it to `"EUR"`, so a symbol or a word here
+  // was never renderable — it threw or silently fell back.
+  @IsOptional() @IsString() @Matches(/^[A-Z]{3}$/) currency?: string;
 
   @IsOptional() @IsString() @MaxLength(200) priceSub?: string;
   @IsOptional() @IsString() @MaxLength(100) startDate?: string;

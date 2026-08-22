@@ -4,7 +4,10 @@ import { Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { PAGE_SIZE } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
-import { ResourceSuggestion, ResourceSuggestionStatus } from './entities/resource-suggestion.entity';
+import {
+  ResourceSuggestion,
+  ResourceSuggestionStatus,
+} from './entities/resource-suggestion.entity';
 import {
   AdminResourceSuggestionDTO,
   AdminResourceSuggestionsPageDTO,
@@ -77,7 +80,12 @@ export class AdminResourceSuggestionsService {
     adminUserId: string,
     note?: string,
   ): Promise<AdminResourceSuggestionDTO> {
-    return this.decide(id, ResourceSuggestionStatus.Approved, adminUserId, note);
+    return this.decide(
+      id,
+      ResourceSuggestionStatus.Approved,
+      adminUserId,
+      note,
+    );
   }
 
   decline(
@@ -85,7 +93,12 @@ export class AdminResourceSuggestionsService {
     adminUserId: string,
     note?: string,
   ): Promise<AdminResourceSuggestionDTO> {
-    return this.decide(id, ResourceSuggestionStatus.Declined, adminUserId, note);
+    return this.decide(
+      id,
+      ResourceSuggestionStatus.Declined,
+      adminUserId,
+      note,
+    );
   }
 
   archive(
@@ -93,7 +106,12 @@ export class AdminResourceSuggestionsService {
     adminUserId: string,
     note?: string,
   ): Promise<AdminResourceSuggestionDTO> {
-    return this.decide(id, ResourceSuggestionStatus.Archived, adminUserId, note);
+    return this.decide(
+      id,
+      ResourceSuggestionStatus.Archived,
+      adminUserId,
+      note,
+    );
   }
 
   private async decide(

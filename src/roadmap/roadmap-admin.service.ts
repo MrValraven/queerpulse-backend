@@ -66,9 +66,42 @@ import { computeVoteBreakdown } from './roadmap-vote-breakdown.util';
  * actor still writes a valid, system-attributed audit row (`actorId: null`,
  * `actorLabel: 'System'`) rather than throwing. See `RoadmapAdminService.audit`.
  */
+/**
+ * The " (seed votes 40 → 400)" suffix appended to an item/idea update's audit
+ * line when — and only when — the seed vote count actually moved (BE-COM-38).
+ *
+ * `roadmap_item.votes` / `roadmap_idea.votes` are a manually settable seed
+ * that the public roadmap ADDS to the live `roadmap_votes` count, so an admin
+ * editing it changes the community demand members are shown. The audit row
+ * used to say only `Updated "<name>"`, leaving no trace of the number.
+ */
+function describeSeedVoteChange(before: number, after: number): string {
+  return before === after ? '' : ` (seed votes ${before} → ${after})`;
+}
+
+/** Row cap for the admin board's three unpaginated collections (items,
+ *  ideas, team roster). Far above real scale; purely so none of the three
+ *  queries can be unbounded (BE-COM-36). */
+const MAX_ADMIN_BOARD_ROWS = 500;
+
+/** Attribution for an action with no acting admin (a seed, a migration). */
+const SYSTEM_ACTOR_LABEL = 'System';
+/** Attribution for an admin whose `profiles` row can't be resolved. */
+const STAFF_ACTOR_LABEL = 'Staff';
+
 export interface RoadmapActor {
   actorId: string;
-  actorLabel: string;
+  /**
+   * Optional pre-resolved display label. The controller deliberately does NOT
+   * supply one: it only ever holds `CurrentUserData`, whose only human-readable
+   * field is the admin's *email*, and writing that into `roadmap_audit_log`
+   * exposed staff emails to every Moderator through `GET /admin/roadmap/audit`
+   * and its CSV export (BE-COM-28). The label is resolved from
+   * `profiles` via `MemberLookup` inside this service instead — see
+   * `resolveActorLabel` — and this field stays only as a fallback for callers
+   * (seeds, tests) that already know the name.
+   */
+  actorLabel?: string;
 }
 
 /**
@@ -130,6 +163,63 @@ export class RoadmapAdminService {
     return ref ? `${ref.firstName} ${ref.lastName}`.trim() : null;
   }
 
+  /**
+   * The human-readable "who" written onto an audit row (and onto a slip's
+   * `movedByName`). Resolved from `profiles` through `MemberLookup`, the same
+   * choke point every other audit surface in the repo uses
+   * (`ModAuditService.namesForUserIds`) — never from `CurrentUserData.email`,
+   * which `users` keeps `select: false` for a reason (BE-COM-28).
+   *
+   * Falls back to any label the caller already resolved (seeds/tests), then to
+   * a neutral `Staff` for an admin with no profile row, and to `System` for a
+   * system-attributed action with no actor at all. Never returns an email.
+   */
+  private async resolveActorLabel(
+    actor: RoadmapActor | undefined,
+  ): Promise<string> {
+    if (!actor) return SYSTEM_ACTOR_LABEL;
+    const refs = await new MemberLookup(this.profiles).byUserIds([
+      actor.actorId,
+    ]);
+    return (
+      this.nameOf(refs.get(actor.actorId)) ??
+      actor.actorLabel ??
+      STAFF_ACTOR_LABEL
+    );
+  }
+
+  /**
+   * Read-time resolution of the stored `actorLabel` for a page of audit rows.
+   * Rows written before BE-COM-28 hold the acting admin's *email*, so any row
+   * that carries an `actorId` has its label re-resolved from `profiles` and,
+   * when no profile matches, replaced with the neutral `Staff` rather than
+   * falling through to the stored (possibly email) value. Only
+   * system-attributed rows (`actorId === null`, label `System`) keep what was
+   * written. One batched query per page — no N+1.
+   */
+  private async resolvedActorLabels(
+    rows: RoadmapAuditLog[],
+  ): Promise<Map<string, string>> {
+    const actorIds = [
+      ...new Set(
+        rows
+          .map((row) => row.actorId)
+          .filter((actorId): actorId is string => actorId !== null),
+      ),
+    ];
+    const refs = await new MemberLookup(this.profiles).byUserIds(actorIds);
+    const labels = new Map<string, string>();
+    for (const row of rows) {
+      labels.set(
+        row.id,
+        row.actorId === null
+          ? row.actorLabel
+          : (this.nameOf(refs.get(row.actorId)) ?? STAFF_ACTOR_LABEL),
+      );
+    }
+    return labels;
+  }
+
   private toCommentDTO(comment: RoadmapItemComment): AdminItemCommentDTO {
     return {
       id: comment.id,
@@ -157,7 +247,7 @@ export class RoadmapAdminService {
     try {
       await logAudit(manager, {
         actorId: actor?.actorId ?? null,
-        actorLabel: actor?.actorLabel ?? 'System',
+        actorLabel: await this.resolveActorLabel(actor),
         action,
       });
     } catch {
@@ -211,9 +301,24 @@ export class RoadmapAdminService {
   async getAdmin(): Promise<RoadmapAdminResponse> {
     const [allItems, allIdeas, teamRows, auditRows, settingsRow] =
       await Promise.all([
-        this.items.find({ order: { column: 'ASC', sortOrder: 'ASC' } }),
-        this.ideas.find({ order: { sortOrder: 'ASC' } }),
-        this.team.find({ order: { sortOrder: 'ASC' } }),
+        // Bounded (BE-COM-36): the board loaded every item, idea and team row
+        // with no `take`, and each item then fans out into vote counts, a
+        // community vote breakdown, comments and dependency edges. The idea
+        // queue in particular is member-writable (`POST /roadmap/ideas`), so
+        // it is the one that actually grows. `MAX_ADMIN_BOARD_ROWS` sits far
+        // above real scale — the board is a kanban view, not an export.
+        this.items.find({
+          order: { column: 'ASC', sortOrder: 'ASC' },
+          take: MAX_ADMIN_BOARD_ROWS,
+        }),
+        this.ideas.find({
+          order: { sortOrder: 'ASC' },
+          take: MAX_ADMIN_BOARD_ROWS,
+        }),
+        this.team.find({
+          order: { sortOrder: 'ASC' },
+          take: MAX_ADMIN_BOARD_ROWS,
+        }),
         this.auditLog.find({ order: { createdAt: 'DESC' }, take: 100 }),
         this.settings.findOne({ where: { id: 1 } }),
       ]);
@@ -283,7 +388,12 @@ export class RoadmapAdminService {
     const team = teamRows.map((member) =>
       toTeamMemberDTO(member, this.nameOf(nameRefs.get(member.userId)) ?? ''),
     );
-    const audit = auditRows.map(toAuditEntryDTO);
+    // Same read-time actor-label resolution as `getAudit`/`getAuditCsv` — rows
+    // written before BE-COM-28 hold the acting admin's email.
+    const auditLabels = await this.resolvedActorLabels(auditRows);
+    const audit = auditRows.map((row) =>
+      toAuditEntryDTO(row, auditLabels.get(row.id)),
+    );
 
     return {
       items,
@@ -337,11 +447,17 @@ export class RoadmapAdminService {
           from: item.targetQuarter ?? '',
           to: dto.targetQuarter ?? '',
           reason: dto.slipReason,
-          movedByName: actor?.actorLabel ?? 'System',
+          movedByName: await this.resolveActorLabel(actor),
           movedAt: new Date().toISOString(),
         },
       ];
     }
+
+    // The seed `votes` column is added to the live `roadmap_votes` count on
+    // the public roadmap, so editing it silently changes the community demand
+    // members are shown. Captured before the merge so the audit line can name
+    // the old and new value (BE-COM-38).
+    const previousSeedVotes = item.votes;
 
     // `slipReason` isn't a mapped column — TypeORM's `save()` only persists
     // entity columns, so carrying it through onto `item` here is harmless.
@@ -364,7 +480,10 @@ export class RoadmapAdminService {
     }
 
     const saved = await this.items.save(item);
-    await this.audit(actor, `Updated "${saved.name}"`);
+    await this.audit(
+      actor,
+      `Updated "${saved.name}"${describeSeedVoteChange(previousSeedVotes, saved.votes)}`,
+    );
     return toAdminItemDTO(saved, await this.buildItemExtras(saved));
   }
 
@@ -682,13 +801,19 @@ export class RoadmapAdminService {
   ): Promise<AdminRoadmapIdeaDTO> {
     const idea = await this.loadIdeaOr404(id);
     const previousStatus = idea.status;
+    // See `updateItem`: the seed vote count is added to the live tally on the
+    // public roadmap, so a change to it is named in the audit line (BE-COM-38).
+    const previousSeedVotes = idea.votes;
     Object.assign(idea, dto);
     if (dto.status === RoadmapIdeaStatus.Published) {
       idea.declineReason = null;
       idea.declineNote = null;
     }
     const saved = await this.ideas.save(idea);
-    await this.audit(actor, `Updated idea "${saved.text}"`);
+    await this.audit(
+      actor,
+      `Updated idea "${saved.text}"${describeSeedVoteChange(previousSeedVotes, saved.votes)}`,
+    );
     // Tell the member who submitted this idea that its status changed (e.g.
     // pending → published, or → dismissed). Only when there's a real submitter
     // and the status genuinely moved. No actor: an admin decision reads as the
@@ -1144,7 +1269,8 @@ export class RoadmapAdminService {
       order: { createdAt: 'DESC' },
       take: limit,
     });
-    return rows.map(toAuditEntryDTO);
+    const labels = await this.resolvedActorLabels(rows);
+    return rows.map((row) => toAuditEntryDTO(row, labels.get(row.id)));
   }
 
   // Raw CSV string — the controller (Task A7) is responsible for the
@@ -1161,11 +1287,12 @@ export class RoadmapAdminService {
       order: { createdAt: 'DESC' },
       take: 5000,
     });
+    const labels = await this.resolvedActorLabels(rows);
     const table = [
       ['when', 'who', 'what'],
       ...rows.map((row) => [
         row.createdAt.toISOString(),
-        row.actorLabel,
+        labels.get(row.id) ?? STAFF_ACTOR_LABEL,
         row.action,
       ]),
     ];

@@ -6,7 +6,36 @@ import { Request, Response } from 'express';
 import { setOAuthStateCookie } from '../auth-cookies';
 import { OAuthCallbackError } from '../errors/oauth-callback.error';
 import { OAuthProfileError } from '../errors/oauth-profile.error';
-import { encodeOAuthState } from '../oauth-state';
+import { encodeOAuthState, sanitizeTermsVersion } from '../oauth-state';
+
+/**
+ * The OAuth 2.0 error codes an authorization endpoint may return
+ * (RFC 6749 §4.1.2.1), plus Google's `admin_policy_enforced`. Anything outside
+ * this set is collapsed to `oauth_failed`.
+ *
+ * `?error=` is attacker-controllable on a direct hit of the callback URL, and
+ * the value is reflected into the sign-in redirect. `signInErrorUrl` puts it
+ * through `searchParams.set`, so it is percent-encoded and cannot break out of
+ * the query, but an unbounded string still ends up in a URL the SPA cannot map
+ * to any copy, in the browser's history, and in our access logs. An allowlist
+ * costs nothing and keeps the vocabulary the SPA renders finite.
+ */
+const GOOGLE_OAUTH_ERROR_CODES = new Set([
+  'access_denied',
+  'admin_policy_enforced',
+  'invalid_request',
+  'invalid_scope',
+  'server_error',
+  'temporarily_unavailable',
+  'unauthorized_client',
+  'unsupported_response_type',
+]);
+
+function safeOAuthErrorCode(raw: unknown): string {
+  return typeof raw === 'string' && GOOGLE_OAUTH_ERROR_CODES.has(raw)
+    ? raw
+    : 'oauth_failed';
+}
 
 @Injectable()
 export class GoogleAuthGuard extends AuthGuard('google') {
@@ -14,7 +43,10 @@ export class GoogleAuthGuard extends AuthGuard('google') {
     super();
   }
 
-  getAuthenticateOptions(context: ExecutionContext): { state?: string } {
+  getAuthenticateOptions(context: ExecutionContext): {
+    state?: string;
+    prompt?: string;
+  } {
     const req = context.switchToHttp().getRequest<Request>();
 
     // Two legs share this guard: the outbound `/auth/google` (no `state` yet) and
@@ -34,10 +66,13 @@ export class GoogleAuthGuard extends AuthGuard('google') {
     // 18+ self-attestation, ticked before the client sends us here. Only the
     // literal "1" attests, so a stray `?ageAttested=0` can't sneak through.
     const ageAttested = req.query?.ageAttested === '1';
-    const termsVersion =
-      typeof req.query?.termsVersion === 'string'
-        ? req.query.termsVersion
-        : undefined;
+    // Clamped, not copied verbatim: this ends up in `users.terms_version`
+    // (`varchar(32)`), so an over-long value from a crafted link failed the
+    // INSERT after Google consent with a raw 500. See `sanitizeTermsVersion`.
+    const termsVersion = sanitizeTermsVersion(req.query?.termsVersion);
+    // Step-up re-auth (see `OAuthState.reauth`'s doc comment). Only the
+    // literal "1" opts in, same guard as `ageAttested`.
+    const reauth = req.query?.reauth === '1';
 
     // Bind this authorization request to the browser: a random nonce lives in
     // BOTH a short-lived httpOnly cookie and the OAuth `state` param; the
@@ -58,8 +93,16 @@ export class GoogleAuthGuard extends AuthGuard('google') {
       nonce,
       ageAttested,
       termsVersion,
+      reauth,
     });
-    return state ? { state } : {};
+    return {
+      ...(state ? { state } : {}),
+      // Forces Google to show its login screen even if the browser already
+      // has an active Google session — proof the caller can complete a fresh
+      // login RIGHT NOW, not just that a cookie is still valid. Only set for
+      // the reauth leg; ordinary sign-in never forces re-entry.
+      ...(reauth ? { prompt: 'login' } : {}),
+    };
   }
 
   // Convert OAuth/profile failures into a redirectable error instead of the
@@ -76,11 +119,10 @@ export class GoogleAuthGuard extends AuthGuard('google') {
     }
     if (err || !user) {
       // Prefer Google's own error code (e.g. `access_denied` when the user
-      // declines consent) when it round-tripped in the query.
+      // declines consent) when it round-tripped in the query, but only from
+      // the known vocabulary — see GOOGLE_OAUTH_ERROR_CODES.
       const req = context.switchToHttp().getRequest<Request>();
-      const code =
-        typeof req.query?.error === 'string' ? req.query.error : 'oauth_failed';
-      throw new OAuthCallbackError(code);
+      throw new OAuthCallbackError(safeOAuthErrorCode(req.query?.error));
     }
     return user;
   }

@@ -60,8 +60,12 @@ export class MessagingService {
     );
   }
 
-  markRead(conversationId: string, userId: string): Promise<{ ok: true }> {
-    return this.conversationsService.markRead(conversationId, userId);
+  markRead(
+    conversationId: string,
+    userId: string,
+    options?: { upToMessageId?: string; lastReadAt?: string },
+  ): Promise<{ ok: true }> {
+    return this.conversationsService.markRead(conversationId, userId, options);
   }
 
   markDelivered(conversationId: string, userId: string): Promise<{ ok: true }> {
@@ -114,6 +118,18 @@ export class MessagingService {
     return this.conversationsService.canJoinConversationLive(
       conversationId,
       userId,
+    );
+  }
+
+  /** DM rooms a block must evict both members from — see
+   *  `ConversationsService.directConversationIdsBetween`. */
+  directConversationIdsBetween(
+    userId: string,
+    otherUserId: string,
+  ): Promise<string[]> {
+    return this.conversationsService.directConversationIdsBetween(
+      userId,
+      otherUserId,
     );
   }
 

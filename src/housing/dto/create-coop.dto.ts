@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsEnum,
@@ -8,6 +9,7 @@ import {
   IsString,
   Matches,
   Max,
+  MaxLength,
   Min,
   ValidateNested,
 } from 'class-validator';
@@ -17,19 +19,24 @@ import { FaceDto } from './face.dto';
 export class CreateCoopDto {
   @IsString()
   @Matches(/^[a-z0-9-]+$/)
+  @MaxLength(120)
   slug!: string;
 
   @IsString()
+  @MaxLength(200)
   name!: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(200)
   nameEm?: string;
 
   @IsString()
+  @MaxLength(120)
   city!: string;
 
   @IsString()
+  @MaxLength(120)
   area!: string;
 
   @IsInt()
@@ -57,6 +64,7 @@ export class CreateCoopDto {
   formingSince?: string;
 
   @IsString()
+  @MaxLength(5000)
   description!: string;
 
   @IsOptional()
@@ -78,6 +86,7 @@ export class CreateCoopDto {
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(40)
   @ValidateNested({ each: true })
   @Type(() => FaceDto)
   faces?: FaceDto[];

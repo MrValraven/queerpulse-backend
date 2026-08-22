@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
   Injectable,
   Logger,
   NotFoundException,
@@ -420,12 +421,17 @@ export class JoinRequestsService {
     // never "sent an email for an approval that then rolled back".
     if (status === PlatformJoinRequestStatus.Approved && result.inviteCode) {
       await this.sendApprovalEmail(
+        id,
         result.applicantEmail,
         result.applicantName,
         result.inviteCode,
       );
     } else if (status === PlatformJoinRequestStatus.Declined) {
-      await this.sendDeclineEmail(result.applicantEmail, result.applicantName);
+      await this.sendDeclineEmail(
+        id,
+        result.applicantEmail,
+        result.applicantName,
+      );
     }
 
     return result.view;
@@ -437,8 +443,15 @@ export class JoinRequestsService {
    * `VerificationService.bulkDecide`'s per-item pattern (batch size capped at
    * the DTO layer via `JOIN_REQUEST_BULK_ACTION_CAP`): a failure on one id
    * (not found, already reviewed, concurrently claimed, missing decline
-   * reason) lands that id in `failed` with the thrown error's message, and
-   * every other id is still attempted.
+   * reason) lands that id in `failed`, and every other id is still attempted.
+   *
+   * ONLY an `HttpException` message reaches `failed[].reason`. Those are our
+   * own deliberate, reviewer-facing sentences. Anything else is an internal
+   * failure whose message is not written for a human reader: a
+   * `QueryFailedError`, for instance, carries the Postgres error text plus the
+   * offending constraint and table name, and `createInviteForApproval` has no
+   * code-collision retry, so a 23505 is a live possibility here. Those are
+   * logged with their stack and reported as a flat "Internal error".
    *
    * Deliberately sequential, not `Promise.all` — each `review()` call is its
    * own transaction against a shared table, and running many of them
@@ -467,10 +480,16 @@ export class JoinRequestsService {
         await this.review(id, reviewerId, status, declineReason);
         succeeded.push(id);
       } catch (err) {
-        failed.push({
-          id,
-          reason: err instanceof Error ? err.message : 'Unknown error',
-        });
+        if (err instanceof HttpException) {
+          failed.push({ id, reason: err.message });
+          continue;
+        }
+        this.logger.error(
+          `Bulk review failed for join request ${id}: ${
+            err instanceof Error ? (err.stack ?? err.message) : String(err)
+          }`,
+        );
+        failed.push({ id, reason: 'Internal error' });
       }
     }
     return { succeeded, failed };
@@ -527,8 +546,15 @@ export class JoinRequestsService {
    * thrown (mirrors `IntakesService.notifySubmitter` and
    * `NewsletterService.sendConfirmation`). The admin queue still shows the
    * invite code/link as a manual fallback either way.
+   *
+   * The failure log names the join-request ID, never the address. An applicant
+   * has no account and no consent record with us, and error-level lines are the
+   * ones most likely to be forwarded off-platform (log explorer, Sentry
+   * breadcrumbs) and retained indefinitely. The id resolves to the address in
+   * one query for anyone who legitimately needs it.
    */
   private async sendApprovalEmail(
+    joinRequestId: string,
     applicantEmail: string,
     applicantName: string,
     inviteCode: string,
@@ -542,7 +568,7 @@ export class JoinRequestsService {
       });
     } catch (error) {
       this.logger.error(
-        `Join request approved for ${applicantEmail} but the invite email ` +
+        `Join request ${joinRequestId} approved but the invite email ` +
           `failed to send: ${String(error)}`,
       );
     }
@@ -553,9 +579,12 @@ export class JoinRequestsService {
    * `sendApprovalEmail`'s shape exactly: sent after the transaction has
    * committed, logged (not thrown) on failure. Deliberately soft and
    * generic, with no reason field in the params (P7 decision) — an
-   * applicant never learns which specific reason a reviewer picked.
+   * applicant never learns which specific reason a reviewer picked. The
+   * failure log names the join-request ID, not the address, for the reason
+   * given on `sendApprovalEmail`.
    */
   private async sendDeclineEmail(
+    joinRequestId: string,
     applicantEmail: string,
     applicantName: string,
   ): Promise<void> {
@@ -565,7 +594,7 @@ export class JoinRequestsService {
       });
     } catch (error) {
       this.logger.error(
-        `Join request declined for ${applicantEmail} but the notice email ` +
+        `Join request ${joinRequestId} declined but the notice email ` +
           `failed to send: ${String(error)}`,
       );
     }

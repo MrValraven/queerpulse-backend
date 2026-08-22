@@ -88,7 +88,7 @@ export interface RoadmapGuide {
 
 /**
  * One roadmap card — backlog, planned, building, or shipped — backing
- * `GET /roadmap` (public) and `GET /roadmap/admin` (the full admin board).
+ * `GET /roadmap` (public) and `GET /admin/roadmap` (the full admin board).
  * Mirrors the frontend's `AdminRoadmapItemDTO` in
  * `queerpulse/src/features/admin/api/roadmapAdmin.api.ts`; the public-facing
  * subset mirrors `ShippedItem`/`BuildingItem`/`PlannedItem` in
@@ -96,7 +96,7 @@ export interface RoadmapGuide {
  * internal notes; `publicNote` holds the warm one-liner shown to members.
  * `ownerId` is a plain FK-less column — no eager relation — because the
  * admin service resolves `ownerName` from `users` in one batch query per
- * `GET /roadmap/admin` call rather than joining per row.
+ * `GET /admin/roadmap` call rather than joining per row.
  */
 @Entity('roadmap_items')
 @Index('IDX_roadmap_items_column_sort', ['column', 'sortOrder'])

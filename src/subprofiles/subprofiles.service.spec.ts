@@ -1684,6 +1684,83 @@ describe('SubprofilesService', () => {
     });
   });
 
+  // M1 (storage-key impersonation): a storage key embeds its uploader's id, and
+  // the interceptor rejects a body that references a foreign key — EXCEPT for an
+  // enumerated shared handler (a co-owned persona is editable by more than one
+  // member), where the resolved-URL form is passed through and the real decision
+  // is delegated here. The rule enforced by `assertNoForeignUploadIntroduced`: a
+  // foreign upload is allowed ONLY when it is the value ALREADY stored on the
+  // persona (a genuine no-op re-save by a collaborator); pointing a field at a
+  // NEW foreign upload is refused, exactly as the interceptor would for a
+  // single-editor surface.
+  describe('foreign upload ownership (M1)', () => {
+    const REQUESTER_ID = '11111111-1111-1111-1111-111111111111';
+    const OTHER_ID = '22222222-2222-2222-2222-222222222222';
+    const FILE_SEGMENT = '33333333-3333-3333-3333-333333333333';
+    // A well-formed key whose embedded owner segment is NOT the requester.
+    const FOREIGN_KEY = `avatars/${OTHER_ID}/${FILE_SEGMENT}.jpg`;
+
+    it('update rejects an avatar key the persona does not already carry', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ userId: REQUESTER_ID, avatarUrl: null }),
+      );
+      await expect(
+        service.update(REQUESTER_ID, 'sp-1', { avatarUrl: FOREIGN_KEY }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('update allows re-saving the foreign avatar key already stored (co-owner no-op)', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ userId: REQUESTER_ID, avatarUrl: FOREIGN_KEY }),
+      );
+      await expect(
+        service.update(REQUESTER_ID, 'sp-1', { avatarUrl: FOREIGN_KEY }),
+      ).resolves.toBeDefined();
+    });
+
+    it('replaceSection rejects an item image the section does not already hold', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({
+          userId: REQUESTER_ID,
+          kind: SubprofileKind.Developer,
+        }),
+      );
+      manager.find.mockImplementation((entity: unknown) =>
+        entity === SubprofileItem ? Promise.resolve([]) : Promise.resolve([]),
+      );
+      await expect(
+        service.replaceSection(REQUESTER_ID, 'sp-1', 'projects', [
+          { title: 'x', imageUrl: FOREIGN_KEY },
+        ]),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('replaceSection allows re-saving an item image the section already holds', async () => {
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({
+          userId: REQUESTER_ID,
+          kind: SubprofileKind.Developer,
+        }),
+      );
+      const stored = makeItem({
+        id: 'it-1',
+        section: SubprofileSection.Projects,
+        imageUrl: FOREIGN_KEY,
+        position: 0,
+      });
+      manager.find.mockImplementation((entity: unknown) =>
+        entity === SubprofileItem
+          ? Promise.resolve([stored])
+          : Promise.resolve([]),
+      );
+      await expect(
+        service.replaceSection(REQUESTER_ID, 'sp-1', 'projects', [
+          { title: 'x', imageUrl: FOREIGN_KEY },
+        ]),
+      ).resolves.toBeDefined();
+    });
+  });
+
   describe('replaceSection', () => {
     it('rejects a section that is not allowed for the kind', async () => {
       subprofiles.findOne.mockResolvedValue(

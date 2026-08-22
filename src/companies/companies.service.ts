@@ -34,6 +34,7 @@ import {
   CompanyValue,
   CompanyWorkItem,
 } from './entities/company.entity';
+import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 
 // `imageUrl` is optional on the request shape (`CompanyWorkItemDto`) but
 // non-nullable-and-required-to-be-`null`-or-`string` on the entity column —
@@ -248,6 +249,27 @@ export class CompaniesService {
       throw new ForbiddenException('Only the owner can update this company');
     }
 
+    // Runs BEFORE any mutation (`CompaniesController.update` is on
+    // `SHARED_UPLOAD_HANDLERS`, so the interceptor's foreign-upload check is
+    // exempted for this handler): a co-manager may re-save a work item whose
+    // image a different collaborator uploaded, but may not point any work
+    // item's image at a NEW upload that is not theirs. Each incoming per-item
+    // image is compared against the full set of currently stored work-item
+    // image keys, so a re-sent stored key passes while a brand-new foreign key
+    // is refused.
+    if (dto.work !== undefined) {
+      const alreadyStoredWorkImageKeys = (company.work ?? []).map(
+        (workItem) => workItem.imageUrl,
+      );
+      for (const incomingWorkItem of dto.work) {
+        assertNoForeignUploadIntroduced(
+          userId,
+          incomingWorkItem.imageUrl,
+          alreadyStoredWorkImageKeys,
+        );
+      }
+    }
+
     Object.assign(company, {
       ...(dto.nameText !== undefined ? { nameText: dto.nameText } : {}),
       ...(dto.tagline !== undefined ? { tagline: dto.tagline } : {}),
@@ -299,6 +321,7 @@ export class CompaniesService {
     dto: CreateReviewInput,
   ): Promise<CompanyReviewDTO> {
     const company = await this.loadOr404(slug);
+    await this.assertNotOwnCompany(company, authorId);
 
     try {
       const saved = await this.reviews.save(
@@ -318,6 +341,32 @@ export class CompaniesService {
         throw new ConflictException('You have already reviewed this company');
       }
       throw err;
+    }
+  }
+
+  /**
+   * BE-HSG-15: nobody reviews the company they run. The owner AND anyone on the
+   * company's team are blocked, because both can speak for the company on its
+   * own page. The `UQ_company_reviews (company_id, author_id)` constraint only
+   * ever stopped the same person reviewing TWICE; it never stopped the first,
+   * self-authored one, which counted toward the `reviewScore`/`reviewBars`
+   * shown on every card. Mirrors the equivalent block on business listings
+   * (`DirectoryService.addReview`).
+   */
+  private async assertNotOwnCompany(
+    company: Company,
+    authorId: string,
+  ): Promise<void> {
+    if (company.ownerId === authorId) {
+      throw new ForbiddenException('You cannot review your own company');
+    }
+    const onTeam = await this.team.exists({
+      where: { companyId: company.id, userId: authorId },
+    });
+    if (onTeam) {
+      throw new ForbiddenException(
+        'You cannot review a company you are on the team of',
+      );
     }
   }
 

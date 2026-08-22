@@ -8,6 +8,10 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
+import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+} from '../common/image-url';
 import { MessagingService } from '../messaging/messaging.service';
 import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
@@ -91,6 +95,11 @@ const CREATE_DTO = {
   title: 'Sunny room',
   city: 'Lisbon',
   rentEuros: 500,
+  // Required on `CreateHousingListingDto`, and read without a fallback by
+  // `assessHousingRisk` (`accessibilityInfo.trim()` for the
+  // `missing_accessibility_info` signal) — omitting it here only ever passed
+  // because the scorer used to be handed a defaulted value.
+  accessibilityInfo: '',
 } as never;
 
 describe('HousingListingsService', () => {
@@ -160,7 +169,37 @@ describe('HousingListingsService', () => {
     }).compile();
 
     service = module.get(HousingListingsService);
+    // `toHousingListingDTO` resolves every gallery storage key through
+    // `toImageUrl`, which throws `Service temporarily unavailable` when the
+    // base was never wired. Only fixtures WITH a gallery hit it, which is why
+    // this bites one test and not the rest.
+    setImageUrlBase('https://api.test');
   });
+
+  afterEach(() => {
+    resetImageUrlBaseForTesting();
+  });
+
+  /**
+   * `HousingListingsService` loads owner-managed listings through
+   * `loadOwnedOr404`, a single owner-scoped `findOne({ where: { ref, ownerId }})`
+   * that replaced the old load-then-`assertOwner` pair. A stranger's `ref`
+   * therefore misses the query entirely, so the repository mock has to honour
+   * the `ownerId` in the where-clause instead of returning the row to anyone.
+   */
+  function mockOwnedFindOne(listing: HousingListing): void {
+    listings.findOne.mockImplementation(
+      (options: { where: { ref?: string; ownerId?: string } }) => {
+        const { ref, ownerId } = options.where;
+        if (ref !== undefined && ref !== listing.ref)
+          return Promise.resolve(null);
+        if (ownerId !== undefined && ownerId !== listing.ownerId) {
+          return Promise.resolve(null);
+        }
+        return Promise.resolve(listing);
+      },
+    );
+  }
 
   describe('create', () => {
     it('allocates a QPH ref from the sequence and forces Review status', async () => {
@@ -182,6 +221,37 @@ describe('HousingListingsService', () => {
       );
       expect(result.ref).toBe(`QPH-${new Date().getFullYear()}-0007`);
       expect(result.status).toBe(HousingListingStatus.Review);
+    });
+
+    // BE-HSG-07: LGBTQ+ affirming is a mandatory universal baseline, carried by
+    // the pledge every lister accepts before posting — never a per-listing
+    // opt-in. The submitted boolean is accepted (so `forbidNonWhitelisted`
+    // doesn't 400 an older client) and ignored.
+    it('forces lgbtqFriendly true regardless of what the submission sent', async () => {
+      listings.save.mockImplementation((row: unknown) =>
+        Promise.resolve(makeListing({ ...(row as object) })),
+      );
+
+      await service.create('owner-1', {
+        ...(CREATE_DTO as object),
+        lgbtqFriendly: false,
+      } as never);
+
+      expect(listings.create).toHaveBeenCalledWith(
+        expect.objectContaining({ lgbtqFriendly: true }),
+      );
+    });
+
+    // The affirming pledge gates posting at all — no pledge, no listing.
+    it('requires the affirming pledge before anything is allocated', async () => {
+      affirmingPledge.requireAccepted.mockRejectedValue(
+        new ForbiddenException('AFFIRMING_PLEDGE_REQUIRED'),
+      );
+
+      await expect(service.create('owner-1', CREATE_DTO)).rejects.toThrow(
+        ForbiddenException,
+      );
+      expect(listings.save).not.toHaveBeenCalled();
     });
   });
 
@@ -209,16 +279,22 @@ describe('HousingListingsService', () => {
       );
     });
 
-    it('403s when the caller is not the owner', async () => {
-      listings.findOne.mockResolvedValue(makeListing({ ownerId: 'owner-1' }));
+    // Ownership is folded into the query (`loadOwnedOr404`), so someone else's
+    // listing 404s exactly like a non-existent ref rather than 403-ing. Refs are
+    // a monotonic sequence, so a 403/404 split would be an existence oracle.
+    it('404s (not 403s) when the caller is not the owner', async () => {
+      mockOwnedFindOne(makeListing({ ownerId: 'owner-1' }));
 
       await expect(
         service.getByRef('QPH-2026-0001', 'intruder'),
-      ).rejects.toThrow(ForbiddenException);
+      ).rejects.toThrow(NotFoundException);
+      expect(listings.findOne).toHaveBeenCalledWith({
+        where: { ref: 'QPH-2026-0001', ownerId: 'intruder' },
+      });
     });
 
     it('returns the DTO for the owning caller', async () => {
-      listings.findOne.mockResolvedValue(makeListing({ ownerId: 'owner-1' }));
+      mockOwnedFindOne(makeListing({ ownerId: 'owner-1' }));
 
       const result = await service.getByRef('QPH-2026-0001', 'owner-1');
 
@@ -227,17 +303,17 @@ describe('HousingListingsService', () => {
   });
 
   describe('update', () => {
-    it('403s a non-owner before mutating', async () => {
-      listings.findOne.mockResolvedValue(makeListing({ ownerId: 'owner-1' }));
+    it('404s a non-owner before mutating', async () => {
+      mockOwnedFindOne(makeListing({ ownerId: 'owner-1' }));
 
       await expect(
         service.update('QPH-2026-0001', 'intruder', { title: 'x' }),
-      ).rejects.toThrow(ForbiddenException);
+      ).rejects.toThrow(NotFoundException);
       expect(listings.save).not.toHaveBeenCalled();
     });
 
     it('applies only the provided fields for the owner', async () => {
-      listings.findOne.mockResolvedValue(
+      mockOwnedFindOne(
         makeListing({ ownerId: 'owner-1', title: 'Old', city: 'Lisbon' }),
       );
       listings.save.mockImplementation((row: unknown) => Promise.resolve(row));
@@ -250,21 +326,183 @@ describe('HousingListingsService', () => {
       expect(result.title).toBe('New title');
       expect(result.city).toBe('Lisbon');
     });
+
+    // BE-HSG-02: moderation is no longer a one-shot check at approval. An owner
+    // edit that touches any field a moderator actually reviewed (the copy, the
+    // price, the location, the photos, the disclosures) sends a LIVE listing
+    // back to `review`, so a clean-approved listing can't be patched into a
+    // scam rent or a discriminatory description while staying browsable.
+    describe('re-review on owner edits (BE-HSG-02)', () => {
+      it('returns a live listing to review when a moderated field changes', async () => {
+        mockOwnedFindOne(
+          makeListing({
+            ownerId: 'owner-1',
+            status: HousingListingStatus.Live,
+            description: 'A room.',
+          }),
+        );
+
+        const result = await service.update('QPH-2026-0001', 'owner-1', {
+          description: 'A room, pay the deposit before viewing.',
+        });
+
+        expect(result.status).toBe(HousingListingStatus.Review);
+      });
+
+      it('leaves a live listing live when the moderated fields are re-sent unchanged', async () => {
+        mockOwnedFindOne(
+          makeListing({
+            ownerId: 'owner-1',
+            status: HousingListingStatus.Live,
+            title: 'Sunny room',
+          }),
+        );
+
+        const result = await service.update('QPH-2026-0001', 'owner-1', {
+          title: 'Sunny room',
+        });
+
+        expect(result.status).toBe(HousingListingStatus.Live);
+      });
+
+      // Scheduling facts carry no moderatable content, so they stay
+      // self-service — an owner can keep their dates honest without waiting on
+      // a human.
+      it('keeps scheduling-only edits self-service on a live listing', async () => {
+        mockOwnedFindOne(
+          makeListing({
+            ownerId: 'owner-1',
+            status: HousingListingStatus.Live,
+          }),
+        );
+
+        const result = await service.update('QPH-2026-0001', 'owner-1', {
+          availableFrom: '2026-04-01',
+          minStayMonths: 3,
+        });
+
+        expect(result.status).toBe(HousingListingStatus.Live);
+      });
+
+      // Same reason: taking your own home off browse (or renewing it) must
+      // never queue behind a moderator.
+      it('keeps markFilled / markAvailable / extend off the review path', async () => {
+        const listing = makeListing({
+          ownerId: 'owner-1',
+          status: HousingListingStatus.Live,
+        });
+        mockOwnedFindOne(listing);
+
+        expect(
+          (await service.markFilled('QPH-2026-0001', 'owner-1')).status,
+        ).toBe(HousingListingStatus.Live);
+        expect(
+          (await service.markAvailable('QPH-2026-0001', 'owner-1')).status,
+        ).toBe(HousingListingStatus.Live);
+        expect((await service.extend('QPH-2026-0001', 'owner-1')).status).toBe(
+          HousingListingStatus.Live,
+        );
+      });
+
+      // A listing already in review has nothing to bounce out of.
+      it('does not touch the status of a listing that was not live', async () => {
+        mockOwnedFindOne(
+          makeListing({
+            ownerId: 'owner-1',
+            status: HousingListingStatus.Review,
+          }),
+        );
+
+        const result = await service.update('QPH-2026-0001', 'owner-1', {
+          title: 'Another title',
+        });
+
+        expect(result.status).toBe(HousingListingStatus.Review);
+      });
+    });
+
+    // BE-HSG-07 on the write side: the flag is not settable at all, so a PATCH
+    // carrying it neither flips the column nor counts as a moderated change.
+    it('ignores lgbtqFriendly on update — affirming is not a per-listing flag', async () => {
+      mockOwnedFindOne(
+        makeListing({ ownerId: 'owner-1', status: HousingListingStatus.Live }),
+      );
+
+      const result = await service.update('QPH-2026-0001', 'owner-1', {
+        lgbtqFriendly: false,
+      });
+
+      expect(result.lgbtqFriendly).toBe(true);
+      expect(result.status).toBe(HousingListingStatus.Live);
+    });
+
+    // BE-HSG-08: the scorer reads every member-typed string, so exclusionary
+    // wording typed into the "ideal for" chips is caught the same as in the
+    // description — it used to score 0 and sort to the bottom of the queue.
+    it('re-scores discriminatory wording typed into idealFor', async () => {
+      mockOwnedFindOne(
+        makeListing({ ownerId: 'owner-1', status: HousingListingStatus.Live }),
+      );
+
+      await service.update('QPH-2026-0001', 'owner-1', {
+        idealFor: ['traditional family'],
+      });
+
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          riskReasons: expect.arrayContaining(['discriminatory_language']),
+        }),
+      );
+    });
+
+    // Finding M1: `HousingListingsController.update` keeps the interceptor's
+    // foreign-upload exemption (co-listers edit the same listing), so the
+    // service is the line that stops a member introducing a NEW gallery image
+    // that is not theirs while still letting a co-lister re-save one a
+    // different collaborator uploaded.
+    describe('foreign gallery image ownership (M1)', () => {
+      const OWNER_ID = 'owner-1';
+      const OTHER_ID = '22222222-2222-2222-2222-222222222222';
+      const FILE_SEGMENT = '33333333-3333-3333-3333-333333333333';
+      // A well-formed key whose embedded owner segment is NOT the requester.
+      const FOREIGN_KEY = `listing-photos/${OTHER_ID}/${FILE_SEGMENT}.jpg`;
+
+      it('allows re-saving a gallery image the listing already carries', async () => {
+        mockOwnedFindOne(
+          makeListing({ ownerId: OWNER_ID, gallery: [FOREIGN_KEY] }),
+        );
+        await expect(
+          service.update('QPH-2026-0001', OWNER_ID, {
+            gallery: [FOREIGN_KEY],
+          }),
+        ).resolves.toBeDefined();
+      });
+
+      it('rejects a new foreign gallery image the listing does not carry', async () => {
+        mockOwnedFindOne(makeListing({ ownerId: OWNER_ID, gallery: [] }));
+        await expect(
+          service.update('QPH-2026-0001', OWNER_ID, {
+            gallery: [FOREIGN_KEY],
+          }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe('remove', () => {
-    it('403s a non-owner', async () => {
-      listings.findOne.mockResolvedValue(makeListing({ ownerId: 'owner-1' }));
+    it('404s a non-owner', async () => {
+      mockOwnedFindOne(makeListing({ ownerId: 'owner-1' }));
 
       await expect(service.remove('QPH-2026-0001', 'intruder')).rejects.toThrow(
-        ForbiddenException,
+        NotFoundException,
       );
       expect(listings.remove).not.toHaveBeenCalled();
     });
 
     it('removes the listing for its owner', async () => {
       const listing = makeListing({ ownerId: 'owner-1' });
-      listings.findOne.mockResolvedValue(listing);
+      mockOwnedFindOne(listing);
 
       await service.remove('QPH-2026-0001', 'owner-1');
 

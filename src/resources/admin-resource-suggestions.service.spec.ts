@@ -53,7 +53,7 @@ describe('AdminResourceSuggestionsService', () => {
       createQueryBuilder: jest.fn(() => qbStub([makeSuggestion()])),
       findOne: jest.fn(),
       save: jest.fn((v: Partial<ResourceSuggestion>) =>
-        Promise.resolve({ ...makeSuggestion(), ...v } as ResourceSuggestion),
+        Promise.resolve({ ...makeSuggestion(), ...v }),
       ),
     };
     profiles = { find: jest.fn().mockResolvedValue([]) };
@@ -74,9 +74,7 @@ describe('AdminResourceSuggestionsService', () => {
   it('lists suggestions newest-first, paginated', async () => {
     const result = await service.list({});
     expect(result.total).toBe(1);
-    expect(result.items[0]!.name).toBe(
-      'Trans-friendly testing van (Almada)',
-    );
+    expect(result.items[0]!.name).toBe('Trans-friendly testing van (Almada)');
   });
 
   it('approve() stamps status/decidedAt/decidedBy and trims the note', async () => {
@@ -95,9 +93,9 @@ describe('AdminResourceSuggestionsService', () => {
 
   it('404s deciding a suggestion that does not exist', async () => {
     suggestions.findOne.mockResolvedValue(null);
-    await expect(
-      service.decline('missing', 'admin-1'),
-    ).rejects.toBeInstanceOf(NotFoundException);
+    await expect(service.decline('missing', 'admin-1')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
   });
 
   it('approving a suggestion cannot create a ResourceListing — the service has no dependency on that repository', async () => {

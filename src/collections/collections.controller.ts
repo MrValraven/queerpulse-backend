@@ -13,6 +13,7 @@ import {
 } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
+  ApiConflictResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
   ApiForbiddenResponse,
@@ -56,7 +57,8 @@ export class CollectionsController {
   // Declared before `:id` — a literal segment must be matched first, or Nest
   // would route this into `getOne` with id="filed-refs" and 400 on the uuid pipe.
   @ApiOperation({
-    summary: "List every saved-item ref filed in any of the member's collections.",
+    summary:
+      "List every saved-item ref filed in any of the member's collections.",
   })
   @ApiOkResponse({ description: 'The filed refs, e.g. ["article:my-slug"].' })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
@@ -122,6 +124,9 @@ export class CollectionsController {
   @ApiOperation({ summary: 'Add a saved item to a collection.' })
   @ApiNoContentResponse({ description: 'The item is filed in the collection.' })
   @ApiBadRequestResponse({ description: 'Malformed item ref.' })
+  @ApiConflictResponse({
+    description: 'The collection already holds the maximum number of items.',
+  })
   @ApiNotFoundResponse({ description: 'No such collection for this member.' })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @ApiForbiddenResponse({ description: 'Not an active member.' })

@@ -16,14 +16,21 @@ import {
   CreateCompanyInput,
 } from '../companies/companies.service';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
-import { normalizePage, paginate, Paginated } from '../common/pagination';
+import {
+  DEFAULT_LIST_LIMIT,
+  normalizePage,
+  paginate,
+  Paginated,
+} from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
+import { MessagingService } from '../messaging/messaging.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
   JobApplication,
   JobApplicationAnswer,
+  JobApplicationStatus,
 } from './entities/job-application.entity';
 import {
   Job,
@@ -144,6 +151,10 @@ export class JobsService {
     // is needed on either side.
     private readonly companiesService: CompaniesService,
     private readonly notifications: NotificationsService,
+    // Delivers the poster's decision on an application to the applicant
+    // (`decideApplication`, BE-HSG-16). There is no applicant-facing job
+    // NotificationType, and a DM gives them somewhere to reply.
+    private readonly messaging: MessagingService,
     // Reads the shared `content_moderation` state so a moderator takedown on a
     // `job` subject withholds the job from ordinary members' read paths.
     private readonly contentModeration: ContentModerationService,
@@ -458,6 +469,12 @@ export class JobsService {
     dto: CreateJobApplicationInput,
   ): Promise<JobApplicationDTO> {
     const job = await this.loadOr404(slug);
+    // BE-HSG-16: a closed role stops taking applications. `apply()` used to
+    // insert regardless of `job.status`, so an applicant could submit into a
+    // role nobody was reading any more and would simply never hear back.
+    if (job.status !== JobStatus.Open) {
+      throw new ConflictException('This role is closed to new applications');
+    }
 
     try {
       const saved = await this.applications.save(
@@ -502,6 +519,116 @@ export class JobsService {
     }
   }
 
+  /**
+   * The poster moves one application out of `submitted` (BE-HSG-16).
+   *
+   * `JobApplicationStatus` has carried `reviewing`/`accepted`/`declined` since
+   * the table was created, but nothing in the codebase ever wrote them outside
+   * the seed: there was no route and no service method, so `status` was
+   * permanently `submitted` for everyone while `JobApplicationDTO.status` and
+   * `myApplicationStatus` presented it to both sides as if it were live. The
+   * poster had a list of applicants they could not act on, and the applicant
+   * never heard anything.
+   *
+   * Mirrors `VolunteeringService.decideSignup` on the sibling domain: poster
+   * gated, one conditional UPDATE so two concurrent decisions cannot both win,
+   * and a best-effort message to the applicant after it commits.
+   */
+  async decideApplication(
+    slug: string,
+    applicationId: string,
+    posterId: string,
+    status:
+      | JobApplicationStatus.Reviewing
+      | JobApplicationStatus.Accepted
+      | JobApplicationStatus.Declined,
+  ): Promise<JobApplicationDTO> {
+    const job = await this.loadOr404(slug);
+    if (job.posterId !== posterId) {
+      throw new ForbiddenException(
+        'Only the poster can decide on applications for this job',
+      );
+    }
+
+    const application = await this.applications.findOne({
+      where: { id: applicationId, jobId: job.id },
+    });
+    if (!application) {
+      throw new NotFoundException('Application not found');
+    }
+    // A decision is final in one direction: an already-decided application is
+    // not re-openable, and `reviewing` is an intermediate the poster can only
+    // move INTO from `submitted`.
+    const decidable: JobApplicationStatus[] =
+      status === JobApplicationStatus.Reviewing
+        ? [JobApplicationStatus.Submitted]
+        : [JobApplicationStatus.Submitted, JobApplicationStatus.Reviewing];
+    if (!decidable.includes(application.status)) {
+      throw new ConflictException('This application was already decided');
+    }
+
+    // Conditional UPDATE on the status we just read: a concurrent second
+    // decision sees `affected === 0` and is rejected rather than silently
+    // overwriting the first.
+    const claim = await this.applications
+      .createQueryBuilder()
+      .update(JobApplication)
+      .set({ status })
+      .where('id = :id AND status IN (:...decidable)', {
+        id: application.id,
+        decidable,
+      })
+      .execute();
+    if (claim.affected === 0) {
+      throw new ConflictException('This application was already decided');
+    }
+    application.status = status;
+
+    const applicant = await this.memberRefFor(application.applicantId);
+    // The applicant is told, unless they are the poster (a poster can apply to
+    // their own posting, and messaging yourself is not a thing). Best-effort and
+    // post-commit: the decision has already landed.
+    //
+    // Delivered as a DM from the poster rather than a bell notification because
+    // there is no applicant-facing job-decision `NotificationType`, and adding
+    // one is a change to the notifications domain. A DM is arguably the better
+    // channel anyway: it gives the applicant somewhere to reply.
+    if (application.applicantId !== posterId) {
+      await this.notifyApplicantBestEffort(posterId, application, job, status);
+    }
+
+    return toJobApplication(
+      application,
+      { slug: job.slug, title: job.title },
+      applicant,
+    );
+  }
+
+  /** Best-effort DM to an applicant whose application was just decided. Never
+   * throws: the decision committed before this ran. */
+  private async notifyApplicantBestEffort(
+    posterId: string,
+    application: JobApplication,
+    job: Job,
+    status: JobApplicationStatus,
+  ): Promise<void> {
+    const body =
+      status === JobApplicationStatus.Accepted
+        ? `Good news about your application for "${job.title}": it has been accepted. Reply here and we can take it from there.`
+        : status === JobApplicationStatus.Declined
+          ? `Thank you for applying for "${job.title}". We are not taking this one forward, but we appreciate the time you put into it.`
+          : `Your application for "${job.title}" is being reviewed. We will come back to you once there is news.`;
+    try {
+      await this.messaging.deliverEnquiry(
+        posterId,
+        application.applicantId,
+        body,
+      );
+    } catch {
+      // Intentionally ignored — the decision already committed.
+    }
+  }
+
   async listApplications(
     slug: string,
     posterId: string,
@@ -513,9 +640,12 @@ export class JobsService {
       );
     }
 
+    // Bounded: a popular posting can carry thousands of applications, each
+    // with a full `answers` jsonb blob, and this had no `take` at all.
     const rows = await this.applications.find({
       where: { jobId: job.id },
       order: { createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     if (!rows.length) return [];
 
@@ -535,6 +665,7 @@ export class JobsService {
     const rows = await this.applications.find({
       where: { applicantId },
       order: { createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
     });
     if (!rows.length) return [];
 

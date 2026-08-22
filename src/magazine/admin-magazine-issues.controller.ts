@@ -101,8 +101,12 @@ export class AdminMagazineIssuesController {
   @ApiOperation({ summary: "Update the issue's cover art and coverlines." })
   @ApiOkResponse({ description: 'The updated issue production record.' })
   @ApiNotFoundResponse({ description: 'No issue exists for this number.' })
-  updateCover(@Param('number') number: string, @Body() dto: UpdateCoverDto) {
-    return this.magazinePieces.updateCover(number, dto);
+  updateCover(
+    @Param('number') number: string,
+    @Body() dto: UpdateCoverDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.magazinePieces.updateCover(number, dto, user.userId);
   }
 
   @Post(':number/digest/test-send')

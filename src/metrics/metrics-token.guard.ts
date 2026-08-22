@@ -4,16 +4,24 @@ import { timingSafeEqual } from 'node:crypto';
 import type { Request } from 'express';
 
 /**
- * Gates `/metrics` on a shared bearer token when one is configured.
+ * Gates `/metrics` (and the two DB-pinging `/health` variants) on a shared
+ * bearer token.
  *
- * `/metrics` is `@Public()` (a Prometheus scraper carries no session cookie) and
- * would otherwise expose route inventory, pool saturation and traffic shape to
- * anyone. When `METRICS_TOKEN` is set, callers must present it as
- * `Authorization: Bearer <token>` (constant-time compared). When it is UNSET the
- * endpoint is open — the intended posture for local dev, or a deploy that
- * restricts the route at the network/private-network layer instead. The env
- * validation makes the token REQUIRED in production (see env.validation.ts), so
- * "open" can never be the accidental production state.
+ * Those routes are `@Public()` (a Prometheus scraper carries no session cookie)
+ * and would otherwise expose route inventory, pool saturation and traffic shape
+ * to anyone. Callers must present the token as `Authorization: Bearer <token>`,
+ * constant-time compared.
+ *
+ * Behaviour when `METRICS_TOKEN` is UNSET depends on the environment:
+ *   - production: DENY. `env.validation.ts` refuses to boot without the token
+ *     there, so an unset token in production means something has bypassed
+ *     validation. Failing closed keeps the guard a real control instead of a
+ *     no-op that silently publishes the scrape.
+ *   - development/test: ALLOW, so a local scrape or an e2e probe needs no
+ *     setup. Neither environment is reachable from the internet.
+ *
+ * Railway's private networking is still the outer layer in production; this
+ * guard is the one that survives a misrouted proxy or a custom domain.
  */
 @Injectable()
 export class MetricsTokenGuard implements CanActivate {
@@ -22,7 +30,8 @@ export class MetricsTokenGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
     const expectedToken = this.configService.get<string>('METRICS_TOKEN');
     if (!expectedToken) {
-      return true;
+      // Fail closed in production, open everywhere else. See the class doc.
+      return this.configService.get<string>('app.nodeEnv') !== 'production';
     }
     const request = context.switchToHttp().getRequest<Request>();
     const header = request.headers.authorization ?? '';

@@ -17,7 +17,7 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
-import { SkipThrottle } from '@nestjs/throttler';
+import { seconds, Throttle } from '@nestjs/throttler';
 import {
   CurrentUser,
   CurrentUserData,
@@ -26,9 +26,7 @@ import { Public } from '../auth/decorators/public.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { SkipCsrf } from '../security/skip-csrf.decorator';
 import { IdentityCallbackDto } from './dto/identity-callback.dto';
-import { StartPhoneVerificationDto } from './dto/start-phone-verification.dto';
 import { SubmitVerificationRequestDto } from './dto/submit-verification-request.dto';
-import { VerifyPhoneDto } from './dto/verify-phone.dto';
 import {
   toVerificationRequestDTO,
   VerificationRequestDTO,
@@ -38,9 +36,13 @@ import { VerificationService } from './verification.service';
 
 /**
  * Member-facing step-up verification. `GET /me` reports the caller's standing;
- * the phone/identity routes raise it. `identity/callback` is the provider
- * webhook seam — unauthenticated (a real provider is authenticated by its
- * signature, verified inside the provider's `parseCallback`).
+ * the identity routes raise it. `identity/callback` is the provider webhook
+ * seam — unauthenticated (a real provider is authenticated by its signature,
+ * verified inside the provider's `parseCallback`). The phone-OTP step-up
+ * (`phone/start`, `phone/verify`) was removed — its only implementation was a
+ * dev-only stub that logged the OTP in plaintext and was never wired to a
+ * real SMS vendor. A member can still reach `phone` level through the manual
+ * review path (`POST /requests` with `requestedLevel: "phone"`).
  */
 @ApiTags('Verification')
 @ApiCookieAuth('access_token')
@@ -105,29 +107,6 @@ export class VerificationController {
     return toVerificationRequestDTO(request);
   }
 
-  @Post('phone/start')
-  @HttpCode(HttpStatus.ACCEPTED)
-  @ApiOperation({ summary: 'Start a phone verification (sends an OTP)' })
-  @ApiOkResponse({ description: 'The challenge was started.' })
-  startPhone(
-    @CurrentUser() user: CurrentUserData,
-    @Body() dto: StartPhoneVerificationDto,
-  ) {
-    return this.service.startPhone(user.userId, dto);
-  }
-
-  @Post('phone/verify')
-  @ApiOperation({
-    summary: 'Confirm the phone OTP and raise the level to phone',
-  })
-  @ApiOkResponse({ description: 'The updated verification status.' })
-  verifyPhone(
-    @CurrentUser() user: CurrentUserData,
-    @Body() dto: VerifyPhoneDto,
-  ) {
-    return this.service.verifyPhone(user.userId, dto);
-  }
-
   @Post('identity/start')
   @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({
@@ -140,9 +119,18 @@ export class VerificationController {
 
   // Provider webhook seam. No cookie/JWT: a real provider authenticates via a
   // signature verified inside `parseCallback` (hence @Public + @SkipCsrf).
+  //
+  // The throttle exemption is GONE. It was justified by "a real provider
+  // signs its callbacks", but the only provider ever bound is the dev stub,
+  // which trusts the JSON as-is — so this was an unauthenticated, unthrottled
+  // write path with a 404/200 oracle on `providerRef`. A real signed webhook
+  // provider stays comfortably inside this budget; if a burst ever needs more,
+  // raise the limit rather than removing the ceiling. `VerificationService`
+  // additionally refuses to serve this route at all when the stub provider is
+  // bound in production.
   @Public()
   @SkipCsrf()
-  @SkipThrottle()
+  @Throttle({ default: { limit: 60, ttl: seconds(60) } })
   @Post('identity/callback')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({

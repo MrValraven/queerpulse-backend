@@ -1,16 +1,19 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, Not, Repository } from 'typeorm';
+import { isUniqueViolation } from '../common/db-errors';
 import { MemberLookup } from '../common/member-ref';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
+import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import {
   HousingListing,
   HousingListingStatus,
@@ -34,9 +37,16 @@ import {
 
 /**
  * Viewing scheduling for member housing listings (P2.3). Requesting a viewing
- * needs a phone-verified account (same step-up gate as a cold enquiry), and no
- * one can request a viewing on their own listing. The state machine lives here;
+ * is a CONTACT action, so it carries the same two gates a cold enquiry does:
+ * the mandatory LGBTQ+ affirming pledge (the universal baseline every housing
+ * write/contact surface enforces) and the phone-verification step-up. No one
+ * can request a viewing on their own listing. The state machine lives here;
  * transitions are guarded on the caller's role AND the current status.
+ *
+ * Only `request()` carries the pledge gate, and that is complete coverage for
+ * the flow: the requester cannot reach `accept`/`propose`/`decline`/`complete`
+ * without first passing through `request()`, and the lister already accepted
+ * the pledge when they posted the listing (`HousingListingsService.create`).
  */
 @Injectable()
 export class HousingViewingsService {
@@ -49,6 +59,7 @@ export class HousingViewingsService {
     private readonly listings: Repository<HousingListing>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly verification: VerificationService,
+    private readonly affirmingPledge: AffirmingPledgeService,
   ) {}
 
   async request(
@@ -66,9 +77,64 @@ export class HousingViewingsService {
         'You cannot request a viewing on your own listing',
       );
     }
+    // Baseline gate: arranging to view someone's home is the most direct
+    // contact action in the module (it delivers the requester's note to the
+    // lister and, once accepted, unlocks the precise address), so it commits to
+    // the affirming pledge exactly like an enquiry, a flatmate hello, a landlord
+    // intro and a group listing already do. Checked BEFORE the verification
+    // step-up so a member who has done neither is asked for the pledge first,
+    // matching `HousingListingsService.create`/`createEnquiry`'s ordering.
+    await this.affirmingPledge.requireAccepted(requesterId);
     // Same step-up as enquiries — arranging to view a home needs a real phone.
     await this.verification.requireLevel(requesterId, VerificationLevel.Phone);
 
+    // One open viewing per (listing, requester) at a time (BE-HSG-09). There
+    // was no dedupe of any kind, so the same member could open an unbounded
+    // number of viewings on one listing, and each one that a lister accepted
+    // became another reviewable "interaction". The partial unique index
+    // `UQ_housing_viewings_open` is the real backstop against the check-then-
+    // insert race; this pre-check exists to give a readable message rather than
+    // a 23505 (mirroring `ListingClaimsService.requestClaim`'s shape).
+    const open = await this.viewings.findOne({
+      where: [
+        {
+          listingId: listing.id,
+          requesterId,
+          status: HousingViewingStatus.Requested,
+        },
+        {
+          listingId: listing.id,
+          requesterId,
+          status: HousingViewingStatus.Accepted,
+        },
+      ],
+    });
+    if (open) {
+      throw new ConflictException(
+        'You already have a viewing open on this listing',
+      );
+    }
+
+    try {
+      return await this.createRequest(listing, requesterId, dto);
+    } catch (error) {
+      // Lost the insert race against a concurrent identical request.
+      if (isUniqueViolation(error, 'UQ_housing_viewings_open')) {
+        throw new ConflictException(
+          'You already have a viewing open on this listing',
+        );
+      }
+      throw error;
+    }
+  }
+
+  /** The insert half of `request`, split out so the unique-violation retry
+   * boundary above stays readable. */
+  private async createRequest(
+    listing: HousingListing,
+    requesterId: string,
+    dto: RequestHousingViewingDto,
+  ): Promise<HousingViewingDTO> {
     const saved = await this.viewings.save(
       this.viewings.create({
         listingId: listing.id,
@@ -77,7 +143,7 @@ export class HousingViewingsService {
         mode: dto.mode,
         status: HousingViewingStatus.Requested,
         proposedBy: HousingViewingParty.Requester,
-        proposedSlots: dto.proposedSlots.map((slot) => new Date(slot)),
+        proposedSlots: this.normalizeSlots(dto.proposedSlots),
         acceptedSlot: null,
         note: dto.note ?? '',
         responseNote: null,
@@ -119,8 +185,19 @@ export class HousingViewingsService {
         'That time is not one of the proposed slots',
       );
     }
+    const acceptedSlot = new Date(dto.slot);
+    // A proposal made days ago can still be sitting in the inbox after its
+    // slots have passed. Accepting one would create an "accepted" viewing that
+    // `complete()` lets either side tick off immediately, which is exactly the
+    // zero-calendar-time review mint BE-HSG-09 closed.
+    if (acceptedSlot.getTime() <= Date.now()) {
+      throw new BadRequestException(
+        'That time has already passed. Propose a new time instead',
+      );
+    }
+    await this.assertSlotFree(viewing, acceptedSlot);
     viewing.status = HousingViewingStatus.Accepted;
-    viewing.acceptedSlot = new Date(dto.slot);
+    viewing.acceptedSlot = acceptedSlot;
     return this.saveAndBuild(viewing, userId);
   }
 
@@ -137,7 +214,7 @@ export class HousingViewingsService {
         'You already proposed these times — wait for a reply',
       );
     }
-    viewing.proposedSlots = dto.slots.map((slot) => new Date(slot));
+    viewing.proposedSlots = this.normalizeSlots(dto.slots);
     viewing.proposedBy = role;
     viewing.responseNote = dto.note ?? null;
     return this.saveAndBuild(viewing, userId);
@@ -172,12 +249,28 @@ export class HousingViewingsService {
 
   /** Mark an accepted viewing as having happened — the real recorded
    * interaction the two-sided blind reviews (P2.4) require. Either participant
-   * may confirm it. */
+   * may confirm it, but NOT before the accepted slot has actually come round
+   * (BE-HSG-09).
+   *
+   * That time check is the whole interaction gate. `complete()` used to check
+   * only `status === Accepted`, so a requester could ask for a viewing, have it
+   * accepted, mark it completed the same second and publish a review minutes
+   * later. Repeat with a friendly lister and a listing accumulates unlimited
+   * five-star "guest" reviews, each costing one accept click. Requiring the
+   * slot to have passed means minting a review costs real calendar time. */
   async complete(id: string, userId: string): Promise<HousingViewingDTO> {
     const viewing = await this.loadParticipant(id, userId);
     if (viewing.status !== HousingViewingStatus.Accepted) {
       throw new BadRequestException(
         'Only an accepted viewing can be marked completed',
+      );
+    }
+    if (
+      viewing.acceptedSlot === null ||
+      viewing.acceptedSlot.getTime() > Date.now()
+    ) {
+      throw new BadRequestException(
+        'This viewing has not happened yet — you can mark it completed once the agreed time has passed',
       );
     }
     viewing.status = HousingViewingStatus.Completed;
@@ -233,6 +326,57 @@ export class HousingViewingsService {
   }
 
   // --- internals ---
+
+  /** Neither participant may hold two accepted viewings at the same instant.
+   * The proposal ping-pong is per-viewing, so without this a lister with five
+   * live listings can be booked five times over at 18:00 on Saturday and only
+   * discover it when five people arrive. Checked for both sides because a
+   * requester touring four flats has the same problem. */
+  private async assertSlotFree(
+    viewing: HousingViewing,
+    slot: Date,
+  ): Promise<void> {
+    const clash = await this.viewings.findOne({
+      where: [
+        {
+          id: Not(viewing.id),
+          status: HousingViewingStatus.Accepted,
+          acceptedSlot: slot,
+          listerId: viewing.listerId,
+        },
+        {
+          id: Not(viewing.id),
+          status: HousingViewingStatus.Accepted,
+          acceptedSlot: slot,
+          requesterId: viewing.requesterId,
+        },
+      ],
+    });
+    if (clash) {
+      throw new ConflictException(
+        'One of you already has a viewing booked at that time. Pick another slot',
+      );
+    }
+  }
+
+  /** Proposed slots must be in the future and distinct. The DTO guarantees each
+   * string is a full ISO-8601 instant with an offset; this turns them into
+   * `Date`s, drops exact duplicates (two identical slots would render as one
+   * choice offered twice) and refuses times that have already gone. */
+  private normalizeSlots(slots: string[]): Date[] {
+    const now = Date.now();
+    const byInstant = new Map<number, Date>();
+    for (const slot of slots) {
+      const parsed = new Date(slot);
+      if (parsed.getTime() <= now) {
+        throw new BadRequestException('Proposed times must be in the future');
+      }
+      if (!byInstant.has(parsed.getTime())) {
+        byInstant.set(parsed.getTime(), parsed);
+      }
+    }
+    return [...byInstant.values()];
+  }
 
   private async loadParticipant(
     id: string,

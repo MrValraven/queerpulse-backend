@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, SelectQueryBuilder } from 'typeorm';
 import {
   CommunityGovernanceLog,
   GovernanceLogAction,
@@ -27,8 +27,14 @@ export interface LogGovernanceActionInput {
  * (manual role changes, removals, ownership transfers, archive/freeze/
  * unfreeze) and `CommunityOwnerOrphanService` (automatic owner→mod
  * promotion on owner erasure) call this after their own action has already
- * committed. Wiring the `CommunitiesService` call sites is a follow-up task;
- * this service only needs to exist and work.
+ * committed.
+ *
+ * `entriesForCommunity()` is the matching read path — the table was
+ * write-only until BE-COM-15, so "who removed me?"/"who unfroze this?" could
+ * not be answered from the product at all. It returns a query builder rather
+ * than rows so the caller owns pagination (`paginate()`) and the
+ * actor/target name resolution, which needs a `profiles` repository this
+ * service deliberately does not carry.
  */
 @Injectable()
 export class CommunityGovernanceLogService {
@@ -52,5 +58,26 @@ export class CommunityGovernanceLogService {
         metadata: input.metadata ?? null,
       }),
     );
+  }
+
+  /**
+   * Newest-first governance entries for one community, as an unexecuted query
+   * builder so the caller can page it with `paginate()`.
+   *
+   * Ordered by `created_at DESC, id DESC`: `created_at` alone is not unique
+   * (two entries written inside one transaction share a timestamp to the
+   * microsecond), and an offset page over a non-deterministic order can
+   * repeat or skip a row at the page boundary. Served by
+   * `IDX_community_governance_log_community_id_created_at`
+   * (`1793620000000-AddCommunityGovernanceLogCommunityCreatedAtIndex`).
+   */
+  entriesForCommunity(
+    communityId: string,
+  ): SelectQueryBuilder<CommunityGovernanceLog> {
+    return this.governanceLogs
+      .createQueryBuilder('entry')
+      .where('entry.community_id = :communityId', { communityId })
+      .orderBy('entry.created_at', 'DESC')
+      .addOrderBy('entry.id', 'DESC');
   }
 }

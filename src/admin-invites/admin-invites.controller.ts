@@ -1,17 +1,32 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Delete,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiBadRequestResponse,
+  ApiConflictResponse,
   ApiCookieAuth,
   ApiForbiddenResponse,
+  ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
+import { AdminInviteDTO } from './admin-invites-response';
 import { AdminInvitesService } from './admin-invites.service';
 import { ListAdminInvitesQuery } from './dto/list-admin-invites.query';
 
@@ -50,5 +65,30 @@ export class AdminInvitesController {
   @Get()
   list(@Query() query: ListAdminInvitesQuery) {
     return this.adminInvites.list(query);
+  }
+
+  /**
+   * Revoke any still-valid invite platform-wide. The member route
+   * (`DELETE /invites/:code`) is scoped to the inviter, so this is the only way
+   * staff can pull someone else's live invite link.
+   *
+   * Addressed by the internal `id` the admin list already returns, never the
+   * shared `code` — a code is a credential that gets pasted into chats, and an
+   * admin surface has no reason to take one. `ParseUUIDPipe` answers 400 for a
+   * malformed id; an unknown one is a 404.
+   */
+  @ApiOperation({ summary: 'Revoke a still-valid invite (admin, audited).' })
+  @ApiOkResponse({ description: 'The invite, now revoked.' })
+  @ApiNotFoundResponse({ description: 'No invite with that id.' })
+  @ApiConflictResponse({
+    description:
+      'The invite is not valid any more (already accepted, revoked, or expired).',
+  })
+  @Delete(':id')
+  revoke(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() current: CurrentUserData,
+  ): Promise<AdminInviteDTO> {
+    return this.adminInvites.revoke(id, current.userId);
   }
 }

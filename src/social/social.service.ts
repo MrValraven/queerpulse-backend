@@ -3,6 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Not, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
@@ -17,6 +18,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { BlockOptionsDto } from './dto/block-options.dto';
 import { Block } from './entities/block.entity';
 import { Mute } from './entities/mute.entity';
+import { MEMBER_BLOCKED, MemberBlockedEvent } from './social.events';
 import {
   BlockDTO,
   BlockStatus,
@@ -41,6 +43,7 @@ export class SocialService {
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly reportsService: ReportsService,
     private readonly dataSource: DataSource,
+    private readonly eventEmitter: EventEmitter2,
   ) {
     this.memberLookup = new MemberLookup(this.profiles);
   }
@@ -117,6 +120,18 @@ export class SocialService {
       where: { blockerId: actorId, blockedId },
     });
 
+    // Post-commit, best-effort: cut the pair's LIVE socket room. Blocking
+    // already severs the connection edge (above) and every write path
+    // (`MessagesService.sendMessage`, `createConversation`,
+    // `ConnectionsService.request`), but a socket authorised into the DM room
+    // BEFORE the block stayed subscribed to it — so the blocked member kept
+    // receiving the blocker's messages, typing indicators and read receipts
+    // until they happened to reconnect. `ChatGateway` evicts both sides.
+    this.emitBestEffort(MEMBER_BLOCKED, {
+      blockerId: actorId,
+      blockedId,
+    } satisfies MemberBlockedEvent);
+
     // `alsoReport`: file a companion report against the blocked member so
     // moderation sees it too (spec §3 Tier 1 "social" `BlockOptions`). Runs
     // after the block itself is committed (idempotent above); `reason`, if
@@ -178,21 +193,26 @@ export class SocialService {
   }
 
   /**
-   * `{ blocking, blockedBy }` — MUST NOT leak anything beyond these two
-   * booleans (spec §3 Tier 1). Allows a self-slug (returns `false`/`false`
-   * rather than erroring) since this is a read, not a mutation.
+   * `{ blocking }` — ONLY the actor's own block. Allows a self-slug (returns
+   * `false` rather than erroring) since this is a read, not a mutation.
+   *
+   * Deliberately does NOT report whether the TARGET blocked the actor. That
+   * fact is exactly what `ConnectionsService.request` refuses to disclose (it
+   * returns the same 409 as a pending request so an inbound block is
+   * indistinguishable), and surfacing it here — on an endpoint any member can
+   * poll for any slug — handed a harasser a live "you have been blocked"
+   * signal and a way to probe the whole directory. Callers that need "can I
+   * interact with this member?" get the answer from the uniform server-side
+   * 403s on the write paths (`MessagesService.sendMessage`,
+   * `ConversationsService.createConversation`, `ConnectionsService.request`),
+   * which look identical whichever direction the block runs in.
    */
   async getBlockStatus(actorId: string, slug: string): Promise<BlockStatus> {
     const targetId = await this.resolveSlugStrict(slug);
-    const [blocking, blockedBy] = await Promise.all([
-      this.blocks.exist({
-        where: { blockerId: actorId, blockedId: targetId },
-      }),
-      this.blocks.exist({
-        where: { blockerId: targetId, blockedId: actorId },
-      }),
-    ]);
-    return { blocking, blockedBy };
+    const blocking = await this.blocks.exist({
+      where: { blockerId: actorId, blockedId: targetId },
+    });
+    return { blocking };
   }
 
   // --- mutes ---
@@ -240,6 +260,19 @@ export class SocialService {
   }
 
   // --- internals ---
+
+  /**
+   * Fire a post-commit domain event without letting a listener's failure
+   * bubble into (and 500) a write that has already committed. Mirrors
+   * `GroupsService.emitBestEffort`.
+   */
+  private emitBestEffort(eventName: string, payload: unknown): void {
+    try {
+      this.eventEmitter.emit(eventName, payload);
+    } catch {
+      // best-effort: post-commit live fan-out never fails a committed write.
+    }
+  }
 
   /**
    * Canonical unordered pair (least/greatest userId) matching `connections`'

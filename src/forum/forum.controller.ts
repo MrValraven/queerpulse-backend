@@ -238,10 +238,15 @@ export class ForumController {
   }
 
   @Post('posts/:id/restore')
-  @ApiOperation({ summary: 'Restore a tombstoned post; author or staff' })
+  @ApiOperation({
+    summary: 'Restore a tombstoned post; whoever deleted it, or staff',
+  })
   @ApiCreatedResponse({ description: 'The restored post.' })
   @ApiForbiddenResponse({
-    description: 'Only the author or a moderator can restore this post.',
+    description:
+      'Only the author or a moderator can restore this post, AND only the ' +
+      "actor who set the tombstone may clear it — a moderator's takedown " +
+      'needs a moderator to lift.',
   })
   @ApiBadRequestResponse({ description: 'Malformed post id.' })
   @ApiNotFoundResponse({ description: 'Post not found.' })

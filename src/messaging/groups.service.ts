@@ -8,6 +8,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { toImageUrl } from '../common/image-url';
+import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { cropFor } from '../media-crops/crop-response';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -22,7 +23,9 @@ import { Message, MessageKind, SystemEvent } from './entities/message.entity';
 import { ConversationResponse } from './message-response';
 import {
   CONVERSATION_CREATED,
+  CONVERSATION_MEMBERSHIP_REVOKED,
   ConversationCreatedEvent,
+  ConversationMembershipRevokedEvent,
 } from './messaging.events';
 import { MessagingCoreService } from './messaging-core.service';
 
@@ -247,6 +250,16 @@ export class GroupsService {
 
     // Best-effort live fan-out AFTER commit.
     await this.broadcastSystemMessage(systemMessage);
+    // Evict the leaver's sockets from the group room. Room authorisation only
+    // ever happens once, at `conversation:join`; without this they keep
+    // receiving `message:new`, `typing`, `reaction` and read receipts for a
+    // group they are no longer in, until their socket reconnects. Emitted
+    // AFTER `broadcastSystemMessage` so they still see the `member_left` pill
+    // that is about them.
+    this.emitBestEffort(CONVERSATION_MEMBERSHIP_REVOKED, {
+      conversationId,
+      userIds: [userId],
+    } satisfies ConversationMembershipRevokedEvent);
     if (promotedSuccessor) {
       await this.fanGroupRefresh(conversationId);
     }
@@ -258,7 +271,9 @@ export class GroupsService {
    * prospective member is gated exactly like a DM/create (block either way → 403,
    * not an accepted connection of the ADDER → 403); an already-active member is
    * skipped, and a previously-removed/left member's row is REACTIVATED (role reset
-   * to member, `left_at`/`cleared_at` cleared so they see history again). Posts a
+   * to member, `left_at` cleared, and `cleared_at` advanced to the later of its
+   * old value and that `left_at` so history resumes from the RE-ADD point rather
+   * than handing them everything posted while they were out). Posts a
    * `member_added` pill per add and fans the group to each new member's user room.
    * SERVER-AUTHORITATIVE: the caller's role is re-checked here, not trusted.
    */
@@ -327,9 +342,25 @@ export class GroupsService {
         const pills: Message[] = [];
         for (const { profile, existing } of membersToAdd) {
           if (existing) {
+            // Re-activation resumes history FROM THE RE-ADD POINT, not from
+            // the beginning of the thread. Nulling `clearedAt` outright (as
+            // this used to) erased two things at once: the read ceiling that
+            // held while they were out — handing a member removed for a period
+            // everything said about them in the interim — and their own
+            // "delete for me" floor, resurrecting history they had chosen to
+            // clear. Carrying the floor forward to the later of the two
+            // preserves both: everything they could legitimately see before
+            // leaving stays visible, the gap stays hidden.
+            const resumeFloor = [existing.clearedAt, existing.leftAt]
+              .filter((value): value is Date => value != null)
+              .reduce<Date | null>(
+                (latest, value) =>
+                  latest === null || value > latest ? value : latest,
+                null,
+              );
+            existing.clearedAt = resumeFloor;
             existing.leftAt = null;
             existing.role = ConversationRole.Member;
-            existing.clearedAt = null;
             await manager.save(existing);
           } else {
             await manager.save(
@@ -423,6 +454,14 @@ export class GroupsService {
       conversationId,
       memberUserIds: [targetUserId],
     } satisfies ConversationCreatedEvent);
+    // Cut the removed member's LIVE subscription to the group room — see
+    // `leaveGroup` above and {@link CONVERSATION_MEMBERSHIP_REVOKED}. Ordered
+    // after the pill + the inbox refetch so their client still learns WHY the
+    // thread went read-only.
+    this.emitBestEffort(CONVERSATION_MEMBERSHIP_REVOKED, {
+      conversationId,
+      userIds: [targetUserId],
+    } satisfies ConversationMembershipRevokedEvent);
     return this.toGroupConversationResponse(convo, actorUserId);
   }
 
@@ -483,6 +522,15 @@ export class GroupsService {
       actorUserId,
       ConversationRole.Admin,
     );
+    // Shared-upload backstop (see `assertNoForeignUploadIntroduced`): a group is
+    // edited by any of its owners/admins, so the interceptor exempts it and lets
+    // an admin re-save the currently stored photo whoever uploaded it. Runs
+    // BEFORE any mutation and draws the line the interceptor cannot: a foreign
+    // photo is allowed only when it is already the stored value, so an admin
+    // cannot point the field at a new foreign upload.
+    assertNoForeignUploadIntroduced(actorUserId, changes.avatarUrl, [
+      convo.avatarUrl,
+    ]);
     let renamed = false;
     if (changes.title !== undefined) {
       const trimmed = changes.title.trim();

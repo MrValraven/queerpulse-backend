@@ -146,10 +146,22 @@ export class CommunitiesController {
   }
 
   @Patch(':slug')
-  @ApiOperation({ summary: 'Update a community (owner/mod only).' })
+  @ApiOperation({
+    summary:
+      'Update a community (owner/mod; access tier and roster visibility are owner-only).',
+  })
   @ApiOkResponse({ description: 'The updated community detail.' })
-  @ApiBadRequestResponse({ description: 'The update payload is invalid.' })
-  @ApiForbiddenResponse({ description: 'Owner or moderator role required.' })
+  @ApiBadRequestResponse({
+    description:
+      'The update payload is invalid. `handle`, `stewards` and `invites` are ' +
+      'creation-only and are rejected here rather than silently ignored.',
+  })
+  @ApiForbiddenResponse({
+    description:
+      'Owner or moderator role required; changing `accessTier` or ' +
+      '`rosterVisible` requires the owner.',
+  })
+  @ApiConflictResponse({ description: 'The community is archived.' })
   @ApiNotFoundResponse({ description: 'No community exists for this slug.' })
   update(
     @CurrentUser() user: CurrentUserData,
@@ -209,6 +221,12 @@ export class CommunitiesController {
   })
   @ApiOkResponse({ description: 'The community detail, no longer frozen.' })
   @ApiForbiddenResponse({ description: 'Only an owner or mod may unfreeze.' })
+  @ApiConflictResponse({
+    description:
+      'The freeze was applied by moderation (an emergency report or a report ' +
+      'pile-up) and the community still has open reports. Resolve them first, ' +
+      'or ask platform staff to lift it.',
+  })
   @ApiNotFoundResponse({ description: 'No community exists for this slug.' })
   unfreeze(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
     return this.communitiesService.unfreeze(slug, user.userId);
@@ -385,12 +403,16 @@ export class CommunitiesController {
 
   @Post(':slug/posts/:id/restore')
   @ApiOperation({
-    summary: 'Restore a soft-deleted post (author or owner/mod).',
+    summary:
+      'Restore a soft-deleted post (whoever deleted it, or an owner/mod).',
   })
   @ApiCreatedResponse({ description: 'The post, tombstone cleared.' })
   @ApiBadRequestResponse({ description: 'Malformed post id.' })
   @ApiForbiddenResponse({
-    description: 'Author or owner/moderator role required.',
+    description:
+      'Author or owner/moderator role required, AND only the actor who set ' +
+      'the tombstone may clear it — an owner/mod takedown needs an owner/mod ' +
+      'to lift.',
   })
   @ApiNotFoundResponse({ description: 'No such community or post.' })
   restorePost(
@@ -482,12 +504,16 @@ export class CommunitiesController {
 
   @Post(':slug/posts/:id/replies/:replyId/restore')
   @ApiOperation({
-    summary: 'Restore a soft-deleted reply (author or owner/mod).',
+    summary:
+      'Restore a soft-deleted reply (whoever deleted it, or an owner/mod).',
   })
   @ApiCreatedResponse({ description: 'The reply, tombstone cleared.' })
   @ApiBadRequestResponse({ description: 'Malformed id.' })
   @ApiForbiddenResponse({
-    description: 'Author or owner/moderator role required.',
+    description:
+      'Author or owner/moderator role required, AND only the actor who set ' +
+      'the tombstone may clear it — an owner/mod takedown needs an owner/mod ' +
+      'to lift.',
   })
   @ApiNotFoundResponse({ description: 'No such community, post, or reply.' })
   restoreReply(
@@ -610,7 +636,9 @@ export class CommunitiesController {
   @ApiNoContentResponse({ description: 'The member was removed.' })
   @ApiBadRequestResponse({ description: 'The owner cannot be removed.' })
   @ApiForbiddenResponse({
-    description: 'Removing another member requires owner/moderator role.',
+    description:
+      'Removing another member requires owner/moderator role, and removing ' +
+      'another MODERATOR requires the owner (mirrors the role-change rule).',
   })
   @ApiNotFoundResponse({ description: 'No such community or member.' })
   removeMember(

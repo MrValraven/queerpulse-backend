@@ -24,6 +24,9 @@ function makeMockRepository(
     : jest.fn().mockResolvedValue(config.findRows ?? []);
   const queryBuilderStub = {
     where: jest.fn().mockReturnThis(),
+    // Sources with an `additionalWhere` (e.g. `Message.attachment.url`) chain
+    // one of these onto the prefilter.
+    andWhere: jest.fn().mockReturnThis(),
     getMany: jest.fn().mockResolvedValue(config.queryBuilderRows ?? []),
   };
   return {
@@ -35,8 +38,8 @@ function makeMockRepository(
 
 /** Builds a `DataSource` stub whose `getRepository` returns the entity's
  *  overridden mock repository, or a default empty repository otherwise —
- *  so every one of the 18 registered sources resolves cleanly even when a
- *  test only cares about one or two of them. Takes an entries array (not a
+ *  so every registered source resolves cleanly even when a test only cares
+ *  about one or two of them. Takes an entries array (not a
  *  `Map` literal) so TypeScript doesn't try to unify the mock repository
  *  shapes of unrelated entities into one tuple type. */
 function createMockDataSource(

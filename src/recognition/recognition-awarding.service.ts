@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { RecognitionStat } from './entities/recognition-stat.entity';
 import { RecognitionAward } from './entities/recognition-award.entity';
 import { RecognitionLedgerEntry } from './entities/recognition-ledger-entry.entity';
@@ -37,18 +37,40 @@ export interface RecomputeResult {
  * Derives XP from live signals, awards badges idempotently, materializes
  * `recognition_stats.xp` with a no-regression floor, and emits level-up and
  * badge-earned notifications. The heart of recognition (spec §3 Tier 2).
+ *
+ * Two properties of `recompute` are deliberate design, not oversights
+ * (BE-COM-24 raised both):
+ *
+ *   1. **XP is monotonic.** The upsert resolves
+ *      `GREATEST(stored, computed)`, so a withdrawn vouch, a deleted post or
+ *      a moderation takedown never lowers a member's score. Recognition here
+ *      is a record of what someone has contributed, not a live gauge of what
+ *      currently exists — taking XP back for a post that was later removed
+ *      would make the number feel punitive and unstable. Changing this is a
+ *      product decision, and it would need a matching answer for the ledger
+ *      (which only ever appends positive rows).
+ *   2. **Event listeners do not force a recompute.** `recomputeByUserId`
+ *      defaults to non-forced so listener-driven recomputes stay bounded by
+ *      the same `RECOMPUTE_TTL_MS` window as the on-read path; a burst of
+ *      high-signal events would otherwise trigger one full cross-domain
+ *      signal gather each. The cost is that a member's XP can lag an action
+ *      by up to five minutes, which the on-read recompute then closes.
+ *
+ * What was NOT deliberate, and is fixed: the ledger double-count under
+ * concurrent recomputes — see the lock in `recompute`.
  */
 @Injectable()
 export class RecognitionAwardingService {
   private readonly logger = new Logger(RecognitionAwardingService.name);
 
   constructor(
+    // The only injected repository this service still holds: `recompute`'s
+    // whole read-modify-write runs through `stats.manager.transaction(...)`
+    // under a per-member advisory lock (BE-COM-24), so awards and ledger rows
+    // are written through that transaction's `EntityManager` rather than
+    // through separate, unsynchronized repositories.
     @InjectRepository(RecognitionStat)
     private readonly stats: Repository<RecognitionStat>,
-    @InjectRepository(RecognitionAward)
-    private readonly awards: Repository<RecognitionAward>,
-    @InjectRepository(RecognitionLedgerEntry)
-    private readonly ledgerEntries: Repository<RecognitionLedgerEntry>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
     @InjectRepository(CommunityMember)
@@ -82,55 +104,131 @@ export class RecognitionAwardingService {
       };
     }
 
+    // Signals are read outside the lock below: they are the expensive part
+    // (a dozen cross-domain counts) and are only ever an input, never a
+    // read-modify-write.
     const signals = await this.gatherSignals(user);
     const qualifying = qualifyingBadgeKeys(signals);
-    const existing = await this.awards.find({ where: { userId } });
-    const existingKeys = new Set(existing.map((award) => award.badgeKey));
-    const newBadgeKeys = qualifying.filter((key) => !existingKeys.has(key));
 
-    if (newBadgeKeys.length > 0) {
-      // Idempotent: the (user_id, badge_key) unique index makes ON CONFLICT
-      // DO NOTHING safe even under a concurrent recompute.
-      await this.awards
-        .createQueryBuilder()
-        .insert()
-        .values(
-          newBadgeKeys.map((badgeKey) => ({
-            userId,
-            badgeKey,
-            context:
-              BADGE_CATALOG.find((badge) => badge.key === badgeKey)
-                ?.earnedContext ?? null,
-          })),
-        )
-        .orIgnore()
-        .execute();
-    }
+    // Everything from here on is a read-modify-write against this member's
+    // recognition state, and it runs under a per-member transaction-scoped
+    // advisory lock (BE-COM-24).
+    //
+    // Without it, two overlapping recomputes (an event listener and a page
+    // read) both read the same stale `xpBefore`, both upsert, and both append
+    // a "Recognition recalculated from recent activity" ledger row for the
+    // same delta — so the ledger's running total drifted above the stat it is
+    // supposed to explain. The same race duplicated the per-badge ledger rows,
+    // because both passes computed the same `newBadgeKeys` before either
+    // insert landed (`orIgnore` de-duplicates the AWARD, not the ledger row).
+    //
+    // An advisory lock rather than `SELECT ... FOR UPDATE` on
+    // `recognition_stats`: a member's first-ever recompute has no row to lock,
+    // which is exactly when both passes see `xpBefore = 0` and double-count
+    // the whole balance. `hashtextextended(userId, 0)` maps the uuid onto the
+    // bigint key the advisory-lock functions take; a hash collision between
+    // two members costs a little needless serialization and nothing else.
+    // `pg_advisory_xact_lock` releases on commit or rollback, so no unlock
+    // path can be missed.
+    const {
+      xpBefore: lockedXpBefore,
+      xpAfter,
+      newBadgeKeys,
+    } = await this.stats.manager.transaction(async (manager) => {
+      await manager.query(
+        `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+        [userId],
+      );
 
-    // Badges are sticky: held = everything previously earned plus the new ones,
-    // even if a signal has since dropped below threshold.
-    const heldKeys = new Set<string>([...existingKeys, ...newBadgeKeys]);
-    const computedXp = scoreSignals(signals) + badgeBonusXp(heldKeys);
+      const awardsRepo = manager.getRepository(RecognitionAward);
+      const existing = await awardsRepo.find({ where: { userId } });
+      const existingKeys = new Set(existing.map((award) => award.badgeKey));
+      const earnedKeys = qualifying.filter((key) => !existingKeys.has(key));
 
-    // Atomic GREATEST upsert: the DB resolves max(stored, computed), so
-    // concurrent recomputes cannot lose an update. Level-up delta uses the
-    // pre-read xpBefore; under rare concurrency two recomputes could both
-    // emit a level-up notification, an accepted cosmetic tradeoff.
-    const [row] = await this.stats.query<{ xp: number | string }[]>(
-      `INSERT INTO recognition_stats (user_id, xp, updated_at)
-       VALUES ($1, $2, now())
-       ON CONFLICT (user_id) DO UPDATE
-         SET xp = GREATEST(recognition_stats.xp, EXCLUDED.xp), updated_at = now()
-       RETURNING xp`,
-      [userId, computedXp],
-    );
-    const xpAfter = Number(row!.xp);
+      if (earnedKeys.length > 0) {
+        // Idempotent: the (user_id, badge_key) unique index makes ON CONFLICT
+        // DO NOTHING safe even were a writer to slip past the lock.
+        await awardsRepo
+          .createQueryBuilder()
+          .insert()
+          .values(
+            earnedKeys.map((badgeKey) => ({
+              userId,
+              badgeKey,
+              context:
+                BADGE_CATALOG.find((badge) => badge.key === badgeKey)
+                  ?.earnedContext ?? null,
+            })),
+          )
+          .orIgnore()
+          .execute();
+      }
+
+      // Badges are sticky: held = everything previously earned plus the new
+      // ones, even if a signal has since dropped below threshold.
+      const heldKeys = new Set<string>([...existingKeys, ...earnedKeys]);
+      const computedXp = scoreSignals(signals) + badgeBonusXp(heldKeys);
+
+      // Re-read the stored XP under the lock. The value read before the
+      // lock (`xpBefore` above, used only for the TTL check) may be stale by
+      // now — that staleness is what used to double-count the delta.
+      const [current] = await manager.query<{ xp: number | string }[]>(
+        `SELECT xp FROM recognition_stats WHERE user_id = $1`,
+        [userId],
+      );
+      const lockedBefore = current ? Number(current.xp) : 0;
+
+      // GREATEST upsert: `recognition_stats.xp` is deliberately a
+      // no-regression floor — see the note on `recompute`'s contract. The
+      // lock, not GREATEST, is what makes the delta correct.
+      const [row] = await manager.query<{ xp: number | string }[]>(
+        `INSERT INTO recognition_stats (user_id, xp, updated_at)
+           VALUES ($1, $2, now())
+           ON CONFLICT (user_id) DO UPDATE
+             SET xp = GREATEST(recognition_stats.xp, EXCLUDED.xp), updated_at = now()
+           RETURNING xp`,
+        [userId, computedXp],
+      );
+      const after = Number(row!.xp);
+
+      // Inside the transaction, so the ledger rows commit (or roll back)
+      // with the stat they explain.
+      await this.writeLedgerEntries(
+        manager,
+        userId,
+        lockedBefore,
+        after,
+        earnedKeys,
+      );
+
+      return {
+        xpBefore: lockedBefore,
+        xpAfter: after,
+        newBadgeKeys: earnedKeys,
+      };
+    });
+
+    // Level transition is measured from the locked pre-value, so a member can
+    // only ever be told they levelled up once.
+    const lockedLevelBefore = computeLevel(lockedXpBefore).level;
     const levelAfter = computeLevel(xpAfter).level;
 
-    await this.writeLedgerEntries(userId, xpBefore, xpAfter, newBadgeKeys);
-    await this.emitNotifications(userId, levelBefore, levelAfter, newBadgeKeys);
+    // Best-effort side effect, deliberately after the transaction: a failed
+    // notification must not roll back the XP it was announcing.
+    await this.emitNotifications(
+      userId,
+      lockedLevelBefore,
+      levelAfter,
+      newBadgeKeys,
+    );
 
-    return { xpBefore, xpAfter, levelBefore, levelAfter, newBadgeKeys };
+    return {
+      xpBefore: lockedXpBefore,
+      xpAfter,
+      levelBefore: lockedLevelBefore,
+      levelAfter,
+      newBadgeKeys,
+    };
   }
 
   /**
@@ -143,6 +241,7 @@ export class RecognitionAwardingService {
    * offset a signal that dropped in the interim).
    */
   private async writeLedgerEntries(
+    manager: EntityManager,
     userId: string,
     xpBefore: number,
     xpAfter: number,
@@ -174,7 +273,7 @@ export class RecognitionAwardingService {
     }
 
     if (rows.length > 0) {
-      await this.ledgerEntries.insert(rows);
+      await manager.getRepository(RecognitionLedgerEntry).insert(rows);
     }
   }
 

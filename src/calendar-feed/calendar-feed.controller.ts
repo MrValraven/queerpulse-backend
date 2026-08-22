@@ -1,6 +1,8 @@
 import {
   Controller,
+  Delete,
   Get,
+  HttpCode,
   NotFoundException,
   Param,
   Res,
@@ -9,6 +11,7 @@ import {
 } from '@nestjs/common';
 import {
   ApiCookieAuth,
+  ApiNoContentResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
@@ -31,11 +34,14 @@ import { CalendarFeedTokenService } from './calendar-feed-token.service';
  * per-member ICS feed a calendar app polls on its own schedule. Split into
  * two routes with very different trust models:
  *
- *  - `GET /me/calendar-feed-token` — session-authenticated, mints the token.
+ *  - `GET /me/calendar-feed-token` — session-authenticated, returns (minting on
+ *    first use) the member's live token.
+ *  - `DELETE /me/calendar-feed-token` — session-authenticated, REVOKES it, so a
+ *    leaked feed URL can be killed by the one member it belongs to.
  *  - `GET /calendar/feed/:token` — deliberately `@Public()`: a calendar app
  *    fetches this unauthenticated (no cookie jar, no login prompt), so the
- *    token itself — HMAC-signed, see `CalendarFeedTokenService` — is the only
- *    credential. `VERSION_NEUTRAL` (mirrors `MetricsController`'s reasoning)
+ *    token itself — a stored random secret, see `CalendarFeedTokenService` — is
+ *    the only credential. `VERSION_NEUTRAL` (mirrors `MetricsController`'s reasoning)
  *    keeps the URL a member pastes into Google/Apple Calendar stable across
  *    API version bumps, since it's meant to be added once and polled forever.
  *
@@ -58,13 +64,40 @@ export class CalendarFeedController {
   })
   @ApiOperation({
     summary:
-      "Mint your calendar-feed token — combine with the API base URL as " +
-      "`{apiUrl}/calendar/feed/{token}` for a webcal-style subscribe link.",
+      'Mint your calendar-feed token — combine with the API base URL as ' +
+      '`{apiUrl}/calendar/feed/{token}` for a webcal-style subscribe link.',
   })
-  @ApiOkResponse({ description: 'A signed, long-lived feed token.' })
+  @ApiOkResponse({ description: "The member's live feed token." })
   @UseGuards(ActiveMemberGuard)
-  mintToken(@CurrentUser() user: CurrentUserData) {
-    return { token: this.calendarFeedToken.mint(user.userId) };
+  async mintToken(@CurrentUser() user: CurrentUserData) {
+    // Idempotent: returns the token already stored for this member, minting one
+    // only on first use. Re-opening the subscribe affordance must not rotate
+    // the URL — that would silently break the calendar they already subscribed.
+    return { token: await this.calendarFeedToken.mint(user.userId) };
+  }
+
+  @Delete('me/calendar-feed-token')
+  @HttpCode(204)
+  @ApiTags('Calendar feed')
+  @ApiCookieAuth('access_token')
+  @ApiUnauthorizedResponse({
+    description: 'Requires an authenticated, active member session.',
+  })
+  @ApiOperation({
+    summary:
+      'Revoke your calendar-feed URL. Any calendar app still polling the old ' +
+      'link stops receiving your events; the next mint issues a fresh token.',
+  })
+  @ApiNoContentResponse({ description: 'The old feed URL no longer works.' })
+  @UseGuards(ActiveMemberGuard)
+  async revokeToken(@CurrentUser() user: CurrentUserData): Promise<void> {
+    // The whole point of storing the token (rather than deriving it from the
+    // member's id and a platform-wide secret, as this used to) is that ONE
+    // member can invalidate ONE leaked feed URL. A feed URL leaks easily — it
+    // is pasted into Google/Apple Calendar, synced across devices, and left in
+    // browser history — and it exposes which gatherings the member is
+    // attending, which on this platform can out someone. Idempotent.
+    await this.calendarFeedToken.revoke(user.userId);
   }
 
   @Get('calendar/feed/:token')
@@ -81,7 +114,7 @@ export class CalendarFeedController {
     @Param('token') token: string,
     @Res() response: Response,
   ): Promise<void> {
-    const userId = this.calendarFeedToken.verify(token);
+    const userId = await this.calendarFeedToken.verify(token);
     if (!userId) {
       throw new NotFoundException('Invalid feed token');
     }

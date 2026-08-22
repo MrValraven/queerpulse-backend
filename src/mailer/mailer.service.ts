@@ -1,10 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createTransport, type Transporter } from 'nodemailer';
+import { BulkUnsubscribeService } from './bulk-unsubscribe.service';
 import {
+  BULK_TEMPLATE_KEYS,
   MailTemplateKey,
   MailTemplateParams,
   renderTemplate,
+  withUnsubscribeFooter,
 } from './mail-templates';
 
 // Outbound-call budget for the SMTP transport, matching the rest of the
@@ -39,7 +42,10 @@ export class MailerService {
   /** True when a real SMTP transport is configured; false = log-only fallback. */
   private readonly deliveringForReal: boolean;
 
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    private readonly bulkUnsubscribe: BulkUnsubscribeService,
+  ) {
     this.from =
       this.config.get<string>('mail.from') ??
       'QueerPulse <no-reply@queerpulse.example>';
@@ -107,13 +113,43 @@ export class MailerService {
    * Throws if a configured SMTP transport fails to send (so a genuine delivery
    * failure surfaces rather than being swallowed as a false success); the
    * log-only transport never throws.
+   *
+   * BULK templates ({@link BULK_TEMPLATE_KEYS}) additionally get a per-recipient
+   * opt-out, resolved and attached HERE rather than by the caller. Deliberately
+   * so: the unsubscribe is a property of "this is list mail", not of any one
+   * send site, and putting it in the one place every message passes through
+   * means a future bulk template cannot ship without it. A bulk send whose
+   * recipient has no resolvable unsubscribe token is REFUSED rather than sent
+   * naked — the digest loop already catches and logs per subscriber, so a
+   * stray address is skipped instead of taking the whole list down.
    */
   async send<K extends MailTemplateKey>(
     to: string,
     templateKey: K,
     params: MailTemplateParams[K],
   ): Promise<void> {
-    const { subject, text, html } = renderTemplate(templateKey, params);
+    const rendered = renderTemplate(templateKey, params);
+    let headers: Record<string, string> | undefined;
+    let { subject, text, html } = rendered;
+    if (BULK_TEMPLATE_KEYS.has(templateKey)) {
+      const links = await this.bulkUnsubscribe.linksFor(to);
+      if (!links) {
+        throw new Error(
+          `Refusing to send bulk "${templateKey}" to ${to}: no unsubscribe token for that address`,
+        );
+      }
+      ({ subject, text, html } = withUnsubscribeFooter(
+        rendered,
+        links.pageUrl,
+      ));
+      // RFC 2369 + RFC 8058. `List-Unsubscribe-Post` is what makes the URI a
+      // ONE-CLICK target (the mail client POSTs it directly, no landing page),
+      // required by Gmail/Yahoo for bulk senders since 2024.
+      headers = {
+        'List-Unsubscribe': `<${links.oneClickUrl}>`,
+        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+      };
+    }
     try {
       const info = await this.transporter.sendMail({
         from: this.from,
@@ -121,6 +157,7 @@ export class MailerService {
         subject,
         text,
         html,
+        ...(headers ? { headers } : {}),
       });
       if (this.deliveringForReal) {
         this.logger.log(

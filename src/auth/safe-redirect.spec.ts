@@ -1,4 +1,9 @@
-import { resolvePostLoginRedirect, safeRedirectPath } from './safe-redirect';
+import {
+  reauthFailureUrl,
+  resolvePostLoginRedirect,
+  resolveReauthCompletionUrl,
+  safeRedirectPath,
+} from './safe-redirect';
 
 describe('safeRedirectPath', () => {
   it('accepts simple internal paths', () => {
@@ -67,5 +72,51 @@ describe('resolvePostLoginRedirect', () => {
   it('never emits a cross-origin URL', () => {
     const out = resolvePostLoginRedirect('/feed', FRONTEND);
     expect(new URL(out).origin).toBe(new URL(FRONTEND).origin);
+  });
+});
+
+describe('resolveReauthCompletionUrl', () => {
+  const FRONTEND = 'http://localhost:5173';
+
+  it('carries the token + expiry in the URL fragment, never the query string', () => {
+    const out = resolveReauthCompletionUrl(
+      '/settings',
+      FRONTEND,
+      'abc123',
+      '2026-01-01T00:05:00.000Z',
+    );
+    const url = new URL(out);
+    expect(url.origin + url.pathname).toBe(`${FRONTEND}/settings`);
+    expect(url.search).toBe('');
+    expect(new URLSearchParams(url.hash.slice(1)).get('reauthToken')).toBe(
+      'abc123',
+    );
+    expect(new URLSearchParams(url.hash.slice(1)).get('reauthExpiresAt')).toBe(
+      '2026-01-01T00:05:00.000Z',
+    );
+  });
+
+  it('falls back to the default landing page for an unsafe/absent redirect, same as resolvePostLoginRedirect', () => {
+    const out = resolveReauthCompletionUrl(
+      'https://evil.com',
+      FRONTEND,
+      'abc123',
+      '2026-01-01T00:05:00.000Z',
+    );
+    expect(new URL(out).origin).toBe(new URL(FRONTEND).origin);
+  });
+});
+
+describe('reauthFailureUrl', () => {
+  const FRONTEND = 'http://localhost:5173';
+
+  it('lands back on the same page (never the sign-in page) with an error code in the fragment', () => {
+    const out = reauthFailureUrl('/settings', FRONTEND, 'reauth_failed');
+    const url = new URL(out);
+    expect(url.origin + url.pathname).toBe(`${FRONTEND}/settings`);
+    expect(url.pathname).not.toContain('sign-in');
+    expect(new URLSearchParams(url.hash.slice(1)).get('reauthError')).toBe(
+      'reauth_failed',
+    );
   });
 });

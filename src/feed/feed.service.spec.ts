@@ -273,6 +273,46 @@ describe('FeedService', () => {
     service = module.get(FeedService);
   });
 
+  describe('moderator takedowns (BE-MSG-05)', () => {
+    // The feed has no tombstone rendering, so a hidden/removed item would
+    // surface with its real title, summary and deep link — the takedown has to
+    // be enforced here exactly as it is on each source's own browse surface.
+    const predicateOf = (qb: Record<string, jest.Mock>, needle: string) =>
+      qb.andWhere.mock.calls.find(
+        (call) => typeof call[0] === 'string' && call[0].includes(needle),
+      );
+
+    it('excludes taken-down community posts, forum threads and gatherings', async () => {
+      const postQb = qbStub([basePost()]);
+      const threadQb = qbStub([baseThread()]);
+      const eventQb = qbStub([baseEvent()]);
+      communityPosts.createQueryBuilder.mockReturnValue(postQb);
+      forumThreads.createQueryBuilder.mockReturnValue(threadQb);
+      events.createQueryBuilder.mockReturnValue(eventQb);
+      communities.find.mockResolvedValue([baseCommunity()]);
+
+      await service.getFeed('viewer-1', 'all', undefined);
+
+      const postCall = predicateOf(postQb, 'content_moderation');
+      expect(postCall?.[0]).toContain('"cp"."id"::text');
+      expect(postCall?.[1]).toEqual({
+        feedModerationSubjectTypes: ['post', 'reply'],
+      });
+
+      // A forum thread carries no takedown row of its own — its OP post does.
+      const threadCall = predicateOf(threadQb, 'content_moderation');
+      expect(threadCall?.[0]).toContain('"forum_post"');
+      expect(threadCall?.[0]).toContain('"feed_op"."is_op" = true');
+      expect(threadCall?.[1]).toEqual({
+        feedModerationSubjectTypes: ['post', 'reply'],
+      });
+
+      const eventCall = predicateOf(eventQb, 'content_moderation');
+      expect(eventCall?.[0]).toContain('"e"."id"::text');
+      expect(eventCall?.[1]).toEqual({ feedModerationSubjectTypes: ['event'] });
+    });
+  });
+
   describe('tab -> source filtering', () => {
     it('"all" unions community posts, forum threads, and gatherings', async () => {
       communityPosts.createQueryBuilder.mockReturnValue(qbStub([basePost()]));

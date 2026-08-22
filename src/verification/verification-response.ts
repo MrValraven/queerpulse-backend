@@ -217,9 +217,9 @@ export function toAdminVerificationRequestDTO(
  * computeSignals`) — the evidence a reviewer sees alongside the request.
  *
  * DEFERRED (computed nowhere yet): phone/VOIP-carrier and IP/geo signals.
- * This platform never stores a member's phone number itself (it lives
- * entirely behind `PhoneVerificationProvider` — see `MemberVerification`'s
- * doc comment) and captures no IP/geo data anywhere, so there is nothing
+ * This platform never stores a member's phone number at all (the automated
+ * phone-OTP step-up was removed; `phone` level is now granted only through
+ * manual review) and captures no IP/geo data anywhere, so there is nothing
  * server-side to compute those from today. `duplicateProviderRef` (the
  * member's identity-provider session reference shared with another account)
  * is the only cross-account signal available.

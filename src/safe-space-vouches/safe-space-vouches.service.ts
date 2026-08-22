@@ -55,6 +55,14 @@ export class SafeSpaceVouchesService {
   ): Promise<{ vouchCount: number }> {
     const listing = await this.resolveVerifiedSpace(slug);
 
+    // A space's own owner cannot vouch for it: a vouch is a community member's
+    // independent endorsement, and letting the owner +1 their own public
+    // `vouchCount` inflates that signal. Mirrors the self-report guard in
+    // `ReportsService` (you cannot report your own content).
+    if (listing.ownerId && listing.ownerId === voucherId) {
+      throw new BadRequestException('You cannot vouch for your own space');
+    }
+
     // Empty/whitespace-only notes are stored as null, not "" — mirrors VouchService.
     const trimmedNote = input?.note?.trim();
     const cleanNote = trimmedNote ? trimmedNote : null;

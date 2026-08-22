@@ -9,7 +9,6 @@ import { AccountService } from './account.service';
 describe('AccountController', () => {
   let controller: AccountController;
   let service: {
-    reauth: jest.Mock;
     deactivate: jest.Mock;
     requestDeletion: jest.Mock;
     getDeletionRequest: jest.Mock;
@@ -40,7 +39,6 @@ describe('AccountController', () => {
 
   beforeEach(async () => {
     service = {
-      reauth: jest.fn(),
       deactivate: jest.fn(),
       requestDeletion: jest.fn(),
       getDeletionRequest: jest.fn(),
@@ -61,21 +59,6 @@ describe('AccountController', () => {
       providers: [{ provide: AccountService, useValue: service }],
     }).compile();
     controller = module.get(AccountController);
-  });
-
-  it('POST /reauth delegates to the service for the current user, ignoring any password', async () => {
-    service.reauth.mockResolvedValue({
-      reauthToken: 'tok',
-      expiresAt: '2026-07-15T12:05:00.000Z',
-    });
-
-    const result = await controller.reauth(user, { password: 'irrelevant' });
-
-    expect(service.reauth).toHaveBeenCalledWith('u1');
-    expect(result).toEqual({
-      reauthToken: 'tok',
-      expiresAt: '2026-07-15T12:05:00.000Z',
-    });
   });
 
   it('POST /deactivate delegates the dto through', async () => {
@@ -377,8 +360,10 @@ describe('AccountController', () => {
 
   it('a pending user can call every account endpoint (no ActiveMemberGuard applied)', async () => {
     const pendingUser: CurrentUserData = { ...user, status: 'pending' };
-    service.reauth.mockResolvedValue({ reauthToken: 'tok', expiresAt: 'x' });
-    await expect(controller.reauth(pendingUser, {})).resolves.toBeDefined();
+    service.getEmailPreferences.mockResolvedValue([]);
+    await expect(
+      controller.getEmailPreferences(pendingUser),
+    ).resolves.toBeDefined();
     // Documents intent: AccountController has no @UseGuards(ActiveMemberGuard).
   });
 });

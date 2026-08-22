@@ -1,7 +1,7 @@
 import { MemberRef } from '../common/member-ref';
 import { GovernanceOverviewChange } from './entities/governance-overview-change.entity';
 
-// Backs `GET /governance/admin/overview/changes` — the per-section audit
+// Backs `GET /admin/governance/overview/changes` — the per-section audit
 // trail. Each row is enriched with the actor's display ref (never a raw
 // uuid).
 export interface AdminOverviewChangeDTO {

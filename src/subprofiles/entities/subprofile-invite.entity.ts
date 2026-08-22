@@ -19,6 +19,11 @@ export enum SubprofileInviteStatus {
 // can coexist for the same pair (a re-invite after a decline is allowed).
 @Index('IDX_subprofile_invites_subprofile_id', ['subprofileId'])
 @Index('IDX_subprofile_invites_invited_user_id', ['invitedUserId'])
+// The inviter FK had no supporting index (CNT-20): Postgres does not index a
+// foreign-key column automatically, so every hard delete of a `users` row (the
+// account-erasure path) had to sequentially scan this table. Created by
+// `1793640000000-AddContentModuleForeignKeyIndexes`.
+@Index('IDX_subprofile_invites_invited_by_user_id', ['invitedByUserId'])
 @Entity('subprofile_invites')
 export class SubprofileInvite {
   @PrimaryGeneratedColumn('uuid')

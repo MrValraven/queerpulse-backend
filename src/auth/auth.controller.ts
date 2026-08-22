@@ -31,8 +31,13 @@ import {
   clearAuthCookies,
   clearCsrfCookie,
   clearOAuthStateCookie,
+  SessionCookieOpts,
 } from './auth-cookies';
 import { AuthService, GoogleUserInput } from './auth.service';
+import {
+  UnderAgeDisclosureResult,
+  UnderAgeDisclosureService,
+} from './under-age-disclosure.service';
 import {
   CurrentUser,
   CurrentUserData,
@@ -43,7 +48,12 @@ import { OAuthCallbackFilter } from './filters/oauth-callback.filter';
 import { Public } from './decorators/public.decorator';
 import { GoogleAuthGuard } from './guards/google-auth.guard';
 import { decodeOAuthState } from './oauth-state';
-import { resolvePostLoginRedirect, signInErrorUrl } from './safe-redirect';
+import {
+  reauthFailureUrl,
+  resolvePostLoginRedirect,
+  resolveReauthCompletionUrl,
+  signInErrorUrl,
+} from './safe-redirect';
 import { Throttle, seconds } from '@nestjs/throttler';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 import { toImageUrl } from '../common/image-url';
@@ -74,12 +84,26 @@ export class AuthController {
     private readonly usersService: UsersService,
     private readonly config: ConfigService,
     private readonly mediaCropService: MediaCropService,
+    private readonly underAgeDisclosure: UnderAgeDisclosureService,
   ) {}
 
-  private cookieOpts() {
+  /**
+   * One object for every auth-cookie call in this controller.
+   *
+   * The two `maxAge`s are DERIVED from the configured JWT TTLs rather than
+   * hardcoded, so `JWT_ACCESS_TTL` / `JWT_REFRESH_TTL` are the single knob:
+   * before this, changing `JWT_REFRESH_TTL` moved the token's expiry without
+   * moving the cookie's, leaving either a cookie the browser keeps long after
+   * the JWT inside it 401s, or a cookie the browser drops while the server
+   * still considers the session live. `clearAuthCookies` ignores the extra
+   * fields (a `maxAge` is meaningless on a deletion).
+   */
+  private cookieOpts(): SessionCookieOpts {
     return {
       secure: this.config.get<string>('app.nodeEnv') === 'production',
       domain: this.config.get<string>('auth.cookieDomain') || undefined,
+      accessMaxAge: this.config.getOrThrow<number>('auth.jwtAccessTtlMs'),
+      refreshMaxAge: this.config.getOrThrow<number>('auth.jwtRefreshTtlMs'),
     };
   }
 
@@ -145,7 +169,50 @@ export class AuthController {
     }
 
     const profile = req.user as GoogleUserInput;
-    const { invite, redirect, ageAttested, termsVersion } = state;
+    const { invite, redirect, ageAttested, termsVersion, reauth } = state;
+    const frontendUrl = this.config.getOrThrow<string>('app.frontendUrl');
+
+    // Step-up re-auth round trip (see `OAuthState.reauth`'s doc comment).
+    // Branches out BEFORE `validateOrCreateGoogleUser` — this never
+    // creates/updates an account or touches session cookies, it only proves
+    // the browser could complete a fresh Google login (forced via
+    // `prompt=login` on the outbound leg) as the SAME member who is already
+    // signed in, then mints a short-lived reauth token for them.
+    if (reauth) {
+      const rawAccessToken = (
+        req.cookies as Record<string, string | undefined> | undefined
+      )?.['access_token'];
+      const currentSession = rawAccessToken
+        ? await this.authService.verifyAccessToken(rawAccessToken)
+        : null;
+      // Resolve which account this Google login belongs to via the same
+      // lookup the ordinary sign-in path uses — never by reading `googleId`
+      // off a loaded `User` row (see that column's `select: false` doc
+      // comment on why it has no value-reader in app code).
+      const linkedUser = currentSession
+        ? await this.usersService.findByGoogleId(profile.googleId)
+        : null;
+      if (
+        !currentSession ||
+        !linkedUser ||
+        linkedUser.id !== currentSession.sub
+      ) {
+        res.redirect(reauthFailureUrl(redirect, frontendUrl, 'reauth_failed'));
+        return;
+      }
+      const { reauthToken, expiresAt } = await this.authService.mintReauthToken(
+        currentSession.sub,
+      );
+      res.redirect(
+        resolveReauthCompletionUrl(
+          redirect,
+          frontendUrl,
+          reauthToken,
+          expiresAt,
+        ),
+      );
+      return;
+    }
 
     let user: User;
     try {
@@ -177,7 +244,6 @@ export class AuthController {
     setAuthCookies(res, tokens, this.cookieOpts());
     // Honor the validated post-login redirect; fall back to the default landing
     // page when it is absent or fails the open-redirect safety checks.
-    const frontendUrl = this.config.getOrThrow<string>('app.frontendUrl');
     res.redirect(resolvePostLoginRedirect(redirect, frontendUrl));
   }
 
@@ -317,7 +383,19 @@ export class AuthController {
       // absolute `https://` URLs, so `toImageUrl` passes them through untouched.
       profile: user.profile
         ? {
-            ...user.profile,
+            // EXPLICIT allowlist, never a spread of the entity. Spreading
+            // `user.profile` shipped every column on `profiles` to the
+            // member — including `verifiedBy` (the verifying admin's internal
+            // user id), `hiddenUntil`, `privateNetwork`, `featuredConsent`,
+            // `discoverableIdentities` — and silently added any column a
+            // future migration introduces. These six fields are the whole
+            // `AuthUser['profile']` contract the SPA declares
+            // (`features/auth/api/auth.api.ts`); richer profile data has its
+            // own endpoint (`GET /profiles/:slug` -> `toFullProfile`).
+            slug: user.profile.slug,
+            firstName: user.profile.firstName,
+            lastName: user.profile.lastName,
+            pronouns: user.profile.pronouns,
             avatarUrl: toImageUrl(user.profile.avatarUrl),
             avatarCrop: cropFor(user.profile.avatarUrl, avatarCrops),
           }
@@ -355,5 +433,45 @@ export class AuthController {
       guidelinesAcceptedAt: result.guidelinesAcceptedAt.toISOString(),
       guidelinesVersion: result.guidelinesVersion,
     };
+  }
+
+  /**
+   * The member has just told us they are not 18 yet (the onboarding wizard's
+   * under-18 branch). Records the disclosure, suspends the account permanently,
+   * and revokes every live session — see `UnderAgeDisclosureService` for why
+   * each of those three is part of the same act.
+   *
+   * Authenticated but deliberately NOT behind `ActiveMemberGuard`: a retry
+   * arriving after the first call has already suspended the account must still
+   * be accepted rather than 403, so the client can be honest about failures
+   * instead of silently giving up. Idempotent for the same reason.
+   *
+   * This device's cookies are cleared on the way out, like `logout-all`, so the
+   * browser is not left holding a session the server has already killed. The
+   * frontend signs out immediately afterwards regardless of what this answers.
+   *
+   * Throttled: it is a self-declared, one-time act, so a burst is never
+   * legitimate traffic.
+   */
+  @ApiOperation({
+    summary: 'Record a self-declared under-18 disclosure and lock the account.',
+  })
+  @ApiCookieAuth('access_token')
+  @ApiCreatedResponse({
+    description:
+      'Disclosure recorded; the account is suspended and signed out.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiTooManyRequestsResponse({ description: 'Too many attempts.' })
+  @Throttle({ default: { limit: 5, ttl: seconds(60) } })
+  @Post('under-18-disclosure')
+  async underEighteenDisclosure(
+    @CurrentUser() current: CurrentUserData,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<UnderAgeDisclosureResult> {
+    const result = await this.underAgeDisclosure.record(current.userId);
+    clearAuthCookies(res, this.cookieOpts());
+    clearCsrfCookie(res);
+    return result;
   }
 }

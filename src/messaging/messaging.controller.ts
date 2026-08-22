@@ -25,6 +25,7 @@ import { CreateConversationDto } from './dto/create-conversation.dto';
 import { CreateGroupDto } from './dto/create-group.dto';
 import { EditMessageDto } from './dto/edit-message.dto';
 import { GetMessagesQuery } from './dto/get-messages.query';
+import { MarkReadDto } from './dto/mark-read.dto';
 import { MessageReactionDto } from './dto/message-reaction.dto';
 import { MessageRequestDto } from './dto/message-request.dto';
 import { SearchMessagesQuery } from './dto/search-messages.query';
@@ -396,11 +397,20 @@ export class ConversationsController {
   })
   @ApiOkResponse({ description: "The caller's read watermark was advanced." })
   @ApiForbiddenResponse({ description: 'The caller is not a participant.' })
+  @ApiNotFoundResponse({
+    description: '`upToMessageId` is not a message in this conversation.',
+  })
   read(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,
+    // Optional body — see `MarkReadDto`. An empty body keeps the original
+    // "read up to now" behaviour, so a client that sends none still works.
+    @Body() dto: MarkReadDto,
   ) {
-    return this.messagingService.markRead(id, user.userId);
+    return this.messagingService.markRead(id, user.userId, {
+      upToMessageId: dto.upToMessageId,
+      lastReadAt: dto.lastReadAt,
+    });
   }
 
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })

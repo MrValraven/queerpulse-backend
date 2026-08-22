@@ -19,6 +19,12 @@ import { randomUUID } from 'node:crypto';
 import { IMAGE_UPLOAD_TYPES } from './upload-content-types';
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 import { isStorageKey } from './storage-key';
+import {
+  MAGIC_BYTE_PREFIX_LENGTH,
+  contentTypeForStorageKey,
+  inlineContentDispositionForStorageKey,
+  magicBytesMatchContentType,
+} from './served-object';
 
 export const PRESIGN_EXPIRY_SECONDS = 300; // 5 minutes
 
@@ -63,9 +69,11 @@ export class StorageService {
   // presign the PUT. The controller passes already-authenticated params through
   // (the caller's `userId` + the validated DTO fields) and owns none of this.
   //
-  // `byteSize` is optional because the legacy avatar/work-image routes don't
-  // send one — only `/presign` gets the early over-cap reject; the others rely
-  // on `createPresignedUpload` pinning `ContentLength` when a size is present.
+  // `byteSize` is typed optional here defensively — every current caller
+  // (avatar, work-image, and the unified `/presign` route) requires it at the
+  // DTO layer (`PresignUploadDto`, `PresignRequestDto`) and always passes it,
+  // so this early over-cap reject and `createPresignedUpload`'s `ContentLength`
+  // pinning both run for every route.
   async presignImageUpload(params: {
     kind: UploadKind;
     userId: string;
@@ -106,8 +114,8 @@ export class StorageService {
   // gets a signature at all); pinning `ContentLength` here closes the gap where
   // a client declared a small `byteSize` to pass that check, then PUT a much
   // larger body — previously the client-declared size was the *only* limit.
-  // `contentLength` is optional because the legacy avatar/work-image routes
-  // don't send a byte size; those keep the up-front check only.
+  // `contentLength` is typed optional defensively; every route's DTO requires
+  // a `byteSize`, so in practice this is always pinned.
   async createPresignedUpload(
     key: string,
     contentType: string,
@@ -129,14 +137,82 @@ export class StorageService {
   // the only way to hand bytes to a browser. `FilesController` authorizes the
   // request first, then redirects here — the bytes come straight from the
   // bucket and never pass through this service.
+  //
+  // `ResponseContentType` / `ResponseContentDisposition` are signed INTO the
+  // presigned GET (S3 response-header overrides), so the bucket returns them on
+  // the object regardless of what content type was stored at PUT time (security
+  // review L12). Forcing the content type to the single image type the key's
+  // extension implies neutralises content-type-confusion / sniffing: even if a
+  // modified client PUT bytes under a mismatched stored type, the served
+  // response is always the correct `image/*` with an `inline` disposition and a
+  // server-minted filename. `X-Content-Type-Options: nosniff` cannot be signed
+  // into a presigned GET (S3 exposes no such override), so the controller sets
+  // it as best-effort on its 302; the authoritative protection is this forced
+  // `ResponseContentType` plus the magic-byte check in `validateImageMagicBytes`.
   async createPresignedDownload(key: string): Promise<string> {
+    const contentType = contentTypeForStorageKey(key);
     const command = new GetObjectCommand({
       Bucket: this.requireConfig('storage.bucket'),
       Key: key,
+      ...(contentType ? { ResponseContentType: contentType } : {}),
+      ResponseContentDisposition: inlineContentDispositionForStorageKey(key),
     });
     return getSignedUrl(this.storageClient(), command, {
       expiresIn: PRESIGN_EXPIRY_SECONDS,
     });
+  }
+
+  /**
+   * Server-side backstop against content-type spoofing (security review M2):
+   * reads only the object's first {@link MAGIC_BYTE_PREFIX_LENGTH} bytes and
+   * checks their magic signature against the image type the key's extension
+   * declares. Because uploads go straight to the bucket via a presigned PUT (the
+   * backend never sees the bytes), this is the only place the actual bytes are
+   * inspected — a `.png` key whose body is really HTML/JS, or an untouched JPEG
+   * carrying GPS EXIF a real re-encode would have stripped, fails here.
+   *
+   * Returns:
+   *  - `'valid'`      the first bytes match the declared image type;
+   *  - `'mismatch'`   the bytes do NOT match (or the extension is not a known
+   *                   image type) — the caller must refuse to serve the object;
+   *  - `'indeterminate'` the check could not run (object missing, storage/read
+   *                   error). The caller decides its own fail-open/closed posture
+   *                   for this case; a transient bucket error must not permanently
+   *                   blank every image.
+   *
+   * Ranged so it never pulls a whole multi-MB object; one small GET per key.
+   */
+  async validateImageMagicBytes(
+    key: string,
+  ): Promise<'valid' | 'mismatch' | 'indeterminate'> {
+    const contentType = contentTypeForStorageKey(key);
+    if (!contentType) {
+      // A key whose extension is not one of the four minted image types can
+      // never be a legitimate object — treat as a definite mismatch.
+      return 'mismatch';
+    }
+    let prefixBytes: Uint8Array;
+    try {
+      const response = await this.storageClient().send(
+        new GetObjectCommand({
+          Bucket: this.requireConfig('storage.bucket'),
+          Key: key,
+          Range: `bytes=0-${MAGIC_BYTE_PREFIX_LENGTH - 1}`,
+        }),
+      );
+      if (!response.Body) {
+        return 'indeterminate';
+      }
+      prefixBytes = await response.Body.transformToByteArray();
+    } catch (error) {
+      this.logger.warn(
+        `Magic-byte read failed for ${key}: ${String(error)} (serving decision deferred to caller)`,
+      );
+      return 'indeterminate';
+    }
+    return magicBytesMatchContentType(prefixBytes, contentType)
+      ? 'valid'
+      : 'mismatch';
   }
 
   /**

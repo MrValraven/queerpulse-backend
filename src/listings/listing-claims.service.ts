@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -9,14 +10,20 @@ import { DataSource, In, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { MemberLookup } from '../common/member-ref';
+import { MessagingService } from '../messaging/messaging.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
+import { User } from '../users/entities/user.entity';
 import { ListingClaimDTO, toListingClaimDTO } from './listing-claim-response';
 import {
   ListingClaim,
   ListingClaimStatus,
 } from './entities/listing-claim.entity';
+import {
+  ListingModerationAction,
+  ListingModerationEvent,
+} from './entities/listing-moderation-event.entity';
 import { Listing } from './entities/listing.entity';
 
 /**
@@ -33,18 +40,34 @@ import { Listing } from './entities/listing.entity';
  */
 @Injectable()
 export class ListingClaimsService {
+  private readonly logger = new Logger(ListingClaimsService.name);
+
   constructor(
     @InjectRepository(Listing) private readonly listings: Repository<Listing>,
     @InjectRepository(ListingClaim)
     private readonly claims: Repository<ListingClaim>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    // Read-only: distinguishes a listing parked on the house/seed account from
+    // one a real member owns (`assertClaimable`).
+    @InjectRepository(User) private readonly users: Repository<User>,
     private readonly dataSource: DataSource,
     private readonly notifications: NotificationsService,
+    // Tells the OUTGOING owner their listing changed hands. There is no
+    // notification type for an ownership transfer, and adding one would mean
+    // editing the notifications domain, so this reuses the same cold-contact DM
+    // seam `ListingsService.notifySubmitterBestEffort` already uses to reach a
+    // listing's submitter from a moderation action.
+    private readonly messaging: MessagingService,
   ) {}
 
   /**
    * A member requests ownership of an existing listing they don't currently
-   * own. Rejects a self-claim on a listing the caller already owns. Dedupes
+   * own. Rejects a self-claim on a listing the caller already owns, and
+   * (BE-HSG-05) any claim on a listing a REAL member already owns: this flow
+   * exists for the unowned entries the directory carries, never as a way to
+   * take a live business away from the member running it. See
+   * `assertClaimable` for what counts as unowned and why the alternative for
+   * everything else is `POST /listings/:ref/dispute`. Dedupes
    * on a repeat call while a claim is still open — mirrors
    * `ReportsService.create`'s "return the existing open one" behavior — so a
    * member spamming the button doesn't pile rows on the mods' desk; the
@@ -62,6 +85,8 @@ export class ListingClaimsService {
     if (listing.ownerId === claimantId) {
       throw new BadRequestException('You already own this listing');
     }
+
+    await this.assertClaimable(listing);
 
     const existing = await this.findOpenClaim(listing.id, claimantId);
     if (existing) {
@@ -175,14 +200,47 @@ export class ListingClaimsService {
         throw new NotFoundException('The claimed listing no longer exists');
       }
 
+      const previousOwnerId = listing.ownerId;
       if (status === ListingClaimStatus.Approved) {
         if (!current.claimantId) {
           throw new BadRequestException(
             'The claimant no longer has an account',
           );
         }
+        // The listing may have changed hands or been claimed by someone else
+        // between filing and review, so the eligibility check runs again here
+        // against the CURRENT row, inside the transaction. Without it the queue
+        // could still be holding a claim filed while the listing was unowned
+        // and approve it long after a real member took it over.
+        await this.assertClaimable(listing);
         listing.ownerId = current.claimantId;
+        // BE-HSG-05: these five columns are the PREVIOUS owner's personal data,
+        // not the business's — `ListingDTO` hands `contactEmail`, `ownerName`,
+        // `ownerBio`, `notify` and `consentOuting` straight to whoever owns the
+        // listing, and `consentOuting`/`consentGuide` are that person's consent
+        // decisions, which cannot transfer to somebody else. Cleared so the new
+        // owner enters their own rather than inheriting them.
+        listing.contactEmail = '';
+        listing.ownerName = '';
+        listing.ownerBio = '';
+        listing.notify = [];
+        listing.consentOuting = false;
+        listing.consentGuide = false;
         await listingsRepo.save(listing);
+        // The audit trail for the transfer, written in the SAME transaction as
+        // the reassignment so the two can never disagree. `fromStatus`/
+        // `toStatus` stay null: a transfer changes who owns the listing, never
+        // its moderation state.
+        await manager.save(ListingModerationEvent, {
+          listingId: listing.id,
+          actorId: reviewerId,
+          action: ListingModerationAction.OwnershipTransferred,
+          fromStatus: null,
+          toStatus: null,
+          reason: current.note
+            ? `Ownership transferred on an approved claim. Claimant's note: ${current.note}`
+            : 'Ownership transferred on an approved claim.',
+        });
       }
 
       const reviewedAt = new Date();
@@ -204,6 +262,15 @@ export class ListingClaimsService {
         dto: toListingClaimDTO(current, listing, null),
         claimantId: current.claimantId,
         listingSlug: listing.slug,
+        listingName: listing.name,
+        listingRef: listing.ref,
+        // Only set on an approval that actually moved the listing — a decline
+        // leaves the previous owner in place, with nothing to tell them.
+        displacedOwnerId:
+          status === ListingClaimStatus.Approved &&
+          previousOwnerId !== current.claimantId
+            ? previousOwnerId
+            : null,
       };
     });
 
@@ -215,6 +282,17 @@ export class ListingClaimsService {
         result.claimantId,
         result.dto.status,
         result.listingSlug,
+      );
+    }
+    // BE-HSG-05: the person who just lost the listing is told too. They used to
+    // find out only by discovering that `GET/PATCH/DELETE /listings/:ref` had
+    // started 403ing.
+    if (result.displacedOwnerId) {
+      await this.notifyDisplacedOwnerBestEffort(
+        reviewerId,
+        result.displacedOwnerId,
+        result.listingName,
+        result.listingRef,
       );
     }
 
@@ -242,6 +320,41 @@ export class ListingClaimsService {
     }
   }
 
+  /**
+   * Tells the outgoing owner, as a DM from the reviewing moderator, that their
+   * listing was reassigned and how to contest it. Sent from the moderator (not
+   * the claimant) so the outgoing owner replies to a human who can reverse it,
+   * and deliberately WITHOUT naming the claimant: a contested transfer must not
+   * hand one member the other's identity.
+   *
+   * Best-effort and post-commit, mirroring `notifyClaimantBestEffort` above:
+   * the review has already committed by the time this runs.
+   */
+  private async notifyDisplacedOwnerBestEffort(
+    reviewerId: string,
+    displacedOwnerId: string,
+    listingName: string,
+    listingRef: string,
+  ): Promise<void> {
+    try {
+      await this.messaging.deliverEnquiry(
+        reviewerId,
+        displacedOwnerId,
+        `Your listing "${listingName}" (${listingRef}) has been transferred to ` +
+          `another member after an approved ownership claim, so it no longer ` +
+          `appears in your listings. Your contact details and consent settings ` +
+          `were cleared from it rather than passed on. If this is wrong, reply ` +
+          `here and a moderator will look at it again.`,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Failed to notify the displaced owner of listing ${listingRef}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
   private async findOpenClaim(
     listingId: string,
     claimantId: string,
@@ -257,6 +370,57 @@ export class ListingClaimsService {
 
   private buildDTO(claim: ListingClaim, listing: Listing): ListingClaimDTO {
     return toListingClaimDTO(claim, listing, null);
+  }
+
+  /**
+   * BE-HSG-05: a claim may only target a listing nobody is actually running.
+   *
+   * `Listing.ownerId` is NOT NULL, so "unowned" is a product state rather than
+   * a null: it is either a listing somebody else SUGGESTED (`path === 'suggest'`)
+   * or one submitted as a "friendly" recommendation rather than an ownership
+   * claim (`badge === 'friendly'`) — the exact two cases
+   * `ListingsService.enqueueOwnerNotifyIfNeeded` already files an owner-outreach
+   * task for, precisely so the named business can come and claim the entry — or
+   * a listing parked on a non-human platform account (`users.is_system`, the
+   * house account seeded content is attributed to). A listing whose owner row
+   * has since been erased is treated as unowned too.
+   *
+   * Everything else has a member behind it, and approving a claim on it hands
+   * an attacker that member's listing, its reviews, its ref and the personal
+   * fields on it. That is a dispute, not a claim: `POST /listings/:ref/dispute`
+   * files one through the report pipeline, where a moderator investigates
+   * rather than reassigns with one click.
+   */
+  private async assertClaimable(listing: Listing): Promise<void> {
+    // Checked FIRST, and it overrides everything below: once a claim on this
+    // listing has been approved, the listing has found its real owner and is
+    // closed to further claims. `path`/`badge` are the SUBMITTER's description
+    // of the entry and are never rewritten by a transfer, so without this a
+    // listing that started as a suggestion would stay permanently claimable and
+    // the second claimant would take it from the business that just claimed it.
+    const alreadyTransferred = await this.claims.exists({
+      where: { listingId: listing.id, status: ListingClaimStatus.Approved },
+    });
+    if (!alreadyTransferred) {
+      // Somebody else suggested this business, or recommended it as "friendly"
+      // rather than claiming to run it. Both are exactly the cases
+      // `ListingsService.enqueueOwnerNotifyIfNeeded` files an owner-outreach
+      // task for, so that the named business can come and claim the entry.
+      if (listing.path === 'suggest' || listing.badge === 'friendly') return;
+
+      // Parked on a non-human platform account (the house account seeded
+      // content is attributed to), or on an account that has since been erased.
+      const owner = await this.users.findOne({
+        where: { id: listing.ownerId },
+        select: { id: true, isSystem: true },
+      });
+      if (!owner || owner.isSystem) return;
+    }
+
+    throw new BadRequestException(
+      'This listing already has an owner. If it is wrong or misrepresents ' +
+        'you, file a dispute instead and a moderator will look into it.',
+    );
   }
 
   /** Mirrors `ListingsService.loadOr404` exactly — kept as a local copy

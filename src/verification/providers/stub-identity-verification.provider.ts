@@ -4,6 +4,7 @@ import {
   IdentityCallbackResult,
   IdentityVerificationProvider,
   IdentityVerificationSession,
+  STUB_IDENTITY_PROVIDER_NAME,
 } from './identity-verification.provider';
 
 /**
@@ -18,7 +19,7 @@ import {
  */
 @Injectable()
 export class StubIdentityVerificationProvider implements IdentityVerificationProvider {
-  readonly name = 'stub_identity';
+  readonly name = STUB_IDENTITY_PROVIDER_NAME;
 
   createSession(_userId: string): Promise<IdentityVerificationSession> {
     const providerRef = `stub_${randomUUID()}`;

@@ -25,6 +25,7 @@ import {
 } from './connection.events';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Block } from '../social/entities/block.entity';
+import { MEMBER_BLOCKED, MemberBlockedEvent } from '../social/social.events';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { VouchService } from '../vouch/vouch.service';
@@ -358,6 +359,15 @@ export class ConnectionsService {
             .orIgnore()
             .execute();
         });
+        // Post-commit, best-effort: same live-room eviction
+        // `SocialService.blockMember` triggers. Both entry points write the
+        // same `blocks` row and the same severed edge, so both must also cut
+        // the pair's socket room — otherwise which button the member pressed
+        // would decide whether the block took effect live.
+        this.emitBestEffort(MEMBER_BLOCKED, {
+          blockerId,
+          blockedId,
+        } satisfies MemberBlockedEvent);
         return this.connections.findOneByOrFail({ id: conn.id });
       }
       case 'unblock': {
@@ -661,6 +671,19 @@ export class ConnectionsService {
       addresseeId: conn.addresseeId,
       introducedBy: conn.introducedBy,
     } satisfies ConnectionRequestedEvent);
+  }
+
+  /**
+   * Fire a post-commit domain event without letting a listener's failure bubble
+   * into (and 500) a write that has already committed. Mirrors
+   * `GroupsService.emitBestEffort` / `SocialService.emitBestEffort`.
+   */
+  private emitBestEffort(eventName: string, payload: unknown): void {
+    try {
+      this.eventEmitter.emit(eventName, payload);
+    } catch {
+      // best-effort: post-commit live fan-out never fails a committed write.
+    }
   }
 
   private otherId(conn: Connection, userId: string): string {

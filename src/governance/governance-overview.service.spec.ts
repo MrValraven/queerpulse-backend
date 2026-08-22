@@ -33,12 +33,30 @@ function makeOverview(
 describe('GovernanceOverviewService', () => {
   let service: GovernanceOverviewService;
   let repo: { findOne: jest.Mock; save: jest.Mock };
-  let changesRepo: { find: jest.Mock };
+  let changesRepo: { find: jest.Mock; createQueryBuilder: jest.Mock };
+  // `getAdminOverview` now resolves the latest change per section with one
+  // `DISTINCT ON (section)` query instead of scanning the whole history in JS
+  // (BE-COM-36), so it goes through the query builder rather than `find`.
+  let latestChangesQb: {
+    distinctOn: jest.Mock;
+    orderBy: jest.Mock;
+    addOrderBy: jest.Mock;
+    getMany: jest.Mock;
+  };
   let profilesRepo: { find: jest.Mock };
 
   beforeEach(async () => {
     repo = { findOne: jest.fn(), save: jest.fn() };
-    changesRepo = { find: jest.fn() };
+    latestChangesQb = {
+      distinctOn: jest.fn(() => latestChangesQb),
+      orderBy: jest.fn(() => latestChangesQb),
+      addOrderBy: jest.fn(() => latestChangesQb),
+      getMany: jest.fn().mockResolvedValue([]),
+    };
+    changesRepo = {
+      find: jest.fn(),
+      createQueryBuilder: jest.fn(() => latestChangesQb),
+    };
     profilesRepo = { find: jest.fn() };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -135,7 +153,7 @@ describe('GovernanceOverviewService', () => {
   describe('getAdminOverview', () => {
     it('returns null editor/editedAt for every section when nothing has been edited', async () => {
       repo.findOne.mockResolvedValue(makeOverview());
-      changesRepo.find.mockResolvedValue([]);
+      latestChangesQb.getMany.mockResolvedValue([]);
 
       const result = await service.getAdminOverview();
 
@@ -143,16 +161,15 @@ describe('GovernanceOverviewService', () => {
       expect(result.meta.health).toEqual({ editor: null, editedAt: null });
     });
 
-    it('surfaces only the most recent change per section, resolved to a display ref', async () => {
+    it('surfaces the most recent change per section, resolved to a display ref', async () => {
       repo.findOne.mockResolvedValue(makeOverview());
-      changesRepo.find.mockResolvedValue([
+      // One row per section — `DISTINCT ON (section) ... ORDER BY section,
+      // created_at DESC, id DESC` is what narrows the history down, so the
+      // query already hands back only the newest row for each.
+      latestChangesQb.getMany.mockResolvedValue([
         makeChange({
           id: 'newest',
           createdAt: new Date('2026-08-15T00:00:00.000Z'),
-        }),
-        makeChange({
-          id: 'older',
-          createdAt: new Date('2026-08-01T00:00:00.000Z'),
         }),
       ]);
       profilesRepo.find.mockResolvedValue([

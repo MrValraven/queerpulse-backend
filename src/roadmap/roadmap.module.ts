@@ -15,6 +15,7 @@ import { RoadmapService } from './roadmap.service';
 import { RoadmapAdminService } from './roadmap-admin.service';
 import { RoadmapController } from './roadmap.controller';
 import { RoadmapPublicController } from './roadmap-public.controller';
+import { AdminRoadmapController } from './admin-roadmap.controller';
 
 @Module({
   imports: [
@@ -40,7 +41,15 @@ import { RoadmapPublicController } from './roadmap-public.controller';
     // changed (published or dismissed).
     NotificationsModule,
   ],
-  controllers: [RoadmapPublicController, RoadmapController],
+  // `AdminRoadmapController` (`/admin/roadmap/*`) carries the staff routes
+  // that used to live on `RoadmapController` under an `admin/*` path prefix —
+  // see BE-COM-14. It reuses `RoadmapAdminService`, so it is registered here
+  // rather than in a separate top-level module.
+  controllers: [
+    RoadmapPublicController,
+    RoadmapController,
+    AdminRoadmapController,
+  ],
   providers: [RoadmapService, RoadmapAdminService],
 })
 export class RoadmapModule {}

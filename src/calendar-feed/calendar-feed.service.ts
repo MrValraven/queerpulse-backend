@@ -16,12 +16,61 @@ function escapeText(value: string): string {
     .replace(/\r\n|\r|\n/g, '\\n');
 }
 
+// RFC 5545 §3.1: no content line may exceed 75 OCTETS, excluding the CRLF.
+// Longer lines are split, with each continuation starting with a single space
+// that the parser strips back out. The space counts toward the 75, hence 74
+// octets of payload per continuation.
+const MAX_CONTENT_LINE_OCTETS = 75;
+
+/**
+ * Folds one content line to RFC 5545's 75-octet limit.
+ *
+ * Measured in UTF-8 OCTETS, not characters, and never split mid-character: a
+ * gathering titled with an emoji or a Portuguese accent would otherwise be cut
+ * through the middle of a multi-byte sequence and arrive as mojibake. Titles
+ * run to 200 characters and venues to 300 (`CreateEventDto`), so unfolded
+ * `SUMMARY:`/`LOCATION:` lines routinely broke the limit and strict parsers
+ * truncated or dropped the whole event.
+ */
+function foldLine(line: string): string {
+  const encoder = new TextEncoder();
+  if (encoder.encode(line).length <= MAX_CONTENT_LINE_OCTETS) {
+    return line;
+  }
+  const folded: string[] = [];
+  let current = '';
+  let currentOctets = 0;
+  // The first line gets the full 75; every continuation spends one octet on
+  // its leading space.
+  let budget = MAX_CONTENT_LINE_OCTETS;
+  // Iterating the string yields whole code points, so a surrogate pair stays
+  // intact; the octet count then keeps whole UTF-8 sequences intact too.
+  for (const character of line) {
+    const characterOctets = encoder.encode(character).length;
+    if (currentOctets + characterOctets > budget) {
+      folded.push(current);
+      current = '';
+      currentOctets = 0;
+      budget = MAX_CONTENT_LINE_OCTETS - 1;
+    }
+    current += character;
+    currentOctets += characterOctets;
+  }
+  folded.push(current);
+  return folded
+    .map((part, index) => (index === 0 ? part : ` ${part}`))
+    .join('\r\n');
+}
+
 /** `Date` -> the RFC 5545 UTC "basic format" timestamp (`YYYYMMDDTHHMMSSZ`).
  *  Always UTC (unlike the FE's client-side export, which emits floating local
  *  time) — a server-generated feed has no single "local" timezone to assume,
  *  since the subscribing calendar app could be anywhere. */
 function toICSDateUTC(date: Date): string {
-  return date.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+  return date
+    .toISOString()
+    .replace(/[-:]/g, '')
+    .replace(/\.\d{3}Z$/, 'Z');
 }
 
 // A gathering with no explicit end time still needs a bounded calendar block —
@@ -74,7 +123,8 @@ export class CalendarFeedService {
     ];
     for (const event of events) {
       const start = event.startAt;
-      const end = event.endAt ?? new Date(start.getTime() + DEFAULT_DURATION_MS);
+      const end =
+        event.endAt ?? new Date(start.getTime() + DEFAULT_DURATION_MS);
       lines.push('BEGIN:VEVENT');
       lines.push(`UID:${event.id}@queerpulse.app`);
       lines.push(`DTSTAMP:${now}`);
@@ -90,6 +140,8 @@ export class CalendarFeedService {
       lines.push('END:VEVENT');
     }
     lines.push('END:VCALENDAR');
-    return lines.join('\r\n');
+    // Fold at the join, so every line the feed emits is bounded regardless of
+    // which branch above pushed it.
+    return lines.map(foldLine).join('\r\n');
   }
 }

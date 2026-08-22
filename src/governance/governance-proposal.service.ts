@@ -1,12 +1,13 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
-import { isUniqueViolation } from '../common/db-errors';
 import { MemberLookup, MemberRef } from '../common/member-ref';
+import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
 import {
   GovernanceProposal,
@@ -84,8 +85,41 @@ export class GovernanceProposalService {
     if (proposal.closesAt.getTime() > Date.now()) return proposal;
     const outcome = proposalOutcome(tally);
     proposal.status = outcome;
-    await this.proposals.update(proposal.id, { status: outcome });
+    // Freeze the counts the outcome was decided on, in the same write
+    // (BE-COM-31). Without this the displayed for/against keeps tracking live
+    // vote rows, which shrink when a voter erases their account — so a
+    // resolved proposal could end up rendering a percentage that contradicts
+    // its own recorded outcome.
+    proposal.finalFor = tally.for;
+    proposal.finalAgainst = tally.against;
+    await this.proposals.update(proposal.id, {
+      status: outcome,
+      finalFor: tally.for,
+      finalAgainst: tally.against,
+    });
     return proposal;
+  }
+
+  /**
+   * What to display for a proposal: the frozen snapshot once it has resolved,
+   * the live count while it is still open (BE-COM-31).
+   *
+   * A resolved proposal from before the snapshot columns existed, and whose
+   * migration backfill found no vote rows, falls back to the live tally — the
+   * counts were never recorded, so there is nothing better to show.
+   */
+  private displayTally(
+    proposal: GovernanceProposal,
+    liveTally: ProposalTally,
+  ): ProposalTally {
+    if (
+      proposal.status !== GovernanceProposalStatus.Open &&
+      proposal.finalFor !== null &&
+      proposal.finalAgainst !== null
+    ) {
+      return { for: proposal.finalFor, against: proposal.finalAgainst };
+    }
+    return liveTally;
   }
 
   private async targetRefsFor(
@@ -144,9 +178,20 @@ export class GovernanceProposalService {
   }
 
   /** Every proposal, open and resolved alike — newest first. The frontend
-   *  groups by `status` for the two-shelf "open" / "resolved" layout. */
+   *  groups by `status` for the two-shelf "open" / "resolved" layout.
+   *
+   *  Bounded by `DEFAULT_LIST_LIMIT` (BE-COM-36): this returned the whole
+   *  `governance_proposals` table with no `take` at all, and each row then
+   *  fans out into a tally, a lazy `resolveIfClosed` write, and a target-ref
+   *  lookup. The response shape stays a plain array (no pagination envelope),
+   *  so the cap is invisible to today's callers — the governance page has
+   *  nowhere near 200 proposals — while making the query bounded. Swap for a
+   *  cursor page if the archive ever approaches the cap. */
   async listProposals(memberId: string): Promise<GovernanceProposalDTO[]> {
-    const rows = await this.proposals.find({ order: { createdAt: 'DESC' } });
+    const rows = await this.proposals.find({
+      order: { createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
+    });
     if (rows.length === 0) return [];
 
     const proposalIds = rows.map((row) => row.id);
@@ -171,7 +216,7 @@ export class GovernanceProposalService {
     return resolvedRows.map((row) =>
       toGovernanceProposalDTO(
         row,
-        tallies.get(row.id) ?? { for: 0, against: 0 },
+        this.displayTally(row, tallies.get(row.id) ?? { for: 0, against: 0 }),
         myVoteByProposal.get(row.id) ?? null,
         row.targetMemberId
           ? (targetRefs.get(row.targetMemberId) ?? null)
@@ -196,7 +241,7 @@ export class GovernanceProposalService {
 
     return toGovernanceProposalDTO(
       resolvedRow,
-      tally,
+      this.displayTally(resolvedRow, tally),
       myVote?.choice ?? null,
       resolvedRow.targetMemberId
         ? (targetRefs.get(resolvedRow.targetMemberId) ?? null)
@@ -226,20 +271,31 @@ export class GovernanceProposalService {
     ) {
       throw new BadRequestException('Voting is closed for this proposal');
     }
-
-    try {
-      await this.votes.save(
-        this.votes.create({ proposalId, memberId, choice: dto.choice }),
+    // Nobody votes on a proposal about themselves (BE-COM-10). A council
+    // removal names its subject in `targetMemberId`, and letting that member
+    // vote on their own removal is the plainest conflict of interest the
+    // process has.
+    if (proposal.targetMemberId && proposal.targetMemberId === memberId) {
+      throw new ForbiddenException(
+        'You cannot vote on a proposal about yourself',
       );
-    } catch (error) {
-      // Idempotent, like `RoadmapService.castVote`: a repeat vote loses on
-      // `UQ_governance_votes_proposal_member` — that IS the "already voted"
-      // state this call converges on. The original choice sticks; there is
-      // no vote-changing.
-      if (!isUniqueViolation(error, 'UQ_governance_votes_proposal_member')) {
-        throw error;
-      }
     }
+
+    // A member may change their mind while the window is open. The unique
+    // violation used to be swallowed instead, which meant a member who voted
+    // `for` and then sent `against` got HTTP 201, `myVote: 'for'`, and a tally
+    // that had not moved — the API reporting success for a write it silently
+    // discarded (BE-COM-09). `ON CONFLICT DO UPDATE` on
+    // `UQ_governance_votes_proposal_member` makes the second cast REPLACE the
+    // first, so the response the caller reads back is always the vote they
+    // just sent. Re-sending the same choice stays a no-op.
+    await this.votes
+      .createQueryBuilder()
+      .insert()
+      .into(GovernanceVote)
+      .values({ proposalId, memberId, choice: dto.choice })
+      .orUpdate(['choice'], ['proposal_id', 'member_id'])
+      .execute();
 
     return this.getProposal(proposalId, memberId);
   }

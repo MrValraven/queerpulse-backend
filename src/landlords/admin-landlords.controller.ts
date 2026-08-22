@@ -12,6 +12,10 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -65,8 +69,8 @@ export class AdminLandlordsController {
   })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
-  create(@Body() dto: CreateLandlordDto) {
-    return this.service.adminCreate(dto);
+  create(@CurrentUser() user: CurrentUserData, @Body() dto: CreateLandlordDto) {
+    return this.service.adminCreate(user.userId, dto);
   }
 
   // Literal `intro-requests` routes declared before `:id` so they win the match.
@@ -126,10 +130,11 @@ export class AdminLandlordsController {
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
   update(
+    @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateLandlordDto,
   ) {
-    return this.service.update(id, dto);
+    return this.service.update(user.userId, id, dto);
   }
 
   @Delete(':id')

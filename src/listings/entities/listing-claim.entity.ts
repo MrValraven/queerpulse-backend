@@ -20,7 +20,7 @@ export enum ListingClaimStatus {
 /**
  * A member's request to take ownership of an EXISTING listing (`POST
  * /listings/:ref/claim`), reviewed by a moderator (`PATCH
- * /listings/admin/claims/:id`). Distinct from `POST /listings`, which always
+ * /admin/listings/claims/:id`). Distinct from `POST /listings`, which always
  * creates a brand-new row owned by the caller — a claim instead reassigns an
  * existing listing's `ownerId` on approval, so the listing's history/reviews/
  * ref survive.

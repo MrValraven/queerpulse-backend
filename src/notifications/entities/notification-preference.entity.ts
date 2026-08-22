@@ -20,7 +20,7 @@ import {
  */
 @Entity('notification_preferences')
 export class NotificationPreference {
-  @PrimaryColumn({ name: 'user_id', type: 'uuid' })
+  @PrimaryColumn({ type: 'uuid' })
   userId!: string;
 
   @PrimaryColumn({ type: 'varchar', length: 64 })

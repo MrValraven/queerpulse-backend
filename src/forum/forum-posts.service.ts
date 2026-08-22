@@ -172,6 +172,12 @@ export class ForumPostsService {
     // either way — a block is a hard severance, so it has to gate the write
     // path too, not just the reads above.
     const thread = await this.threadsService.loadOr404(threadSlug, user.userId);
+    // A community-scoped thread takes replies from that community's roster
+    // only — same rule `ForumThreadsService.create` applies to starting one
+    // (BE-COM-05). `loadOr404` above has already 404'd a Private community's
+    // thread for a non-member; this covers the request/invite tiers, whose
+    // threads are readable platform-wide but still not writable by outsiders.
+    await this.threadsService.assertCanReplyInThread(thread, user.userId);
     if (thread.isLocked) {
       throw new ForbiddenException('This thread is locked');
     }
@@ -383,20 +389,28 @@ export class ForumPostsService {
     this.assertCanModerate(post, user);
     if (!post.deletedAt) {
       post.deletedAt = new Date();
+      // Stamped with the marker so `assertCanRestore` can tell an author's own
+      // delete apart from a moderator takedown (BE-COM-01).
+      post.deletedById = user.userId;
       await this.posts.save(post);
     }
     return this.mapOne(post, user);
   }
 
-  // POST /forum/posts/:id/restore — clear the tombstone. Author or staff.
+  // POST /forum/posts/:id/restore — clear the tombstone. Only the actor who
+  // set it, or a platform Moderator/Admin (see `assertCanRestore`).
   async restorePost(
     postId: string,
     user: CurrentUserData,
   ): Promise<ForumPostResponse> {
     const post = await this.loadPostOr404(postId);
     this.assertCanModerate(post, user);
+    this.assertCanRestore(post, user);
     if (post.deletedAt) {
       post.deletedAt = null;
+      // Cleared with the marker so a later delete/restore pair is judged on
+      // its own actor, never a stale one.
+      post.deletedById = null;
       await this.posts.save(post);
     }
     return this.mapOne(post, user);
@@ -435,6 +449,32 @@ export class ForumPostsService {
     if (post.authorId !== user.userId && !isModeratorRole(user.role)) {
       throw new ForbiddenException(
         'Only the author or a moderator can do that',
+      );
+    }
+  }
+
+  /**
+   * Restore authz, on top of `assertCanModerate`'s author-or-moderator gate.
+   *
+   * A tombstone may only be cleared by the actor who SET it, or by a platform
+   * Moderator/Admin. Delete and restore previously shared `assertCanModerate`
+   * outright, so a moderator's `DELETE /forum/posts/:id` was undone by the
+   * author's `POST /forum/posts/:id/restore` in the very next request —
+   * exactly the rule `toForumPostResponse` already documented ("Only an
+   * author's own tombstone is restorable through the forum route") but nothing
+   * enforced (BE-COM-01).
+   *
+   * A null `deletedById` is the legacy case (a tombstone written before
+   * `AddContentTombstoneActor1793520000000`, or no tombstone at all, where
+   * restore is a no-op) — it falls through to `assertCanModerate`'s rule
+   * rather than locking legacy content out of restore.
+   */
+  private assertCanRestore(post: ForumPost, user: CurrentUserData): void {
+    if (isModeratorRole(user.role)) return;
+    if (post.deletedById === null) return;
+    if (post.deletedById !== user.userId) {
+      throw new ForbiddenException(
+        'Only a moderator can restore a post a moderator removed',
       );
     }
   }

@@ -64,18 +64,7 @@ export function toChangemakerDTO(entity: Changemaker): ChangemakerDTO {
   };
 }
 
-export function toDirectoryStatsDTO(
-  publishedProfiles: Changemaker[],
-  peopleHelped: number,
-  activeCampaigns: number,
-): DirectoryStatsDTO {
-  const causeAreas = new Set(
-    publishedProfiles.map((profile) => profile.cause.trim().toLowerCase()),
-  );
-  return {
-    profiled: publishedProfiles.length,
-    causeAreas: causeAreas.size,
-    peopleHelped,
-    activeCampaigns,
-  };
-}
+// `profiled`/`causeAreas` used to be derived here from an in-memory array of
+// every published profile. They are now counted in SQL
+// (`ChangemakersService.publishedTotals`) so the directory list can be paged
+// without the headline figures quietly counting only the first page.

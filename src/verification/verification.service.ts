@@ -18,21 +18,15 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { BulkDecideVerificationRequestsResultDTO } from './dto/bulk-decide-verification-requests.dto';
-import { StartPhoneVerificationDto } from './dto/start-phone-verification.dto';
-import { VerifyPhoneDto } from './dto/verify-phone.dto';
 import { MemberVerification } from './entities/member-verification.entity';
 import { VerificationEvent } from './entities/verification-event.entity';
 import { VerificationRequest } from './entities/verification-request.entity';
 import {
   IDENTITY_VERIFICATION_PROVIDER,
   IdentityVerificationProvider,
+  STUB_IDENTITY_PROVIDER_NAME,
 } from './providers/identity-verification.provider';
 import {
-  PHONE_VERIFICATION_PROVIDER,
-  PhoneVerificationProvider,
-} from './providers/phone-verification.provider';
-import {
-  AdminVerificationDTO,
   AdminVerificationListDTO,
   AdminVerificationRequestDetailDTO,
   AdminVerificationRequestListDTO,
@@ -143,9 +137,11 @@ function wholeDaysBetween(from: Date, to: Date): number {
  *
  * The email floor is IMPLICIT: sign-in is Google-only, so any account already
  * proves email control. `levelForUser` therefore resolves a member with no row
- * (or a seeded `email` row) to `email` without a write. Phone/ID are real
- * events that create/raise a row. The document check itself never touches this
- * service — it lives behind `IdentityVerificationProvider`.
+ * (or a seeded `email` row) to `email` without a write. ID is a real event
+ * that creates/raises a row via `IdentityVerificationProvider`; `phone` is
+ * reachable only through the manual review path (`submitRequest` /
+ * `decideRequest`) since the automated phone-OTP step-up was removed — its
+ * only implementation was a dev-only stub, never a real SMS vendor.
  */
 @Injectable()
 export class VerificationService {
@@ -162,8 +158,6 @@ export class VerificationService {
     private readonly profiles: Repository<Profile>,
     @InjectRepository(User)
     private readonly userRepo: Repository<User>,
-    @Inject(PHONE_VERIFICATION_PROVIDER)
-    private readonly phoneProvider: PhoneVerificationProvider,
     @Inject(IDENTITY_VERIFICATION_PROVIDER)
     private readonly identityProvider: IdentityVerificationProvider,
     private readonly notifications: NotificationsService,
@@ -218,46 +212,6 @@ export class VerificationService {
     return toVerificationStatusDTO(row?.level ?? VerificationLevel.Email, row);
   }
 
-  // --- phone step-up ---
-
-  async startPhone(
-    userId: string,
-    dto: StartPhoneVerificationDto,
-  ): Promise<{ started: true }> {
-    await this.phoneProvider.startChallenge(userId, dto.phoneNumber);
-    return { started: true };
-  }
-
-  async verifyPhone(
-    userId: string,
-    dto: VerifyPhoneDto,
-  ): Promise<VerificationStatusDTO> {
-    const ok = await this.phoneProvider.checkChallenge(userId, dto.code);
-    if (!ok) {
-      throw new BadRequestException({
-        statusCode: 400,
-        error: 'Bad Request',
-        message: 'That code did not match — request a new one and try again',
-        code: 'PHONE_CODE_INVALID',
-      });
-    }
-    // Phase 2 (Task 6): manual-first by default. The OTP check above is a
-    // real, recorded provider event regardless of the flag — only the
-    // automatic level-RAISE is dormant. With VERIFICATION_AUTOMATED_ELEVATION
-    // unset/false, a member reaches `phone` only through an approved
-    // verification request (`decideRequest`'s approve path); flip the flag on
-    // to restore the old instant-raise seam.
-    if (this.automatedElevationEnabled()) {
-      await this.raiseTo(
-        userId,
-        VerificationLevel.Phone,
-        'phone_otp',
-        'dev_phone',
-      );
-    }
-    return this.getStatus(userId);
-  }
-
   // --- identity step-up ---
 
   async startIdentity(
@@ -282,6 +236,20 @@ export class VerificationService {
    * no-op once the member is already ID-verified.
    */
   async handleIdentityCallback(payload: unknown): Promise<{ received: true }> {
+    // The route is `@Public()` + `@SkipCsrf()` on the premise that the bound
+    // provider authenticates the caller by verifying a signature over the raw
+    // body inside `parseCallback`. The stub does no such thing — it trusts the
+    // JSON — so with the stub bound in production this endpoint is an
+    // unauthenticated write keyed on a `providerRef` the member was handed by
+    // `startIdentity`. Refuse to act on it at all rather than leaving the seam
+    // open; local development, where the stub belongs, is unaffected.
+    if (this.isStubProviderInProduction()) {
+      this.logger.error(
+        'Identity callback rejected: the stub identity provider is bound in production. ' +
+          'Bind a real, signature-verifying provider in VerificationModule before using this route.',
+      );
+      throw new NotFoundException('Unknown verification session');
+    }
     const result = this.identityProvider.parseCallback(payload);
     const row = await this.repo.findOne({
       where: { providerRef: result.providerRef },
@@ -777,11 +745,11 @@ export class VerificationService {
    * true days ago at submission).
    *
    * DEFERRED (not computed here): phone/VOIP-carrier and IP/geo signals.
-   * There is no separately stored member phone number — it lives entirely
-   * behind `PhoneVerificationProvider` (see `MemberVerification`'s doc
-   * comment) — and this platform captures no IP/geo data anywhere, so there
-   * is nothing server-side to compute those from yet. `duplicateProviderRef`
-   * is therefore the only cross-account signal available today.
+   * This platform never stores a member's phone number at all (the automated
+   * phone-OTP step-up was removed; `phone` level is now granted only through
+   * manual review) and captures no IP/geo data anywhere, so there is nothing
+   * server-side to compute those from yet. `duplicateProviderRef` is
+   * therefore the only cross-account signal available today.
    *
    * The three reads (user, prior-rejection count, this member's own
    * verification row) run in parallel — independent lookups, no reason to
@@ -1528,8 +1496,33 @@ export class VerificationService {
    * the old instant-raise-on-verify behavior.
    */
   private automatedElevationEnabled(): boolean {
+    const enabled =
+      this.config.get<string>('VERIFICATION_AUTOMATED_ELEVATION') === 'true';
+    if (enabled && this.isStubProviderInProduction()) {
+      // The flag turns "the provider says verified" into `id_verified`, the
+      // top assurance tier gating the housing/landlord surfaces. Behind the
+      // unsigned stub that reads "whoever POSTs the callback says verified",
+      // i.e. any member self-granting the tier with one request. Setting the
+      // env var must not be enough to do that.
+      this.logger.error(
+        'VERIFICATION_AUTOMATED_ELEVATION is ignored: automatic elevation requires a real, ' +
+          'signature-verifying identity provider, and the stub is bound.',
+      );
+      return false;
+    }
+    return enabled;
+  }
+
+  /**
+   * True when the dev stub identity provider is bound while running in
+   * production. The stub's `parseCallback` is documented DEV ONLY (it trusts
+   * an unsigned payload), so anything that would treat a callback as
+   * provider-attested has to refuse in that combination.
+   */
+  private isStubProviderInProduction(): boolean {
     return (
-      this.config.get<string>('VERIFICATION_AUTOMATED_ELEVATION') === 'true'
+      this.identityProvider.name === STUB_IDENTITY_PROVIDER_NAME &&
+      this.config.get<string>('app.nodeEnv') === 'production'
     );
   }
 
@@ -1537,21 +1530,5 @@ export class VerificationService {
     const existing = await this.repo.findOne({ where: { userId } });
     if (existing) return existing;
     return this.repo.create({ userId, level: VerificationLevel.Email });
-  }
-
-  /** Raise a member to `level` if it is above their current one; never lowers. */
-  private async raiseTo(
-    userId: string,
-    level: VerificationLevel,
-    method: string,
-    provider: string,
-  ): Promise<void> {
-    const row = await this.loadOrCreate(userId);
-    if (levelRank(level) <= levelRank(row.level)) return;
-    row.level = level;
-    row.method = method;
-    row.provider = provider;
-    row.verifiedAt = new Date();
-    await this.repo.save(row);
   }
 }

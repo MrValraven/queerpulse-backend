@@ -16,11 +16,23 @@ const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
  * gone status, or the member just stops using it — leaving a row that is never
  * delivered to again and never cleaned up.
  *
- * A subscription is stale when it has not had a successful send within the
+ * A subscription is stale when nothing has confirmed it alive within the
  * window: `last_used_at` older than the threshold, or — for a subscription that
- * was created but never once delivered to — `created_at` older than it. Any
- * later successful send refreshes `last_used_at`, so an active device is never
- * pruned.
+ * was created but never once delivered to — `created_at` older than it.
+ *
+ * Two things refresh `last_used_at`: a successful send (`PushService.sendToUser`)
+ * and a (re)subscribe from the device itself (`PushService.saveSubscription`).
+ * The second one exists because the first is not enough on its own — a device
+ * that is always online receives no DM pushes at all (the listener skips online
+ * recipients), so a healthy device could go 90 days without a single successful
+ * send and be pruned while the browser still held a valid subscription.
+ *
+ * REMAINING GAP: the web client only re-posts its subscription when the
+ * endpoint has actually drifted, so a quiet, healthy, never-rotating device
+ * still ages out. Closing it needs the client to re-post on boot whenever its
+ * last successful sync is older than the window (see `usePushSubscription`'s
+ * `syncSubscriptionHealth`, which currently returns early when the endpoint is
+ * unchanged).
  *
  * Single-instance job — safe because the app runs one scheduler; the delete is
  * idempotent and batched, so an overlapping tick or a future scale-out only

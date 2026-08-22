@@ -82,7 +82,7 @@ export class GovernanceOverviewService {
     return toGovernanceOverviewResponse(overview);
   }
 
-  // POST /governance/admin/publish (P3-7) — mark the current singleton snapshot
+  // POST /admin/governance/publish (P3-7) — mark the current singleton snapshot
   // as published *now*, so the public `GET /governance/overview` can surface a
   // "last published" line. Idempotent in intent (re-publishing simply advances
   // the timestamp to the latest deliberate act); mirrors the seeded-singleton
@@ -112,18 +112,27 @@ export class GovernanceOverviewService {
     }
     overview.health = await this.withLiveActiveMemberCount(overview.health);
 
-    const allChanges = await this.changes.find({
-      order: { createdAt: 'DESC' },
-    });
+    // `DISTINCT ON (section)` — at most five rows, one per section (BE-COM-36).
+    // This used to `find()` the entire `governance_overview_changes` table
+    // ordered newest-first and then keep the first row per section in JS, so
+    // every Policy-tab load scanned the whole edit history just to find five
+    // rows, and the scan grew with every edit ever made.
+    //
+    // `id DESC` is the tiebreak: two sections saved in the same
+    // `updateOverview` transaction share a `created_at` to the microsecond,
+    // and without a deterministic second key `DISTINCT ON` would pick
+    // arbitrarily between them.
+    const latestChanges = await this.changes
+      .createQueryBuilder('change')
+      .distinctOn(['change.section'])
+      .orderBy('change.section', 'ASC')
+      .addOrderBy('change.created_at', 'DESC')
+      .addOrderBy('change.id', 'DESC')
+      .getMany();
     const latestChangeBySection = new Map<
       OverviewSection,
       GovernanceOverviewChange
-    >();
-    for (const change of allChanges) {
-      if (!latestChangeBySection.has(change.section)) {
-        latestChangeBySection.set(change.section, change);
-      }
-    }
+    >(latestChanges.map((change) => [change.section, change]));
 
     const actorIds = [
       ...new Set(

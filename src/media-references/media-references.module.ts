@@ -3,7 +3,10 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { MediaReferenceResolver } from './media-reference.resolver';
 import { Profile } from '../users/entities/profile.entity';
 import { WorkItem } from '../profiles/entities/work-item.entity';
+import { MagazineArticle } from '../magazine/entities/magazine-article.entity';
+import { MagazineDeck } from '../magazine/entities/magazine-deck.entity';
 import { MagazineIssue } from '../magazine/entities/magazine-issue.entity';
+import { Message } from '../messaging/entities/message.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { Conversation } from '../messaging/entities/conversation.entity';
 import { Event } from '../events/entities/event.entity';
@@ -31,7 +34,10 @@ import { HousingListing } from '../housing-listings/entities/housing-listing.ent
     TypeOrmModule.forFeature([
       Profile,
       WorkItem,
+      MagazineArticle,
+      MagazineDeck,
       MagazineIssue,
+      Message,
       EventPhoto,
       Conversation,
       Event,

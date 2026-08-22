@@ -22,9 +22,14 @@ describe('AdminBotsController', () => {
     expect(service.listBots).toHaveBeenCalled();
   });
 
-  it('forwards a profile update to the service by userId', async () => {
+  it('forwards a profile update to the service with the acting admin id and target userId', async () => {
     const dto = { bio: 'Hi' } as never;
-    await controller.updateBotProfile('bot-1', dto);
-    expect(service.updateBotProfile).toHaveBeenCalledWith('bot-1', dto);
+    const actingAdmin = { userId: 'admin-1' } as never;
+    await controller.updateBotProfile(actingAdmin, 'bot-1', dto);
+    expect(service.updateBotProfile).toHaveBeenCalledWith(
+      'admin-1',
+      'bot-1',
+      dto,
+    );
   });
 });

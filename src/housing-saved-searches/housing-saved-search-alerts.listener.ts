@@ -18,11 +18,34 @@ import { matchesHousingCriteria } from './housing-search-criteria';
  * `NotificationsService.createForRecipients` (it announces every persisted
  * row); the phone push is added by `PushNotificationListener`'s whitelist.
  *
- * Efficiency: ONE query loads every alerts-enabled saved search, matching runs
- * in memory (the criteria is jsonb — cheap to evaluate, awkward to express as a
- * per-listing SQL predicate), recipients are de-duplicated, and a SINGLE
- * `createForRecipients` write covers the whole fan-out — no per-search or
- * per-recipient query. `alertsEnabled` is the member's consent, so no extra
+ * Efficiency (BE-HSG-11). This used to be `find({ where: { alertsEnabled: true } })`
+ * with no `take` and no criteria predicate: every alerts-enabled saved search on
+ * the platform was materialised and hydrated as an entity on every approval, at
+ * a cap of 25 searches per member. At 10k members that is up to 250k rows
+ * materialised per moderator click, on the same event loop that serves every
+ * other request.
+ *
+ * Two changes:
+ *  - The two cheap, indexable criteria are pushed into SQL as jsonb predicates:
+ *    a search that pins a DIFFERENT city or a DIFFERENT type can never match
+ *    this listing, so it is never loaded. Searches that leave a knob unset (or
+ *    set it empty) still match anything and are still loaded, which is correct.
+ *  - The remaining rows are streamed in keyset batches rather than one
+ *    unbounded result set, and `createForRecipients` is called per chunk instead
+ *    of once with an unbounded recipient array.
+ *
+ * `{ async: true }` on `@OnEvent` is a marker, not a fix: `setStatus` calls
+ * `emit`, which invokes listeners in-process and never awaits them, so the
+ * moderator's response was never blocked on this completing. The flag states
+ * the fire-and-forget contract explicitly so a future `emitAsync` caller does
+ * not accidentally start awaiting a fan-out. The work still shares this
+ * process's event loop with request handling, which is exactly why the row
+ * count above had to come down.
+ *
+ * The rest of the criteria (price bands, bedrooms, areas, availability) stays in
+ * memory via `matchesHousingCriteria`: it is the same evaluator the browse SQL
+ * mirrors, and duplicating all of it as jsonb predicates would give the two
+ * copies room to disagree. `alertsEnabled` is the member's consent, so no extra
  * notification-preference category gates this type.
  */
 @Injectable()
@@ -35,44 +58,105 @@ export class HousingSavedSearchAlertsListener {
     private readonly notifications: NotificationsService,
   ) {}
 
-  @OnEvent(HOUSING_LISTING_WENT_LIVE)
+  /** Rows per keyset page. Large enough that a realistic platform is one or two
+   * queries, small enough that no single page is an unbounded materialisation. */
+  private static readonly BATCH_SIZE = 500;
+
+  @OnEvent(HOUSING_LISTING_WENT_LIVE, { async: true })
   async onListingWentLive(event: HousingListingWentLiveEvent): Promise<void> {
     try {
       const { listing, listingVerified } = event;
-      const searches = await this.savedSearches.find({
-        where: { alertsEnabled: true },
-      });
-      if (!searches.length) return;
 
-      // Unique members whose search matches — excluding the lister (never alert
-      // someone about their own listing). Order-preserving de-dup.
-      const recipientIds: string[] = [];
+      // Order-preserving de-dup across ALL batches. The lister is seeded in so
+      // they are never alerted about their own listing.
       const seen = new Set<string>([listing.ownerId]);
-      for (const search of searches) {
-        if (seen.has(search.memberId)) continue;
-        if (matchesHousingCriteria(listing, search.criteria, listingVerified)) {
-          seen.add(search.memberId);
-          recipientIds.push(search.memberId);
-        }
-      }
-      if (!recipientIds.length) return;
+      // Keyset cursor over the primary key: stable under concurrent inserts and
+      // never re-reads a page, unlike OFFSET.
+      let cursor: string | null = null;
 
-      // No actor — this is the platform telling you a home matched your search,
-      // so no block/mute actorId. Payload carries what the bell/push render +
-      // deep-link to the listing.
-      await this.notifications.createForRecipients(
-        recipientIds,
-        NotificationType.HousingListingMatch,
-        {
-          slug: listing.slug,
-          title: listing.title,
-          area: listing.area || listing.city,
-        },
-      );
+      for (;;) {
+        const page: HousingSavedSearch[] = await this.loadCandidatePage(
+          listing,
+          cursor,
+        );
+        if (!page.length) break;
+        cursor = page[page.length - 1]!.id;
+
+        const recipientIds: string[] = [];
+        for (const search of page) {
+          if (seen.has(search.memberId)) continue;
+          if (
+            matchesHousingCriteria(listing, search.criteria, listingVerified)
+          ) {
+            seen.add(search.memberId);
+            recipientIds.push(search.memberId);
+          }
+        }
+
+        // No actor — this is the platform telling you a home matched your
+        // search, so no block/mute actorId. Payload carries what the bell/push
+        // render + deep-link to the listing.
+        if (recipientIds.length) {
+          await this.notifications.createForRecipients(
+            recipientIds,
+            NotificationType.HousingListingMatch,
+            {
+              slug: listing.slug,
+              title: listing.title,
+              area: listing.area || listing.city,
+            },
+          );
+        }
+
+        if (page.length < HousingSavedSearchAlertsListener.BATCH_SIZE) break;
+      }
     } catch (error) {
       // Alerting is best-effort — a failure here must never affect the
       // moderator's approve action that produced the event.
       this.logger.warn(`Housing saved-search alert failed: ${String(error)}`);
     }
+  }
+
+  /**
+   * One keyset page of saved searches that COULD match this listing.
+   *
+   * The two predicates are written as "the knob is unset OR it equals this
+   * listing's value", which is exactly how `matchesHousingCriteria` treats an
+   * absent knob, so pushing them down cannot change the result — it only avoids
+   * loading rows that were always going to be rejected in memory. `->>` yields
+   * NULL for a missing key, so `IS NULL` covers both "key absent" and "key
+   * explicitly null".
+   */
+  private loadCandidatePage(
+    listing: HousingListingWentLiveEvent['listing'],
+    cursor: string | null,
+  ): Promise<HousingSavedSearch[]> {
+    const qb = this.savedSearches
+      .createQueryBuilder('s')
+      .where('s.alerts_enabled = true')
+      // `''` is checked alongside `IS NULL` because `matchesHousingCriteria`
+      // treats an empty string as "unset" (a falsy guard), and the two
+      // evaluators must not disagree. `btrim` mirrors its `equalsCaseInsensitive`
+      // helper, which trims both sides before comparing.
+      .andWhere(
+        `(s.criteria->>'city' IS NULL
+            OR s.criteria->>'city' = ''
+            OR lower(btrim(s.criteria->>'city')) = lower(btrim(:city)))`,
+        { city: listing.city },
+      )
+      .andWhere(
+        `(s.criteria->>'type' IS NULL
+            OR s.criteria->>'type' = ''
+            OR s.criteria->>'type' = :type)`,
+        { type: listing.type },
+      )
+      .orderBy('s.id', 'ASC')
+      .limit(HousingSavedSearchAlertsListener.BATCH_SIZE);
+    if (cursor) {
+      // Explicit cast: the driver sends the cursor as an untyped text
+      // parameter, and `uuid > text` has no operator.
+      qb.andWhere('s.id > CAST(:cursor AS uuid)', { cursor });
+    }
+    return qb.getMany();
   }
 }

@@ -19,7 +19,7 @@ export enum ListingEditSuggestionStatus {
 /**
  * A non-owner member's proposed correction to a business listing ("suggest an
  * edit" — e.g. "the hours are wrong", "phone number changed"), landing in a
- * moderator-reviewable queue (`GET /listings/admin/edit-suggestions`).
+ * moderator-reviewable queue (`GET /admin/listings/edit-suggestions`).
  *
  * Deliberately a separate entity from `Report`/`ReportSubjectType`
  * (`src/reports`): a report flags a problem for moderation action against the

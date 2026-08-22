@@ -7,6 +7,7 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
+import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 
 /**
  * Body of `POST /magazine/admin/decks`. Metadata fields mirror
@@ -31,7 +32,10 @@ export class CreateDeckDto {
   @IsOptional() @IsString() @MaxLength(200) section?: string;
   @IsOptional() @IsString() @MaxLength(200) byline?: string;
   @IsOptional() @IsString() @MaxLength(200) readTime?: string;
-  @IsOptional() @IsString() @MaxLength(200) cover?: string;
+  // An uploaded storage key or an `https://` URL. Was `@IsString()` capped at
+  // 200 — both too permissive (any scheme) and too tight (a real CDN URL with
+  // query params overflows 200). `IsImageReference` fixes both.
+  @IsOptional() @IsImageReference() cover?: string;
   @IsOptional() @IsString() @MaxLength(200) coverDesc?: string;
 
   @IsOptional() @IsString() @MaxLength(200) role?: string;

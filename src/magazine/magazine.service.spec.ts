@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { MagazineArticle } from './entities/magazine-article.entity';
@@ -77,6 +77,12 @@ describe('MagazineService', () => {
   let authors: { find: jest.Mock; findOne: jest.Mock };
   let issues: { find: jest.Mock; findOne: jest.Mock };
   let sections: { find: jest.Mock };
+  let decks: {
+    find: jest.Mock;
+    findOne: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+  };
 
   beforeEach(async () => {
     articles = {
@@ -86,6 +92,14 @@ describe('MagazineService', () => {
     authors = { find: jest.fn().mockResolvedValue([]), findOne: jest.fn() };
     issues = { find: jest.fn().mockResolvedValue([]), findOne: jest.fn() };
     sections = { find: jest.fn().mockResolvedValue([]) };
+    decks = {
+      find: jest.fn(),
+      findOne: jest.fn(),
+      // `create` echoes its input like the real TypeORM repository, so the
+      // service's ownership check has run before anything is persisted.
+      create: jest.fn((entity) => entity),
+      save: jest.fn(async (entity) => entity),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -95,7 +109,7 @@ describe('MagazineService', () => {
         { provide: getRepositoryToken(MagazineIssue), useValue: issues },
         {
           provide: getRepositoryToken(MagazineDeck),
-          useValue: { find: jest.fn(), findOne: jest.fn() },
+          useValue: decks,
         },
         { provide: getRepositoryToken(MagazineSection), useValue: sections },
         {
@@ -331,6 +345,99 @@ describe('MagazineService', () => {
         name: 'Sofia Andrade',
         bio: 'Writes about queer life in Lisbon.',
         avatarUrl: 'https://example.com/sofia.jpg',
+      });
+    });
+  });
+
+  // M1 foreign-upload backstop: a magazine deck is multi-editor and keeps the
+  // interceptor's shared-upload exemption, so the service must itself refuse a
+  // NEW foreign storage key while allowing an UNCHANGED one to be re-saved.
+  describe('deck image ownership (M1)', () => {
+    const REQUESTER_ID = '11111111-2222-3333-4444-555555555555';
+    const OTHER_EDITOR_ID = '99999999-8888-7777-6666-555555555555';
+    const keyOf = (ownerId: string): string =>
+      `avatars/${ownerId}/66666666-7777-8888-9999-000000000000.jpg`;
+    const OWN_KEY = keyOf(REQUESTER_ID);
+    const FOREIGN_KEY = keyOf(OTHER_EDITOR_ID);
+
+    function makeDeck(overrides: Partial<MagazineDeck>): MagazineDeck {
+      return {
+        id: 'deck-1',
+        slug: 'a-deck',
+        title: 'A deck',
+        kicker: '',
+        section: '',
+        byline: '',
+        role: null,
+        authorBio: '',
+        cover: '',
+        coverDesc: '',
+        readTime: '',
+        tags: [],
+        related: [],
+        slides: [],
+        publishedAt: null,
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+        ...overrides,
+      };
+    }
+
+    describe('createDeck', () => {
+      it('rejects a foreign cover key (no stored baseline) before persisting', async () => {
+        await expect(
+          service.createDeck(
+            { slug: 'x', title: 'X', cover: FOREIGN_KEY, slides: [] },
+            REQUESTER_ID,
+          ),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(decks.findOne).not.toHaveBeenCalled();
+        expect(decks.save).not.toHaveBeenCalled();
+      });
+
+      it('rejects a foreign key nested inside an image slide', async () => {
+        await expect(
+          service.createDeck(
+            {
+              slug: 'x',
+              title: 'X',
+              slides: [
+                { layout: 'image', src: FOREIGN_KEY, alt: 'a', tint: 'coral' },
+              ],
+            },
+            REQUESTER_ID,
+          ),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(decks.save).not.toHaveBeenCalled();
+      });
+
+      it('allows the creator to reference their own uploaded cover', async () => {
+        decks.findOne.mockResolvedValue(null);
+        await expect(
+          service.createDeck(
+            { slug: 'x', title: 'X', cover: OWN_KEY, slides: [] },
+            REQUESTER_ID,
+          ),
+        ).resolves.toMatchObject({ cover: OWN_KEY });
+        expect(decks.save).toHaveBeenCalled();
+      });
+    });
+
+    describe('updateDeck', () => {
+      it('allows re-saving the deck’s existing (foreign-uploaded) cover unchanged', async () => {
+        decks.findOne.mockResolvedValue(makeDeck({ cover: FOREIGN_KEY }));
+        await expect(
+          service.updateDeck('deck-1', { cover: FOREIGN_KEY }, REQUESTER_ID),
+        ).resolves.toMatchObject({ cover: FOREIGN_KEY });
+        expect(decks.save).toHaveBeenCalled();
+      });
+
+      it('rejects pointing the cover at a NEW foreign key', async () => {
+        decks.findOne.mockResolvedValue(makeDeck({ cover: '' }));
+        await expect(
+          service.updateDeck('deck-1', { cover: FOREIGN_KEY }, REQUESTER_ID),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(decks.save).not.toHaveBeenCalled();
       });
     });
   });

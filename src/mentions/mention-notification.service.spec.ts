@@ -1,6 +1,7 @@
 import { MentionNotificationService } from './mention-notification.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { RosterRole } from '../communities/entities/community-member.entity';
+import { AccessTier } from '../communities/entities/community.entity';
 import { MemberLookup } from '../common/member-ref';
 
 // Minimal fake repositories; only the paths exercised below are stubbed.
@@ -10,7 +11,10 @@ import { MemberLookup } from '../common/member-ref';
 // reimplementing its query-builder chain here.
 function build() {
   const profiles = {} as never;
-  const communities = { find: jest.fn().mockResolvedValue([]) };
+  const communities = {
+    find: jest.fn().mockResolvedValue([]),
+    findOne: jest.fn().mockResolvedValue(null),
+  };
   const members = { find: jest.fn().mockResolvedValue([]) };
   const listings = { findOne: jest.fn() };
   const events = { findOne: jest.fn() };
@@ -155,6 +159,73 @@ describe('MentionNotificationService.notify', () => {
     );
 
     expect(notifications.createForRecipients).not.toHaveBeenCalled();
+  });
+
+  it('restricts an @-member mention inside a NON-public community to its roster (excerpt must not leak — H3)', async () => {
+    const { service, communities, members, notifications, userIdsForSlugs } =
+      build();
+    userIdsForSlugs.mockResolvedValue(
+      new Map([
+        ['insider', 'user-insider'],
+        ['outsider', 'user-outsider'],
+      ]),
+    );
+    communities.findOne.mockResolvedValue({
+      id: 'community-1',
+      slug: 'private-support',
+      accessTier: AccessTier.Private,
+    });
+    // Only the insider holds a roster row in the private community; the
+    // service's `members.find` (an `In(candidateUserIds)` lookup) returns just
+    // them, so the outsider is dropped before any notification is created.
+    members.find.mockResolvedValue([
+      { communityId: 'community-1', userId: 'user-insider' },
+    ]);
+
+    await service.notify('@insider @outsider look here', 'author-1', {
+      source: 'community',
+      communitySlug: 'private-support',
+      postId: 'post-1',
+      excerpt: 'a private thing said inside a private community',
+    });
+
+    const notifiedRecipients = (
+      notifications.createForRecipients.mock.calls as [string[]][]
+    ).flatMap((call) => call[0]);
+    expect(notifiedRecipients).toEqual(['user-insider']);
+    expect(notifiedRecipients).not.toContain('user-outsider');
+  });
+
+  it('does NOT restrict an @-member mention in a PUBLIC community', async () => {
+    const { service, communities, members, notifications, userIdsForSlugs } =
+      build();
+    userIdsForSlugs.mockResolvedValue(
+      new Map([
+        ['alice', 'user-alice'],
+        ['bob', 'user-bob'],
+      ]),
+    );
+    communities.findOne.mockResolvedValue({
+      id: 'community-1',
+      slug: 'open-space',
+      accessTier: AccessTier.Public,
+    });
+
+    await service.notify('@alice @bob welcome', 'author-1', {
+      source: 'community',
+      communitySlug: 'open-space',
+      postId: 'post-1',
+      excerpt: 'public content',
+    });
+
+    const notifiedRecipients = (
+      notifications.createForRecipients.mock.calls as [string[]][]
+    ).flatMap((call) => call[0]);
+    expect(new Set(notifiedRecipients)).toEqual(
+      new Set(['user-alice', 'user-bob']),
+    );
+    // A public community is never roster-filtered.
+    expect(members.find).not.toHaveBeenCalled();
   });
 
   it('never propagates a thrown resolver error — best-effort only', async () => {

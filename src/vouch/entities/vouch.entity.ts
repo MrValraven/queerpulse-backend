@@ -61,6 +61,17 @@ export class Vouch {
   @Column({ type: 'timestamptz', nullable: true })
   withdrawnAt!: Date | null;
 
+  // When a withdrawn vouch was last reinstated. Null = never withdrawn and
+  // brought back.
+  //
+  // Exists for the daily vouch cap, which counts
+  // `COALESCE(reactivated_at, created_at)` within the current UTC day. A
+  // re-vouch updates this row in place and keeps its original `created_at`, so
+  // without this stamp a withdraw/re-vouch cycle cost nothing and the cap was
+  // evadable for any member already vouched for once.
+  @Column({ type: 'timestamptz', nullable: true })
+  reactivatedAt!: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 }

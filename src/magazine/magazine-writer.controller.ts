@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
+  ApiConflictResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
   ApiForbiddenResponse,
@@ -126,6 +127,10 @@ export class MagazineWriterController {
   })
   @ApiNotFoundResponse({ description: 'No piece exists for this id.' })
   @ApiForbiddenResponse({ description: "The piece isn't this writer's." })
+  @ApiConflictResponse({
+    description:
+      'The article draft moved on since this client read it (an editor saved, or a version was restored). Send the `version` from the latest read as `expectedVersion`; reload before filing again.',
+  })
   fileDraft(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: FileDraftDto,

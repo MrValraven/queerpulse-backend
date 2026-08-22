@@ -73,6 +73,44 @@ export interface RenderedMail {
   html: string;
 }
 
+/**
+ * Template keys that are BULK mail — sent to a subscriber list rather than to
+ * one person about something they just did.
+ *
+ * `MailerService.send` refuses to dispatch any of these without a resolvable
+ * per-recipient unsubscribe link, and attaches `List-Unsubscribe` /
+ * `List-Unsubscribe-Post` headers plus an in-body opt-out. Bulk email with no
+ * self-serve opt-out breaches CAN-SPAM, GDPR Art. 21 / ePrivacy and CASL, and
+ * burns the sending domain's reputation under the 2024 Gmail/Yahoo bulk-sender
+ * rules.
+ *
+ * `digest_test` is deliberately NOT here: it is a one-off preview to the
+ * requesting admin's own inbox, not a list send.
+ */
+export const BULK_TEMPLATE_KEYS: ReadonlySet<MailTemplateKey> = new Set([
+  'digest',
+]);
+
+/**
+ * Appends the human-facing opt-out to a rendered bulk message, in BOTH the
+ * plain-text and HTML parts. The `List-Unsubscribe` header covers mail clients
+ * that surface a native button; this covers everyone else, who otherwise has no
+ * way to discover the unsubscribe URL at all.
+ */
+export function withUnsubscribeFooter(
+  mail: RenderedMail,
+  unsubscribeUrl: string,
+): RenderedMail {
+  return {
+    subject: mail.subject,
+    text: `${mail.text}\n\n--\nYou are receiving this because you subscribed to the QueerPulse newsletter.\nUnsubscribe: ${unsubscribeUrl}`,
+    html:
+      `${mail.html}<hr/><p style="font-size:12px;color:#666">` +
+      `You are receiving this because you subscribed to the QueerPulse newsletter. ` +
+      `<a href="${escapeHtml(unsubscribeUrl)}">Unsubscribe</a>.</p>`,
+  };
+}
+
 /** Minimal HTML-escape for values interpolated into the `html` body. */
 function escapeHtml(value: string): string {
   return value
@@ -192,18 +230,23 @@ export function renderTemplate<K extends MailTemplateKey>(
           : "We've reviewed it and closed it without further action.";
       return {
         subject: 'An update on the concern you raised',
+        // The copy used to invite a reply, but this mail goes out from the
+        // no-reply sender (`MailerService`'s default `from`) and `send` sets
+        // no `replyTo`, so anyone who followed that instruction wrote into a
+        // void. For a safety concern that is the worst possible place to lose
+        // someone, hence the one live route stays named instead.
         text:
           `Thanks for raising a concern with QueerPulse.\n\n` +
           `${outcome}\n\n` +
-          `If you have more to add, you can reply to this email or submit ` +
-          `another concern from the governance page. Thank you for helping ` +
-          `keep the community safe.`,
+          `This address is unattended, so replies here won't reach us. If you ` +
+          `have more to add, submit another concern from the governance page. ` +
+          `Thank you for helping keep the community safe.`,
         html:
           `<p>Thanks for raising a concern with QueerPulse.</p>` +
           `<p>${escapeHtml(outcome)}</p>` +
-          `<p>If you have more to add, you can reply to this email or submit ` +
-          `another concern from the governance page. Thank you for helping ` +
-          `keep the community safe.</p>`,
+          `<p>This address is unattended, so replies here won't reach us. If ` +
+          `you have more to add, submit another concern from the governance ` +
+          `page. Thank you for helping keep the community safe.</p>`,
       };
     }
     case 'join_request_approved': {

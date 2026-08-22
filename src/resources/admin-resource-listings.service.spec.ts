@@ -8,7 +8,9 @@ import {
 } from './entities/resource-listing.entity';
 import { AdminResourceListingsService } from './admin-resource-listings.service';
 
-function makeListing(overrides: Partial<ResourceListing> = {}): ResourceListing {
+function makeListing(
+  overrides: Partial<ResourceListing> = {},
+): ResourceListing {
   return {
     id: 'rl-1',
     category: ResourceListingCategory.LegalAid,
@@ -43,7 +45,7 @@ describe('AdminResourceListingsService', () => {
       findOne: jest.fn(),
       create: jest.fn((v: Partial<ResourceListing>) => v),
       save: jest.fn((v: Partial<ResourceListing>) =>
-        Promise.resolve({ ...makeListing(), ...v } as ResourceListing),
+        Promise.resolve({ ...makeListing(), ...v }),
       ),
       delete: jest.fn(),
     };

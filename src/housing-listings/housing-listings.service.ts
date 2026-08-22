@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   ConflictException,
-  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -22,6 +21,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
+import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { CreateHousingEnquiryDto } from './dto/create-housing-enquiry.dto';
 import { CreateHousingListingDto } from './dto/create-housing-listing.dto';
 import { UpdateHousingListingDto } from './dto/update-housing-listing.dto';
@@ -62,9 +62,6 @@ function applyUpdate(
     ...(dto.billsIncluded !== undefined
       ? { billsIncluded: dto.billsIncluded }
       : {}),
-    ...(dto.lgbtqFriendly !== undefined
-      ? { lgbtqFriendly: dto.lgbtqFriendly }
-      : {}),
     ...(dto.accessibilityInfo !== undefined
       ? { accessibilityInfo: dto.accessibilityInfo }
       : {}),
@@ -83,6 +80,53 @@ function applyUpdate(
       ? { virtualTourUrl: dto.virtualTourUrl }
       : {}),
   });
+}
+
+/**
+ * The public-facing fields a moderator actually reviewed before a listing went
+ * `live`: the copy, the price, the location, the photos and the transparency
+ * disclosures. An owner PATCH that changes ANY of them re-opens the review
+ * (`update()` below) — without this, a listing could be approved clean and then
+ * have a discriminatory description, a scam rent, an IBAN or an unrelated
+ * gallery patched in while it stayed publicly browsable, keeping the verified
+ * chip it earned before the edit (BE-HSG-02).
+ *
+ * Deliberately EXCLUDED so an owner keeps them self-service on a live listing,
+ * because none of them can carry moderatable content: `availableFrom` and
+ * `minStayMonths` are scheduling facts. `filledAt`/`expiresAt` are not
+ * reachable from this DTO at all — they move through `markFilled`/
+ * `markAvailable`/`extend`, which stay unaffected on purpose so an owner can
+ * always take their own home off browse without waiting for a moderator.
+ */
+const MODERATED_HOUSING_FIELDS = [
+  'type',
+  'title',
+  'blurb',
+  'city',
+  'area',
+  'rentEuros',
+  'bedrooms',
+  'billsIncluded',
+  'accessibilityInfo',
+  'listerKind',
+  'description',
+  'features',
+  'idealFor',
+  'gallery',
+  'virtualTourUrl',
+] as const satisfies readonly (keyof HousingListing)[];
+
+/**
+ * A stable fingerprint of the moderated fields, so `update()` can tell a real
+ * content change from a PATCH that re-sends the same values. Every listed field
+ * is a scalar or a string array, so `JSON.stringify` over them is total and
+ * order-stable; arrays compare by value AND order, which is intended (a
+ * re-ordered gallery IS a change — the lead photo moved).
+ */
+function moderatedHousingFingerprint(listing: HousingListing): string {
+  return JSON.stringify(
+    MODERATED_HOUSING_FIELDS.map((field) => listing[field]),
+  );
 }
 
 export interface ListMyHousingQueryInput {
@@ -156,8 +200,7 @@ export class HousingListingsService {
   }
 
   async getByRef(ref: string, userId: string): Promise<HousingListingDTO> {
-    const listing = await this.loadOr404(ref);
-    this.assertOwner(listing, userId);
+    const listing = await this.loadOwnedOr404(ref, userId);
     return this.buildDTO(listing);
   }
 
@@ -166,8 +209,28 @@ export class HousingListingsService {
     userId: string,
     dto: UpdateHousingListingDto,
   ): Promise<HousingListingDTO> {
-    const listing = await this.loadOr404(ref);
-    this.assertOwner(listing, userId);
+    const listing = await this.loadOwnedOr404(ref, userId);
+    const wasLive = listing.status === HousingListingStatus.Live;
+    // Snapshot BEFORE the merge so a real content change is distinguishable
+    // from a PATCH that re-sends the same values (which must not bounce a live
+    // listing out of browse for nothing).
+    const before = wasLive ? moderatedHousingFingerprint(listing) : null;
+    // Runs BEFORE any mutation (`HousingListingsController.update` is on
+    // `SHARED_UPLOAD_HANDLERS`, so the interceptor's foreign-upload check is
+    // exempted for this handler): a co-lister may re-save the gallery whoever
+    // uploaded its images, but may not add a NEW gallery image that is not
+    // theirs. Each incoming image is compared against the full set of currently
+    // stored gallery keys, so a re-sent stored key passes while a brand-new
+    // foreign key is refused.
+    if (dto.gallery !== undefined) {
+      for (const incomingGalleryKey of dto.gallery) {
+        assertNoForeignUploadIntroduced(
+          userId,
+          incomingGalleryKey,
+          listing.gallery,
+        );
+      }
+    }
     applyUpdate(listing, dto);
     // Re-score on every edit — a listing that was clean can be edited to add
     // off-platform payment language or an implausible rent, and the queue must
@@ -176,13 +239,26 @@ export class HousingListingsService {
     const assessment = this.riskForListing(listing, level);
     listing.riskScore = assessment.score;
     listing.riskReasons = assessment.reasons;
+    // BE-HSG-02: moderation used to happen exactly once, at approval. An owner
+    // editing any field a moderator actually looked at now re-opens that
+    // review — the listing leaves public browse until a human clears it again
+    // through `setStatus`, which also re-fires the saved-search go-live alert
+    // on re-approval (by then `wasLive` is false there). The re-scored
+    // `riskScore` above only ever sorted the queue; nothing consulted it as a
+    // gate, so the score alone could never have caught this.
+    if (
+      wasLive &&
+      before !== null &&
+      moderatedHousingFingerprint(listing) !== before
+    ) {
+      listing.status = HousingListingStatus.Review;
+    }
     const saved = await this.listings.save(listing);
     return this.buildDTO(saved);
   }
 
   async remove(ref: string, userId: string): Promise<void> {
-    const listing = await this.loadOr404(ref);
-    this.assertOwner(listing, userId);
+    const listing = await this.loadOwnedOr404(ref, userId);
     await this.listings.remove(listing);
   }
 
@@ -190,8 +266,7 @@ export class HousingListingsService {
    * public browse (see `HousingDirectoryService.browse`) without touching the
    * moderation `status` or deleting anything. Reversible via `markAvailable`. */
   async markFilled(ref: string, userId: string): Promise<HousingListingDTO> {
-    const listing = await this.loadOr404(ref);
-    this.assertOwner(listing, userId);
+    const listing = await this.loadOwnedOr404(ref, userId);
     listing.filledAt = new Date();
     const saved = await this.listings.save(listing);
     return this.buildDTO(saved);
@@ -201,8 +276,7 @@ export class HousingListingsService {
    * already passed, also refreshes it — otherwise the next daily sweep would
    * immediately re-mark it filled, silently undoing the owner's action. */
   async markAvailable(ref: string, userId: string): Promise<HousingListingDTO> {
-    const listing = await this.loadOr404(ref);
-    this.assertOwner(listing, userId);
+    const listing = await this.loadOwnedOr404(ref, userId);
     listing.filledAt = null;
     if (listing.expiresAt.getTime() <= Date.now()) {
       listing.expiresAt = computeExpiry();
@@ -216,8 +290,7 @@ export class HousingListingsService {
    * `filledAt`: extending a listing the owner marked filled on purpose
    * shouldn't silently un-hide it from browse — call `markAvailable` for that. */
   async extend(ref: string, userId: string): Promise<HousingListingDTO> {
-    const listing = await this.loadOr404(ref);
-    this.assertOwner(listing, userId);
+    const listing = await this.loadOwnedOr404(ref, userId);
     listing.expiresAt = computeExpiry();
     const saved = await this.listings.save(listing);
     return this.buildDTO(saved);
@@ -303,10 +376,26 @@ export class HousingListingsService {
     return listing;
   }
 
-  private assertOwner(listing: HousingListing, userId: string): void {
-    if (listing.ownerId !== userId) {
-      throw new ForbiddenException('Only the owner can do that');
+  /**
+   * Owner-scoped load: folds ownership into the query so a valid `ref` owned by
+   * someone else 404s exactly like a non-existent one, instead of loading it and
+   * then 403-ing. Refs are a monotonic sequence, so a 403-vs-404 split would be
+   * an existence oracle (a member could enumerate `QPH-<year>-NNNN` and learn
+   * which listings, including in-review/rejected ones, exist). Use this for every
+   * owner-management read/update/remove path; keep `loadOr404` only where a
+   * non-owner is legitimately allowed to load (the moderator `setStatus` path).
+   */
+  private async loadOwnedOr404(
+    ref: string,
+    userId: string,
+  ): Promise<HousingListing> {
+    const listing = await this.listings.findOne({
+      where: { ref, ownerId: userId },
+    });
+    if (!listing) {
+      throw new NotFoundException('Housing listing not found');
     }
+    return listing;
   }
 
   private async mapRows(rows: HousingListing[]): Promise<HousingListingDTO[]> {
@@ -359,6 +448,8 @@ export class HousingListingsService {
       accessibilityInfo: listing.accessibilityInfo,
       gallery: listing.gallery,
       features: listing.features,
+      // BE-HSG-08: the "ideal for" chips are scanned as text too.
+      idealFor: listing.idealFor,
       listerVerificationLevel: level,
     });
   }
@@ -411,6 +502,8 @@ export class HousingListingsService {
       accessibilityInfo: dto.accessibilityInfo,
       gallery: dto.gallery ?? [],
       features: dto.features ?? [],
+      // BE-HSG-08: the "ideal for" chips are scanned as text too.
+      idealFor: dto.idealFor ?? [],
       listerVerificationLevel: level,
     });
     const MAX_ATTEMPTS = 5;
@@ -433,7 +526,17 @@ export class HousingListingsService {
             rentEuros: dto.rentEuros,
             bedrooms: dto.bedrooms ?? null,
             billsIncluded: dto.billsIncluded ?? false,
-            lgbtqFriendly: dto.lgbtqFriendly ?? false,
+            // BE-HSG-07: hard-set, never read from the submission. Posting a
+            // home requires the affirming pledge (see the gate at the top of
+            // `create`), so every listing that exists is affirming by
+            // definition. Storing the lister's own boolean modelled affirmation
+            // as an opt-in attribute of individual homes and let a public card
+            // read "not LGBTQ friendly" on a listing posted under the pledge,
+            // which is the exact framing the mandatory baseline replaced. The
+            // DTO field is accepted and ignored rather than removed, because
+            // the global ValidationPipe runs `forbidNonWhitelisted` and would
+            // 400 a client still sending it.
+            lgbtqFriendly: true,
             accessibilityInfo: dto.accessibilityInfo,
             listerKind: dto.listerKind ?? HousingListerKind.Member,
             availableFrom: dto.availableFrom ?? null,

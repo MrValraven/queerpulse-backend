@@ -10,7 +10,7 @@ import {
  * One append-only entry in the admin roadmap's audit trail — every mutating
  * admin action (item/idea/team writes) logs a row here via
  * `roadmap-audit.util.ts`'s `logAudit()` helper (Task A4). Backs
- * `GET /roadmap/admin/audit` and its CSV export. `actorId` is null for
+ * `GET /admin/roadmap/audit` and its CSV export. `actorId` is null for
  * system-attributed actions, in which case `actorLabel` still carries a
  * display name (matches `RoadmapItemComment.authorId`/`authorLabel`).
  * The migration (Task A2) creates this index as `created_at DESC` — the

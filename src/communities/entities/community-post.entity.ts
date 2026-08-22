@@ -74,4 +74,18 @@ export class CommunityPost {
   // (see `CommunityPostsService.deletePost`).
   @Column({ type: 'timestamptz', nullable: true })
   deletedAt!: Date | null;
+
+  // WHO set the tombstone above. Without this, `restore` could not tell an
+  // author's own delete apart from a moderator takedown, so the author simply
+  // undid a mod's removal (BE-COM-01). Only the actor who set the tombstone —
+  // or the community's owner/mod — may clear it; see
+  // `CommunityPostsService.assertCanRestore`.
+  //
+  // NULL means either "not tombstoned" or a LEGACY tombstone written before
+  // `AddContentTombstoneActor1793520000000` added this column; the restore
+  // check treats the legacy case as the old author-or-staff rule rather than
+  // inventing an actor. `ON DELETE SET NULL` for account erasure, like every
+  // other actor reference on this table.
+  @Column({ type: 'uuid', nullable: true })
+  deletedById!: string | null;
 }

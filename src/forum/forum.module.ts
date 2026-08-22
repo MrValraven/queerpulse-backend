@@ -4,6 +4,7 @@ import { CommunityMembershipModule } from '../communities/community-membership.m
 import { ContentModule } from '../content/content.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { MentionsModule } from '../mentions/mentions.module';
+import { ModerationModule } from '../moderation/moderation.module';
 import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
 import { ForumPostEdit } from './entities/forum-post-edit.entity';
@@ -49,6 +50,14 @@ import { ForumThreadsService } from './forum-threads.service';
     // `forwardRef`: `ContentModule` imports `SocialModule` + `UsersModule`,
     // neither of which reaches back into `ForumModule`.
     ContentModule,
+    // `ModAuditService` — staff thread actions (lock/unlock, pin/unpin, the
+    // "QueerPulse Official" byline toggle) append a `mod_audit_logs` row so
+    // they show up in `GET /mod/audit` and its CSV export alongside every
+    // other moderator action (BE-COM-19). Plain import, no `forwardRef`:
+    // `ModerationModule`'s own import graph (auth, users, reports,
+    // content-moderation, notifications, community-membership) never reaches
+    // back into `ForumModule`.
+    ModerationModule,
   ],
   controllers: [ForumController],
   providers: [ForumThreadsService, ForumPostsService],

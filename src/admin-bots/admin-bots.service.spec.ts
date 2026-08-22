@@ -1,6 +1,8 @@
-import { NotFoundException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Repository } from 'typeorm';
+import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
+import { WorkItem } from '../profiles/entities/work-item.entity';
 import { ProfilesService } from '../profiles/profiles.service';
 import { ShapingKind } from '../profiles/entities/shaping.entity';
 import { AdminBotsService } from './admin-bots.service';
@@ -19,12 +21,30 @@ type ProfilesServiceWriteMethods = Pick<
 describe('AdminBotsService', () => {
   let service: AdminBotsService;
   let users: jest.Mocked<Pick<Repository<User>, 'findOne' | 'find'>>;
+  let profileRows: jest.Mocked<Pick<Repository<Profile>, 'findOne'>>;
+  let workItems: jest.Mocked<Pick<Repository<WorkItem>, 'find'>>;
   let profiles: jest.Mocked<ProfilesServiceWriteMethods>;
+
+  // Well-formed storage keys (`<prefix>/<ownerUserId>/<uuid><ext>`, all UUID
+  // segments) whose embedded owner is a DIFFERENT user than the acting admin,
+  // so `storageKeyOwnerId` parses them and reads a foreign owner.
+  const OTHER_ID = '22222222-2222-2222-2222-222222222222';
+  const FILE_SEGMENT = '33333333-3333-3333-3333-333333333333';
+  const foreignKey = `avatars/${OTHER_ID}/${FILE_SEGMENT}.jpg`;
+  const foreignWorkKey = `work/${OTHER_ID}/${FILE_SEGMENT}.jpg`;
 
   beforeEach(() => {
     users = {
       findOne: jest.fn(),
       find: jest.fn(),
+    };
+    profileRows = {
+      // No stored avatar unless a test overrides it.
+      findOne: jest.fn().mockResolvedValue(null),
+    };
+    workItems = {
+      // No stored work items unless a test overrides it.
+      find: jest.fn().mockResolvedValue([]),
     };
     profiles = {
       updateMe: jest.fn().mockResolvedValue({ ok: true }),
@@ -37,22 +57,24 @@ describe('AdminBotsService', () => {
     };
     service = new AdminBotsService(
       users as unknown as Repository<User>,
+      profileRows as unknown as Repository<Profile>,
+      workItems as unknown as Repository<WorkItem>,
       profiles as unknown as ProfilesService,
     );
   });
 
   it('throws NotFound when the target is not a system account', async () => {
     users.findOne.mockResolvedValue({ id: 'user-1', isSystem: false } as User);
-    await expect(service.updateBotProfile('user-1', {})).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
+    await expect(
+      service.updateBotProfile('admin-1', 'user-1', {}),
+    ).rejects.toBeInstanceOf(NotFoundException);
     expect(profiles.updateMe).not.toHaveBeenCalled();
   });
 
   it('throws NotFound when the target user does not exist', async () => {
     users.findOne.mockResolvedValue(null);
     await expect(
-      service.updateBotProfile('missing', {}),
+      service.updateBotProfile('admin-1', 'missing', {}),
     ).rejects.toBeInstanceOf(NotFoundException);
     expect(profiles.updateMe).not.toHaveBeenCalled();
   });
@@ -60,9 +82,34 @@ describe('AdminBotsService', () => {
   it('delegates to ProfilesService for a system account', async () => {
     users.findOne.mockResolvedValue({ id: 'bot-1', isSystem: true } as User);
     const dto = { bio: 'Hello' } as never;
-    const result = await service.updateBotProfile('bot-1', dto);
+    const result = await service.updateBotProfile('admin-1', 'bot-1', dto);
     expect(profiles.updateMe).toHaveBeenCalledWith('bot-1', dto);
     expect(result).toEqual({ ok: true });
+  });
+
+  it('allows re-saving the avatar a different admin already stored', async () => {
+    users.findOne.mockResolvedValue({ id: 'bot-1', isSystem: true } as User);
+    // The bot already carries the foreign key: re-sending it verbatim is a
+    // no-op and must pass.
+    profileRows.findOne.mockResolvedValue({ avatarUrl: foreignKey } as Profile);
+    const dto = { avatarUrl: foreignKey } as never;
+    await expect(
+      service.updateBotProfile('admin-1', 'bot-1', dto),
+    ).resolves.toEqual({ ok: true });
+    expect(profiles.updateMe).toHaveBeenCalledWith('bot-1', dto);
+  });
+
+  it('rejects introducing a NEW foreign avatar upload', async () => {
+    users.findOne.mockResolvedValue({ id: 'bot-1', isSystem: true } as User);
+    // Stored avatar differs from the foreign key being introduced.
+    profileRows.findOne.mockResolvedValue({
+      avatarUrl: 'avatars/admin-1/current.png',
+    } as Profile);
+    const dto = { avatarUrl: foreignKey } as never;
+    await expect(
+      service.updateBotProfile('admin-1', 'bot-1', dto),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(profiles.updateMe).not.toHaveBeenCalled();
   });
 
   // Single source of truth for each write dto's contents. Each literal is
@@ -111,7 +158,7 @@ describe('AdminBotsService', () => {
     },
     {
       name: 'replaceBotWork',
-      invoke: (userId) => service.replaceBotWork(userId, workDto),
+      invoke: (userId) => service.replaceBotWork('admin-1', userId, workDto),
       profilesMock: () => profiles.replaceWork,
       expectedArgs: ['bot-1', workDto.items],
     },
@@ -174,6 +221,52 @@ describe('AdminBotsService', () => {
         expect(profilesMock()).toHaveBeenCalledWith(...expectedArgs);
       },
     );
+  });
+
+  describe('replaceBotWork foreign-upload guard', () => {
+    beforeEach(() => {
+      users.findOne.mockResolvedValue({ id: 'bot-1', isSystem: true } as User);
+    });
+
+    it('allows an item image a different admin already stored', async () => {
+      workItems.find.mockResolvedValue([
+        { imageUrl: foreignWorkKey } as WorkItem,
+      ]);
+      const dto = {
+        items: [
+          {
+            category: 'Community',
+            title: 'Engineer',
+            year: '2024',
+            imageUrl: foreignWorkKey,
+          },
+        ],
+      } as never;
+      await expect(
+        service.replaceBotWork('admin-1', 'bot-1', dto),
+      ).resolves.toEqual({ ok: true });
+      expect(profiles.replaceWork).toHaveBeenCalled();
+    });
+
+    it('rejects introducing a NEW foreign item image', async () => {
+      workItems.find.mockResolvedValue([
+        { imageUrl: 'work/admin-1/existing.png' } as WorkItem,
+      ]);
+      const dto = {
+        items: [
+          {
+            category: 'Community',
+            title: 'Engineer',
+            year: '2024',
+            imageUrl: foreignWorkKey,
+          },
+        ],
+      } as never;
+      await expect(
+        service.replaceBotWork('admin-1', 'bot-1', dto),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(profiles.replaceWork).not.toHaveBeenCalled();
+    });
   });
 
   describe('listBots', () => {

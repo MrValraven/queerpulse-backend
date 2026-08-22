@@ -22,11 +22,15 @@ export type MediaReferenceType =
   | 'housing' // HousingListing.gallery[]
   | 'magazine-author' // MagazineAuthor.avatarUrl
   | 'changemaker' // Changemaker.imageUrl
-  | 'collection'; // Collection.cover
+  | 'collection' // Collection.cover
+  | 'magazine-article' // MagazineArticle.blocks[].src / .socialImage
+  | 'magazine-deck' // MagazineDeck.cover / .slides[] image refs
+  | 'message-photo'; // Message.attachment (a photo sent in a conversation)
 
 export interface MediaReference {
   type: MediaReferenceType;
-  /** UUID of the referencing row (the parent persona for a persona-item). */
+  /** UUID of the referencing row (the parent persona for a persona-item, the
+   *  conversation for a message-photo). */
   entityId: string;
   /** Human title of the item, e.g. "Décima Casa". May be '' if the row has none. */
   label: string;

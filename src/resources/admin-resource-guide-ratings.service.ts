@@ -59,7 +59,9 @@ export class AdminResourceGuideRatingsService {
       .sort(
         (a, b) =>
           a.ratio - b.ratio ||
-          b.helpfulCount + b.notHelpfulCount - (a.helpfulCount + a.notHelpfulCount),
+          b.helpfulCount +
+            b.notHelpfulCount -
+            (a.helpfulCount + a.notHelpfulCount),
       );
   }
 }

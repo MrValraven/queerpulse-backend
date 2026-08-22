@@ -8,6 +8,7 @@ import {
 import { Request } from 'express';
 import { Observable } from 'rxjs';
 import { storageKeyFromImageUrl } from '../common/image-url';
+import { allowsSharedUploads } from './shared-upload-handlers';
 import { storageKeyOwnerId } from './storage-key';
 
 // This interceptor does two related things to every image-ish string in a
@@ -35,13 +36,19 @@ import { storageKeyOwnerId } from './storage-key';
 //    added without the check. A single request-body walk is impossible to
 //    forget on the next new image field.
 //
-// A value normalized in step 1 is SERVER-ISSUED — the API only ever mints a
-// `/files/<key>` URL for a viewer already authorised to see that image — so it
-// is NOT subjected to the foreign-owner check (this is what lets a co-owner
-// re-save an entity whose photo another co-owner uploaded without a spurious
-// 403). The foreign-owner check applies only to a BARE key in the body, which
-// is the actual write-side attack vector (a guessed/enumerated key never shown
-// to the requester).
+// BOTH FORMS ARE OWNERSHIP-CHECKED. A normalized `/files/<key>` URL used to be
+// exempted as "server-issued and therefore trusted". It is not: that URL is
+// exactly what every `<img src>` on every page carries, so any member could
+// copy another member's avatar URL out of the DOM and PATCH it onto their own
+// profile — impersonation, plus a later replace/clear of that field deletes the
+// victim's object from the bucket. The check now runs on the NORMALIZED value
+// whichever form it arrived in.
+//
+// The multi-editor case that exemption was protecting (a moderator re-saving a
+// community whose cover another moderator uploaded) survives as an ENUMERATED
+// per-handler allowance — see `shared-upload-handlers.ts`, which also records
+// the intended end state: the service compares against the entity's currently
+// stored value and allows a foreign key only when it is unchanged.
 //
 // Guards run before interceptors (see `app.module.ts`), so `request.user` is
 // already populated here when a route is authenticated.
@@ -75,16 +82,31 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
     const requesterUserId = (request as { user?: { userId?: string } }).user
       ?.userId;
 
+    // Resolved per REQUEST, not per string: the handler is fixed for the whole
+    // body walk. Unknown handlers are not exempt (fail-closed).
+    const sharedUploadsAllowed = allowsSharedUploads(
+      // Read defensively: a hand-rolled `ExecutionContext` (unit tests, a
+      // future non-controller caller) may not implement these, and a missing
+      // name must fail CLOSED into the strict rule, never crash the request.
+      typeof context.getClass === 'function'
+        ? context.getClass()?.name
+        : undefined,
+      typeof context.getHandler === 'function'
+        ? context.getHandler()?.name
+        : undefined,
+    );
+
     if (typeof body === 'string') {
       // A top-level string body can't be rewritten in place (nothing owns the
       // reference), but it is still ownership-checked. `inspectString`'s
-      // normalized result is discarded here — a bare foreign key throws, our
-      // own resolved URLs are left untouched.
-      this.inspectString(body, requesterUserId);
+      // normalized result is discarded here — a foreign key throws in either
+      // form.
+      this.inspectString(body, requesterUserId, sharedUploadsAllowed);
     } else if (typeof body === 'object') {
       this.normalizeAndAssert(
         body as BodyContainer,
         requesterUserId,
+        sharedUploadsAllowed,
         new Set(),
       );
     }
@@ -93,27 +115,36 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
   }
 
   // Normalizes one string: our own `<apiBaseUrl>/files/<key>` URL → the bare
-  // key (server-issued, so NOT ownership-checked); a bare foreign key throws;
-  // anything else is returned verbatim. Returns the value to store back.
+  // key; then ownership-checks whatever key came out of that, in EITHER form.
+  // A foreign key throws; anything that is not one of our keys is returned
+  // verbatim. Returns the value to store back.
   private inspectString(
     value: string,
     requesterUserId: string | undefined,
+    sharedUploadsAllowed: boolean,
   ): string {
     const normalized = storageKeyFromImageUrl(value);
-    if (normalized !== value) {
-      // Was one of our own resolved URLs — trusted, rewritten to its key.
+    const arrivedAsResolvedUrl = normalized !== value;
+
+    const ownerUserId = storageKeyOwnerId(normalized);
+    if (ownerUserId === null) {
+      // Not one of our storage keys (external URL, ordinary text) — untouched.
       return normalized;
     }
-    const ownerUserId = storageKeyOwnerId(value);
-    if (ownerUserId === null) {
-      return value;
-    }
-    // A bare storage key: enforce ownership. No authenticated user but the body
+    // A storage key: enforce ownership. No authenticated user but the body
     // references a key is illegitimate too — there is no way to own one.
     if (!requesterUserId || ownerUserId !== requesterUserId) {
+      // The only exemption: an ENUMERATED multi-editor handler re-saving an
+      // image that was rendered to the requester (so it arrived as the
+      // resolved URL, not a bare key an attacker guessed). See
+      // `shared-upload-handlers.ts` — the service owns the unchanged-value
+      // check for these.
+      if (arrivedAsResolvedUrl && sharedUploadsAllowed) {
+        return normalized;
+      }
       throw new ForbiddenException('Referenced upload does not belong to you');
     }
-    return value;
+    return normalized;
   }
 
   // Recursively walks plain objects and arrays, rewriting each string child in
@@ -123,6 +154,7 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
   private normalizeAndAssert(
     container: BodyContainer,
     requesterUserId: string | undefined,
+    sharedUploadsAllowed: boolean,
     visited: Set<object>,
     depth = 0,
   ): void {
@@ -149,6 +181,7 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
         container[index] = this.processEntry(
           container[index],
           requesterUserId,
+          sharedUploadsAllowed,
           visited,
           depth,
         );
@@ -159,6 +192,7 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
       container[key] = this.processEntry(
         container[key],
         requesterUserId,
+        sharedUploadsAllowed,
         visited,
         depth,
       );
@@ -170,16 +204,18 @@ export class StorageKeyOwnershipInterceptor implements NestInterceptor {
   private processEntry(
     value: unknown,
     requesterUserId: string | undefined,
+    sharedUploadsAllowed: boolean,
     visited: Set<object>,
     depth: number,
   ): unknown {
     if (typeof value === 'string') {
-      return this.inspectString(value, requesterUserId);
+      return this.inspectString(value, requesterUserId, sharedUploadsAllowed);
     }
     if (value !== null && typeof value === 'object') {
       this.normalizeAndAssert(
         value as BodyContainer,
         requesterUserId,
+        sharedUploadsAllowed,
         visited,
         depth + 1,
       );

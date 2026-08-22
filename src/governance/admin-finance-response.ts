@@ -5,7 +5,7 @@ import {
   GovernanceFinanceReport,
 } from './entities/governance-finance-report.entity';
 
-// Backs `GET /governance/admin/finances` — the admin governance Finances tab
+// Backs `GET /admin/governance/finances` — the admin governance Finances tab
 // (`/admin/governance`). Unlike `GovernanceFinanceResponseDTO` (the public
 // `/governance/finances` snapshot for one quarter), this response bundles the
 // latest quarter's full metrics + ledgers alongside a lightweight historical

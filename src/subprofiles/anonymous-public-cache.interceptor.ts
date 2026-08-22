@@ -23,9 +23,20 @@ import { Observable } from 'rxjs';
 // Guards run before interceptors (see `app.module.ts` and
 // `storage-key-ownership.interceptor.ts`), so `req.user` — populated by the
 // route's `OptionalJwtAuthGuard` — is already resolved here.
+//
+// `Vary: Cookie` is set on BOTH branches and is not optional. A shared cache
+// keyed on the URL alone would store the anonymous variant and then hand it to
+// the next request for the same URL regardless of its cookie — serving the
+// public view to a member the persona's owner has blocked, and serving a stale
+// public view back to the owner right after they edited. That exact failure
+// has already happened on this platform's edge once (see the incident note in
+// `files.controller.ts`), which is why the header is stated explicitly rather
+// than assumed. Naming the header also keeps the authenticated `no-store`
+// branch honest for any intermediary that caches despite it.
 const ANONYMOUS_CACHE_CONTROL =
   'public, s-maxage=60, stale-while-revalidate=300';
 const AUTHENTICATED_CACHE_CONTROL = 'private, no-store';
+const VARY_ON_SESSION = 'Cookie';
 
 @Injectable()
 export class AnonymousPublicCacheInterceptor implements NestInterceptor {
@@ -39,6 +50,9 @@ export class AnonymousPublicCacheInterceptor implements NestInterceptor {
         'Cache-Control',
         request.user ? AUTHENTICATED_CACHE_CONTROL : ANONYMOUS_CACHE_CONTROL,
       );
+      // `res.vary()` APPENDS rather than replacing, so the `Vary: Origin` the
+      // CORS layer already set survives alongside it.
+      response.vary(VARY_ON_SESSION);
     }
     return next.handle();
   }

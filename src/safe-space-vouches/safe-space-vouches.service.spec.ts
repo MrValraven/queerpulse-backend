@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import { Repository } from 'typeorm';
 import {
   Listing,
@@ -86,13 +87,18 @@ describe('SafeSpaceVouchesService.createVouch', () => {
     expect(actorId).toBe('voucher-1');
   });
 
-  it('does not notify when the owner vouches for their own space', async () => {
-    const { service, notifications } = build(
+  it('rejects an owner vouching for their own space (L8) and records nothing', async () => {
+    const { service, memberVouches, notifications } = build(
       makeListing({ ownerId: 'self-1' }),
     );
 
-    await service.createVouch('self-1', 'casa-aberta');
-
+    // A space's own owner must not be able to +1 their own public vouchCount:
+    // the guard throws before any row is written or any notification fires.
+    await expect(service.createVouch('self-1', 'casa-aberta')).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(memberVouches.insert).not.toHaveBeenCalled();
+    expect(memberVouches.update).not.toHaveBeenCalled();
     expect(notifications.create).not.toHaveBeenCalled();
   });
 });

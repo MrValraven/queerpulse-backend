@@ -1,7 +1,5 @@
 import { CookieOptions, Response } from 'express';
 
-const ACCESS_MAX_AGE = 15 * 60 * 1000; // 15m
-const REFRESH_MAX_AGE = 30 * 24 * 60 * 60 * 1000; // 30d
 // The OAuth `state` nonce only needs to survive the Google consent round-trip.
 const OAUTH_STATE_MAX_AGE = 10 * 60 * 1000; // 10m
 
@@ -21,6 +19,18 @@ export interface AuthCookieOpts {
   domain?: string;
 }
 
+/**
+ * Adds the two session lifetimes, which are NOT constants here: they are
+ * derived from `auth.jwtAccessTtlMs` / `auth.jwtRefreshTtlMs` by the caller
+ * (see `AuthController.cookieOpts`). Hardcoding them here meant a
+ * `JWT_REFRESH_TTL` change in the deploy dashboard silently desynced the cookie
+ * the browser keeps from the JWT the server accepts.
+ */
+export interface SessionCookieOpts extends AuthCookieOpts {
+  accessMaxAge: number;
+  refreshMaxAge: number;
+}
+
 function base(opts: AuthCookieOpts): CookieOptions {
   return {
     httpOnly: true,
@@ -38,15 +48,15 @@ function refreshBase(opts: AuthCookieOpts): CookieOptions {
 export function setAuthCookies(
   res: Response,
   tokens: { accessToken: string; refreshToken: string },
-  opts: AuthCookieOpts,
+  opts: SessionCookieOpts,
 ): void {
   res.cookie('access_token', tokens.accessToken, {
     ...base(opts),
-    maxAge: ACCESS_MAX_AGE,
+    maxAge: opts.accessMaxAge,
   });
   res.cookie('refresh_token', tokens.refreshToken, {
     ...refreshBase(opts),
-    maxAge: REFRESH_MAX_AGE,
+    maxAge: opts.refreshMaxAge,
   });
 }
 

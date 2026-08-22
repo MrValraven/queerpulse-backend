@@ -2,6 +2,7 @@ import { NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
 import { CinemaReconciliationService } from './cinema-reconciliation.service';
 import { CinemaService } from './cinema.service';
 import {
@@ -48,8 +49,24 @@ describe('CinemaReconciliationService', () => {
   };
   let mux: { getUpload: jest.Mock; getAsset: jest.Mock };
   let configValues: Record<string, string | undefined>;
+  // The sweep is single-flighted across replicas by a Postgres advisory lock
+  // (CNT-16) taken on a dedicated QueryRunner. `lockRunner.query` answers the
+  // `pg_try_advisory_lock` probe; flip `isLockAvailable` to exercise the
+  // "another replica is already sweeping" path.
+  let isLockAvailable: boolean;
+  let lockRunner: { connect: jest.Mock; query: jest.Mock; release: jest.Mock };
 
   beforeEach(async () => {
+    isLockAvailable = true;
+    lockRunner = {
+      connect: jest.fn().mockResolvedValue(undefined),
+      query: jest.fn((sql: string) =>
+        sql.includes('pg_try_advisory_lock')
+          ? Promise.resolve([{ locked: isLockAvailable }])
+          : Promise.resolve([{ pg_advisory_unlock: true }]),
+      ),
+      release: jest.fn().mockResolvedValue(undefined),
+    };
     titles = {
       find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue(null),
@@ -72,6 +89,10 @@ describe('CinemaReconciliationService', () => {
           provide: ConfigService,
           useValue: { get: jest.fn((key: string) => configValues[key]) },
         },
+        {
+          provide: DataSource,
+          useValue: { createQueryRunner: jest.fn(() => lockRunner) },
+        },
       ],
     }).compile();
     service = module.get(CinemaReconciliationService);
@@ -81,6 +102,26 @@ describe('CinemaReconciliationService', () => {
     configValues = {};
     await service.reconcile();
     expect(titles.find).not.toHaveBeenCalled();
+  });
+
+  it('does not sweep when another replica holds the advisory lock', async () => {
+    isLockAvailable = false;
+    await service.reconcile();
+    expect(titles.find).not.toHaveBeenCalled();
+    // The runner is still returned to the pool, and no unlock is issued for a
+    // lock this replica never took.
+    expect(lockRunner.release).toHaveBeenCalled();
+    expect(lockRunner.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases the advisory lock and the runner after sweeping', async () => {
+    await service.reconcile();
+    expect(titles.find).toHaveBeenCalled();
+    expect(lockRunner.query).toHaveBeenCalledWith(
+      expect.stringContaining('pg_advisory_unlock'),
+      expect.anything(),
+    );
+    expect(lockRunner.release).toHaveBeenCalled();
   });
 
   it('cuts stuck titles on last_ingest_event_at, not updated_at', async () => {

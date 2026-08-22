@@ -19,7 +19,9 @@ import { resolveFrontendOrigins } from '../config/frontend-origins';
 import { ConnectionsService } from '../connections/connections.service';
 import {
   CONVERSATION_CREATED,
+  CONVERSATION_MEMBERSHIP_REVOKED,
   ConversationCreatedEvent,
+  ConversationMembershipRevokedEvent,
   MESSAGE_CREATED,
   MESSAGE_DELETED,
   MESSAGE_DELIVERED,
@@ -36,10 +38,12 @@ import {
   MessageUpdatedEvent,
 } from '../messaging/messaging.events';
 import { MessagingService } from '../messaging/messaging.service';
+import { MEMBER_BLOCKED, MemberBlockedEvent } from '../social/social.events';
 import {
   NOTIFICATION_CREATED,
   NotificationCreatedEvent,
 } from '../notifications/notification.events';
+import { toNotificationResponse } from '../notifications/notification-response';
 import {
   PLATFORM_LOCKDOWN_ENABLED,
   PlatformLockdownEnabledEvent,
@@ -178,9 +182,18 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   // WS abuse limits — the global HTTP ThrottlerGuard skips WS contexts, so the
   // gateway owns its own per-user token buckets (keyed on client.data.userId).
+  //
+  // The send bucket is deliberately ALIGNED with the HTTP ceiling on the same
+  // write: `POST /conversations/:id/messages` is throttled at 60 per 60s, and
+  // both transports land in the identical `MessagesService.sendMessage` (which
+  // fans out to push and to the whole room). At `refillPerSecond: 5` the socket
+  // sustained 300 messages a minute — five times the number the HTTP limit was
+  // tuned for — so a spammer simply used the socket. `capacity: 10` keeps the
+  // burst headroom a real typing session needs; `refillPerSecond: 1` puts the
+  // sustained rate at the same 60/min.
   private readonly messageLimiter = new TokenBucketLimiter({
     capacity: 10,
-    refillPerSecond: 5,
+    refillPerSecond: 1,
   });
   private readonly typingLimiter = new TokenBucketLimiter({
     capacity: 10,
@@ -349,7 +362,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() data: ReadPayload,
   ): Promise<void> {
     const userId = this.requireUserId(client);
-    await this.messaging.markRead(data.conversationId, userId);
+    await this.messaging.markRead(data.conversationId, userId, {
+      upToMessageId: data.upToMessageId,
+    });
   }
 
   @SubscribeMessage('delivered')
@@ -444,6 +459,72 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   /**
+   * Evict a member's sockets from a conversation room they may no longer
+   * receive from (removed from a group, left one).
+   *
+   * Room membership was authorised exactly ONCE, by `handleJoin`; every
+   * broadcast after that (`message:new`, `typing`, `read`, `message:delivered`,
+   * `reaction`, `message:deleted`, `message:pinned`) is a blind `to(room)`
+   * emit. Without this eviction a removed member kept a live subscription to
+   * every one of those frames until their socket reconnected — silently undoing
+   * both the HTTP read path's `leftAt` ceiling and `canJoinConversationLive`'s
+   * refusal to let them back in.
+   *
+   * `socketsLeave` (not `disconnectSockets`): the member's OTHER conversations,
+   * notifications and presence are untouched — only this room is cut.
+   *
+   * SINGLE-REPLICA ONLY, same caveat as {@link handleSessionRevoked}.
+   */
+  @OnEvent(CONVERSATION_MEMBERSHIP_REVOKED)
+  handleConversationMembershipRevoked(
+    payload: ConversationMembershipRevokedEvent,
+  ): void {
+    for (const userId of payload.userIds) {
+      this.namespace?.in(`user:${userId}`).socketsLeave(payload.conversationId);
+    }
+  }
+
+  /**
+   * A block severs the pair's live DM room in BOTH directions.
+   *
+   * `canJoinConversationLive` already refuses a fresh join from either side
+   * once a block exists, and `sendMessage`/`createConversation` refuse the
+   * write — but sockets already inside the room were never pushed out, so the
+   * blocked member kept receiving the blocker's messages, typing indicators and
+   * read receipts. Both entry points that place a block
+   * (`SocialService.blockMember`, `ConnectionsService.respond('block')`) emit
+   * {@link MEMBER_BLOCKED}, so which button was pressed no longer decides
+   * whether the block takes effect live.
+   *
+   * Async because the DM room ids have to be resolved first; the emitter
+   * awaits nothing, so failures are logged here rather than surfacing to the
+   * blocker's request (which has already committed).
+   */
+  @OnEvent(MEMBER_BLOCKED)
+  async handleMemberBlocked(payload: MemberBlockedEvent): Promise<void> {
+    try {
+      const conversationIds = await this.messaging.directConversationIdsBetween(
+        payload.blockerId,
+        payload.blockedId,
+      );
+      for (const conversationId of conversationIds) {
+        this.namespace
+          ?.in(`user:${payload.blockerId}`)
+          .socketsLeave(conversationId);
+        this.namespace
+          ?.in(`user:${payload.blockedId}`)
+          .socketsLeave(conversationId);
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to evict blocked pair from their DM room: ${
+          err instanceof Error ? err.message : 'unknown error'
+        }`,
+      );
+    }
+  }
+
+  /**
    * Push a newly-created notification to its recipient's live sockets.
    *
    * Fans out to the `user:${userId}` room (joined at handshake, so this reaches
@@ -456,9 +537,20 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
    */
   @OnEvent(NOTIFICATION_CREATED)
   handleNotificationCreated(payload: NotificationCreatedEvent): void {
+    // Emit the hand-mapped response DTO, never the raw entity — its `payload`
+    // is opaque jsonb whose allowlist projection (`toNotificationResponse` →
+    // `toClientPayload`) strips content-bearing fields like `excerpt` before
+    // they cross the wire (finding M6, backstopping H3). The client refetches
+    // the feed on this frame for its full render, so the actor is resolved
+    // there; passing `undefined` keeps this handler query-free (it does no DB
+    // work), matching the raw-entity relay it replaces (which carried no
+    // resolved actor either).
     this.namespace
       ?.to(`user:${payload.userId}`)
-      .emit('notification:new', payload.notification);
+      .emit(
+        'notification:new',
+        toNotificationResponse(payload.notification, undefined),
+      );
   }
 
   /**
@@ -529,6 +621,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // verifyAsync rejects an expired or tampered token (throws → handshake fail).
     const payload = await this.jwt.verifyAsync<AccessTokenClaims>(raw, {
       secret: this.config.getOrThrow<string>('auth.jwtAccessSecret'),
+      algorithms: ['HS256'],
     });
     // Enforce active membership on the WS path (parity with ActiveMemberGuard).
     if (payload.status !== UserStatus.Active) {

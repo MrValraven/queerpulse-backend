@@ -8,5 +8,6 @@ export class RequestDeletionDto {
 
   @IsString()
   @MinLength(1)
+  @MaxLength(256)
   reauthToken!: string;
 }

@@ -5,6 +5,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  MaxLength,
   Min,
 } from 'class-validator';
 import { ListingStatus } from '../entities/listing.entity';
@@ -12,7 +13,7 @@ import { ListingStatus } from '../entities/listing.entity';
 const LISTING_QUEUE_SORTS = ['newest', 'oldest', 'name'] as const;
 export type ListingQueueSort = (typeof LISTING_QUEUE_SORTS)[number];
 
-/** `GET /listings/admin/queue?status=&page=&q=&sort=` query. Moderator/admin-only
+/** `GET /admin/listings/queue?status=&page=&q=&sort=` query. Moderator/admin-only
  * (see `ListingsController.listQueue`). `status` omitted ⇒ every status;
  * `q` (item #9) searches the listing name, submitter first name, and ref;
  * `sort` omitted ⇒ `newest` (matches the queue's historical default order). */
@@ -27,8 +28,12 @@ export class ListListingQueueQuery {
   @Min(1)
   page?: number;
 
+  // Interpolated into three `ILIKE '%...%'` patterns (`listings.service.ts`),
+  // so an unbounded term is a cheap way to make Postgres scan hard. 120 matches
+  // the cap `SearchQuery.q` already uses.
   @IsOptional()
   @IsString()
+  @MaxLength(120)
   q?: string;
 
   @IsOptional()

@@ -12,11 +12,15 @@ import { ListingStatus } from './listing.entity';
 
 /**
  * One moderation action taken on a `Listing` — the audit trail (item #16)
- * and reason-capture (item #15) backing `GET /listings/admin/:ref/history`.
+ * and reason-capture (item #15) backing `GET /admin/listings/:ref/history`.
  * Written by `ListingsService` on every moderator-initiated action: a direct
  * status change (`setStatus`), a bulk status change (`bulkSetStatus`), a hard
  * removal (`removeByModerator`/`bulkRemove`), a question asked
- * (`askQuestion`), or a question answered (`answerQuestion`).
+ * (`askQuestion`), or a question answered (`answerQuestion`); by
+ * `ListingClaimsService.review` on an approved ownership transfer; and by
+ * `ListingsService.update` when an OWNER edit to a live listing re-opens its
+ * review (the one row here whose `actorId` is the owner rather than a
+ * moderator, which is the point: it records who caused the re-review).
  */
 export enum ListingModerationAction {
   StatusChanged = 'status_changed',
@@ -24,6 +28,19 @@ export enum ListingModerationAction {
   QuestionAsked = 'question_asked',
   Answered = 'answered',
   BulkStatus = 'bulk_status',
+  /**
+   * A moderator approved a `ListingClaim` and the listing's `ownerId` moved
+   * from one member to another (`ListingClaimsService.review`). Before
+   * BE-HSG-05 an ownership transfer was the one moderator action that left no
+   * trace at all: the previous owner lost every `:ref` route on their listing
+   * with no notification and nothing in this table to review afterwards.
+   *
+   * `fromStatus`/`toStatus` are both null on this action — a transfer changes
+   * who owns the listing, never its moderation state. The `reason` carries the
+   * claimant's submitted note. See migration
+   * `AddListingOwnershipTransferredAction1793530200000`.
+   */
+  OwnershipTransferred = 'ownership_transferred',
 }
 
 /**
@@ -36,7 +53,7 @@ export enum ListingModerationAction {
  * moderator hard-deleting a listing (`removeByModerator`/`bulkRemove`) must
  * never cascade away the very `removed` event that documents the deletion.
  * The row becomes historically orphaned once its listing is gone, which is
- * expected — `GET /listings/admin/:ref/history` is `ref`-keyed and 404s once
+ * expected — `GET /admin/listings/:ref/history` is `ref`-keyed and 404s once
  * the listing itself no longer exists, so the row simply stops being
  * reachable through that endpoint, exactly like a `reports.subjectId`
  * pointing at a since-removed subject.

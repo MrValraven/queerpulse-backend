@@ -2,7 +2,7 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, LessThan, Not, Repository } from 'typeorm';
+import { DataSource, IsNull, LessThan, Not, Repository } from 'typeorm';
 import { CinemaService } from './cinema.service';
 import { CinemaTitle, TitleStatus } from './entities/cinema-title.entity';
 import { MuxService } from './mux.service';
@@ -14,6 +14,24 @@ const STUCK_AFTER_MS = 15 * 60 * 1000;
 
 const FAILED_UPLOAD_STATUSES = new Set(['errored', 'cancelled', 'timed_out']);
 
+/**
+ * Postgres advisory-lock key for the hourly sweep (CNT-16).
+ *
+ * `@Cron` fires in EVERY app replica, so without a lock a two-replica deploy
+ * polls Mux twice per stuck title every hour and two workers `save()` the same
+ * row concurrently — the transitions themselves are idempotent, but
+ * `lastIngestEventAt`/`errorMessage` can still lose an update. One
+ * `pg_try_advisory_lock` makes the sweep single-flight across the whole
+ * cluster with no queue infrastructure: whoever wins runs it, everybody else
+ * returns immediately.
+ *
+ * Advisory locks live in a single global namespace shared by every session on
+ * the database, so this constant must stay unique across the codebase. It is
+ * currently the only advisory lock in `src/`. Chosen arbitrarily but
+ * memorably; do not reuse it for another job.
+ */
+const RECONCILE_ADVISORY_LOCK_KEY = 793640001;
+
 @Injectable()
 export class CinemaReconciliationService {
   private readonly logger = new Logger(CinemaReconciliationService.name);
@@ -24,13 +42,56 @@ export class CinemaReconciliationService {
     private readonly cinema: CinemaService,
     private readonly mux: MuxService,
     private readonly config: ConfigService,
+    private readonly dataSource: DataSource,
   ) {}
 
+  /**
+   * Hourly stuck-ingest sweep, held to ONE replica by a Postgres advisory lock
+   * (CNT-16).
+   *
+   * The lock is taken on a DEDICATED `QueryRunner`, not through the repository:
+   * `pg_advisory_lock` is session-scoped, and a pooled query gives no guarantee
+   * that the unlock lands on the same connection that took it. The runner is
+   * held for the duration of the sweep and released in `finally`, so a crash
+   * mid-sweep frees the lock when the connection drops rather than wedging the
+   * job forever.
+   */
   @Cron(CronExpression.EVERY_HOUR)
   async reconcile(): Promise<void> {
     if (!this.config.get<string>('mux.tokenId')) {
       return; // Mux not configured — nothing to reconcile against
     }
+
+    const lockRunner = this.dataSource.createQueryRunner();
+    await lockRunner.connect();
+    try {
+      // `QueryRunner.query` is untyped (unlike `DataSource.query<T>`), hence
+      // the assertion rather than a type argument.
+      const lockRows = (await lockRunner.query(
+        'SELECT pg_try_advisory_lock($1) AS locked',
+        [RECONCILE_ADVISORY_LOCK_KEY],
+      )) as { locked: boolean }[];
+      if (lockRows[0]?.locked !== true) {
+        // Another replica is already sweeping. Nothing to log at warn level —
+        // this is the expected outcome on every replica but one.
+        this.logger.debug(
+          'Cinema reconciliation skipped: another replica holds the sweep lock',
+        );
+        return;
+      }
+      try {
+        await this.sweepStuckTitles();
+      } finally {
+        await lockRunner.query('SELECT pg_advisory_unlock($1)', [
+          RECONCILE_ADVISORY_LOCK_KEY,
+        ]);
+      }
+    } finally {
+      await lockRunner.release();
+    }
+  }
+
+  private async sweepStuckTitles(): Promise<void> {
     // Cut on last_ingest_event_at, NOT updated_at: a view-count increment bumps
     // updated_at and would reset the clock on a title that is genuinely stuck
     // mid-ingest, hiding it from this sweep. Every in-flight title stamps

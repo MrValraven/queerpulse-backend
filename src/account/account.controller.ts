@@ -22,11 +22,11 @@ import {
 import { AccountService } from './account.service';
 import { ExportEntry } from './export-archive';
 import { DeactivateDto } from './dto/deactivate.dto';
-import { ReauthDto } from './dto/reauth.dto';
 import { RequestDeletionDto } from './dto/request-deletion.dto';
 import { RequestExportDto } from './dto/request-export.dto';
 import { SubmitDsarDto } from './dto/submit-dsar.dto';
 import { UpdateEmailPreferenceDto } from './dto/update-email-preferences.dto';
+import { Throttle, seconds } from '@nestjs/throttler';
 import {
   ApiBadRequestResponse,
   ApiConflictResponse,
@@ -37,12 +37,23 @@ import {
   ApiOkResponse,
   ApiOperation,
   ApiTags,
+  ApiTooManyRequestsResponse,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
-// No ActiveMemberGuard: account lifecycle actions (reauth, deactivate,
-// deletion, export, DSAR, sessions, email preferences) must remain reachable
-// by a pending member, same as `consent`/`notifications`.
+// No ActiveMemberGuard: account lifecycle actions (deactivate, deletion,
+// export, DSAR, sessions, email preferences) must remain reachable by a
+// pending member, same as `consent`/`notifications`.
+//
+// Step-up re-authentication (`reauthToken`, required below by deactivate/
+// deletion/export/DSAR) is no longer minted by a plain POST here — that had
+// no actual re-authentication behind it (this is an OAuth-only app; there is
+// no password to re-check). It is now minted only by completing a real
+// Google OAuth round trip with `prompt=login` as the SAME already-signed-in
+// member: `GET /auth/google?reauth=1&redirect=<path>` ->
+// `AuthController.googleCallback`'s `reauth` branch ->
+// `AuthService.mintReauthToken`. `AccountService.assertReauth` (below) is
+// unchanged — it still just validates whatever token the caller presents.
 @ApiTags('Account')
 @ApiCookieAuth('access_token')
 @Controller('account')
@@ -50,23 +61,6 @@ export class AccountController {
   private readonly logger = new Logger(AccountController.name);
 
   constructor(private readonly accountService: AccountService) {}
-
-  @ApiOperation({
-    summary: 'Confirm a recent re-authentication and mint a step-up token.',
-  })
-  @ApiCreatedResponse({
-    description: 'Step-up re-authentication token issued.',
-  })
-  @ApiBadRequestResponse({ description: 'Malformed request body.' })
-  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-  @Post('reauth')
-  reauth(
-    @CurrentUser() user: CurrentUserData,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    @Body() _dto: ReauthDto,
-  ) {
-    return this.accountService.reauth(user.userId);
-  }
 
   @ApiOperation({ summary: 'Deactivate (reversibly hide) the account.' })
   @ApiCreatedResponse({ description: 'Account deactivated.' })
@@ -127,6 +121,13 @@ export class AccountController {
   @ApiUnauthorizedResponse({
     description: 'Not authenticated, or step-up re-authentication required.',
   })
+  // Rate-limited well below the global 120/min/IP bucket: each call builds the
+  // member's ENTIRE archive synchronously and stores it as jsonb, so a loop
+  // here is a storage and CPU amplifier rather than a normal write. Identical
+  // repeats inside the reuse window are answered from the existing job (see
+  // `AccountService.requestExport`), so 3/hour is generous for real use.
+  @Throttle({ default: { limit: 3, ttl: seconds(3600) } })
+  @ApiTooManyRequestsResponse({ description: 'Export rate limit exceeded.' })
   @Post('export')
   requestExport(
     @CurrentUser() user: CurrentUserData,
@@ -294,6 +295,11 @@ export class AccountController {
   @ApiUnauthorizedResponse({
     description: 'Not authenticated, or step-up re-authentication required.',
   })
+  // A DSAR is a human-reviewed intake row carrying up to 4 KB of free text
+  // (see SubmitDsarDto's caps). Nobody files five in an hour legitimately, and
+  // the global bucket alone allowed 120/min of persisted text per IP.
+  @Throttle({ default: { limit: 5, ttl: seconds(3600) } })
+  @ApiTooManyRequestsResponse({ description: 'DSAR rate limit exceeded.' })
   @Post('dsar')
   submitDsar(@CurrentUser() user: CurrentUserData, @Body() dto: SubmitDsarDto) {
     return this.accountService.submitDsar(user.userId, dto);
@@ -357,12 +363,14 @@ export class AccountController {
     );
   }
 
-  // NOT-YET-ACTIVE: no transactional mailer is wired at launch (see
-  // docs/ops/no-email-at-launch.md). These toggles are stored but nothing is
-  // delivered; every item comes back with `comingSoon: true`.
+  // NOT-YET-ACTIVE. A transactional mailer DOES exist now (`MailerService`,
+  // used by the join-request approve/decline flow), but nothing consults these
+  // categories: no digest, reminder or product-update sender reads
+  // `email_preference`. The toggles are persisted and never acted on, so every
+  // item still comes back with `comingSoon: true`.
   @ApiOperation({
     summary:
-      "Get the caller's email-notification preferences. NOTE: no mailer is wired at launch — toggles are stored but not delivered (every item carries comingSoon: true).",
+      "Get the caller's email-notification preferences. NOTE: no sender consults these categories yet, so toggles are stored but not acted on (every item carries comingSoon: true).",
   })
   @ApiOkResponse({
     description: 'The email preferences (delivery not yet active).',
@@ -378,7 +386,7 @@ export class AccountController {
   // /account/email-preferences (was POST).
   @ApiOperation({
     summary:
-      'Update one email-notification preference. NOTE: no mailer is wired at launch — the toggle is persisted but no email is sent (see docs/ops/no-email-at-launch.md).',
+      'Update one email-notification preference. NOTE: no sender consults these categories yet, so the toggle is persisted but nothing changes about what is sent.',
   })
   @ApiOkResponse({
     description: 'The updated email preferences (delivery not yet active).',

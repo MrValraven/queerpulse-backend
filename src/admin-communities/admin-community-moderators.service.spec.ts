@@ -7,6 +7,8 @@ import {
 } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { CommunityGovernanceLogService } from '../communities/community-governance-log.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { AdminCommunityModeratorsService } from './admin-community-moderators.service';
 
 function makeCommunity(overrides: Partial<Community> = {}): Community {
@@ -50,11 +52,15 @@ describe('AdminCommunityModeratorsService', () => {
     save: jest.Mock;
   };
   let profiles: { find: jest.Mock };
+  let governanceLog: { log: jest.Mock };
+  let notifications: { create: jest.Mock };
 
   beforeEach(async () => {
     communities = { findOne: jest.fn() };
     communityMembers = { find: jest.fn(), findOne: jest.fn(), save: jest.fn() };
     profiles = { find: jest.fn() };
+    governanceLog = { log: jest.fn() };
+    notifications = { create: jest.fn() };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -65,6 +71,12 @@ describe('AdminCommunityModeratorsService', () => {
           useValue: communityMembers,
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        // BE-COM-19 — a staff promotion/demotion now writes a
+        // `community_governance_log` row and notifies the member; both are
+        // best-effort side effects, stubbed here so the role-transition
+        // assertions below stay the subject of these specs.
+        { provide: CommunityGovernanceLogService, useValue: governanceLog },
+        { provide: NotificationsService, useValue: notifications },
       ],
     }).compile();
 
@@ -75,7 +87,7 @@ describe('AdminCommunityModeratorsService', () => {
     it('404s when the community does not exist', async () => {
       communities.findOne.mockResolvedValue(null);
       await expect(
-        service.addModerator('missing', 'user-plain'),
+        service.addModerator('missing', 'user-plain', 'admin-1'),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
@@ -83,7 +95,7 @@ describe('AdminCommunityModeratorsService', () => {
       communities.findOne.mockResolvedValue(makeCommunity());
       communityMembers.findOne.mockResolvedValue(null);
       await expect(
-        service.addModerator('circle-of-care', 'user-nobody'),
+        service.addModerator('circle-of-care', 'user-nobody', 'admin-1'),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
@@ -93,7 +105,7 @@ describe('AdminCommunityModeratorsService', () => {
         makeMember({ userId: 'user-owner', role: RosterRole.Owner }),
       );
       await expect(
-        service.addModerator('circle-of-care', 'user-owner'),
+        service.addModerator('circle-of-care', 'user-owner', 'admin-1'),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(communityMembers.save).not.toHaveBeenCalled();
     });
@@ -104,7 +116,11 @@ describe('AdminCommunityModeratorsService', () => {
       communityMembers.findOne.mockResolvedValue(membership);
       profiles.find.mockResolvedValue([makeProfile()]);
 
-      const result = await service.addModerator('circle-of-care', 'user-plain');
+      const result = await service.addModerator(
+        'circle-of-care',
+        'user-plain',
+        'admin-1',
+      );
 
       expect(communityMembers.save).toHaveBeenCalledWith(
         expect.objectContaining({ role: RosterRole.Mod }),
@@ -126,7 +142,11 @@ describe('AdminCommunityModeratorsService', () => {
       );
       profiles.find.mockResolvedValue([makeProfile()]);
 
-      const result = await service.addModerator('circle-of-care', 'user-plain');
+      const result = await service.addModerator(
+        'circle-of-care',
+        'user-plain',
+        'admin-1',
+      );
 
       expect(communityMembers.save).not.toHaveBeenCalled();
       expect(result.role).toBe('mod');
@@ -138,7 +158,7 @@ describe('AdminCommunityModeratorsService', () => {
       communities.findOne.mockResolvedValue(makeCommunity());
       communityMembers.findOne.mockResolvedValue(null);
       await expect(
-        service.removeModerator('circle-of-care', 'user-nobody'),
+        service.removeModerator('circle-of-care', 'user-nobody', 'admin-1'),
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
@@ -148,7 +168,7 @@ describe('AdminCommunityModeratorsService', () => {
         makeMember({ userId: 'user-owner', role: RosterRole.Owner }),
       );
       await expect(
-        service.removeModerator('circle-of-care', 'user-owner'),
+        service.removeModerator('circle-of-care', 'user-owner', 'admin-1'),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(communityMembers.save).not.toHaveBeenCalled();
     });
@@ -157,7 +177,7 @@ describe('AdminCommunityModeratorsService', () => {
       communities.findOne.mockResolvedValue(makeCommunity());
       communityMembers.findOne.mockResolvedValue(makeMember());
       await expect(
-        service.removeModerator('circle-of-care', 'user-plain'),
+        service.removeModerator('circle-of-care', 'user-plain', 'admin-1'),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(communityMembers.save).not.toHaveBeenCalled();
     });
@@ -168,7 +188,7 @@ describe('AdminCommunityModeratorsService', () => {
         makeMember({ role: RosterRole.Mod }),
       );
 
-      await service.removeModerator('circle-of-care', 'user-plain');
+      await service.removeModerator('circle-of-care', 'user-plain', 'admin-1');
 
       expect(communityMembers.save).toHaveBeenCalledWith(
         expect.objectContaining({ role: RosterRole.Member }),

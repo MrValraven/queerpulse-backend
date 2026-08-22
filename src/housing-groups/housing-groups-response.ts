@@ -7,7 +7,10 @@ import {
   GroupJoinRequestStatus,
   GroupScreeningAnswer,
 } from './entities/group-join-request.entity';
-import { GroupListing } from './entities/group-listing.entity';
+import {
+  GroupListing,
+  GroupListingStatus,
+} from './entities/group-listing.entity';
 
 // Mirrors the frontend `HousingGroupDTO`. Deliberately drops the entity's
 // timestamps and the `joinRequests`/`listings` relations — the public client
@@ -43,8 +46,10 @@ export function toHousingGroupDTO(group: HousingGroup): HousingGroupDTO {
 }
 
 // The public-safe shape of a visible group listing — the norm-required price +
-// accessibility fields the group page surfaces. Hidden listings are filtered
-// out before mapping, so `hidden`/`hiddenReason` never reach the public client.
+// accessibility fields the group page surfaces. Non-`live` and hidden listings
+// are filtered out before mapping (`listVisibleListings`), and the moderation
+// fields (`status`, `hidden`/`hiddenReason`, `riskScore`/`riskReasons`) plus
+// the poster's `postedByUserId` never reach the public client.
 export interface GroupListingDTO {
   id: string;
   title: string;
@@ -111,9 +116,15 @@ export function toAdminGroupJoinRequestDTO(
 }
 
 // An admin-side listing row — includes the moderation fields the public DTO
-// hides, so a moderator can see and reverse a hide.
+// hides, so a moderator can review a listing before it is ever public
+// (`status`, with `riskScore`/`riskReasons` as the queue's sort + rationale)
+// and see or reverse a post-publication hide. None of these ride on the public
+// `GroupListingDTO`.
 export interface AdminGroupListingDTO extends GroupListingDTO {
   groupSlug: string | null;
+  status: GroupListingStatus;
+  riskScore: number;
+  riskReasons: string[];
   hidden: boolean;
   hiddenReason: string | null;
   createdAt: Date;
@@ -125,6 +136,9 @@ export function toAdminGroupListingDTO(
   return {
     ...toGroupListingDTO(listing),
     groupSlug: listing.group ? listing.group.slug : null,
+    status: listing.status,
+    riskScore: listing.riskScore,
+    riskReasons: listing.riskReasons,
     hidden: listing.hidden,
     hiddenReason: listing.hiddenReason,
     createdAt: listing.createdAt,

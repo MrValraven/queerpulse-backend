@@ -2,11 +2,13 @@ import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
+  IsEmail,
   IsEnum,
   IsOptional,
   IsString,
   MaxLength,
   MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { IsSafeExternalUrl } from '../../common/validators/is-safe-external-url.decorator';
@@ -44,7 +46,14 @@ export class PartnerAtGlanceDto {
 export class PartnerContactDto {
   @IsOptional() @IsString() @MaxLength(50) phone?: string;
   @IsOptional() @IsString() @MaxLength(200) phoneNote?: string;
-  @IsOptional() @IsString() @MaxLength(200) email?: string;
+  // Reachable address or nothing: this is how the partnerships team replies to
+  // an application. `''` is accepted because the form sends every contact field
+  // whether or not it was filled in, matching `CreateListingDto`'s
+  // `@ValidateIf`-on-non-empty precedent.
+  @ValidateIf((dto: PartnerContactDto) => (dto.email ?? '') !== '')
+  @IsEmail()
+  @MaxLength(200)
+  email?: string;
   @IsOptional()
   @IsString()
   @IsSafeExternalUrl()
@@ -55,7 +64,21 @@ export class PartnerContactDto {
 
 export class CreatePartnerApplicationDto {
   @IsString() @MinLength(1) @MaxLength(200) name!: string;
-  @IsString() @MinLength(1) @MaxLength(500) logo!: string;
+  /**
+   * A short MONOGRAM shown on the partner card, not an image reference: every
+   * real value in the codebase is two letters ("NA", "CH", "RA", "CS"), the
+   * column is a plain `varchar`, and `toPartnerCard` emits it as text that the
+   * card renders as a lettermark. It is deliberately NOT `@IsImageReference()`
+   * for that reason: applying that decorator would reject every genuine value.
+   *
+   * The 500-char cap was nonetheless far wider than a lettermark needs, which
+   * is what let an arbitrary blob sit in a field an admin reads in the pending
+   * queue. Capped to a real monogram's length instead (BE-HSG-19). If partner
+   * logos ever become actual uploaded images, that is a new column plus
+   * `@IsImageReference()` plus a `toImageUrl()` pass in `toPartnerCard`, not a
+   * widening of this one.
+   */
+  @IsString() @MinLength(1) @MaxLength(8) logo!: string;
   @IsEnum(PartnerRegion) region!: PartnerRegion;
   @IsString() @MinLength(1) @MaxLength(80) regionLabel!: string;
   @IsString() @MinLength(1) @MaxLength(200) city!: string;

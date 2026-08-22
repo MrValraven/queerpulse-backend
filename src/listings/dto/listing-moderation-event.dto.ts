@@ -6,7 +6,7 @@ import {
 import { ListingStatus } from '../entities/listing.entity';
 
 /** One row of the moderation audit trail (item #16), as returned by
- * `GET /listings/admin/:ref/history`. Manually mapped — never the raw
+ * `GET /admin/listings/:ref/history`. Manually mapped — never the raw
  * `ListingModerationEvent` entity. */
 export interface ListingModerationEventDTO {
   id: string;

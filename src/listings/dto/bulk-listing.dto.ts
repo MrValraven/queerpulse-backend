@@ -9,7 +9,7 @@ import {
 } from 'class-validator';
 import { ListingStatus } from '../entities/listing.entity';
 
-/** `PATCH /listings/admin/bulk-status` body (moderator/admin only) — applies
+/** `PATCH /admin/listings/bulk-status` body (moderator/admin only) — applies
  * one status transition to many listings in a single transaction (item #9).
  * `reason` is optional free text recorded on each listing's moderation event
  * and included in the best-effort DM to each submitter (item #15). */
@@ -32,7 +32,7 @@ export class BulkStatusDto {
   reason?: string;
 }
 
-/** `POST /listings/admin/bulk-remove` body (moderator/admin only) — hard
+/** `POST /admin/listings/bulk-remove` body (moderator/admin only) — hard
  * deletes many listings in a single transaction (item #9). */
 export class BulkRemoveDto {
   @IsArray()

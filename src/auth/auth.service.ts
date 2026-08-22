@@ -3,8 +3,12 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { DataSource, EntityManager, IsNull, Repository } from 'typeorm';
+import { ReauthResult } from '../account/account-response';
+import { isUniqueViolation } from '../common/db-errors';
+import { REAUTH_TTL_MS } from '../account/account.constants';
+import { AccountReauthToken } from '../account/entities/account-reauth-token.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { UsersService } from '../users/users.service';
@@ -37,6 +41,7 @@ import {
   Notification,
   NotificationType,
 } from '../notifications/entities/notification.entity';
+import { AccessTokenPayload } from './strategies/jwt.strategy';
 
 /** The suspension detail `GET /auth/me` surfaces to a locked-out member. */
 export interface SuspensionInfo {
@@ -58,6 +63,24 @@ export interface TokenPair {
   accessToken: string;
   refreshToken: string;
 }
+
+/**
+ * How long after a refresh token is rotated its PARENT is still accepted.
+ *
+ * Rotation is a conditional claim on `revoked_at IS NULL`, and the loser used
+ * to be treated as theft: the whole family revoked, every session dropped, a
+ * `warn` line indistinguishable from a real compromise. Two of the member's own
+ * clients refreshing the same expiring cookie within the same instant (a tab
+ * plus the installed PWA, a tab in a browser without the Web Locks API the
+ * frontend's cross-tab lock relies on) hit that deterministically and were
+ * signed out everywhere. Inside this window the presenting client is handed a
+ * fresh pair instead; outside it, reuse detection is unchanged.
+ *
+ * Kept short on purpose: it is the width of the window in which a stolen
+ * refresh token could be replayed alongside the legitimate one without
+ * tripping detection.
+ */
+const REFRESH_ROTATION_GRACE_MS = 10_000;
 
 @Injectable()
 export class AuthService {
@@ -92,6 +115,13 @@ export class AuthService {
     // grants for `staffRolesFor` (surfaced on `GET /auth/me`).
     @InjectRepository(UserStaffRole)
     private readonly staffRoles: Repository<UserStaffRole>,
+    // Write-side this time (same cross-module registration pattern as the
+    // repositories above) — `mintReauthToken` writes the row the step-up
+    // reauth OAuth round trip (`AuthController.googleCallback`'s `reauth`
+    // branch) produces; `AccountService.assertReauth` is still what reads it
+    // back to gate a destructive/export action.
+    @InjectRepository(AccountReauthToken)
+    private readonly reauthTokens: Repository<AccountReauthToken>,
     private readonly platformSettings: PlatformSettingsService,
   ) {}
 
@@ -213,6 +243,18 @@ export class AuthService {
     if (!attestation?.ageAttested) {
       throw new SignupRejectedError('age_attestation_required');
     }
+    // The `googleId` lookup above can miss while the EMAIL is already taken —
+    // a re-created Google Workspace account presenting a new subject for the
+    // same verified address, a seeded fixture, the HOUSE_EMAIL collision
+    // genesis.constants.ts documents. Left to the insert, `users.email`'s
+    // unique constraint threw a QueryFailedError that nothing on this path
+    // maps, so the browser (mid-OAuth redirect, so no SPA to catch it) landed
+    // on a raw `{"statusCode":500}` body. Reject it as a signup rejection
+    // instead, which redirects to the sign-in page. The race that slips past
+    // this check is caught at the insert below.
+    if (await this.usersService.existsByEmail(profile.email)) {
+      throw new SignupRejectedError('email_in_use');
+    }
     const attestedAt = new Date();
 
     const { user, vouched, inviterId } = await this.dataSource.transaction(
@@ -223,17 +265,30 @@ export class AuthService {
             inviteCode,
             profile.email,
           );
-        const created = await this.usersService.createGoogleUser(manager, {
-          googleId: profile.googleId,
-          email: profile.email,
-          firstName: profile.firstName,
-          lastName: profile.lastName,
-          avatarUrl: profile.avatarUrl ?? null,
-          status: UserStatus.Active,
-          invitedBy: inviterId,
-          ageAttestedAt: attestedAt,
-          termsVersion: attestation.termsVersion ?? null,
-        });
+        let created: User;
+        try {
+          created = await this.usersService.createGoogleUser(manager, {
+            googleId: profile.googleId,
+            email: profile.email,
+            firstName: profile.firstName,
+            lastName: profile.lastName,
+            avatarUrl: profile.avatarUrl ?? null,
+            status: UserStatus.Active,
+            invitedBy: inviterId,
+            ageAttestedAt: attestedAt,
+            termsVersion: attestation.termsVersion ?? null,
+          });
+        } catch (err) {
+          // Backstop for the check above losing a race. `createGoogleUser`
+          // already absorbs slug/handle collisions internally (savepoint +
+          // retry), so a 23505 escaping to here is an identity collision on
+          // `users.email` / `users.google_id`. Either way a redirect to the
+          // sign-in page beats a raw 500 the member cannot act on.
+          if (isUniqueViolation(err)) {
+            throw new SignupRejectedError('email_in_use');
+          }
+          throw err;
+        }
         await this.invitesService.claimInvite(manager, inviteId, created.id);
         // The inviter vouches for the member they personally brought in — the
         // real endorsement edge behind the "X vouched for you" card the new
@@ -381,6 +436,80 @@ export class AuthService {
     return { accessToken, refreshToken };
   }
 
+  /**
+   * Verifies + decodes an access token, returning `null` (never throwing) on
+   * any failure — missing, malformed, expired, wrong secret. Used only by
+   * `AuthController.googleCallback`'s reauth branch to read who the CALLER
+   * was before the step-up round trip, from the same `access_token` cookie
+   * `JwtStrategy` reads on every other request. Deliberately does NOT re-read
+   * status/role from the DB the way `JwtStrategy.validate` does — the caller
+   * only needs `sub` (to mint the reauth token against) and the shape check
+   * doubles as cheap defense against a token minted for a different purpose
+   * (e.g. a refresh token, which carries no `email`/`status`/`role`).
+   */
+  /**
+   * Verify an access token's signature/expiry and claim shape.
+   *
+   * The returned `status` and `role` are ADVISORY snapshots taken at mint time
+   * (see {@link AccessTokenPayload}); the only caller, the reauth branch of
+   * `AuthController.googleCallback`, reads `sub` alone and re-resolves the
+   * account from the database. Do not start authorising on the other claims.
+   */
+  async verifyAccessToken(token: string): Promise<AccessTokenPayload | null> {
+    try {
+      const payload = await this.jwtService.verifyAsync<AccessTokenPayload>(
+        token,
+        {
+          secret: this.configService.getOrThrow<string>('auth.jwtAccessSecret'),
+          // Pin the algorithm to the one we sign with (HS256). Without an
+          // allowlist the verifier accepts any algorithm the token's header
+          // names, which is the shape of the classic JWT algorithm-confusion
+          // bug — defence in depth even though our secret is a symmetric string.
+          algorithms: ['HS256'],
+        },
+      );
+      if (
+        !payload?.sub ||
+        !payload?.email ||
+        !payload?.status ||
+        !payload?.role
+      ) {
+        return null;
+      }
+      return payload;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Mints a short-lived, single-purpose token proving `userId` just completed
+   * a step-up re-authentication — the OAuth round trip in
+   * `AuthController.googleCallback`'s `reauth` branch, which forces
+   * `prompt=login` and verifies the returned Google account matches this same
+   * user before ever calling this. `AccountService.assertReauth` is the only
+   * reader; `AccountRetentionService` sweeps expired rows. Mirrors what
+   * `AccountService.reauth` used to do directly (with no actual
+   * re-authentication behind it) — this is the same shape, now reachable only
+   * after a real step-up.
+   *
+   * The token is hashed at rest with the same SHA-256 `hashToken` the refresh
+   * tokens use: the row stores only the hash, and only the plaintext is handed
+   * back to the caller. A leaked reauth-token table therefore yields no usable
+   * step-up tokens. `AccountService.assertReauth` hashes the presented token
+   * the same way to look the row up, and consumes it on first use.
+   */
+  async mintReauthToken(userId: string): Promise<ReauthResult> {
+    const token = randomBytes(24).toString('hex');
+    const expiresAt = new Date(Date.now() + REAUTH_TTL_MS);
+    await this.reauthTokens.save({
+      userId,
+      token: this.hashToken(token),
+      expiresAt,
+    });
+    return { reauthToken: token, expiresAt: expiresAt.toISOString() };
+  }
+
   async rotateRefreshToken(
     rawRefreshToken: string,
     userAgent?: string,
@@ -389,6 +518,9 @@ export class AuthService {
     try {
       await this.jwtService.verifyAsync(rawRefreshToken, {
         secret: this.configService.getOrThrow<string>('auth.jwtRefreshSecret'),
+        // Pin the algorithm to the one we sign with (HS256); an unpinned
+        // verifier trusts the token header's `alg`, the algorithm-confusion bug.
+        algorithms: ['HS256'],
       });
     } catch {
       throw new UnauthorizedException('Invalid refresh token');
@@ -401,8 +533,16 @@ export class AuthService {
       throw new UnauthorizedException('Unknown refresh token');
     }
 
-    // 3. Reuse detection: an already-revoked token presented again = theft.
+    // 3. Reuse detection: an already-revoked token presented again = theft —
+    //    UNLESS it was rotated moments ago and we know what replaced it, which
+    //    is the signature of two of the member's own clients refreshing the
+    //    same expiring cookie at once (a tab plus the installed PWA; the
+    //    frontend's single-flight refresh is per tab). See
+    //    `REFRESH_ROTATION_GRACE_MS`.
     if (row.revokedAt) {
+      if (this.withinRotationGrace(row)) {
+        return this.issueGraceReplacement(row, userAgent);
+      }
       await this.revokeFamily(row.userId, 'reuse-detected', {
         rowId: row.id,
         userAgent,
@@ -455,6 +595,15 @@ export class AuthService {
     });
 
     if (outcome.reuse) {
+      // Re-read: the winner of the race has committed by now, so the row
+      // carries its `revoked_at`/`replaced_by`. Inside the grace window this
+      // is the same benign two-client race as above, not theft.
+      const rotated = await this.refreshTokens.findOne({
+        where: { id: row.id },
+      });
+      if (rotated && this.withinRotationGrace(rotated)) {
+        return this.issueGraceReplacement(rotated, userAgent);
+      }
       await this.revokeFamily(row.userId, 'reuse-detected', {
         rowId: row.id,
         userAgent,
@@ -466,6 +615,47 @@ export class AuthService {
       accessToken: outcome.accessToken,
       refreshToken: outcome.refreshToken,
     };
+  }
+
+  /**
+   * True when this row was rotated by a legitimate refresh a moment ago —
+   * `replaced_by` is set (so a rotation, not a logout or a family revocation)
+   * and `revoked_at` is inside the grace window.
+   */
+  private withinRotationGrace(row: RefreshToken): boolean {
+    return (
+      Boolean(row.revokedAt) &&
+      Boolean(row.replacedBy) &&
+      Date.now() - (row.revokedAt as Date).getTime() <=
+        REFRESH_ROTATION_GRACE_MS
+    );
+  }
+
+  /**
+   * Answer a lost rotation race with a fresh, valid pair instead of revoking
+   * the family.
+   *
+   * We cannot hand back the pair the winner received: only sha-256 hashes of
+   * refresh tokens are stored, never the tokens themselves. Minting a new pair
+   * is equivalent for the client (it ends up holding one working cookie) and
+   * costs one extra `refresh_tokens` row that nobody holds the plaintext for —
+   * it simply ages out. Reuse detection outside the window is unchanged, so a
+   * stolen token replayed later still burns the whole family.
+   */
+  private async issueGraceReplacement(
+    row: RefreshToken,
+    userAgent?: string,
+  ): Promise<TokenPair> {
+    const user = await this.usersService.findByIdWithEmail(row.userId);
+    if (!user) {
+      throw new UnauthorizedException('User no longer exists');
+    }
+    // `log`, not `warn`: this is an expected multi-client race, and logging it
+    // at the same level as a real theft signal is what diluted that signal.
+    this.logger.log(
+      `Refresh rotation race absorbed within the grace window: userId=${row.userId} rowId=${row.id}`,
+    );
+    return this.issueTokens(user, userAgent);
   }
 
   async revokeRefreshToken(rawRefreshToken: string): Promise<void> {
@@ -552,6 +742,9 @@ export class AuthService {
     rowId?: string,
     manager?: EntityManager,
   ): Promise<TokenPair & { rowId: string }> {
+    // `status`/`role` are advisory-only claims: see the doc on
+    // `AccessTokenPayload`. `JwtStrategy.validate` ignores them and re-reads
+    // the row, and nothing else may authorise on them.
     const accessToken = await this.jwtService.signAsync(
       { sub: user.id, email: user.email, status: user.status, role: user.role },
       {

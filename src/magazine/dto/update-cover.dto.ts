@@ -1,4 +1,11 @@
-import { IsArray, IsOptional, IsString } from 'class-validator';
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from 'class-validator';
+import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 
 /**
  * `PATCH /magazine/admin/issues/:number/cover` body (Magazine Desk Phase 5):
@@ -6,12 +13,17 @@ import { IsArray, IsOptional, IsString } from 'class-validator';
  * coverlines list can be saved separately.
  */
 export class UpdateCoverDto {
+  // An uploaded storage key or an `https://` URL, like every other image field
+  // — was a bare `@IsString()`, so a `javascript:`/`data:` URI could be
+  // persisted and then rendered on the issue page. `''` clears the cover.
   @IsOptional()
-  @IsString()
+  @IsImageReference()
   coverUrl?: string;
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(12)
   @IsString({ each: true })
+  @MaxLength(200, { each: true })
   coverlines?: string[];
 }

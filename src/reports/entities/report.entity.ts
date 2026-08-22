@@ -145,7 +145,13 @@ export class Report {
   severity!: ReportSeverity;
 
   // Computed at creation from `severity` (see `../report-severity.ts`).
-  @Column({ type: 'timestamptz' })
+  //
+  // Millisecond precision (not Postgres's microsecond default), like
+  // `createdAt` below: the moderation queue's `sort=priority` page is a keyset
+  // over this raw column, and `cursorPaginate` carries a millisecond-resolution
+  // JS `Date` cursor — a microsecond tail would re-serve the boundary row on
+  // the next page. See `1793520300000-NarrowReportCursorPrecision.ts`.
+  @Column({ type: 'timestamptz', precision: 3 })
   slaDueAt!: Date;
 
   @Index('IDX_reports_status')
@@ -209,6 +215,9 @@ export class Report {
   @Column({ type: 'varchar', array: true, nullable: true })
   resolutionNotified!: string[] | null;
 
-  @CreateDateColumn({ type: 'timestamptz' })
+  // Millisecond precision — see `slaDueAt` above and
+  // `1793520300000-NarrowReportCursorPrecision.ts`. Backs both the default
+  // newest-first cursor page and `sort=age`.
+  @CreateDateColumn({ type: 'timestamptz', precision: 3 })
   createdAt!: Date;
 }

@@ -5,6 +5,7 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle, seconds } from '@nestjs/throttler';
 import {
   CurrentUser,
   CurrentUserData,
@@ -46,6 +47,10 @@ export class GenesisController {
    * `GENESIS_EMAIL` and nobody else can redeem it.
    */
   @Public()
+  // Tighter than the global 120/min/IP bucket. Bootstrap is a handful of
+  // clicks by one person, so anything above a few per minute is a stranger
+  // probing the route and paying us three queries per probe.
+  @Throttle({ default: { limit: 3, ttl: seconds(60) } })
   @Post('invite')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Mint the one-time genesis (founder) invite' })
@@ -57,6 +62,7 @@ export class GenesisController {
     return this.genesis.mintGenesisInvite();
   }
 
+  @Throttle({ default: { limit: 3, ttl: seconds(60) } })
   @Post('claim')
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(ActiveMemberGuard)

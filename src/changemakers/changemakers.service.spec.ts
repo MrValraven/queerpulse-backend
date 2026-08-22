@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { ChangemakersService } from './changemakers.service';
@@ -133,7 +133,7 @@ describe('ChangemakersService', () => {
   it('create() allocates a slug from the name and saves a draft profile', async () => {
     changemakerRepo.exists.mockResolvedValue(false);
 
-    const result = await service.create(baseCreateDto);
+    const result = await service.create('admin-1', baseCreateDto);
 
     expect(result.slug).toBe('ada-lovelace');
     expect(result.status).toBe('draft');
@@ -147,7 +147,7 @@ describe('ChangemakersService', () => {
       .mockRejectedValueOnce({ code: '23505' })
       .mockImplementationOnce((value: Changemaker) => Promise.resolve(value));
 
-    const result = await service.create(baseCreateDto);
+    const result = await service.create('admin-1', baseCreateDto);
 
     expect(result.slug).toBe('ada-lovelace');
     expect(changemakerRepo.save).toHaveBeenCalledTimes(2);
@@ -157,9 +157,9 @@ describe('ChangemakersService', () => {
     changemakerRepo.exists.mockResolvedValue(false);
     changemakerRepo.save.mockRejectedValue({ code: '23505' });
 
-    await expect(service.create(baseCreateDto)).rejects.toBeInstanceOf(
-      ConflictException,
-    );
+    await expect(
+      service.create('admin-1', baseCreateDto),
+    ).rejects.toBeInstanceOf(ConflictException);
     expect(changemakerRepo.save).toHaveBeenCalledTimes(5);
   });
 
@@ -168,7 +168,7 @@ describe('ChangemakersService', () => {
     const boom = new Error('boom');
     changemakerRepo.save.mockRejectedValueOnce(boom);
 
-    await expect(service.create(baseCreateDto)).rejects.toBe(boom);
+    await expect(service.create('admin-1', baseCreateDto)).rejects.toBe(boom);
     expect(changemakerRepo.save).toHaveBeenCalledTimes(1);
   });
 
@@ -180,7 +180,7 @@ describe('ChangemakersService', () => {
     });
     changemakerRepo.findOne.mockResolvedValue(existing);
 
-    const result = await service.update('id-1', {
+    const result = await service.update('admin-1', 'id-1', {
       summary: 'new summary',
       cause: 'Climate',
     });
@@ -203,7 +203,7 @@ describe('ChangemakersService', () => {
       imageUrl: null,
     } as unknown as UpdateChangemakerDto;
 
-    const cleared = await service.update('id-1', clearImageUrl);
+    const cleared = await service.update('admin-1', 'id-1', clearImageUrl);
 
     expect(cleared.imageUrl).toBeNull();
 
@@ -211,10 +211,51 @@ describe('ChangemakersService', () => {
       buildProfile({ imageUrl: 'https://example.com/old.jpg' }),
     );
 
-    const untouched = await service.update('id-1', {
+    const untouched = await service.update('admin-1', 'id-1', {
       summary: 'unrelated change',
     });
 
     expect(untouched.imageUrl).toBe('https://example.com/old.jpg');
+  });
+
+  // M1 (storage-key impersonation): the imageUrl field is exempt from the
+  // strict interceptor rule (staff-curated, multi-editor), so the service is
+  // the backstop — a foreign key is allowed ONLY when it is already stored.
+  describe('foreign image upload (M1)', () => {
+    const OTHER_ID = '22222222-2222-2222-2222-222222222222';
+    const FILE_SEGMENT = '33333333-3333-3333-3333-333333333333';
+    const FOREIGN_KEY = `avatars/${OTHER_ID}/${FILE_SEGMENT}.jpg`;
+
+    it('create() rejects a new foreign image key', async () => {
+      changemakerRepo.exists.mockResolvedValue(false);
+
+      await expect(
+        service.create('admin-1', { ...baseCreateDto, imageUrl: FOREIGN_KEY }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(changemakerRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('update() rejects a foreign image the profile does not already carry', async () => {
+      changemakerRepo.findOne.mockResolvedValue(
+        buildProfile({ imageUrl: null }),
+      );
+
+      await expect(
+        service.update('admin-1', 'id-1', { imageUrl: FOREIGN_KEY }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(changemakerRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('update() allows re-saving the foreign image already stored', async () => {
+      changemakerRepo.findOne.mockResolvedValue(
+        buildProfile({ imageUrl: FOREIGN_KEY }),
+      );
+
+      const result = await service.update('admin-1', 'id-1', {
+        imageUrl: FOREIGN_KEY,
+      });
+
+      expect(result.imageUrl).toBe(FOREIGN_KEY);
+    });
   });
 });

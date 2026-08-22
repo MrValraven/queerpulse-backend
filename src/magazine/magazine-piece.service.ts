@@ -6,12 +6,17 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Not, Repository } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
+import { normalizePage, Paginated } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MailerService } from '../mailer/mailer.service';
-import { NewsletterSubscription } from '../newsletter/entities/newsletter-subscription.entity';
+import {
+  NEWSLETTER_DIGEST_DUE,
+  NewsletterDigestDueEvent,
+} from '../newsletter/newsletter.events';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -24,7 +29,12 @@ import { CreatePieceDto } from './dto/create-piece.dto';
 import { CreatePieceMessageDto } from './dto/create-piece-message.dto';
 import { CreatePitchDto } from './dto/create-pitch.dto';
 import { FileDraftDto } from './dto/file-draft.dto';
-import { ListPiecesQuery, SavedViewId } from './dto/list-pieces.query';
+import {
+  ListPiecesQuery,
+  PIECE_PAGE_SIZE_DEFAULT,
+  PIECE_PAGE_SIZE_MAX,
+  SavedViewId,
+} from './dto/list-pieces.query';
 import { PublishArticleDto } from './dto/publish-article.dto';
 import { ReplyArticleCommentDto } from './dto/reply-article-comment.dto';
 import { ResolveArticleCommentDto } from './dto/resolve-article-comment.dto';
@@ -37,7 +47,10 @@ import { UpdateDigestDto } from './dto/update-digest.dto';
 import { UpdatePaymentDto } from './dto/update-payment.dto';
 import { UpdatePieceDto } from './dto/update-piece.dto';
 import { UpdateRunOrderDto } from './dto/update-run-order.dto';
-import { MagazineArticle } from './entities/magazine-article.entity';
+import {
+  ArticleBlock,
+  MagazineArticle,
+} from './entities/magazine-article.entity';
 import { MagazineArticleComment } from './entities/magazine-article-comment.entity';
 import { MagazineArticleVersion } from './entities/magazine-article-version.entity';
 import { MagazineAuthor } from './entities/magazine-author.entity';
@@ -61,8 +74,6 @@ import {
   computePublishGate,
   CorrectionResponse,
   CurrentIssueSummary,
-  deriveLate,
-  deriveWaitingOn,
   DeskSummary,
   IssueProductionResponse,
   LetterResponse,
@@ -87,9 +98,9 @@ import {
   toPaymentResponse,
   toPieceListItem,
   toPieceRecordFull,
-  stripHtmlTags,
   toPieceRecordSummary,
   toPitchResponse,
+  toPlainText,
 } from './magazine-piece-response';
 import {
   ArticleCommentResponse,
@@ -116,6 +127,8 @@ import {
   WriterPitchResponse,
 } from './magazine-writer-response';
 import { validateArticleBlocks } from './magazine-article-blocks.validation';
+import { sanitizeArticleBlocks } from './article-html-sanitizer';
+import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import {
   validatePieceBrief,
   validatePieceCare,
@@ -150,23 +163,41 @@ const ARCHIVE_SEARCH_LIMIT = 20;
 const NOTIFICATIONS_DEFAULT_LIMIT = 20;
 
 /**
- * In-memory saved-view predicates, applied AFTER the SQL filters load a page
- * of pieces — mirrors the frontend `VIEW_TEST` map (spec §4.1 / plan Task 4)
- * exactly, so a saved view means the same thing whether it's evaluated
- * client-side (demo mode) or server-side (live mode).
+ * Saved-view predicates as SQL, ANDed into the `listPieces` query builder.
+ *
+ * These used to be JS predicates applied to `getMany()`'s full result set,
+ * which is why the endpoint could not be paginated (CNT-09): filtering after
+ * the fetch means the LIMIT would have been applied to the wrong row set.
+ * Expressed in SQL they narrow BEFORE the limit, so page N of a saved view is
+ * correct and `total` counts the view, not the table.
+ *
+ * Each expression mirrors the frontend `VIEW_TEST` map (spec §4.1 / plan
+ * Task 4) and the `deriveLate`/`deriveWaitingOn` helpers in
+ * `magazine-piece-response.ts` term for term, so a saved view means the same
+ * thing whether it's evaluated client-side (demo mode) or server-side.
+ *
+ * `v-late` is the only non-trivial one:
+ *   deriveLate         -> due_on IS NOT NULL AND stage <> 'ready'
+ *                         AND due_on < today (UTC)
+ *   waitingOn='writer' -> stage IN ('commissioned','drafting')
+ *                         AND writer_id IS NOT NULL
+ * The date compare is pinned to UTC (`(now() AT TIME ZONE 'UTC')::date`)
+ * rather than `CURRENT_DATE`, which would follow the DB session's timezone
+ * and could disagree with `deriveLate`'s `Date.UTC` arithmetic by a day.
  */
-const SAVED_VIEW_TEST: Record<SavedViewId, (piece: MagazinePiece) => boolean> =
-  {
-    'v-late': (piece) =>
-      deriveLate(piece) || deriveWaitingOn(piece) === 'writer',
-    // Real art state (Magazine Desk Phase 7, Task A3): a piece still needs
-    // art work when nothing has been requested yet, or a brief has gone out
-    // but nothing has come in ('in') or been marked not-applicable ('na').
-    'v-art': (piece) => piece.art === 'none' || piece.art === 'brief',
-    'v-sens': (piece) =>
-      piece.stage === 'sensitivity_read' || piece.stage === 'edit',
-    'v-pay': (piece) => piece.stage === 'layout' || piece.stage === 'ready',
-  };
+const SAVED_VIEW_SQL: Record<SavedViewId, string> = {
+  'v-late':
+    "((piece.dueOn IS NOT NULL AND piece.stage <> 'ready' " +
+    "AND piece.dueOn < (now() AT TIME ZONE 'UTC')::date) " +
+    "OR (piece.stage IN ('commissioned', 'drafting') " +
+    'AND piece.writerId IS NOT NULL))',
+  // Real art state (Magazine Desk Phase 7, Task A3): a piece still needs
+  // art work when nothing has been requested yet, or a brief has gone out
+  // but nothing has come in ('in') or been marked not-applicable ('na').
+  'v-art': "piece.art IN ('none', 'brief')",
+  'v-sens': "piece.stage IN ('sensitivity_read', 'edit')",
+  'v-pay': "piece.stage IN ('layout', 'ready')",
+};
 
 /**
  * The Desk's workflow spine (spec §4.1 / plan Task 4): pieces, pitches, and
@@ -217,14 +248,30 @@ export class MagazinePieceService {
     private readonly users: Repository<User>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
-    @InjectRepository(NewsletterSubscription)
-    private readonly newsletterSubscriptions: Repository<NewsletterSubscription>,
     private readonly dataSource: DataSource,
     private readonly notifications: NotificationsService,
     private readonly mailer: MailerService,
+    // Publishing announces "this issue's digest is due" and returns; the
+    // newsletter module owns the subscriber list, the ledger and the sending.
+    // See `sendDigestIfScheduled`.
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
-  async listPieces(query: ListPiecesQuery): Promise<PieceListItem[]> {
+  /**
+   * The desk board's main list — ALWAYS paginated (CNT-09).
+   *
+   * This previously ran `getMany()` with no limit and then filtered the saved
+   * view in JS, so every board load pulled the whole `magazine_piece` table
+   * including its `brief`/`care` jsonb. Both halves are fixed together: the
+   * saved views moved into SQL (`SAVED_VIEW_SQL`) so they narrow before the
+   * limit, and the result is the shared `Paginated` envelope.
+   *
+   * BREAKING for callers: the response is now
+   * `{ items, total, page, pageSize }`, not a bare array. `total` is the count
+   * of rows matching every filter INCLUDING the saved view, so a client can
+   * page a view correctly.
+   */
+  async listPieces(query: ListPiecesQuery): Promise<Paginated<PieceListItem>> {
     const queryBuilder = this.pieces.createQueryBuilder('piece');
 
     if (query.format) {
@@ -258,14 +305,39 @@ export class MagazinePieceService {
       );
     }
 
-    queryBuilder.orderBy('piece.createdAt', 'DESC');
+    if (query.savedView) {
+      queryBuilder.andWhere(SAVED_VIEW_SQL[query.savedView]);
+    }
 
-    const rows = await queryBuilder.getMany();
-    const visibleRows = query.savedView
-      ? rows.filter(SAVED_VIEW_TEST[query.savedView])
-      : rows;
+    // `createdAt` is not unique, so it alone leaves rows that share a
+    // timestamp free to swap between pages. `id` breaks the tie so the sort is
+    // total and offset pagination cannot duplicate or skip a piece.
+    queryBuilder
+      .orderBy('piece.createdAt', 'DESC')
+      .addOrderBy('piece.id', 'DESC');
 
-    return visibleRows.map(toPieceListItem);
+    const page = normalizePage(query.page);
+    const pageSize = Math.min(
+      query.pageSize && query.pageSize > 0
+        ? query.pageSize
+        : PIECE_PAGE_SIZE_DEFAULT,
+      PIECE_PAGE_SIZE_MAX,
+    );
+
+    // `offset`/`limit` rather than `skip`/`take`: there is no join here, so the
+    // DISTINCT-subquery pass `skip`/`take` adds buys nothing (and is the shape
+    // that breaks on joined-alias ORDER BY elsewhere in this codebase).
+    const [rows, total] = await queryBuilder
+      .offset((page - 1) * pageSize)
+      .limit(pageSize)
+      .getManyAndCount();
+
+    return {
+      items: rows.map(toPieceListItem),
+      total,
+      page,
+      pageSize,
+    };
   }
 
   async getPieceById(id: string): Promise<PieceRecord> {
@@ -310,6 +382,13 @@ export class MagazinePieceService {
    * partially applies the rest of the patch (mirrors `updatePiece`'s
    * brief/care handling). Auto-creates the draft first if the piece doesn't
    * have one yet, same as `getArticleDraft`.
+   *
+   * The write itself goes through `saveArticleDraftGuarded`, which refuses a
+   * save that is not based on the row's current `version` — the desk is
+   * multi-actor, and this used to be last-write-wins over a whole `blocks`
+   * array. `title` (and the plain-text `kicker`/`metaDescription`) are
+   * normalised to plain text here, at the write boundary, rather than stripped
+   * again at each read site.
    */
   async updateArticleDraft(
     pieceId: string,
@@ -318,32 +397,69 @@ export class MagazinePieceService {
   ): Promise<ArticleDraftResponse> {
     const piece = await this.loadPieceOr404(pieceId);
     const article = await this.ensureArticleForPiece(piece, actorId);
+    // Fail the stale save BEFORE validating/allocating anything, so a losing
+    // autosave costs one query and leaves nothing behind (no orphan slug
+    // allocation, no audit event). The authoritative check is the conditional
+    // UPDATE in `saveArticleDraftGuarded` — this is the cheap early exit.
+    this.assertArticleVersionCurrent(article, dto.expectedVersion);
 
     const blocks =
       dto.blocks !== undefined ? validateArticleBlocks(dto.blocks) : undefined;
 
-    const trimmedTitle = dto.title?.trim();
-    // `article.title` is rich text (the editor's contentEditable headline —
-    // may legitimately carry `<em>`/`<strong>` emphasis), but the slug and
-    // `MagazinePiece.title` below are both meant to be plain text, so they
-    // derive from this stripped copy rather than `trimmedTitle` directly.
-    const plainTitle =
-      trimmedTitle !== undefined
-        ? stripHtmlTags(trimmedTitle).trim()
-        : undefined;
-    const isRealTitleChange =
-      trimmedTitle !== undefined &&
-      trimmedTitle.length > 0 &&
-      trimmedTitle !== article.title;
+    // Foreign-upload backstop (M1): the article-draft handler keeps the
+    // interceptor's shared-upload exemption (any `magazine_editor` re-saves a
+    // draft whose images a DIFFERENT editor uploaded), so a foreign storage key
+    // reaches the service instead of being rejected. Allow such a key only when
+    // it is ALREADY stored on the article — the social image or an existing
+    // image block — and refuse any NEW foreign reference the caller is trying to
+    // introduce. Runs BEFORE any mutation. See `assert-no-foreign-upload.ts`.
+    const storedArticleImageRefs = this.collectArticleImageRefs(
+      article.socialImage,
+      article.blocks,
+    );
+    if (dto.socialImage !== undefined) {
+      assertNoForeignUploadIntroduced(
+        actorId,
+        dto.socialImage,
+        storedArticleImageRefs,
+      );
+    }
+    if (blocks !== undefined) {
+      for (const incomingImageRef of this.collectArticleImageRefs(
+        undefined,
+        blocks,
+      )) {
+        assertNoForeignUploadIntroduced(
+          actorId,
+          incomingImageRef,
+          storedArticleImageRefs,
+        );
+      }
+    }
 
-    Object.assign(article, {
-      ...(dto.title !== undefined ? { title: dto.title } : {}),
+    // The headline arrives as the contentEditable's raw `innerHTML`. It is
+    // stored as PLAIN TEXT — the reader, the archive list, search results, the
+    // slug and the `MagazinePiece.title` mirror all render it as text, so the
+    // markup is stripped ONCE here at the write boundary rather than at each of
+    // those read sites (several of which never stripped it, printing literal
+    // `<em>` into a headline).
+    const plainTitle =
+      dto.title !== undefined ? toPlainText(dto.title) : undefined;
+    const isRealTitleChange =
+      plainTitle !== undefined &&
+      plainTitle.length > 0 &&
+      plainTitle !== article.title;
+
+    const patch: Partial<MagazineArticle> = {
+      ...(plainTitle !== undefined ? { title: plainTitle } : {}),
       ...(dto.standfirst !== undefined ? { standfirst: dto.standfirst } : {}),
-      ...(dto.kicker !== undefined ? { kicker: dto.kicker } : {}),
+      ...(dto.kicker !== undefined ? { kicker: toPlainText(dto.kicker) } : {}),
       ...(dto.section !== undefined ? { section: dto.section } : {}),
       ...(dto.role !== undefined ? { role: dto.role } : {}),
       ...(dto.metaDescription !== undefined
-        ? { metaDescription: dto.metaDescription }
+        ? // Emitted into `<meta name="description">` — plain text by
+          // definition, same reasoning as the title.
+          { metaDescription: toPlainText(dto.metaDescription) }
         : {}),
       ...(dto.socialImage !== undefined
         ? { socialImage: dto.socialImage }
@@ -356,7 +472,7 @@ export class MagazinePieceService {
         ? { contentNotes: dto.contentNotes }
         : {}),
       ...(blocks !== undefined ? { blocks } : {}),
-    });
+    };
 
     // The slug is server-generated and read-only in the editor (ArticleMetaRail)
     // — it's derived from the title, never typed directly. It's seeded once,
@@ -366,7 +482,7 @@ export class MagazinePieceService {
     // still unpublished; once published the slug is a public URL and must
     // stay stable, so it stops tracking title edits at that point.
     if (isRealTitleChange && article.publishedAt === null) {
-      article.slug = await allocateUniqueSlug(
+      patch.slug = await allocateUniqueSlug(
         slugify(plainTitle || 'draft', 'draft'),
         async (candidate) =>
           (await this.articles.findOne({
@@ -375,15 +491,14 @@ export class MagazinePieceService {
       );
     }
 
-    await this.articles.save(article);
+    await this.saveArticleDraftGuarded(article, patch);
 
     // `MagazinePiece.title` is what every surface outside the editor reads
     // (command palette, piece board, piece record) — sync it with the
     // article's real headline instead of leaving it frozen at whatever
     // placeholder was set at commission time (e.g. "Untitled piece"). It's
-    // rendered as plain text everywhere it's read, so it must never carry
-    // the rich-text markup `article.title` is allowed to hold — hence
-    // `plainTitle`, not `trimmedTitle`, here.
+    // rendered as plain text everywhere it's read, and so, now, is
+    // `article.title` — both hold the same normalised `plainTitle`.
     if (isRealTitleChange && plainTitle && piece.title !== plainTitle) {
       piece.title = plainTitle;
       await this.pieces.save(piece);
@@ -671,14 +786,69 @@ export class MagazinePieceService {
     return toPieceRecordSummary(piece, events);
   }
 
+  /**
+   * Deletes a piece AND the content it owns.
+   *
+   * The piece holds `articleId`/`deckId` as plain nullable uuid columns with no
+   * reverse link from the content back to the piece, so removing the piece
+   * alone used to leave the article/deck row behind with nothing pointing at
+   * it. A PUBLISHED one kept serving to readers with no desk surface left to
+   * take it down from; an unpublished one became unreachable while still
+   * squatting its slug on the unique index and still turning up in
+   * `searchArchive`.
+   *
+   * So: published content is REFUSED (409 — unpublish it first, which is one
+   * click and keeps the destructive act explicit), and unpublished content is
+   * deleted with the piece in one transaction. Article versions and editor
+   * comments go with the article: neither carries a database-level cascade
+   * (both model `article_id` as a plain indexed uuid, see
+   * `AddMagazineArticleVersion`), so they are deleted here or not at all.
+   * Reader comments are not swept because only a published article can have
+   * them, and a published article never reaches this path.
+   */
   async deletePiece(id: string, actorId: string): Promise<void> {
     const piece = await this.loadPieceOr404(id);
+
+    const article =
+      piece.articleId === null
+        ? null
+        : await this.articles.findOne({ where: { id: piece.articleId } });
+    const deck =
+      piece.deckId === null
+        ? null
+        : await this.decks.findOne({ where: { id: piece.deckId } });
+
+    if (article !== null && article.publishedAt !== null) {
+      throw new ConflictException(
+        'This piece has a published article. Unpublish it before deleting the piece.',
+      );
+    }
+    if (deck !== null && deck.publishedAt !== null) {
+      throw new ConflictException(
+        'This piece has a published deck. Unpublish it before deleting the piece.',
+      );
+    }
+
     // Record the audit event before removing the row so it isn't silently
-    // dropped — Task 8's migration should either cascade
-    // `magazine_piece_event.piece_id` or leave it unconstrained so this
+    // dropped — `magazine_piece_event.piece_id` is unconstrained, so this
     // history entry (and any earlier ones) survives the piece's removal.
     await this.recordEvent(id, actorId, 'deleted');
-    await this.pieces.remove(piece);
+
+    await this.dataSource.transaction(async (manager) => {
+      if (article !== null) {
+        await manager
+          .getRepository(MagazineArticleVersion)
+          .delete({ articleId: article.id });
+        await manager
+          .getRepository(MagazineArticleComment)
+          .delete({ articleId: article.id });
+        await manager.getRepository(MagazineArticle).delete({ id: article.id });
+      }
+      if (deck !== null) {
+        await manager.getRepository(MagazineDeck).delete({ id: deck.id });
+      }
+      await manager.getRepository(MagazinePiece).delete({ id: piece.id });
+    });
   }
 
   async listPitches(): Promise<PitchResponse[]> {
@@ -1150,8 +1320,10 @@ export class MagazinePieceService {
     // restore is itself undoable.
     await this.snapshotArticleVersion(article, actorId, 'Before restore');
 
-    article.blocks = restoredBlocks;
-    await this.articles.save(article);
+    // Guarded like every other draft-body write: bumping `version` is what
+    // makes a tab that was open across the restore fail its next autosave with
+    // a 409 instead of quietly writing its pre-restore blocks back over it.
+    await this.saveArticleDraftGuarded(article, { blocks: restoredBlocks });
     await this.recordEvent(pieceId, actorId, 'version_restored');
 
     // Record the restore itself as a new version, so it shows up in the
@@ -1392,8 +1564,17 @@ export class MagazinePieceService {
   async updateCover(
     issueNumber: string,
     dto: UpdateCoverDto,
+    requesterUserId: string,
   ): Promise<IssueProductionResponse> {
     const issue = await this.loadIssueOr404(issueNumber);
+    // Foreign-upload backstop (M1): the cover handler keeps the interceptor's
+    // shared-upload exemption (any `magazine_editor` re-saves an issue whose
+    // cover a DIFFERENT editor uploaded), so a foreign key reaches here. Allow
+    // it only when it is UNCHANGED (already the stored cover); a new foreign
+    // reference is refused. Runs BEFORE any mutation.
+    assertNoForeignUploadIntroduced(requesterUserId, dto.coverUrl, [
+      issue.coverUrl,
+    ]);
     Object.assign(issue, {
       ...(dto.coverUrl !== undefined ? { coverUrl: dto.coverUrl } : {}),
       ...(dto.coverlines !== undefined ? { coverlines: dto.coverlines } : {}),
@@ -1503,13 +1684,13 @@ export class MagazinePieceService {
   /**
    * CNT-6 "Schedule with issue": the real dispatch behind the toggle. Fires
    * from `shipIssue` right after a ship actually publishes pieces — there is
-   * no cron in this module, so shipping IS the scheduled moment. Guarded on
-   * `digestSentAt === null` so a re-ship (the issue's publish gate can be hit
-   * more than once as later pieces clear it) never re-sends. Best-effort per
-   * recipient: one failed send is logged and skipped rather than aborting
-   * the rest of the list or leaving `digestSentAt` unset (which would retry
-   * every subscriber, including the ones who already got it, on the next
-   * ship).
+   * no cron in this module, so shipping IS the scheduled moment.
+   *
+   * Two independent guards keep a re-ship (the issue's publish gate can be hit
+   * more than once as later pieces clear it) from mailing anyone twice:
+   * `digestSentAt === null` here, and the ledger's own UNIQUE keys in
+   * `NewsletterDigestService.queueDigest`. Delivery itself belongs to the
+   * newsletter module's drain cron, not to this request.
    */
   private async sendDigestIfScheduled(
     issue: MagazineIssue,
@@ -1520,25 +1701,24 @@ export class MagazinePieceService {
     }
 
     const items = this.resolveDigestMailItemsFromPieces(issue, pieces);
-    const subscribers = await this.newsletterSubscriptions.find({
-      where: { status: 'confirmed' },
-    });
-
-    for (const subscriber of subscribers) {
-      try {
-        await this.mailer.send(subscriber.email, 'digest', {
-          issueNumber: issue.number,
-          issueTitle: issue.title,
-          items,
-        });
-      } catch (error) {
-        this.logger.warn(
-          `Failed to send issue ${issue.number} digest to ${subscriber.email}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
-    }
+    // QUEUE, don't send. This used to loop the whole confirmed subscriber list
+    // and await an SMTP round trip each, right here in the publish request:
+    // `subscribers x up to 16s` of blocked request time, and because
+    // `digestSentAt` was stamped only after the last one, a proxy timeout or a
+    // restart part-way through left the issue looking unsent and re-mailed
+    // everyone who had already received it on the next ship. There was no
+    // per-subscriber record either way.
+    //
+    // `emitAsync` awaits the listener, so `digestSentAt` is stamped only once
+    // the mailing is DURABLY queued (`newsletter_digest_sends`, one row per
+    // subscriber). Queueing is idempotent on the issue, so a re-ship is a
+    // no-op rather than a second mailing.
+    await this.eventEmitter.emitAsync(NEWSLETTER_DIGEST_DUE, {
+      issueId: issue.id,
+      issueNumber: issue.number,
+      issueTitle: issue.title,
+      items,
+    } satisfies NewsletterDigestDueEvent);
 
     issue.digestSentAt = new Date();
     await this.issues.save(issue);
@@ -1632,6 +1812,10 @@ export class MagazinePieceService {
       tags: deck.tags,
       readMinutes: 1,
       publishedAt: null,
+      // Set explicitly rather than left to the column default, so the
+      // in-memory row a caller keeps editing already carries the base version
+      // `saveArticleDraftGuarded` will match on.
+      version: 0,
     });
     await this.articles.save(article);
 
@@ -1819,8 +2003,25 @@ export class MagazinePieceService {
     if (dto?.blocks !== undefined) {
       const pastedBlocks = validateArticleBlocks(dto.blocks);
       const article = await this.ensureArticleForPiece(piece, writerId);
-      article.blocks = [...article.blocks, ...pastedBlocks];
-      await this.articles.save(article);
+      this.assertArticleVersionCurrent(article, dto.expectedVersion);
+
+      // Filing APPENDS (a writer refiling after drafting in the block editor
+      // must not lose that work), which makes the operation non-idempotent: the
+      // route is a plain POST with no idempotency key, so a network retry or a
+      // second click would otherwise paste the same draft in twice and leave
+      // the editor to clean it up. Block ids are client-minted and stable
+      // across a retry, so dropping incoming blocks whose id the article
+      // already holds makes the second call a no-op without rejecting a
+      // genuine second filing of NEW material.
+      const existingBlockIds = new Set(article.blocks.map((block) => block.id));
+      const newBlocks = pastedBlocks.filter(
+        (block) => !existingBlockIds.has(block.id),
+      );
+      if (newBlocks.length > 0) {
+        await this.saveArticleDraftGuarded(article, {
+          blocks: [...article.blocks, ...newBlocks],
+        });
+      }
     }
 
     if (piece.stage === 'drafting' || piece.stage === 'commissioned') {
@@ -2223,6 +2424,107 @@ export class MagazinePieceService {
       : UNRESOLVED_COMMENT_AUTHOR_LABEL;
   }
 
+  /**
+   * Cheap pre-flight for the optimistic-concurrency precondition: refuses a
+   * save whose client-declared base `expectedVersion` already disagrees with
+   * the row we just loaded. `saveArticleDraftGuarded` re-checks the same thing
+   * atomically — this only saves the losing request from doing work first.
+   *
+   * A caller that sends no `expectedVersion` is not refused here (see
+   * `UpdateArticleDto.expectedVersion` for why it is still optional); it still
+   * gets the load→write race closed by the guarded save.
+   */
+  private assertArticleVersionCurrent(
+    article: MagazineArticle,
+    expectedVersion: number | undefined,
+  ): void {
+    if (expectedVersion === undefined || expectedVersion === article.version) {
+      return;
+    }
+    throw new ConflictException({
+      message:
+        'This draft changed since you loaded it. Reload to see the current version before saving again.',
+      currentVersion: article.version,
+    });
+  }
+
+  /**
+   * Every image storage key referenced by an article: the social image plus
+   * each image block's `src`. Blank values are dropped. Used as the
+   * `alreadyStored` baseline for the M1 foreign-upload backstop, so a foreign
+   * key already on the article (uploaded by another editor) is allowed while a
+   * new foreign reference is refused.
+   */
+  private collectArticleImageRefs(
+    socialImage: string | null | undefined,
+    blocks: readonly ArticleBlock[],
+  ): string[] {
+    const refs: string[] = [];
+    if (socialImage) {
+      refs.push(socialImage);
+    }
+    for (const block of blocks) {
+      if (block.kind === 'image' && block.src) {
+        refs.push(block.src);
+      }
+    }
+    return refs;
+  }
+
+  /**
+   * The ONLY way the article draft body is written.
+   *
+   * Applies `patch` to `article` under an optimistic-concurrency precondition:
+   * the row must still be at the version this request loaded. Two editors (or
+   * an editor and the piece's writer filing a draft) autosaving the same
+   * article otherwise overwrite each other's whole `blocks` array, and a tab
+   * left open across a "Restore version" silently undoes the restore on its
+   * next autosave. Autosaves are not snapshotted, so what is lost is gone.
+   *
+   * The conditional UPDATE and the save share ONE transaction on purpose. The
+   * `UPDATE ... WHERE version = :baseVersion` takes the row lock, so a
+   * concurrent request blocks on it, and by the time it is let through the
+   * version no longer matches and it gets its 409 — rather than both requests
+   * reading the same version, both passing, and one of them winning silently.
+   */
+  private async saveArticleDraftGuarded(
+    article: MagazineArticle,
+    patch: Partial<MagazineArticle>,
+  ): Promise<void> {
+    // Sanitize block rich text on the WRITE boundary (M3): this is the ONE
+    // path that writes the draft body, so sanitizing `blocks` here guarantees
+    // no unsanitized `html`/`q`/`caption` is ever persisted, whichever handler
+    // supplied it (editor autosave, writer file-draft, version restore).
+    const safePatch: Partial<MagazineArticle> =
+      patch.blocks !== undefined
+        ? { ...patch, blocks: sanitizeArticleBlocks(patch.blocks) }
+        : patch;
+
+    const baseVersion = article.version;
+    const nextVersion = baseVersion + 1;
+
+    const applied = await this.dataSource.transaction(async (manager) => {
+      const articleRepository = manager.getRepository(MagazineArticle);
+      const claim = await articleRepository.update(
+        { id: article.id, version: baseVersion },
+        { version: nextVersion },
+      );
+      if (claim.affected === 0) {
+        return false;
+      }
+      Object.assign(article, safePatch, { version: nextVersion });
+      await articleRepository.save(article);
+      return true;
+    });
+
+    if (!applied) {
+      throw new ConflictException({
+        message:
+          'This draft changed while you were saving. Reload to see the current version before saving again.',
+      });
+    }
+  }
+
   private async loadArticleOr404(id: string): Promise<MagazineArticle> {
     const article = await this.articles.findOne({ where: { id } });
     if (!article) {
@@ -2344,6 +2646,9 @@ export class MagazinePieceService {
       tags: [],
       readMinutes: 1,
       publishedAt: null,
+      // See `convertDeckToArticle` — the in-memory row must carry its base
+      // version, not `undefined`, for the guarded save to match on.
+      version: 0,
     });
     await this.articles.save(article);
 

@@ -79,9 +79,10 @@ describe('AdminChangemakersController', () => {
     const created = { id: 'id-1', slug: 'ada-lovelace' };
     service.create.mockResolvedValue(created);
 
-    const result = await controller.create(dto);
+    const actingAdmin = { userId: 'admin-1' } as never;
+    const result = await controller.create(actingAdmin, dto);
 
-    expect(service.create).toHaveBeenCalledWith(dto);
+    expect(service.create).toHaveBeenCalledWith('admin-1', dto);
     expect(result).toBe(created);
   });
 
@@ -90,9 +91,10 @@ describe('AdminChangemakersController', () => {
     const updated = { id: 'id-1', name: 'Updated Name' };
     service.update.mockResolvedValue(updated);
 
-    const result = await controller.update('id-1', dto);
+    const actingAdmin = { userId: 'admin-1' } as never;
+    const result = await controller.update(actingAdmin, 'id-1', dto);
 
-    expect(service.update).toHaveBeenCalledWith('id-1', dto);
+    expect(service.update).toHaveBeenCalledWith('admin-1', 'id-1', dto);
     expect(result).toBe(updated);
   });
 

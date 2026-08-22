@@ -68,7 +68,12 @@ export class CreateCommunityDto {
   // de-dupes it. Ignored entirely on PATCH (see `UpdateCommunityDto`).
   @IsString() @MinLength(1) @MaxLength(100) handle!: string;
 
-  // Member slugs -> seeded as 'mod' roster rows on creation.
+  // Member slugs proposed as moderators. Each resolved member gets a
+  // `CommunityInviteReceived` notification carrying `proposedRole: 'mod'` —
+  // this is an INVITATION, never a roster add: nobody is made a moderator of a
+  // community they never agreed to join (BE-COM-06). The owner promotes them
+  // with `PATCH /communities/:slug/members/:memberSlug` once they join. See
+  // `CommunitiesService.resolveInvitees`.
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(50)
@@ -78,7 +83,7 @@ export class CreateCommunityDto {
 
   // Member slugs -> each resolved invitee gets a `CommunityInviteReceived`
   // notification, but is never force-added to the roster (no consent-less
-  // roster adds; see `CommunitiesService.seedExtraRoster`/`notifyInvitees`).
+  // roster adds; see `CommunitiesService.resolveInvitees`/`notifyInvitees`).
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(50)

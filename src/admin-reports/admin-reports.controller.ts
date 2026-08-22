@@ -61,10 +61,7 @@ export class AdminReportsController {
 
   @Get('reports-by-type.csv')
   @Header('Content-Type', 'text/csv')
-  @Header(
-    'Content-Disposition',
-    'attachment; filename="reports-by-type.csv"',
-  )
+  @Header('Content-Disposition', 'attachment; filename="reports-by-type.csv"')
   @ApiOperation({ summary: 'Download reports-by-type as CSV.' })
   @ApiOkResponse({ description: 'Weekly reason-code buckets as CSV.' })
   getReportsByTypeCsv(@Query() query: ReportsRangeQuery) {

@@ -7,6 +7,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Not, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
+import { Paginated, normalizePage, paginate } from '../common/pagination';
 import { CommunityGovernanceLogService } from '../communities/community-governance-log.service';
 import { GovernanceLogAction } from '../communities/entities/community-governance-log.entity';
 import {
@@ -15,7 +16,10 @@ import {
 } from '../communities/entities/community-member.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
-import { Community } from '../communities/entities/community.entity';
+import {
+  Community,
+  CommunityFrozenReason,
+} from '../communities/entities/community.entity';
 import {
   Report,
   ReportStatus,
@@ -28,15 +32,18 @@ import {
   AdminCommunityListDTO,
   AdminCommunityModeratorDTO,
   AdminCommunityQueueItemDTO,
+  AdminGovernanceLogEntryDTO,
   CommunityAggregates,
   toAdminCommunityCard,
   toAdminCommunityDetail,
+  toAdminGovernanceLogEntry,
   toAdminModerator,
 } from './admin-communities-response';
 import {
   CommunityReportTotals,
   summariseReportsByCommunity,
 } from './community-report-scope';
+import { ListCommunityGovernanceLogQuery } from './dto/list-community-governance-log.query';
 import { UpdateAdminCommunitySettingsDto } from './dto/update-admin-community-settings.dto';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -274,6 +281,51 @@ export class AdminCommunitiesService {
   }
 
   /**
+   * The governance audit trail for one community — every role change,
+   * removal, ownership transfer, archive/unarchive, freeze/unfreeze, settings
+   * diff and owner auto-promotion, newest first.
+   *
+   * `community_governance_log` was write-only until BE-COM-15: every action
+   * was persisted and nothing anywhere read it, so "who removed me?" / "who
+   * unfroze this?" could only be answered with direct database access. This
+   * is that read path.
+   *
+   * Actor and target names are resolved through one batched `MemberLookup`
+   * per page (never one lookup per row), and only ever as a compact
+   * `MemberRef`-derived shape — no `User`/`Profile` row is returned. A
+   * `null` actor/target is a system-driven action or someone who has since
+   * erased their account; the entry itself deliberately survives them.
+   */
+  async getGovernanceLog(
+    slug: string,
+    query: ListCommunityGovernanceLogQuery,
+  ): Promise<Paginated<AdminGovernanceLogEntryDTO>> {
+    const community = await this.communities.findOne({ where: { slug } });
+    if (!community) {
+      throw new NotFoundException('Community not found');
+    }
+
+    const queryBuilder = this.governanceLog.entriesForCommunity(community.id);
+    if (query.action) {
+      queryBuilder.andWhere('entry.action = :action', { action: query.action });
+    }
+
+    return paginate(queryBuilder, normalizePage(query.page), async (rows) => {
+      const memberIds = [
+        ...new Set(
+          rows
+            .flatMap((row) => [row.actorUserId, row.targetUserId])
+            .filter((userId): userId is string => userId !== null),
+        ),
+      ];
+      const memberRefs = await new MemberLookup(this.profiles).byUserIds(
+        memberIds,
+      );
+      return rows.map((row) => toAdminGovernanceLogEntry(row, memberRefs));
+    });
+  }
+
+  /**
    * Update a community's safety-policy settings. Only the fields present on the
    * DTO are written, so a partial PATCH from a single toggle leaves the others
    * untouched. Returns the freshly rebuilt admin detail (via `getCommunity`) so
@@ -283,10 +335,41 @@ export class AdminCommunitiesService {
   async updateSettings(
     slug: string,
     dto: UpdateAdminCommunitySettingsDto,
+    actorUserId: string,
   ): Promise<AdminCommunityDetailDTO> {
     const community = await this.communities.findOne({ where: { slug } });
     if (!community) {
       throw new NotFoundException('Community not found');
+    }
+    // Field-by-field diff, captured before the assignments below. These three
+    // toggles used to change with nothing recorded anywhere (BE-COM-19), even
+    // though the neighbouring freeze/archive/reassign-owner overrides all
+    // write a governance-log row — and `requiresSecondVouch` in particular
+    // changes who can join the community at all.
+    const changes: Record<string, { from: boolean; to: boolean }> = {};
+    if (
+      dto.requiresSecondVouch !== undefined &&
+      dto.requiresSecondVouch !== community.requiresSecondVouch
+    ) {
+      changes.requiresSecondVouch = {
+        from: community.requiresSecondVouch,
+        to: dto.requiresSecondVouch,
+      };
+    }
+    if (
+      dto.autoFreezeOnReports !== undefined &&
+      dto.autoFreezeOnReports !== community.autoFreezeOnReports
+    ) {
+      changes.autoFreezeOnReports = {
+        from: community.autoFreezeOnReports,
+        to: dto.autoFreezeOnReports,
+      };
+    }
+    if (
+      dto.isFeatured !== undefined &&
+      dto.isFeatured !== community.isFeatured
+    ) {
+      changes.isFeatured = { from: community.isFeatured, to: dto.isFeatured };
     }
     if (dto.requiresSecondVouch !== undefined) {
       community.requiresSecondVouch = dto.requiresSecondVouch;
@@ -311,6 +394,16 @@ export class AdminCommunitiesService {
       });
     } else {
       await this.communities.save(community);
+    }
+    // Only when something actually moved — a PATCH that re-sends the current
+    // values is a no-op and does not belong in the trail.
+    if (Object.keys(changes).length) {
+      await this.governanceLog.log({
+        communityId: community.id,
+        actorUserId,
+        action: GovernanceLogAction.SettingsChanged,
+        metadata: { adminOverride: true, changes },
+      });
     }
     return this.getCommunity(slug);
   }
@@ -343,7 +436,14 @@ export class AdminCommunitiesService {
     const result = await this.communities
       .createQueryBuilder()
       .update(Community)
-      .set({ frozenAt: () => 'now()' })
+      // Stamped `manual`: a platform-staff freeze is a human decision, and
+      // `CommunitiesService.unfreeze`'s automatic-freeze gate (BE-COM-04) is
+      // there to stop a community's own owner clearing MODERATION's freeze,
+      // not to trap them under one an admin can already lift here.
+      .set({
+        frozenAt: () => 'now()',
+        frozenReason: CommunityFrozenReason.Manual,
+      })
       .where('id = :id AND frozen_at IS NULL', { id: community.id })
       .execute();
 
@@ -382,7 +482,10 @@ export class AdminCommunitiesService {
     const result = await this.communities
       .createQueryBuilder()
       .update(Community)
-      .set({ frozenAt: null })
+      // The override path: no roster role and no open-report condition — this
+      // is deliberately the escape hatch `CommunitiesService.unfreeze` points
+      // an owner at when its own automatic-freeze gate (BE-COM-04) holds.
+      .set({ frozenAt: null, frozenReason: null })
       .where('id = :id AND frozen_at IS NOT NULL', { id: community.id })
       .execute();
 

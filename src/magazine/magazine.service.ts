@@ -8,12 +8,13 @@ import { In, Repository } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import { MediaCropService } from '../media-crops/media-crops.service';
+import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { validateDeckSlides } from './deck-slides.validation';
 import { CreateDeckDto } from './dto/create-deck.dto';
 import { UpdateDeckDto } from './dto/update-deck.dto';
 import { MagazineArticle } from './entities/magazine-article.entity';
 import { MagazineAuthor } from './entities/magazine-author.entity';
-import { MagazineDeck } from './entities/magazine-deck.entity';
+import { DeckSlide, MagazineDeck } from './entities/magazine-deck.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
 import { MagazineSection } from './entities/magazine-section.entity';
 import {
@@ -279,8 +280,58 @@ export class MagazineService {
     return toDeckResponse(deck);
   }
 
-  async createDeck(dto: CreateDeckDto): Promise<DeckResponse> {
+  /**
+   * Every image storage key referenced by a deck: its cover plus each image
+   * slide's `src` and each before/after interactive panel's `src`. Blank
+   * values are dropped. Used as the `alreadyStored` baseline for the M1
+   * foreign-upload backstop.
+   */
+  private collectDeckImageRefs(
+    cover: string | null | undefined,
+    slides: readonly DeckSlide[],
+  ): string[] {
+    const refs: string[] = [];
+    if (cover) {
+      refs.push(cover);
+    }
+    for (const slide of slides) {
+      if (slide.layout === 'image' && slide.src) {
+        refs.push(slide.src);
+      }
+      if (slide.layout === 'interactive' && slide.kind === 'before-after') {
+        if (slide.before?.src) {
+          refs.push(slide.before.src);
+        }
+        if (slide.after?.src) {
+          refs.push(slide.after.src);
+        }
+      }
+    }
+    return refs;
+  }
+
+  async createDeck(
+    dto: CreateDeckDto,
+    requesterUserId: string,
+  ): Promise<DeckResponse> {
     const slides = validateDeckSlides(dto.slides);
+
+    // Foreign-upload backstop (M1): the deck-create handler keeps the
+    // interceptor's shared-upload exemption, so a foreign storage key reaches
+    // the service. A fresh deck has NO stored baseline, so every referenced
+    // image must belong to the creator — any foreign key is a new reference and
+    // is refused. Runs BEFORE the slug lookup / insert.
+    const noStoredBaseline: string[] = [];
+    for (const incomingImageRef of this.collectDeckImageRefs(
+      dto.cover,
+      slides,
+    )) {
+      assertNoForeignUploadIntroduced(
+        requesterUserId,
+        incomingImageRef,
+        noStoredBaseline,
+      );
+    }
 
     const existing = await this.decks.findOne({ where: { slug: dto.slug } });
     if (existing) {
@@ -303,14 +354,50 @@ export class MagazineService {
     return toDeckResponse(deck);
   }
 
-  async updateDeck(id: string, dto: UpdateDeckDto): Promise<DeckResponse> {
+  async updateDeck(
+    id: string,
+    dto: UpdateDeckDto,
+    requesterUserId: string,
+  ): Promise<DeckResponse> {
     const deck = await this.decks.findOne({ where: { id } });
     if (!deck) {
       throw new NotFoundException('Deck not found');
     }
 
-    if (dto.slides !== undefined) {
-      deck.slides = validateDeckSlides(dto.slides);
+    const incomingSlides =
+      dto.slides !== undefined ? validateDeckSlides(dto.slides) : undefined;
+
+    // Foreign-upload backstop (M1): the deck-update handler keeps the
+    // interceptor's shared-upload exemption (any `magazine_editor` re-saves a
+    // deck whose cover/slide images a DIFFERENT editor uploaded), so a foreign
+    // key reaches here. Allow it only when it is ALREADY stored on the deck; a
+    // new foreign reference is refused. Runs BEFORE any mutation.
+    const storedDeckImageRefs = this.collectDeckImageRefs(
+      deck.cover,
+      deck.slides,
+    );
+    if (dto.cover !== undefined) {
+      assertNoForeignUploadIntroduced(
+        requesterUserId,
+        dto.cover,
+        storedDeckImageRefs,
+      );
+    }
+    if (incomingSlides !== undefined) {
+      for (const incomingImageRef of this.collectDeckImageRefs(
+        undefined,
+        incomingSlides,
+      )) {
+        assertNoForeignUploadIntroduced(
+          requesterUserId,
+          incomingImageRef,
+          storedDeckImageRefs,
+        );
+      }
+    }
+
+    if (incomingSlides !== undefined) {
+      deck.slides = incomingSlides;
     }
 
     if (dto.published !== undefined) {

@@ -138,12 +138,13 @@ export interface EmailPreferenceResponse {
   email: boolean;
   locked?: boolean;
   /**
-   * ⚠️ ALWAYS `true` AT LAUNCH. There is NO transactional mailer wired (no
-   * provider, no dependency, no sender) — see `docs/ops/no-email-at-launch.md`.
-   * Every toggle here is stored but NOTHING IS DELIVERED. This flag exists so
-   * the endpoint's own payload states the gap rather than implying delivery;
-   * the FE must render it as "email isn't live yet", not a working switch.
-   * Drop it (or flip to omitted) when the mailer lands.
+   * ⚠️ ALWAYS `true` for now. `MailerService` is wired and does deliver, but
+   * no sender consults these categories: nothing reads `email_preference`
+   * before sending, and no digest/reminder/product-update job exists. Every
+   * toggle here is stored and never acted on. This flag exists so the
+   * endpoint's own payload states the gap rather than implying delivery; the FE
+   * renders it as "this isn't live yet". Drop it (or flip to omitted) once a
+   * sender honours the stored preference.
    */
   comingSoon: boolean;
 }

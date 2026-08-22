@@ -238,11 +238,17 @@ export const toTeamMemberDTO = (
   sortOrder: member.sortOrder,
 });
 
+// `actorLabel` is resolved at read time by
+// `RoadmapAdminService.resolvedActorLabels` rather than read straight off the
+// row: rows written before BE-COM-28 stored the acting admin's email, which
+// must never reach a Moderator through the audit feed or its CSV. The stored
+// value is only used for system-attributed rows (`actorId === null`).
 export const toAuditEntryDTO = (
   row: RoadmapAuditLog,
+  actorLabel: string = row.actorLabel,
 ): RoadmapAuditEntryDTO => ({
   id: row.id,
-  actorLabel: row.actorLabel,
+  actorLabel,
   action: row.action,
   createdAt: row.createdAt.toISOString(),
 });

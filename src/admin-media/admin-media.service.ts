@@ -1,7 +1,10 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
@@ -70,6 +73,8 @@ const CONTENT_TYPE_BY_EXTENSION: Record<string, string> = Object.fromEntries(
 
 @Injectable()
 export class AdminMediaService {
+  private readonly logger = new Logger(AdminMediaService.name);
+
   constructor(
     private readonly storage: StorageService,
     @InjectRepository(Profile)
@@ -225,16 +230,65 @@ export class AdminMediaService {
   }
 
   /**
-   * Permanently delete one stored object. `assertKnownKey` first, so a
-   * malformed/unknown key 404s with the same don't-leak posture as `head`
-   * rather than reaching the storage SDK. Deletes the RAW bucket object only —
-   * this console deliberately does not reverse-look-up and clear DB columns that
-   * still reference the key (a still-referencing avatar/listing image simply
-   * stops loading), matching its raw-bucket / orphan-cleanup purpose. The UI
-   * warns the admin of exactly that before confirming.
+   * Permanently delete one stored object.
+   *
+   * This is the same bug `MyMediaService.deleteMine` was fixed for (CNT-02),
+   * on the admin side: the console deleted the bucket object with NO
+   * reference check at all, so one click on a still-live avatar, community
+   * cover, listing photo, cinema still or magazine byline left a permanently
+   * broken image with no way back. The `references` column the list renders is
+   * a hint the admin may not have looked at, on data that may be a page load
+   * stale; a UI warning is not an authority. It also takes the key as a QUERY
+   * PARAM, which is why the global `StorageKeyOwnershipInterceptor` (a
+   * body-inspecting interceptor) never saw this route either.
+   *
+   * Order matters. `assertKnownKey` stays FIRST so a malformed/unknown key
+   * 404s with the same don't-leak posture as `head`. Then the key is proven
+   * unreferenced, exactly as `deleteMine` does it:
+   *  - `degraded` (a reference source threw and was swallowed) is a 503, not a
+   *    green light — "no references" is UNVERIFIED, and a bucket delete is not
+   *    recoverable, so "try again" is the honest answer.
+   *  - a live reference is a 409 carrying the reference list, so the console
+   *    can name the places to detach it from.
+   *
+   * `force` is the one thing this has that `deleteMine` does not, and it is
+   * deliberate: unlike a member tidying their own uploads, an admin sometimes
+   * MUST remove an image that is still live — an abuse/illegal-content
+   * takedown is exactly the case where the object is attached to something.
+   * Refusing outright would turn a safety tool into a dead end. It is
+   * opt-in per request, never the default, and every use is logged with the
+   * references it overrode so the action is auditable after the fact.
    */
-  async delete(key: string): Promise<void> {
+  async delete(key: string, force = false): Promise<void> {
     this.assertKnownKey(key);
+
+    const { references, degraded } = await this.references.resolve([key]);
+    const referencingPlaces = references.get(key) ?? [];
+
+    if (force) {
+      this.logger.warn(
+        `Admin force-deleted stored object ${key} with ` +
+          `${referencingPlaces.length} live reference(s)` +
+          `${degraded ? ' (reference check degraded)' : ''}: ` +
+          JSON.stringify(referencingPlaces),
+      );
+      await this.storage.deleteObjectByKey(key);
+      return;
+    }
+
+    if (degraded) {
+      throw new ServiceUnavailableException(
+        'Could not verify where this upload is used. Please try again, or re-send with force=true to delete anyway.',
+      );
+    }
+    if (referencingPlaces.length > 0) {
+      throw new ConflictException({
+        message:
+          'This upload is still used. Detach it there first, or re-send with force=true to delete anyway.',
+        references: referencingPlaces,
+      });
+    }
+
     await this.storage.deleteObjectByKey(key);
   }
 

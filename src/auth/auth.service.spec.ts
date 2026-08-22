@@ -7,6 +7,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
+import { AccountReauthToken } from '../account/entities/account-reauth-token.entity';
 import {
   DeletionRequest,
   DeletionRequestStatus,
@@ -42,6 +43,7 @@ interface UsersMock {
   findByIdWithEmail: jest.Mock;
   findByGoogleId: jest.Mock;
   createGoogleUser: jest.Mock;
+  existsByEmail: jest.Mock;
 }
 
 function buildMocks() {
@@ -75,6 +77,9 @@ function buildMocks() {
     findByIdWithEmail: jest.fn().mockResolvedValue(activeUser),
     findByGoogleId: jest.fn(),
     createGoogleUser: jest.fn(),
+    // Signup's "a different Google subject already holds this email" guard.
+    // Nobody holds it by default, so signup is unaffected unless a test says so.
+    existsByEmail: jest.fn().mockResolvedValue(false),
   };
   // The transaction manager exposes getRepository so the atomic rotation can
   // run its conditional claim + insert through the same (mock) repo, plus a
@@ -109,6 +114,13 @@ function buildMocks() {
   // or from a pending erasure (leave alone). Empty by default.
   const deactivations = { findOne: jest.fn().mockResolvedValue(null) };
   const deletionRequests = { findOne: jest.fn().mockResolvedValue(null) };
+  // Write-side — `mintReauthToken`'s target (the step-up reauth OAuth round
+  // trip). `save` echoes back whatever it was given, same pattern as `repo`.
+  const reauthTokens = {
+    save: jest.fn((v: Record<string, unknown>) =>
+      Promise.resolve({ id: 'reauth-row', ...v }),
+    ),
+  };
   // Read-side only — `suspensionInfoFor` reads the member's latest
   // moderation-outcome notification for the reason. Empty by default.
   const notifications = { findOne: jest.fn().mockResolvedValue(null) };
@@ -133,6 +145,7 @@ function buildMocks() {
     suppressions,
     deactivations,
     deletionRequests,
+    reauthTokens,
     notifications,
     staffRoles,
     platformSettings,
@@ -168,6 +181,10 @@ async function buildService(
       {
         provide: getRepositoryToken(DeletionRequest),
         useValue: mocks.deletionRequests,
+      },
+      {
+        provide: getRepositoryToken(AccountReauthToken),
+        useValue: mocks.reauthTokens,
       },
       {
         // Read-side only — backs `suspensionInfoFor`'s latest-outcome lookup.
@@ -253,6 +270,40 @@ describe('AuthService.rotateRefreshToken', () => {
     expect(mocks.dataSource.transaction).not.toHaveBeenCalled();
     expect(mocks.repo.save).not.toHaveBeenCalled();
     // A compromise signal — the member's live socket must be dropped too.
+    expect(mocks.events.emit).toHaveBeenCalledWith('user.session.revoked', {
+      userId: 'u1',
+    });
+  });
+
+  it('absorbs a rotation race inside the grace window: issues a fresh pair, keeps the family', async () => {
+    // Rotated one second ago BY A ROTATION (`replacedBy` set) — the signature
+    // of the member's other tab/PWA refreshing the same expiring cookie, not
+    // of a stolen token replayed later.
+    mocks.repo.findOne.mockResolvedValue({
+      ...liveRow(),
+      revokedAt: new Date(Date.now() - 1_000),
+      replacedBy: 'newer-row',
+    });
+
+    const result = await service.rotateRefreshToken('raw-token', 'agent');
+
+    expect(result).toEqual({ accessToken: 'signed', refreshToken: 'signed' });
+    // No family revocation, and crucially no socket-dropping sign-out event.
+    expect(mocks.events.emit).not.toHaveBeenCalledWith('user.session.revoked', {
+      userId: 'u1',
+    });
+  });
+
+  it('still treats a token revoked long ago as reuse', async () => {
+    mocks.repo.findOne.mockResolvedValue({
+      ...liveRow(),
+      revokedAt: new Date(Date.now() - 60_000),
+      replacedBy: 'newer-row',
+    });
+
+    await expect(
+      service.rotateRefreshToken('raw-token', 'agent'),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
     expect(mocks.events.emit).toHaveBeenCalledWith('user.session.revoked', {
       userId: 'u1',
     });
@@ -372,6 +423,34 @@ describe('AuthService.revokeRefreshToken / revokeAllForUser', () => {
     expect(mocks.events.emit).toHaveBeenCalledWith('user.session.revoked', {
       userId: 'u1',
     });
+  });
+});
+
+describe('AuthService.mintReauthToken', () => {
+  let service: AuthService;
+  let mocks: ReturnType<typeof buildMocks>;
+
+  beforeEach(async () => {
+    mocks = buildMocks();
+    service = await buildService(mocks);
+  });
+
+  it('stores only the SHA-256 hash of the token, never the plaintext', async () => {
+    const result = await service.mintReauthToken('u1');
+
+    // The row persisted to the reauth store holds the HASH, so a leaked table
+    // yields no usable step-up tokens (finding L1).
+    expect(mocks.reauthTokens.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'u1',
+        token: sha256(result.reauthToken),
+      }),
+    );
+    // The plaintext handed back to the caller is NOT what we stored.
+    const savedArguments = mocks.reauthTokens.save.mock.calls[0] as [
+      { token: string },
+    ];
+    expect(savedArguments[0].token).not.toEqual(result.reauthToken);
   });
 });
 

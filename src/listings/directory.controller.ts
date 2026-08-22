@@ -176,7 +176,7 @@ export class DirectoryController {
   }
 
   // Member-gated: propose a correction to this listing ("suggest an edit"),
-  // landing in the moderator queue (`GET /listings/admin/edit-suggestions`).
+  // landing in the moderator queue (`GET /admin/listings/edit-suggestions`).
   // Slug-keyed like `addReview` above, NOT `ref`-keyed — this is a non-owner
   // action reached from this same public detail page, which only ever has
   // the `slug` (`ref` lives solely on the owner-scoped `ListingDTO`, 403'd

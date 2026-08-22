@@ -1,7 +1,7 @@
 import { IsIn } from 'class-validator';
 
 /**
- * Body of `PATCH /listings/admin/edit-suggestions/:id` — the moderator/admin
+ * Body of `PATCH /admin/listings/edit-suggestions/:id` — the moderator/admin
  * accept-or-dismiss decision on a member's proposed listing correction.
  */
 export class ResolveEditSuggestionDto {

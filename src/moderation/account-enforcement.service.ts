@@ -199,8 +199,14 @@ export class AccountEnforcementService {
           'Could not restrict the reported member.',
         );
       }
-      // Same staff carve-out as suspend/ban below — a moderator may only act
-      // against an ordinary member.
+      // Same house-account and staff carve-outs as suspend/ban below. The
+      // house account has `role = member` and `is_system = true`, so the role
+      // check alone let a `member`-subject report against its slug restrict
+      // it (BE-COM-33) — the direct admin path (`restrictMember`) has always
+      // refused this.
+      if (restrictedUser.isSystem) {
+        throw new ForbiddenException('The house account cannot be restricted.');
+      }
       if (restrictedUser.role !== UserRole.Member) {
         throw new ForbiddenException(
           'Moderation actions cannot target staff accounts.',
@@ -237,6 +243,15 @@ export class AccountEnforcementService {
     const user = await manager.findOne(User, { where: { id: userId } });
     if (!user) {
       throw new BadRequestException('Could not suspend the reported member.');
+    }
+
+    // The house/system account is never a legitimate enforcement target: it
+    // carries `role = member` with `is_system = true`, so the role check below
+    // does not catch it and a `ban` resolved from a report against its slug
+    // would suspend it and run `revokeAllForUser` on it (BE-COM-33). Mirrors
+    // the same guard on the direct admin path (`restrictMember`).
+    if (user.isSystem) {
+      throw new ForbiddenException('The house account cannot be restricted.');
     }
 
     // A moderator may only enforce against ordinary members — never against

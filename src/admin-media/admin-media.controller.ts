@@ -7,11 +7,13 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import {
+  ApiConflictResponse,
   ApiCookieAuth,
   ApiForbiddenResponse,
   ApiNoContentResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiServiceUnavailableResponse,
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
@@ -74,11 +76,28 @@ export class AdminMediaController {
 
   @ApiOperation({
     summary: 'Permanently delete one stored object from the bucket.',
+    description:
+      'Refuses (409) while the object is still referenced anywhere, and 503s ' +
+      'when the reference check could not be completed — a bucket delete is ' +
+      'irreversible and the rows pointing at the key keep pointing at it. ' +
+      'Pass `force=true` to override, e.g. for an abuse takedown of an image ' +
+      'that IS still live; every forced delete is logged with the references ' +
+      'it overrode.',
   })
   @ApiNoContentResponse({ description: 'The object was deleted.' })
+  @ApiConflictResponse({
+    description:
+      'The object is still referenced. The body carries `references` — every ' +
+      'place it is used.',
+  })
+  @ApiServiceUnavailableResponse({
+    description:
+      'Reference checking is degraded, so the object could not be proven ' +
+      'unused. Deleting is refused rather than risking a live image.',
+  })
   @Delete()
   @HttpCode(204)
   delete(@Query() query: AdminMediaDeleteQueryDto): Promise<void> {
-    return this.adminMedia.delete(query.key);
+    return this.adminMedia.delete(query.key, query.force === true);
   }
 }

@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
@@ -9,6 +9,7 @@ import { RecognitionPerkClaim } from './entities/recognition-perk-claim.entity';
 import { RecognitionStat } from './entities/recognition-stat.entity';
 import { buildRecognition, RecognitionDTO } from './recognition-response';
 import { RecognitionAwardingService } from './recognition-awarding.service';
+import { ProfilesService } from '../profiles/profiles.service';
 
 @Injectable()
 export class RecognitionService {
@@ -24,6 +25,7 @@ export class RecognitionService {
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
     private readonly awarding: RecognitionAwardingService,
+    private readonly profilesService: ProfilesService,
   ) {}
 
   /**
@@ -80,14 +82,23 @@ export class RecognitionService {
 
   /**
    * Another member's recognition (`GET /profiles/:slug/recognition`).
-   * Resolves `slug` -> `userId`, then delegates with `includePerks = false`
-   * so perk state is never leaked to a non-owner (I9).
+   * Resolves `slug` -> `userId` through `ProfilesService.findBySlugOrThrow`,
+   * which applies the same block / hidden-from / self-hide / moderator-takedown
+   * gates the profile read uses (L10): a viewer who cannot see the profile
+   * gets an identical 404 here instead of the member's badges/level. Then
+   * delegates with `includePerks = false` so perk state is never leaked to a
+   * non-owner (I9).
    */
-  async getBySlug(slug: string): Promise<RecognitionDTO> {
-    const profile = await this.profiles.findOne({ where: { slug } });
-    if (!profile) {
-      throw new NotFoundException('Profile not found');
-    }
+  async getBySlug(
+    slug: string,
+    viewerUserId: string,
+    viewerRole?: string,
+  ): Promise<RecognitionDTO> {
+    const profile = await this.profilesService.findBySlugOrThrow(
+      slug,
+      viewerUserId,
+      viewerRole,
+    );
     return this.getForUser(profile.userId, false);
   }
 }

@@ -9,6 +9,10 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -65,8 +69,11 @@ export class AdminChangemakersController {
   @ApiConflictResponse({
     description: 'Could not allocate a unique changemaker slug.',
   })
-  create(@Body() dto: CreateChangemakerDto) {
-    return this.changemakers.create(dto);
+  create(
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: CreateChangemakerDto,
+  ) {
+    return this.changemakers.create(user.userId, dto);
   }
 
   @Patch(':id')
@@ -74,10 +81,11 @@ export class AdminChangemakersController {
   @ApiOkResponse({ description: 'The updated changemaker profile.' })
   @ApiNotFoundResponse({ description: 'No changemaker exists for this id.' })
   update(
+    @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateChangemakerDto,
   ) {
-    return this.changemakers.update(id, dto);
+    return this.changemakers.update(user.userId, id, dto);
   }
 
   @Patch(':id/publish')

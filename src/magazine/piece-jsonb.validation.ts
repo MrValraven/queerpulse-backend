@@ -56,6 +56,14 @@ function failCare(reason: string): never {
   throw new BadRequestException(`care: ${reason}`);
 }
 
+// Size ceilings for the two jsonb columns on `magazine_piece`. Both are
+// rewritten in full on every desk save and returned by every
+// `getPieceRecordFull`/board load, so an unbounded blob is paid for on every
+// read, not just once. Set well above any real commission — a brief has a
+// handful of "wants", a care record a handful of subjects and flags.
+const MAX_JSONB_ITEMS = 50;
+const MAX_JSONB_TEXT_LENGTH = 5_000;
+
 /**
  * Validates an `unknown` payload as a `PieceBrief`: required string fields
  * (`angle`, `avoid`, `rate`, `killFee`, `commissionedBy`, `commissionedOn`,
@@ -82,13 +90,24 @@ export function validatePieceBrief(input: unknown): PieceBrief | null {
     'commissionedOn',
     'art',
   ] as const) {
-    if (!isString(record[field])) {
+    const fieldValue = record[field];
+    if (!isString(fieldValue)) {
       failBrief(`${field} must be a string`);
+    }
+    if (fieldValue.length > MAX_JSONB_TEXT_LENGTH) {
+      failBrief(`${field} must be at most ${MAX_JSONB_TEXT_LENGTH} characters`);
     }
   }
 
-  if (!isStringArray(record.wants)) {
+  const wants = record.wants;
+  if (!isStringArray(wants)) {
     failBrief('wants must be an array of strings');
+  }
+  if (wants.length > MAX_JSONB_ITEMS) {
+    failBrief(`wants can have at most ${MAX_JSONB_ITEMS} entries`);
+  }
+  if (wants.some((want) => want.length > MAX_JSONB_TEXT_LENGTH)) {
+    failBrief(`each want must be at most ${MAX_JSONB_TEXT_LENGTH} characters`);
   }
 
   if (!isNumberOrNull(record.wordCount)) {
@@ -216,16 +235,31 @@ export function validatePieceCare(input: unknown): PieceCare | null {
   if (!Array.isArray(record.subjects)) {
     failCare('subjects must be an array');
   }
+  if (record.subjects.length > MAX_JSONB_ITEMS) {
+    failCare(`subjects can have at most ${MAX_JSONB_ITEMS} entries`);
+  }
   record.subjects.forEach((subject, index) =>
     assertCareSubject(subject, index),
   );
 
-  if (!isStringArray(record.contentNotes)) {
+  const contentNotes = record.contentNotes;
+  if (!isStringArray(contentNotes)) {
     failCare('contentNotes must be an array of strings');
+  }
+  if (contentNotes.length > MAX_JSONB_ITEMS) {
+    failCare(`contentNotes can have at most ${MAX_JSONB_ITEMS} entries`);
+  }
+  if (contentNotes.some((note) => note.length > MAX_JSONB_TEXT_LENGTH)) {
+    failCare(
+      `each content note must be at most ${MAX_JSONB_TEXT_LENGTH} characters`,
+    );
   }
 
   if (!Array.isArray(record.flags)) {
     failCare('flags must be an array');
+  }
+  if (record.flags.length > MAX_JSONB_ITEMS) {
+    failCare(`flags can have at most ${MAX_JSONB_ITEMS} entries`);
   }
   record.flags.forEach((flag, index) => validateCareFlag(flag, index));
 

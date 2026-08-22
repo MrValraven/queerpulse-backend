@@ -77,7 +77,7 @@ export class GovernanceOverview {
   @Column({ type: 'jsonb' })
   health!: OverviewHealthStat[];
 
-  @Column({ type: 'jsonb', name: 'moderation_steps' })
+  @Column({ type: 'jsonb' })
   moderationSteps!: OverviewModerationStep[];
 
   @Column({ type: 'jsonb' })
@@ -96,7 +96,7 @@ export class GovernanceOverview {
    * members can rely on" act, so the public `GET /governance/overview` response
    * carries this timestamp for a "last published" line.
    */
-  @Column({ type: 'timestamptz', name: 'published_at', nullable: true })
+  @Column({ type: 'timestamptz', nullable: true })
   publishedAt!: Date | null;
 
   @UpdateDateColumn({ type: 'timestamptz' })

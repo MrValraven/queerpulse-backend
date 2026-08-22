@@ -4,20 +4,26 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+} from '../common/image-url';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { ConnectionsService } from '../connections/connections.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
-import { VouchService } from '../vouch/vouch.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import {
   CommunitiesService,
   CreateCommunityInput,
 } from './communities.service';
+import { CommunityAutoFreezeService } from './community-auto-freeze.service';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
 import {
   CommunityJoinRequest,
@@ -29,6 +35,7 @@ import {
 } from './entities/community-member.entity';
 import { GovernanceLogAction } from './entities/community-governance-log.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
+import { CommunityTagRequest } from './entities/community-tag-request.entity';
 import { CommunityPost } from './entities/community-post.entity';
 import {
   AccessTier,
@@ -122,7 +129,7 @@ describe('CommunitiesService', () => {
     find: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
-  let users: { findOne: jest.Mock };
+  let users: { findOne: jest.Mock; find: jest.Mock };
   // `getBySlug` consults the moderation state before returning a detail; a
   // VISIBLE (`hidden:false, removed:false`) default keeps every non-moderation
   // test on the normal path. `notifications` is fire-and-forget on join/triage
@@ -130,6 +137,19 @@ describe('CommunitiesService', () => {
   let contentModeration: { stateFor: jest.Mock };
   let notifications: { create: jest.Mock; createForRecipients: jest.Mock };
   let governanceLog: { log: jest.Mock };
+  // `suggestedCommunities`'s social-graph signal and `unfreeze`'s
+  // automatic-freeze gate (BE-COM-04). Neither is exercised by the flows
+  // below beyond needing to resolve, so both default to the permissive
+  // answer: no connections, and zero open reports.
+  let connections: { allAcceptedConnectionUserIds: jest.Mock };
+  let autoFreeze: { openReportCount: jest.Mock };
+  let tagRequests: { create: jest.Mock; save: jest.Mock; find: jest.Mock };
+  // Fire-and-forget roster-membership domain events
+  // (`COMMUNITY_MEMBER_JOINED` / `COMMUNITY_MEMBER_LEFT`).
+  let eventEmitter: { emit: jest.Mock };
+  // The transaction manager `createWithUniqueRef` runs inside; `query` is the
+  // raw `SELECT nextval('communities_ref_seq')` ref allocation.
+  let manager: { query: jest.Mock; getRepository: jest.Mock };
 
   beforeEach(async () => {
     communities = {
@@ -178,7 +198,13 @@ describe('CommunitiesService', () => {
       find: jest.fn().mockResolvedValue([]),
       createQueryBuilder: jest.fn(() => qbStub()),
     };
-    users = { findOne: jest.fn().mockResolvedValue(null) };
+    // `resolveInvitees` batches a house-account (`isSystem`) exclusion
+    // lookup over every resolved invitee; an empty result means "none of
+    // them is a system account".
+    users = {
+      findOne: jest.fn().mockResolvedValue(null),
+      find: jest.fn().mockResolvedValue([]),
+    };
     contentModeration = {
       stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
     };
@@ -189,12 +215,33 @@ describe('CommunitiesService', () => {
     governanceLog = {
       log: jest.fn().mockResolvedValue(undefined),
     };
+    connections = {
+      allAcceptedConnectionUserIds: jest.fn().mockResolvedValue([]),
+    };
+    autoFreeze = {
+      openReportCount: jest.fn().mockResolvedValue(0),
+    };
+    tagRequests = {
+      create: jest.fn((v: object) => v),
+      save: jest.fn((v: unknown) => Promise.resolve(v)),
+      find: jest.fn().mockResolvedValue([]),
+    };
+    eventEmitter = { emit: jest.fn() };
 
     // `manager.getRepository(Entity)` routes to the same mocks the outer
     // `@InjectRepository` tokens use, so `communities.save`/`members.save`
     // assertions work whether the code path runs inside the transaction or
     // not — the transaction is otherwise opaque to the caller.
-    const manager = {
+    // `communities_ref_seq` (BE-COM-23) — `createWithUniqueRef` allocates the
+    // `QP-C-####` ref with a raw `SELECT nextval(...)` through the transaction
+    // manager instead of `COUNT(*) + 1`. Returns a string, like the pg driver
+    // does for a bigint.
+    let nextCommunityRefNumber = 0;
+    manager = {
+      query: jest.fn(() => {
+        nextCommunityRefNumber += 1;
+        return Promise.resolve([{ refNumber: String(nextCommunityRefNumber) }]);
+      }),
       getRepository: jest.fn((entity: unknown) => {
         if (entity === Community) return communities;
         if (entity === CommunityMember) return members;
@@ -222,6 +269,10 @@ describe('CommunitiesService', () => {
           provide: getRepositoryToken(CommunityJoinRequest),
           useValue: joinRequests,
         },
+        {
+          provide: getRepositoryToken(CommunityTagRequest),
+          useValue: tagRequests,
+        },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: getRepositoryToken(User), useValue: users },
         { provide: DataSource, useValue: dataSource },
@@ -231,10 +282,6 @@ describe('CommunitiesService', () => {
         },
         { provide: NotificationsService, useValue: notifications },
         {
-          provide: VouchService,
-          useValue: { hasActiveVouchFrom: jest.fn().mockResolvedValue(false) },
-        },
-        {
           provide: MediaCropService,
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
         },
@@ -242,9 +289,21 @@ describe('CommunitiesService', () => {
           provide: CommunityGovernanceLogService,
           useValue: governanceLog,
         },
+        { provide: ConnectionsService, useValue: connections },
+        { provide: CommunityAutoFreezeService, useValue: autoFreeze },
+        { provide: EventEmitter2, useValue: eventEmitter },
       ],
     }).compile();
     service = module.get(CommunitiesService);
+    // `toCommunityDetail` resolves `coverImageUrl` through `toImageUrl`, which
+    // throws `Service temporarily unavailable` when the base was never wired.
+    // Only fixtures carrying a storage-key cover hit it (the M1 foreign-cover
+    // cases), which is why it bites those and not the rest.
+    setImageUrlBase('https://api.test');
+  });
+
+  afterEach(() => {
+    resetImageUrlBaseForTesting();
   });
 
   describe('create', () => {
@@ -269,16 +328,30 @@ describe('CommunitiesService', () => {
       };
       const res = await service.create('u1', dto as CreateCommunityInput);
       expect(res.slug).toBe('queer-devs');
-      expect(res.ref).toMatch(/^QP-C-\d{4}$/);
+      expect(res.ref).toBe('QP-C-0001');
       expect(members.save).toHaveBeenCalledWith(
         expect.objectContaining({ userId: 'u1', role: RosterRole.Owner }),
       );
+      // BE-COM-23: the ref comes from `communities_ref_seq`, never
+      // `COUNT(*) + 1` — a hard-deleted community used to make every later
+      // create collide on `UQ_communities_ref`.
+      expect(manager.query).toHaveBeenCalledWith(
+        expect.stringContaining("nextval('communities_ref_seq')"),
+      );
+      expect(communities.count).not.toHaveBeenCalled();
     });
 
-    it('seeds stewards as mod roster rows via slug lookup, skipping the owner', async () => {
+    // BE-COM-06: `stewards` used to be seeded straight into the roster as
+    // `mod` inside the create transaction — no notification, no accept step,
+    // no way to decline. Any member could make up to 50 other members
+    // moderators of a community they never agreed to. A steward is now only
+    // INVITED (a `CommunityInviteReceived` carrying `proposedRole: 'mod'`),
+    // and the owner promotes them with `setMemberRole` once they join.
+    it('invites stewards with proposedRole=mod instead of seeding roster rows', async () => {
       communities.save.mockImplementation((c: Partial<Community>) => ({
         ...c,
         id: 'c1',
+        slug: 'queer-devs',
         createdAt: new Date('2026-01-01T00:00:00.000Z'),
       }));
       members.save.mockImplementation((m: Partial<CommunityMember>) => m);
@@ -301,9 +374,24 @@ describe('CommunitiesService', () => {
       };
       await service.create('u1', dto as CreateCommunityInput);
 
-      expect(members.save).toHaveBeenCalledWith([
-        expect.objectContaining({ userId: 'steward-1', role: RosterRole.Mod }),
-      ]);
+      // The creator's own `owner` row is the only membership written.
+      expect(members.save).toHaveBeenCalledTimes(1);
+      expect(members.save).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 'u1', role: RosterRole.Owner }),
+      );
+      expect(members.save).not.toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 'steward-1' }),
+      );
+      expect(notifications.createForRecipients).toHaveBeenCalledWith(
+        ['steward-1'],
+        NotificationType.CommunityInviteReceived,
+        expect.objectContaining({
+          actorId: 'u1',
+          communitySlug: 'queer-devs',
+          proposedRole: RosterRole.Mod,
+        }),
+        'u1',
+      );
     });
 
     it('does not enroll invites onto the roster (no membership without consent)', async () => {
@@ -343,12 +431,23 @@ describe('CommunitiesService', () => {
       expect(members.save).not.toHaveBeenCalledWith(
         expect.objectContaining({ userId: 'invitee-1' }),
       );
+      // A plain invite carries no `proposedRole` — that field is what
+      // distinguishes a steward ask from an ordinary one.
+      expect(notifications.createForRecipients).toHaveBeenCalledWith(
+        ['invitee-1'],
+        NotificationType.CommunityInviteReceived,
+        expect.not.objectContaining({
+          proposedRole: expect.anything() as unknown,
+        }),
+        'u1',
+      );
     });
 
-    it('seeds stewards but never invites when both are present on the same create', async () => {
+    it('invites both stewards and invites, and writes no roster row for either', async () => {
       communities.save.mockImplementation((c: Partial<Community>) => ({
         ...c,
         id: 'c1',
+        slug: 'queer-devs',
         createdAt: new Date('2026-01-01T00:00:00.000Z'),
       }));
       members.save.mockImplementation((m: Partial<CommunityMember>) => m);
@@ -375,12 +474,28 @@ describe('CommunitiesService', () => {
       };
       await service.create('u1', dto as CreateCommunityInput);
 
-      // The second `members.save` call is the roster-seed batch — exactly
-      // the steward, nothing for the invitee.
-      expect(members.save).toHaveBeenCalledTimes(2);
-      expect(members.save).toHaveBeenCalledWith([
-        expect.objectContaining({ userId: 'steward-1', role: RosterRole.Mod }),
-      ]);
+      // One roster write only: the creator's `owner` row.
+      expect(members.save).toHaveBeenCalledTimes(1);
+      expect(members.save).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 'u1', role: RosterRole.Owner }),
+      );
+
+      // Two fan-outs, not one — the steward's carries `proposedRole: 'mod'`
+      // so the client can say "asked you to help moderate".
+      expect(notifications.createForRecipients).toHaveBeenCalledWith(
+        ['invitee-1'],
+        NotificationType.CommunityInviteReceived,
+        expect.not.objectContaining({
+          proposedRole: expect.anything() as unknown,
+        }),
+        'u1',
+      );
+      expect(notifications.createForRecipients).toHaveBeenCalledWith(
+        ['steward-1'],
+        NotificationType.CommunityInviteReceived,
+        expect.objectContaining({ proposedRole: RosterRole.Mod }),
+        'u1',
+      );
     });
 
     it('retries ref/slug allocation on a unique-violation race and eventually succeeds', async () => {
@@ -621,6 +736,201 @@ describe('CommunitiesService', () => {
         service.update('x', 'mod-1', { tagline: 'new tagline' }),
       ).resolves.toMatchObject({ tagline: 'new tagline' });
     });
+
+    // BE-COM-22: `PATCH /communities/:slug` was the only mutating community
+    // route with no audit entry, so an access-tier change left nothing behind
+    // for a member asking "who made this public?".
+    it('writes a settings_changed governance entry carrying the before/after diff', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        ownerId: 'u1',
+        name: 'Old',
+        purpose: 'p',
+        type: CommunityType.Social,
+        whoFor: 'w',
+        tagline: 't',
+        accessTier: AccessTier.Public,
+        rosterVisible: true,
+        features: [],
+        rules: [],
+        ref: 'QP-C-0001',
+        archivedAt: null,
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Owner });
+
+      await service.update('x', 'u1', { name: 'New name', tagline: 't' });
+
+      expect(governanceLog.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          communityId: 'c1',
+          actorUserId: 'u1',
+          action: GovernanceLogAction.SettingsChanged,
+          // Only the field that actually moved — an echoed-back unchanged
+          // `tagline` is diffed out rather than logged as a change.
+          metadata: { changes: { name: { from: 'Old', to: 'New name' } } },
+        }),
+      );
+    });
+
+    it('logs nothing when the patch changes no field', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        ownerId: 'u1',
+        name: 'Old',
+        purpose: 'p',
+        type: CommunityType.Social,
+        whoFor: 'w',
+        tagline: 't',
+        accessTier: AccessTier.Public,
+        rosterVisible: true,
+        features: [],
+        rules: [],
+        ref: 'QP-C-0001',
+        archivedAt: null,
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Owner });
+
+      await service.update('x', 'u1', { name: 'Old' });
+
+      expect(governanceLog.log).not.toHaveBeenCalled();
+    });
+
+    // `accessTier`/`rosterVisible` are the community's privacy promise —
+    // flipping `private` to `public` exposes the roster and every post at
+    // once, the same class of act as archiving or transferring it. Owner-only,
+    // even though a mod may edit everything else.
+    it('forbids a mod from changing accessTier (owner-only)', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        ownerId: 'owner-1',
+        name: 'Old',
+        purpose: 'p',
+        type: CommunityType.Social,
+        whoFor: 'w',
+        tagline: 't',
+        accessTier: AccessTier.Private,
+        rosterVisible: true,
+        features: [],
+        rules: [],
+        ref: 'QP-C-0001',
+        archivedAt: null,
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Mod });
+
+      await expect(
+        service.update('x', 'mod-1', { accessTier: AccessTier.Public }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(communities.save).not.toHaveBeenCalled();
+    });
+
+    it('lets a mod re-send an unchanged accessTier (no-op, not a privacy change)', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        ownerId: 'owner-1',
+        name: 'Old',
+        purpose: 'p',
+        type: CommunityType.Social,
+        whoFor: 'w',
+        tagline: 't',
+        accessTier: AccessTier.Public,
+        rosterVisible: true,
+        features: [],
+        rules: [],
+        ref: 'QP-C-0001',
+        archivedAt: null,
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Mod });
+
+      await expect(
+        service.update('x', 'mod-1', {
+          accessTier: AccessTier.Public,
+          tagline: 'new tagline',
+        }),
+      ).resolves.toMatchObject({ tagline: 'new tagline' });
+    });
+
+    it('refuses to edit an archived community', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        ownerId: 'u1',
+        name: 'Old',
+        purpose: 'p',
+        type: CommunityType.Social,
+        whoFor: 'w',
+        tagline: 't',
+        accessTier: AccessTier.Public,
+        rosterVisible: true,
+        features: [],
+        rules: [],
+        ref: 'QP-C-0001',
+        archivedAt: new Date('2026-02-01T00:00:00.000Z'),
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue({ role: RosterRole.Owner });
+
+      await expect(
+        service.update('x', 'u1', { name: 'New name' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(communities.save).not.toHaveBeenCalled();
+    });
+
+    // M1 (storage-key impersonation): the community cover is a shared-upload
+    // surface (any owner/moderator edits the same community), so the interceptor
+    // exempts it and the service draws the line — a foreign cover key is allowed
+    // only when it is already the stored value (a co-editor's no-op re-save);
+    // pointing the field at a NEW foreign upload is refused.
+    describe('foreign cover ownership (M1)', () => {
+      const OTHER_ID = '22222222-2222-2222-2222-222222222222';
+      const FILE_SEGMENT = '33333333-3333-3333-3333-333333333333';
+      const FOREIGN_COVER = `community-covers/${OTHER_ID}/${FILE_SEGMENT}.jpg`;
+      const baseCommunity = {
+        id: 'c1',
+        slug: 'x',
+        ownerId: 'owner-1',
+        name: 'Old',
+        purpose: 'p',
+        type: CommunityType.Social,
+        whoFor: 'w',
+        tagline: 't',
+        accessTier: AccessTier.Public,
+        rosterVisible: true,
+        features: [],
+        rules: [],
+        ref: 'QP-C-0001',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      };
+
+      it('lets a moderator re-save the unchanged foreign cover already stored', async () => {
+        communities.findOne.mockResolvedValue({
+          ...baseCommunity,
+          coverImageUrl: FOREIGN_COVER,
+        });
+        members.findOne.mockResolvedValue({ role: RosterRole.Mod });
+        await expect(
+          service.update('x', 'mod-1', { coverImageUrl: FOREIGN_COVER }),
+        ).resolves.toBeDefined();
+      });
+
+      it('rejects introducing a new foreign cover key', async () => {
+        communities.findOne.mockResolvedValue({
+          ...baseCommunity,
+          coverImageUrl: null,
+        });
+        members.findOne.mockResolvedValue({ role: RosterRole.Mod });
+        await expect(
+          service.update('x', 'mod-1', { coverImageUrl: FOREIGN_COVER }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+      });
+    });
   });
 
   describe('join', () => {
@@ -685,6 +995,62 @@ describe('CommunitiesService', () => {
       await expect(service.join('x', 'u1', {})).rejects.toBeInstanceOf(
         ConflictException,
       );
+    });
+
+    // BE-COM-17: `join` used to check `frozenAt` and nothing else, so a caller
+    // could confirm a private community exists purely from the status code
+    // (201 here vs 404 on the detail), and staff of a private or archived
+    // community received join-request notifications from people who should
+    // never have known it was there. Everything `getBySlug` 404s, this route
+    // 404s too.
+    it('404s a private community for a non-member', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Private,
+        archivedAt: null,
+      });
+      members.findOne.mockResolvedValue(null);
+
+      await expect(service.join('x', 'u1', {})).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(joinRequests.save).not.toHaveBeenCalled();
+      expect(notifications.createForRecipients).not.toHaveBeenCalled();
+    });
+
+    it('404s an archived community', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Public,
+        archivedAt: new Date('2026-02-01T00:00:00.000Z'),
+      });
+      members.findOne.mockResolvedValue(null);
+
+      await expect(service.join('x', 'u1', {})).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(members.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('404s a community a moderator has taken down', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        accessTier: AccessTier.Public,
+        archivedAt: null,
+      });
+      members.findOne.mockResolvedValue(null);
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: false,
+        removed: true,
+      });
+
+      await expect(service.join('x', 'u1', {})).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(members.createQueryBuilder).not.toHaveBeenCalled();
     });
 
     it('is idempotent for an already-existing member: resolves joined, never throws', async () => {
@@ -831,6 +1197,64 @@ describe('CommunitiesService', () => {
         service.removeMember('x', 'owner-1', 'owner-slug'),
       ).rejects.toBeInstanceOf(BadRequestException);
       expect(members.delete).not.toHaveBeenCalled();
+    });
+
+    // Mirrors `setMemberRole`'s peer-mod rule: a mod cannot remove another
+    // mod, only the owner can. Otherwise one moderator could quietly clear the
+    // rest of the moderation team off the roster.
+    it('forbids a mod from removing a peer mod (only the owner can)', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        ownerId: 'owner-1',
+      });
+      const qb = qbStub();
+      qb.getMany!.mockResolvedValue([{ slug: 'peer-slug', userId: 'peer-1' }]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+      members.findOne
+        // target's roster row
+        .mockResolvedValueOnce({
+          id: 'm3',
+          role: RosterRole.Mod,
+          userId: 'peer-1',
+        })
+        // actor's own roster row, read by `assertOwnerOrMod`
+        .mockResolvedValueOnce({ role: RosterRole.Mod, userId: 'mod-1' });
+
+      await expect(
+        service.removeMember('x', 'mod-1', 'peer-slug'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(members.delete).not.toHaveBeenCalled();
+    });
+
+    it('lets the owner remove a mod', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        ownerId: 'owner-1',
+      });
+      const qb = qbStub();
+      qb.getMany!.mockResolvedValue([{ slug: 'peer-slug', userId: 'peer-1' }]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+      members.findOne
+        .mockResolvedValueOnce({
+          id: 'm3',
+          role: RosterRole.Mod,
+          userId: 'peer-1',
+        })
+        .mockResolvedValueOnce({ role: RosterRole.Owner, userId: 'owner-1' });
+
+      await service.removeMember('x', 'owner-1', 'peer-slug');
+
+      expect(members.delete).toHaveBeenCalledWith({ id: 'm3' });
+      expect(governanceLog.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          communityId: 'c1',
+          actorUserId: 'owner-1',
+          action: GovernanceLogAction.MemberRemoved,
+          targetUserId: 'peer-1',
+        }),
+      );
     });
   });
 

@@ -402,6 +402,48 @@ describe('ListingsService', () => {
         phone: '+351123',
       });
     });
+
+    // Finding M1: `ListingsController.update` keeps the interceptor's
+    // foreign-upload exemption (a claimed listing has more than one editor),
+    // so the service is the line that stops a member introducing a NEW photo
+    // that is not theirs while still letting a co-editor re-save one a
+    // different collaborator uploaded.
+    describe('foreign photo ownership (M1)', () => {
+      const OWNER_ID = 'owner-1';
+      const OTHER_ID = '22222222-2222-2222-2222-222222222222';
+      const FILE_SEGMENT = '33333333-3333-3333-3333-333333333333';
+      // A well-formed key whose embedded owner segment is NOT the requester.
+      const FOREIGN_KEY = `listing-photos/${OTHER_ID}/${FILE_SEGMENT}.jpg`;
+
+      it('allows re-saving a photo slot the listing already carries', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: OWNER_ID,
+            photos: { wide: FOREIGN_KEY, d1: '', d2: '', vibe: '' },
+          }),
+        );
+        await expect(
+          service.update('QPL-2026-0001', OWNER_ID, {
+            photos: { wide: FOREIGN_KEY },
+          }),
+        ).resolves.toBeDefined();
+      });
+
+      it('rejects a new foreign photo the listing does not carry', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: OWNER_ID,
+            photos: { wide: '', d1: '', d2: '', vibe: '' },
+          }),
+        );
+        await expect(
+          service.update('QPL-2026-0001', OWNER_ID, {
+            photos: { wide: FOREIGN_KEY },
+          }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe('remove', () => {

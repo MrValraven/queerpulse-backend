@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Post } from '@nestjs/common';
+import { Throttle, seconds } from '@nestjs/throttler';
 import {
   CurrentUser,
   CurrentUserData,
@@ -25,6 +26,10 @@ export class ConsentController {
   constructor(private readonly consentService: ConsentService) {}
 
   // Append a consent record; returns the stored `ConsentRecord`.
+  // Throttled: the table is append-only by design, so an unthrottled caller
+  // could grow it without bound. `record()` also de-duplicates an unchanged
+  // decision, so a banner that re-posts the same choice costs nothing.
+  @Throttle({ default: { limit: 10, ttl: seconds(60) } })
   @Post()
   @ApiOperation({ summary: 'Record a consent decision (append-only).' })
   @ApiCreatedResponse({ description: 'The stored consent record.' })

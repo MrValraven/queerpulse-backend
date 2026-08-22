@@ -15,6 +15,26 @@ export const MESSAGE_DELIVERED = 'message.delivered';
 export const MESSAGE_REACTION = 'message.reaction';
 export const MESSAGE_DELETED = 'message.deleted';
 export const MESSAGE_PINNED = 'message.pinned';
+/**
+ * A member's LIVE access to a conversation was revoked — they were removed from
+ * a group, left one, or a block severed the DM pair.
+ *
+ * Purely a socket-room instruction: `ChatGateway` evicts every socket in each
+ * listed member's `user:<id>` room from the conversation room
+ * (`socketsLeave`). Without it, room authorisation was a one-shot check at
+ * `conversation:join` time and every later broadcast (`message:new`, `typing`,
+ * `read`, `message:delivered`, `reaction`, `message:deleted`,
+ * `message:pinned`) is a blind room emit — so a removed member or a blocked DM
+ * counterpart kept receiving message bodies live until their socket happened to
+ * reconnect (up to the 15-minute access-token lifetime, longer if the tab
+ * refreshed the cookie first). The HTTP read path's `leftAt` ceiling and the
+ * `canJoinConversationLive` gate were both silently undone by that gap.
+ *
+ * Emitted post-commit and best-effort: a socket relay failure must never fail a
+ * membership write that already committed.
+ */
+export const CONVERSATION_MEMBERSHIP_REVOKED =
+  'conversation.membership.revoked';
 
 export interface MessageCreatedEvent {
   conversationId: string;
@@ -30,7 +50,18 @@ export interface MessageCreatedEvent {
 
 export interface MessageUpdatedEvent {
   conversationId: string;
-  message: MessageView;
+  /**
+   * The frontend-contract shape, HYDRATED — not the internal `MessageView`.
+   *
+   * `toMessageResponses` is what blanks the body of a message a moderator has
+   * taken down; relaying the raw view meant an edit inside the 15-minute window
+   * pushed the new body to every connected participant even for a message that
+   * was already hidden. (`editMessage` now refuses that edit outright, so this
+   * is the second of two locks on the same door.) The frontend's
+   * `message:updated` contract already declares `MessageResponse` and reads
+   * only `id`/`body`/`editedAt`, all of which both shapes carry.
+   */
+  message: MessageResponse;
 }
 
 export interface ConversationCreatedEvent {
@@ -73,6 +104,13 @@ export interface MessageReactionEvent {
    *  patch the chip counts in place (each keeping its own `mine`) instead of
    *  refetching the whole thread on every reaction. */
   reactions: MessageReactionCount[];
+}
+
+/** See {@link CONVERSATION_MEMBERSHIP_REVOKED}. `userIds` may hold more than
+ *  one member (a block severs the room for BOTH sides of the DM pair). */
+export interface ConversationMembershipRevokedEvent {
+  conversationId: string;
+  userIds: string[];
 }
 
 export interface MessageDeletedEvent {

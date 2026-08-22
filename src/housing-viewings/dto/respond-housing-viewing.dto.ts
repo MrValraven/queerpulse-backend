@@ -2,16 +2,16 @@ import {
   ArrayMaxSize,
   ArrayMinSize,
   IsArray,
-  IsDateString,
   IsOptional,
   IsString,
   MaxLength,
 } from 'class-validator';
+import { IsInstantString } from './is-instant-string.decorator';
 
 /** POST /housing-viewings/:id/accept — the party being asked picks one of the
  * proposed slots. */
 export class AcceptHousingViewingDto {
-  @IsDateString() slot!: string;
+  @IsInstantString() slot!: string;
 }
 
 /** POST /housing-viewings/:id/propose — counter-propose new slots (with an
@@ -20,7 +20,7 @@ export class ProposeHousingViewingDto {
   @IsArray()
   @ArrayMinSize(1)
   @ArrayMaxSize(3)
-  @IsDateString({}, { each: true })
+  @IsInstantString({ each: true })
   slots!: string[];
 
   @IsOptional() @IsString() @MaxLength(1000) note?: string;

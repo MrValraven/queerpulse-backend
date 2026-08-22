@@ -153,9 +153,7 @@ export class MagazineReaderCommentsService {
     );
   }
 
-  private async loadCommentOrThrow(
-    id: string,
-  ): Promise<MagazineReaderComment> {
+  private async loadCommentOrThrow(id: string): Promise<MagazineReaderComment> {
     const comment = await this.comments.findOne({ where: { id } });
     if (!comment) {
       throw new NotFoundException('Comment not found');

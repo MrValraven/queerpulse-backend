@@ -75,6 +75,35 @@ describe('GoogleAuthGuard.getAuthenticateOptions', () => {
     expect(typeof decoded.nonce).toBe('string');
   });
 
+  it('sets prompt=login and embeds reauth:true in state when the outbound leg opts into step-up reauth', () => {
+    const res = { cookie: jest.fn() };
+    const opts = makeGuard().getAuthenticateOptions(
+      outboundContext({ reauth: '1', redirect: '/settings' }, res),
+    );
+    expect(opts.prompt).toBe('login');
+    expect(decodeOAuthState(opts.state)).toEqual(
+      expect.objectContaining({ reauth: true, redirect: '/settings' }),
+    );
+  });
+
+  it('does not set prompt when reauth is absent (ordinary sign-in is never forced to re-enter credentials)', () => {
+    const res = { cookie: jest.fn() };
+    const opts = makeGuard().getAuthenticateOptions(
+      outboundContext({ redirect: '/feed' }, res),
+    );
+    expect(opts.prompt).toBeUndefined();
+    expect(decodeOAuthState(opts.state)?.reauth).toBeUndefined();
+  });
+
+  it('only a literal "1" opts into reauth (mirrors ageAttested\'s guard)', () => {
+    const res = { cookie: jest.fn() };
+    const opts = makeGuard().getAuthenticateOptions(
+      outboundContext({ reauth: 'true' }, res),
+    );
+    expect(opts.prompt).toBeUndefined();
+    expect(decodeOAuthState(opts.state)?.reauth).toBeUndefined();
+  });
+
   it('does not re-mint on the callback leg (state already present in query)', () => {
     // On the callback Google echoes `state` back; passport reads it from the
     // query, so we must not overwrite the nonce cookie.
@@ -125,6 +154,20 @@ describe('GoogleAuthGuard.handleRequest', () => {
     } catch (e) {
       expect(e).toBeInstanceOf(OAuthCallbackError);
       expect((e as OAuthCallbackError).code).toBe('access_denied');
+    }
+  });
+
+  it('collapses an off-vocabulary ?error= to oauth_failed', () => {
+    try {
+      makeGuard().handleRequest(
+        null,
+        null,
+        null,
+        ctx({ error: 'x'.repeat(2000) }),
+      );
+      fail('expected throw');
+    } catch (e) {
+      expect((e as OAuthCallbackError).code).toBe('oauth_failed');
     }
   });
 

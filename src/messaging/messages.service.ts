@@ -10,7 +10,7 @@ import { escapeLikeTerm } from '../common/like-escape';
 import { ConnectionsService } from '../connections/connections.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
-import { UserRole } from '../users/entities/user.entity';
+import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
 import { Conversation, ConversationKind } from './entities/conversation.entity';
@@ -164,7 +164,15 @@ export class MessagesService {
           { before, beforeId },
         );
       } else {
-        qb.andWhere('m.created_at < :before', { before });
+        // Legacy single-column cursor (`before` with no `beforeId`). It has to
+        // be INCLUSIVE: several messages routinely share one millisecond (a
+        // burst send, or the system pills `GroupsService` inserts in a single
+        // transaction), and a strict `<` silently dropped every message that
+        // shared the boundary instant with the client's oldest known row. An
+        // inclusive bound can only ever REPEAT the boundary message, which
+        // every client already absorbs (history pages are merged by message
+        // id). Pass `beforeId` too for the exact composite keyset above.
+        qb.andWhere('m.created_at <= :before', { before });
       }
     }
     // @DeleteDateColumn makes the QueryBuilder exclude soft-deleted rows by
@@ -220,7 +228,10 @@ export class MessagesService {
         { after, afterId },
       );
     } else {
-      qb.andWhere('m.created_at > :after', { after });
+      // Inclusive for the same reason as the backward cursor's fallback above:
+      // without `afterId` a strict `>` skips every message sharing the boundary
+      // millisecond, and reconnect sync merges by id so a repeat is free.
+      qb.andWhere('m.created_at >= :after', { after });
     }
     const rows = await qb
       .withDeleted()
@@ -297,6 +308,13 @@ export class MessagesService {
       // clearedAt floor: at-or-before the caller's clear point does not exist
       // for them (mirrors getMessages' history floor).
       .andWhere('(p.cleared_at IS NULL OR m.created_at > p.cleared_at)')
+      // leftAt ceiling: the mirror of the floor above, and the same P0
+      // hardening `getMessages`/`getMessagesSince` apply. Without it a member
+      // removed from (or who left) a group could probe common terms through
+      // `GET /messages/search` and read `buildSearchSnippet` windows of every
+      // message posted AFTER their departure — reconstructing the thread the
+      // history ceiling was added to withhold.
+      .andWhere('(p.left_at IS NULL OR m.created_at <= p.left_at)')
       // Moderator-taken-down messages (hidden OR removed, keyed by the message
       // uuid) never surface as a search hit — the searcher is always an
       // ordinary participant here (never acting as staff), and a tombstoned
@@ -389,6 +407,22 @@ export class MessagesService {
     kind?: 'user' | 'gif' | 'image',
     attachment?: GifAttachment,
   ): Promise<MessageResponse> {
+    // Sending is the ONE messaging write both transports share (HTTP POST and
+    // the gateway's `message:send`), so the sender's CURRENT account status is
+    // asserted here rather than in either caller.
+    //
+    // The websocket path reads `status` from the JWT claim once, at the
+    // handshake, and never again — so without this a member suspended or
+    // banned by a moderator kept posting for the remaining life of their
+    // 15-minute access token, which for a harassment suspension is exactly the
+    // window that matters. HTTP is already covered by `JwtStrategy`'s
+    // per-request row read; this makes the two agree and fails closed on a
+    // deleted row. `ChatSessionEnforcementService` is the receive-side half:
+    // it drops the offending sockets on its next sweep.
+    const sender = await this.usersService.findById(userId);
+    if (sender?.status !== UserStatus.Active) {
+      throw new ForbiddenException('Your account cannot send messages');
+    }
     const participant = await this.core.requireParticipant(
       conversationId,
       userId,
@@ -535,7 +569,11 @@ export class MessagesService {
     userId: string,
     body: string,
   ): Promise<MessageResponse> {
-    await this.core.requireParticipant(conversationId, userId);
+    // Active participation: an edit broadcasts a new body into the room, so a
+    // member who left the group (or a blocked DM counterpart) must not be able
+    // to push one (BE-MSG-09). `deleteMessage` deliberately keeps the lenient
+    // check — removing your own content stays possible after you leave.
+    await this.core.requireActiveParticipant(conversationId, userId);
     const message = await this.messages.findOne({
       where: { id: messageId, conversationId },
     });
@@ -548,17 +586,29 @@ export class MessagesService {
     if (Date.now() - message.createdAt.getTime() > EDIT_WINDOW_MS) {
       throw new ForbiddenException('The edit window has expired');
     }
+    // A moderator takedown outranks the author's edit window. Reads already
+    // tombstone a hidden/removed message, but editing it was still permitted:
+    // the author of a just-hidden message could rewrite it inside the 15
+    // minutes, changing what the moderator sees in the report, and the
+    // `message:updated` frame carried the new body to every connected
+    // participant — defeating the takedown on live clients.
+    if (await this.core.isMessageTakenDown(messageId)) {
+      throw new ForbiddenException('This message can no longer be edited');
+    }
     message.body = body;
     message.editedAt = new Date();
     const saved = await this.messages.save(message);
     const view = toMessageView(saved);
-    this.eventEmitter.emit(MESSAGE_UPDATED, {
-      conversationId,
-      message: view,
-    } satisfies MessageUpdatedEvent);
     const [response] = await this.core.toMessageResponses([view], userId);
     // invariant: toMessageResponses returns one response per input view, and
     // exactly one view was passed in.
+    // Broadcast the HYDRATED response, not the raw view: `toMessageResponses`
+    // is what applies tombstoning, so the live frame can never carry a body
+    // the read path would have withheld. (See `MessageUpdatedEvent`.)
+    this.eventEmitter.emit(MESSAGE_UPDATED, {
+      conversationId,
+      message: response!,
+    } satisfies MessageUpdatedEvent);
     return response!;
   }
 }

@@ -305,7 +305,7 @@ describe('Partners (e2e)', () => {
     );
 
     const res = await request(app.getHttpServer() as App)
-      .get('/partner-applications')
+      .get('/admin/partners/applications')
       .set('Cookie', memberCookies);
 
     expect(res.status).toBe(403);
@@ -334,7 +334,7 @@ describe('Partners (e2e)', () => {
       await withCsrf(adminCookies);
 
     const patchRes = await request(app.getHttpServer() as App)
-      .patch(`/partner-applications/${id}`)
+      .patch(`/admin/partners/applications/${id}`)
       .set('Cookie', adminCsrfCookies)
       .set('X-CSRF-Token', adminCsrfToken)
       .send({ action: 'approve' });
@@ -372,7 +372,7 @@ describe('Partners (e2e)', () => {
       await withCsrf(adminCookies);
 
     const patchRes = await request(app.getHttpServer() as App)
-      .patch(`/partner-applications/${id}`)
+      .patch(`/admin/partners/applications/${id}`)
       .set('Cookie', adminCsrfCookies)
       .set('X-CSRF-Token', adminCsrfToken)
       .send({ action: 'reject', note: 'Not a fit for the directory' });

@@ -53,6 +53,12 @@ export class MagazineWriterApplication {
   })
   status!: WriterApplicationStatus;
 
+  // Indexed (CNT-20): Postgres does not index a foreign-key column
+  // automatically, so without this every hard delete of a `users` row (the
+  // account-erasure path) sequentially scanned this table to fix up the
+  // ON DELETE SET NULL. Created by
+  // `1793640000000-AddContentModuleForeignKeyIndexes`.
+  @Index('IDX_magazine_writer_applications_reviewed_by')
   @Column({ type: 'uuid', nullable: true })
   reviewedBy!: string | null;
 

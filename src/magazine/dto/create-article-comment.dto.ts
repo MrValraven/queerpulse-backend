@@ -1,4 +1,6 @@
-import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
+
+import { DESK_BLOCK_ID_MAX, DESK_BODY_MAX } from './desk-text-limits';
 
 /**
  * Body of `POST /magazine/admin/pieces/:id/comments` (Magazine Desk Phase 7,
@@ -7,7 +9,8 @@ import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
  * `blockId` optionally anchors the note to one article block.
  */
 export class CreateArticleCommentDto {
-  @IsString() @IsNotEmpty() body!: string;
+  // Capped (CNT-14), matching the reader-facing `CreateReaderCommentDto`.
+  @IsString() @IsNotEmpty() @MaxLength(DESK_BODY_MAX) body!: string;
 
-  @IsOptional() @IsString() blockId?: string;
+  @IsOptional() @IsString() @MaxLength(DESK_BLOCK_ID_MAX) blockId?: string;
 }

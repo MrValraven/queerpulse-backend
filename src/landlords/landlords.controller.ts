@@ -1,7 +1,10 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   Post,
   Query,
@@ -22,6 +25,7 @@ import {
   ApiConflictResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
+  ApiNoContentResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
@@ -94,6 +98,26 @@ export class LandlordsController {
     @Body() dto: CreateRecommendationDto,
   ) {
     return this.service.recommend(slug, user.userId, dto);
+  }
+
+  // BE-HSG-18: the author can take their own recommendation down. Until this
+  // route existed, removal lived only on the admin controller, so a member who
+  // regretted publicly rating a named real person had to find a moderator.
+  @Delete(':slug/recommendations/mine')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Withdraw your own recommendation of a landlord' })
+  @ApiNoContentResponse({
+    description: 'Withdrawn (or there was nothing to withdraw).',
+  })
+  @ApiNotFoundResponse({ description: 'No live landlord with that slug.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  removeMyRecommendation(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.service.removeMyRecommendation(slug, user.userId);
   }
 
   @Post(':slug/intro-requests')

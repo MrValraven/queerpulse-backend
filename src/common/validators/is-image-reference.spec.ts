@@ -43,10 +43,39 @@ describe('IsImageReference', () => {
     ).toBeUndefined();
   });
 
-  it('accepts an external https URL', () => {
-    expect(
-      firstError('https://images.unsplash.com/photo-1611178204388'),
-    ).toBeUndefined();
+  it.each([
+    [
+      'a Google account photo',
+      'https://lh3.googleusercontent.com/a/photo=s96-c',
+    ],
+    [
+      'a seeded Unsplash image',
+      'https://images.unsplash.com/photo-1611178204388',
+    ],
+    [
+      'a Mux poster frame',
+      'https://image.mux.com/pb-1/thumbnail.webp?token=tok',
+    ],
+  ])('accepts %s', (_label, value) => {
+    expect(firstError(value)).toBeUndefined();
+  });
+
+  // REGRESSION: `https://` alone used to be the whole test, so a group avatar
+  // or event cover could be a tracking pixel on any host — loaded by every
+  // other member's browser on every render. See ALLOWED_IMAGE_HOSTS.
+  it.each([
+    ['an arbitrary host', 'https://tracker.example/pixel.gif'],
+    ['a lookalike subdomain', 'https://images.unsplash.com.evil.example/p.png'],
+    [
+      'a host smuggled in userinfo',
+      'https://images.unsplash.com@evil.example/p.png',
+    ],
+    [
+      'a host smuggled in a query param',
+      'https://evil.example/?u=images.unsplash.com',
+    ],
+  ])('rejects %s', (_label, value) => {
+    expect(firstError(value)).toBeDefined();
   });
 
   it('accepts null, which clears the field', () => {

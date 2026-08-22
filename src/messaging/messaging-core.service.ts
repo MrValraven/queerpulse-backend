@@ -1,17 +1,25 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Not, QueryFailedError, Repository } from 'typeorm';
+import {
+  DataSource,
+  In,
+  IsNull,
+  Not,
+  QueryFailedError,
+  Repository,
+} from 'typeorm';
 import {
   ConversationParticipant,
   ConversationRole,
 } from './entities/conversation-participant.entity';
 import { ConversationPinnedMessage } from './entities/conversation-pinned-message.entity';
-import { Conversation } from './entities/conversation.entity';
+import { Conversation, ConversationKind } from './entities/conversation.entity';
 import { MessageReaction } from './entities/message-reaction.entity';
 import { MessageStar } from './entities/message-star.entity';
 import { GifAttachment, Message, MessageKind } from './entities/message.entity';
@@ -40,9 +48,7 @@ import { MESSAGE_CREATED, MessageCreatedEvent } from './messaging.events';
 /** `Message.kind` (the entity enum) → the frontend-contract `MessageResponse.kind`
  *  string union. Shared by `buildLastMessagePreview` and `toMessageResponses` so
  *  the mapping can't drift between the inbox-preview and full-thread paths. */
-function messageKindToResponseKind(
-  kind: MessageKind,
-): MessageResponse['kind'] {
+function messageKindToResponseKind(kind: MessageKind): MessageResponse['kind'] {
   switch (kind) {
     case MessageKind.System:
       return 'system';
@@ -147,6 +153,110 @@ export class MessagingCoreService {
   }
 
   /**
+   * The WRITE-path counterpart of {@link requireParticipant}: the caller must
+   * not only be a participant, they must still be ENTITLED TO ACT in the
+   * conversation.
+   *
+   * `requireParticipant` deliberately returns a row regardless of `leftAt`,
+   * because reads still serve a former member their ceilinged history. Every
+   * WRITE, though, was gating on that same lenient check, so a member removed
+   * from a group could keep reacting to and pinning/unpinning messages — each
+   * one broadcasting a live `reaction` / `message:pinned` frame the remaining
+   * members saw — and a blocked DM counterpart could pin, react, and fire
+   * `read` receipts into the blocker's room. `sendMessage` and
+   * `canJoinConversationLive` already applied both extra rules; this brings
+   * every other write in line with them, in one place so they cannot drift.
+   *
+   * Two rules on top of participation:
+   *  - **`leftAt`**: a member who left (or was removed from) a group may no
+   *    longer write to it.
+   *  - **blocks**: in a DIRECT, non-official thread, a block in EITHER
+   *    direction severs writing. Groups are exempt for the same reason
+   *    `sendMessage` exempts them (a block between two members does not
+   *    dissolve the group), and so is the platform's official thread.
+   *
+   * Costs one extra query beyond `requireParticipant`, and only for a
+   * conversation that actually has a counterpart to be blocked by — the kind /
+   * `is_official` predicates live inside the same statement.
+   */
+  async requireActiveParticipant(
+    conversationId: string,
+    userId: string,
+  ): Promise<ConversationParticipant> {
+    const participant = await this.requireParticipant(conversationId, userId);
+    if (participant.leftAt) {
+      throw new ForbiddenException('You have left this conversation');
+    }
+    const blockedCounterpart = await this.participants
+      .createQueryBuilder('other')
+      .innerJoin(Conversation, 'c', 'c.id = other.conversation_id')
+      .where('other.conversation_id = :conversationId', { conversationId })
+      .andWhere('other.user_id != :userId', { userId })
+      .andWhere('c.kind != :groupKind', { groupKind: ConversationKind.Group })
+      .andWhere('c.is_official = false')
+      .andWhere(
+        `EXISTS (
+          SELECT 1 FROM "blocks" "b"
+          WHERE ("b"."blocker_id" = :userId AND "b"."blocked_id" = other.user_id)
+             OR ("b"."blocked_id" = :userId AND "b"."blocker_id" = other.user_id)
+        )`,
+      )
+      .getExists();
+    if (blockedCounterpart) {
+      throw new ForbiddenException(
+        'You cannot interact with this conversation',
+      );
+    }
+    return participant;
+  }
+
+  /**
+   * The `created_at` of one message, scoped to the conversation it must belong
+   * to, or `null` when it isn't there. Backs `markRead`'s explicit read
+   * watermark (`upToMessageId`): the timestamp comes from the DB row, never
+   * from the caller, so a client can neither stamp a watermark past what it
+   * actually received nor point at another thread's message.
+   */
+  async messageCreatedAt(
+    conversationId: string,
+    messageId: string,
+  ): Promise<Date | null> {
+    const message = await this.messages.findOne({
+      where: { id: messageId, conversationId },
+      select: ['id', 'createdAt'],
+      withDeleted: true,
+    });
+    return message?.createdAt ?? null;
+  }
+
+  /**
+   * Whether a moderator has taken this message down (hidden OR removed).
+   *
+   * `toMessageResponses` already tombstones a taken-down message on every READ
+   * path, but writes had no equivalent check: within the 15-minute edit window
+   * the author of a just-hidden message could PATCH it, changing what
+   * moderators see in the report and pushing the new body out live. Exposed
+   * here (rather than duplicating the lookup) so `editMessage` reads the same
+   * table, under the same subject key, as the read path.
+   */
+  isMessageTakenDown(messageId: string): Promise<boolean> {
+    return this.moderationStates.exist({
+      where: [
+        {
+          subjectType: MessagingCoreService.MESSAGE_SUBJECT_TYPE,
+          subjectId: messageId,
+          hiddenAt: Not(IsNull()),
+        },
+        {
+          subjectType: MessagingCoreService.MESSAGE_SUBJECT_TYPE,
+          subjectId: messageId,
+          removedAt: Not(IsNull()),
+        },
+      ],
+    });
+  }
+
+  /**
    * A `NOT EXISTS` SQL fragment (message alias `m`) that is TRUE only when the
    * message carries no moderator takedown (neither hidden nor removed). Shared
    * by the message-counting/preview query builders so a taken-down message is
@@ -214,6 +324,11 @@ export class MessagingCoreService {
       .andWhere('m.sender_id != :userId', { userId })
       .andWhere('(p.last_read_at IS NULL OR m.created_at > p.last_read_at)')
       .andWhere('(p.cleared_at IS NULL OR m.created_at > p.cleared_at)')
+      // leftAt ceiling, matching `MessagesService.getMessages`: a member
+      // removed from a group cannot READ anything posted after they left, so
+      // those messages must not keep driving an unread badge they can never
+      // clear (BE-MSG-08).
+      .andWhere('(p.left_at IS NULL OR m.created_at <= p.left_at)')
       // A moderator-taken-down message never counts toward unread — the viewer
       // can no longer see it, so it must not drive a badge.
       .andWhere(this.notModeratedPredicate())
@@ -251,6 +366,30 @@ export class MessagingCoreService {
       .where('m.sender_id != :userId', { userId })
       .andWhere('(p.last_read_at IS NULL OR m.created_at > p.last_read_at)')
       .andWhere('(p.cleared_at IS NULL OR m.created_at > p.cleared_at)')
+      // leftAt ceiling — see `unreadCountsByConversation` (BE-MSG-08).
+      .andWhere('(p.left_at IS NULL OR m.created_at <= p.left_at)')
+      // A blocked DM does not appear in the inbox (`listConversations` drops
+      // it), so it must not appear in the nav badge either — otherwise the
+      // number permanently outruns the list beneath it, on a thread the member
+      // has no UI path to open and clear. Scoped to DIRECT, non-official
+      // threads for the same reason every other block gate is: a block between
+      // two members does not dissolve a group, and nobody is blocked out of
+      // the platform's own official thread (BE-MSG-08).
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1 FROM "conversation_participants" "__unread_other"
+          JOIN "conversations" "__unread_convo"
+            ON "__unread_convo"."id" = "__unread_other"."conversation_id"
+          JOIN "blocks" "__unread_block"
+            ON ("__unread_block"."blocker_id" = :userId AND "__unread_block"."blocked_id" = "__unread_other"."user_id")
+            OR ("__unread_block"."blocked_id" = :userId AND "__unread_block"."blocker_id" = "__unread_other"."user_id")
+          WHERE "__unread_other"."conversation_id" = m.conversation_id
+            AND "__unread_other"."user_id" != :userId
+            AND "__unread_convo"."kind" != :unreadGroupKind
+            AND "__unread_convo"."is_official" = false
+        )`,
+        { unreadGroupKind: ConversationKind.Group },
+      )
       // A moderator-taken-down message never counts toward the unread badge.
       .andWhere(this.notModeratedPredicate())
       .setParameter(
@@ -638,6 +777,7 @@ export class MessagingCoreService {
         withDeleted: true,
       });
       if (existing) {
+        this.assertOwnIdempotencyKey(existing, senderId);
         return this.buildPostResult(existing, senderId, false);
       }
     }
@@ -669,21 +809,36 @@ export class MessagingCoreService {
       // key (an unrelated kind's, or a malformed string) to a message. 404-
       // style rejection posture doesn't apply here (unlike `FilesController`,
       // nothing is disclosed either way) — a plain 400 is correct.
-      if (parseStorageKey(attachment.url) !== UPLOAD_KIND_SPECS['message-image']) {
+      if (
+        parseStorageKey(attachment.url) !== UPLOAD_KIND_SPECS['message-image']
+      ) {
         throw new BadRequestException('Invalid image attachment');
       }
-      // A FRESH send must additionally be the sender's OWN upload — the abuse
-      // this guards against is attaching someone else's private key to a
-      // message you didn't upload it into. A FORWARD is exempt: it re-sends
-      // an existing message's attachment (the forwarder already saw the image
-      // as a participant of the original conversation, and the key's shape
-      // was already validated above), so requiring the forwarder to also be
-      // the original uploader would break the ordinary "forward a photo"
-      // action for no real safety gain.
-      if (!forwarded && storageKeyOwnerId(attachment.url) !== senderId) {
-        throw new ForbiddenException(
-          'You may only attach an image you uploaded',
+      // The attachment must be one this sender is entitled to send. Two
+      // legitimate cases:
+      //   1. A FRESH send of the sender's OWN upload — the key encodes the
+      //      uploader, so `storageKeyOwnerId(key) === senderId` proves it.
+      //   2. A genuine FORWARD of an image the sender already had access to —
+      //      an existing image message carrying this exact attachment key lives
+      //      in a conversation the sender is (or once was) a participant of.
+      //
+      // The client's `forwarded` boolean is a DISPLAY HINT only and is never
+      // trusted to skip this check: a forward is DERIVED server-side from a
+      // message the sender provably had access to (see
+      // `senderCanForwardAttachment`). Before this, `forwarded: true` alone
+      // bypassed the ownership check, so any member who merely knew someone
+      // else's `message-image` key could attach it by asserting the flag — the
+      // flag is now non-authoritative and the server proves genuine access.
+      if (storageKeyOwnerId(attachment.url) !== senderId) {
+        const isGenuineForward = await this.senderCanForwardAttachment(
+          senderId,
+          attachment.url,
         );
+        if (!isGenuineForward) {
+          throw new ForbiddenException(
+            'You may only attach an image you uploaded',
+          );
+        }
       }
     }
     const entityKind =
@@ -722,12 +877,66 @@ export class MessagingCoreService {
           withDeleted: true,
         });
         if (winner) {
+          this.assertOwnIdempotencyKey(winner, senderId);
           return this.buildPostResult(winner, senderId, false);
         }
       }
       throw error;
     }
     return this.buildPostResult(saved, senderId, true);
+  }
+
+  /**
+   * Idempotency is a contract between ONE sender and their own retry, so a
+   * dedup hit belonging to somebody else is refused rather than returned.
+   *
+   * The dedup key `(conversation_id, client_message_id)` carries no sender (and
+   * neither does the partial unique index behind it), so without this a
+   * participant who reused another participant's `clientMessageId` — which is
+   * echoed to everyone in every `MessageResponse` and in the `message:new`
+   * broadcast — got that member's message handed back as though it were their
+   * own successful send: no insert, no error, and `reactions.mine` computed for
+   * the wrong person. A 409 is the honest answer; a genuine `randomUUID()`
+   * collision between two members in one conversation is not a real event.
+   */
+  private assertOwnIdempotencyKey(existing: Message, senderId: string): void {
+    if (existing.senderId !== senderId) {
+      throw new ConflictException(
+        'That clientMessageId is already in use in this conversation',
+      );
+    }
+  }
+
+  /**
+   * True when `senderId` is entitled to FORWARD the image stored at
+   * `attachmentKey`: an existing image message carrying that exact attachment
+   * key lives in a conversation the sender is (or once was) a participant of.
+   * That proves the sender genuinely had access to the image, so a forward can
+   * safely skip the "must be your own upload" ownership check WITHOUT trusting
+   * any client-supplied flag or id — closing the client-controlled `forwarded`
+   * bypass. `attachmentKey` is the canonical bare storage key (callers collapse
+   * the resolved `/files/<key>` URL back to the key before this runs). A left
+   * (`leftAt`) participant still qualifies: they retain read access to history,
+   * so they genuinely saw the image and may forward it.
+   */
+  private async senderCanForwardAttachment(
+    senderId: string,
+    attachmentKey: string,
+  ): Promise<boolean> {
+    const accessibleCount = await this.messages
+      .createQueryBuilder('message')
+      .innerJoin(
+        ConversationParticipant,
+        'participant',
+        'participant.conversation_id = message.conversation_id AND participant.user_id = :senderId',
+        { senderId },
+      )
+      .where('message.kind = :imageKind', { imageKind: MessageKind.Image })
+      .andWhere("message.attachment ->> 'url' = :attachmentKey", {
+        attachmentKey,
+      })
+      .getCount();
+    return accessibleCount > 0;
   }
 
   /**

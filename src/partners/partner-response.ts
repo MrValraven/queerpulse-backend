@@ -43,7 +43,8 @@ export interface PartnerDetailDTO extends PartnerCardDTO {
 }
 
 // Admin-only view (includes review metadata). `id` isn't in the spec's
-// interface block, but the endpoint table's `PATCH /partner-applications/:id`
+// interface block, but the endpoint table's triage route (now
+// `PATCH /admin/partners/applications/:id`)
 // has to address a row by id and `listApplications()`/`triage()` are the only
 // callers that ever see this shape — so it's surfaced here the same way
 // `JobApplicationDTO` (also id-addressed, unlike the public `JobCardDTO`)

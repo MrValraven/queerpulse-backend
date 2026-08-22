@@ -10,6 +10,7 @@ import {
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { GifAttachmentDto } from '../../messaging/dto/send-message.dto';
+import { TrimMessageBody } from '../../messaging/dto/trim-message-body';
 
 export class JoinPayload {
   @IsUUID('4')
@@ -20,6 +21,7 @@ export class SendMessagePayload {
   @IsUUID('4')
   conversationId!: string;
 
+  @TrimMessageBody()
   @IsString()
   @MinLength(1)
   @MaxLength(5000)
@@ -56,6 +58,14 @@ export class TypingPayload {
 export class ReadPayload {
   @IsUUID('4')
   conversationId!: string;
+
+  /** The newest message this client has actually rendered. The server reads
+   *  that row's own `created_at` and stamps the watermark there, so a message
+   *  that arrived between the last fetch and this frame is not silently marked
+   *  read. Omitted, the watermark stays `now()` (the original behaviour). */
+  @IsOptional()
+  @IsUUID('4')
+  upToMessageId?: string;
 }
 
 export class DeliveredPayload {

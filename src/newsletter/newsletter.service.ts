@@ -58,7 +58,20 @@ export class NewsletterService {
       );
     }
 
-    await this.sendConfirmation(email, confirmToken);
+    // Fire-and-forget, deliberately NOT awaited.
+    //
+    // The response body is uniform so membership can't be read off it, but
+    // awaiting the send leaked the same fact through TIMING: an
+    // already-confirmed address returned in tens of milliseconds (it exits
+    // above without sending), while every other address paid a synchronous SMTP
+    // round trip — up to the mailer's 8s connect + 8s socket timeouts against a
+    // degraded host. `POST /newsletter/subscribe` was a reliable membership
+    // oracle for anyone with a stopwatch, and the 5/min throttle is plenty for
+    // a targeted check. Both branches now return as soon as the row is written.
+    //
+    // `void` (not a floating promise): `sendConfirmation` already swallows its
+    // own delivery errors and logs them, so this can never reject unhandled.
+    void this.sendConfirmation(email, confirmToken);
     return { status: 'pending' };
   }
 
@@ -108,6 +121,10 @@ export class NewsletterService {
    * Build the confirm link and dispatch it through the shared mailer (log-only
    * until SMTP env is set). A delivery failure is logged but swallowed so the
    * subscribe response stays uniform and never depends on the mail transport.
+   *
+   * Called OFF the request path (`void`-ed by `subscribe`), so it must never
+   * throw — see the timing-oracle note there. Anything added here has to keep
+   * that guarantee.
    */
   private async sendConfirmation(
     email: string,

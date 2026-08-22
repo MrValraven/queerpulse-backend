@@ -1,12 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { RefreshToken } from './entities/refresh-token.entity';
-
-// Rows are kept for a grace window after they stop being usable (so reuse
-// detection and audit still work briefly), then purged.
-const RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30d
 
 @Injectable()
 export class AuthMaintenanceService {
@@ -15,11 +12,27 @@ export class AuthMaintenanceService {
   constructor(
     @InjectRepository(RefreshToken)
     private readonly refreshTokens: Repository<RefreshToken>,
+    private readonly config: ConfigService,
   ) {}
 
   /**
+   * Rows are kept for a grace window after they stop being usable (so reuse
+   * detection and audit still work briefly), then purged.
+   *
+   * DERIVED from `JWT_REFRESH_TTL` rather than a 30-day constant of its own.
+   * A hardcoded 30 days deleted rows a `JWT_REFRESH_TTL=90d` deployment still
+   * considered valid, turning a legitimate refresh into a forced sign-out.
+   * One refresh lifetime past expiry/revocation is long enough for reuse
+   * detection to still catch a replayed token.
+   */
+  private retentionMs(): number {
+    return this.config.getOrThrow<number>('auth.jwtRefreshTtlMs');
+  }
+
+  /**
    * Daily purge of dead refresh-token rows: anything that expired, or was
-   * revoked, more than 30 days ago. `revoked_at < cutoff` implicitly excludes
+   * revoked, more than one refresh lifetime ago (see `retentionMs`).
+   * `revoked_at < cutoff` implicitly excludes
    * NULLs (live tokens), and expired-but-never-revoked rows are caught by the
    * `expires_at` clause. Column names are the snake_case DB names (no alias, so
    * they resolve unambiguously in the DELETE).
@@ -34,7 +47,7 @@ export class AuthMaintenanceService {
     // down. A transient DB blip must not restart the server; the next run picks
     // up whatever this one missed.
     try {
-      const cutoff = new Date(Date.now() - RETENTION_MS);
+      const cutoff = new Date(Date.now() - this.retentionMs());
       const result = await this.refreshTokens
         .createQueryBuilder()
         .delete()

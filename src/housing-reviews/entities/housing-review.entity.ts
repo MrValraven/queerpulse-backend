@@ -22,11 +22,23 @@ export enum HousingReviewAuthorRole {
  * have submitted OR a fixed window elapses — so this row stores only the
  * submission, never a "revealed" flag. Exactly one review per (viewing, author)
  * via the composite unique index.
+ *
+ * A SECOND uniqueness rule sits alongside it (BE-HSG-09): one review per
+ * (listing, author, author_role). Per-viewing uniqueness alone let the same
+ * member review one listing over and over, once per viewing they opened on it,
+ * which is what made the "real recorded interaction" premise above forgeable.
+ * Declared in migration `AddHousingViewingAndReviewUniqueness1793530600000` as
+ * `UQ_housing_reviews_listing_author`.
  */
 @Entity('housing_reviews')
 @Index('UQ_housing_reviews_viewing_author', ['viewingId', 'authorId'], {
   unique: true,
 })
+@Index(
+  'UQ_housing_reviews_listing_author',
+  ['listingId', 'authorId', 'authorRole'],
+  { unique: true },
+)
 export class HousingReview {
   @PrimaryGeneratedColumn('uuid')
   id!: string;

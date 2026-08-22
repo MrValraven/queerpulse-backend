@@ -35,6 +35,7 @@ describe('EventCohostInvitesService', () => {
     findOne: jest.Mock;
     save: jest.Mock;
     createQueryBuilder: jest.Mock;
+    manager: { transaction: jest.Mock };
   };
   let insertBuilder: InsertBuilderMock;
   let events: { findOne: jest.Mock; count: jest.Mock };
@@ -64,6 +65,19 @@ describe('EventCohostInvitesService', () => {
       findOne: jest.fn(),
       save: jest.fn((invite: unknown) => invite),
       createQueryBuilder: jest.fn(() => insertBuilder),
+      // `respond` writes the invite status and the cohost roster row in ONE
+      // transaction. The stub runs the callback with a manager whose `save`
+      // delegates to the same repository mock, so the assertions below are
+      // unchanged by the transaction.
+      manager: {
+        transaction: jest.fn(
+          async (runInTransaction: (manager: unknown) => Promise<unknown>) =>
+            runInTransaction({
+              save: (_entity: unknown, entityLike: unknown) =>
+                invites.save(entityLike),
+            }),
+        ),
+      },
     };
     events = { findOne: jest.fn(), count: jest.fn().mockResolvedValue(0) };
     rsvps = { count: jest.fn().mockResolvedValue(0) };
@@ -276,7 +290,11 @@ describe('EventCohostInvitesService', () => {
       });
       const result = await service.respond('inv-1', 'u2', 'accept');
       expect(result.status).toBe(EventCohostInviteStatus.Accepted);
-      expect(eventsService.addCohostByUserId).toHaveBeenCalledWith('e1', 'u2');
+      expect(eventsService.addCohostByUserId).toHaveBeenCalledWith(
+        'e1',
+        'u2',
+        expect.anything(),
+      );
     });
 
     it('decline does not add a cohost', async () => {

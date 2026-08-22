@@ -9,9 +9,14 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, IsNull, Not, Repository } from 'typeorm';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
-import { DEFAULT_LIST_LIMIT } from '../common/pagination';
+import { normalizePage } from '../common/pagination';
+import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { User, UserRole } from '../users/entities/user.entity';
 import { CreateTitleDto } from './dto/create-title.dto';
+import {
+  TITLE_PAGE_SIZE_DEFAULT,
+  TITLE_PAGE_SIZE_MAX,
+} from './dto/list-titles.query';
 import { UpdateTitleDto } from './dto/update-title.dto';
 import { CinemaTitle, TitleStatus } from './entities/cinema-title.entity';
 import { WatchProgress } from './entities/watch-progress.entity';
@@ -63,22 +68,45 @@ export class CinemaService {
     private readonly dataSource: DataSource,
   ) {}
 
+  /**
+   * One page of the catalog (CNT-17).
+   *
+   * Both branches used to apply `take: DEFAULT_LIST_LIMIT` with no `skip`, so
+   * the cap silently truncated the catalog as it grew: past 200 titles the
+   * older published ones were reachable only by direct id, and the moderator
+   * `all=true` view hid older drafts and failed ingests. `skip` makes the tail
+   * reachable.
+   *
+   * The return stays a bare array (see `ListTitlesQuery.page`); omitting
+   * `page`/`pageSize` reproduces the previous response exactly.
+   */
   async listTitles(
     user: CurrentUserData,
     includeAll: boolean,
+    page?: number,
+    pageSize?: number,
   ): Promise<TitleListItem[]> {
     if (includeAll && !isModerator(user)) {
       throw new ForbiddenException('Moderator role required');
     }
+    const take = Math.min(
+      pageSize && pageSize > 0 ? pageSize : TITLE_PAGE_SIZE_DEFAULT,
+      TITLE_PAGE_SIZE_MAX,
+    );
+    const skip = (normalizePage(page) - 1) * take;
     const rows = includeAll
       ? await this.titles.find({
-          order: { createdAt: 'DESC' },
-          take: DEFAULT_LIST_LIMIT,
+          // `createdAt` alone is not unique, so a tie could shuffle rows
+          // between pages; `id` makes the sort total.
+          order: { createdAt: 'DESC', id: 'DESC' },
+          skip,
+          take,
         })
       : await this.titles.find({
           where: { status: TitleStatus.Ready, publishedAt: Not(IsNull()) },
-          order: { publishedAt: 'DESC' },
-          take: DEFAULT_LIST_LIMIT,
+          order: { publishedAt: 'DESC', id: 'DESC' },
+          skip,
+          take,
         });
     const progressByTitle = await this.progressFor(
       user.userId,
@@ -140,6 +168,11 @@ export class CinemaService {
     user: CurrentUserData,
     dto: CreateTitleDto,
   ): Promise<TitleDetail> {
+    // No stored baseline on create, so any foreign cover key is refused (see
+    // `assertNoForeignUploadIntroduced`). The admin create form presigns its
+    // own upload in the acting admin's session, so `owner === requester` and a
+    // legitimate create passes; only a copied foreign key is blocked.
+    assertNoForeignUploadIntroduced(user.userId, dto.coverImageUrl, []);
     const title = await this.titles.save(
       this.titles.create({
         kind: dto.kind,
@@ -153,11 +186,20 @@ export class CinemaService {
     return toTitleDetail(title, null, true);
   }
 
-  async updateTitle(id: string, dto: UpdateTitleDto): Promise<TitleDetail> {
+  async updateTitle(
+    requesterUserId: string,
+    id: string,
+    dto: UpdateTitleDto,
+  ): Promise<TitleDetail> {
     const title = await this.titles.findOne({ where: { id } });
     if (!title) {
       throw new NotFoundException('Title not found');
     }
+    // Runs BEFORE mutating: any moderator/admin may re-save the cover another
+    // staffer sourced, but may not point it at a NEW foreign key.
+    assertNoForeignUploadIntroduced(requesterUserId, dto.coverImageUrl, [
+      title.coverImageUrl,
+    ]);
     if (dto.kind !== undefined) title.kind = dto.kind;
     if (dto.title !== undefined) title.title = dto.title;
     if (dto.description !== undefined) title.description = dto.description;

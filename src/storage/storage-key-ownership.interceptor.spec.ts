@@ -21,9 +21,17 @@ function httpContext(
   method: string,
   body: unknown,
   user: { userId: string } | undefined,
+  // Defaults to a handler that is NOT on `SHARED_UPLOAD_HANDLERS`, so every
+  // existing case exercises the STRICT rule.
+  handler: { controller: string; method: string } = {
+    controller: 'ProfilesController',
+    method: 'update',
+  },
 ): ExecutionContext {
   return {
     getType: () => 'http',
+    getClass: () => ({ name: handler.controller }),
+    getHandler: () => ({ name: handler.method }),
     switchToHttp: () => ({ getRequest: () => ({ method, body, user }) }),
   } as unknown as ExecutionContext;
 }
@@ -249,17 +257,47 @@ describe('StorageKeyOwnershipInterceptor', () => {
       });
     });
 
-    it("normalizes a co-owner's resolved URL without a 403 (server-issued, trusted)", (done) => {
-      // The API only mints `/files/<key>` for a viewer already authorised to see
-      // the image; echoing one back is not the "reference a bare key you were
-      // never shown" attack, so it is normalized and NOT ownership-checked.
-      const body = { coverUrl: `${BASE}/files/${OTHER_USER_KEY}` };
+    it("rejects another member's resolved URL on an ordinary handler", () => {
+      // The bug this replaced: `/files/<key>` was treated as "server-issued and
+      // therefore trusted", but that URL is exactly what every `<img src>` on
+      // every page carries — so any member could copy another member's avatar
+      // URL out of the DOM and PATCH it onto their own profile.
+      const body = { avatarUrl: `${BASE}/files/${OTHER_USER_KEY}` };
       const ctx = httpContext('PATCH', body, { userId: OWN_USER_ID });
+      expect(() => interceptor.intercept(ctx, nextHandler())).toThrow(
+        ForbiddenException,
+      );
+    });
+
+    it("normalizes a co-editor's resolved URL on an enumerated shared handler", (done) => {
+      // A community is edited by every one of its moderators, and the cover was
+      // uploaded by whichever one sourced it. See `shared-upload-handlers.ts`.
+      const body = { coverImageUrl: `${BASE}/files/${OTHER_USER_KEY}` };
+      const ctx = httpContext(
+        'PATCH',
+        body,
+        { userId: OWN_USER_ID },
+        { controller: 'CommunitiesController', method: 'update' },
+      );
       interceptor.intercept(ctx, nextHandler()).subscribe((value) => {
         expect(value).toBe(RESULT);
-        expect(body.coverUrl).toBe(OTHER_USER_KEY);
+        expect(body.coverImageUrl).toBe(OTHER_USER_KEY);
         done();
       });
+    });
+
+    it('still rejects a BARE foreign key on a shared handler', () => {
+      // The exemption covers only the resolved-URL form (an image the requester
+      // was actually shown), never a bare key they could have guessed.
+      const ctx = httpContext(
+        'PATCH',
+        { coverImageUrl: OTHER_USER_KEY },
+        { userId: OWN_USER_ID },
+        { controller: 'CommunitiesController', method: 'update' },
+      );
+      expect(() => interceptor.intercept(ctx, nextHandler())).toThrow(
+        ForbiddenException,
+      );
     });
 
     it('still rejects a BARE foreign key even when a base URL is set', () => {

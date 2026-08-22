@@ -201,7 +201,8 @@ export class MagazineController {
       'Parent comment is in another article, is itself a reply, or is deleted.',
   })
   @ApiNotFoundResponse({
-    description: 'No published article with that slug, or parent comment not found.',
+    description:
+      'No published article with that slug, or parent comment not found.',
   })
   createComment(
     @CurrentUser() user: CurrentUserData,
@@ -219,7 +220,9 @@ export class MagazineController {
   @Patch('comments/:id')
   @ApiOperation({ summary: 'Edit a reader comment (author only)' })
   @ApiOkResponse({ description: 'The updated comment.' })
-  @ApiForbiddenResponse({ description: 'Only the author can edit this comment.' })
+  @ApiForbiddenResponse({
+    description: 'Only the author can edit this comment.',
+  })
   @ApiNotFoundResponse({ description: 'Comment not found or already deleted.' })
   updateComment(
     @CurrentUser() user: CurrentUserData,

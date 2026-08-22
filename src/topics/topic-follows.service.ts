@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ConflictException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import {
@@ -6,6 +6,15 @@ import {
   toTopicFollowsResponse,
 } from './dto/topic-follows-response';
 import { TopicFollow } from './entities/topic-follow.entity';
+
+/**
+ * Hard ceiling on how many topics one member can follow (BE-COM-35). There is
+ * no topics table to bound the slug space against, so without a cap a single
+ * member could accumulate unbounded rows — every one of which `listFollows`
+ * returns to the client on every page load. Set far above any plausible real
+ * use of the topics directory, so this only ever fires on abuse.
+ */
+const MAX_TOPIC_FOLLOWS = 200;
 
 /**
  * Topic follows (P2-15). Topics are frontend-derived by slug, so a follow is a
@@ -27,6 +36,23 @@ export class TopicFollowsService {
    * resulting "is following" truth.
    */
   async follow(userId: string, slug: string): Promise<{ following: true }> {
+    // Checked before the insert and only for a slug the caller isn't already
+    // following, so re-following stays the idempotent no-op documented above
+    // even once the member is at the cap. The count/insert pair is not
+    // transactional: this is an abuse ceiling, not an invariant, and a
+    // concurrent double-tap landing one row over it is harmless.
+    const isAlreadyFollowing = await this.follows.exists({
+      where: { userId, topicSlug: slug },
+    });
+    if (!isAlreadyFollowing) {
+      const followCount = await this.follows.count({ where: { userId } });
+      if (followCount >= MAX_TOPIC_FOLLOWS) {
+        throw new ConflictException(
+          `You can follow up to ${MAX_TOPIC_FOLLOWS} topics. Unfollow one to make room.`,
+        );
+      }
+    }
+
     await this.follows
       .createQueryBuilder()
       .insert()
@@ -58,6 +84,9 @@ export class TopicFollowsService {
       where: { userId },
       select: { topicSlug: true },
       order: { createdAt: 'DESC' },
+      // Belt and braces alongside `MAX_TOPIC_FOLLOWS` on the write path: rows
+      // predating the cap can exceed it, and this read must stay bounded.
+      take: MAX_TOPIC_FOLLOWS,
     });
     return toTopicFollowsResponse(rows);
   }
