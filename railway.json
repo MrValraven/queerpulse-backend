@@ -9,7 +9,7 @@
       "npm run migration:preflight && npm run migration:run:prod && npm run storage:cors"
     ],
     "healthcheckPath": "/health/live",
-    "healthcheckTimeout": 60,
+    "healthcheckTimeout": 600,
     "restartPolicyType": "ON_FAILURE"
   }
 }

@@ -15,7 +15,7 @@ import { DataSource } from 'typeorm';
 import { AppModule } from './app.module';
 import { VALIDATION_PIPE_OPTIONS } from './common/validation-pipe.options';
 import { DEFAULT_FRONTEND_ORIGIN } from './config/frontend-origins';
-import { assertNoPendingMigrations } from './database/assert-no-pending-migrations';
+import { ensureDatabaseSchema } from './database/ensure-database-schema';
 
 // How long to let Sentry drain its buffer on shutdown before giving up.
 const SENTRY_FLUSH_TIMEOUT_MS = 2000;
@@ -32,12 +32,14 @@ async function bootstrap() {
   const logger = app.get(Logger);
   app.useLogger(logger);
 
-  // Before anything is wired up to serve: verify the database actually has
+  // Before anything is wired up to serve: make sure the database actually has
   // the schema this build expects. The deploy applies migrations in a
-  // pre-deploy step; when that step does not finish, every route that touches
-  // the affected table 500s with a driver error instead of the deploy failing.
-  // Throws in production, warns elsewhere.
-  await assertNoPendingMigrations(app.get(DataSource), { isProd, logger });
+  // pre-deploy step; when that step is missing or does not finish, every route
+  // that touches the affected table 500s with a driver error instead of the
+  // deploy failing. So anything still pending is applied here, under an
+  // advisory lock so concurrent instances apply it once. A failure to apply
+  // throws in production and warns elsewhere.
+  await ensureDatabaseSchema(app.get(DataSource), { isProd, logger });
 
   const configService = app.get(ConfigService);
 

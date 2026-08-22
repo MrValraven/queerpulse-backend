@@ -11,9 +11,12 @@ import type { DatabasePoolConfig } from '../config/database.config';
 
 // Mirrors src/data-source.ts: anchored to __dirname (not cwd) and matched on
 // this file's own extension, so the glob resolves under ts-node in dev and
-// under dist/ in production. Registered ONLY so the app can tell whether the
-// database is behind this build (see assert-no-pending-migrations.ts).
-// `migrationsRun` stays off: the CLI owns applying them, as it always has.
+// under dist/ in production. Registered so the app can tell whether the
+// database is behind this build, and apply what is missing at boot (see
+// ensure-database-schema.ts). `migrationsRun` stays off: TypeORM's
+// run-on-connect has no locking and no say over transaction mode, so the
+// bootstrap path applies migrations explicitly instead (advisory lock,
+// per-migration transactions, no statement_timeout).
 const migrationsGlob = join(
   __dirname,
   '..',
