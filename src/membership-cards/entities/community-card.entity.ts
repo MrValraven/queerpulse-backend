@@ -15,6 +15,16 @@ export enum CardIssuerType {
   Collective = 'collective',
 }
 
+// How a member's photo is printed on the card. 'mono' desaturates it, which
+// is a decision the ISSUING community makes about other people's faces — the
+// member's own control stays the veto on `MembershipCard.isPhotoHidden`.
+export type CardPhotoStyle = 'color' | 'mono';
+
+export const CARD_PHOTO_STYLES: readonly CardPhotoStyle[] = [
+  'color',
+  'mono',
+] as const;
+
 // The curated skins. Each one's contrast is locked in the frontend so a
 // community's colour choice can never fail the a11y build ratchet.
 export enum CardSkin {
@@ -104,6 +114,16 @@ export class CommunityCard {
   // keeps a veto on their own card (`MembershipCard.isPhotoHidden`).
   @Column({ type: 'boolean', default: false })
   allowsMemberPhoto!: boolean;
+
+  // How those photos are printed. A closed list stored as varchar, the same
+  // discipline `backgroundPreset` follows and for the same reason: the
+  // frontend owns the rendering, and a two-value Postgres enum would have to
+  // be altered rather than extended the first time a third style ships.
+  //
+  // Defaults to 'color', so a programme that already prints photos keeps
+  // printing the photo its members uploaded.
+  @Column({ type: 'varchar', length: 16, default: 'color' })
+  photoStyle!: CardPhotoStyle;
 
   // The three-letter serial prefix, derived once from the community name at
   // programme creation and frozen thereafter so serials stay stable.

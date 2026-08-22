@@ -104,6 +104,9 @@ export class CardProgramsService {
     if (dto.allowsMemberPhoto !== undefined) {
       program.allowsMemberPhoto = dto.allowsMemberPhoto;
     }
+    if (dto.photoStyle !== undefined) {
+      program.photoStyle = dto.photoStyle;
+    }
 
     const saved = await this.programs.save(program);
 

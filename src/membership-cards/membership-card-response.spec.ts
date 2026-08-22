@@ -41,6 +41,7 @@ function program(overrides: Partial<CommunityCard> = {}): CommunityCard {
     allowsWallet: false,
     allowsPublicBadge: true,
     allowsMemberPhoto: false,
+    photoStyle: 'color',
     serialPrefix: 'AZO',
     createdAt: new Date('2026-01-01T00:00:00Z'),
     updatedAt: new Date('2026-01-01T00:00:00Z'),
@@ -121,13 +122,53 @@ describe('toMyCard', () => {
 });
 
 describe('toIssuerCard', () => {
+  const holder = {
+    holderSlug: 'rita',
+    holderName: 'Rita V',
+    avatarUrl: 'https://api.test/files/avatar.png',
+    role: 'mod',
+  };
+
   it('does expose the revocation reason, which is issuer-only', () => {
-    const dto = toIssuerCard(card(), 'active', {
-      holderSlug: 'rita',
-      holderName: 'Rita V',
-      avatarUrl: null,
-    });
+    const dto = toIssuerCard(card(), program(), 'active', holder);
     expect(dto.revokedReason).toBe('Left under a safety report');
+  });
+
+  it('carries the role the card prints', () => {
+    expect(toIssuerCard(card(), program(), 'active', holder).role).toBe('mod');
+  });
+
+  it('withholds the card photo when the programme runs no photos', () => {
+    const dto = toIssuerCard(
+      card(),
+      program({ allowsMemberPhoto: false }),
+      'active',
+      holder,
+    );
+    expect(dto.cardPhotoUrl).toBeNull();
+    // The roster row still shows the profile picture, which is a different
+    // question from what the card prints.
+    expect(dto.avatarUrl).toBe(holder.avatarUrl);
+  });
+
+  it('withholds the card photo when the holder vetoed theirs', () => {
+    const dto = toIssuerCard(
+      card({ isPhotoHidden: true }),
+      program({ allowsMemberPhoto: true }),
+      'active',
+      holder,
+    );
+    expect(dto.cardPhotoUrl).toBeNull();
+  });
+
+  it('sends the card photo when both switches allow it', () => {
+    const dto = toIssuerCard(
+      card({ isPhotoHidden: false }),
+      program({ allowsMemberPhoto: true }),
+      'active',
+      holder,
+    );
+    expect(dto.cardPhotoUrl).toBe(holder.avatarUrl);
   });
 });
 

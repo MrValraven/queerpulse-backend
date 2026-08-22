@@ -10,7 +10,11 @@ import {
   Min,
   MinLength,
 } from 'class-validator';
-import { CardSkin } from '../entities/community-card.entity';
+import {
+  CARD_PHOTO_STYLES,
+  CardPhotoStyle,
+  CardSkin,
+} from '../entities/community-card.entity';
 
 // The design tokens a community may choose as its card accent. A closed list
 // because the card must stay inside the token system: a raw hex would break
@@ -86,4 +90,9 @@ export class UpsertCardProgramDto {
   @IsOptional()
   @IsBoolean()
   allowsMemberPhoto?: boolean;
+
+  // Same absent-leaves-it-alone contract as the switch above.
+  @IsOptional()
+  @IsIn(CARD_PHOTO_STYLES)
+  photoStyle?: CardPhotoStyle;
 }

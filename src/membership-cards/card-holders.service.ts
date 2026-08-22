@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { Community } from '../communities/entities/community.entity';
+import { CommunityMember } from '../communities/entities/community-member.entity';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { Profile } from '../users/entities/profile.entity';
 import { toImageUrl } from '../common/image-url';
@@ -22,6 +23,8 @@ export class CardHoldersService {
     private readonly cards: MembershipCardsService,
     @InjectRepository(Community)
     private readonly communities: Repository<Community>,
+    @InjectRepository(CommunityMember)
+    private readonly members: Repository<CommunityMember>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
   ) {}
@@ -68,10 +71,23 @@ export class CardHoldersService {
       holderProfiles.map((profile) => [profile.userId, profile]),
     );
 
+    // The role the card prints. Batched with the same `In` shape as the
+    // profiles above, so a roster of two hundred holders still costs one
+    // query. A holder who has since left the community keeps their card until
+    // an issuer acts on it, so a missing row falls back to `member` rather
+    // than dropping the card out of this list.
+    const roleRows = await this.members.find({
+      where: { communityId, userId: In(cards.map((card) => card.userId)) },
+    });
+    const roleByUserId = new Map(
+      roleRows.map((row) => [row.userId, row.role as string]),
+    );
+
     return cards.map((card) => {
       const profile = profileByUserId.get(card.userId);
       return toIssuerCard(
         card,
+        program,
         effectiveCardStatus({
           status: card.status,
           expiresAt: card.expiresAt,
@@ -85,6 +101,7 @@ export class CardHoldersService {
             ? [profile.firstName, profile.lastName].filter(Boolean).join(' ')
             : 'A member',
           avatarUrl: profile?.avatarUrl ? toImageUrl(profile.avatarUrl) : null,
+          role: roleByUserId.get(card.userId) ?? 'member',
         },
       );
     });

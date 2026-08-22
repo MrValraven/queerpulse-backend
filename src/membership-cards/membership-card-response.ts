@@ -1,6 +1,10 @@
 import { toImageUrl } from '../common/image-url';
 import { EffectiveCardStatus } from './card-status';
-import { CardSkin, CommunityCard } from './entities/community-card.entity';
+import {
+  CardPhotoStyle,
+  CardSkin,
+  CommunityCard,
+} from './entities/community-card.entity';
 import { MembershipCard } from './entities/membership-card.entity';
 
 export interface CardProgramDTO {
@@ -19,6 +23,8 @@ export interface CardProgramDTO {
   allowsPublicBadge: boolean;
   /** Whether this programme's cards carry the holder's photo at all. */
   allowsMemberPhoto: boolean;
+  /** How those photos are printed: in colour, or desaturated. */
+  photoStyle: CardPhotoStyle;
   serialPrefix: string;
 }
 
@@ -61,7 +67,21 @@ export interface IssuerCardDTO {
   revokedReason: string | null;
   holderSlug: string;
   holderName: string;
+  /**
+   * The holder's PROFILE picture, for the roster row. A mod already sees this
+   * everywhere else in the community, so it is not gated here.
+   */
   avatarUrl: string | null;
+  /** The holder's role in the issuing community, as printed on the card. */
+  role: string;
+  /**
+   * The face the card ACTUALLY carries, or null. Gated by the same pair of
+   * switches `toMyCard` applies (the programme's photo setting and the
+   * holder's own veto), so an issuer looking at a member's card sees the card
+   * that member holds rather than a photo they chose to keep off it. Kept
+   * separate from `avatarUrl` precisely because those two answers differ.
+   */
+  cardPhotoUrl: string | null;
 }
 
 export interface CardVerificationDTO {
@@ -87,6 +107,7 @@ export function toCardProgram(program: CommunityCard): CardProgramDTO {
     allowsWallet: program.allowsWallet,
     allowsPublicBadge: program.allowsPublicBadge,
     allowsMemberPhoto: program.allowsMemberPhoto,
+    photoStyle: program.photoStyle,
     serialPrefix: program.serialPrefix,
   };
 }
@@ -126,11 +147,27 @@ export function toMyCard(
   };
 }
 
+/**
+ * One issued card, as its ISSUER sees it. Carries the revocation reason (which
+ * `toMyCard` withholds) and enough of the card itself — role, and the photo
+ * the card really prints — for an owner or mod to look at the object a member
+ * is holding, not just a roster row about it.
+ */
 export function toIssuerCard(
   card: MembershipCard,
+  program: CommunityCard,
   status: EffectiveCardStatus,
-  holder: { holderSlug: string; holderName: string; avatarUrl: string | null },
+  holder: {
+    holderSlug: string;
+    holderName: string;
+    /** Already resolved to a fetchable URL by the caller. */
+    avatarUrl: string | null;
+    role: string;
+  },
 ): IssuerCardDTO {
+  // The same one boundary `toMyCard` gates on, applied to the same pair of
+  // switches. An issuer may not see a face the card does not print.
+  const canShowPhoto = program.allowsMemberPhoto && !card.isPhotoHidden;
   return {
     id: card.id,
     serial: card.serial,
@@ -142,6 +179,8 @@ export function toIssuerCard(
     holderSlug: holder.holderSlug,
     holderName: holder.holderName,
     avatarUrl: holder.avatarUrl,
+    role: holder.role,
+    cardPhotoUrl: canShowPhoto ? holder.avatarUrl : null,
   };
 }
 
