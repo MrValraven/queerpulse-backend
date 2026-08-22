@@ -47,13 +47,18 @@ export class CommunityCardsController {
     return toCardProgram(program);
   }
 
+  /**
+   * Bulk issue across the roster. The response breaks the roster down by what
+   * actually happened to each member so the caller can report it truthfully:
+   * a plain total would count members whose card was already active, and
+   * would hide the suspended/revoked cards this deliberately leaves alone.
+   */
   @Post('issue-all')
   async issueAll(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
   ) {
-    const issued = await this.cardHolders.issueForCommunity(slug, user.userId);
-    return { issued };
+    return this.cardHolders.issueForCommunity(slug, user.userId);
   }
 
   @Get('holders')

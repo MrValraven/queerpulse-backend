@@ -4,6 +4,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+} from '../common/image-url';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
 import { MediaCropService } from '../media-crops/media-crops.service';
@@ -152,6 +156,27 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   ...overrides,
 });
 
+/**
+ * A `findOne` that scopes by owner exactly as the real repository does.
+ * `loadOwnedOr404` puts the ownership check IN the query (`where: { ref,
+ * ownerId }`), so a caller who does not own the listing gets no row at all and
+ * the service answers 404 — deliberately not confirming that the ref exists.
+ * Passing this rather than a bare `mockResolvedValue` is what keeps those
+ * tests proving the scope instead of assuming it.
+ */
+const scopeFindOneToOwner = (
+  findOne: jest.Mock,
+  ownerId: string,
+  listing: Listing,
+) =>
+  findOne.mockImplementation((options?: { where?: { ownerId?: string } }) =>
+    Promise.resolve(
+      options?.where?.ownerId === undefined || options.where.ownerId === ownerId
+        ? listing
+        : null,
+    ),
+  );
+
 describe('ListingsService', () => {
   let service: ListingsService;
   let listings: {
@@ -271,6 +296,14 @@ describe('ListingsService', () => {
       ],
     }).compile();
     service = module.get(ListingsService);
+    // The listing mapper resolves photos through `toImageUrl`, which throws
+    // `Service temporarily unavailable` when the base was never wired. Only
+    // storage-key fixtures reach it (the M1 foreign-photo cases).
+    setImageUrlBase('https://api.test');
+  });
+
+  afterEach(() => {
+    resetImageUrlBaseForTesting();
   });
 
   describe('create', () => {
@@ -341,11 +374,15 @@ describe('ListingsService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it('403s a caller who does not own the listing', async () => {
-      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+    it('404s a caller who does not own the listing', async () => {
+      scopeFindOneToOwner(
+        listings.findOne,
+        'owner-1',
+        baseListing({ ownerId: 'owner-1' }),
+      );
       await expect(
         service.getByRef('QPL-2026-0001', 'someone-else'),
-      ).rejects.toBeInstanceOf(ForbiddenException);
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
 
     it('returns the listing to its owner', async () => {
@@ -357,11 +394,15 @@ describe('ListingsService', () => {
   });
 
   describe('update', () => {
-    it('403s a non-owner', async () => {
-      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+    it('404s a non-owner and writes nothing', async () => {
+      scopeFindOneToOwner(
+        listings.findOne,
+        'owner-1',
+        baseListing({ ownerId: 'owner-1' }),
+      );
       await expect(
         service.update('QPL-2026-0001', 'someone-else', { blurb: 'nope' }),
-      ).rejects.toBeInstanceOf(ForbiddenException);
+      ).rejects.toBeInstanceOf(NotFoundException);
       expect(listings.save).not.toHaveBeenCalled();
     });
 
@@ -447,11 +488,15 @@ describe('ListingsService', () => {
   });
 
   describe('remove', () => {
-    it('403s a non-owner and does not delete', async () => {
-      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+    it('404s a non-owner and does not delete', async () => {
+      scopeFindOneToOwner(
+        listings.findOne,
+        'owner-1',
+        baseListing({ ownerId: 'owner-1' }),
+      );
       await expect(
         service.remove('QPL-2026-0001', 'someone-else'),
-      ).rejects.toBeInstanceOf(ForbiddenException);
+      ).rejects.toBeInstanceOf(NotFoundException);
       expect(listings.remove).not.toHaveBeenCalled();
     });
 
@@ -567,13 +612,17 @@ describe('ListingsService', () => {
       expect(reviews.save).not.toHaveBeenCalled();
     });
 
-    it('403s a caller who does not own the listing', async () => {
-      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+    it('404s a caller who does not own the listing', async () => {
+      scopeFindOneToOwner(
+        listings.findOne,
+        'owner-1',
+        baseListing({ ownerId: 'owner-1' }),
+      );
       await expect(
         service.replyToReview('QPL-2026-0001', 'someone-else', 'review-1', {
           text: 'Thanks!',
         }),
-      ).rejects.toBeInstanceOf(ForbiddenException);
+      ).rejects.toBeInstanceOf(NotFoundException);
       expect(reviews.findOne).not.toHaveBeenCalled();
       expect(reviews.save).not.toHaveBeenCalled();
     });
@@ -876,8 +925,12 @@ describe('ListingsService', () => {
   });
 
   describe('answerQuestion', () => {
-    it('403s a non-owner', async () => {
-      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+    it('404s a non-owner', async () => {
+      scopeFindOneToOwner(
+        listings.findOne,
+        'owner-1',
+        baseListing({ ownerId: 'owner-1' }),
+      );
       await expect(
         service.answerQuestion(
           'QPL-2026-0001',
@@ -885,7 +938,7 @@ describe('ListingsService', () => {
           'someone-else',
           'Sure, opens at 9am.',
         ),
-      ).rejects.toBeInstanceOf(ForbiddenException);
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
 
     it('404s a question that does not belong to this listing', async () => {

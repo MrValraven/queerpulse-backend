@@ -1737,7 +1737,13 @@ describe('MagazinePieceService', () => {
 
       const result = await service.searchArchive('');
 
-      expect(articleQueryBuilder.andWhere).not.toHaveBeenCalled();
+      // No TEXT filter — that is the point of an empty query. The
+      // not-yet-published guard is a separate `andWhere` that always runs, so
+      // assert on the ILIKE pattern rather than on "no andWhere at all".
+      const articleConditions = (
+        articleQueryBuilder.andWhere.mock.calls as [string, unknown?][]
+      ).map(([condition]) => condition);
+      expect(articleConditions).toEqual(['article.published_at <= :now']);
       expect(deckQueryBuilder.andWhere).not.toHaveBeenCalled();
       expect(result).toHaveLength(1);
     });

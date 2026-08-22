@@ -1195,7 +1195,9 @@ export class ModerationService {
   ): Promise<ModReportDTO> {
     const report = await this.findReportOrThrow(id);
     const currentAssignee = report.assignedModeratorId;
-    const isAdmin = actorRole === UserRole.Admin;
+    // `actorRole` is a JWT claim, typed `string` on `CurrentUserData` — the
+    // widening says so, rather than implying the two are the same enum.
+    const isAdmin = actorRole === (UserRole.Admin as string);
 
     if (assign) {
       if (currentAssignee === actorId) {

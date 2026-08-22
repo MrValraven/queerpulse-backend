@@ -11,7 +11,11 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UsersService } from '../users/users.service';
+import { ListingLookupService } from '../listings/listing-lookup.service';
+import { MediaCropService } from '../media-crops/media-crops.service';
+import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBookmarksService } from './event-bookmarks.service';
+import { EventSeries } from './entities/event-series.entity';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
 import { EventLineupEntry } from './entities/event-lineup-entry.entity';
@@ -86,6 +90,12 @@ describe('EventsService — event lineup (Personas Phase 5, Moment 5)', () => {
           provide: getRepositoryToken(EventLineupEntry),
           useValue: lineupEntries,
         },
+        // This suite only exercises the lineup, so every dependency the
+        // lineup paths never touch is stubbed to its inert default.
+        {
+          provide: getRepositoryToken(EventSeries),
+          useValue: { find: jest.fn().mockResolvedValue([]) },
+        },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: UsersService, useValue: { findById: jest.fn() } },
         { provide: RsvpService, useValue: {} },
@@ -97,6 +107,18 @@ describe('EventsService — event lineup (Personas Phase 5, Moment 5)', () => {
         { provide: ContentModerationService, useValue: contentModeration },
         { provide: CommunityMembershipService, useValue: {} },
         { provide: EventBookmarksService, useValue: {} },
+        {
+          provide: EventAudienceGateService,
+          useValue: { assertViewable: jest.fn() },
+        },
+        {
+          provide: MediaCropService,
+          useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
+        },
+        {
+          provide: ListingLookupService,
+          useValue: { findLive: jest.fn().mockResolvedValue(null) },
+        },
       ],
     }).compile();
     service = module.get(EventsService);

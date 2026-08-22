@@ -4,7 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { Community } from '../communities/entities/community.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
@@ -29,6 +29,18 @@ const LEFT_COMMUNITY_REASON = 'Left the community';
 // unique index is the real backstop — retry with a freshly-generated serial
 // rather than surfacing a 500.
 const MAX_ISSUE_ATTEMPTS = 3;
+
+/** What one bulk roster issue actually did, per member. */
+export interface RosterIssueResult {
+  /** Members who had no card at all and now hold one. */
+  issued: number;
+  /** Active cards whose expiry had already passed, put back in date. */
+  renewed: number;
+  /** Members holding a card an issuer suspended or revoked. Left untouched. */
+  skipped: number;
+  /** Members already holding a valid, in-date card. */
+  unchanged: number;
+}
 
 @Injectable()
 export class MembershipCardsService {
@@ -100,17 +112,65 @@ export class MembershipCardsService {
     throw new Error('Could not issue membership card');
   }
 
-  /** Bulk issue to everyone currently on the roster. Returns the count. */
-  async issueForRoster(programId: string): Promise<number> {
-    const communityId = await this.programIssuerId(programId);
-    if (!communityId) return 0;
+  /**
+   * Bulk issue to everyone currently on the roster.
+   *
+   * Deliberately NOT a call to `issue()` per member. `issue()` revives a
+   * suspended or revoked card, which is right on the rejoin path (a member
+   * who left had their card auto-revoked, and coming back should give it
+   * back) and wrong here: anyone on the CURRENT roster holding a withdrawn
+   * card had it withdrawn by an issuer, on purpose. Running this from the
+   * card designer's Save used to hand every one of those cards back
+   * silently. This skips them and reports the count instead, so the caller
+   * can say what it did and did not do.
+   *
+   * An active card whose expiry has already passed IS renewed here: that is
+   * the only route a community with `validityMonths` set has to put its
+   * roster back in date.
+   */
+  async issueForRoster(programId: string): Promise<RosterIssueResult> {
+    const result: RosterIssueResult = {
+      issued: 0,
+      renewed: 0,
+      skipped: 0,
+      unchanged: 0,
+    };
+    const program = await this.programRepo.findOne({
+      where: { id: programId },
+    });
+    if (!program) return result;
+    const communityId = program.issuerId;
     const roster = await this.members.find({ where: { communityId } });
-    let issued = 0;
+    if (roster.length === 0) return result;
+
+    const existingCards = await this.cards.find({
+      where: { programId, userId: In(roster.map((member) => member.userId)) },
+    });
+    const cardByUserId = new Map(
+      existingCards.map((card) => [card.userId, card]),
+    );
+    const now = Date.now();
+
     for (const member of roster) {
-      await this.issue(programId, member.userId);
-      issued += 1;
+      const existing = cardByUserId.get(member.userId);
+      if (!existing) {
+        await this.issue(programId, member.userId);
+        result.issued += 1;
+        continue;
+      }
+      if (existing.status !== MembershipCardStatus.Active) {
+        result.skipped += 1;
+        continue;
+      }
+      if (existing.expiresAt && existing.expiresAt.getTime() <= now) {
+        existing.expiresAt = this.expiryFrom(program.validityMonths);
+        await this.cards.save(existing);
+        result.renewed += 1;
+        continue;
+      }
+      result.unchanged += 1;
     }
-    return issued;
+    return result;
   }
 
   async setStatus(

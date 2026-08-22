@@ -9,6 +9,10 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+} from '../common/image-url';
 import { ListingLookupService } from '../listings/listing-lookup.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -47,6 +51,15 @@ describe('EventsService', () => {
   };
   let invites: { exists: jest.Mock };
   let lineupEntries: { find: jest.Mock };
+  // Recurrence: `create` writes one `EventSeries` row and hangs the generated
+  // occurrences off it. No test here creates a series, so the default is a
+  // repository nothing has written to.
+  let eventSeries: {
+    create: jest.Mock;
+    save: jest.Mock;
+    find: jest.Mock;
+    findOne: jest.Mock;
+  };
   let rsvpService: { reconcileWaitlist: jest.Mock };
   let notifications: { createForRecipients: jest.Mock };
   let blockFilter: { excludeBlocked: jest.Mock };
@@ -78,9 +91,11 @@ describe('EventsService', () => {
     scopedVisibilityWhere: jest.Mock;
   };
 
-  // A chainable query-builder stub for `attendees`' paginated RSVP query
-  // (`.skip().take().getManyAndCount()`, matching `common/pagination.ts`'s
-  // `paginate()`).
+  // A chainable query-builder stub for the RSVP queries: `attendees`'
+  // paginated page (`.skip().take().getManyAndCount()`, matching
+  // `common/pagination.ts`'s `paginate()`) and the detail's
+  // `goingAttendeesPreview`, which counts first and then takes a capped slice
+  // (`.getCount()` then `.take().getMany()`).
   const attendeesQbStub = () => {
     const qb: Record<string, jest.Mock> = {};
     for (const m of [
@@ -94,6 +109,8 @@ describe('EventsService', () => {
       qb[m] = jest.fn().mockReturnValue(qb);
     }
     qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
+    qb.getCount = jest.fn().mockResolvedValue(0);
+    qb.getMany = jest.fn().mockResolvedValue([]);
     return qb;
   };
 
@@ -137,6 +154,14 @@ describe('EventsService', () => {
     };
     invites = { exists: jest.fn().mockResolvedValue(false) };
     lineupEntries = { find: jest.fn().mockResolvedValue([]) };
+    eventSeries = {
+      create: jest.fn((entity: unknown) => entity),
+      save: jest.fn((entity: object) =>
+        Promise.resolve({ id: 'series-1', ...entity }),
+      ),
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(null),
+    };
     rsvpService = { reconcileWaitlist: jest.fn().mockResolvedValue(undefined) };
     notifications = {
       createForRecipients: jest.fn().mockResolvedValue(undefined),
@@ -178,6 +203,7 @@ describe('EventsService', () => {
           provide: getRepositoryToken(EventLineupEntry),
           useValue: lineupEntries,
         },
+        { provide: getRepositoryToken(EventSeries), useValue: eventSeries },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: UsersService, useValue: { findById: jest.fn() } },
         { provide: RsvpService, useValue: rsvpService },
@@ -191,9 +217,24 @@ describe('EventsService', () => {
           provide: MediaCropService,
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
         },
+        // An event can point at a venue listing; no test here does, so the
+        // lookup resolves to "no such live listing".
+        {
+          provide: ListingLookupService,
+          useValue: { findLive: jest.fn().mockResolvedValue(null) },
+        },
       ],
     }).compile();
     service = module.get(EventsService);
+    // The detail mapper resolves `coverImageUrl` through `toImageUrl`, which
+    // throws `Service temporarily unavailable` when the base was never wired.
+    // Only fixtures carrying a storage-key cover reach it (the M1
+    // foreign-cover cases), which is why it bites those and not the rest.
+    setImageUrlBase('https://api.test');
+  });
+
+  afterEach(() => {
+    resetImageUrlBaseForTesting();
   });
 
   // Attendee lists filter BLOCKS ONLY, never mutes: a mute silences content,

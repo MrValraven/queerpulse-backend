@@ -20,9 +20,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
-export class AddBarterProposalReceivedNotificationType1793720000000
-  implements MigrationInterface
-{
+export class AddBarterProposalReceivedNotificationType1793720000000 implements MigrationInterface {
   name = 'AddBarterProposalReceivedNotificationType1793720000000';
 
   transaction = false as const;

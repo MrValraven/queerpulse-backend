@@ -8,7 +8,10 @@ import { toImageUrl } from '../common/image-url';
 import { effectiveCardStatus } from './card-status';
 import { CardProgramsService } from './card-programs.service';
 import { IssuerCardDTO, toIssuerCard } from './membership-card-response';
-import { MembershipCardsService } from './membership-cards.service';
+import {
+  MembershipCardsService,
+  type RosterIssueResult,
+} from './membership-cards.service';
 
 /** The issuer's view of who holds a card. Owner and mod only. */
 @Injectable()
@@ -23,7 +26,10 @@ export class CardHoldersService {
     private readonly profiles: Repository<Profile>,
   ) {}
 
-  async issueForCommunity(slug: string, actorId: string): Promise<number> {
+  async issueForCommunity(
+    slug: string,
+    actorId: string,
+  ): Promise<RosterIssueResult> {
     const communityId = await this.membership.assertOwnerOrModBySlug(
       slug,
       actorId,

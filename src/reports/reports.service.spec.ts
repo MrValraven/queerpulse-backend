@@ -155,9 +155,15 @@ describe('ReportsService', () => {
     });
 
     it('allows reporting a message authored by someone else', async () => {
+      // A reported message is snapshotted into `evidence` at filing time, so
+      // the fixture needs the timestamps that snapshot reads.
       messages.findOne.mockResolvedValue({
         id: 'msg-1',
         senderId: 'someone-else',
+        body: 'Leave me alone',
+        createdAt: new Date('2026-08-01T10:00:00.000Z'),
+        editedAt: null,
+        deletedAt: null,
       });
 
       await expect(
@@ -168,6 +174,23 @@ describe('ReportsService', () => {
         }),
       ).resolves.toBeDefined();
       expect(reports.save).toHaveBeenCalled();
+      // The snapshot is what lets a moderator judge a message the sender may
+      // since have edited or deleted.
+      expect(reports.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          evidence: [
+            expect.objectContaining({
+              type: 'message-snapshot',
+              messageId: 'msg-1',
+              body: 'Leave me alone',
+              senderId: 'someone-else',
+              createdAt: '2026-08-01T10:00:00.000Z',
+              editedAt: null,
+              deletedAtTimeOfReport: false,
+            }) as unknown,
+          ],
+        }),
+      );
     });
 
     it('accepts a magazine_comment subject (CNT-10 report wiring)', async () => {

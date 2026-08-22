@@ -33,6 +33,8 @@ function program(overrides: Partial<CommunityCard> = {}): CommunityCard {
     skin: CardSkin.Plum,
     accentToken: 'accent',
     crestMediaKey: CREST_KEY,
+    backgroundPreset: null,
+    backgroundMediaKey: null,
     cardName: 'Sócie',
     validityMonths: 12,
     allowsPrint: false,

@@ -20,6 +20,26 @@ import { CardSkin } from '../entities/community-card.entity';
 // face's `color-mix()` and silently lose the accent tint.
 const ACCENT_TOKENS = ['accent', 'plum', 'jade', 'ink'] as const;
 
+// The curated card grounds. A closed list for the same reason ACCENT_TOKENS is
+// one: the frontend owns how each is drawn (including the contrast scrim that
+// keeps the card readable), so an unknown name here would render as nothing at
+// all. Flags are rendered from these ids, never from colours a client posts.
+const BACKGROUND_PRESETS = [
+  'rainbow',
+  'progress',
+  'transgender',
+  'bisexual',
+  'lesbian',
+  'pansexual',
+  'asexual',
+  'aromantic',
+  'nonbinary',
+  'genderfluid',
+  'genderqueer',
+  'agender',
+  'intersex',
+] as const;
+
 export class UpsertCardProgramDto {
   @IsBoolean()
   isEnabled!: boolean;
@@ -34,6 +54,17 @@ export class UpsertCardProgramDto {
   @IsString()
   @MaxLength(512)
   crestMediaKey?: string | null;
+
+  // Null clears the preset. Absent leaves whatever is stored alone — see the
+  // note on the crest in `CardProgramsService.upsert`.
+  @IsOptional()
+  @IsIn(BACKGROUND_PRESETS)
+  backgroundPreset?: string | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  backgroundMediaKey?: string | null;
 
   @IsString()
   @MinLength(1)

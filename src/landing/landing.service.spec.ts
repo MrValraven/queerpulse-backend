@@ -5,6 +5,7 @@ import { DataSource } from 'typeorm';
 import {
   AccessTier,
   Community,
+  CommunityType,
 } from '../communities/entities/community.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import {
@@ -62,6 +63,14 @@ function makeCommunity(overrides: Partial<Community>): Community {
     accessTier: AccessTier.Public,
     archivedAt: null,
     frozenAt: null,
+    // The card renders a category badge, a "since ‹year›" line and the
+    // "what you get" chips, so a fixture missing these blows up in the mapper
+    // rather than in the assertion.
+    type: CommunityType.Social,
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    features: [],
+    coverImageUrl: null,
+    rosterVisible: true,
     ...overrides,
   } as Community;
 }
@@ -166,6 +175,9 @@ describe('LandingService', () => {
         async (callback: (manager: unknown) => Promise<unknown>) =>
           callback(manager),
       ),
+      // The community roster strip picks its faces with one window-function
+      // query rather than a per-community fetch. Default: no faces.
+      query: jest.fn().mockResolvedValue([]),
     };
 
     const module: TestingModule = await Test.createTestingModule({

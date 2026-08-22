@@ -9,6 +9,10 @@ import {
 import { Conversation, ConversationKind } from './entities/conversation.entity';
 import { Message } from './entities/message.entity';
 import { Profile } from '../users/entities/profile.entity';
+import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+} from '../common/image-url';
 
 // M1 (storage-key impersonation): the group photo is a shared-upload surface
 // (any owner/admin of the group edits the same conversation), so the
@@ -84,6 +88,14 @@ describe('GroupsService.updateGroup foreign photo ownership (M1)', () => {
       {} as never,
       mediaCropService as never,
     );
+    // The group mapper resolves the photo through `toImageUrl`, which throws
+    // `Service temporarily unavailable` when the base was never wired — and
+    // every fixture here carries a storage key.
+    setImageUrlBase('https://api.test');
+  });
+
+  afterEach(() => {
+    resetImageUrlBaseForTesting();
   });
 
   it('lets an admin re-save the unchanged foreign photo already stored', async () => {

@@ -28,7 +28,7 @@
     "migration:run": "pnpm run typeorm migration:run",
     "migration:revert": "pnpm run typeorm migration:revert",
     "migration:create": "typeorm-ts-node-commonjs migration:create",
-    "migration:preflight": "node scripts/check-migration-timestamps.mjs && node scripts/migration-preflight.mjs",
+    "migration:preflight": "node scripts/migration-preflight.mjs",
     "migration:run:prod": "typeorm -d dist/data-source.js migration:run",
     "migration:revert:prod": "typeorm -d dist/data-source.js migration:revert",
     "storage:cors": "node scripts/set-bucket-cors.mjs",
@@ -121,6 +121,19 @@
     "rootDir": "src",
     "testRegex": ".*\\.spec\\.ts$",
     "transform": {
+      "[\\\\/]node_modules[\\\\/].*\\.js$": [
+        "ts-jest",
+        {
+          "tsconfig": {
+            "module": "commonjs",
+            "moduleResolution": "node",
+            "allowJs": true,
+            "target": "ES2023",
+            "isolatedModules": true,
+            "esModuleInterop": true
+          }
+        }
+      ],
       "^.+\\.(t|j)s$": [
         "ts-jest",
         {
@@ -135,6 +148,12 @@
       "!migrations/**"
     ],
     "coverageDirectory": "../coverage",
-    "testEnvironment": "node"
+    "testEnvironment": "node",
+    "setupFiles": [
+      "reflect-metadata"
+    ],
+    "transformIgnorePatterns": [
+      "^(?!.*[\\\\/]node_modules[\\\\/]\\.pnpm[\\\\/](htmlparser2|domhandler|domutils|dom-serializer|domelementtype|entities)@).*[\\\\/]node_modules[\\\\/]"
+    ]
   }
 }

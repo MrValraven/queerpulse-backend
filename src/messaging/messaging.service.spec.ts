@@ -123,7 +123,10 @@ describe('MessagingService', () => {
   let profiles: { findOne: jest.Mock; find: jest.Mock };
   let dataSource: { transaction: jest.Mock };
   let connections: { areConnected: jest.Mock; requestConnection: jest.Mock };
-  let blockFilter: { isBlockedEitherWay: jest.Mock };
+  let blockFilter: {
+    isBlockedEitherWay: jest.Mock;
+    blockedUserIds: jest.Mock;
+  };
   let emitter: { emit: jest.Mock };
   let reactions: {
     find: jest.Mock;
@@ -187,7 +190,13 @@ describe('MessagingService', () => {
       areConnected: jest.fn().mockResolvedValue(true),
       requestConnection: jest.fn(),
     };
-    blockFilter = { isBlockedEitherWay: jest.fn().mockResolvedValue(false) };
+    blockFilter = {
+      isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+      // The inbox drops threads whose counterpart is blocked either way, in
+      // ONE batched query rather than per conversation. Default: nobody
+      // blocked.
+      blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
+    };
     emitter = { emit: jest.fn() };
     reactions = {
       find: jest.fn().mockResolvedValue([]),

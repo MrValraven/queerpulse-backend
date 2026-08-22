@@ -4,6 +4,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+} from '../common/image-url';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
@@ -51,6 +55,7 @@ describe('CompaniesService', () => {
     find: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
+    exists: jest.Mock;
   };
   let reviews: {
     create: jest.Mock;
@@ -85,6 +90,9 @@ describe('CompaniesService', () => {
       find: jest.fn().mockResolvedValue([]),
       create: jest.fn((v: object) => v),
       save: jest.fn((v: unknown) => Promise.resolve(v)),
+      // A review author who is on the company's team is refused, the same way
+      // the owner is. Default: the author is not on the team.
+      exists: jest.fn().mockResolvedValue(false),
     };
     reviews = {
       create: jest.fn((v: object) => v),
@@ -150,6 +158,14 @@ describe('CompaniesService', () => {
       ],
     }).compile();
     service = module.get(CompaniesService);
+    // Mappers resolve stored image keys through `toImageUrl`, which throws
+    // `Service temporarily unavailable` when the base was never wired. Only
+    // storage-key fixtures reach it (the M1 foreign-upload cases).
+    setImageUrlBase('https://api.test');
+  });
+
+  afterEach(() => {
+    resetImageUrlBaseForTesting();
   });
 
   describe('create', () => {

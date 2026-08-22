@@ -17,6 +17,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
+import { UsersService } from '../users/users.service';
 import { VouchService } from '../vouch/vouch.service';
 import {
   AdminMembersService,
@@ -137,6 +138,10 @@ describe('AdminMembersService', () => {
   let modAuditLogs: { find: jest.Mock };
   let staffRoles: { find: jest.Mock };
   let vouchService: { getVouchCounts: jest.Mock; getVouchCount: jest.Mock };
+  // The last-admin guard counts admins through `UsersService.countAdmins`,
+  // inside the demotion's own transaction. Two by default, so an ordinary
+  // role change is never the last-admin case.
+  let usersService: { countAdmins: jest.Mock };
   let dataSource: { transaction: jest.Mock };
 
   // The repos as seen through `manager.getRepository(...)` inside
@@ -191,6 +196,7 @@ describe('AdminMembersService', () => {
       getVouchCounts: jest.fn().mockResolvedValue(new Map()),
       getVouchCount: jest.fn().mockResolvedValue(0),
     };
+    usersService = { countAdmins: jest.fn().mockResolvedValue(2) };
 
     transactionUsers = {
       findOne: jest.fn().mockResolvedValue(null),
@@ -250,6 +256,7 @@ describe('AdminMembersService', () => {
         { provide: getRepositoryToken(ModAuditLog), useValue: modAuditLogs },
         { provide: getRepositoryToken(UserStaffRole), useValue: staffRoles },
         { provide: VouchService, useValue: vouchService },
+        { provide: UsersService, useValue: usersService },
         { provide: DataSource, useValue: dataSource },
       ],
     }).compile();

@@ -39,6 +39,40 @@ export default tseslint.config(
       '@typescript-eslint/no-unsafe-call': 'warn',
       '@typescript-eslint/no-unsafe-return': 'warn',
       "prettier/prettier": ["error", { endOfLine: "auto" }],
+      // `_`-prefixed names are the codebase's "deliberately unused" marker:
+      // an interface method that ignores an argument
+      // (`createSession(_userId)`), and the omit-by-destructuring idiom
+      // (`const { startAt: _startAt, ...patch } = dto`) that builds a patch
+      // without the fields it must not carry. `ignoreRestSiblings` covers the
+      // latter shape even when the omitted key keeps its own name.
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+          ignoreRestSiblings: true,
+        },
+      ],
     },
+  },
+  {
+    // A migration's `up`/`down` satisfy `MigrationInterface`, which types both
+    // as returning a Promise. Several legitimately await nothing: a `down()`
+    // that is deliberately irreversible throws instead (Postgres cannot drop
+    // an enum value), and a few `up()`s only call synchronous helpers. `async`
+    // there is the interface's requirement, not a forgotten await — and an
+    // applied migration is frozen history that must not be edited to satisfy
+    // a lint rule.
+    files: ['src/migrations/**/*.ts'],
+    rules: { '@typescript-eslint/require-await': 'off' },
+  },
+  {
+    // Spec mocks stand in for async APIs, so `jest.fn(async () => value)` is
+    // how a mock is typed to return a promise; there is nothing for it to
+    // await. `@typescript-eslint/no-floating-promises` (error, above) is what
+    // actually catches a forgotten await in a test.
+    files: ['**/*.spec.ts', 'test/**/*.ts'],
+    rules: { '@typescript-eslint/require-await': 'off' },
   },
 );

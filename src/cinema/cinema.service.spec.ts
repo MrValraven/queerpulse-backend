@@ -5,6 +5,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+} from '../common/image-url';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
@@ -143,6 +147,14 @@ describe('CinemaService', () => {
       ],
     }).compile();
     service = module.get(CinemaService);
+    // Mappers resolve stored image keys through `toImageUrl`, which throws
+    // `Service temporarily unavailable` when the base was never wired. Only
+    // storage-key fixtures reach it (the M1 foreign-upload cases).
+    setImageUrlBase('https://api.test');
+  });
+
+  afterEach(() => {
+    resetImageUrlBaseForTesting();
   });
 
   describe('createPlaybackSession', () => {

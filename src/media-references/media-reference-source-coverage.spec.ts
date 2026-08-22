@@ -25,6 +25,9 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   'UpdateHousingListingDto.gallery': 'HousingListing.gallery',
   'CreatePostDto.image': 'CommunityPost.image',
   'UpdatePostDto.image': 'CommunityPost.image',
+  // A flat/global post is a `CommunityPost` row with a null `communityId`, so
+  // its image lives in the same column the nested route writes.
+  'UpdateFlatPostDto.image': 'CommunityPost.image',
   'CreateCommunityDto.coverImageUrl': 'Community.coverImageUrl',
   'CreateLandlordDto.photo': 'Landlord.photo',
   'UpdateLandlordDto.photo': 'Landlord.photo',

@@ -8,6 +8,13 @@
 // deliberate — renaming an applied migration makes it look pending and re-runs
 // its `up()` (see CLAUDE.md) — so those are allowlisted rather than "fixed".
 //
+// BUILD-TIME ONLY. This reads the TypeScript sources in src/migrations, which
+// exist in the Docker *build* stage but NOT in the runtime image (that copies
+// only package.json, node_modules, dist and scripts). Do not chain it into a
+// deploy step such as `migration:preflight`: it ENOENTs on /app/src/migrations
+// and takes the whole preDeployCommand chain down with it. `pnpm build` already
+// gates on it, and no migration file can appear between build and deploy.
+//
 // Run: node scripts/check-migration-timestamps.mjs
 
 import { readFileSync, readdirSync } from 'node:fs';

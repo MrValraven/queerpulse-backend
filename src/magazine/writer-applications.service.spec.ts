@@ -1,9 +1,6 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { WriterApplicationsService } from './writer-applications.service';
-import {
-  MagazineWriterApplication,
-  WriterApplicationStatus,
-} from './entities/magazine-writer-application.entity';
+import { WriterApplicationStatus } from './entities/magazine-writer-application.entity';
 
 function makeApplicationsRepo(overrides: Record<string, jest.Mock> = {}) {
   return {
@@ -51,7 +48,12 @@ describe('WriterApplicationsService', () => {
     it('rejects a duplicate pending application (unique violation)', async () => {
       const applications = makeApplicationsRepo({
         save: jest.fn(async () => {
-          throw { code: '23505' };
+          // Mirrors the driver's unique-violation error, which the service maps
+          // to 409. Thrown as an Error so the mock cannot be mistaken for a
+          // deliberate non-Error throw.
+          throw Object.assign(new Error('duplicate key value'), {
+            code: '23505',
+          });
         }),
       });
       const service = new WriterApplicationsService(

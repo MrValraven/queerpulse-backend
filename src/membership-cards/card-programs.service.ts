@@ -84,6 +84,18 @@ export class CardProgramsService {
     if (dto.crestMediaKey !== undefined) {
       program.crestMediaKey = dto.crestMediaKey;
     }
+    // The ground is ONE choice: a curated preset or an uploaded image, never
+    // both. Setting either clears the other, so a programme can never hold two
+    // grounds and leave the renderer to guess which wins. Same absent-vs-null
+    // rule as the crest above: absent leaves it alone, null clears it.
+    if (dto.backgroundPreset !== undefined) {
+      program.backgroundPreset = dto.backgroundPreset;
+      if (dto.backgroundPreset !== null) program.backgroundMediaKey = null;
+    }
+    if (dto.backgroundMediaKey !== undefined) {
+      program.backgroundMediaKey = dto.backgroundMediaKey;
+      if (dto.backgroundMediaKey !== null) program.backgroundPreset = null;
+    }
     program.cardName = dto.cardName;
     program.validityMonths = dto.validityMonths ?? null;
     program.allowsPublicBadge = dto.allowsPublicBadge;

@@ -289,6 +289,10 @@ describe('AdminCommunitiesService', () => {
       find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn(),
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
+      // `reassignOwner` promotes the incoming owner and demotes the outgoing
+      // one through the transaction's own repository, which this same mock
+      // stands in for.
+      save: jest.fn((row: unknown) => Promise.resolve(row)),
       createQueryBuilder: jest.fn(() => makeQueryBuilderStub([])),
     };
     communityPosts = {
@@ -759,6 +763,9 @@ describe('AdminCommunitiesService', () => {
           slug: 'ada-lovelace',
           name: 'Ada Lovelace',
           initials: 'AL',
+          // The roster renders faces, falling back to initials when a
+          // moderator has no avatar.
+          avatarUrl: null,
           role: 'owner',
           joinedAt: daysAgo(300).toISOString(),
         },
@@ -767,6 +774,7 @@ describe('AdminCommunitiesService', () => {
           slug: 'marsha-p',
           name: 'Marsha Johnson',
           initials: 'MJ',
+          avatarUrl: null,
           role: 'mod',
           joinedAt: daysAgo(200).toISOString(),
         },

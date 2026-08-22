@@ -130,6 +130,9 @@ describe('AdminCommunityModeratorsService', () => {
         slug: 'plain-pat',
         name: 'Pat Plain',
         initials: 'PP',
+        // The roster renders faces, falling back to initials when a
+        // moderator has no avatar.
+        avatarUrl: null,
         role: 'mod',
         joinedAt: membership.joinedAt.toISOString(),
       });

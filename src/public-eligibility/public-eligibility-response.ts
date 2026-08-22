@@ -29,8 +29,10 @@ export interface PublicEligibilitySignalsDto {
   standingOk: boolean;
 }
 
-/** The service's internally-assembled values, before wire shaping. */
-export interface RawSignals extends PublicEligibilitySignalsDto {}
+/** The service's internally-assembled values, before wire shaping. An alias,
+ *  not an extending interface: it adds no members, and the name is what
+ *  carries the meaning at the call site. */
+export type RawSignals = PublicEligibilitySignalsDto;
 
 export function toPublicEligibilitySignals(
   raw: RawSignals,

@@ -10,7 +10,8 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { createHash } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
-import { User, UserStatus } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+import { UsersService } from '../users/users.service';
 import { AccountExportService } from './account-export.service';
 import { AccountService, DEFAULT_EMAIL_PREFERENCES } from './account.service';
 import { AccountDeactivation } from './entities/account-deactivation.entity';
@@ -60,10 +61,14 @@ describe('AccountService', () => {
   // Stand-in for the `users` row the deactivation/deletion transactions read
   // and update. Tests set `users.u1.status` to drive the status a flow must
   // preserve, then assert on it after the call.
-  let users: { u1: { id: string; status: UserStatus } } & Record<
-    string,
-    { id: string; status: UserStatus }
-  >;
+  let users: {
+    u1: { id: string; status: UserStatus; role?: UserRole };
+  } & Record<string, { id: string; status: UserStatus; role?: UserRole }>;
+  // The sole-admin guard counts admins through `UsersService.countAdmins`,
+  // inside the caller's transaction. Two by default, so the ordinary
+  // deactivate/delete flows are never the last-admin case; the guard's own
+  // test drops the count to one.
+  let usersService: { countAdmins: jest.Mock };
   let dataSource: { transaction: jest.Mock };
   let events: { emit: jest.Mock };
 
@@ -146,6 +151,7 @@ describe('AccountService', () => {
     };
 
     users = { u1: { id: 'u1', status: UserStatus.Active } };
+    usersService = { countAdmins: jest.fn().mockResolvedValue(2) };
 
     // Deactivation/deletion must drop live sockets too — the access token still
     // carries `status: 'active'` until it expires, so the gateway needs telling.
@@ -248,6 +254,7 @@ describe('AccountService', () => {
         { provide: AccountExportService, useValue: exportService },
         { provide: DataSource, useValue: dataSource },
         { provide: EventEmitter2, useValue: events },
+        { provide: UsersService, useValue: usersService },
       ],
     }).compile();
 
@@ -516,6 +523,40 @@ describe('AccountService', () => {
       expect(events.emit).toHaveBeenCalledWith('user.session.revoked', {
         userId: 'u1',
       });
+    });
+
+    // The sole-admin guard: an admin who deactivates (or erases) the last
+    // admin account leaves the platform with nobody able to reverse it, and
+    // the count is read inside the write's own transaction so a concurrent
+    // action against a different admin cannot slip past a stale one.
+    it('refuses to deactivate the last remaining admin', async () => {
+      reauthTokens.findOne.mockResolvedValue({
+        userId: 'u1',
+        token: 'tok',
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      users.u1.role = UserRole.Admin;
+      usersService.countAdmins.mockResolvedValue(1);
+
+      await expect(
+        service.deactivate('u1', { reauthToken: 'tok' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(deactivations.save).not.toHaveBeenCalled();
+      expect(users.u1.status).toBe(UserStatus.Active);
+    });
+
+    it('lets an admin deactivate while another admin remains', async () => {
+      reauthTokens.findOne.mockResolvedValue({
+        userId: 'u1',
+        token: 'tok',
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      users.u1.role = UserRole.Admin;
+      usersService.countAdmins.mockResolvedValue(2);
+
+      await expect(
+        service.deactivate('u1', { reauthToken: 'tok' }),
+      ).resolves.toEqual({ status: 'deactivated' });
     });
 
     it('records the prior status so reactivation can restore it', async () => {

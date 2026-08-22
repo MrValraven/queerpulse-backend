@@ -367,18 +367,18 @@ describe('MembershipCardsService.deleteOwnCard', () => {
   it('404s a card that belongs to someone else, without deleting it', async () => {
     const { service, cards } = makeService();
     cards.findOne.mockResolvedValue({ id: 'card-1', userId: 'someone-else' });
-    await expect(
-      service.deleteOwnCard('card-1', 'user-1'),
-    ).rejects.toThrow(NotFoundException);
+    await expect(service.deleteOwnCard('card-1', 'user-1')).rejects.toThrow(
+      NotFoundException,
+    );
     expect(cards.delete).not.toHaveBeenCalled();
   });
 
   it('404s a card id that does not exist', async () => {
     const { service, cards } = makeService();
     cards.findOne.mockResolvedValue(null);
-    await expect(
-      service.deleteOwnCard('missing', 'user-1'),
-    ).rejects.toThrow(NotFoundException);
+    await expect(service.deleteOwnCard('missing', 'user-1')).rejects.toThrow(
+      NotFoundException,
+    );
     expect(cards.delete).not.toHaveBeenCalled();
   });
 });

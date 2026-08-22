@@ -38,9 +38,19 @@ describe('MyRecognitionController', () => {
 
     const result = await controller.getMine(user);
 
-    expect(awarding.recompute).toHaveBeenCalledWith(user);
+    // The throttle-bypass flag rides along on every recompute; the query
+    // parameter is absent here, so it is off.
+    expect(awarding.recompute).toHaveBeenCalledWith(user, { force: false });
     expect(service.getForUser).toHaveBeenCalledWith('u1', true);
     expect(result).toBe(dto);
+  });
+
+  it('passes force through when ?force=true, bypassing the recompute throttle', async () => {
+    service.getForUser.mockResolvedValue({ level: { level: 1 } });
+
+    await controller.getMine(user, 'true');
+
+    expect(awarding.recompute).toHaveBeenCalledWith(user, { force: true });
   });
 });
 

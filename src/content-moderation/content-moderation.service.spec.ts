@@ -152,13 +152,15 @@ describe('ContentModerationService', () => {
   describe('revert', () => {
     it('deletes the state row via the caller manager', async () => {
       const { service } = build();
-      const manager = {
-        delete: jest.fn().mockResolvedValue(undefined),
-      } as unknown as EntityManager;
+      // Held as its own binding rather than asserted through `manager.delete`:
+      // reading a method off the cast object detaches it from its receiver,
+      // which is exactly what `@typescript-eslint/unbound-method` guards.
+      const deleteMock = jest.fn().mockResolvedValue(undefined);
+      const manager = { delete: deleteMock } as unknown as EntityManager;
 
       await service.revert(manager, 'post', 'p1');
 
-      expect(manager.delete).toHaveBeenCalledWith(ContentModeration, {
+      expect(deleteMock).toHaveBeenCalledWith(ContentModeration, {
         subjectType: 'post',
         subjectId: 'p1',
       });

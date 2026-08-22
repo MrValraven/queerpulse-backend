@@ -120,7 +120,11 @@ describe('FlatmateDirectoryService', () => {
         lifestyleTags: ['nonsmoker'],
       });
       // Opposite type (Offering) -> scored; same type (Seeking) -> null score, sorts last.
+      // DISTINCT ids matter: the ranked path re-reads the page's rows and keys
+      // them by `id`, so two fixtures sharing the default id collapse into one
+      // and the page serves the same profile twice.
       const opposite = makeFlatmate({
+        id: 'fm-opposite',
         ownerId: 'owner-opposite',
         slug: 'opposite',
         type: FlatmateProfileType.Offering,
@@ -129,6 +133,7 @@ describe('FlatmateDirectoryService', () => {
         lifestyleTags: ['nonsmoker'],
       });
       const sameType = makeFlatmate({
+        id: 'fm-same',
         ownerId: 'owner-same',
         slug: 'same-type',
         type: FlatmateProfileType.Seeking,

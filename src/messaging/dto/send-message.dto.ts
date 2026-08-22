@@ -4,7 +4,6 @@ import {
   IsInt,
   IsOptional,
   IsString,
-  IsUrl,
   IsUUID,
   MaxLength,
   Min,

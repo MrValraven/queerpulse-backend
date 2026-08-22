@@ -1,3 +1,4 @@
+import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { HealthCheckService, TypeOrmHealthIndicator } from '@nestjs/terminus';
 import { HealthController } from './health.controller';
@@ -26,6 +27,13 @@ describe('HealthController', () => {
         {
           provide: TypeOrmHealthIndicator,
           useValue: { pingCheck },
+        },
+        // The two DB-pinging probes sit behind `MetricsTokenGuard`, which
+        // Nest instantiates for the controller even though these tests call
+        // the handlers directly. Its only dependency is the config.
+        {
+          provide: ConfigService,
+          useValue: { get: jest.fn().mockReturnValue(undefined) },
         },
       ],
     }).compile();

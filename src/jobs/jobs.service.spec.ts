@@ -8,6 +8,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { CompaniesService } from '../companies/companies.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { MessagingService } from '../messaging/messaging.service';
 import { Profile } from '../users/entities/profile.entity';
 import {
   JobApplication,
@@ -134,6 +135,13 @@ describe('JobsService', () => {
         { provide: CompaniesService, useValue: companiesService },
         { provide: ContentModerationService, useValue: contentModeration },
         { provide: NotificationsService, useValue: notifications },
+        // An application decision also opens a DM to the applicant. The
+        // service treats a delivery failure as non-fatal (the decision has
+        // already committed), so the stub only has to exist.
+        {
+          provide: MessagingService,
+          useValue: { deliverEnquiry: jest.fn().mockResolvedValue(undefined) },
+        },
       ],
     }).compile();
     service = module.get(JobsService);
@@ -221,10 +229,13 @@ describe('JobsService', () => {
 
   describe('apply', () => {
     it('maps a duplicate (job, applicant) application to 409 Conflict', async () => {
+      // `status` matters: `apply` refuses a role that is not Open, so a
+      // fixture without it would 409 for the wrong reason.
       jobs.findOne.mockResolvedValue({
         id: 'job-1',
         slug: 'backend-engineer',
         title: 'Backend Engineer',
+        status: JobStatus.Open,
       });
       applications.save.mockRejectedValueOnce({ code: '23505' });
 
@@ -235,11 +246,30 @@ describe('JobsService', () => {
       ).rejects.toBeInstanceOf(ConflictException);
     });
 
+    it('refuses an application to a role that is no longer open', async () => {
+      jobs.findOne.mockResolvedValue({
+        id: 'job-1',
+        slug: 'backend-engineer',
+        title: 'Backend Engineer',
+        status: JobStatus.Closed,
+      });
+
+      await expect(
+        service.apply('backend-engineer', 'applicant-1', {
+          answers: [{ question: 'Why?', answer: 'Because.' }],
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      // Nothing is written: an applicant must not be left waiting on a role
+      // nobody is reading any more.
+      expect(applications.save).not.toHaveBeenCalled();
+    });
+
     it('creates an application and resolves the applicant MemberRef', async () => {
       jobs.findOne.mockResolvedValue({
         id: 'job-1',
         slug: 'backend-engineer',
         title: 'Backend Engineer',
+        status: JobStatus.Open,
       });
       profiles.find.mockResolvedValue([
         {

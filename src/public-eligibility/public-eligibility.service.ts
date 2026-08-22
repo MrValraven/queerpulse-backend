@@ -129,7 +129,10 @@ export class PublicEligibilityService {
     const blocked = [...moderationStates.values()].some(
       (state) => state.hidden || state.removed,
     );
-    const standingOk = user.status === UserStatus.Active && !blocked;
+    // `user.status` is a JWT claim, typed `string` on `CurrentUserData`; the
+    // widening keeps the comparison honest about that.
+    const standingOk =
+      user.status === (UserStatus.Active as string) && !blocked;
 
     return toPublicEligibilitySignals({
       verified: profile?.verified === true,

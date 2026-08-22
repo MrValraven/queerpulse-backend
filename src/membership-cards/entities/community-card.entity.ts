@@ -63,6 +63,21 @@ export class CommunityCard {
   @Column({ type: 'varchar', nullable: true })
   crestMediaKey!: string | null;
 
+  // The card's GROUND, when the community wants something other than a flat
+  // skin colour. At most one of these two is ever set; both null means the
+  // card paints `skin` as before.
+  //
+  // A preset NAME from a closed list (a pride flag), never raw colours —
+  // same discipline as `accentToken`, and it keeps the rendering in the
+  // frontend where the contrast scrim lives.
+  @Column({ type: 'varchar', nullable: true })
+  backgroundPreset!: string | null;
+
+  // Raw storage key for an uploaded background, resolved through `toImageUrl`
+  // at the response boundary. Never store the resolved URL.
+  @Column({ type: 'varchar', length: 512, nullable: true })
+  backgroundMediaKey!: string | null;
+
   // The word on the card, e.g. 'Sócie'. Community-authored.
   @Column({ type: 'varchar', default: 'Member' })
   cardName!: string;

@@ -8,6 +8,7 @@ import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { StorageService } from '../storage/storage.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { HiddenFromService } from '../social/hidden-from.service';
 import { Community } from '../communities/entities/community.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Profile } from '../users/entities/profile.entity';
@@ -129,6 +130,13 @@ describe('ProfilesService board lifecycle', () => {
           useValue: {
             isBlockedEitherWay: jest.fn().mockResolvedValue(false),
             excludeBlocked: jest.fn((qb: unknown) => qb),
+          },
+        },
+        {
+          provide: HiddenFromService,
+          useValue: {
+            isHiddenFrom: jest.fn().mockResolvedValue(false),
+            excludeHiddenFrom: jest.fn((qb: unknown) => qb),
           },
         },
         { provide: HandlesService, useValue: { rename: jest.fn() } },

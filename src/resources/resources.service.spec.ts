@@ -129,6 +129,10 @@ describe('ResourcesService', () => {
             body: 'Full guide body text…',
             meta: 'Guide · 12 min · PT / EN',
             externalUrl: null,
+            // Editorial freshness: the reader shows "last checked ‹date›", so
+            // an unverified resource has to map to an explicit null rather
+            // than be absent from the response.
+            lastVerifiedAt: null,
           },
         ],
         total: 1,
@@ -180,7 +184,19 @@ describe('ResourcesService', () => {
         body: 'Full guide body text…',
         meta: 'Guide · 12 min · PT / EN',
         externalUrl: null,
+        lastVerifiedAt: null,
       });
+    });
+
+    it('serves an ISO lastVerifiedAt when the resource has been checked', async () => {
+      resources.findOne.mockResolvedValue({
+        ...publishedResource,
+        lastVerifiedAt: new Date('2026-06-01T09:30:00.000Z'),
+      });
+
+      const detail = await service.getBySlug('workplace-discrimination-guide');
+
+      expect(detail.lastVerifiedAt).toBe('2026-06-01T09:30:00.000Z');
     });
   });
 

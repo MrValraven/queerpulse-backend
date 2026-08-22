@@ -79,9 +79,10 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     // filled and the sweeper hasn't hidden it).
     filledAt: null,
     // NOT NULL on the entity — every listing always carries a real expiry.
-    // Comfortably after the fixture's `createdAt` so "live" fixtures read as
-    // not-yet-expired by default.
-    expiresAt: new Date('2026-03-02T00:00:00.000Z'),
+    // Relative to NOW rather than a fixed date: `detail` 404s an expired
+    // listing for everyone but its owner, so a hardcoded date silently turns
+    // every "live listing" test red once the wall clock passes it.
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,

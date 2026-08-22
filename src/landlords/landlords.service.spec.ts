@@ -4,6 +4,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import {
+  resetImageUrlBaseForTesting,
+  setImageUrlBase,
+} from '../common/image-url';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import { POSTGRES_UNIQUE_VIOLATION } from '../common/db-errors';
@@ -74,6 +78,18 @@ function uniqueViolation(): Error & { code: string } {
   });
 }
 
+// The rating aggregate's query-builder stub: chainable, resolving to the
+// "no recommendations yet" raw row by default. Tests that need a rating
+// override `getRawOne`.
+const ratingQbStub = () => {
+  const qb: Record<string, jest.Mock> = {};
+  for (const method of ['select', 'addSelect', 'where']) {
+    qb[method] = jest.fn().mockReturnValue(qb);
+  }
+  qb.getRawOne = jest.fn().mockResolvedValue({ average: null, count: '0' });
+  return qb;
+};
+
 describe('LandlordsService', () => {
   let service: LandlordsService;
   // Declared with the exact method shape (rather than the bare `RepoMock`
@@ -125,6 +141,11 @@ describe('LandlordsService', () => {
       create: jest.fn((row: unknown) => row),
       save: jest.fn((row: unknown) => Promise.resolve(row)),
       remove: jest.fn().mockResolvedValue(undefined),
+      delete: jest.fn().mockResolvedValue({ affected: 1 }),
+      // One landlord's rating is aggregated in SQL (AVG + COUNT) rather than
+      // summed in JS, so the detail view goes through the query builder.
+      // Default: no recommendations yet.
+      createQueryBuilder: jest.fn(() => ratingQbStub()),
     };
     introRequests = {
       find: jest.fn().mockResolvedValue([]),
@@ -159,8 +180,15 @@ describe('LandlordsService', () => {
         { provide: AffirmingPledgeService, useValue: affirmingPledge },
       ],
     }).compile();
-
     service = module.get(LandlordsService);
+    // The detail mapper resolves photos through `toImageUrl`, which throws
+    // `Service temporarily unavailable` when the base was never wired. Only
+    // storage-key fixtures reach it (the foreign-photo cases).
+    setImageUrlBase('https://api.test');
+  });
+
+  afterEach(() => {
+    resetImageUrlBaseForTesting();
   });
 
   describe('browse', () => {
@@ -203,6 +231,11 @@ describe('LandlordsService', () => {
     it('assembles the detail view with recommendations and a computed rating', async () => {
       landlords.findOne.mockResolvedValue(makeLandlord());
       recommendations.find.mockResolvedValue([makeRec({ stars: 4 })]);
+      // The rating is aggregated in SQL, not summed from the rows above, so
+      // the raw AVG/COUNT is what the view reads.
+      const ratingQb = ratingQbStub();
+      ratingQb.getRawOne.mockResolvedValue({ average: '4', count: '1' });
+      recommendations.createQueryBuilder.mockReturnValue(ratingQb);
 
       const result = await service.detail('friendly-landlord');
 

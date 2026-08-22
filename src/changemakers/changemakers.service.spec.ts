@@ -35,6 +35,20 @@ function buildProfile(overrides: Partial<Changemaker> = {}): Changemaker {
   };
 }
 
+// The published-totals aggregate's query-builder stub: chainable, resolving
+// to "nothing published" by default. Tests that assert on the totals override
+// `getRawOne`.
+const totalsQbStub = () => {
+  const qb: Record<string, jest.Mock> = {};
+  for (const method of ['select', 'addSelect', 'where']) {
+    qb[method] = jest.fn().mockReturnValue(qb);
+  }
+  qb.getRawOne = jest
+    .fn()
+    .mockResolvedValue({ profiled: '0', causeAreas: '0' });
+  return qb;
+};
+
 describe('ChangemakersService', () => {
   let service: ChangemakersService;
   const changemakerRepo = {
@@ -46,6 +60,9 @@ describe('ChangemakersService', () => {
     // Used by `allocateUniqueSlug`'s exists-checker inside
     // `createWithUniqueSlug`.
     exists: jest.fn(),
+    // `profiled` / `causeAreas` are aggregated in SQL (COUNT + COUNT
+    // DISTINCT) rather than derived from the fetched rows.
+    createQueryBuilder: jest.fn(() => totalsQbStub()),
   };
   const settingsRepo = {
     findOne: jest.fn(),
@@ -98,6 +115,13 @@ describe('ChangemakersService', () => {
       peopleHelped: 1200,
       activeCampaigns: 12,
     });
+
+    // The totals are counted in SQL over the published set, not derived from
+    // the rows fetched above: three profiles, two distinct causes once
+    // "Housing"/"housing" are folded together.
+    const totalsQb = totalsQbStub();
+    totalsQb.getRawOne.mockResolvedValue({ profiled: '3', causeAreas: '2' });
+    changemakerRepo.createQueryBuilder.mockReturnValue(totalsQb);
 
     const result = await service.listPublic();
 

@@ -11,10 +11,7 @@ import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
-import {
-  CreateEditSuggestionDto,
-  EditSuggestionField,
-} from './dto/create-edit-suggestion.dto';
+import { CreateEditSuggestionDto } from './dto/create-edit-suggestion.dto';
 import { ResolveEditSuggestionDto } from './dto/resolve-edit-suggestion.dto';
 import {
   ListingEditSuggestion,

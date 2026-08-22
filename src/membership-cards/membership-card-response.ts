@@ -8,6 +8,10 @@ export interface CardProgramDTO {
   skin: CardSkin;
   accentToken: string;
   crestUrl: string | null;
+  /** A curated ground (a pride flag), drawn by the frontend from this id. */
+  backgroundPreset: string | null;
+  /** An uploaded ground, already resolved to a fetchable URL. */
+  backgroundUrl: string | null;
   cardName: string;
   validityMonths: number | null;
   allowsPrint: boolean;
@@ -58,6 +62,8 @@ export function toCardProgram(program: CommunityCard): CardProgramDTO {
     skin: program.skin,
     accentToken: program.accentToken,
     crestUrl: toImageUrl(program.crestMediaKey),
+    backgroundPreset: program.backgroundPreset,
+    backgroundUrl: toImageUrl(program.backgroundMediaKey),
     cardName: program.cardName,
     validityMonths: program.validityMonths,
     allowsPrint: program.allowsPrint,

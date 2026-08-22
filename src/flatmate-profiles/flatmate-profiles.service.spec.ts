@@ -14,8 +14,6 @@ import {
 } from './entities/flatmate-profile.entity';
 import { FlatmateProfilesService } from './flatmate-profiles.service';
 
-type RepoMock = Record<string, jest.Mock>;
-
 function makeFlatmate(
   overrides: Partial<FlatmateProfile> = {},
 ): FlatmateProfile {
@@ -53,7 +51,7 @@ const UPSERT_DTO: UpsertFlatmateProfileDto = {
 
 describe('FlatmateProfilesService', () => {
   let service: FlatmateProfilesService;
-  // Declared with the exact method shape (rather than the bare `RepoMock`
+  // Declared with the exact method shape (rather than a bare
   // index-signature alias) so `flatmates.findOne.mockResolvedValue(...)`-style
   // chained access doesn't see `noUncheckedIndexedAccess`'s `| undefined`.
   let flatmates: {

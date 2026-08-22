@@ -67,7 +67,10 @@ describe('MembershipCardsController', () => {
     });
 
     it('404s for a card the caller does not hold, without minting', async () => {
-      cards.cardById.mockResolvedValue({ id: 'card-1', userId: 'someone-else' });
+      cards.cardById.mockResolvedValue({
+        id: 'card-1',
+        userId: 'someone-else',
+      });
       await expect(controller.token(user, 'card-1')).rejects.toThrow(
         NotFoundException,
       );

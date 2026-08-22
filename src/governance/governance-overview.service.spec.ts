@@ -8,6 +8,7 @@ import {
 } from './entities/governance-overview.entity';
 import { governanceOverviewSeed } from './governance-overview.seed';
 import { Profile } from '../users/entities/profile.entity';
+import { UsersService } from '../users/users.service';
 import { DataSource } from 'typeorm';
 import {
   GovernanceOverviewChange,
@@ -30,8 +31,20 @@ function makeOverview(
   };
 }
 
+// `activeMembers` is the one health stat NOT served from the stored row: the
+// service overwrites it with a live count so the page can never quote a number
+// that went stale between publishes.
+const ACTIVE_MEMBER_COUNT = 412;
+const seedHealthWithLiveCount = () =>
+  governanceOverviewSeed.health.map((stat) =>
+    stat.key === 'activeMembers'
+      ? { ...stat, n: String(ACTIVE_MEMBER_COUNT) }
+      : stat,
+  );
+
 describe('GovernanceOverviewService', () => {
   let service: GovernanceOverviewService;
+  let usersService: { countActiveMembers: jest.Mock };
   let repo: { findOne: jest.Mock; save: jest.Mock };
   let changesRepo: { find: jest.Mock; createQueryBuilder: jest.Mock };
   // `getAdminOverview` now resolves the latest change per section with one
@@ -46,6 +59,9 @@ describe('GovernanceOverviewService', () => {
   let profilesRepo: { find: jest.Mock };
 
   beforeEach(async () => {
+    usersService = {
+      countActiveMembers: jest.fn().mockResolvedValue(ACTIVE_MEMBER_COUNT),
+    };
     repo = { findOne: jest.fn(), save: jest.fn() };
     latestChangesQb = {
       distinctOn: jest.fn(() => latestChangesQb),
@@ -67,6 +83,7 @@ describe('GovernanceOverviewService', () => {
           useValue: changesRepo,
         },
         { provide: getRepositoryToken(Profile), useValue: profilesRepo },
+        { provide: UsersService, useValue: usersService },
         { provide: DataSource, useValue: { transaction: jest.fn() } },
       ],
     }).compile();
@@ -100,13 +117,32 @@ describe('GovernanceOverviewService', () => {
         where: { id: GOVERNANCE_OVERVIEW_ID },
       });
       expect(result).toEqual({
-        health: governanceOverviewSeed.health,
+        health: seedHealthWithLiveCount(),
         moderationSteps: governanceOverviewSeed.moderationSteps,
         council: governanceOverviewSeed.council,
         principles: governanceOverviewSeed.principles,
         decisions: governanceOverviewSeed.decisions,
         publishedAt: null,
       });
+    });
+
+    it('serves a LIVE activeMembers count, not the stored one', async () => {
+      repo.findOne.mockResolvedValue(makeOverview());
+      usersService.countActiveMembers.mockResolvedValue(9001);
+
+      const result = await service.getOverview();
+
+      expect(
+        result.health.find((stat) => stat.key === 'activeMembers')?.n,
+      ).toBe('9001');
+      // Every other stat still comes from the stored snapshot.
+      expect(
+        result.health.filter((stat) => stat.key !== 'activeMembers'),
+      ).toEqual(
+        governanceOverviewSeed.health.filter(
+          (stat) => stat.key !== 'activeMembers',
+        ),
+      );
     });
 
     it('maps a published snapshot to an ISO `publishedAt`', async () => {
@@ -128,7 +164,9 @@ describe('GovernanceOverviewService', () => {
     it('stamps `publishedAt` on the singleton and returns the ISO timestamp', async () => {
       const overview = makeOverview();
       repo.findOne.mockResolvedValue(overview);
-      repo.save.mockImplementation(async (row: GovernanceOverview) => row);
+      repo.save.mockImplementation((row: GovernanceOverview) =>
+        Promise.resolve(row),
+      );
 
       const before = Date.now();
       const result = await service.publish();

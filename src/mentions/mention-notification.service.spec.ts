@@ -20,7 +20,13 @@ function build() {
   const events = { findOne: jest.fn() };
   const threads = { findOne: jest.fn() };
   const notifications = {
-    createForRecipients: jest.fn().mockResolvedValue(undefined),
+    // Resolves to the ids it actually notified (the real signature returns
+    // `Promise<string[]>`; `notify` reads that array). A stub resolving to
+    // `undefined` throws inside the loop and silently swallows every
+    // remaining mention group.
+    createForRecipients: jest.fn((userIds: string[]) =>
+      Promise.resolve(userIds),
+    ),
   };
   const userIdsForSlugs = jest
     .spyOn(MemberLookup.prototype, 'userIdsForSlugs')
