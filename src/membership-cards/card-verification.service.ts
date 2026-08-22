@@ -44,11 +44,16 @@ export class CardVerificationService {
   ) {}
 
   async verify(token: string): Promise<CardVerificationDTO | null> {
-    const cardId = this.tokens.verify(token);
-    if (!cardId) return null;
+    const payload = this.tokens.verify(token);
+    if (!payload) return null;
 
-    const card = await this.cards.cardById(cardId);
+    const card = await this.cards.cardById(payload.cardId);
     if (!card) return null;
+
+    // The generation check. A card whose issuer has replaced it keeps its row,
+    // its status and its serial, and every printed copy of the previous code
+    // stops resolving here.
+    if (card.codeVersion !== payload.codeVersion) return null;
 
     const program = await this.programs.findOne({
       where: { id: card.programId },
@@ -81,6 +86,13 @@ export class CardVerificationService {
         ? [holder.firstName, holder.lastName].filter(Boolean).join(' ')
         : ERASED_HOLDER_NAME,
       role: membership?.role ?? 'member',
+      // Three conditions, all of which must hold for a face to be on the card:
+      // the programme prints photos, the member has not vetoed theirs, and they
+      // actually have one.
+      hasPhoto:
+        program.allowsMemberPhoto &&
+        !card.isPhotoHidden &&
+        Boolean(holder?.avatarUrl),
     });
   }
 }

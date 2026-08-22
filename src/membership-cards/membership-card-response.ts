@@ -53,6 +53,13 @@ export interface MyCardDTO {
    * avatar; only this distinguishes them.
    */
   isPhotoHidden: boolean;
+  /**
+   * The card's permanent scannable code, or null when the platform has no card
+   * signing key configured. Sent whatever the card's status: a printed card
+   * exists in the world whatever its status, and the verify page reports the
+   * truth about it. The client decides whether to draw it.
+   */
+  token: string | null;
   program: CardProgramDTO;
 }
 
@@ -82,6 +89,13 @@ export interface IssuerCardDTO {
    * separate from `avatarUrl` precisely because those two answers differ.
    */
   cardPhotoUrl: string | null;
+  /**
+   * The card's permanent scannable code, or null when the platform has no card
+   * signing key configured. Sent whatever the card's status: a printed card
+   * exists in the world whatever its status, and the verify page reports the
+   * truth about it. The client decides whether to draw it.
+   */
+  token: string | null;
 }
 
 export interface CardVerificationDTO {
@@ -91,6 +105,12 @@ export interface CardVerificationDTO {
   role: string;
   serial: string;
   memberSince: string;
+  /**
+   * Whether the card actually carries the holder's face. With one permanent
+   * code there is no way to tell a phone screen from a piece of paper, so this
+   * is what tells a door whether it has anything to check the person against.
+   */
+  hasPhoto: boolean;
 }
 
 export function toCardProgram(program: CommunityCard): CardProgramDTO {
@@ -123,6 +143,9 @@ export function toMyCard(
     holderName: string;
     /** The holder's profile avatar, before either switch is applied. */
     holderAvatarUrl?: string | null;
+    /** Already minted by the caller, which is the only layer holding the
+     *  signing key. Null on a platform with no key configured. */
+    token: string | null;
   },
 ): MyCardDTO {
   // Both switches are enforced HERE, at the one boundary the avatar can leave
@@ -143,6 +166,7 @@ export function toMyCard(
       ? toImageUrl(context.holderAvatarUrl ?? null)
       : null,
     isPhotoHidden: card.isPhotoHidden,
+    token: context.token,
     program: toCardProgram(program),
   };
 }
@@ -163,6 +187,9 @@ export function toIssuerCard(
     /** Already resolved to a fetchable URL by the caller. */
     avatarUrl: string | null;
     role: string;
+    /** The same permanent code the holder sees. There is nothing
+     *  holder-specific to withhold: it is the card's own value. */
+    token: string | null;
   },
 ): IssuerCardDTO {
   // The same one boundary `toMyCard` gates on, applied to the same pair of
@@ -181,6 +208,7 @@ export function toIssuerCard(
     avatarUrl: holder.avatarUrl,
     role: holder.role,
     cardPhotoUrl: canShowPhoto ? holder.avatarUrl : null,
+    token: holder.token,
   };
 }
 
@@ -193,7 +221,12 @@ export function toIssuerCard(
 export function toCardVerification(
   card: MembershipCard,
   status: EffectiveCardStatus,
-  context: { issuerName: string; holderName: string; role: string },
+  context: {
+    issuerName: string;
+    holderName: string;
+    role: string;
+    hasPhoto: boolean;
+  },
 ): CardVerificationDTO {
   return {
     status,
@@ -202,5 +235,6 @@ export function toCardVerification(
     role: context.role,
     serial: card.serial,
     memberSince: card.issuedAt.toISOString(),
+    hasPhoto: context.hasPhoto,
   };
 }

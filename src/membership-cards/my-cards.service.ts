@@ -5,6 +5,7 @@ import { Community } from '../communities/entities/community.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { effectiveCardStatus } from './card-status';
+import { CardTokenService } from './card-token.service';
 import { CommunityCard } from './entities/community-card.entity';
 import { MyCardDTO, toMyCard } from './membership-card-response';
 import { MembershipCardsService } from './membership-cards.service';
@@ -18,6 +19,7 @@ import { MembershipCardsService } from './membership-cards.service';
 export class MyCardsService {
   constructor(
     private readonly cards: MembershipCardsService,
+    private readonly tokens: CardTokenService,
     @InjectRepository(CommunityCard)
     private readonly programs: Repository<CommunityCard>,
     @InjectRepository(Community)
@@ -27,6 +29,15 @@ export class MyCardsService {
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
   ) {}
+
+  /**
+   * Never throws on an unconfigured platform. A missing signing key should cost
+   * a member the code on their card, never their whole wallet page.
+   */
+  private tokenFor(card: { id: string; codeVersion: number }): string | null {
+    if (!this.tokens.isConfigured) return null;
+    return this.tokens.mint(card.id, card.codeVersion);
+  }
 
   async forUser(userId: string): Promise<MyCardDTO[]> {
     const cards = await this.cards.cardsForUser(userId);
@@ -82,6 +93,7 @@ export class MyCardsService {
           role: roleByCommunity.get(community.id) ?? 'member',
           holderName,
           holderAvatarUrl,
+          token: this.tokenFor(card),
         }),
       ];
     });

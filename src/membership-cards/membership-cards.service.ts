@@ -14,6 +14,7 @@ import { GovernanceLogAction } from '../communities/entities/community-governanc
 import { CardProgramsService } from './card-programs.service';
 import { CardSerialService } from './card-serial.service';
 import { EffectiveCardStatus, effectiveCardStatus } from './card-status';
+import { MAX_CODE_VERSION } from './card-token.service';
 import { CommunityCard } from './entities/community-card.entity';
 import {
   MembershipCard,
@@ -225,6 +226,58 @@ export class MembershipCardsService {
             : GovernanceLogAction.CardRevoked,
       targetUserId: card.userId,
       metadata: { serial: card.serial },
+    });
+    return saved;
+  }
+
+  /**
+   * Void every printed copy of one card without touching the holder's digital
+   * card.
+   *
+   * This is the "my wallet was stolen" remedy, and it is deliberately a
+   * different act from reinstating. Reinstating revives the same row and
+   * therefore the same permanent code, which is right when a revocation was a
+   * mistake and wrong when the physical object is gone. Bumping the generation
+   * leaves status, serial and dates exactly as they were, so the member stays
+   * a member throughout and their card on their phone simply starts showing a
+   * new code.
+   */
+  async replaceCode(
+    slug: string,
+    actorId: string,
+    cardId: string,
+  ): Promise<MembershipCard> {
+    const communityId = await this.membership.assertOwnerOrModBySlug(
+      slug,
+      actorId,
+    );
+    const program = await this.programs.programForCommunity(communityId);
+    if (!program) throw new NotFoundException('Card programme not found');
+
+    // Scoped by programId for the same reason `setStatus` is: it stops a mod
+    // of community A acting on a card issued by community B.
+    const card = await this.cards.findOne({
+      where: { id: cardId, programId: program.id },
+    });
+    if (!card) throw new NotFoundException('Card not found');
+
+    // The code carries a uint16 generation. Guarded here so the ceiling is a
+    // clear 400 rather than a signing error sixty-five thousand replacements
+    // from now.
+    if (card.codeVersion >= MAX_CODE_VERSION) {
+      throw new BadRequestException(
+        'This card has been replaced too many times',
+      );
+    }
+
+    card.codeVersion += 1;
+    const saved = await this.cards.save(card);
+    await this.governance.log({
+      communityId,
+      actorUserId: actorId,
+      action: GovernanceLogAction.CardReplaced,
+      targetUserId: card.userId,
+      metadata: { serial: card.serial, codeVersion: card.codeVersion },
     });
     return saved;
   }

@@ -62,6 +62,7 @@ function card(overrides: Partial<MembershipCard> = {}): MembershipCard {
     revokedReason: 'Left under a safety report',
     isPubliclyVisible: false,
     isPhotoHidden: false,
+    codeVersion: 1,
     ...overrides,
   };
 }
@@ -98,6 +99,7 @@ describe('toMyCard', () => {
       communitySlug: 'azores-queer',
       role: 'member',
       holderName: 'Rita V',
+      token: 'signed.code',
     });
     expect(dto.serial).toBe('AZO-7K4M2');
     expect(dto.status).toBe('active');
@@ -115,6 +117,7 @@ describe('toMyCard', () => {
         communitySlug: 'azores-queer',
         role: 'member',
         holderName: 'Rita V',
+        token: 'signed.code',
       },
     );
     expect(JSON.stringify(dto)).not.toContain('safety report');
@@ -127,6 +130,7 @@ describe('toIssuerCard', () => {
     holderName: 'Rita V',
     avatarUrl: 'https://api.test/files/avatar.png',
     role: 'mod',
+    token: 'signed.code',
   };
 
   it('does expose the revocation reason, which is issuer-only', () => {
@@ -170,6 +174,14 @@ describe('toIssuerCard', () => {
     );
     expect(dto.cardPhotoUrl).toBe(holder.avatarUrl);
   });
+
+  // The whole point of the permanent code: an issuer reading a member's card
+  // sees the same value that member shows, so the roster can draw a real,
+  // scannable symbol instead of a "holder only" sentence.
+  it('carries the same permanent code the holder sees', () => {
+    const dto = toIssuerCard(card(), program(), 'active', holder);
+    expect(dto.token).toBe('signed.code');
+  });
 });
 
 describe('toCardVerification', () => {
@@ -178,9 +190,11 @@ describe('toCardVerification', () => {
       issuerName: 'Azores Queer',
       holderName: 'Rita V',
       role: 'member',
+      hasPhoto: false,
     });
     expect(Object.keys(dto).sort()).toEqual(
       [
+        'hasPhoto',
         'holderName',
         'issuerName',
         'memberSince',
@@ -195,9 +209,43 @@ describe('toCardVerification', () => {
     const dto = toCardVerification(
       card({ status: MembershipCardStatus.Revoked }),
       'revoked',
-      { issuerName: 'Azores Queer', holderName: 'Rita V', role: 'member' },
+      {
+        issuerName: 'Azores Queer',
+        holderName: 'Rita V',
+        role: 'member',
+        hasPhoto: false,
+      },
     );
     expect(JSON.stringify(dto)).not.toContain('safety report');
     expect(dto.status).toBe('revoked');
+  });
+});
+
+describe('the permanent code on a card DTO', () => {
+  it('is carried on a card of any status', () => {
+    const dto = toMyCard(
+      card({ status: MembershipCardStatus.Revoked }),
+      program(),
+      'revoked',
+      {
+        communityName: 'Azores Queer',
+        communitySlug: 'azores-queer',
+        role: 'member',
+        holderName: 'Rita V',
+        token: 'signed.code',
+      },
+    );
+    expect(dto.token).toBe('signed.code');
+  });
+
+  it('is null when the platform has no signing key', () => {
+    const dto = toMyCard(card(), program(), 'active', {
+      communityName: 'Azores Queer',
+      communitySlug: 'azores-queer',
+      role: 'member',
+      holderName: 'Rita V',
+      token: null,
+    });
+    expect(dto.token).toBeNull();
   });
 });

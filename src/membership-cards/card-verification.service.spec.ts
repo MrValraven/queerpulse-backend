@@ -2,7 +2,9 @@ import { CardVerificationService } from './card-verification.service';
 import { MembershipCardStatus } from './entities/membership-card.entity';
 
 function makeService() {
-  const tokens = { verify: jest.fn().mockReturnValue('card-1') };
+  const tokens = {
+    verify: jest.fn().mockReturnValue({ cardId: 'card-1', codeVersion: 1 }),
+  };
   const cards = {
     cardById: jest.fn().mockResolvedValue({
       id: 'card-1',
@@ -13,6 +15,8 @@ function makeService() {
       issuedAt: new Date('2026-02-01T00:00:00Z'),
       expiresAt: null,
       revokedReason: 'Left under a safety report',
+      codeVersion: 1,
+      isPhotoHidden: false,
     }),
   };
   const programs = {
@@ -20,6 +24,7 @@ function makeService() {
       id: 'prog-1',
       issuerId: 'com-1',
       isEnabled: true,
+      allowsMemberPhoto: false,
     }),
   };
   const communities = {
@@ -34,7 +39,11 @@ function makeService() {
     findOne: jest.fn().mockResolvedValue({ role: 'member' }),
   };
   const users = {
-    findOne: jest.fn().mockResolvedValue({ firstName: 'Rita', lastName: 'V' }),
+    findOne: jest.fn().mockResolvedValue({
+      firstName: 'Rita',
+      lastName: 'V',
+      avatarUrl: 'media/rita.jpg',
+    }),
   };
   const service = new CardVerificationService(
     tokens as never,
@@ -58,6 +67,7 @@ describe('CardVerificationService.verify', () => {
       role: 'member',
       serial: 'AQ-7K4M2',
       memberSince: '2026-02-01T00:00:00.000Z',
+      hasPhoto: false,
     });
   });
 
@@ -107,6 +117,8 @@ describe('CardVerificationService.verify', () => {
       issuedAt: new Date('2026-02-01T00:00:00Z'),
       expiresAt: null,
       revokedReason: 'Left under a safety report',
+      codeVersion: 1,
+      isPhotoHidden: false,
     });
     const result = await service.verify('good.token');
     expect(JSON.stringify(result)).not.toContain('safety report');
@@ -117,5 +129,74 @@ describe('CardVerificationService.verify', () => {
     const { service, users } = makeService();
     users.findOne.mockResolvedValue(null);
     expect((await service.verify('good.token'))?.holderName).toBe('A member');
+  });
+
+  // The generation check behind "replace a lost card". The row is untouched;
+  // only the code the paper carries has moved on.
+  it('returns null when the scanned code is a superseded generation', async () => {
+    const { service, cards } = makeService();
+    cards.cardById.mockResolvedValue({
+      id: 'card-1',
+      programId: 'prog-1',
+      userId: 'user-1',
+      serial: 'AQ-7K4M2',
+      status: MembershipCardStatus.Active,
+      issuedAt: new Date('2026-02-01T00:00:00Z'),
+      expiresAt: null,
+      revokedReason: null,
+      codeVersion: 2,
+      isPhotoHidden: false,
+    });
+    expect(await service.verify('printed.token')).toBeNull();
+  });
+
+  it('reports hasPhoto true when the programme prints photos and the holder has one', async () => {
+    const { service, programs } = makeService();
+    programs.findOne.mockResolvedValue({
+      id: 'prog-1',
+      issuerId: 'com-1',
+      isEnabled: true,
+      allowsMemberPhoto: true,
+    });
+    expect((await service.verify('good.token'))?.hasPhoto).toBe(true);
+  });
+
+  it('reports hasPhoto false when the holder vetoed their own photo', async () => {
+    const { service, programs, cards } = makeService();
+    programs.findOne.mockResolvedValue({
+      id: 'prog-1',
+      issuerId: 'com-1',
+      isEnabled: true,
+      allowsMemberPhoto: true,
+    });
+    cards.cardById.mockResolvedValue({
+      id: 'card-1',
+      programId: 'prog-1',
+      userId: 'user-1',
+      serial: 'AQ-7K4M2',
+      status: MembershipCardStatus.Active,
+      issuedAt: new Date('2026-02-01T00:00:00Z'),
+      expiresAt: null,
+      revokedReason: null,
+      codeVersion: 1,
+      isPhotoHidden: true,
+    });
+    expect((await service.verify('good.token'))?.hasPhoto).toBe(false);
+  });
+
+  it('reports hasPhoto false when the holder has no avatar at all', async () => {
+    const { service, programs, users } = makeService();
+    programs.findOne.mockResolvedValue({
+      id: 'prog-1',
+      issuerId: 'com-1',
+      isEnabled: true,
+      allowsMemberPhoto: true,
+    });
+    users.findOne.mockResolvedValue({
+      firstName: 'Rita',
+      lastName: 'V',
+      avatarUrl: null,
+    });
+    expect((await service.verify('good.token'))?.hasPhoto).toBe(false);
   });
 });

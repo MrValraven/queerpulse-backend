@@ -382,3 +382,82 @@ describe('MembershipCardsService.deleteOwnCard', () => {
     expect(cards.delete).not.toHaveBeenCalled();
   });
 });
+
+describe('MembershipCardsService.replaceCode', () => {
+  const activeCard = {
+    id: 'card-1',
+    programId: 'prog-1',
+    userId: 'user-1',
+    serial: 'AQ-7K4M2',
+    status: MembershipCardStatus.Active,
+    codeVersion: 1,
+  };
+
+  it('bumps the generation and leaves everything else alone', async () => {
+    const { service, cards } = makeService();
+    cards.findOne.mockResolvedValue({ ...activeCard });
+    await service.replaceCode('azores-queer', 'actor-1', 'card-1');
+    expect(cards.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        codeVersion: 2,
+        status: MembershipCardStatus.Active,
+        serial: 'AQ-7K4M2',
+      }),
+    );
+  });
+
+  it('records the replacement in the community governance log', async () => {
+    const { service, cards, governance } = makeService();
+    cards.findOne.mockResolvedValue({ ...activeCard });
+    await service.replaceCode('azores-queer', 'actor-1', 'card-1');
+    expect(governance.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        communityId: 'com-1',
+        actorUserId: 'actor-1',
+        action: 'card_replaced',
+        targetUserId: 'user-1',
+      }),
+    );
+  });
+
+  // The scoping that stops a mod of one community reaching into another's
+  // cards: the lookup is by id AND programId, so a foreign card simply is not
+  // found.
+  it('404s a card issued by another community', async () => {
+    const { service, cards } = makeService();
+    cards.findOne.mockResolvedValue(null);
+    await expect(
+      service.replaceCode('azores-queer', 'actor-1', 'card-1'),
+    ).rejects.toThrow(NotFoundException);
+    expect(cards.save).not.toHaveBeenCalled();
+  });
+
+  it('propagates the refusal for an actor who is not an owner or mod', async () => {
+    const { service, membership, cards } = makeService();
+    membership.assertOwnerOrModBySlug.mockRejectedValue(
+      new NotFoundException('Community not found'),
+    );
+    await expect(
+      service.replaceCode('azores-queer', 'actor-1', 'card-1'),
+    ).rejects.toThrow(NotFoundException);
+    expect(cards.save).not.toHaveBeenCalled();
+  });
+
+  it('404s when the community runs no card programme', async () => {
+    const { service, programs, cards } = makeService();
+    programs.programForCommunity.mockResolvedValue(null);
+    await expect(
+      service.replaceCode('azores-queer', 'actor-1', 'card-1'),
+    ).rejects.toThrow(NotFoundException);
+    expect(cards.save).not.toHaveBeenCalled();
+  });
+
+  it('refuses to overflow the generation the code can carry', async () => {
+    const { service, cards } = makeService();
+    cards.findOne.mockResolvedValue({ ...activeCard, codeVersion: 0xffff });
+    await expect(
+      service.replaceCode('azores-queer', 'actor-1', 'card-1'),
+    ).rejects.toThrow(BadRequestException);
+    expect(cards.save).not.toHaveBeenCalled();
+  });
+});

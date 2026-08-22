@@ -101,6 +101,9 @@ export class CardProgramsService {
     program.allowsPublicBadge = dto.allowsPublicBadge;
     // Same absent-vs-explicit rule as the crest and the ground above: only a
     // payload that actually names the field may change it.
+    if (dto.allowsPrint !== undefined) {
+      program.allowsPrint = dto.allowsPrint;
+    }
     if (dto.allowsMemberPhoto !== undefined) {
       program.allowsMemberPhoto = dto.allowsMemberPhoto;
     }

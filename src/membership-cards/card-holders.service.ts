@@ -8,6 +8,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { toImageUrl } from '../common/image-url';
 import { effectiveCardStatus } from './card-status';
 import { CardProgramsService } from './card-programs.service';
+import { CardTokenService } from './card-token.service';
 import { IssuerCardDTO, toIssuerCard } from './membership-card-response';
 import {
   MembershipCardsService,
@@ -21,6 +22,7 @@ export class CardHoldersService {
     private readonly membership: CommunityMembershipService,
     private readonly programs: CardProgramsService,
     private readonly cards: MembershipCardsService,
+    private readonly tokens: CardTokenService,
     @InjectRepository(Community)
     private readonly communities: Repository<Community>,
     @InjectRepository(CommunityMember)
@@ -28,6 +30,15 @@ export class CardHoldersService {
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
   ) {}
+
+  /**
+   * Never throws on an unconfigured platform. A missing signing key should cost
+   * the roster its codes, never the whole holders panel.
+   */
+  private tokenFor(card: { id: string; codeVersion: number }): string | null {
+    if (!this.tokens.isConfigured) return null;
+    return this.tokens.mint(card.id, card.codeVersion);
+  }
 
   async issueForCommunity(
     slug: string,
@@ -102,6 +113,7 @@ export class CardHoldersService {
             : 'A member',
           avatarUrl: profile?.avatarUrl ? toImageUrl(profile.avatarUrl) : null,
           role: roleByUserId.get(card.userId) ?? 'member',
+          token: this.tokenFor(card),
         },
       );
     });

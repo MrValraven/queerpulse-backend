@@ -71,4 +71,12 @@ export class MembershipCard {
   // turn it off per card without leaving the community.
   @Column({ type: 'boolean', default: false })
   isPhotoHidden!: boolean;
+
+  // The generation counter behind this card's permanent code. The code is
+  // signed over this value, so bumping it kills every printed copy of the card
+  // instantly while the holder's digital card keeps working: that is the "my
+  // wallet was stolen" remedy, and it is deliberately a different act from
+  // reinstating, which revives the same row and therefore the same code.
+  @Column({ type: 'int', default: 1 })
+  codeVersion!: number;
 }

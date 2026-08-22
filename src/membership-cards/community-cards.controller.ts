@@ -66,6 +66,21 @@ export class CommunityCardsController {
     return this.cardHolders.listForCommunity(slug, user.userId);
   }
 
+  /**
+   * Void the printed copies of one card. Owner or mod only, enforced inside
+   * the service. Returns an acknowledgement only: the caller refetches the
+   * roster, which is where the card's state lives.
+   */
+  @Post('holders/:cardId/replace')
+  async replace(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('cardId') cardId: string,
+  ) {
+    await this.cards.replaceCode(slug, user.userId, cardId);
+    return { ok: true };
+  }
+
   @Patch('holders/:cardId')
   async setStatus(
     @CurrentUser() user: CurrentUserData,

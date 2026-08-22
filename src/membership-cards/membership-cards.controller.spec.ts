@@ -1,7 +1,6 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
-import { CardTokenService } from './card-token.service';
 import { MembershipCard } from './entities/membership-card.entity';
 import { MembershipCardsController } from './membership-cards.controller';
 import { MembershipCardsService } from './membership-cards.service';
@@ -15,7 +14,6 @@ describe('MembershipCardsController', () => {
     resolveEffectiveStatus: jest.Mock;
     deleteOwnCard: jest.Mock;
   };
-  let tokens: { mint: jest.Mock };
 
   const user: CurrentUserData = {
     userId: 'user-1',
@@ -33,18 +31,11 @@ describe('MembershipCardsController', () => {
       resolveEffectiveStatus: jest.fn().mockResolvedValue('active'),
       deleteOwnCard: jest.fn().mockResolvedValue(undefined),
     };
-    tokens = {
-      mint: jest
-        .fn()
-        .mockResolvedValue({ token: 'signed', expiresAt: 'later' }),
-    };
-
     const module: TestingModule = await Test.createTestingModule({
       controllers: [MembershipCardsController],
       providers: [
         { provide: MyCardsService, useValue: myCards },
         { provide: MembershipCardsService, useValue: cards },
-        { provide: CardTokenService, useValue: tokens },
       ],
     }).compile();
 
@@ -55,58 +46,6 @@ describe('MembershipCardsController', () => {
     it('delegates to MyCardsService with the caller id', async () => {
       await controller.list(user);
       expect(myCards.forUser).toHaveBeenCalledWith('user-1');
-    });
-  });
-
-  describe('token', () => {
-    it('mints a token for an active card the caller holds', async () => {
-      const result = await controller.token(user, 'card-1');
-      expect(cards.resolveEffectiveStatus).toHaveBeenCalledWith(ownCard);
-      expect(tokens.mint).toHaveBeenCalledWith('card-1');
-      expect(result).toEqual({ token: 'signed', expiresAt: 'later' });
-    });
-
-    it('404s for a card the caller does not hold, without minting', async () => {
-      cards.cardById.mockResolvedValue({
-        id: 'card-1',
-        userId: 'someone-else',
-      });
-      await expect(controller.token(user, 'card-1')).rejects.toThrow(
-        NotFoundException,
-      );
-      expect(tokens.mint).not.toHaveBeenCalled();
-    });
-
-    it('404s for a missing card id, without minting', async () => {
-      cards.cardById.mockResolvedValue(null);
-      await expect(controller.token(user, 'missing')).rejects.toThrow(
-        NotFoundException,
-      );
-      expect(tokens.mint).not.toHaveBeenCalled();
-    });
-
-    it('404s a revoked card rather than minting a fresh token', async () => {
-      cards.resolveEffectiveStatus.mockResolvedValue('revoked');
-      await expect(controller.token(user, 'card-1')).rejects.toThrow(
-        NotFoundException,
-      );
-      expect(tokens.mint).not.toHaveBeenCalled();
-    });
-
-    it('404s a suspended card rather than minting a fresh token', async () => {
-      cards.resolveEffectiveStatus.mockResolvedValue('suspended');
-      await expect(controller.token(user, 'card-1')).rejects.toThrow(
-        NotFoundException,
-      );
-      expect(tokens.mint).not.toHaveBeenCalled();
-    });
-
-    it('404s an expired card rather than minting a fresh token', async () => {
-      cards.resolveEffectiveStatus.mockResolvedValue('expired');
-      await expect(controller.token(user, 'card-1')).rejects.toThrow(
-        NotFoundException,
-      );
-      expect(tokens.mint).not.toHaveBeenCalled();
     });
   });
 

@@ -33,6 +33,7 @@ export enum GovernanceLogAction {
   CardRevoked = 'card_revoked',
   CardSuspended = 'card_suspended',
   CardReinstated = 'card_reinstated',
+  CardReplaced = 'card_replaced',
 }
 
 /**
