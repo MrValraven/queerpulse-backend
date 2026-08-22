@@ -40,6 +40,7 @@ function program(overrides: Partial<CommunityCard> = {}): CommunityCard {
     allowsPrint: false,
     allowsWallet: false,
     allowsPublicBadge: true,
+    allowsMemberPhoto: false,
     serialPrefix: 'AZO',
     createdAt: new Date('2026-01-01T00:00:00Z'),
     updatedAt: new Date('2026-01-01T00:00:00Z'),
@@ -59,6 +60,7 @@ function card(overrides: Partial<MembershipCard> = {}): MembershipCard {
     revokedAt: null,
     revokedReason: 'Left under a safety report',
     isPubliclyVisible: false,
+    isPhotoHidden: false,
     ...overrides,
   };
 }

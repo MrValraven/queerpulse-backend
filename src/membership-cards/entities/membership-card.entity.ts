@@ -63,4 +63,12 @@ export class MembershipCard {
   // Member-controlled, Phase 3 public badge. Default off.
   @Column({ type: 'boolean', default: false })
   isPubliclyVisible!: boolean;
+
+  // The member's veto over their own face appearing on this card, honoured
+  // even where the programme has photos switched on. Default off, so a member
+  // of a photo-card community gets the photo the community intends; anyone
+  // who is not out, or whose face and documents are read against them, can
+  // turn it off per card without leaving the community.
+  @Column({ type: 'boolean', default: false })
+  isPhotoHidden!: boolean;
 }

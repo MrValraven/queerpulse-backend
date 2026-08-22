@@ -1,9 +1,11 @@
 import {
+  Body,
   Controller,
   Delete,
   Get,
   NotFoundException,
   Param,
+  Patch,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -13,6 +15,7 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { CardTokenService } from './card-token.service';
+import { UpdateMyCardDto } from './dto/update-my-card.dto';
 import { MembershipCardsService } from './membership-cards.service';
 import { MyCardsService } from './my-cards.service';
 
@@ -57,6 +60,21 @@ export class MembershipCardsController {
       throw new NotFoundException('Card not found');
     }
     return this.tokens.mint(card.id);
+  }
+
+  /**
+   * The settings the HOLDER controls on their own card, as against the ones
+   * the issuing community controls on the programme. Today that is only
+   * whether their photo appears on it.
+   */
+  @Patch(':cardId')
+  async update(
+    @CurrentUser() user: CurrentUserData,
+    @Param('cardId') cardId: string,
+    @Body() dto: UpdateMyCardDto,
+  ) {
+    await this.cards.setPhotoHidden(cardId, user.userId, dto.isPhotoHidden);
+    return { ok: true };
   }
 
   /**

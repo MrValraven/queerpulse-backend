@@ -11,9 +11,11 @@ import * as Sentry from '@sentry/node';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
+import { DataSource } from 'typeorm';
 import { AppModule } from './app.module';
 import { VALIDATION_PIPE_OPTIONS } from './common/validation-pipe.options';
 import { DEFAULT_FRONTEND_ORIGIN } from './config/frontend-origins';
+import { assertNoPendingMigrations } from './database/assert-no-pending-migrations';
 
 // How long to let Sentry drain its buffer on shutdown before giving up.
 const SENTRY_FLUSH_TIMEOUT_MS = 2000;
@@ -27,7 +29,15 @@ async function bootstrap() {
     rawBody: true,
     bufferLogs: true,
   });
-  app.useLogger(app.get(Logger));
+  const logger = app.get(Logger);
+  app.useLogger(logger);
+
+  // Before anything is wired up to serve: verify the database actually has
+  // the schema this build expects. The deploy applies migrations in a
+  // pre-deploy step; when that step does not finish, every route that touches
+  // the affected table 500s with a driver error instead of the deploy failing.
+  // Throws in production, warns elsewhere.
+  await assertNoPendingMigrations(app.get(DataSource), { isProd, logger });
 
   const configService = app.get(ConfigService);
 
@@ -148,4 +158,10 @@ async function bootstrap() {
   await app.listen(port);
 }
 
-void bootstrap();
+// A rejection here is a refusal to start (a schema behind the code, a bad
+// env). Log it as the single fatal line an operator needs and exit non-zero,
+// rather than letting it surface as an unhandled rejection trace.
+void bootstrap().catch((error: unknown) => {
+  console.error('[bootstrap] failed to start:', error);
+  process.exit(1);
+});

@@ -17,6 +17,8 @@ export interface CardProgramDTO {
   allowsPrint: boolean;
   allowsWallet: boolean;
   allowsPublicBadge: boolean;
+  /** Whether this programme's cards carry the holder's photo at all. */
+  allowsMemberPhoto: boolean;
   serialPrefix: string;
 }
 
@@ -30,6 +32,21 @@ export interface MyCardDTO {
   communitySlug: string;
   role: string;
   holderName: string;
+  /**
+   * The face on the card, or null. Resolved server-side from the holder's own
+   * profile avatar, and ONLY when the programme allows photos, the member has
+   * not hidden theirs, and they actually have one. A client never receives an
+   * avatar it is not supposed to draw, so it cannot leak one by rendering the
+   * wrong branch.
+   */
+  holderAvatarUrl: string | null;
+  /**
+   * The member's own veto, reported separately from `holderAvatarUrl` so the
+   * settings control can show its real state. Both a member who turned their
+   * photo off and a member whose community never turned photos on have a null
+   * avatar; only this distinguishes them.
+   */
+  isPhotoHidden: boolean;
   program: CardProgramDTO;
 }
 
@@ -69,6 +86,7 @@ export function toCardProgram(program: CommunityCard): CardProgramDTO {
     allowsPrint: program.allowsPrint,
     allowsWallet: program.allowsWallet,
     allowsPublicBadge: program.allowsPublicBadge,
+    allowsMemberPhoto: program.allowsMemberPhoto,
     serialPrefix: program.serialPrefix,
   };
 }
@@ -82,8 +100,14 @@ export function toMyCard(
     communitySlug: string;
     role: string;
     holderName: string;
+    /** The holder's profile avatar, before either switch is applied. */
+    holderAvatarUrl?: string | null;
   },
 ): MyCardDTO {
+  // Both switches are enforced HERE, at the one boundary the avatar can leave
+  // through, rather than at each render site. A photo the member vetoed or the
+  // programme never enabled is not sent at all.
+  const canShowPhoto = program.allowsMemberPhoto && !card.isPhotoHidden;
   return {
     id: card.id,
     serial: card.serial,
@@ -94,6 +118,10 @@ export function toMyCard(
     communitySlug: context.communitySlug,
     role: context.role,
     holderName: context.holderName,
+    holderAvatarUrl: canShowPhoto
+      ? toImageUrl(context.holderAvatarUrl ?? null)
+      : null,
+    isPhotoHidden: card.isPhotoHidden,
     program: toCardProgram(program),
   };
 }

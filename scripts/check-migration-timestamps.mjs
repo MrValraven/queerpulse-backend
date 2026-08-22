@@ -52,9 +52,30 @@ const allowedDuplicateTimestamps = new Set([
   '1793000000000',
 ]);
 
-const migrationFileNames = readdirSync(migrationsDirectory).filter((fileName) =>
-  fileName.endsWith('.ts'),
-);
+let migrationFileNames;
+try {
+  migrationFileNames = readdirSync(migrationsDirectory).filter((fileName) =>
+    fileName.endsWith('.ts'),
+  );
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
+  // Say what actually went wrong. A bare ENOENT here reads as a broken script,
+  // and the one place it happens is the runtime image, where this has no
+  // business running at all: chained into `migration:preflight` it took down
+  // the whole preDeployCommand before `migration:run:prod` ever started, and
+  // the only symptom downstream was a live app querying columns whose
+  // migrations had silently never run.
+  console.error(
+    `No migration sources at ${migrationsDirectory}.\n` +
+      'This script lints the TypeScript sources and only runs where they ' +
+      'exist (the repo, CI, and the Docker BUILD stage). The runtime image ' +
+      'carries only package.json, node_modules, dist and scripts.\n' +
+      'If this ran during a deploy, remove it from that step: `pnpm build` ' +
+      'already gates on it, and no migration file can appear between build ' +
+      'and deploy.',
+  );
+  process.exit(1);
+}
 
 const fileNamesByTimestamp = new Map();
 const malformedFileNames = [];

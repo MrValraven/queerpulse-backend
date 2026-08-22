@@ -99,6 +99,11 @@ export class CardProgramsService {
     program.cardName = dto.cardName;
     program.validityMonths = dto.validityMonths ?? null;
     program.allowsPublicBadge = dto.allowsPublicBadge;
+    // Same absent-vs-explicit rule as the crest and the ground above: only a
+    // payload that actually names the field may change it.
+    if (dto.allowsMemberPhoto !== undefined) {
+      program.allowsMemberPhoto = dto.allowsMemberPhoto;
+    }
 
     const saved = await this.programs.save(program);
 

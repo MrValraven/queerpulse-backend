@@ -304,6 +304,29 @@ export class MembershipCardsService {
    * route already uses: a caller must never learn that a card id exists
    * under someone else's account.
    */
+  /**
+   * Set the member's photo veto on a card they HOLD.
+   *
+   * Deliberately allowed on a card of ANY status. A suspended or expired card
+   * can come back (see the note in `MyCardsPage` on why only revoked and
+   * expired are offered for destruction), and a member who wants their face
+   * off a credential should not have to wait for the issuer to reinstate it
+   * first. Same 404-not-403 rule as everything else here: a caller who does
+   * not hold the card learns nothing about whether it exists.
+   */
+  async setPhotoHidden(
+    cardId: string,
+    userId: string,
+    isPhotoHidden: boolean,
+  ): Promise<void> {
+    const card = await this.cards.findOne({ where: { id: cardId } });
+    if (!card || card.userId !== userId) {
+      throw new NotFoundException('Card not found');
+    }
+    if (card.isPhotoHidden === isPhotoHidden) return;
+    await this.cards.update(card.id, { isPhotoHidden });
+  }
+
   async deleteOwnCard(cardId: string, userId: string): Promise<void> {
     const card = await this.cards.findOne({ where: { id: cardId } });
     if (!card || card.userId !== userId) {

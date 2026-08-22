@@ -97,6 +97,14 @@ export class CommunityCard {
   @Column({ type: 'boolean', default: true })
   allowsPublicBadge!: boolean;
 
+  // Whether this programme's cards carry the holder's photo at all. Off by
+  // default: a card that pairs a face with a named LGBTQ+ community is a
+  // different object from one that does not, and that is the community's
+  // deliberate choice to make rather than a default it inherits. The member
+  // keeps a veto on their own card (`MembershipCard.isPhotoHidden`).
+  @Column({ type: 'boolean', default: false })
+  allowsMemberPhoto!: boolean;
+
   // The three-letter serial prefix, derived once from the community name at
   // programme creation and frozen thereafter so serials stay stable.
   @Column({ type: 'varchar', length: 3 })

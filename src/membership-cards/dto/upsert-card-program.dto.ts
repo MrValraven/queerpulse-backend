@@ -80,4 +80,10 @@ export class UpsertCardProgramDto {
 
   @IsBoolean()
   allowsPublicBadge!: boolean;
+
+  // Absent leaves the stored setting alone, so a client that predates photo
+  // cards cannot silently switch a community's photos off on its next save.
+  @IsOptional()
+  @IsBoolean()
+  allowsMemberPhoto?: boolean;
 }

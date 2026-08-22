@@ -54,6 +54,10 @@ export class MyCardsService {
     const holderName = profile
       ? [profile.firstName, profile.lastName].filter(Boolean).join(' ')
       : 'A member';
+    // One avatar per member, not one per card: whether it actually reaches
+    // the wire is decided per card in `toMyCard`, which applies the
+    // programme's switch and the member's veto together.
+    const holderAvatarUrl = profile?.avatarUrl ?? null;
 
     return cards.flatMap((card) => {
       const program = programById.get(card.programId);
@@ -77,6 +81,7 @@ export class MyCardsService {
           communitySlug: community.slug,
           role: roleByCommunity.get(community.id) ?? 'member',
           holderName,
+          holderAvatarUrl,
         }),
       ];
     });
