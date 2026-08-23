@@ -27,10 +27,14 @@ import { CommunityPostsService } from './community-posts.service';
 import { CreateCommunityDto } from './dto/create-community.dto';
 import { CreateCommunityTagRequestDto } from './dto/create-community-tag-request.dto';
 import { CreatePostDto } from './dto/create-post.dto';
+import { FreezeCommunityDto } from './dto/freeze-community.dto';
 import { JoinCommunityDto } from './dto/join-community.dto';
 import { ListCommunitiesQuery } from './dto/list-communities.query';
 import { ReactionDto } from './dto/reaction.dto';
+import { RemoveMemberQuery } from './dto/remove-member.query';
 import { ReplyDto } from './dto/reply.dto';
+import { ListCommunityPostsQuery } from './dto/list-community-posts.query';
+import { RosterQuery } from './dto/roster.query';
 import { TransferOwnershipDto } from './dto/transfer-ownership.dto';
 import { TriageJoinRequestDto } from './dto/triage-join-request.dto';
 import { UpdateCommunityDto } from './dto/update-community.dto';
@@ -49,6 +53,7 @@ import {
   ApiOperation,
   ApiTags,
   ApiUnauthorizedResponse,
+  ApiUnprocessableEntityResponse,
 } from '@nestjs/swagger';
 
 @Feature('communities')
@@ -66,7 +71,14 @@ export class CommunitiesController {
   @Get()
   @ApiOperation({
     summary:
-      'List communities (discover or mine), paginated and sortable (newest/name).',
+      'List communities (discover or mine), paginated, filterable by type, ' +
+      'access tier, tags, city, language and online, and sortable by ' +
+      'newest/name/active.',
+    description:
+      '`sort=active` orders by `communities.active_this_week`, the indexed, ' +
+      'hourly-refreshed count of distinct members who posted or replied in ' +
+      'the trailing week. Each card carries that number too, so a "busy this ' +
+      'week" treatment needs no second call.',
   })
   @ApiOkResponse({ description: 'A paginated page of community cards.' })
   list(
@@ -154,12 +166,15 @@ export class CommunitiesController {
   @ApiBadRequestResponse({
     description:
       'The update payload is invalid. `handle`, `stewards` and `invites` are ' +
-      'creation-only and are rejected here rather than silently ignored.',
+      'creation-only and are rejected here rather than silently ignored. ' +
+      '`isPubliclyListed: true` is refused unless the resulting access tier ' +
+      'is `public` or `request`; moving the tier to `invite`/`private` ' +
+      'forces the community back to unlisted in the same update.',
   })
   @ApiForbiddenResponse({
     description:
-      'Owner or moderator role required; changing `accessTier` or ' +
-      '`rosterVisible` requires the owner.',
+      'Owner or moderator role required; changing `accessTier`, ' +
+      '`rosterVisible` or `isPubliclyListed` requires an owner or co-owner.',
   })
   @ApiConflictResponse({ description: 'The community is archived.' })
   @ApiNotFoundResponse({ description: 'No community exists for this slug.' })
@@ -205,12 +220,22 @@ export class CommunitiesController {
   @ApiOperation({
     summary:
       'Manually freeze a community ahead of moderation review (owner/mod, idempotent).',
+    description:
+      'The optional `note` is a short PUBLIC line members read alongside the ' +
+      'frozen state ("paused while we rewrite the rules"). The body may be ' +
+      'omitted entirely. Who applied the freeze is recorded on the community ' +
+      'and is not part of any response.',
   })
   @ApiOkResponse({ description: 'The community detail, now frozen.' })
+  @ApiBadRequestResponse({ description: 'The freeze payload is invalid.' })
   @ApiForbiddenResponse({ description: 'Only an owner or mod may freeze.' })
   @ApiNotFoundResponse({ description: 'No community exists for this slug.' })
-  freeze(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
-    return this.communitiesService.freeze(slug, user.userId);
+  freeze(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: FreezeCommunityDto,
+  ) {
+    return this.communitiesService.freeze(slug, user.userId, dto);
   }
 
   @Post(':slug/unfreeze')
@@ -219,7 +244,11 @@ export class CommunitiesController {
     summary:
       'Lift a freeze (automatic or manual) once reports are handled (owner/mod, idempotent).',
   })
-  @ApiOkResponse({ description: 'The community detail, no longer frozen.' })
+  @ApiOkResponse({
+    description:
+      'The community detail, no longer frozen. The freeze note and the actor ' +
+      'that applied it are cleared with the freeze.',
+  })
   @ApiForbiddenResponse({ description: 'Only an owner or mod may unfreeze.' })
   @ApiConflictResponse({
     description:
@@ -257,17 +286,25 @@ export class CommunitiesController {
   }
 
   @Get(':slug/posts')
-  @ApiOperation({ summary: "List a community's posts, paginated." })
+  @ApiOperation({
+    summary: "List a community's posts, paginated and searchable via `q`.",
+  })
   @ApiOkResponse({ description: 'A paginated page of community posts.' })
+  @ApiBadRequestResponse({ description: 'Invalid `page` or `q`.' })
   @ApiNotFoundResponse({
     description: 'Unknown slug, or a private community the viewer is not in.',
   })
   listPosts(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
-    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+    @Query() query: ListCommunityPostsQuery,
   ) {
-    return this.communityPostsService.listPosts(slug, user.userId, page);
+    return this.communityPostsService.listPosts(
+      slug,
+      user.userId,
+      query.page,
+      query.q,
+    );
   }
 
   @Post(':slug/posts')
@@ -555,10 +592,17 @@ export class CommunitiesController {
   }
 
   @Get(':slug/roster')
-  @ApiOperation({ summary: "List a community's roster, paginated." })
-  @ApiOkResponse({
-    description: "A paginated page of the community's roster entries.",
+  @ApiOperation({
+    summary:
+      "List a community's roster, paginated, with an optional `q` search over member name and handle.",
   })
+  @ApiOkResponse({
+    description:
+      "A paginated page of the community's roster entries. `q` filters " +
+      'server-side across the whole roster (case-insensitive, matching first ' +
+      'name, last name, full name or handle), so `total` counts matches.',
+  })
+  @ApiBadRequestResponse({ description: 'Invalid `page` or `q`.' })
   @ApiForbiddenResponse({
     description: 'The roster is members-only and the caller is not a member.',
   })
@@ -568,9 +612,14 @@ export class CommunitiesController {
   roster(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
-    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+    @Query() query: RosterQuery,
   ) {
-    return this.communitiesService.roster(slug, user.userId, page);
+    return this.communitiesService.roster(
+      slug,
+      user.userId,
+      query.page,
+      query.q,
+    );
   }
 
   @Post(':slug/join')
@@ -580,7 +629,20 @@ export class CommunitiesController {
   @ApiCreatedResponse({
     description: 'The join outcome: joined immediately, or a pending request.',
   })
-  @ApiBadRequestResponse({ description: 'The join payload is invalid.' })
+  @ApiBadRequestResponse({
+    description:
+      'The join payload is invalid. A community with house rules also ' +
+      'answers 400 with `code: "RULES_ACCEPTANCE_REQUIRED"` and the ' +
+      '`rulesVersion` to agree to, when `acceptedRulesVersion` is missing or ' +
+      'out of date.',
+  })
+  @ApiForbiddenResponse({
+    description:
+      'The community is frozen, the caller is barred from it ' +
+      '(`code: "BANNED_FROM_COMMUNITY"`), or a previous decline set a reapply ' +
+      'date that has not passed (`code: "REAPPLY_TOO_SOON"`, with ' +
+      '`reapplyAfter`).',
+  })
   @ApiConflictResponse({ description: 'A join request is already pending.' })
   @ApiNotFoundResponse({ description: 'No community exists for this slug.' })
   join(
@@ -593,9 +655,17 @@ export class CommunitiesController {
 
   @Get(':slug/join-requests')
   @ApiOperation({
-    summary: 'List pending join requests for a community (owner/mod only).',
+    summary:
+      'List pending join requests for a community, with reviewer context (owner/mod only).',
   })
-  @ApiOkResponse({ description: 'The pending join requests.' })
+  @ApiOkResponse({
+    description:
+      'The pending join requests. Each carries the applicant (slug and ' +
+      'pronouns ride on `member`), their stated `involvement`, when their ' +
+      'ACCOUNT was created, how many connections they share with the ' +
+      'reviewing moderator, and how many communities they share with this ' +
+      "community's roster. All of it computed in batch for the whole queue.",
+  })
   @ApiForbiddenResponse({ description: 'Owner or moderator role required.' })
   @ApiNotFoundResponse({ description: 'No community exists for this slug.' })
   listJoinRequests(
@@ -607,12 +677,23 @@ export class CommunitiesController {
 
   @Patch(':slug/join-requests/:id')
   @ApiOperation({
-    summary: 'Approve or decline a join request (owner/mod only).',
+    summary:
+      'Approve or decline a join request, with the kind of decline and an optional reason (owner/mod only).',
   })
-  @ApiOkResponse({ description: 'The join request with its resolved status.' })
-  @ApiBadRequestResponse({ description: 'Malformed id or invalid action.' })
+  @ApiOkResponse({
+    description:
+      'The join request with its resolved status. A decline also carries ' +
+      '`declineKind`, `declineReason` and the `reapplyAfter` date it set ' +
+      '(30 days for `not_now`, 180 for `not_a_fit`).',
+  })
+  @ApiBadRequestResponse({ description: 'Malformed id or invalid payload.' })
   @ApiForbiddenResponse({ description: 'Owner or moderator role required.' })
   @ApiConflictResponse({ description: 'The join request is already resolved.' })
+  @ApiUnprocessableEntityResponse({
+    description:
+      'This community requires a vouch from a current member before the ' +
+      'applicant can be admitted (approve only).',
+  })
   @ApiNotFoundResponse({ description: 'No such community or join request.' })
   triageJoinRequest(
     @CurrentUser() user: CurrentUserData,
@@ -620,41 +701,54 @@ export class CommunitiesController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: TriageJoinRequestDto,
   ) {
-    return this.communitiesService.triageJoinRequest(
-      slug,
-      id,
-      user.userId,
-      dto.action,
-    );
+    return this.communitiesService.triageJoinRequest(slug, id, user.userId, {
+      action: dto.action,
+      declineKind: dto.declineKind,
+      declineReason: dto.declineReason,
+    });
   }
 
   @Delete(':slug/members/:memberSlug')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({
-    summary: 'Remove a member, or leave the community yourself.',
+    summary:
+      'Remove a member (barring their return unless `allowReturn=true`), or leave the community yourself.',
   })
-  @ApiNoContentResponse({ description: 'The member was removed.' })
-  @ApiBadRequestResponse({ description: 'The owner cannot be removed.' })
+  @ApiNoContentResponse({
+    description:
+      'The member was removed. Unless `allowReturn=true`, the removal also ' +
+      'bars them from re-joining at any access tier. A member removing ' +
+      'THEMSELVES is never barred, whatever the query says.',
+  })
+  @ApiBadRequestResponse({
+    description: 'The owner cannot be removed, or the query is invalid.',
+  })
   @ApiForbiddenResponse({
     description:
-      'Removing another member requires owner/moderator role, and removing ' +
-      'another MODERATOR requires the owner (mirrors the role-change rule).',
+      'Removing another member requires owner/moderator role, removing ' +
+      'another MODERATOR requires an owner or co-owner (mirrors the ' +
+      'role-change rule), and removing a CO-OWNER requires the owner.',
   })
   @ApiNotFoundResponse({ description: 'No such community or member.' })
   removeMember(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
     @Param('memberSlug') memberSlug: string,
+    @Query() query: RemoveMemberQuery,
   ) {
-    return this.communitiesService.removeMember(slug, user.userId, memberSlug);
+    return this.communitiesService.removeMember(slug, user.userId, memberSlug, {
+      allowReturn: query.allowReturn,
+      reason: query.reason,
+    });
   }
 
-  /** Promote a member to moderator, or demote a moderator back to member.
+  /** Promote a member to moderator or co-owner, or demote them back.
    * Owner/mod only, with further restrictions on *which* members each may
    * act on — see `CommunitiesService.setMemberRole` for the full rules. */
   @Patch(':slug/members/:memberSlug')
   @ApiOperation({
-    summary: 'Promote a member to moderator, or demote a moderator to member.',
+    summary:
+      'Change a member\'s roster role (member, mod, or co-owner; "co-owner" is owner-granted only).',
   })
   @ApiOkResponse({ description: "The member's new role." })
   @ApiBadRequestResponse({
@@ -662,7 +756,9 @@ export class CommunitiesController {
   })
   @ApiForbiddenResponse({
     description:
-      'Owner/mod required; cannot change your own role; only the owner may change a moderator.',
+      'Owner/mod required; cannot change your own role; changing a ' +
+      "moderator's role requires an owner or co-owner; granting co-owner, or " +
+      "changing a co-owner's role, requires the owner.",
   })
   @ApiNotFoundResponse({ description: 'No such community or member.' })
   setMemberRole(

@@ -103,11 +103,15 @@ export interface AdminCommunityDetailDTO extends AdminCommunityCardDTO {
   description: string;
   foundedAt: string;
   visibility: Visibility;
-  /** Whether joining requires a second existing member's vouch. Stored intent
-   *  only for now — see the entity's `requiresSecondVouch` note; not yet
-   *  enforced in the join flow. */
+  /** Whether joining requires a vouch from a current member of this
+   *  community. Enforced in two places: `CommunitiesService.join` withholds
+   *  the instant join and routes the applicant to the request queue, and
+   *  `triageJoinRequest` refuses an approve until that vouch exists. */
   requiresSecondVouch: boolean;
-  /** Whether the community auto-freezes when open reports pile up. */
+  /** Whether the community auto-freezes when open reports pile up. Arms
+   *  `CommunityAutoFreezeService`, which freezes on an emergency report
+   *  (doxxing/outing) or a report pile-up and stamps `frozenAt` +
+   *  `frozenReason`. */
   autoFreezeOnReports: boolean;
   /** Whether this is the one community the Communities Discover page's hero
    *  card currently shows — a platform-wide singleton, see the entity. */

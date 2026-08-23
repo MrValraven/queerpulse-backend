@@ -6,6 +6,7 @@ import { CommunityGovernanceLogService } from '../communities/community-governan
 import { GovernanceLogAction } from '../communities/entities/community-governance-log.entity';
 import {
   CommunityMember,
+  CommunityNotificationLevel,
   RosterRole,
 } from '../communities/entities/community-member.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
@@ -69,6 +70,19 @@ function makeCommunity(overrides: Partial<Community> = {}): Community {
     frozenAt: null,
     isFeatured: false,
     needsOwnerReviewAt: null,
+    frozenReason: null,
+    frozenNote: null,
+    frozenByUserId: null,
+    rulesVersion: 1,
+    welcomeMessage: null,
+    avatarImageUrl: null,
+    city: null,
+    area: null,
+    isOnline: false,
+    languages: [],
+    activeThisWeek: 0,
+    activityCountedAt: null,
+    isPubliclyListed: false,
     ...overrides,
   };
 }
@@ -82,6 +96,10 @@ function makeCommunityMember(
     userId: 'user-owner',
     role: RosterRole.Member,
     joinedAt: daysAgo(300),
+    notificationLevel: CommunityNotificationLevel.Announcements,
+    rulesAcceptedAt: null,
+    rulesVersionAccepted: null,
+    welcomeSeenAt: null,
     ...overrides,
   };
 }
@@ -264,6 +282,9 @@ describe('AdminCommunitiesService', () => {
     find: jest.Mock;
     findOne: jest.Mock;
     delete: jest.Mock;
+    // `reassignOwner` writes both roster rows through the transaction's
+    // repository, which this same mock stands in for.
+    save: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
   let communityPosts: { createQueryBuilder: jest.Mock };

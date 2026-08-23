@@ -5,7 +5,11 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, MoreThanOrEqual, Repository } from 'typeorm';
-import { CommunityInsightsResponse } from './community-insights-response';
+import {
+  CommunityInsightsResponse,
+  CommunityTrendPoint,
+  INSIGHTS_TREND_WEEKS,
+} from './community-insights-response';
 import {
   CommunityMember,
   RosterRole,
@@ -17,7 +21,70 @@ import { Community } from './entities/community.entity';
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const MONTH_MS = 30 * 24 * 60 * 60 * 1000;
 
-const STAFF_ROLES: readonly RosterRole[] = [RosterRole.Owner, RosterRole.Mod];
+// `co_owner` is a member the owner handed owner-level powers to inside the
+// community (see `RosterRole.CoOwner`), so it reads insights exactly as
+// `owner` does.
+const STAFF_ROLES: readonly RosterRole[] = [
+  RosterRole.Owner,
+  RosterRole.CoOwner,
+  RosterRole.Mod,
+];
+
+/**
+ * The Monday 00:00 UTC that starts the ISO calendar week containing `date`.
+ * UTC and Monday-based on both sides of the boundary: the SQL below truncates
+ * with `date_trunc('week', ... AT TIME ZONE 'UTC')`, which is also Monday-based
+ * in Postgres, so a bucket key produced here always matches a bucket key
+ * produced there.
+ */
+function startOfIsoWeekUtc(date: Date): Date {
+  const dayStart = new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
+  );
+  const offsetToMonday = (dayStart.getUTCDay() + 6) % 7;
+  dayStart.setUTCDate(dayStart.getUTCDate() - offsetToMonday);
+  return dayStart;
+}
+
+/** `YYYY-MM-DD`, the bucket key shape `CommunityTrendPoint.weekStart` carries. */
+function toIsoDate(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+/**
+ * The `INSIGHTS_TREND_WEEKS` week-start keys the series must cover, oldest
+ * first, ending with the week `now` falls in (which is partial and counts
+ * whatever has landed so far).
+ */
+function trendWeekStarts(now: Date): string[] {
+  const currentWeekStart = startOfIsoWeekUtc(now);
+  const weekStarts: string[] = [];
+  for (let index = INSIGHTS_TREND_WEEKS - 1; index >= 0; index -= 1) {
+    const weekStart = new Date(currentWeekStart);
+    weekStart.setUTCDate(weekStart.getUTCDate() - index * 7);
+    weekStarts.push(toIsoDate(weekStart));
+  }
+  return weekStarts;
+}
+
+/**
+ * Turns the sparse `{weekStart, count}` rows one grouped query returned into a
+ * dense series with a zero for every week the query had nothing for. Done in
+ * application code precisely so the database side stays ONE grouped query
+ * rather than a generate_series join or, far worse, a query per week.
+ */
+function fillWeeks(
+  weekStarts: string[],
+  rows: { weekStart: string; count: string }[],
+): CommunityTrendPoint[] {
+  const countsByWeek = new Map<string, number>(
+    rows.map((row) => [row.weekStart, Number(row.count)]),
+  );
+  return weekStarts.map((weekStart) => ({
+    weekStart,
+    count: countsByWeek.get(weekStart) ?? 0,
+  }));
+}
 
 /**
  * Backs `GET /communities/:slug/insights` — a lightweight aggregate-stats
@@ -29,6 +96,13 @@ const STAFF_ROLES: readonly RosterRole[] = [RosterRole.Owner, RosterRole.Mod];
  * parallel" discipline `CommunitiesService.statsForMany` already uses, kept
  * local here rather than reused from that service since this endpoint's
  * files are deliberately new (see this feature's own module doc).
+ *
+ * The two 12-week trend series (`newMembersByWeek`/`postsByWeek`) hold that
+ * same line: each is ONE grouped `date_trunc('week', ...)` query returning
+ * volumes per week, densified to a full 12 points in Node. They answer
+ * "is this community growing or fading", and they carry no per-member
+ * dimension at all, which is not an oversight to be corrected later. Tracking
+ * an individual's activity is out of bounds on this platform.
  */
 @Injectable()
 export class CommunityInsightsService {
@@ -48,8 +122,14 @@ export class CommunityInsightsService {
     userId: string,
   ): Promise<CommunityInsightsResponse> {
     const communityId = await this.resolveStaffCommunityId(slug, userId);
-    const weekAgo = new Date(Date.now() - WEEK_MS);
-    const monthAgo = new Date(Date.now() - MONTH_MS);
+    const now = new Date();
+    const weekAgo = new Date(now.getTime() - WEEK_MS);
+    const monthAgo = new Date(now.getTime() - MONTH_MS);
+    // The 12 bucket keys the two series must cover, and the instant the oldest
+    // of them begins. Both grouped queries below filter on that instant, so
+    // neither ever scans further back than the window it renders.
+    const weekStarts = trendWeekStarts(now);
+    const trendSince = new Date(`${weekStarts[0]}T00:00:00.000Z`);
 
     const [
       memberCount,
@@ -59,6 +139,8 @@ export class CommunityInsightsService {
       postsThisWeek,
       postAuthorRows,
       replyAuthorRows,
+      newMemberWeekRows,
+      postWeekRows,
     ] = await Promise.all([
       this.members.count({ where: { communityId } }),
       this.members.count({
@@ -98,6 +180,37 @@ export class CommunityInsightsService {
         .andWhere('r.deleted_at IS NULL')
         .andWhere('r.created_at >= :since', { since: weekAgo })
         .getRawMany<{ authorId: string }>(),
+      // TREND, query 1 of 2: new members per ISO week over the trend window,
+      // as ONE grouped query. `date_trunc('week', ...)` buckets server-side
+      // and `GROUP BY` collapses each week to a single row, so twelve points
+      // cost one round trip and the sparse result is densified in Node (see
+      // `fillWeeks`). A per-week count would have been twelve queries.
+      this.members
+        .createQueryBuilder('m')
+        .select(
+          "to_char(date_trunc('week', m.joined_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD')",
+          'weekStart',
+        )
+        .addSelect('COUNT(*)', 'count')
+        .where('m.community_id = :communityId', { communityId })
+        .andWhere('m.joined_at >= :since', { since: trendSince })
+        .groupBy("date_trunc('week', m.joined_at AT TIME ZONE 'UTC')")
+        .getRawMany<{ weekStart: string; count: string }>(),
+      // TREND, query 2 of 2: posts per ISO week over the same window, same
+      // single-grouped-query shape. Tombstoned posts are excluded so the line
+      // matches `postCount` above.
+      this.posts
+        .createQueryBuilder('p')
+        .select(
+          "to_char(date_trunc('week', p.created_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD')",
+          'weekStart',
+        )
+        .addSelect('COUNT(*)', 'count')
+        .where('p.community_id = :communityId', { communityId })
+        .andWhere('p.deleted_at IS NULL')
+        .andWhere('p.created_at >= :since', { since: trendSince })
+        .groupBy("date_trunc('week', p.created_at AT TIME ZONE 'UTC')")
+        .getRawMany<{ weekStart: string; count: string }>(),
     ]);
 
     // Two queries, merged here rather than a single UNION query — plenty for
@@ -116,6 +229,8 @@ export class CommunityInsightsService {
       postCount,
       postsThisWeek,
       activeMemberCount7d,
+      newMembersByWeek: fillWeeks(weekStarts, newMemberWeekRows),
+      postsByWeek: fillWeeks(weekStarts, postWeekRows),
     };
   }
 

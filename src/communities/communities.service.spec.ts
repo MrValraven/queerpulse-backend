@@ -24,6 +24,7 @@ import {
   CreateCommunityInput,
 } from './communities.service';
 import { CommunityAutoFreezeService } from './community-auto-freeze.service';
+import { CommunityBan } from './entities/community-ban.entity';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
 import {
   CommunityJoinRequest,
@@ -143,6 +144,7 @@ describe('CommunitiesService', () => {
   // answer: no connections, and zero open reports.
   let connections: { allAcceptedConnectionUserIds: jest.Mock };
   let autoFreeze: { openReportCount: jest.Mock };
+  let bans: { exists: jest.Mock; createQueryBuilder: jest.Mock };
   let tagRequests: { create: jest.Mock; save: jest.Mock; find: jest.Mock };
   // Fire-and-forget roster-membership domain events
   // (`COMMUNITY_MEMBER_JOINED` / `COMMUNITY_MEMBER_LEFT`).
@@ -221,6 +223,13 @@ describe('CommunitiesService', () => {
     autoFreeze = {
       openReportCount: jest.fn().mockResolvedValue(0),
     };
+    // `join` asks whether the applicant is barred (`exists`), and
+    // `removeMember` writes the bar through an insert chain. Default: nobody
+    // is banned.
+    bans = {
+      exists: jest.fn().mockResolvedValue(false),
+      createQueryBuilder: jest.fn(() => insertQbStub()),
+    };
     tagRequests = {
       create: jest.fn((v: object) => v),
       save: jest.fn((v: unknown) => Promise.resolve(v)),
@@ -273,6 +282,7 @@ describe('CommunitiesService', () => {
           provide: getRepositoryToken(CommunityTagRequest),
           useValue: tagRequests,
         },
+        { provide: getRepositoryToken(CommunityBan), useValue: bans },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: getRepositoryToken(User), useValue: users },
         { provide: DataSource, useValue: dataSource },
@@ -1114,7 +1124,9 @@ describe('CommunitiesService', () => {
       // A plain member cannot triage.
       members.findOne.mockResolvedValue({ role: RosterRole.Member });
       await expect(
-        service.triageJoinRequest('x', 'jr1', 'intruder', 'approve'),
+        service.triageJoinRequest('x', 'jr1', 'intruder', {
+          action: 'approve',
+        }),
       ).rejects.toBeInstanceOf(ForbiddenException);
 
       // A mod can: approving flips the status and upserts the roster row.
@@ -1139,12 +1151,9 @@ describe('CommunitiesService', () => {
       const insertQb = insertQbStub();
       members.createQueryBuilder.mockReturnValue(insertQb);
 
-      const res = await service.triageJoinRequest(
-        'x',
-        'jr1',
-        'mod-1',
-        'approve',
-      );
+      const res = await service.triageJoinRequest('x', 'jr1', 'mod-1', {
+        action: 'approve',
+      });
 
       expect(res.status).toBe(JoinRequestStatus.Approved);
       expect(insertQb.insert).toHaveBeenCalled();
@@ -1174,7 +1183,7 @@ describe('CommunitiesService', () => {
       });
 
       await expect(
-        service.triageJoinRequest('x', 'jr1', 'mod-1', 'decline'),
+        service.triageJoinRequest('x', 'jr1', 'mod-1', { action: 'decline' }),
       ).rejects.toBeInstanceOf(ConflictException);
     });
   });

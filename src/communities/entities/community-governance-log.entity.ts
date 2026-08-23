@@ -34,6 +34,16 @@ export enum GovernanceLogAction {
   CardSuspended = 'card_suspended',
   CardReinstated = 'card_reinstated',
   CardReplaced = 'card_replaced',
+  // Written by `CommunitiesService.removeMember` when a removal also bars the
+  // member's return, which is the default (a moderator opts out per removal
+  // for the tidy-up case). Distinct from `MemberRemoved` on purpose: the two
+  // outcomes differ in whether the person can come back, and an audit trail
+  // that recorded them identically would answer the wrong question.
+  MemberBanned = 'member_banned',
+  // Written by `CommunityBansService.liftBan` when an owner/mod lets a
+  // previously barred member back in. Lifting a ban clears the bar and never
+  // restores the roster row: they still have to rejoin.
+  BanLifted = 'ban_lifted',
 }
 
 /**

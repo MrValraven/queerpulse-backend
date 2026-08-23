@@ -242,6 +242,45 @@ export enum NotificationType {
   // `VolunteerApplicationReceived`. See migration
   // `AddBarterProposalReceivedNotificationType1793720000000`.
   BarterProposalReceived = 'barter_proposal_received',
+  // Communities build (2026-08-23). Every value below is appended to
+  // `notifications_type_enum` by migration
+  // `AddCommunityNotificationTypes1793940000000`.
+  //
+  // Sent to a community's members whose `community_members.notification_level`
+  // is `all` when a new post lands in the community, excluding the author. The
+  // per-member level IS the consent here, the same shape as
+  // `HousingListingMatch`'s `alertsEnabled` and `TopicNewPost`'s follow, so no
+  // `NotificationPreferenceCategory` gates it. Carries the poster as
+  // `payload.actorId` so block/mute filtering applies like any member-driven
+  // type, plus the community slug and post id for the deep link.
+  CommunityNewPost = 'community_new_post',
+  // Sent to a community's members when an owner/mod marks a post as an
+  // ANNOUNCEMENT. Reaches everyone above `muted` (levels `all`,
+  // `announcements` and `mentions`), because an announcement is the one thing
+  // a member who turned the volume down still asked to hear. Carries the
+  // announcing owner/mod as `payload.actorId`.
+  CommunityAnnouncement = 'community_announcement',
+  // Sent to the member an owner/mod bans from a community
+  // (`community_bans`), so a removal is never silent and they are not left
+  // guessing why the room vanished. System-driven, no preference toggle, like
+  // `ModerationOutcome`: it is the platform's word on an action taken against
+  // them. Deliberately carries NO actor id, so the ban does not name which
+  // moderator applied it; the payload carries the community name plus the
+  // moderator's `reason` where one was given.
+  CommunityBanned = 'community_banned',
+  // Sent to PLATFORM STAFF when a community's moderators file an owner-review
+  // request (`community_owner_review_requests`), reporting an owner who has
+  // gone unreachable. The same stamp
+  // (`communities.needs_owner_review_at`) the automatic orphan path sets, so
+  // both routes land on one admin surface. Carries the requesting moderator as
+  // `payload.actorId` and the community slug plus their reason.
+  CommunityOwnerReviewRequested = 'community_owner_review_requested',
+  // Sent to a community's members whose notification level is `all` when an
+  // owner/mod pins a new resource to the community's shelf
+  // (`community_resources`), because a shelf nobody is told about is a shelf
+  // nobody reads. Carries the adding owner/mod as `payload.actorId` plus the
+  // resource title and community slug.
+  CommunityResourceAdded = 'community_resource_added',
 }
 
 @Entity('notifications')

@@ -22,6 +22,25 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
+ * The roster roles that carry standing to speak or act for a community, as
+ * opposed to merely belonging to it. `CoOwner` sits here alongside `Owner`
+ * because a co-owner holds owner-level powers by design: leaving it out would
+ * silently refuse a co-owner in every cross-feature caller of this service
+ * (volunteering's `communitySlug` link, the events audience gate, moderation's
+ * community-mod dismiss carve-out) while the communities module itself let
+ * them through, which is the worst kind of permission drift.
+ *
+ * The three owner-only powers (transferring ownership, archiving, and changing
+ * another owner's or co-owner's role) are enforced in `CommunitiesService` and
+ * deliberately do NOT read this list.
+ */
+const STANDING_ROLES: readonly RosterRole[] = [
+  RosterRole.Owner,
+  RosterRole.CoOwner,
+  RosterRole.Mod,
+];
+
+/**
  * Shared "resolve a community by slug, then assert the caller is on its
  * roster" step, reused by feature modules (events, forum threads, ...) that
  * need this exact check without importing the whole `CommunitiesModule` or
@@ -83,11 +102,7 @@ export class CommunityMembershipService {
     const membership = await this.members.findOne({
       where: { communityId: community.id, userId },
     });
-    if (
-      !membership ||
-      (membership.role !== RosterRole.Owner &&
-        membership.role !== RosterRole.Mod)
-    ) {
+    if (!membership || !STANDING_ROLES.includes(membership.role)) {
       throw new ForbiddenException(
         'Only the community owner or a moderator can do that',
       );
@@ -119,11 +134,7 @@ export class CommunityMembershipService {
     const membership = await this.members.findOne({
       where: { communityId, userId },
     });
-    return (
-      !!membership &&
-      (membership.role === RosterRole.Owner ||
-        membership.role === RosterRole.Mod)
-    );
+    return !!membership && STANDING_ROLES.includes(membership.role);
   }
 
   /**

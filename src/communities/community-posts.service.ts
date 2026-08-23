@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, Not, Repository } from 'typeorm';
 import {
   ContentModerationService,
   ContentModerationState,
@@ -16,6 +16,7 @@ import {
   CommunityPostCreatedEvent,
 } from './community.events';
 import { StorageService } from '../storage/storage.service';
+import { escapeLikeTerm } from '../common/like-escape';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import {
   DEFAULT_LIST_LIMIT,
@@ -25,6 +26,8 @@ import {
   Paginated,
 } from '../common/pagination';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import {
   Report,
@@ -46,6 +49,7 @@ import {
 } from './community-response';
 import {
   CommunityMember,
+  CommunityNotificationLevel,
   RosterRole,
 } from './entities/community-member.entity';
 import { CommunityPostEdit } from './entities/community-post-edit.entity';
@@ -63,6 +67,36 @@ export interface CreatePostInput {
   image?: string | null;
   kind?: PostKind;
 }
+
+/**
+ * Roster-wide post notifications are a fan-out, so they are written in
+ * batches: one `createForRecipients` call per chunk of recipients rather than
+ * one insert per member. 500 is the chunk size (each chunk is a single
+ * multi-row INSERT plus the two batched preference/block filters
+ * `createForRecipients` already runs), and 5000 is the hard ceiling on how
+ * many members one post may page in a single request. A roster larger than
+ * the ceiling gets its first 5000 members in `joined_at` order notified and
+ * the rest skipped: the alternative is an unbounded write on the request path,
+ * and the fan-out is explicitly best-effort. Raise the ceiling only by moving
+ * this off the request path entirely (a queue or a scheduled sweep).
+ */
+const POST_NOTIFY_CHUNK_SIZE = 500;
+const POST_NOTIFY_MAX_RECIPIENTS = 5000;
+
+/**
+ * Which members hear about a post at all, by their own per-community
+ * `notificationLevel`. `mentions` and `muted` are absent on purpose: a member
+ * on `mentions` is still reached through `MentionNotificationService` (that
+ * path is untouched by this fan-out), and `muted` means nothing from this
+ * community.
+ */
+const LEVELS_WANTING_EVERY_POST: readonly CommunityNotificationLevel[] = [
+  CommunityNotificationLevel.All,
+];
+const LEVELS_WANTING_ANNOUNCEMENTS: readonly CommunityNotificationLevel[] = [
+  CommunityNotificationLevel.All,
+  CommunityNotificationLevel.Announcements,
+];
 
 /** Input for the flat `POST /community-posts` alias (see `createFlatPost`). */
 export interface CreateFlatPostInput {
@@ -108,6 +142,10 @@ export class CommunityPostsService {
     // in `CommunitiesModule`, shared by both providers).
     @InjectRepository(Report) private readonly reports: Repository<Report>,
     private readonly mentions: MentionNotificationService,
+    // Roster-wide fan-out on post creation (see `notifyRosterOfPost`). Batched
+    // through `createForRecipients`, the same path
+    // `CommunitiesService.notifyRosterArchived` uses.
+    private readonly notifications: NotificationsService,
     private readonly contentModeration: ContentModerationService,
     private readonly storage: StorageService,
     private readonly eventEmitter: EventEmitter2,
@@ -119,10 +157,17 @@ export class CommunityPostsService {
   // (`post` / `reply`), keyed by the row's uuid — reads check both.
   private static readonly SUBJECT_TYPES = ['post', 'reply'];
 
-  // Owner/mod see moderated content (flagged); ordinary members/non-members do
-  // not receive hidden content.
+  // Owner/co-owner/mod see moderated content (flagged); ordinary
+  // members/non-members do not receive hidden content. `co_owner` is a role
+  // the owner handed owner-level powers to inside the community (see
+  // `RosterRole.CoOwner`), so every staff check in this file treats it exactly
+  // as it treats `owner`.
   private static isStaffRole(viewerRole: RosterRole | null): boolean {
-    return viewerRole === RosterRole.Owner || viewerRole === RosterRole.Mod;
+    return (
+      viewerRole === RosterRole.Owner ||
+      viewerRole === RosterRole.CoOwner ||
+      viewerRole === RosterRole.Mod
+    );
   }
 
   private static readonly VISIBLE: ContentModerationState = {
@@ -149,6 +194,7 @@ export class CommunityPostsService {
     slug: string,
     viewerId: string,
     page?: number,
+    searchTerm?: string,
   ): Promise<Paginated<CommunityPostDTO>> {
     const community = await this.loadCommunityOr404(slug);
     await this.assertViewable(community, viewerId);
@@ -159,6 +205,18 @@ export class CommunityPostsService {
       .where('p.community_id = :communityId', { communityId: community.id })
       .orderBy('p.pinned', 'DESC')
       .addOrderBy('p.created_at', 'DESC');
+    // Case-insensitive body search, ANDed into the same query as every other
+    // filter below so `paginate`'s LIMIT/OFFSET and its `total` both count
+    // only matching posts. A community's own posts were unsearchable until
+    // now: global search matches communities themselves and never their
+    // contents, so "what did we decide about X" had no answer past the point
+    // where scrolling stopped being practical.
+    const trimmedSearchTerm = searchTerm?.trim();
+    if (trimmedSearchTerm) {
+      qb.andWhere('p.body ILIKE :searchPattern', {
+        searchPattern: `%${escapeLikeTerm(trimmedSearchTerm)}%`,
+      });
+    }
     // Blocked-either-way and muted authors' posts are excluded in-query, so
     // `paginate`'s LIMIT/OFFSET and its `total` both count only visible posts.
     // Filtering the fetched rows instead would under-fill every page *and*
@@ -195,16 +253,26 @@ export class CommunityPostsService {
     this.assertNotFrozen(community, membership);
     CommunityPostsService.assertKindAllowed(dto.kind, membership.role);
 
+    const kind = dto.kind ?? PostKind.Post;
+    const isAnnouncement = kind === PostKind.Announcement;
+
     const saved = await this.posts.save(
       this.posts.create({
         communityId: community.id,
         authorId,
         body: dto.body,
         image: dto.image ?? null,
-        kind: dto.kind ?? PostKind.Post,
-        pinned: false,
+        kind,
+        // An announcement is auto-pinned. Only an owner/co-owner/mod can
+        // publish one (`assertKindAllowed` above), so this is the same staff
+        // authority the manual pin in `updatePost` requires, applied at the
+        // moment the announcement is made rather than as a second step the
+        // author has to remember. Unpinning it later is the ordinary
+        // staff-only `PATCH ... { pinned: false }`.
+        pinned: isAnnouncement,
       }),
     );
+    await this.notifyRosterOfPost(community, saved, authorId, isAnnouncement);
     await this.mentions.notify(dto.body, authorId, {
       actorId: authorId,
       source: 'community',
@@ -1306,6 +1374,88 @@ export class CommunityPostsService {
     if (!CommunityPostsService.isStaffRole(viewerRole)) {
       throw new ForbiddenException(
         'Only a community owner/mod can post an announcement',
+      );
+    }
+  }
+
+  /**
+   * Best-effort roster fan-out for a newly created community post.
+   *
+   * Who hears what is the member's own per-community `notificationLevel`
+   * (`community_members.notification_level`):
+   *   - `all`: `community_new_post` for every post, `community_announcement`
+   *     for an announcement (one notification per post either way, never both)
+   *   - `announcements`: only `community_announcement`
+   *   - `mentions` / `muted`: nothing from here. A member on `mentions` still
+   *     gets named-in-the-post notifications through
+   *     `MentionNotificationService`, which this method does not touch.
+   * The author never notifies themselves.
+   *
+   * ONE query selects the recipients: a `user_id` projection over
+   * `community_members` filtered by community, level and "not the author", so
+   * a roster of any size costs a single indexed read rather than a lookup per
+   * member. The write side is then chunked through
+   * `NotificationsService.createForRecipients` (see `POST_NOTIFY_CHUNK_SIZE`),
+   * which is itself batched: one multi-row INSERT per chunk, with the
+   * block/mute and per-category preference filters applied in two more batched
+   * queries. There is no per-member create anywhere on this path.
+   *
+   * Wrapped in its own try/catch and awaited only for ordering: a notification
+   * failure must never fail or roll back the post, which is already committed
+   * by the time this runs.
+   */
+  private async notifyRosterOfPost(
+    community: Community,
+    post: CommunityPost,
+    authorId: string,
+    isAnnouncement: boolean,
+  ): Promise<void> {
+    try {
+      const levels = isAnnouncement
+        ? LEVELS_WANTING_ANNOUNCEMENTS
+        : LEVELS_WANTING_EVERY_POST;
+      const rosterRows = await this.members.find({
+        where: {
+          communityId: community.id,
+          notificationLevel: In([...levels]),
+          userId: Not(authorId),
+        },
+        select: { userId: true },
+        order: { joinedAt: 'ASC' },
+        take: POST_NOTIFY_MAX_RECIPIENTS,
+      });
+      const recipientIds = rosterRows.map((row) => row.userId);
+      if (!recipientIds.length) return;
+
+      const type = isAnnouncement
+        ? NotificationType.CommunityAnnouncement
+        : NotificationType.CommunityNewPost;
+      const payload = {
+        actorId: authorId,
+        source: 'community',
+        communitySlug: community.slug,
+        communityName: community.name,
+        postId: post.id,
+        excerpt: post.body.slice(0, 140),
+      };
+
+      for (
+        let offset = 0;
+        offset < recipientIds.length;
+        offset += POST_NOTIFY_CHUNK_SIZE
+      ) {
+        await this.notifications.createForRecipients(
+          recipientIds.slice(offset, offset + POST_NOTIFY_CHUNK_SIZE),
+          type,
+          payload,
+          authorId,
+        );
+      }
+    } catch (error) {
+      // Intentionally swallowed: the post already committed, and a bell that
+      // did not ring is never worth losing a member's post over.
+      this.logger.warn(
+        `Community post fan-out failed for ${community.slug}/${post.id}: ${String(error)}`,
       );
     }
   }

@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import {
   CommunityMember,
+  CommunityNotificationLevel,
   RosterRole,
 } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
@@ -28,6 +29,10 @@ function makeMember(overrides: Partial<CommunityMember> = {}): CommunityMember {
     userId: 'user-plain',
     role: RosterRole.Member,
     joinedAt: new Date('2024-06-01T00:00:00.000Z'),
+    notificationLevel: CommunityNotificationLevel.Announcements,
+    rulesAcceptedAt: null,
+    rulesVersionAccepted: null,
+    welcomeSeenAt: null,
     ...overrides,
   };
 }

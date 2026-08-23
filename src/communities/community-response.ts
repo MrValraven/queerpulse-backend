@@ -5,10 +5,13 @@ import { cropFor } from '../media-crops/crop-response';
 import {
   AccessTier,
   Community,
+  CommunityFrozenReason,
   CommunityType,
 } from './entities/community.entity';
 import {
   CommunityJoinRequest,
+  CommunityJoinRequestDeclineKind,
+  CommunityJoinRequestInvolvement,
   JoinRequestStatus,
 } from './entities/community-join-request.entity';
 import {
@@ -28,8 +31,16 @@ export interface CommunityPostViewer {
   role: RosterRole | null;
 }
 
+// The post/reply "can I moderate this" test. A co-owner holds owner-level
+// powers inside the community (see the permission model at
+// `CommunitiesService.isOwnerLevelRole`), so it sits on this side of the line
+// with the owner and mods.
 function isOwnerOrMod(role: RosterRole | null): boolean {
-  return role === RosterRole.Owner || role === RosterRole.Mod;
+  return (
+    role === RosterRole.Owner ||
+    role === RosterRole.CoOwner ||
+    role === RosterRole.Mod
+  );
 }
 
 // Author identity hidden on a tombstoned post/reply. The frontend branches on
@@ -50,7 +61,14 @@ const DELETED_MEMBER: MemberRef = {
  */
 export interface CommunityStats {
   memberCount: number;
-  activeThisWeek: number; // distinct post/reply authors, last 7 days
+  // Distinct post/reply authors over the last 7 days, computed per page by
+  // `statsForMany`. Same definition as the denormalised
+  // `communities.active_this_week` column that `?sort=active` orders by (see
+  // `CommunityActivityCounterService`); this one is computed at read time, the
+  // column is the hourly-refreshed cache that makes the sort possible before
+  // pagination. Cards carry the number so a "busy this week" treatment needs
+  // no second call.
+  activeThisWeek: number;
   postsThisWeek: number;
 }
 
@@ -73,6 +91,17 @@ export interface CommunityCardDTO {
   // on the card (not just the detail) so `GET /communities?tags=` results can
   // render matched tags without a second fetch.
   tags: string[];
+  // Resolved (`toImageUrl`) avatar URL, or null when the community has none
+  // and the client should fall back to its generated initial mark.
+  avatarImageUrl: string | null;
+  // Where the community meets, and which languages it runs in. On the CARD
+  // rather than only the detail for the same reason `tags` is: these are the
+  // facets `GET /communities?city=&language=&online=` filters on, so a result
+  // row has to be able to show why it matched without a second fetch.
+  city: string | null;
+  area: string | null;
+  isOnline: boolean;
+  languages: string[];
 }
 
 export interface CommunityDetailDTO extends CommunityCardDTO {
@@ -95,12 +124,43 @@ export interface CommunityDetailDTO extends CommunityCardDTO {
   // all viewers — the hub shows a "frozen, under review" banner, and its
   // owner/mods get the unfreeze control.
   frozen: boolean;
+  // The freeze, in enough detail for a member to be told the truth about it.
+  // `frozen` alone forced the client to word all three reasons as "moderators
+  // are reviewing recent reports", which is alarming and simply untrue of a
+  // manual pause where no report exists. `frozenReason` distinguishes a
+  // deliberate pause from the two automatic triggers, `frozenNote` is the
+  // moderator's own short public line about it (null when none was written),
+  // and `frozenAt` is when it started. All three read as null while the
+  // community is not frozen, whatever the columns still hold. `frozenByUserId` is deliberately NOT exposed: who froze a
+  // community is moderation detail and lives in the governance log.
+  frozenAt: string | null;
+  frozenReason: CommunityFrozenReason | null;
+  frozenNote: string | null;
   myJoinRequestStatus: JoinRequestStatus | null;
   // A moderator takedown. Only ever surfaced to an owner/mod — outsiders get a
   // 404 for a moderated community, never this detail — so they know why the
   // community is no longer publicly reachable.
   moderationRemoved: boolean;
   moderationHidden: boolean;
+  // The community's current house-rules version, and the version THIS viewer
+  // last agreed to. `rulesAcceptedVersion` is null when the viewer is not a
+  // member, and also for a member who joined before rules acceptance existed.
+  // The client re-prompts whenever `rulesAcceptedVersion` is null or trails
+  // `rulesVersion` and the community actually has rules, which is how an
+  // existing roster is asked to re-agree after an owner edits them.
+  rulesVersion: number;
+  rulesAcceptedVersion: number | null;
+  // The owner's once-only greeting for a new joiner. STAFF ONLY here: this is
+  // the settings-form value, and the member-facing read (which also carries
+  // "has this member seen it yet") is `GET /communities/:slug/preferences`.
+  // Null for anyone who is not owner/co-owner/mod, and for a community with
+  // no greeting set.
+  welcomeMessage: string | null;
+  // Whether a signed-out visitor can see this community's teaser. Surfaced to
+  // every viewer, not just staff: a member is entitled to know their
+  // community is findable by people who are not on this platform. Only ever
+  // true while `accessTier` is `public` or `request`.
+  isPubliclyListed: boolean;
 }
 
 export function toCommunityCard(
@@ -121,6 +181,11 @@ export function toCommunityCard(
     myRole,
     coverImageUrl: toImageUrl(c.coverImageUrl),
     tags: c.tags,
+    avatarImageUrl: toImageUrl(c.avatarImageUrl),
+    city: c.city,
+    area: c.area,
+    isOnline: c.isOnline,
+    languages: c.languages,
   };
 }
 
@@ -135,6 +200,10 @@ export function toCommunityDetail(
   // `MediaCropService.getMany` and passes the resulting Map straight through;
   // this mapper stays synchronous.
   crops: Map<string, CropRect> = new Map(),
+  // The viewer's own `community_members.rules_version_accepted`. Defaults to
+  // null, which is the honest answer for a non-member and for a member who
+  // joined before acceptance was recorded.
+  rulesAcceptedVersion: number | null = null,
 ): CommunityDetailDTO {
   return {
     ...toCommunityCard(c, stats, myRole),
@@ -148,9 +217,20 @@ export function toCommunityDetail(
     createdAt: c.createdAt.toISOString(),
     archived: c.archivedAt != null,
     frozen: c.frozenAt != null,
+    // Read as a set, gated on the freeze actually being live. A path that
+    // clears `frozenAt` without clearing the note (platform staff lifting a
+    // freeze through `AdminCommunitiesService`, for one) must not leave
+    // members reading an explanation for a pause that ended.
+    frozenAt: c.frozenAt ? c.frozenAt.toISOString() : null,
+    frozenReason: c.frozenAt ? c.frozenReason : null,
+    frozenNote: c.frozenAt ? c.frozenNote : null,
     myJoinRequestStatus,
     moderationRemoved: moderation?.removed ?? false,
     moderationHidden: moderation?.hidden ?? false,
+    rulesVersion: c.rulesVersion,
+    rulesAcceptedVersion,
+    welcomeMessage: isOwnerOrMod(myRole) ? c.welcomeMessage : null,
+    isPubliclyListed: c.isPubliclyListed,
   };
 }
 
@@ -182,11 +262,49 @@ export interface MemberRoleDTO {
   role: RosterRole;
 }
 
+/**
+ * What a reviewer needs to know about the person behind a join request,
+ * beyond their name. Computed in BATCH for a whole queue by
+ * `CommunitiesService.applicantContexts` (never per row), and left undefined
+ * on the surfaces that have no reviewer: the applicant's own
+ * `POST /communities/:slug/join` echo carries nulls here, so nobody learns
+ * their own reviewer-side signals.
+ */
+export interface JoinRequestApplicantContext {
+  // When the applicant's ACCOUNT was created (`users.created_at`), which is
+  // the "is this a week-old account" signal a reviewer actually wants. Not
+  // when the request was filed, which is `createdAt`.
+  accountCreatedAt: Date;
+  // Connections the applicant and the REVIEWING moderator have in common.
+  sharedConnectionCount: number;
+  // Other communities the applicant is in that at least one member of THIS
+  // community's roster is also in.
+  sharedCommunityCount: number;
+}
+
 export interface CommunityJoinRequestDTO {
   id: string;
+  // Carries the applicant's profile `slug` and `pronouns` already, so the
+  // reviewer surface reads both from here rather than duplicating them.
   member: MemberRef;
   note: string | null;
+  // The applicant's self-reported answer to "how do you want to take part".
+  // Null when they skipped the question or the request predates the field.
+  involvement: CommunityJoinRequestInvolvement | null;
   status: JoinRequestStatus;
+  // Set on a decline. `declineKind` lets the client word "not right now" and
+  // "not a fit" differently; `declineReason` is the reviewer's own words,
+  // which this column exists to carry TO THE APPLICANT (moderator-only notes
+  // live in `internalNote`, which no response ever includes). `reapplyAfter`
+  // is the earliest the applicant may file again, null when there is no wait.
+  declineKind: CommunityJoinRequestDeclineKind | null;
+  declineReason: string | null;
+  reapplyAfter: string | null;
+  // Reviewer-side context. Null on any surface that computed none (see
+  // `JoinRequestApplicantContext`).
+  accountCreatedAt: string | null;
+  sharedConnectionCount: number | null;
+  sharedCommunityCount: number | null;
   createdAt: string;
 }
 
@@ -215,13 +333,27 @@ export function toRosterEntry(
 export function toJoinRequestDTO(
   request: CommunityJoinRequest,
   memberRef: MemberRef,
+  // Omitted on the applicant-facing surfaces, which have no reviewer to
+  // compute it for.
+  context?: JoinRequestApplicantContext,
 ): CommunityJoinRequestDTO {
   return {
     id: request.id,
     member: memberRef,
     note: request.note,
+    involvement: request.involvement,
     status: request.status,
+    declineKind: request.declineKind,
+    declineReason: request.declineReason,
+    reapplyAfter: request.reapplyAfter
+      ? request.reapplyAfter.toISOString()
+      : null,
+    accountCreatedAt: context ? context.accountCreatedAt.toISOString() : null,
+    sharedConnectionCount: context ? context.sharedConnectionCount : null,
+    sharedCommunityCount: context ? context.sharedCommunityCount : null,
     createdAt: request.createdAt.toISOString(),
+    // `internalNote` is deliberately absent: it is moderator-only working
+    // notes and must never reach a response body.
   };
 }
 

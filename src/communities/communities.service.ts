@@ -28,6 +28,8 @@ import {
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { knownCommunityTags } from './community-tags';
+import { knownLanguages } from '../profiles/languages';
+import { toStoredPlainTextOrNull } from './community-plain-text';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -40,6 +42,7 @@ import {
   CommunityDetailDTO,
   CommunityJoinRequestDTO,
   CommunityStats,
+  JoinRequestApplicantContext,
   JoinResultDTO,
   MemberRoleDTO,
   MyCommunityDTO,
@@ -49,8 +52,11 @@ import {
   toJoinRequestDTO,
   toRosterEntry,
 } from './community-response';
+import { CommunityBan } from './entities/community-ban.entity';
 import {
   CommunityJoinRequest,
+  CommunityJoinRequestDeclineKind,
+  CommunityJoinRequestInvolvement,
   JoinRequestStatus,
 } from './entities/community-join-request.entity';
 import { CommunityTagRequest } from './entities/community-tag-request.entity';
@@ -100,6 +106,26 @@ const EMPTY_STATS: CommunityStats = {
 // caps at 4 — a short shelf, not a browse list.
 const SUGGESTED_COMMUNITIES_LIMIT = 6;
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// How long a declined applicant waits before they may apply again, one wait
+// per kind of "no" (see `CommunityJoinRequestDeclineKind`).
+//
+// `not_now` is a timing answer, so the wait is short: a month is long enough
+// that whatever made this a bad moment (a full intake, a pause before an
+// event) has plausibly moved on, and short enough that the invitation to come
+// back is a real one.
+const REAPPLY_WAIT_DAYS_NOT_NOW = 30;
+// `not_a_fit` is an answer about fit, so the wait is half a year: reapplying
+// should mean something has genuinely changed rather than the applicant
+// simply trying the door again. It is still a wait, never a permanent bar. A
+// permanent bar is a ban (`community_bans`), which is a different decision.
+const REAPPLY_WAIT_DAYS_NOT_A_FIT = 180;
+
+// Cap on the free-text roster search term, so a pathological ILIKE pattern
+// cannot be handed to Postgres. Matches `ListCommunitiesQuery.q`'s own limit.
+const ROSTER_SEARCH_MAX_LENGTH = 200;
+
 // Postgres unique-violation SQLSTATE. TypeORM surfaces it either directly on
 // the QueryFailedError or on the wrapped driverError depending on the path.
 // Mirrors `EventsService`'s identical helper (file-local there too, not
@@ -116,6 +142,15 @@ export interface CreateCommunityInput {
   tagline: string;
   tags?: string[]; // curated ids from COMMUNITY_TAGS; defaults to [] when omitted
   coverImageUrl?: string | null; // storage key / https URL / '' to clear
+  avatarImageUrl?: string | null; // same convention as coverImageUrl
+  welcomeMessage?: string | null; // plain text, sanitized on write
+  city?: string | null; // plain text, sanitized on write
+  area?: string | null; // plain text, sanitized on write
+  isOnline?: boolean; // defaults to false when omitted
+  languages?: string[]; // codes from LANGUAGE_CODES; defaults to [] when omitted
+  // Owner-level opt-in to a signed-out teaser. Only ever true while
+  // `accessTier` is `public` or `request`; see `assertPublicListingAllowed`.
+  isPubliclyListed?: boolean;
   handle: string; // desired slug
   // Member slugs -> sent a CommunityInviteReceived notification carrying
   // `proposedRole: 'mod'`. NOT a roster add: nobody is made a moderator
@@ -137,15 +172,16 @@ export type UpdateCommunityInput = Partial<
 
 export type CommunityListFilter = 'discover' | 'mine';
 
-// 'active' (most members / most recent post activity) was deliberately left
-// out: both would need an aggregate join/subquery across `community_members`
-// or `community_posts` evaluated for the *whole* filtered set before
-// pagination — unlike `statsForMany`, which only ever batches stats for the
-// current page's rows after the fact — and neither table carries an index
-// that makes that aggregate cheap. Doing it properly would mean a
-// denormalized, trigger-maintained counter column (its own migration +
-// sync mechanism), which is out of scope here.
-export type CommunityListSort = 'newest' | 'name';
+// 'active' used to be left out because ranking by liveliness meant an
+// aggregate join/subquery across `community_posts` evaluated for the WHOLE
+// filtered set before pagination, with no index to make it cheap. The
+// denormalized counter that comment asked for now exists:
+// `communities.active_this_week`, refreshed hourly by
+// `CommunityActivityCounterService` and indexed
+// (`IDX_communities_active_this_week`), so the sort is a plain indexed
+// ORDER BY and the frontend can stop draining every page of the directory to
+// the browser to compute it.
+export type CommunityListSort = 'newest' | 'name' | 'active';
 
 export interface CommunityListQuery {
   filter?: CommunityListFilter;
@@ -165,17 +201,53 @@ export interface CommunityListQuery {
   // `ProfilesService.searchMembers`'s `?tags=` filter over `profiles.tags`.
   // Unknown ids are dropped before the query runs; see COMMUNITY_TAGS.
   tags?: string;
+  // Exact, case-insensitive match on `communities.city`.
+  city?: string;
+  // One code from LANGUAGE_CODES; matches when `communities.languages`
+  // CONTAINS it (array overlap, the same operator `tags` uses).
+  language?: string;
+  // Matches `communities.is_online`. Undefined applies no filter, so both
+  // `true` and `false` are real, expressible answers.
+  online?: boolean;
+}
+
+/** Body of `freeze`. `note` is the moderator's optional short PUBLIC line
+ *  explaining the pause, stored in `communities.frozen_note` and cleared by
+ *  `unfreeze`. Absent on a client that predates it, and on every automatic
+ *  freeze (which has no human author to write one). */
+export interface FreezeCommunityInput {
+  note?: string | null;
 }
 
 export interface JoinCommunityInput {
   note?: string;
+  involvement?: CommunityJoinRequestInvolvement;
+  acceptedRulesVersion?: number;
 }
 
 export type JoinRequestAction = 'approve' | 'decline';
 
+/** The decline half of a triage call. Both fields are absent on approve, and
+ * both may be absent on a decline from a client that predates them. */
+export interface TriageJoinRequestInput {
+  action: JoinRequestAction;
+  declineKind?: CommunityJoinRequestDeclineKind;
+  declineReason?: string;
+}
+
+/** Options of `removeMember`. `allowReturn` opts OUT of the ban a removal
+ * writes by default; it is ignored for a self-leave. `reason` is stored on
+ * the ban row for the mod panel and the governance log. */
+export interface RemoveMemberOptions {
+  allowReturn?: boolean;
+  reason?: string;
+}
+
 /** The only roles `setMemberRole` can assign — `owner` is not grantable here
- * (see `UpdateMemberRoleDto`). */
-export type AssignableRole = RosterRole.Member | RosterRole.Mod;
+ * (ownership moves through `transferOwnership`; see `UpdateMemberRoleDto`).
+ * `co_owner` is grantable, by the owner alone. */
+export type AssignableRole =
+  RosterRole.Member | RosterRole.Mod | RosterRole.CoOwner;
 
 @Injectable()
 export class CommunitiesService {
@@ -192,6 +264,11 @@ export class CommunitiesService {
     private readonly joinRequests: Repository<CommunityJoinRequest>,
     @InjectRepository(CommunityTagRequest)
     private readonly tagRequests: Repository<CommunityTagRequest>,
+    // Written by `removeMember` (a removal bars the return by default) and
+    // read by `join` before any other gate. Only the WRITE and the enforcing
+    // READ live here; listing and lifting bans is a separate surface.
+    @InjectRepository(CommunityBan)
+    private readonly bans: Repository<CommunityBan>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     // For the house-account guardrail on `transferOwnership` (a `User.isSystem`
     // account can never be handed a community). The repo is available via
@@ -231,9 +308,80 @@ export class CommunitiesService {
   // slug (matching the report `subjectId`).
   private static readonly SUBJECT_TYPE = 'community';
 
+  /**
+   * THE COMMUNITY PERMISSION MODEL, in one place, so the next reader does not
+   * have to re-derive it from a dozen role comparisons.
+   *
+   * There are three tiers, and every check in this file is one of them:
+   *
+   *  1. `isStaffRole` (owner, co-owner, mod) is the MODERATION gate. It is
+   *     what lets someone see an archived or moderated community, freeze and
+   *     unfreeze it, edit its settings, triage join requests, and remove a
+   *     plain member.
+   *  2. `isOwnerLevelRole` (owner, co-owner) is the GOVERNANCE gate. It is
+   *     what the owner alone used to hold: changing `accessTier` and
+   *     `rosterVisible` (the community's privacy promise), and acting on a
+   *     moderator (removing one, or changing their role). Handing those to a
+   *     trusted second person is the entire point of the co-owner role.
+   *  3. A bare `role === RosterRole.Owner`, or `assertOwner` (which reads
+   *     `Community.ownerId`, the source of truth), is the OWNER-ONLY gate.
+   *     Exactly three powers stay here and a co-owner never reaches them:
+   *     transferring ownership, archiving the community, and changing or
+   *     removing an owner or a co-owner. Those three are the ones that decide
+   *     who the owner is or whether the community continues to exist, so a
+   *     co-owner can neither promote themselves out of the owner's reach nor
+   *     unseat the person who granted them the role.
+   *
+   * `Community.ownerId` still holds exactly one accountable owner of record.
+   * A co-owner is never the community's owner, and promoting one is still an
+   * explicit ownership transfer.
+   */
   private static isStaffRole(role: RosterRole | null): boolean {
-    return role === RosterRole.Owner || role === RosterRole.Mod;
+    return (
+      role === RosterRole.Owner ||
+      role === RosterRole.CoOwner ||
+      role === RosterRole.Mod
+    );
   }
+
+  /** Tier 2 of the model above: owner-level powers, held by the owner and by
+   *  a co-owner. See `isStaffRole`'s comment for the full matrix. */
+  private static isOwnerLevelRole(role: RosterRole | null): boolean {
+    return role === RosterRole.Owner || role === RosterRole.CoOwner;
+  }
+
+  /**
+   * Whether a community at this access tier may be publicly listed at all
+   * (`Community.isPubliclyListed`, the signed-out teaser).
+   *
+   * Only `public` and `request` qualify. An `invite` or `private` community
+   * is one whose very existence is not meant to be findable by a stranger, so
+   * "listed but invite-only" is a contradiction rather than a configuration.
+   * Both write paths lean on this: `create`/`update` refuse to set the flag
+   * true at a disqualifying tier, and `update` forces it back to false when
+   * the tier itself moves to one.
+   */
+  private static isPublicListingAllowedAtTier(tier: AccessTier): boolean {
+    return tier === AccessTier.Public || tier === AccessTier.Request;
+  }
+
+  /** 400 rather than a silent drop: a client that asked to be listed and was
+   *  quietly left unlisted would show the owner a switch that lies. */
+  private static assertPublicListingAllowed(tier: AccessTier): void {
+    if (!CommunitiesService.isPublicListingAllowedAtTier(tier)) {
+      throw new BadRequestException(
+        'A community can only be publicly listed while its access tier is public or request. Change the tier first, or leave it unlisted.',
+      );
+    }
+  }
+
+  /** The roles that are the community's staff for notification fan-out and
+   *  for the moderated-listing exemption. Same set as `isStaffRole`. */
+  private static readonly STAFF_ROLES: RosterRole[] = [
+    RosterRole.Owner,
+    RosterRole.CoOwner,
+    RosterRole.Mod,
+  ];
 
   // Excludes moderator-taken-down communities from a browse/search query, in
   // the query itself so the paginated `total` stays consistent with the rows
@@ -251,7 +399,7 @@ export class CommunitiesService {
         ) OR m.role IN (:...communityStaffRoles))`,
       {
         communitySubjectType: CommunitiesService.SUBJECT_TYPE,
-        communityStaffRoles: [RosterRole.Owner, RosterRole.Mod],
+        communityStaffRoles: CommunitiesService.STAFF_ROLES,
       },
     );
   }
@@ -260,6 +408,12 @@ export class CommunitiesService {
     ownerId: string,
     dto: CreateCommunityInput,
   ): Promise<CommunityDetailDTO> {
+    // Refused before anything is written: a community created `invite` or
+    // `private` can never be publicly listed, exactly as `update` enforces.
+    if (dto.isPubliclyListed) {
+      CommunitiesService.assertPublicListingAllowed(dto.accessTier);
+    }
+
     // Resolved BEFORE the create transaction opens: neither list writes
     // anything any more (see `resolveInvitees`), so there is no reason to
     // re-resolve them on each retry of that transaction.
@@ -356,6 +510,19 @@ export class CommunitiesService {
               rules: dto.rules,
               tags: dto.tags ?? [],
               coverImageUrl: dto.coverImageUrl ?? null,
+              avatarImageUrl: dto.avatarImageUrl || null,
+              // Free text from a member-facing form: stripped of markup once,
+              // here at the write boundary, so no render site has to. An
+              // empty result stores as NULL rather than an empty string.
+              welcomeMessage: toStoredPlainTextOrNull(dto.welcomeMessage),
+              city: toStoredPlainTextOrNull(dto.city),
+              area: toStoredPlainTextOrNull(dto.area),
+              isOnline: dto.isOnline ?? false,
+              languages: dto.languages ?? [],
+              // Guarded against the tier above (see
+              // `assertPublicListingAllowed`), and off unless the creator
+              // deliberately asked for it.
+              isPubliclyListed: dto.isPubliclyListed ?? false,
               ownerId,
               ref,
             }),
@@ -438,6 +605,33 @@ export class CommunitiesService {
         { qPattern: pattern },
       );
     }
+    // Exact city match, case-insensitively, so "Lisbon" and "lisbon" are the
+    // same place. `LOWER()` on both sides means the plain btree
+    // `IDX_communities_city` cannot serve this predicate; a functional index
+    // on `LOWER(city)` is the follow-up if the filter ever gets hot, and that
+    // needs a migration this task does not own.
+    if (query.city) {
+      qb.andWhere('LOWER(c.city) = LOWER(:city)', { city: query.city });
+    }
+    // Language filter: the community's `languages` array must CONTAIN the
+    // requested code. Array overlap (`&&`) against the GIN-indexed column
+    // (`IDX_communities_languages`), the same operator and shape the tag
+    // filter below uses. An unknown code cannot match anything, so it matches
+    // nothing rather than quietly returning the unfiltered list.
+    if (query.language) {
+      const languages = knownLanguages([query.language]);
+      if (!languages.length) {
+        qb.andWhere('1 = 0');
+      } else {
+        qb.andWhere('c.languages && :languages', { languages });
+      }
+    }
+    // Both directions are real answers here: `false` narrows to communities
+    // that meet in person, it does not mean "no filter" (see
+    // `ListCommunitiesQuery.online`).
+    if (query.online !== undefined) {
+      qb.andWhere('c.is_online = :isOnline', { isOnline: query.online });
+    }
     // Curated tag filter. Plain array-overlap against the GIN-indexed
     // `communities.tags` (see `AddCommunityTags`), same shape as
     // `ProfilesService.searchMembers`'s `?tags=`/`?disciplines=` filters.
@@ -462,6 +656,15 @@ export class CommunitiesService {
     // secondary key so pagination doesn't reshuffle rows across pages.
     if (query.sort === 'name') {
       qb.orderBy('c.name', 'ASC').addOrderBy('c.id', 'ASC');
+    } else if (query.sort === 'active') {
+      // Liveliness first, served straight off the indexed
+      // `communities.active_this_week` counter. Ties are dense here (every
+      // quiet community sits at 0), so the tiebreak matters more than it does
+      // for 'name': newest first, then `id`, which is unique and therefore
+      // makes the total order deterministic across pages.
+      qb.orderBy('c.activeThisWeek', 'DESC')
+        .addOrderBy('c.createdAt', 'DESC')
+        .addOrderBy('c.id', 'ASC');
     } else {
       qb.orderBy('c.createdAt', 'DESC');
     }
@@ -760,11 +963,13 @@ export class CommunitiesService {
   /**
    * `PATCH /communities/:slug` — edit the community's settings.
    *
-   * Owner/mod for most fields, OWNER-ONLY for `accessTier` and
-   * `rosterVisible` (BE-COM-22). Those two are the community's privacy
-   * promise: flipping `private` to `public` exposes the roster and every post
-   * at once, which is the same class of act as archiving or transferring it,
-   * and those are already owner-only. An archived community takes no edits at
+   * Owner/mod for most fields, OWNER-LEVEL (owner or co-owner) for
+   * `accessTier`, `rosterVisible` and `isPubliclyListed` (BE-COM-22). Those
+   * three are the community's privacy promise: flipping `private` to `public`
+   * exposes the roster and every post at once, and listing it publicly makes
+   * it findable by people who are not on this platform. That is the same
+   * class of act as archiving or transferring it, and those are already
+   * owner-only. An archived community takes no edits at
    * all — it is down for everyone but its own staff, and editing it would
    * quietly reshape something no member can see.
    *
@@ -796,19 +1001,72 @@ export class CommunitiesService {
     assertNoForeignUploadIntroduced(userId, dto.coverImageUrl, [
       community.coverImageUrl,
     ]);
+    // Same backstop for the avatar, which rides the same exempted handler.
+    assertNoForeignUploadIntroduced(userId, dto.avatarImageUrl, [
+      community.avatarImageUrl,
+    ]);
 
-    const isOwner = actorMembership.role === RosterRole.Owner;
+    // Tier 2 of the permission model (see `isStaffRole`): `accessTier` and
+    // `rosterVisible` are the community's privacy promise, so a plain mod
+    // still cannot touch them, but a CO-OWNER can. Handing exactly this to a
+    // trusted second person is what the co-owner role is for.
+    const hasOwnerLevelPowers = CommunitiesService.isOwnerLevelRole(
+      actorMembership.role,
+    );
     if (
-      !isOwner &&
+      !hasOwnerLevelPowers &&
       ((dto.accessTier !== undefined &&
         dto.accessTier !== community.accessTier) ||
         (dto.rosterVisible !== undefined &&
-          dto.rosterVisible !== community.rosterVisible))
+          dto.rosterVisible !== community.rosterVisible) ||
+        // `isPubliclyListed` sits on this side of the line for the same
+        // reason: it decides whether a stranger who is not on this platform
+        // can see the community exists at all. That is a privacy decision on
+        // an invite-only platform, so a plain moderator cannot make it.
+        (dto.isPubliclyListed !== undefined &&
+          dto.isPubliclyListed !== community.isPubliclyListed))
     ) {
       throw new ForbiddenException(
-        'Only the owner can change who can see or join this community',
+        'Only an owner or co-owner can change who can see or join this community',
       );
     }
+
+    // THE PUBLIC-LISTING INVARIANT, in one place.
+    //
+    // A community may only be publicly listed while its access tier is
+    // `public` or `request`. Two things follow, and both are enforced here:
+    //
+    //  1. Asking to be listed at a disqualifying tier is a 400, never a
+    //     silently-dropped field.
+    //  2. A TIER CHANGE MUST NEVER LEAVE A PRIVATE COMMUNITY PUBLICLY LISTED.
+    //     Moving to `invite` or `private` forces `isPubliclyListed` back to
+    //     false IN THE SAME UPDATE, whether or not the client mentioned the
+    //     flag. Anything else would leave the teaser standing for a community
+    //     that just closed its doors, which is the exact failure this
+    //     invariant exists to prevent.
+    const nextAccessTier = dto.accessTier ?? community.accessTier;
+    const isListingAllowed =
+      CommunitiesService.isPublicListingAllowedAtTier(nextAccessTier);
+    if (dto.isPubliclyListed === true) {
+      CommunitiesService.assertPublicListingAllowed(nextAccessTier);
+    }
+    const requestedPubliclyListed =
+      dto.isPubliclyListed ?? community.isPubliclyListed;
+    const nextPubliclyListed = isListingAllowed
+      ? requestedPubliclyListed
+      : false;
+
+    // A rules edit that actually changes the text bumps `rulesVersion`, and
+    // that bump is what re-prompts the existing roster: every member's
+    // `rulesVersionAccepted` then trails the community's, which the detail
+    // response surfaces as `rulesAcceptedVersion`. Compared by contents so
+    // re-saving the same array (the common case when a form echoes every
+    // field back) leaves the version alone and nobody is asked to re-agree to
+    // rules that did not move. Reordering the list DOES count as a change: the
+    // order rules are read in is part of what a member agreed to.
+    const shouldBumpRulesVersion =
+      dto.rules !== undefined &&
+      !CommunitiesService.sameStringList(community.rules, dto.rules);
 
     const next = {
       ...(dto.name !== undefined ? { name: dto.name } : {}),
@@ -822,11 +1080,39 @@ export class CommunitiesService {
         : {}),
       ...(dto.features !== undefined ? { features: dto.features } : {}),
       ...(dto.rules !== undefined ? { rules: dto.rules } : {}),
+      ...(shouldBumpRulesVersion
+        ? { rulesVersion: community.rulesVersion + 1 }
+        : {}),
       ...(dto.tags !== undefined ? { tags: dto.tags } : {}),
       // '' from the client (cleared field) normalizes to NULL so an empty
       // cover reads back as "no cover", not an empty string.
       ...(dto.coverImageUrl !== undefined
         ? { coverImageUrl: dto.coverImageUrl || null }
+        : {}),
+      ...(dto.avatarImageUrl !== undefined
+        ? { avatarImageUrl: dto.avatarImageUrl || null }
+        : {}),
+      // Plain-text fields: markup is stripped once here at the write
+      // boundary, and a value that strips down to nothing stores as NULL.
+      ...(dto.welcomeMessage !== undefined
+        ? { welcomeMessage: toStoredPlainTextOrNull(dto.welcomeMessage) }
+        : {}),
+      ...(dto.city !== undefined
+        ? { city: toStoredPlainTextOrNull(dto.city) }
+        : {}),
+      ...(dto.area !== undefined
+        ? { area: toStoredPlainTextOrNull(dto.area) }
+        : {}),
+      ...(dto.isOnline !== undefined ? { isOnline: dto.isOnline } : {}),
+      ...(dto.languages !== undefined ? { languages: dto.languages } : {}),
+      // Included whenever the effective value moves, which covers both an
+      // explicit toggle and the forced unlisting a tier change causes. Being
+      // in `next` is also what puts it in the `settings_changed` diff: who
+      // made this community visible to the whole internet, and when, is at
+      // least as consequential as the access tier the log already singles
+      // out.
+      ...(nextPubliclyListed !== community.isPubliclyListed
+        ? { isPubliclyListed: nextPubliclyListed }
         : {}),
     };
     // Diffed BEFORE the assign, against the loaded row, so the log records
@@ -856,6 +1142,17 @@ export class CommunitiesService {
    * `rules`, `tags`) compare by contents, in order, which is how they are
    * stored and sent.
    */
+  /** Contents-and-order equality for the string arrays this service diffs
+   *  (`rules`, and any list compared the same way). Same comparison
+   *  `diffSettings` applies, factored out because `update`'s `rulesVersion`
+   *  bump has to make the identical call before the diff runs. */
+  private static sameStringList(left: string[], right: string[]): boolean {
+    return (
+      left.length === right.length &&
+      left.every((value, index) => value === right[index])
+    );
+  }
+
   private static diffSettings(
     community: Community,
     next: Record<string, unknown>,
@@ -917,8 +1214,20 @@ export class CommunitiesService {
    * IS NULL`) as `CommunityAutoFreezeService.maybeFreeze`, so a manual freeze
    * racing an automatic one (or a second manual call) can't double-log or
    * double-notify.
+   *
+   * The optional `note` is the moderator's short PUBLIC explanation, stored
+   * in `frozenNote` and read back by every member off the community detail.
+   * It exists because one generic sentence covered all three freeze reasons,
+   * so a deliberate pause ("closed while we rewrite the rules") was announced
+   * to members as a moderation review that was not happening. `frozenByUserId`
+   * records who pulled the lever; an automatic freeze leaves it NULL, which is
+   * how the two are told apart beyond `frozenReason`.
    */
-  async freeze(slug: string, userId: string): Promise<CommunityDetailDTO> {
+  async freeze(
+    slug: string,
+    userId: string,
+    input: FreezeCommunityInput = {},
+  ): Promise<CommunityDetailDTO> {
     const community = await this.loadOr404(slug);
     const role = await this.myRole(community.id, userId);
     if (!CommunitiesService.isStaffRole(role)) {
@@ -926,6 +1235,10 @@ export class CommunitiesService {
         'Only an owner or mod can freeze a community',
       );
     }
+
+    // Members read this, so it is stripped to plain text on the way in like
+    // every other member-facing free-text field in this module.
+    const frozenNote = toStoredPlainTextOrNull(input.note);
 
     if (community.frozenAt == null) {
       const result = await this.communities
@@ -937,18 +1250,22 @@ export class CommunitiesService {
           // THEIR OWN freeze freely, while an automatic one stays gated on the
           // reports actually being handled (BE-COM-04).
           frozenReason: CommunityFrozenReason.Manual,
+          frozenNote,
+          frozenByUserId: userId,
         })
         .where('id = :id AND frozen_at IS NULL', { id: community.id })
         .execute();
       if (result.affected) {
         community.frozenAt = new Date();
         community.frozenReason = CommunityFrozenReason.Manual;
+        community.frozenNote = frozenNote;
+        community.frozenByUserId = userId;
         await this.logGovernanceAction(
           community.id,
           userId,
           GovernanceLogAction.Frozen,
           null,
-          { reason: 'manual' },
+          { reason: 'manual', note: frozenNote },
         );
         await this.notifyStaffFreezeChange(
           community,
@@ -1004,6 +1321,11 @@ export class CommunitiesService {
       }
       community.frozenAt = null;
       community.frozenReason = null;
+      // The note and the actor belong to the freeze that just ended. Leaving
+      // them behind would show members a stale explanation for a community
+      // that is no longer paused.
+      community.frozenNote = null;
+      community.frozenByUserId = null;
       await this.communities.save(community);
       await this.logGovernanceAction(
         community.id,
@@ -1138,6 +1460,13 @@ export class CommunitiesService {
   ): Promise<JoinResultDTO> {
     const community = await this.loadOr404(slug);
 
+    // Bans are checked FIRST, before the roster short-circuit and before every
+    // tier gate, because a ban applies to every access tier: the loop it exists
+    // to close is exactly "removed from a public community, re-joins in one
+    // tap". `community_bans` outlives the roster row that was deleted, which
+    // is why it is a separate table (see `CommunityBan`).
+    await this.assertNotBanned(community, userId);
+
     const existingMembership = await this.members.findOne({
       where: { communityId: community.id, userId },
     });
@@ -1177,6 +1506,16 @@ export class CommunitiesService {
       );
     }
 
+    // A `not_now` (or `not_a_fit`) decline sets a date before which this
+    // applicant may not apply again. Checked after the existence gates above,
+    // so a wait period can never confirm a community the caller should not
+    // know about.
+    await this.assertReapplyWindowPassed(community, userId);
+
+    // House rules are agreed to at the door, per version. A community with no
+    // rules has nothing to accept and this is a no-op.
+    CommunitiesService.assertRulesAccepted(community, dto.acceptedRulesVersion);
+
     // Second-vouch gate: a community that requires a vouch to join can only
     // instant-admit an applicant a current member has vouched for. An un-vouched
     // applicant to an otherwise-public community is routed to a reviewable
@@ -1196,7 +1535,16 @@ export class CommunitiesService {
         .createQueryBuilder()
         .insert()
         .into(CommunityMember)
-        .values({ communityId: community.id, userId, role: RosterRole.Member })
+        .values({
+          communityId: community.id,
+          userId,
+          role: RosterRole.Member,
+          // Recorded only when there were rules to agree to. Stamping an
+          // acceptance for a community with no rules would write down a
+          // consent nobody was asked for, and a later rules edit bumps
+          // `rulesVersion` anyway, so this member is prompted then.
+          ...CommunitiesService.rulesAcceptanceStamp(community),
+        })
         .orIgnore()
         .execute();
       this.eventEmitter.emit(COMMUNITY_MEMBER_JOINED, {
@@ -1229,6 +1577,10 @@ export class CommunitiesService {
           communityId: community.id,
           userId,
           note: dto.note ?? null,
+          // A real column now, so a reviewer can read a queue by involvement
+          // instead of parsing it back out of the free-text note. `note` is
+          // untouched and keeps carrying whatever the client sends.
+          involvement: dto.involvement ?? null,
         }),
       );
       const memberRef = await this.memberRefFor(userId);
@@ -1283,6 +1635,104 @@ export class CommunitiesService {
     return match !== undefined && match !== null;
   }
 
+  /**
+   * Refuses a join by someone this community has barred. Applies to EVERY
+   * access tier, and runs before every other gate in `join`.
+   *
+   * The message is deliberately plain and carries no reason, no moderator
+   * name and no date: a person being told they cannot enter a room does not
+   * also need to be lectured about it, and the moderator's `reason` is
+   * written for the mod panel and the audit trail, not for them. It does say
+   * where to go next, because a mistaken ban has to be appealable.
+   */
+  private async assertNotBanned(
+    community: Community,
+    userId: string,
+  ): Promise<void> {
+    const isBanned = await this.bans.exists({
+      where: { communityId: community.id, userId },
+    });
+    if (isBanned) {
+      throw new ForbiddenException({
+        code: 'BANNED_FROM_COMMUNITY',
+        message:
+          'You are not able to join this community. If you think that is a mistake, you can contact its moderators.',
+      });
+    }
+  }
+
+  /**
+   * Refuses a join filed before the reapply date a previous decline set. The
+   * date is in the response so the client can say "you can apply again on the
+   * 3rd" rather than an unexplained no.
+   *
+   * Reads the most recent declined request for this pair, so a later decline
+   * always supersedes an earlier one. A NULL `reapplyAfter` means no wait,
+   * never a permanent bar (that is a ban, in a different table).
+   */
+  private async assertReapplyWindowPassed(
+    community: Community,
+    userId: string,
+  ): Promise<void> {
+    const lastDecline = await this.joinRequests.findOne({
+      where: {
+        communityId: community.id,
+        userId,
+        status: JoinRequestStatus.Declined,
+      },
+      order: { createdAt: 'DESC' },
+    });
+    const reapplyAfter = lastDecline?.reapplyAfter ?? null;
+    if (reapplyAfter && reapplyAfter.getTime() > Date.now()) {
+      throw new ForbiddenException({
+        code: 'REAPPLY_TOO_SOON',
+        message: `This community asked you to apply again later. You can apply again on ${reapplyAfter.toISOString().slice(0, 10)}.`,
+        reapplyAfter: reapplyAfter.toISOString(),
+      });
+    }
+  }
+
+  /**
+   * A community with house rules only admits someone who agreed to the
+   * CURRENT version of them. The refusal is a distinct, machine-readable 400
+   * (`code: 'RULES_ACCEPTANCE_REQUIRED'`, plus the version to agree to), so
+   * the client can tell it apart from every other 400 on this route and
+   * re-prompt with the rules rather than showing a generic validation error.
+   *
+   * Static: it is a pure function of the community and the submitted version.
+   */
+  private static assertRulesAccepted(
+    community: Community,
+    acceptedRulesVersion: number | undefined,
+  ): void {
+    if (!community.rules.length) return;
+    if (acceptedRulesVersion === community.rulesVersion) return;
+    throw new BadRequestException({
+      code: 'RULES_ACCEPTANCE_REQUIRED',
+      message:
+        "Please read and accept this community's house rules before joining.",
+      rulesVersion: community.rulesVersion,
+    });
+  }
+
+  /**
+   * The `rules_accepted_at` / `rules_version_accepted` pair to stamp on a
+   * roster row being created, as a spreadable partial. Empty for a community
+   * with no rules: there was nothing to agree to, and recording an acceptance
+   * anyway would be a consent nobody gave.
+   */
+  private static rulesAcceptanceStamp(
+    community: Community,
+  ): Partial<
+    Pick<CommunityMember, 'rulesAcceptedAt' | 'rulesVersionAccepted'>
+  > {
+    if (!community.rules.length) return {};
+    return {
+      rulesAcceptedAt: new Date(),
+      rulesVersionAccepted: community.rulesVersion,
+    };
+  }
+
   // Private + non-member -> 404, not 403, so existence isn't leaked — mirrors
   // `getBySlug`/`CommunityPostsService.assertViewable`. Beyond that, respects
   // `rosterVisible`: a non-member is forbidden from seeing the roster of a
@@ -1300,6 +1750,7 @@ export class CommunitiesService {
     slug: string,
     viewerId: string,
     page?: number,
+    q?: string,
   ): Promise<Paginated<RosterEntryDTO>> {
     const community = await this.loadOr404(slug);
     const role = await this.myRole(community.id, viewerId);
@@ -1317,6 +1768,30 @@ export class CommunitiesService {
       .createQueryBuilder('m')
       .where('m.community_id = :communityId', { communityId: community.id })
       .orderBy('m.joined_at', 'ASC');
+
+    // Server-side search across the WHOLE roster, so a big community is
+    // searchable at all: filtering only the pages already fetched can never
+    // find the member on page nine. Expressed as an EXISTS against `profiles`
+    // rather than a join, which keeps `paginate`'s `.skip()/.take()` clear of
+    // the distinct-alias pass a joined ORDER BY runs into, and keeps `total`
+    // counting matches rather than the whole roster.
+    const searchTerm = q?.trim().slice(0, ROSTER_SEARCH_MAX_LENGTH);
+    if (searchTerm) {
+      const pattern = `%${escapeLikeTerm(searchTerm)}%`;
+      qb.andWhere(
+        `EXISTS (
+           SELECT 1 FROM "profiles" "rp"
+           WHERE "rp"."user_id" = m.user_id
+             AND (
+               "rp"."first_name" ILIKE :rosterPattern
+               OR "rp"."last_name" ILIKE :rosterPattern
+               OR ("rp"."first_name" || ' ' || "rp"."last_name") ILIKE :rosterPattern
+               OR "rp"."slug" ILIKE :rosterPattern
+             )
+         )`,
+        { rosterPattern: pattern },
+      );
+    }
 
     return paginate(qb, normalizedPage, async (rows) => {
       if (!rows.length) return [];
@@ -1381,20 +1856,114 @@ export class CommunitiesService {
     });
     if (!rows.length) return [];
 
-    const refs = await new MemberLookup(this.profiles).byUserIds(
-      rows.map((r) => r.userId),
-    );
+    const applicantIds = rows.map((row) => row.userId);
+    // Both lookups are batched across the WHOLE queue, never per row: this
+    // list is rendered one card per request, and a per-request query here
+    // would be the N+1 that `statsForMany` exists to avoid elsewhere in this
+    // service.
+    const [refs, contexts] = await Promise.all([
+      new MemberLookup(this.profiles).byUserIds(applicantIds),
+      this.applicantContexts(community, actorId, applicantIds),
+    ]);
     return rows
-      .filter((r) => refs.has(r.userId))
-      .map((r) => toJoinRequestDTO(r, refs.get(r.userId)!));
+      .filter((row) => refs.has(row.userId))
+      .map((row) =>
+        toJoinRequestDTO(row, refs.get(row.userId)!, contexts.get(row.userId)),
+      );
+  }
+
+  /**
+   * The reviewer-side context for a whole queue of applicants, in THREE
+   * batched queries total regardless of queue length (see
+   * `JoinRequestApplicantContext`). Same discipline as `statsForMany`: one
+   * query per metric across the id set, never one per row.
+   *
+   *  - account age comes from `users.created_at`;
+   *  - shared connections reuse `ConnectionsService.mutualCountsByUserIds`,
+   *    which already answers exactly this question in batch;
+   *  - shared communities is one grouped query, counting the OTHER
+   *    communities an applicant is in that somebody on this community's
+   *    roster is also in. This community itself is excluded (the applicant is
+   *    not in it yet, and it would be a constant anyway).
+   *
+   * An applicant with no rows in a given lane simply reads 0.
+   */
+  private async applicantContexts(
+    community: Community,
+    reviewerId: string,
+    applicantIds: string[],
+  ): Promise<Map<string, JoinRequestApplicantContext>> {
+    const contexts = new Map<string, JoinRequestApplicantContext>();
+    if (!applicantIds.length) return contexts;
+
+    const [accounts, sharedConnectionCounts, sharedCommunityRows] =
+      await Promise.all([
+        this.users.find({
+          where: { id: In(applicantIds) },
+          select: { id: true, createdAt: true },
+        }),
+        this.connectionsService.mutualCountsByUserIds(reviewerId, applicantIds),
+        // Alias kept lowercase on purpose: TypeORM quotes the alias it
+        // generates, and an unquoted camelCase reference inside the raw
+        // `EXISTS` below would fold to lowercase in Postgres and fail to
+        // match it. Every alias in this file is lowercase for the same
+        // reason.
+        this.members
+          .createQueryBuilder('applicant')
+          .select('applicant.user_id', 'applicantId')
+          .addSelect('COUNT(DISTINCT applicant.community_id)', 'sharedCount')
+          .where('applicant.user_id IN (:...applicantIds)', {
+            applicantIds,
+          })
+          .andWhere('applicant.community_id != :communityId', {
+            communityId: community.id,
+          })
+          .andWhere(
+            `EXISTS (
+               SELECT 1
+               FROM "community_members" "shared_membership"
+               INNER JOIN "community_members" "roster_membership"
+                 ON "roster_membership"."user_id" = "shared_membership"."user_id"
+                AND "roster_membership"."community_id" = :communityId
+               WHERE "shared_membership"."community_id" = applicant.community_id
+             )`,
+          )
+          .groupBy('applicant.user_id')
+          .getRawMany<{ applicantId: string; sharedCount: string }>(),
+      ]);
+
+    const createdAtByUserId = new Map(
+      accounts.map((account) => [account.id, account.createdAt]),
+    );
+    const sharedCommunityCountByUserId = new Map(
+      sharedCommunityRows.map((row) => [
+        row.applicantId,
+        Number(row.sharedCount),
+      ]),
+    );
+
+    for (const applicantId of applicantIds) {
+      const accountCreatedAt = createdAtByUserId.get(applicantId);
+      // No `users` row means the account is gone; there is no context to
+      // report, and the caller renders the request without it.
+      if (!accountCreatedAt) continue;
+      contexts.set(applicantId, {
+        accountCreatedAt,
+        sharedConnectionCount: sharedConnectionCounts.get(applicantId) ?? 0,
+        sharedCommunityCount:
+          sharedCommunityCountByUserId.get(applicantId) ?? 0,
+      });
+    }
+    return contexts;
   }
 
   async triageJoinRequest(
     slug: string,
     id: string,
     actorId: string,
-    action: JoinRequestAction,
+    input: TriageJoinRequestInput,
   ): Promise<CommunityJoinRequestDTO> {
+    const { action } = input;
     const community = await this.loadOr404(slug);
     await this.assertOwnerOrMod(community.id, actorId);
 
@@ -1427,6 +1996,17 @@ export class CommunitiesService {
         ? JoinRequestStatus.Approved
         : JoinRequestStatus.Declined;
 
+    // The decline half of the decision, resolved once so the guarded UPDATE,
+    // the in-memory entity and the notification all describe the same thing.
+    // A decline with no kind (an older client) records no kind and no wait,
+    // which is how `CommunityJoinRequest.declineKind` tells readers to treat
+    // an unqualified decline.
+    const declineKind =
+      action === 'decline' ? (input.declineKind ?? null) : null;
+    const declineReason =
+      action === 'decline' ? input.declineReason?.trim() || null : null;
+    const reapplyAfter = CommunitiesService.reapplyAfterFor(declineKind);
+
     const saved = await this.dataSource.transaction(async (manager) => {
       const joinRequestsRepo = manager.getRepository(CommunityJoinRequest);
       const membersRepo = manager.getRepository(CommunityMember);
@@ -1441,7 +2021,7 @@ export class CommunitiesService {
       const claim = await joinRequestsRepo
         .createQueryBuilder()
         .update(CommunityJoinRequest)
-        .set({ status: newStatus })
+        .set({ status: newStatus, declineKind, declineReason, reapplyAfter })
         .where('id = :id AND status = :pending', {
           id: request.id,
           pending: JoinRequestStatus.Pending,
@@ -1464,14 +2044,25 @@ export class CommunitiesService {
             communityId: community.id,
             userId: request.userId,
             role: RosterRole.Member,
+            // The applicant agreed to the rules when they applied, and this
+            // is the roster row that records it. See `rulesAcceptanceStamp`.
+            // Known limitation: the version they actually agreed to at
+            // request time is not persisted on the request itself, so an
+            // approval that lands after an owner edits the rules records the
+            // CURRENT version. Fixing that properly needs an
+            // `accepted_rules_version` column on `community_join_requests`.
+            ...CommunitiesService.rulesAcceptanceStamp(community),
           })
           .orIgnore()
           .execute();
       }
 
-      // Reflect the claimed status on the in-memory entity for the DTO — the
-      // guarded UPDATE doesn't hydrate it.
+      // Reflect the claimed status and the decline fields on the in-memory
+      // entity for the DTO — the guarded UPDATE doesn't hydrate it.
       request.status = newStatus;
+      request.declineKind = declineKind;
+      request.declineReason = declineReason;
+      request.reapplyAfter = reapplyAfter;
       return request;
     });
 
@@ -1495,7 +2086,24 @@ export class CommunitiesService {
         action === 'approve'
           ? NotificationType.JoinRequestApproved
           : NotificationType.JoinRequestDeclined,
-        { source: 'community', communitySlug: slug },
+        {
+          source: 'community',
+          communitySlug: slug,
+          // The decline payload carries the KIND so the client can word "not
+          // right now, here is when you can apply again" and "not a fit"
+          // differently, and the date so it can say when. It also carries the
+          // reviewer's `declineReason`, which is the column's stated purpose:
+          // it is written FOR the applicant. The moderators' private channel
+          // is `internalNote`, which no notification and no response body
+          // ever includes.
+          ...(action === 'decline'
+            ? {
+                declineKind,
+                declineReason,
+                reapplyAfter: reapplyAfter ? reapplyAfter.toISOString() : null,
+              }
+            : {}),
+        },
       );
     } catch {
       // Intentionally ignored — the triage decision already committed.
@@ -1503,6 +2111,23 @@ export class CommunitiesService {
 
     const memberRef = await this.memberRefFor(saved.userId);
     return toJoinRequestDTO(saved, memberRef);
+  }
+
+  /**
+   * The date a declined applicant may apply again, from the kind of "no" they
+   * were given. NULL for an approve and for a decline that carried no kind,
+   * which means no waiting period at all rather than a permanent bar.
+   */
+  private static reapplyAfterFor(
+    declineKind: CommunityJoinRequestDeclineKind | null,
+  ): Date | null {
+    if (declineKind === CommunityJoinRequestDeclineKind.NotNow) {
+      return new Date(Date.now() + REAPPLY_WAIT_DAYS_NOT_NOW * DAY_MS);
+    }
+    if (declineKind === CommunityJoinRequestDeclineKind.NotAFit) {
+      return new Date(Date.now() + REAPPLY_WAIT_DAYS_NOT_A_FIT * DAY_MS);
+    }
+    return null;
   }
 
   /**
@@ -1536,20 +2161,35 @@ export class CommunitiesService {
    *     owner/mod. Authorization runs before the owner check so an
    *     unauthorized stranger gets Forbidden rather than a hint about who owns
    *     the community.
-   *  2. Only the OWNER may remove another moderator. `setMemberRole` already
-   *     refuses to let a mod demote a peer ("only the owner can change a
-   *     moderator's role"), but `removeMember` used to block only the owner —
-   *     so a mod could simply kick a peer mod off the roster instead, which is
-   *     strictly stronger than the demotion the other rule forbids (BE-COM-07).
-   *     The two now agree: a mod's standing in a community can only be taken
-   *     away by its owner, whichever route is used. A mod removing THEMSELVES
-   *     is still a self-leave and stays allowed.
-   *  3. The owner is never removable — they'd orphan the community.
+   *  2. Only an OWNER-LEVEL actor (owner or co-owner) may remove another
+   *     moderator. `setMemberRole` already refuses to let a mod demote a peer
+   *     ("only the owner can change a moderator's role"), but `removeMember`
+   *     used to block only the owner — so a mod could simply kick a peer mod
+   *     off the roster instead, which is strictly stronger than the demotion
+   *     the other rule forbids (BE-COM-07). The two agree: a mod's standing in
+   *     a community can only be taken away from above, whichever route is
+   *     used. A mod removing THEMSELVES is still a self-leave and stays
+   *     allowed.
+   *  3. Only the OWNER may remove a CO-OWNER. A co-owner holds owner-level
+   *     powers, so letting one remove another would make the role
+   *     self-consuming: two co-owners could race to unseat each other, and the
+   *     owner would find their governance team dismantled by someone they
+   *     appointed. This is one of the three powers the owner keeps alone (see
+   *     the permission model at `isStaffRole`).
+   *  4. The owner is never removable — they'd orphan the community.
+   *
+   * REMOVAL BARS RETURN BY DEFAULT. Deleting the roster row alone means a
+   * removed member re-joins a public-tier community in one tap, so a removal
+   * also writes a `community_bans` row unless the caller explicitly passes
+   * `allowReturn`. A member removing THEMSELVES never writes one, whatever
+   * the caller sent: leaving is not a moderation act, and a member who leaves
+   * must be able to come back.
    */
   async removeMember(
     slug: string,
     actorId: string,
     memberSlug: string,
+    options: RemoveMemberOptions = {},
   ): Promise<void> {
     const community = await this.loadOr404(slug);
 
@@ -1566,17 +2206,29 @@ export class CommunitiesService {
       throw new NotFoundException('Member not found');
     }
 
-    if (actorId !== targetUserId) {
+    const isSelfLeave = actorId === targetUserId;
+    if (!isSelfLeave) {
       const actorMembership = await this.assertOwnerOrMod(
         community.id,
         actorId,
       );
-      // Mirrors `setMemberRole`'s rule 5 — see this method's doc comment.
+      // Rule 3, checked before rule 2 because it is the stricter of the two:
+      // removing a co-owner is owner-only.
       if (
-        targetMembership.role === RosterRole.Mod &&
+        targetMembership.role === RosterRole.CoOwner &&
         actorMembership.role !== RosterRole.Owner
       ) {
-        throw new ForbiddenException('Only the owner can remove a moderator');
+        throw new ForbiddenException('Only the owner can remove a co-owner');
+      }
+      // Rule 2, mirroring `setMemberRole`'s rule 5 — see this method's doc
+      // comment. Owner-level, so a co-owner may remove a mod.
+      if (
+        targetMembership.role === RosterRole.Mod &&
+        !CommunitiesService.isOwnerLevelRole(actorMembership.role)
+      ) {
+        throw new ForbiddenException(
+          'Only an owner or co-owner can remove a moderator',
+        );
       }
     }
 
@@ -1592,19 +2244,74 @@ export class CommunitiesService {
       userId: targetUserId,
     } satisfies CommunityMemberLeftEvent);
 
-    const removedBySelf = actorId === targetUserId;
+    // A self-leave never bars the return, whatever `allowReturn` said: this
+    // guard is explicit rather than relying on the caller, because the query
+    // param is client-supplied and "leaving banned me from my own community"
+    // is the worst possible way to be wrong here.
+    const banReason = options.reason?.trim() || null;
+    const hasBarredReturn =
+      !isSelfLeave && !options.allowReturn
+        ? await this.barReturn(community, actorId, targetUserId, banReason)
+        : false;
+
+    // One entry, under the action that describes what actually happened. A
+    // removal that bars the return and one that does not differ in whether the
+    // person can come back, so the audit trail records them as different
+    // actions rather than one action with a flag (see `MemberBanned`).
     await this.logGovernanceAction(
       community.id,
       actorId,
-      GovernanceLogAction.MemberRemoved,
+      hasBarredReturn
+        ? GovernanceLogAction.MemberBanned
+        : GovernanceLogAction.MemberRemoved,
       targetUserId,
-      { removedBySelf },
+      {
+        removedBySelf: isSelfLeave,
+        ...(hasBarredReturn && banReason ? { reason: banReason } : {}),
+      },
     );
     // A self-leave doesn't need a "you were removed" notification telling the
-    // member the thing they themselves just did.
-    if (!removedBySelf) {
-      await this.notifyMemberRemoved(community, actorId, targetUserId);
+    // member the thing they themselves just did. One notification per
+    // removal: `CommunityBanned` when the return was barred, the plain
+    // `CommunityMemberRemoved` for the tidy-up case, never both.
+    if (!isSelfLeave) {
+      if (hasBarredReturn) {
+        await this.notifyMemberBanned(community, actorId, targetUserId);
+      } else {
+        await this.notifyMemberRemoved(community, actorId, targetUserId);
+      }
     }
+  }
+
+  /**
+   * Writes the `community_bans` row a removal leaves behind, and reports
+   * whether the bar is now in place. `ON CONFLICT DO NOTHING` against the
+   * unique (community, user) index, so re-removing someone already banned is
+   * a no-op rather than a 23505; that still counts as barred, since the
+   * outcome the caller asked for holds.
+   *
+   * Only the WRITE lives here. Listing and lifting bans is a separate surface
+   * with its own service.
+   */
+  private async barReturn(
+    community: Community,
+    actorId: string,
+    targetUserId: string,
+    reason: string | null,
+  ): Promise<boolean> {
+    await this.bans
+      .createQueryBuilder()
+      .insert()
+      .into(CommunityBan)
+      .values({
+        communityId: community.id,
+        userId: targetUserId,
+        bannedByUserId: actorId,
+        reason,
+      })
+      .orIgnore()
+      .execute();
+    return true;
   }
 
   /**
@@ -1694,16 +2401,23 @@ export class CommunitiesService {
    *     any future rule change — self-mutation is the classic escalation
    *     vector. Stepping down is done by leaving (`DELETE .../members/:me`),
    *     which is the self-service path that already exists.
-   *  5. **Only the owner may change an existing moderator's role.** A mod may
-   *     therefore only promote a plain `member` to `mod`; they may not demote
-   *     a peer. Otherwise any single mod could unilaterally dismantle the rest
-   *     of the mod team and become the sole moderator — a takeover from
-   *     inside the mod tier, quietly and with nothing on the roster to show
-   *     for it. `removeMember` enforces the same rule (BE-COM-07). It used to
-   *     let a mod remove a peer mod outright, on the reasoning that removal is
-   *     loud where a demotion is quiet — but loud does not make it weaker, and
-   *     it left the exact takeover this rule forbids reachable through the
-   *     next endpoint over. Both routes now require the owner.
+   *  5. **Only an owner-level actor may change an existing moderator's
+   *     role.** A mod may therefore only promote a plain `member` to `mod`;
+   *     they may not demote a peer. Otherwise any single mod could
+   *     unilaterally dismantle the rest of the mod team and become the sole
+   *     moderator — a takeover from inside the mod tier, quietly and with
+   *     nothing on the roster to show for it. `removeMember` enforces the same
+   *     rule (BE-COM-07). It used to let a mod remove a peer mod outright, on
+   *     the reasoning that removal is loud where a demotion is quiet — but
+   *     loud does not make it weaker, and it left the exact takeover this rule
+   *     forbids reachable through the next endpoint over. Both routes agree.
+   *  6. **Only the OWNER may grant or revoke `co_owner`, or change the role
+   *     of someone who already holds it.** Both directions of the same rule:
+   *     a co-owner who could appoint another co-owner, or demote one, could
+   *     rebuild the community's governance around themselves without the
+   *     owner. This is one of the three owner-only powers in the permission
+   *     model (see `isStaffRole`). 403, since the actor's role is the reason
+   *     the change is refused.
    *
    * The rules are evaluated against the *current* roles only, never against
    * the role being requested, so authorization can't be steered by the body.
@@ -1747,13 +2461,32 @@ export class CommunitiesService {
       throw new ForbiddenException('You cannot change your own role');
     }
 
-    // 5. only the owner may change a moderator's role
+    // 6a. only the owner may change a co-owner's role (checked before rule 5,
+    //     being the stricter of the two)
     if (
-      targetMembership.role === RosterRole.Mod &&
+      targetMembership.role === RosterRole.CoOwner &&
       actorMembership.role !== RosterRole.Owner
     ) {
       throw new ForbiddenException(
-        "Only the owner can change a moderator's role",
+        "Only the owner can change a co-owner's role",
+      );
+    }
+
+    // 6b. only the owner may GRANT co-owner, whoever the target is
+    if (
+      role === RosterRole.CoOwner &&
+      actorMembership.role !== RosterRole.Owner
+    ) {
+      throw new ForbiddenException('Only the owner can appoint a co-owner');
+    }
+
+    // 5. only an owner-level actor may change a moderator's role
+    if (
+      targetMembership.role === RosterRole.Mod &&
+      !CommunitiesService.isOwnerLevelRole(actorMembership.role)
+    ) {
+      throw new ForbiddenException(
+        "Only an owner or co-owner can change a moderator's role",
       );
     }
 
@@ -1790,8 +2523,10 @@ export class CommunitiesService {
     return community;
   }
 
-  /** Returns the actor's roster row on success, so callers that need to
-   * distinguish owner from mod (`setMemberRole`) don't re-query for it.
+  /** Tier 1 of the permission model (see `isStaffRole`): the moderation gate,
+   * passed by an owner, a CO-OWNER and a mod alike. Returns the actor's roster
+   * row on success, so callers that need to tell those three apart
+   * (`update`, `removeMember`, `setMemberRole`) don't re-query for it.
    * Callers that only need the gate can keep ignoring the value. */
   private async assertOwnerOrMod(
     communityId: string,
@@ -1800,20 +2535,17 @@ export class CommunitiesService {
     const membership = await this.members.findOne({
       where: { communityId, userId },
     });
-    if (
-      !membership ||
-      (membership.role !== RosterRole.Owner &&
-        membership.role !== RosterRole.Mod)
-    ) {
+    if (!membership || !CommunitiesService.isStaffRole(membership.role)) {
       throw new ForbiddenException('Only the owner or a moderator can do that');
     }
     return membership;
   }
 
-  /** Owner-only gate, from `Community.ownerId` (the source of truth for
-   * ownership — a roster row can never contradict it). Used by the community-
-   * level destructive actions (`archive`, `transferOwnership`) that a mod must
-   * not reach. Throws Forbidden otherwise. */
+  /** Tier 3 of the permission model (see `isStaffRole`): the owner-only gate,
+   * read from `Community.ownerId` (the source of truth for ownership — a
+   * roster row can never contradict it). Used by the two community-level
+   * actions no co-owner or mod may reach (`archive`, `transferOwnership`).
+   * Throws Forbidden otherwise. */
   private assertOwner(community: Community, userId: string): void {
     if (community.ownerId !== userId) {
       throw new ForbiddenException('Only the owner can do that');
@@ -1929,11 +2661,16 @@ export class CommunitiesService {
     myRole?: RosterRole | null,
     moderation?: ContentModerationState,
   ): Promise<CommunityDetailDTO> {
-    const [role, stats, ownerProfile, myJoinRequest, crops] = await Promise.all(
-      [
-        myRole !== undefined
-          ? Promise.resolve(myRole)
-          : this.myRole(community.id, viewerId),
+    const [membership, stats, ownerProfile, myJoinRequest, crops] =
+      await Promise.all([
+        // The viewer's own roster row, loaded even when the caller already
+        // knows their role: `rulesVersionAccepted` lives on it, and it is what
+        // lets the detail tell an existing member their agreement is out of
+        // date after an owner edits the rules. One indexed lookup, the same
+        // one `myRole` was doing.
+        this.members.findOne({
+          where: { communityId: community.id, userId: viewerId },
+        }),
         this.statsFor(community.id),
         // `ownerId` is null for an ownerless (post-erasure, pre-promotion)
         // community — no profile to look up; the detail simply renders no
@@ -1948,8 +2685,10 @@ export class CommunitiesService {
         this.mediaCropService.getMany(
           community.coverImageUrl ? [community.coverImageUrl] : [],
         ),
-      ],
-    );
+      ]);
+    // The caller's `myRole` still wins when it passed one (it may describe a
+    // role this request just wrote and the row above predates).
+    const role = myRole !== undefined ? myRole : (membership?.role ?? null);
     return toCommunityDetail(
       community,
       stats,
@@ -1958,6 +2697,7 @@ export class CommunitiesService {
       myJoinRequest?.status ?? null,
       moderation,
       crops,
+      membership?.rulesVersionAccepted ?? null,
     );
   }
 
@@ -2070,7 +2810,7 @@ export class CommunitiesService {
     const staff = await this.members.find({
       where: {
         communityId: community.id,
-        role: In([RosterRole.Owner, RosterRole.Mod]),
+        role: In(CommunitiesService.STAFF_ROLES),
       },
       select: { userId: true },
     });
@@ -2120,6 +2860,38 @@ export class CommunitiesService {
       await this.notifications.create(
         targetUserId,
         NotificationType.CommunityMemberRemoved,
+        {
+          actorId,
+          source: 'community',
+          communitySlug: community.slug,
+        },
+        actorId,
+      );
+    } catch {
+      // Intentionally ignored — best-effort; the removal already committed.
+    }
+  }
+
+  /**
+   * Best-effort "you were removed and cannot re-join" notification, sent in
+   * place of `notifyMemberRemoved` when the removal barred the return. Own
+   * try/catch, exactly like every other notify helper here: a notification
+   * failure must never surface as a failed removal.
+   *
+   * The payload carries no `reason`. The moderator's words on a ban are
+   * written for the mod panel and the audit trail, and a removed member is
+   * told the fact plainly rather than handed a justification they cannot
+   * reply to.
+   */
+  private async notifyMemberBanned(
+    community: Community,
+    actorId: string,
+    targetUserId: string,
+  ): Promise<void> {
+    try {
+      await this.notifications.create(
+        targetUserId,
+        NotificationType.CommunityBanned,
         {
           actorId,
           source: 'community',

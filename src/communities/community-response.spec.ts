@@ -26,6 +26,7 @@ function makePost(overrides: Partial<CommunityPost> = {}): CommunityPost {
     createdAt: new Date('2026-07-23T10:00:00Z'),
     editedAt: null,
     deletedAt: null,
+    deletedById: null,
     ...overrides,
   };
 }
@@ -41,6 +42,7 @@ function makeReply(
     createdAt: new Date('2026-07-23T10:05:00Z'),
     editedAt: null,
     deletedAt: null,
+    deletedById: null,
     ...overrides,
   };
 }

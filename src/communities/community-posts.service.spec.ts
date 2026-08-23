@@ -136,6 +136,19 @@ const COMMUNITY: Community = {
   frozenAt: null,
   isFeatured: false,
   needsOwnerReviewAt: null,
+  frozenReason: null,
+  frozenNote: null,
+  frozenByUserId: null,
+  rulesVersion: 1,
+  welcomeMessage: null,
+  avatarImageUrl: null,
+  city: null,
+  area: null,
+  isOnline: false,
+  languages: [],
+  activeThisWeek: 0,
+  activityCountedAt: null,
+  isPubliclyListed: false,
 };
 
 const POST: CommunityPost = {

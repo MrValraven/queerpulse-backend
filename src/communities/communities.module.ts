@@ -15,7 +15,25 @@ import { UsersModule } from '../users/users.module';
 import { VolunteeringModule } from '../volunteering/volunteering.module';
 import { CommunitiesController } from './communities.controller';
 import { CommunitiesService } from './communities.service';
+import { Event } from '../events/entities/event.entity';
+import { CommunityActivityCounterService } from './community-activity-counter.service';
 import { CommunityAutoFreezeService } from './community-auto-freeze.service';
+import { CommunityBansController } from './community-bans.controller';
+import { CommunityBansService } from './community-bans.service';
+import { CommunityDigestService } from './community-digest.service';
+import { CommunityGovernanceHistoryController } from './community-governance-history.controller';
+import { CommunityGovernanceHistoryService } from './community-governance-history.service';
+import { CommunityInvitesController } from './community-invites.controller';
+import { CommunityInvitesService } from './community-invites.service';
+import { CommunityOwnerReviewController } from './community-owner-review.controller';
+import { CommunityOwnerReviewService } from './community-owner-review.service';
+import { CommunityResourcesController } from './community-resources.controller';
+import { CommunityResourcesService } from './community-resources.service';
+import { CommunityPreferencesController } from './community-preferences.controller';
+import { CommunityPreferencesService } from './community-preferences.service';
+import { CommunityPublicController } from './community-public.controller';
+import { CommunityPublicService } from './community-public.service';
+import { MeCommunityDigestController } from './me-community-digest.controller';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
 import { CommunityInsightsController } from './community-insights.controller';
 import { CommunityInsightsService } from './community-insights.service';
@@ -25,7 +43,10 @@ import { CommunityPostsController } from './community-posts.controller';
 import { CommunityPostsService } from './community-posts.service';
 import { CommunityPulseController } from './community-pulse.controller';
 import { CommunityPulseService } from './community-pulse.service';
+import { CommunityBan } from './entities/community-ban.entity';
 import { CommunityGovernanceLog } from './entities/community-governance-log.entity';
+import { CommunityOwnerReviewRequest } from './entities/community-owner-review-request.entity';
+import { CommunityResource } from './entities/community-resource.entity';
 import { CommunityJoinRequest } from './entities/community-join-request.entity';
 import { CommunityMember } from './entities/community-member.entity';
 import { CommunityPostEdit } from './entities/community-post-edit.entity';
@@ -58,12 +79,28 @@ import { MeCommunitiesController } from './me-communities.controller';
       // via `CommunityOwnerOrphanService`, the sink for automatic owner→mod
       // promotion entries.
       CommunityGovernanceLog,
+      // Removal bars return by default, so a ban row is written on the way
+      // out (`CommunitiesService.removeMember`) and read back by the
+      // owner/mod ban list and the join gate.
+      CommunityBan,
+      // The owner-editable link shelf on the About tab, which until now could
+      // only ever show demo fixtures.
+      CommunityResource,
+      // Moderators jointly flagging an unreachable owner. Stamps the
+      // community's existing `needsOwnerReviewAt` for the admin surface.
+      CommunityOwnerReviewRequest,
       Profile,
       // Read-only, for the auto-freeze listener's open-report count. Same
       // cross-module `forFeature` reuse `ReportsModule` itself does with
       // `Message`/`HousingListing` — TypeORM allows an entity's repo in more
       // than one module.
       Report,
+      // Read-only, for `CommunityDigestService`'s upcoming-gathering counts
+      // and `CommunityPublicService`'s next-public-gathering lookup.
+      // Importing `EventsModule` (already done below, for the pulse service)
+      // provides the service and never the repository, so the entity has to
+      // be listed here. Same cross-module `forFeature` reuse as `Report`.
+      Event,
     ]),
     UsersModule,
     // `ConnectionsService` — `suggestedCommunities` reads the viewer's accepted
@@ -121,6 +158,29 @@ import { MeCommunitiesController } from './me-communities.controller';
     // controller's own doc comment.
     CommunityPulseController,
     CommunityInsightsController,
+    // The caller's own per-community notification level plus the one-time
+    // welcome acknowledgement. Its own controller for the same reason as the
+    // two above: this feature's read side never has to touch
+    // `CommunitiesController`.
+    CommunityPreferencesController,
+    // `GET /me/communities/digest`, the live weekly digest across every
+    // community the caller belongs to.
+    MeCommunityDigestController,
+    // `GET /communities/:slug/public`, the only signed-out-reachable
+    // community surface. Deliberately its own controller with NO class-level
+    // `ActiveMemberGuard`, matching `DirectoryController` and
+    // `RoadmapPublicController`. Do not merge it into a guarded controller.
+    CommunityPublicController,
+    // Owner/mod surfaces that likewise keep off `CommunitiesController`.
+    CommunityResourcesController,
+    CommunityInvitesController,
+    CommunityBansController,
+    CommunityOwnerReviewController,
+    // A community's own staff reading their own audit trail. Until now the
+    // only reader was the platform-admin route, so when two moderators
+    // disagreed about who removed whom the answer sat in the database
+    // reachable only by staff.
+    CommunityGovernanceHistoryController,
   ],
   providers: [
     CommunitiesService,
@@ -130,6 +190,20 @@ import { MeCommunitiesController } from './me-communities.controller';
     CommunityOwnerOrphanService,
     CommunityPulseService,
     CommunityInsightsService,
+    CommunityPreferencesService,
+    CommunityDigestService,
+    CommunityPublicService,
+    // Hourly `@Cron` recompute of `communities.active_this_week`, so discover
+    // can sort and filter on the column server-side instead of draining every
+    // page to the browser. `ScheduleModule.forRoot()` is already registered in
+    // `AppModule`, so a `@Cron` provider only needs to appear here (same
+    // precedent as `HousingListingExpirySweeperService`).
+    CommunityActivityCounterService,
+    CommunityResourcesService,
+    CommunityInvitesService,
+    CommunityBansService,
+    CommunityOwnerReviewService,
+    CommunityGovernanceHistoryService,
   ],
   // `CommunityOwnerOrphanService` is exported so `AccountModule` can call
   // `handleOwnerErasure(userId)` from `AccountDeletionProcessorService.eraseAccount`,

@@ -440,9 +440,15 @@ export class AdminCommunitiesService {
       // `CommunitiesService.unfreeze`'s automatic-freeze gate (BE-COM-04) is
       // there to stop a community's own owner clearing MODERATION's freeze,
       // not to trap them under one an admin can already lift here.
+      // `frozenByUserId` records the staff member who froze it, matching what
+      // `CommunitiesService.freeze` stamps on the owner/mod path. No
+      // `frozenNote`: the member-facing note is written by a community's own
+      // moderators, and platform staff explaining a takedown to the roster is
+      // a different decision that belongs to the moderation surface.
       .set({
         frozenAt: () => 'now()',
         frozenReason: CommunityFrozenReason.Manual,
+        frozenByUserId: actorUserId,
       })
       .where('id = :id AND frozen_at IS NULL', { id: community.id })
       .execute();
@@ -485,7 +491,16 @@ export class AdminCommunitiesService {
       // The override path: no roster role and no open-report condition — this
       // is deliberately the escape hatch `CommunitiesService.unfreeze` points
       // an owner at when its own automatic-freeze gate (BE-COM-04) holds.
-      .set({ frozenAt: null, frozenReason: null })
+      // Clears the whole freeze, `frozenNote`/`frozenByUserId` included.
+      // Leaving those behind would strand a stale explanation on the row,
+      // ready to reappear the next time the community is frozen for an
+      // unrelated reason. Mirrors `CommunitiesService.unfreeze`.
+      .set({
+        frozenAt: null,
+        frozenReason: null,
+        frozenNote: null,
+        frozenByUserId: null,
+      })
       .where('id = :id AND frozen_at IS NOT NULL', { id: community.id })
       .execute();
 

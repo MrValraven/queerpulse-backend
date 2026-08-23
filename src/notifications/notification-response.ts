@@ -185,6 +185,28 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     [NotificationType.CommunityFrozen]: ['communityName'],
     [NotificationType.CommunityUnfrozen]: ['communityName'],
     [NotificationType.CommunityInviteReceived]: ['communityName'],
+    // The community post fan-out. `postId` already rides along in
+    // `COMMON_PAYLOAD_KEYS` for the deep link, so only the name is needed for
+    // the copy. The writer also puts an `excerpt` in the payload and it is
+    // deliberately absent here: it is member-authored post content, and this
+    // allowlist is the guarantee it never reaches the bell.
+    [NotificationType.CommunityNewPost]: ['communityName'],
+    [NotificationType.CommunityAnnouncement]: ['communityName'],
+    // Sent to the member who was barred. No actor field is listed, so the bell
+    // never names the moderator who acted.
+    [NotificationType.CommunityBanned]: ['communityName'],
+    // The resource's own title, which is owner-authored and already public on
+    // the community's shelf to anyone who can see this notification.
+    [NotificationType.CommunityResourceAdded]: ['communityName', 'title'],
+    // Platform-staff operational mail only (the write site restricts
+    // recipients to Moderator/Admin). `reason` is listed on purpose, unlike
+    // `BarterProposalReceived`'s `message` above: the reason IS the actionable
+    // content of a staff alert, and there is no other surface a responder
+    // would read it from before deciding whether to reassign the community.
+    [NotificationType.CommunityOwnerReviewRequested]: [
+      'communityName',
+      'reason',
+    ],
     // The listing id the bell deep-links to, plus the listing's OWN public
     // headline for the copy — the same kind of field as `ForumReply`'s
     // `threadTitle`. The proposal's `message` is deliberately NOT listed: it

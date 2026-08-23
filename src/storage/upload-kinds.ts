@@ -11,6 +11,7 @@ export type UploadKind =
   | 'group-avatar'
   | 'listing-photo'
   | 'community-cover'
+  | 'community-avatar'
   | 'message-image';
 
 export interface UploadKindSpec {
@@ -90,6 +91,38 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
   'community-cover': {
     prefix: 'community-covers',
     maxBytes: 10 * MB,
+    requiresSession: false,
+  },
+  // A community's avatar: the small square identity mark next to its name,
+  // alongside `community-cover`'s wide banner. Communities have had no logo at
+  // all until now, so every one of them renders as initials on one of three
+  // tints.
+  //
+  // `requiresSession: false`, and that is a deliberate choice rather than a
+  // copy of the cover's. Two independent reasons force it:
+  //
+  //  1. `GET /files/<key>` serves a session-gated kind ONLY to the member who
+  //     uploaded it (see `files.controller.ts`: there is no photo-to-resource
+  //     table to scope it any wider, and the `message-image` special case is
+  //     the one exception, written for conversation participants). Gating the
+  //     avatar would therefore hide it from every member of the community
+  //     EXCEPT whichever moderator happened to upload it, which is the exact
+  //     failure `group-avatar` exists to document.
+  //  2. A publicly listed community's signed-out teaser and the shared-link
+  //     unfurlers both render this mark while nobody is logged in.
+  //
+  // Nothing private rides on it: an avatar is chosen to be the community's
+  // public face. Ownership of the SET action is unaffected either way, since
+  // the key embeds the uploader's user id, the global
+  // StorageKeyOwnershipInterceptor rejects a PATCH referencing someone else's
+  // key, and `CommunitiesService.update` re-checks the caller is staff and
+  // that no FOREIGN upload is being introduced
+  // (`assertNoForeignUploadIntroduced`) before persisting it. 5 MB matches the
+  // other square marks (`avatar`, `group-avatar`) rather than the 10 MB
+  // full-bleed cover cap: this is a thumbnail, not a hero.
+  'community-avatar': {
+    prefix: 'community-avatars',
+    maxBytes: 5 * MB,
     requiresSession: false,
   },
   // A message-composer image attachment (MSG-8). `requiresSession: true`, but

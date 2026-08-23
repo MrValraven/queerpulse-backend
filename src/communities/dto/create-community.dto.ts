@@ -10,6 +10,7 @@ import {
   MinLength,
 } from 'class-validator';
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
+import { LANGUAGE_CODES } from '../../profiles/languages';
 import { COMMUNITY_TAGS } from '../community-tags';
 import { AccessTier, CommunityType } from '../entities/community.entity';
 
@@ -63,6 +64,48 @@ export class CreateCommunityDto {
   // (not `@IsUrl`) rejects `javascript:`/`data:`/`http:`; the global
   // StorageKeyOwnershipInterceptor enforces the key was uploaded by the caller.
   @IsOptional() @IsImageReference() coverImageUrl?: string | null;
+
+  // The community's small square identity mark, alongside the wide
+  // `coverImageUrl` banner. Same convention as that field in every respect: a
+  // storage key (from the `community-avatar` upload kind), an absolute
+  // `https://` URL, or `''`/`null` to clear it, validated by
+  // `@IsImageReference` so `javascript:`/`data:`/`http:` are refused, with the
+  // global StorageKeyOwnershipInterceptor plus
+  // `assertNoForeignUploadIntroduced` in the service enforcing the key was the
+  // caller's own upload.
+  @IsOptional() @IsImageReference() avatarImageUrl?: string | null;
+
+  // Owner-authored greeting a new member sees ONCE after joining (see
+  // `Community.welcomeMessage`). Free text from a member-facing form, so it is
+  // stripped to plain text at the write boundary by `toStoredPlainTextOrNull`
+  // before it is stored; `''`/`null` clears it.
+  @IsOptional() @IsString() @MaxLength(2000) welcomeMessage?: string | null;
+
+  // Where the community actually meets. `city` is the city label, `area` the
+  // neighbourhood or region inside it, and `isOnline` marks a community that
+  // gathers on a call. The two are not exclusive: a local group that also
+  // meets online is both. `city`/`area` are plain text and are sanitized on
+  // write like `welcomeMessage`; `''`/`null` clears either.
+  @IsOptional() @IsString() @MaxLength(120) city?: string | null;
+  @IsOptional() @IsString() @MaxLength(120) area?: string | null;
+  @IsOptional() @IsBoolean() isOnline?: boolean;
+
+  // Languages the community runs in, picked from the SAME fixed vocabulary
+  // `profiles.languages` uses (`src/profiles/languages.ts`) so a member's own
+  // languages and a community's are comparable values rather than two lists
+  // that drift. Same `@IsIn(..., { each: true })` shape as `tags` above.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(LANGUAGE_CODES.length)
+  @IsIn(LANGUAGE_CODES, { each: true })
+  languages?: string[];
+
+  // Owner opt-in to a signed-out TEASER of this community (see
+  // `Community.isPubliclyListed` for exactly what that exposes). Owner-level
+  // only, and only meaningful for the `public`/`request` tiers: the service
+  // refuses to set it true on an `invite`/`private` community and forces it
+  // back to false if the tier later moves there.
+  @IsOptional() @IsBoolean() isPubliclyListed?: boolean;
 
   // Desired slug; `CommunitiesService.createWithUniqueRef` slugifies +
   // de-dupes it. Ignored entirely on PATCH (see `UpdateCommunityDto`).

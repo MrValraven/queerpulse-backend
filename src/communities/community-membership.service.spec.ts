@@ -5,6 +5,7 @@ import { IsNull } from 'typeorm';
 import { CommunityMembershipService } from './community-membership.service';
 import {
   CommunityMember,
+  CommunityNotificationLevel,
   RosterRole,
 } from './entities/community-member.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
@@ -46,6 +47,19 @@ describe('CommunityMembershipService', () => {
     frozenAt: null,
     isFeatured: false,
     needsOwnerReviewAt: null,
+    frozenReason: null,
+    frozenNote: null,
+    frozenByUserId: null,
+    rulesVersion: 1,
+    welcomeMessage: null,
+    avatarImageUrl: null,
+    city: null,
+    area: null,
+    isOnline: false,
+    languages: [],
+    activeThisWeek: 0,
+    activityCountedAt: null,
+    isPubliclyListed: false,
   };
 
   const MEMBERSHIP: CommunityMember = {
@@ -54,6 +68,10 @@ describe('CommunityMembershipService', () => {
     userId: 'user-1',
     role: RosterRole.Member,
     joinedAt: new Date('2026-01-02T00:00:00.000Z'),
+    notificationLevel: CommunityNotificationLevel.Announcements,
+    rulesAcceptedAt: null,
+    rulesVersionAccepted: null,
+    welcomeSeenAt: null,
   };
 
   beforeEach(async () => {

@@ -86,8 +86,14 @@ export function standingFor(input: {
   return 'trusted';
 }
 
+// Only the ORDER matters here (highest role wins the "primary community"
+// tie-break), so adding `co_owner` re-based the numbers rather than changing
+// any relative ranking that already existed. A co-owner holds owner-level
+// powers inside the community and so outranks a mod, while the community's one
+// accountable owner of record still outranks them.
 const ROLE_RANK: Record<RosterRole, number> = {
-  [RosterRole.Owner]: 3,
+  [RosterRole.Owner]: 4,
+  [RosterRole.CoOwner]: 3,
   [RosterRole.Mod]: 2,
   [RosterRole.Member]: 1,
 };
