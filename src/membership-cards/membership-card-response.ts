@@ -25,6 +25,8 @@ export interface CardProgramDTO {
   allowsMemberPhoto: boolean;
   /** How those photos are printed: in colour, or desaturated. */
   photoStyle: CardPhotoStyle;
+  /** Whether this programme's cards print the holder's pronouns. */
+  allowsPronouns: boolean;
   serialPrefix: string;
 }
 
@@ -53,6 +55,22 @@ export interface MyCardDTO {
    * avatar; only this distinguishes them.
    */
   isPhotoHidden: boolean;
+  /**
+   * The pronouns printed on the card, or null. Read server-side from the
+   * holder's own profile, and sent ONLY when the programme prints pronouns,
+   * the member has not hidden theirs, and they have any set. Gated at this one
+   * boundary for the same reason the avatar is: a client cannot leak what it
+   * never receives.
+   */
+  holderPronouns: string | null;
+  /**
+   * The member's own veto, reported separately from `holderPronouns` so the
+   * settings control can show its real state. A member who turned pronouns
+   * off, a member whose community never turned them on, and a member with no
+   * pronouns on their profile all have a null value; only this distinguishes
+   * the first from the other two.
+   */
+  isPronounsHidden: boolean;
   /**
    * The card's permanent scannable code, or null when the platform has no card
    * signing key configured. Sent whatever the card's status: a printed card
@@ -90,6 +108,12 @@ export interface IssuerCardDTO {
    */
   cardPhotoUrl: string | null;
   /**
+   * The pronouns the card ACTUALLY prints, or null. Gated by the same pair of
+   * switches `toMyCard` applies, so an issuer reading a member's card sees the
+   * card that member holds rather than pronouns they chose to keep off it.
+   */
+  cardPronouns: string | null;
+  /**
    * The card's permanent scannable code, or null when the platform has no card
    * signing key configured. Sent whatever the card's status: a printed card
    * exists in the world whatever its status, and the verify page reports the
@@ -111,6 +135,13 @@ export interface CardVerificationDTO {
    * is what tells a door whether it has anything to check the person against.
    */
   hasPhoto: boolean;
+  /**
+   * The pronouns the card prints, or null. Present only when the card itself
+   * carries them, so whoever just scanned it can address the person in front
+   * of them correctly. A card that does not print pronouns tells a stranger
+   * nothing about the holder's, which is the same answer the card gives.
+   */
+  holderPronouns: string | null;
 }
 
 export function toCardProgram(program: CommunityCard): CardProgramDTO {
@@ -128,6 +159,7 @@ export function toCardProgram(program: CommunityCard): CardProgramDTO {
     allowsPublicBadge: program.allowsPublicBadge,
     allowsMemberPhoto: program.allowsMemberPhoto,
     photoStyle: program.photoStyle,
+    allowsPronouns: program.allowsPronouns,
     serialPrefix: program.serialPrefix,
   };
 }
@@ -143,6 +175,8 @@ export function toMyCard(
     holderName: string;
     /** The holder's profile avatar, before either switch is applied. */
     holderAvatarUrl?: string | null;
+    /** The holder's profile pronouns, before either switch is applied. */
+    holderPronouns?: string | null;
     /** Already minted by the caller, which is the only layer holding the
      *  signing key. Null on a platform with no key configured. */
     token: string | null;
@@ -152,6 +186,10 @@ export function toMyCard(
   // through, rather than at each render site. A photo the member vetoed or the
   // programme never enabled is not sent at all.
   const canShowPhoto = program.allowsMemberPhoto && !card.isPhotoHidden;
+  // The same pair of switches, asked about the other thing a card can say
+  // about its holder. Empty pronouns are normalised to null here so the client
+  // has one absent-value shape to render against rather than two.
+  const canShowPronouns = program.allowsPronouns && !card.isPronounsHidden;
   return {
     id: card.id,
     serial: card.serial,
@@ -166,6 +204,10 @@ export function toMyCard(
       ? toImageUrl(context.holderAvatarUrl ?? null)
       : null,
     isPhotoHidden: card.isPhotoHidden,
+    holderPronouns: canShowPronouns
+      ? context.holderPronouns?.trim() || null
+      : null,
+    isPronounsHidden: card.isPronounsHidden,
     token: context.token,
     program: toCardProgram(program),
   };
@@ -186,6 +228,8 @@ export function toIssuerCard(
     holderName: string;
     /** Already resolved to a fetchable URL by the caller. */
     avatarUrl: string | null;
+    /** The holder's profile pronouns, before either switch is applied. */
+    pronouns: string | null;
     role: string;
     /** The same permanent code the holder sees. There is nothing
      *  holder-specific to withhold: it is the card's own value. */
@@ -195,6 +239,7 @@ export function toIssuerCard(
   // The same one boundary `toMyCard` gates on, applied to the same pair of
   // switches. An issuer may not see a face the card does not print.
   const canShowPhoto = program.allowsMemberPhoto && !card.isPhotoHidden;
+  const canShowPronouns = program.allowsPronouns && !card.isPronounsHidden;
   return {
     id: card.id,
     serial: card.serial,
@@ -208,6 +253,7 @@ export function toIssuerCard(
     avatarUrl: holder.avatarUrl,
     role: holder.role,
     cardPhotoUrl: canShowPhoto ? holder.avatarUrl : null,
+    cardPronouns: canShowPronouns ? holder.pronouns?.trim() || null : null,
     token: holder.token,
   };
 }
@@ -226,6 +272,8 @@ export function toCardVerification(
     holderName: string;
     role: string;
     hasPhoto: boolean;
+    /** Already gated by the caller, the same way `hasPhoto` is. */
+    holderPronouns: string | null;
   },
 ): CardVerificationDTO {
   return {
@@ -236,5 +284,6 @@ export function toCardVerification(
     serial: card.serial,
     memberSince: card.issuedAt.toISOString(),
     hasPhoto: context.hasPhoto,
+    holderPronouns: context.holderPronouns,
   };
 }

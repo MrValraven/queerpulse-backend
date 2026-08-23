@@ -42,6 +42,7 @@ function program(overrides: Partial<CommunityCard> = {}): CommunityCard {
     allowsPublicBadge: true,
     allowsMemberPhoto: false,
     photoStyle: 'color',
+    allowsPronouns: false,
     serialPrefix: 'AZO',
     createdAt: new Date('2026-01-01T00:00:00Z'),
     updatedAt: new Date('2026-01-01T00:00:00Z'),
@@ -62,6 +63,7 @@ function card(overrides: Partial<MembershipCard> = {}): MembershipCard {
     revokedReason: 'Left under a safety report',
     isPubliclyVisible: false,
     isPhotoHidden: false,
+    isPronounsHidden: false,
     codeVersion: 1,
     ...overrides,
   };
@@ -129,6 +131,7 @@ describe('toIssuerCard', () => {
     holderSlug: 'rita',
     holderName: 'Rita V',
     avatarUrl: 'https://api.test/files/avatar.png',
+    pronouns: 'she/her',
     role: 'mod',
     token: 'signed.code',
   };
@@ -191,11 +194,13 @@ describe('toCardVerification', () => {
       holderName: 'Rita V',
       role: 'member',
       hasPhoto: false,
+      holderPronouns: null,
     });
     expect(Object.keys(dto).sort()).toEqual(
       [
         'hasPhoto',
         'holderName',
+        'holderPronouns',
         'issuerName',
         'memberSince',
         'role',
@@ -214,6 +219,7 @@ describe('toCardVerification', () => {
         holderName: 'Rita V',
         role: 'member',
         hasPhoto: false,
+        holderPronouns: null,
       },
     );
     expect(JSON.stringify(dto)).not.toContain('safety report');
@@ -247,5 +253,80 @@ describe('the permanent code on a card DTO', () => {
       token: null,
     });
     expect(dto.token).toBeNull();
+  });
+});
+
+describe('pronouns on a card', () => {
+  const context = {
+    communityName: 'Azores Queer',
+    communitySlug: 'azores-queer',
+    role: 'member',
+    holderName: 'Rita V',
+    holderPronouns: 'she/her',
+    token: 'signed.code',
+  };
+
+  it('withholds them when the programme does not print pronouns', () => {
+    const dto = toMyCard(
+      card(),
+      program({ allowsPronouns: false }),
+      'active',
+      context,
+    );
+    expect(dto.holderPronouns).toBeNull();
+  });
+
+  it('withholds them when the holder vetoed theirs', () => {
+    const dto = toMyCard(
+      card({ isPronounsHidden: true }),
+      program({ allowsPronouns: true }),
+      'active',
+      context,
+    );
+    expect(dto.holderPronouns).toBeNull();
+    // The veto still reports its own state, so the member's toggle can show
+    // the truth rather than reading an absent value as "off".
+    expect(dto.isPronounsHidden).toBe(true);
+  });
+
+  it('sends them when both switches allow it', () => {
+    const dto = toMyCard(
+      card(),
+      program({ allowsPronouns: true }),
+      'active',
+      context,
+    );
+    expect(dto.holderPronouns).toBe('she/her');
+  });
+
+  it('reads blank profile pronouns as none at all', () => {
+    const dto = toMyCard(card(), program({ allowsPronouns: true }), 'active', {
+      ...context,
+      holderPronouns: '   ',
+    });
+    expect(dto.holderPronouns).toBeNull();
+  });
+
+  it('applies the same pair of switches to the issuer view', () => {
+    const holder = {
+      holderSlug: 'rita',
+      holderName: 'Rita V',
+      avatarUrl: null,
+      pronouns: 'she/her',
+      role: 'mod',
+      token: 'signed.code',
+    };
+    expect(
+      toIssuerCard(card(), program({ allowsPronouns: true }), 'active', holder)
+        .cardPronouns,
+    ).toBe('she/her');
+    expect(
+      toIssuerCard(
+        card({ isPronounsHidden: true }),
+        program({ allowsPronouns: true }),
+        'active',
+        holder,
+      ).cardPronouns,
+    ).toBeNull();
   });
 });

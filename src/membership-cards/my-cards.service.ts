@@ -69,6 +69,10 @@ export class MyCardsService {
     // the wire is decided per card in `toMyCard`, which applies the
     // programme's switch and the member's veto together.
     const holderAvatarUrl = profile?.avatarUrl ?? null;
+    // Read from the profile rather than stored per card, so a member who
+    // changes their pronouns changes every card they hold at once. Whether it
+    // reaches the wire is decided per card in `toMyCard`.
+    const holderPronouns = profile?.pronouns ?? null;
 
     return cards.flatMap((card) => {
       const program = programById.get(card.programId);
@@ -93,6 +97,7 @@ export class MyCardsService {
           role: roleByCommunity.get(community.id) ?? 'member',
           holderName,
           holderAvatarUrl,
+          holderPronouns,
           token: this.tokenFor(card),
         }),
       ];

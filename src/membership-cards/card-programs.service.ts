@@ -110,6 +110,9 @@ export class CardProgramsService {
     if (dto.photoStyle !== undefined) {
       program.photoStyle = dto.photoStyle;
     }
+    if (dto.allowsPronouns !== undefined) {
+      program.allowsPronouns = dto.allowsPronouns;
+    }
 
     const saved = await this.programs.save(program);
 

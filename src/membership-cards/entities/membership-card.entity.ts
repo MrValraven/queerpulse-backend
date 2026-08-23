@@ -72,6 +72,15 @@ export class MembershipCard {
   @Column({ type: 'boolean', default: false })
   isPhotoHidden!: boolean;
 
+  // The member's veto over their own pronouns appearing on this card, honoured
+  // even where the programme prints them. Default off, matching the photo veto
+  // above: a member of a community that prints pronouns gets the card the
+  // community intends, and anyone for whom that is the wrong thing to hand a
+  // stranger can turn it off per card without leaving the community or
+  // clearing the pronouns from their profile.
+  @Column({ type: 'boolean', default: false })
+  isPronounsHidden!: boolean;
+
   // The generation counter behind this card's permanent code. The code is
   // signed over this value, so bumping it kills every printed copy of the card
   // instantly while the holder's digital card keeps working: that is the "my

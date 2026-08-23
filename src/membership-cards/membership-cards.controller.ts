@@ -31,8 +31,9 @@ export class MembershipCardsController {
 
   /**
    * The settings the HOLDER controls on their own card, as against the ones
-   * the issuing community controls on the programme. Today that is only
-   * whether their photo appears on it.
+   * the issuing community controls on the programme: whether their photo and
+   * their pronouns appear on it. Both are absent-leaves-it-alone, so a client
+   * may send either on its own.
    */
   @Patch(':cardId')
   async update(
@@ -40,7 +41,10 @@ export class MembershipCardsController {
     @Param('cardId') cardId: string,
     @Body() dto: UpdateMyCardDto,
   ) {
-    await this.cards.setPhotoHidden(cardId, user.userId, dto.isPhotoHidden);
+    await this.cards.updateOwnCardSettings(cardId, user.userId, {
+      isPhotoHidden: dto.isPhotoHidden,
+      isPronounsHidden: dto.isPronounsHidden,
+    });
     return { ok: true };
   }
 

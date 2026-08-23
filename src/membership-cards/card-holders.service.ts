@@ -112,6 +112,7 @@ export class CardHoldersService {
             ? [profile.firstName, profile.lastName].filter(Boolean).join(' ')
             : 'A member',
           avatarUrl: profile?.avatarUrl ? toImageUrl(profile.avatarUrl) : null,
+          pronouns: profile?.pronouns ?? null,
           role: roleByUserId.get(card.userId) ?? 'member',
           token: this.tokenFor(card),
         },

@@ -93,6 +93,14 @@ export class CardVerificationService {
         program.allowsMemberPhoto &&
         !card.isPhotoHidden &&
         Boolean(holder?.avatarUrl),
+      // The same three conditions applied to the other thing the card can say
+      // about its holder: the programme prints pronouns, the member has not
+      // vetoed theirs, and they have any set. A stranger learns exactly what
+      // the card in their hand says and nothing beyond it.
+      holderPronouns:
+        program.allowsPronouns && !card.isPronounsHidden
+          ? holder?.pronouns?.trim() || null
+          : null,
     });
   }
 }

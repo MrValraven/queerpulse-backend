@@ -102,4 +102,10 @@ export class UpsertCardProgramDto {
   @IsOptional()
   @IsIn(CARD_PHOTO_STYLES)
   photoStyle?: CardPhotoStyle;
+
+  // Whether these cards print each holder's pronouns beside their name. Same
+  // absent-leaves-it-alone contract as the switches above.
+  @IsOptional()
+  @IsBoolean()
+  allowsPronouns?: boolean;
 }

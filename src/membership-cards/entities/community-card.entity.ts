@@ -125,6 +125,17 @@ export class CommunityCard {
   @Column({ type: 'varchar', length: 16, default: 'color' })
   photoStyle!: CardPhotoStyle;
 
+  // Whether this programme's cards print the holder's pronouns beside their
+  // name. Off by default, on the same reasoning as the photo switch: what a
+  // card says about the person carrying it is the community's deliberate
+  // choice rather than a default it inherits, and an existing programme must
+  // not start printing something new because the platform shipped a feature.
+  // The value itself is never stored here: it is read from the holder's own
+  // profile, so updating it in one place updates every card. The member keeps
+  // a veto on their own card (`MembershipCard.isPronounsHidden`).
+  @Column({ type: 'boolean', default: false })
+  allowsPronouns!: boolean;
+
   // The three-letter serial prefix, derived once from the community name at
   // programme creation and frozen thereafter so serials stay stable.
   @Column({ type: 'varchar', length: 3 })

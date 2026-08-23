@@ -367,17 +367,34 @@ export class MembershipCardsService {
    * first. Same 404-not-403 rule as everything else here: a caller who does
    * not hold the card learns nothing about whether it exists.
    */
-  async setPhotoHidden(
+  async updateOwnCardSettings(
     cardId: string,
     userId: string,
-    isPhotoHidden: boolean,
+    settings: { isPhotoHidden?: boolean; isPronounsHidden?: boolean },
   ): Promise<void> {
     const card = await this.cards.findOne({ where: { id: cardId } });
     if (!card || card.userId !== userId) {
       throw new NotFoundException('Card not found');
     }
-    if (card.isPhotoHidden === isPhotoHidden) return;
-    await this.cards.update(card.id, { isPhotoHidden });
+    // Only the fields the payload actually named, and only where they differ,
+    // so toggling one veto never rewrites the other and a no-op save costs no
+    // write. The ownership check above runs whether or not anything changes:
+    // a caller who does not hold the card gets the same 404 either way.
+    const patch: Partial<MembershipCard> = {};
+    if (
+      settings.isPhotoHidden !== undefined &&
+      settings.isPhotoHidden !== card.isPhotoHidden
+    ) {
+      patch.isPhotoHidden = settings.isPhotoHidden;
+    }
+    if (
+      settings.isPronounsHidden !== undefined &&
+      settings.isPronounsHidden !== card.isPronounsHidden
+    ) {
+      patch.isPronounsHidden = settings.isPronounsHidden;
+    }
+    if (Object.keys(patch).length === 0) return;
+    await this.cards.update(card.id, patch);
   }
 
   async deleteOwnCard(cardId: string, userId: string): Promise<void> {
