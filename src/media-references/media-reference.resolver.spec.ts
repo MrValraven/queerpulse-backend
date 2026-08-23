@@ -5,6 +5,11 @@ import { Profile } from '../users/entities/profile.entity';
 import { WorkItem } from '../profiles/entities/work-item.entity';
 import { Listing } from '../listings/entities/listing.entity';
 import { Company } from '../companies/entities/company.entity';
+import { Community } from '../communities/entities/community.entity';
+import {
+  CardIssuerType,
+  CommunityCard,
+} from '../membership-cards/entities/community-card.entity';
 
 /** A repository stub covering both call shapes `MediaReferenceSource`s use:
  *  plain-column sources call `repository.find(...)`; structured/array
@@ -256,5 +261,83 @@ describe('MediaReferenceResolver', () => {
     const { references } = await resolver.resolve([bareKey]);
 
     expect(references.has(bareKey)).toBe(false);
+  });
+  it('resolves a membership-card crest to the issuing community', async () => {
+    const bareKey = 'community-images/crest.png';
+    const dataSource = createMockDataSource([
+      [
+        CommunityCard,
+        makeMockRepository({
+          findRows: [
+            {
+              id: 'card-program-1',
+              crestMediaKey: bareKey,
+              issuerType: CardIssuerType.Community,
+              issuerId: 'community-1',
+            },
+          ],
+        }),
+      ],
+      [
+        Community,
+        makeMockRepository({
+          findRows: [
+            {
+              id: 'community-1',
+              name: 'Coletivo Gula',
+              slug: 'coletivo-gula',
+            },
+          ],
+        }),
+      ],
+    ]);
+    const resolver = new MediaReferenceResolver(dataSource);
+
+    const { references } = await resolver.resolve([bareKey]);
+
+    // The ISSUING community's id and slug, so the reference links to
+    // `/community/<slug>` — a card programme has no page of its own.
+    expect(references.get(bareKey)).toEqual([
+      {
+        type: 'card-crest',
+        entityId: 'community-1',
+        label: 'Coletivo Gula',
+        slug: 'coletivo-gula',
+      },
+    ]);
+  });
+
+  it('resolves a /files/<key> card background even for a collective issuer', async () => {
+    const bareKey = 'community-covers/desk.png';
+    const dataSource = createMockDataSource([
+      [
+        CommunityCard,
+        makeMockRepository({
+          findRows: [
+            {
+              id: 'card-program-2',
+              backgroundMediaKey: `/files/${bareKey}`,
+              // A collective-issued programme has no `communities` row to
+              // resolve: the reference must still exist (the key IS in use),
+              // just without a label or a link.
+              issuerType: CardIssuerType.Collective,
+              issuerId: 'collective-1',
+            },
+          ],
+        }),
+      ],
+    ]);
+    const resolver = new MediaReferenceResolver(dataSource);
+
+    const { references } = await resolver.resolve([bareKey]);
+
+    expect(references.get(bareKey)).toEqual([
+      {
+        type: 'card-background',
+        entityId: 'card-program-2',
+        label: '',
+        slug: '',
+      },
+    ]);
   });
 });

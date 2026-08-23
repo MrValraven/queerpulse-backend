@@ -29,6 +29,9 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   // its image lives in the same column the nested route writes.
   'UpdateFlatPostDto.image': 'CommunityPost.image',
   'CreateCommunityDto.coverImageUrl': 'Community.coverImageUrl',
+  'CreateCommunityDto.avatarImageUrl': 'Community.avatarImageUrl',
+  'UpsertCardProgramDto.crestMediaKey': 'CommunityCard.crestMediaKey',
+  'UpsertCardProgramDto.backgroundMediaKey': 'CommunityCard.backgroundMediaKey',
   'CreateLandlordDto.photo': 'Landlord.photo',
   'UpdateLandlordDto.photo': 'Landlord.photo',
   'ListingPhotoSetDto.wide': 'Listing.photos',

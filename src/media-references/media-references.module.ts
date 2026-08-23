@@ -14,6 +14,7 @@ import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { SubprofileItem } from '../subprofiles/entities/subprofile-item.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { Community } from '../communities/entities/community.entity';
+import { CommunityCard } from '../membership-cards/entities/community-card.entity';
 import { CinemaTitle } from '../cinema/entities/cinema-title.entity';
 import { Landlord } from '../landlords/entities/landlord.entity';
 import { MagazineAuthor } from '../magazine/entities/magazine-author.entity';
@@ -45,6 +46,7 @@ import { HousingListing } from '../housing-listings/entities/housing-listing.ent
       SubprofileItem,
       CommunityPost,
       Community,
+      CommunityCard,
       CinemaTitle,
       Landlord,
       MagazineAuthor,

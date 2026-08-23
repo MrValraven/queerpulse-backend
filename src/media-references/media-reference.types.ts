@@ -16,6 +16,9 @@ export type MediaReferenceType =
   | 'persona-item' // SubprofileItem.imageUrl
   | 'community-post' // CommunityPost.image
   | 'community-cover' // Community.coverImageUrl
+  | 'community-avatar' // Community.avatarImageUrl
+  | 'card-crest' // CommunityCard.crestMediaKey
+  | 'card-background' // CommunityCard.backgroundMediaKey
   | 'cinema-cover' // CinemaTitle.coverImageUrl
   | 'landlord' // Landlord.photo
   | 'company-work' // Company.work[].imageUrl

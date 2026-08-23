@@ -17,6 +17,10 @@ import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { SubprofileItem } from '../subprofiles/entities/subprofile-item.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { Community } from '../communities/entities/community.entity';
+import {
+  CardIssuerType,
+  CommunityCard,
+} from '../membership-cards/entities/community-card.entity';
 import { CinemaTitle } from '../cinema/entities/cinema-title.entity';
 import { Landlord } from '../landlords/entities/landlord.entity';
 import { MagazineAuthor } from '../magazine/entities/magazine-author.entity';
@@ -185,6 +189,21 @@ export const PLAIN_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
     slugColumn: 'slug',
   }),
   plainSource({
+    // The community's small square identity mark, a separate column from the
+    // wide banner above and written by the same upload kind. Its own source
+    // (rather than a second column on the cover one) because `plainSource`
+    // matches exactly one column, and because the two are independently
+    // deletable: an avatar with no references must not be kept alive by a
+    // cover that happens to share the row.
+    type: 'community-avatar',
+    field: 'Community.avatarImageUrl',
+    entity: Community,
+    column: 'avatarImageUrl',
+    idColumn: 'id',
+    labelColumns: ['name'],
+    slugColumn: 'slug',
+  }),
+  plainSource({
     type: 'cinema-cover',
     field: 'CinemaTitle.coverImageUrl',
     entity: CinemaTitle,
@@ -295,6 +314,89 @@ const PERSONA_ITEM_SOURCE: MediaReferenceSource = {
     });
   },
 };
+
+// --- membership-card programme art — SPECIAL sources, beyond `plainSource`. -
+// A `CommunityCard` row is the card PROGRAMME an issuer designs once, and it
+// holds two uploads of its own: the crest printed on the card and the ground
+// the card is painted on. Both were invisible to this resolver, so a crest or
+// a background that is on every member's card read as "No references" in the
+// media console and invited a delete that would have blanked live cards.
+//
+// They cannot use `plainSource` because the row carries no name or slug: its
+// identity is the ISSUING community, reached through `issuerId`. So this
+// resolves matching cards first, then looks up those communities (there is no
+// ORM relation between the two entities) and returns the COMMUNITY's id and
+// slug so the reference links to `/community/<slug>`, mirroring how
+// `PERSONA_ITEM_SOURCE` links an item to its parent persona.
+//
+// A `collective`-issued programme has no `communities` row to resolve, so it
+// comes back label- and slug-less: still a reference (the key IS in use, which
+// is the part that must never be wrong), just without a link.
+function cardProgramSource(config: {
+  type: MediaReferenceType;
+  field: string;
+  column: 'crestMediaKey' | 'backgroundMediaKey';
+}): MediaReferenceSource {
+  return {
+    type: config.type,
+    field: config.field,
+    async resolve(dataSource, _candidateBareKeys, candidateStoredForms) {
+      if (candidateStoredForms.length === 0) return [];
+      const communityCardRepository = dataSource.getRepository(CommunityCard);
+      const matchingCards = await communityCardRepository.find({
+        where: { [config.column]: In(candidateStoredForms) },
+        select: ['id', config.column, 'issuerType', 'issuerId'],
+      });
+      if (matchingCards.length === 0) return [];
+
+      const communityIssuerIds = [
+        ...new Set(
+          matchingCards
+            .filter((card) => card.issuerType === CardIssuerType.Community)
+            .map((card) => card.issuerId),
+        ),
+      ];
+      const communityRepository = dataSource.getRepository(Community);
+      const issuingCommunities =
+        communityIssuerIds.length > 0
+          ? await communityRepository.find({
+              where: { id: In(communityIssuerIds) },
+              select: ['id', 'name', 'slug'],
+            })
+          : [];
+      const communityById = new Map(
+        issuingCommunities.map((community) => [community.id, community]),
+      );
+
+      return matchingCards.map((card) => {
+        const bareKey = toBareKey(String(card[config.column]));
+        const issuingCommunity = communityById.get(card.issuerId);
+        const reference: MediaReference = {
+          type: config.type,
+          // The issuing community's id: `entityId` is what the frontend links
+          // on, and a card programme has no page of its own.
+          entityId: issuingCommunity?.id ?? card.id,
+          label: issuingCommunity?.name ?? '',
+          slug: issuingCommunity?.slug ?? '',
+        };
+        return [bareKey, reference] as [string, MediaReference];
+      });
+    },
+  };
+}
+
+const CARD_PROGRAM_SOURCES: MediaReferenceSource[] = [
+  cardProgramSource({
+    type: 'card-crest',
+    field: 'CommunityCard.crestMediaKey',
+    column: 'crestMediaKey',
+  }),
+  cardProgramSource({
+    type: 'card-background',
+    field: 'CommunityCard.backgroundMediaKey',
+    column: 'backgroundMediaKey',
+  }),
+];
 
 /** Storage refs found in one row's structured column. Implement per source. */
 type ExtractRefs = (row: ObjectLiteral) => string[];
@@ -484,6 +586,7 @@ export const ARRAY_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
 export const MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
   ...PLAIN_MEDIA_REFERENCE_SOURCES,
   PERSONA_ITEM_SOURCE,
+  ...CARD_PROGRAM_SOURCES,
   ...ARRAY_MEDIA_REFERENCE_SOURCES,
 ];
 

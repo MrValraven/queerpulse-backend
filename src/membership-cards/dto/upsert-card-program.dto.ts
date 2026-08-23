@@ -10,6 +10,7 @@ import {
   Min,
   MinLength,
 } from 'class-validator';
+import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 import {
   CARD_PHOTO_STYLES,
   CARD_TEXT_BACKDROPS,
@@ -56,8 +57,15 @@ export class UpsertCardProgramDto {
   @IsIn(ACCENT_TOKENS)
   accentToken!: string;
 
+  // These two hold an upload key that other members' browsers fetch on every
+  // card render, so they carry `@IsImageReference` like every other image
+  // field. That decorator is also what the media-reference coverage tripwire
+  // keys off, which is why both columns stayed invisible to the "in use"
+  // resolver for as long as they did. `@MaxLength` stays alongside it: the
+  // guard allows up to 2048 chars while `background_media_key` is
+  // varchar(512).
   @IsOptional()
-  @IsString()
+  @IsImageReference()
   @MaxLength(512)
   crestMediaKey?: string | null;
 
@@ -68,7 +76,7 @@ export class UpsertCardProgramDto {
   backgroundPreset?: string | null;
 
   @IsOptional()
-  @IsString()
+  @IsImageReference()
   @MaxLength(512)
   backgroundMediaKey?: string | null;
 
