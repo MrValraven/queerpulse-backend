@@ -263,6 +263,9 @@ describe('profile-response mappers', () => {
           typeLabel: 'Professional',
           countLabel: '128 members',
           role: RosterRole.Owner,
+          tags: ['beginner-friendly'],
+          coverImageUrl: 'https://api.test/files/cover.jpg',
+          activeThisWeek: 12,
         },
       ],
     };
@@ -305,6 +308,9 @@ describe('profile-response mappers', () => {
       typeLabel: 'Professional',
       countLabel: '128 members',
       role: 'owner',
+      tags: ['beginner-friendly'],
+      coverImageUrl: 'https://api.test/files/cover.jpg',
+      activeThisWeek: 12,
     });
   });
 

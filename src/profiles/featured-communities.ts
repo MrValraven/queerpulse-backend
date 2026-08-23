@@ -24,6 +24,16 @@ export interface FeaturedCommunityRefView {
   /** e.g. `"128 members"` — the community's live roster size. */
   countLabel: string;
   role: RosterRole;
+  /** Curated ids from COMMUNITY_TAGS; empty when the owner set none. Carried
+   *  here for the same reason the discover card DTO carries them: a profile
+   *  pin renders the same card and must show its tags without a second fetch. */
+  tags: string[];
+  /** Resolved (`toImageUrl`) cover-image URL, or null when the community has
+   *  no cover — the card letterhead's ground. */
+  coverImageUrl: string | null;
+  /** The community's denormalised weekly activity count
+   *  (`communities.active_this_week`), as the discover card shows it. */
+  activeThisWeek: number;
 }
 
 /**

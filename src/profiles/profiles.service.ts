@@ -363,6 +363,12 @@ export class ProfilesService {
       .addSelect('c.tagline', 'tagline')
       .addSelect('c.type', 'type')
       .addSelect('cm.role', 'role')
+      // The display fields the shared community card renders alongside the
+      // name: its tag pills, its letterhead cover, and this week's activity.
+      // Selected in the same pass rather than fetched per pin.
+      .addSelect('c.tags', 'tags')
+      .addSelect('c.cover_image_url', 'coverImageUrl')
+      .addSelect('c.active_this_week', 'activeThisWeek')
       .orderBy('pin.position', 'ASC')
       .getRawMany<{
         communityId: string;
@@ -371,6 +377,9 @@ export class ProfilesService {
         tagline: string;
         type: CommunityType;
         role: RosterRole;
+        tags: string[] | null;
+        coverImageUrl: string | null;
+        activeThisWeek: number | string | null;
       }>();
 
     if (rows.length === 0) {
@@ -402,6 +411,9 @@ export class ProfilesService {
         typeLabel: communityTypeLabel(r.type),
         countLabel: `${memberCount} members`,
         role: r.role,
+        tags: r.tags ?? [],
+        coverImageUrl: toImageUrl(r.coverImageUrl),
+        activeThisWeek: Number(r.activeThisWeek ?? 0),
       };
     });
   }
