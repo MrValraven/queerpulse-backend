@@ -113,6 +113,9 @@ export class CardProgramsService {
     if (dto.allowsPronouns !== undefined) {
       program.allowsPronouns = dto.allowsPronouns;
     }
+    if (dto.textBackdrop !== undefined) {
+      program.textBackdrop = dto.textBackdrop;
+    }
 
     const saved = await this.programs.save(program);
 

@@ -12,8 +12,10 @@ import {
 } from 'class-validator';
 import {
   CARD_PHOTO_STYLES,
+  CARD_TEXT_BACKDROPS,
   CardPhotoStyle,
   CardSkin,
+  CardTextBackdrop,
 } from '../entities/community-card.entity';
 
 // The design tokens a community may choose as its card accent. A closed list
@@ -108,4 +110,11 @@ export class UpsertCardProgramDto {
   @IsOptional()
   @IsBoolean()
   allowsPronouns?: boolean;
+
+  // Which legibility treatment a flag or photo ground carries. Same
+  // absent-leaves-it-alone contract: a client that predates this setting must
+  // not reset a community's chosen treatment on its next save.
+  @IsOptional()
+  @IsIn(CARD_TEXT_BACKDROPS)
+  textBackdrop?: CardTextBackdrop;
 }

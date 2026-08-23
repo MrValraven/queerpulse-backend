@@ -25,6 +25,23 @@ export const CARD_PHOTO_STYLES: readonly CardPhotoStyle[] = [
   'mono',
 ] as const;
 
+// How a card with a flag or a photo ground keeps its own text readable. Not a
+// choice about WHETHER the text is protected — a card must be readable at a
+// door, so every value here protects it — only about which treatment suits
+// the ground the community picked.
+//
+// 'shade' is the top-and-bottom gradient every ground has carried so far.
+// 'panel' plates the two text blocks instead and leaves the rest of the
+// artwork untouched, which is what a busy illustration needs. 'veil' dims the
+// whole card evenly, for a ground with detail everywhere.
+export type CardTextBackdrop = 'shade' | 'panel' | 'veil';
+
+export const CARD_TEXT_BACKDROPS: readonly CardTextBackdrop[] = [
+  'shade',
+  'panel',
+  'veil',
+] as const;
+
 // The curated skins. Each one's contrast is locked in the frontend so a
 // community's colour choice can never fail the a11y build ratchet.
 export enum CardSkin {
@@ -124,6 +141,17 @@ export class CommunityCard {
   // printing the photo its members uploaded.
   @Column({ type: 'varchar', length: 16, default: 'color' })
   photoStyle!: CardPhotoStyle;
+
+  // Which legibility treatment this programme's cards use over a flag or an
+  // uploaded photo. A closed list stored as varchar, the same discipline
+  // `photoStyle` follows and for the same reasons.
+  //
+  // Read only when a ground is set: the five flat skins carry their own
+  // curated contrast (see cardSkins.ts) and need no treatment at all. Defaults
+  // to 'shade', so every card already in someone's wallet keeps exactly the
+  // face it has today.
+  @Column({ type: 'varchar', length: 16, default: 'shade' })
+  textBackdrop!: CardTextBackdrop;
 
   // Whether this programme's cards print the holder's pronouns beside their
   // name. Off by default, on the same reasoning as the photo switch: what a

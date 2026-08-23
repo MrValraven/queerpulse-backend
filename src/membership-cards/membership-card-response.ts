@@ -3,6 +3,7 @@ import { EffectiveCardStatus } from './card-status';
 import {
   CardPhotoStyle,
   CardSkin,
+  CardTextBackdrop,
   CommunityCard,
 } from './entities/community-card.entity';
 import { MembershipCard } from './entities/membership-card.entity';
@@ -27,6 +28,8 @@ export interface CardProgramDTO {
   photoStyle: CardPhotoStyle;
   /** Whether this programme's cards print the holder's pronouns. */
   allowsPronouns: boolean;
+  /** Which legibility treatment a flag or photo ground carries. */
+  textBackdrop: CardTextBackdrop;
   serialPrefix: string;
 }
 
@@ -160,6 +163,7 @@ export function toCardProgram(program: CommunityCard): CardProgramDTO {
     allowsMemberPhoto: program.allowsMemberPhoto,
     photoStyle: program.photoStyle,
     allowsPronouns: program.allowsPronouns,
+    textBackdrop: program.textBackdrop,
     serialPrefix: program.serialPrefix,
   };
 }
