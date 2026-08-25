@@ -684,6 +684,15 @@ function sortPiecesForFallbackRunOrder(
  * matches a piece (e.g. a deleted piece never cleaned out of the jsonb list).
  * When `issue.runOrder` is empty (a fresh issue nobody has arranged yet),
  * falls back to every piece on the issue ordered by `orderIndex`.
+ *
+ * Pieces assigned to the issue AFTER a running order was saved are appended
+ * to the end rather than dropped. `runOrder` is a hand-curated jsonb list
+ * that only `updateRunOrder` writes, so assignment (which touches
+ * `magazine_piece.issueId` alone) would otherwise leave the new piece
+ * invisible on the production page while still counting toward the issue's
+ * slot fill and ship gate — the running order and the issue's actual
+ * contents would disagree. Self-healing: the moment an editor saves the
+ * order, the appended entries become real `runOrder` items.
  */
 export function toIssueProduction(
   issue: MagazineIssue,
@@ -691,21 +700,33 @@ export function toIssueProduction(
 ): IssueProductionResponse {
   const pieceById = new Map(pieces.map((piece) => [piece.id, piece]));
 
+  const orderedPieceIds = new Set(issue.runOrder.map((item) => item.pieceId));
+  const unorderedPieces = pieces.filter(
+    (piece) => !orderedPieceIds.has(piece.id),
+  );
+
   const runOrder: IssueRunOrderEntry[] =
     issue.runOrder.length > 0
-      ? issue.runOrder.flatMap((item): IssueRunOrderEntry[] => {
-          const piece = pieceById.get(item.pieceId);
-          if (!piece) {
-            return [];
-          }
-          return [
-            {
-              piece: toPieceListItem(piece),
-              pages: item.pages,
-              laidOut: piece.laidOut,
-            },
-          ];
-        })
+      ? [
+          ...issue.runOrder.flatMap((item): IssueRunOrderEntry[] => {
+            const piece = pieceById.get(item.pieceId);
+            if (!piece) {
+              return [];
+            }
+            return [
+              {
+                piece: toPieceListItem(piece),
+                pages: item.pages,
+                laidOut: piece.laidOut,
+              },
+            ];
+          }),
+          ...sortPiecesForFallbackRunOrder(unorderedPieces).map((piece) => ({
+            piece: toPieceListItem(piece),
+            pages: piece.pages ?? '',
+            laidOut: piece.laidOut,
+          })),
+        ]
       : sortPiecesForFallbackRunOrder(pieces).map((piece) => ({
           piece: toPieceListItem(piece),
           pages: piece.pages ?? '',
@@ -825,6 +846,21 @@ export interface CurrentIssueSummary {
   theme: string;
   filled: number;
   slots: number;
+}
+
+/**
+ * One row of the desk's issue switcher (`GET /magazine/admin/issues`).
+ * Extends the current-issue read model with the fields the switcher and the
+ * new-issue modal need: `title` for the option label and `publishedOn` for
+ * the header meta line.
+ *
+ * The public `GET /magazine/issues` cannot serve this list: it projects
+ * `id` and `theme` away on purpose (`MagazineService.listIssues`), and `id`
+ * is exactly what the desk writes onto `magazine_piece.issueId`.
+ */
+export interface IssueSummaryResponse extends CurrentIssueSummary {
+  title: string;
+  publishedOn: string;
 }
 
 /**

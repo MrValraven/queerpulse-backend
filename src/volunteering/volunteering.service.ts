@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, FindOptionsWhere, In, Repository } from 'typeorm';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
 import {
   DEFAULT_LIST_LIMIT,
@@ -451,14 +451,14 @@ export class VolunteeringService {
 
   async listSignups(
     slug: string,
-    posterId: string,
+    viewerId: string,
   ): Promise<VolunteerSignupDTO[]> {
     const opportunity = await this.loadOr404(slug);
-    if (opportunity.posterId !== posterId) {
-      throw new ForbiddenException(
-        'Only the poster can view signups for this opportunity',
-      );
-    }
+    await this.assertCanManageApplicants(
+      opportunity,
+      viewerId,
+      'view signups for',
+    );
 
     // Bounded: a popular posting can carry thousands of signups, each with a
     // full `answers` jsonb blob, and this had no `take` at all.
@@ -482,15 +482,15 @@ export class VolunteeringService {
   async decideSignup(
     slug: string,
     signupId: string,
-    posterId: string,
+    deciderId: string,
     status: SignupStatus.Accepted | SignupStatus.Declined,
   ): Promise<VolunteerSignupDTO> {
     const opportunity = await this.loadOr404(slug);
-    if (opportunity.posterId !== posterId) {
-      throw new ForbiddenException(
-        'Only the poster can decide on applicants for this opportunity',
-      );
-    }
+    await this.assertCanManageApplicants(
+      opportunity,
+      deciderId,
+      'decide on applicants for',
+    );
 
     const signup = await this.signups.findOne({
       where: { id: signupId, opportunityId: opportunity.id },
@@ -533,9 +533,28 @@ export class VolunteeringService {
     return toVolunteerSignup(signup, member);
   }
 
-  async listMine(posterId: string): Promise<MyOpportunitySummary[]> {
+  /**
+   * The viewer's manage-applicants desk: everything they posted themselves,
+   * PLUS everything attributed to a community they own or moderate. The
+   * community tier mirrors how the attribution got there in the first place
+   * (`resolveCommunityId` only accepts an owner/mod), so a community's
+   * standing roster can review its own applicants without the original
+   * poster becoming a single point of failure. Editing and closing stay
+   * poster-only.
+   */
+  async listMine(userId: string): Promise<MyOpportunitySummary[]> {
+    const managedCommunityIds =
+      await this.communityMembership.ownerOrModCommunityIdsForUser(userId);
+    // `In([])` is not a safe empty-set predicate, so the community branch is
+    // only added when the viewer actually has standing somewhere.
+    const where: FindOptionsWhere<VolunteerOpportunity>[] = [
+      { posterId: userId },
+      ...(managedCommunityIds.length
+        ? [{ communityId: In(managedCommunityIds) }]
+        : []),
+    ];
     const rows = await this.opportunities.find({
-      where: { posterId },
+      where,
       order: { createdAt: 'DESC' },
       take: DEFAULT_LIST_LIMIT,
     });
@@ -738,6 +757,33 @@ export class VolunteeringService {
     const ids = [...new Set(partnerIds.filter((id): id is string => !!id))];
     if (!ids.length) return new Map();
     return this.partnersService.refsByIds(ids);
+  }
+
+  /**
+   * The applicant-review tier: the poster, or anyone with standing (owner,
+   * co-owner, mod) in the community the opportunity is attributed to. Shared
+   * by the signups roster and the accept/decline decision so the two can
+   * never drift. `action` completes the 403 message ("Only the poster or a
+   * community organiser can <action> this opportunity").
+   */
+  private async assertCanManageApplicants(
+    opportunity: VolunteerOpportunity,
+    userId: string,
+    action: string,
+  ): Promise<void> {
+    if (opportunity.posterId === userId) return;
+    if (
+      opportunity.communityId &&
+      (await this.communityMembership.isOwnerOrMod(
+        opportunity.communityId,
+        userId,
+      ))
+    ) {
+      return;
+    }
+    throw new ForbiddenException(
+      `Only the poster or a community organiser can ${action} this opportunity`,
+    );
   }
 
   /** Resolves a `communitySlug` to a `community_id`, asserting the given

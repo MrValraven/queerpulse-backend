@@ -213,6 +213,23 @@ export class CommunityMembershipService {
   }
 
   /**
+   * Every community id the given user holds STANDING in (owner, co-owner, or
+   * mod), as opposed to `communityIdsForUser`'s full roster. Backs
+   * volunteering's community co-manage tier
+   * (`VolunteeringService.listMine` and the signups roster/decide guards):
+   * an opportunity attributed to a community can only have been attributed
+   * by someone with standing there (`resolveCommunityId` asserts it), so the
+   * same tier is what may review its applicants.
+   */
+  async ownerOrModCommunityIdsForUser(userId: string): Promise<string[]> {
+    const memberships = await this.members.find({
+      where: { userId, role: In([...STANDING_ROLES]) },
+      select: { communityId: true },
+    });
+    return memberships.map((membership) => membership.communityId);
+  }
+
+  /**
    * Resolve a community id straight to its slug — a plain display lookup, no
    * roster/archived check. Backs `EventDetail.communitySlug`
    * (`EventsService.buildDetail`): the edit UI needs the slug (not just the

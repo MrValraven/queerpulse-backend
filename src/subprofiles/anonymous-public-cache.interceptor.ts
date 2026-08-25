@@ -6,6 +6,10 @@ import {
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { Observable } from 'rxjs';
+import {
+  PUBLIC_READ_CACHE,
+  PUBLIC_READ_CDN_CACHE,
+} from '../common/public-read-cache';
 
 // Public persona reads (`by-handle/:handle`, the nested
 // `:slug/subprofiles/:subslug` GET) are best-effort authenticated: a signed-out
@@ -13,12 +17,17 @@ import { Observable } from 'rxjs';
 // member may get a per-viewer variant (block/mute gating, owner signals). So the
 // response is only CDN/shared-cacheable when the request is ANONYMOUS.
 //
-// This interceptor sets `Cache-Control` accordingly:
-//   - anonymous (`req.user` absent): `public, s-maxage=60,
-//     stale-while-revalidate=300` — a shared cache may hold the hot public view
-//     for a minute and serve it stale for five while it revalidates.
-//   - authenticated: `private, no-store` — never let a shared cache keep a
-//     per-viewer variant.
+// This interceptor sets the cache headers accordingly:
+//   - anonymous (`req.user` absent): the shared `PUBLIC_READ_CACHE` /
+//     `PUBLIC_READ_CDN_CACHE` pair, so a shared cache may hold the hot public
+//     view for a minute and serve it stale for five while it revalidates,
+//     while the visitor's OWN browser cache is given no stale window. See
+//     `common/public-read-cache.ts`: the stale window used to reach browsers
+//     too, which meant a persona owner could edit their page and still be
+//     shown the pre-edit copy until their next load.
+//   - authenticated: `private, no-store` on both headers, so neither a shared
+//     cache nor a CDN reading the specific header can keep a per-viewer
+//     variant.
 //
 // Guards run before interceptors (see `app.module.ts` and
 // `storage-key-ownership.interceptor.ts`), so `req.user` — populated by the
@@ -33,8 +42,6 @@ import { Observable } from 'rxjs';
 // `files.controller.ts`), which is why the header is stated explicitly rather
 // than assumed. Naming the header also keeps the authenticated `no-store`
 // branch honest for any intermediary that caches despite it.
-const ANONYMOUS_CACHE_CONTROL =
-  'public, s-maxage=60, stale-while-revalidate=300';
 const AUTHENTICATED_CACHE_CONTROL = 'private, no-store';
 const VARY_ON_SESSION = 'Cookie';
 
@@ -48,7 +55,11 @@ export class AnonymousPublicCacheInterceptor implements NestInterceptor {
       const response = context.switchToHttp().getResponse<Response>();
       response.setHeader(
         'Cache-Control',
-        request.user ? AUTHENTICATED_CACHE_CONTROL : ANONYMOUS_CACHE_CONTROL,
+        request.user ? AUTHENTICATED_CACHE_CONTROL : PUBLIC_READ_CACHE,
+      );
+      response.setHeader(
+        'CDN-Cache-Control',
+        request.user ? AUTHENTICATED_CACHE_CONTROL : PUBLIC_READ_CDN_CACHE,
       );
       // `res.vary()` APPENDS rather than replacing, so the `Vary: Origin` the
       // CORS layer already set survives alongside it.

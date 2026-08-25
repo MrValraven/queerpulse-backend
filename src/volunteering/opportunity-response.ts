@@ -154,9 +154,10 @@ export function toVolunteerSignup(
   };
 }
 
-/** One row of `GET /volunteering/mine` — an opportunity the viewer posted,
- *  annotated with pending/accepted applicant counts for the manage-applicants
- *  dashboard's opportunity list. */
+/** One row of `GET /volunteering/mine`: an opportunity the viewer posted, or
+ *  one attributed to a community they own or moderate, annotated with
+ *  pending/accepted applicant counts for the manage-applicants dashboard's
+ *  opportunity list. */
 export interface MyOpportunitySummary {
   slug: string;
   role: string;

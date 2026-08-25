@@ -20,6 +20,10 @@ import {
 import { Public } from '../auth/decorators/public.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
+import {
+  PUBLIC_READ_CACHE,
+  PUBLIC_READ_CDN_CACHE,
+} from '../common/public-read-cache';
 import { DirectoryService } from './directory.service';
 import { AskListingPublicQuestionDto } from './dto/ask-listing-public-question.dto';
 import { CreateEditSuggestionDto } from './dto/create-edit-suggestion.dto';
@@ -51,14 +55,16 @@ import {
  * `spaces` is a static segment declared before the `:slug` detail route (added
  * in a later sub-project) so route matching resolves it literally.
  *
- * Every read here carries a positive `Cache-Control` (AUDIT-2026-07-30.md §I
+ * Every read here carries a positive cache header (AUDIT-2026-07-30.md §I
  * "No CDN cache headers on public GETs"): none of these responses vary by
  * caller (no `@CurrentUser()`, no session-scoped filtering), so Vercel's CDN
  * can answer repeat anonymous requests without invoking the Function or
  * touching Postgres at all for up to 60s, then serve one more stale response
  * while revalidating in the background for up to 5 more minutes (see
- * `caching-and-cost.md`). The write routes below stay uncached (POST/PATCH/
- * DELETE are never cached regardless).
+ * `caching-and-cost.md`). That stale window is addressed to the CDN ALONE, via
+ * `CDN-Cache-Control`: see `common/public-read-cache.ts` for why a browser
+ * must never be given it. The write routes stay uncached (POST/PATCH/DELETE are
+ * never cached regardless).
  *
  * That caching is also why no response here carries a per-caller field. A CDN
  * hit is served to everybody from one stored copy, so a "have I voted on this
@@ -79,7 +85,8 @@ export class DirectoryController {
   // Host page "Partner spaces" — live listings flagged as partner venues.
   @Public()
   @Get('spaces')
-  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({ summary: 'List live listings flagged as partner venues' })
   @ApiOkResponse({ description: 'The partner spaces.' })
   listPartnerSpaces() {
@@ -91,7 +98,8 @@ export class DirectoryController {
   // `ListDirectoryQuery.page`'s doc comment).
   @Public()
   @Get()
-  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({ summary: 'List the public directory of live listings' })
   @ApiOkResponse({
     description:
@@ -106,7 +114,8 @@ export class DirectoryController {
   // Public Safe Spaces page — verified + removed safe spaces with hero stats.
   @Public()
   @Get('safe-spaces')
-  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({
     summary: 'List verified and removed safe spaces with hero stats',
   })
@@ -118,7 +127,8 @@ export class DirectoryController {
   // Public Safe Space detail (verified or removed).
   @Public()
   @Get('safe-spaces/:slug')
-  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({ summary: 'Get a safe space (verified or removed) by slug' })
   @ApiOkResponse({ description: 'The safe-space detail.' })
   @ApiNotFoundResponse({ description: 'No safe space with that slug.' })
@@ -133,7 +143,8 @@ export class DirectoryController {
   // unknown/inactive member yields an empty array, not a 404.
   @Public()
   @Get('by-member/:slug')
-  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({
     summary: "List live listings owned by a member's profile slug",
   })
@@ -149,7 +160,8 @@ export class DirectoryController {
   // so route matching resolves those literally rather than as `:slug`.
   @Public()
   @Get(':slug')
-  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({ summary: 'Get a live directory listing by slug' })
   @ApiOkResponse({ description: 'The directory detail.' })
   @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
@@ -160,7 +172,8 @@ export class DirectoryController {
   // Public: paginated reviews for a listing.
   @Public()
   @Get(':slug/reviews')
-  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({ summary: 'List paginated reviews for a live listing' })
   @ApiOkResponse({ description: 'A page of reviews.' })
   @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
@@ -280,7 +293,8 @@ export class DirectoryController {
   // Cached like every other read here — it varies by listing, never by caller.
   @Public()
   @Get(':slug/questions')
-  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({ summary: 'List public questions and answers for a listing' })
   @ApiOkResponse({ description: 'A page of questions with answers inline.' })
   @ApiNotFoundResponse({ description: 'No live listing with that slug.' })

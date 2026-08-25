@@ -32,6 +32,10 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
+import {
+  PUBLIC_READ_CACHE,
+  PUBLIC_READ_CDN_CACHE,
+} from '../common/public-read-cache';
 
 // Public marketing content — the For Organisations page is reachable logged-out,
 // so the tier list opts out of auth (mirrors PlatformStatusController /
@@ -46,7 +50,8 @@ export class OrgTiersController {
   // AUDIT-2026-07-30.md §I "No CDN cache headers on public GETs" /
   // `caching-and-cost.md`.
   @Get()
-  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({ summary: 'List published organisation tiers' })
   @ApiOkResponse({ description: 'Published tiers in display order.' })
   list() {

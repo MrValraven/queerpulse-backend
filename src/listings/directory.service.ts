@@ -586,13 +586,8 @@ export class DirectoryService {
    * `askerId`. One `IN (...)` query, never N+1 — the same shape as
    * `resolveReviewAuthors`, and it exposes the same two fields and no others.
    *
-   * It differs from `resolveReviewAuthors` in two respects, both deliberate:
-   * the avatar is resolved through `toImageUrl`, and it honours the member's
-   * own `photoVisible` switch. A raw column value is a bare storage key for
-   * every member who UPLOADED their photo rather than arriving with a Google
-   * one, and a bare key does not render; and a member who has turned their face
-   * off should not have it appear next to their name here. Both are what
-   * `toMemberRef` already does for every other cross-domain member reference.
+   * The avatar goes through `DirectoryService.publicAvatarUrl`, like every
+   * other member reference this service resolves.
    */
   private async resolveQuestionAskers(
     questions: ListingPublicQuestion[],
@@ -614,9 +609,7 @@ export class DirectoryService {
         profile.userId,
         {
           slug: profile.slug,
-          avatarUrl: profile.photoVisible
-            ? toImageUrl(profile.avatarUrl)
-            : null,
+          avatarUrl: DirectoryService.publicAvatarUrl(profile),
         },
       ]),
     );
@@ -664,6 +657,26 @@ export class DirectoryService {
   }
 
   /**
+   * The publicly renderable avatar for any member reference on a directory
+   * surface (listing owner, review author, question asker).
+   *
+   * A raw `profiles.avatarUrl` column value is a bare STORAGE KEY for every
+   * member who UPLOADED their photo (only a Google sign-in leaves an absolute
+   * URL there), and a bare key renders as a broken relative image on the
+   * client. `toImageUrl` turns it into the `/files/:key` URL the browser can
+   * actually load. It also honours the member's own `photoVisible` switch, so
+   * someone who turned their face off does not have it reappear here. This is
+   * the same contract `toMemberRef` applies to every other cross-domain member
+   * reference.
+   */
+  private static publicAvatarUrl(profile: {
+    avatarUrl: string | null;
+    photoVisible: boolean;
+  }): string | null {
+    return profile.photoVisible ? toImageUrl(profile.avatarUrl) : null;
+  }
+
+  /**
    * The listing owner's public profile slug + avatar for the "Who runs it"
    * card ("View profile" deep link + real photo) — but only when they linked
    * their profile (`linkToProfile`) AND their chosen visibility exposes their
@@ -683,11 +696,11 @@ export class DirectoryService {
     }
     const profile = await this.profiles.findOne({
       where: { userId: listing.ownerId },
-      select: { slug: true, avatarUrl: true },
+      select: { slug: true, avatarUrl: true, photoVisible: true },
     });
     return {
       slug: profile?.slug ?? null,
-      avatarUrl: profile?.avatarUrl ?? null,
+      avatarUrl: profile ? DirectoryService.publicAvatarUrl(profile) : null,
     };
   }
 
@@ -711,12 +724,15 @@ export class DirectoryService {
     if (reviewerIds.length === 0) return new Map();
     const profiles = await this.profiles.find({
       where: { userId: In(reviewerIds) },
-      select: { userId: true, slug: true, avatarUrl: true },
+      select: { userId: true, slug: true, avatarUrl: true, photoVisible: true },
     });
     return new Map(
       profiles.map((profile) => [
         profile.userId,
-        { slug: profile.slug, avatarUrl: profile.avatarUrl },
+        {
+          slug: profile.slug,
+          avatarUrl: DirectoryService.publicAvatarUrl(profile),
+        },
       ]),
     );
   }
@@ -869,7 +885,12 @@ export class DirectoryService {
     // so the freshly-returned row is immediately clickable + shows their photo.
     return toReviewDTO(
       saved,
-      profile ? { slug: profile.slug, avatarUrl: profile.avatarUrl } : null,
+      profile
+        ? {
+            slug: profile.slug,
+            avatarUrl: DirectoryService.publicAvatarUrl(profile),
+          }
+        : null,
     );
   }
 
@@ -965,11 +986,16 @@ export class DirectoryService {
 
     const profile = await this.profiles.findOne({
       where: { userId },
-      select: { slug: true, avatarUrl: true },
+      select: { slug: true, avatarUrl: true, photoVisible: true },
     });
     return toReviewDTO(
       saved,
-      profile ? { slug: profile.slug, avatarUrl: profile.avatarUrl } : null,
+      profile
+        ? {
+            slug: profile.slug,
+            avatarUrl: DirectoryService.publicAvatarUrl(profile),
+          }
+        : null,
     );
   }
 
@@ -1224,9 +1250,7 @@ export class DirectoryService {
       profile
         ? {
             slug: profile.slug,
-            avatarUrl: profile.photoVisible
-              ? toImageUrl(profile.avatarUrl)
-              : null,
+            avatarUrl: DirectoryService.publicAvatarUrl(profile),
           }
         : null,
     );

@@ -25,6 +25,8 @@ import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { CreateArticleCommentDto } from './dto/create-article-comment.dto';
 import { CreateCorrectionDto } from './dto/create-correction.dto';
 import { CreateLetterDto } from './dto/create-letter.dto';
+import { AssignIssueDto } from './dto/assign-issue.dto';
+import { CreateIssueDto } from './dto/create-issue.dto';
 import { CreatePieceDto } from './dto/create-piece.dto';
 import { CreatePieceMessageDto } from './dto/create-piece-message.dto';
 import { CreatePitchDto } from './dto/create-pitch.dto';
@@ -76,6 +78,7 @@ import {
   CurrentIssueSummary,
   DeskSummary,
   IssueProductionResponse,
+  IssueSummaryResponse,
   LetterResponse,
   MagazineEditorResponse,
   MagazineNotificationResponse,
@@ -1373,6 +1376,163 @@ export class MagazinePieceService {
   }
 
   /**
+   * Every issue, newest first, for the desk's issue switcher and the
+   * new-issue modal's suggested next number. `filled` is that issue's
+   * assigned-piece count; `slots` is the shared section-target sum (the same
+   * value for every issue, so the sections are read once, never per issue).
+   *
+   * Piece counts come from ONE grouped query rather than a `count()` per
+   * issue — the switcher renders the whole archive, and an issue-per-query
+   * loop would grow linearly with every issue ever shipped.
+   */
+  async listIssuesForDesk(): Promise<IssueSummaryResponse[]> {
+    const [issues, sections] = await Promise.all([
+      this.issues.find({ order: { number: 'DESC' } }),
+      this.sections.find(),
+    ]);
+    if (issues.length === 0) {
+      return [];
+    }
+
+    const slots = sections.reduce(
+      (total, section) => total + section.target,
+      0,
+    );
+
+    const countRows = await this.pieces
+      .createQueryBuilder('piece')
+      .select('piece.issueId', 'issueId')
+      .addSelect('COUNT(*)', 'filled')
+      .where('piece.issueId IN (:...issueIds)', {
+        issueIds: issues.map((issue) => issue.id),
+      })
+      .groupBy('piece.issueId')
+      .getRawMany<{ issueId: string; filled: string }>();
+    // `COUNT(*)` comes back as a string from `pg` (bigint), never a number.
+    const filledByIssueId = new Map(
+      countRows.map((row) => [row.issueId, Number(row.filled)]),
+    );
+
+    return issues.map((issue) => ({
+      id: issue.id,
+      number: issue.number,
+      title: issue.title,
+      theme: issue.theme,
+      publishedOn: issue.publishedOn,
+      filled: filledByIssueId.get(issue.id) ?? 0,
+      slots,
+    }));
+  }
+
+  /**
+   * Creates an issue from the desk's "New issue" modal. `number` arrives
+   * already zero-padded by `CreateIssueDto`'s `@Transform`, so the uniqueness
+   * check and the stored value agree on the same normalized form ("1" and
+   * "01" are the same issue, and only one of them can exist).
+   *
+   * The production-only fields (`runOrder`, `digest`, `coverlines`,
+   * `coverUrl`) are left at their column defaults: they belong to the
+   * issue-production page, and pre-filling them here would give an empty
+   * issue a cover checklist that looks half-done.
+   */
+  async createIssue(
+    dto: CreateIssueDto,
+    actorId: string,
+  ): Promise<IssueSummaryResponse> {
+    const existing = await this.issues.findOne({
+      where: { number: dto.number },
+    });
+    if (existing) {
+      throw new ConflictException(`Issue ${dto.number} already exists`);
+    }
+
+    const issue = this.issues.create({
+      number: dto.number,
+      title: dto.title,
+      theme: dto.theme,
+      publishedOn: dto.publishedOn,
+      dek: dto.dek ?? '',
+      coverUrl: null,
+    });
+    await this.issues.save(issue);
+
+    this.logger.log(
+      `Magazine issue ${issue.number} created by user ${actorId}`,
+    );
+
+    const sections = await this.sections.find();
+    return {
+      id: issue.id,
+      number: issue.number,
+      title: issue.title,
+      theme: issue.theme,
+      publishedOn: issue.publishedOn,
+      filled: 0,
+      slots: sections.reduce((total, section) => total + section.target, 0),
+    };
+  }
+
+  /**
+   * Moves a batch of pieces onto one issue, or (with `issueId: null`) detaches
+   * them back to the unassigned pool. Backs the desk's bulk-assign bar.
+   *
+   * One `UPDATE` for the whole batch instead of a save-per-piece: the batch
+   * either lands or does not, so a half-assigned selection can never leave the
+   * desk showing some rows moved and some not. The per-piece audit events are
+   * written afterwards in one `save()` of the whole array.
+   *
+   * Unknown piece ids are ignored rather than rejected — a stale desk tab can
+   * hold a selection containing a piece another editor has since deleted, and
+   * failing the entire batch over one dead row would be worse than assigning
+   * the rest. The count of rows actually moved is returned so the caller can
+   * report what happened.
+   */
+  async assignPiecesToIssue(
+    dto: AssignIssueDto,
+    actorId: string,
+  ): Promise<{ assigned: number; issueNumber: string | null }> {
+    let issue: MagazineIssue | null = null;
+    if (dto.issueId !== null) {
+      issue = await this.issues.findOne({ where: { id: dto.issueId } });
+      if (!issue) {
+        throw new NotFoundException('Issue not found');
+      }
+    }
+
+    const pieces = await this.pieces.find({
+      where: { id: In(dto.pieceIds) },
+    });
+    // Already on the target issue: skip, so a re-run of the same bulk action
+    // does not write a second identical audit event per piece.
+    const movingPieces = pieces.filter(
+      (piece) => piece.issueId !== (issue?.id ?? null),
+    );
+    if (movingPieces.length === 0) {
+      return { assigned: 0, issueNumber: issue?.number ?? null };
+    }
+
+    await this.pieces.update(
+      { id: In(movingPieces.map((piece) => piece.id)) },
+      { issueId: issue?.id ?? null },
+    );
+
+    const events = movingPieces.map((piece) =>
+      this.pieceEvents.create({
+        pieceId: piece.id,
+        actorId,
+        action: issue ? 'issue_assigned' : 'issue_detached',
+        detail: issue ? `issue ${issue.number}` : null,
+      }),
+    );
+    await this.pieceEvents.save(events);
+
+    return {
+      assigned: movingPieces.length,
+      issueNumber: issue?.number ?? null,
+    };
+  }
+
+  /**
    * The editor desk's archive search (Magazine Desk Phase 7, Task B1):
    * published articles and decks (`publishedAt IS NOT NULL`) whose title,
    * byline, or tags match `query` — an empty `query` skips the text filter
@@ -1638,10 +1798,27 @@ export class MagazinePieceService {
           const article = await articleRepository.findOne({
             where: { id: piece.articleId },
           });
-          if (article && article.publishedAt === null) {
-            article.publishedAt = publishedAt;
-            await articleRepository.save(article);
-            published = true;
+          if (article) {
+            // Stamp the issue onto the article itself, not only the piece.
+            // `magazine_piece` is desk-side workflow state that no public
+            // read touches; the public issue page resolves its contents from
+            // `magazine_article.issueId` (see `MagazineService.getIssueByNumber`).
+            // Without this, shipping published every article and left the
+            // issue's public contents empty. Applied even when the article is
+            // already published, so pulling a web-only piece into an issue
+            // still files it under that issue.
+            const needsIssueStamp = article.issueId !== issue.id;
+            const needsPublishStamp = article.publishedAt === null;
+            if (needsPublishStamp) {
+              article.publishedAt = publishedAt;
+            }
+            if (needsIssueStamp) {
+              article.issueId = issue.id;
+            }
+            if (needsPublishStamp || needsIssueStamp) {
+              await articleRepository.save(article);
+            }
+            published = needsPublishStamp;
           }
         }
 

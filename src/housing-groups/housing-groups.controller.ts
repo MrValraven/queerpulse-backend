@@ -34,6 +34,10 @@ import { CreateGroupJoinRequestDto } from './dto/create-group-join-request.dto';
 import { CreateGroupListingDto } from './dto/create-group-listing.dto';
 import { UpdateGroupListingDto } from './dto/update-group-listing.dto';
 import { HousingGroupsService } from './housing-groups.service';
+import {
+  PUBLIC_READ_CACHE,
+  PUBLIC_READ_CDN_CACHE,
+} from '../common/public-read-cache';
 
 /**
  * Public directory of vetted housing groups. Static segments (`listings`,
@@ -55,7 +59,8 @@ export class HousingGroupsController {
 
   @Public()
   @Get()
-  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({ summary: 'List published vetted housing groups' })
   @ApiOkResponse({ description: 'All published groups.' })
   listGroups() {
@@ -64,7 +69,8 @@ export class HousingGroupsController {
 
   @Public()
   @Get(':slug')
-  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({ summary: 'Get one published group by slug' })
   @ApiOkResponse({ description: 'The group.' })
   @ApiNotFoundResponse({ description: 'No published group with that slug.' })

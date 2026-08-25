@@ -2,6 +2,10 @@ import { Controller, Get, Header } from '@nestjs/common';
 import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Public } from '../auth/decorators/public.decorator';
 import { PressKitService } from './press-kit.service';
+import {
+  PUBLIC_READ_CACHE,
+  PUBLIC_READ_CDN_CACHE,
+} from '../common/public-read-cache';
 
 // Public, read-only payload backing the `/about/press-kit` page. `@Public()`
 // is required: `JwtAuthGuard` is bound globally via `APP_GUARD`, so without it
@@ -18,7 +22,8 @@ export class PressKitController {
 
   @Public()
   @Get()
-  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({
     summary:
       'Get the public press kit: derived headline facts, press coverage, and press contacts.',

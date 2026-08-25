@@ -56,9 +56,13 @@ export class VolunteeringController {
 
   @Get('mine')
   @ApiOperation({
-    summary: 'List opportunities you posted, with applicant counts',
+    summary:
+      'List opportunities you can review applicants for, with applicant counts',
   })
-  @ApiOkResponse({ description: 'Opportunities you posted.' })
+  @ApiOkResponse({
+    description:
+      'Opportunities you posted, plus those attributed to a community you own or moderate.',
+  })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })

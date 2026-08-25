@@ -46,6 +46,10 @@ import {
   ApiUnauthorizedResponse,
   ApiUnprocessableEntityResponse,
 } from '@nestjs/swagger';
+import {
+  PUBLIC_READ_CACHE,
+  PUBLIC_READ_CDN_CACHE,
+} from '../common/public-read-cache';
 
 // `ActiveMemberGuard` is bound at the CLASS level so no handler can silently
 // miss it — previously `GET mine` and `GET :id` were only JWT-protected and
@@ -133,7 +137,8 @@ export class SubprofilesController {
   @Public()
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Get('public-handles')
-  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({
     summary:
       'List every crawlable persona handle (public, for sitemap/prerender)',

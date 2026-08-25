@@ -33,6 +33,7 @@ import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { StaffRolesGuard } from '../auth/guards/staff-roles.guard';
 import { Feature } from '../common/feature.decorator';
+import { AssignIssueDto } from './dto/assign-issue.dto';
 import { CreateArticleCommentDto } from './dto/create-article-comment.dto';
 import { CreateArticleVersionDto } from './dto/create-article-version.dto';
 import { CreateCorrectionDto } from './dto/create-correction.dto';
@@ -105,6 +106,28 @@ export class AdminMagazinePiecesController {
     @CurrentUser() user: CurrentUserData,
   ) {
     return this.magazinePieces.createPiece(dto, user.userId);
+  }
+
+  // Declared BEFORE `pieces/:id` — Nest matches in declaration order, so the
+  // literal segment would otherwise be swallowed by `:id` and rejected by its
+  // `ParseUUIDPipe` as a malformed piece id.
+  @Patch('pieces/assign-issue')
+  @ApiOperation({
+    summary:
+      'Move a batch of pieces onto one issue, or detach them with `issueId: null`.',
+  })
+  @ApiOkResponse({
+    description:
+      'How many pieces actually moved, and the target issue number (null when detaching). ' +
+      'Pieces already on the target issue and ids that match no piece are skipped, not errors.',
+  })
+  @ApiBadRequestResponse({ description: 'Malformed payload.' })
+  @ApiNotFoundResponse({ description: 'No issue exists for this id.' })
+  assignPiecesToIssue(
+    @Body() dto: AssignIssueDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.magazinePieces.assignPiecesToIssue(dto, user.userId);
   }
 
   @Patch('pieces/:id')

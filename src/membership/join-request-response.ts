@@ -11,10 +11,10 @@ import { JoinRequestFlag } from './join-request-flags';
  *
  * `inviteCode` is a CODE, never a URL: the backend has no business assuming the
  * frontend's origin or route map (`app.frontendUrl` is an allowlist that can
- * legitimately hold apex + www + staging). Approval also fires an automatic
- * invite email (`JoinRequestsService.review` → `join_request_approved`
- * template); the frontend still builds the link from this code too, as a
- * manual backup a reviewer can send by hand if the email doesn't land.
+ * legitimately hold apex + www + staging). The frontend builds the link from
+ * this code, and a reviewer sends it to the applicant by hand: approval
+ * delivers nothing to their inbox, because the platform runs no mail service
+ * for applicants, so this code is the only route an invite has to them.
  */
 export interface JoinRequestView {
   id: string;

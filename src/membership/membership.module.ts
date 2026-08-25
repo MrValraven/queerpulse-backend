@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { UsersModule } from '../users/users.module';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
-import { MailerModule } from '../mailer/mailer.module';
 import { Invite } from './entities/invite.entity';
 import { PlatformJoinRequest } from './entities/join-request.entity';
 import { InvitesController } from './invites.controller';
@@ -17,7 +16,6 @@ import { JoinRequestsService } from './join-requests.service';
     TypeOrmModule.forFeature([Invite, PlatformJoinRequest]),
     UsersModule,
     PlatformSettingsModule,
-    MailerModule,
   ],
   controllers: [
     InvitesController,

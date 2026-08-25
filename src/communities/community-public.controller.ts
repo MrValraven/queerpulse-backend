@@ -9,6 +9,10 @@ import {
 import { Public } from '../auth/decorators/public.decorator';
 import { Feature } from '../common/feature.decorator';
 import { CommunityPublicService } from './community-public.service';
+import {
+  PUBLIC_READ_CACHE,
+  PUBLIC_READ_CDN_CACHE,
+} from '../common/public-read-cache';
 
 /**
  * `GET /communities/:slug/public` — the signed-out teaser behind a shared
@@ -44,7 +48,8 @@ export class CommunityPublicController {
   @Public()
   @Get(':slug/public')
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
-  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({
     summary:
       'The signed-out teaser for a community whose owner opted into public listing.',

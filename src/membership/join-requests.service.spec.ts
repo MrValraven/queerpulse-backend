@@ -4,7 +4,6 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, In, QueryFailedError } from 'typeorm';
@@ -15,7 +14,6 @@ import {
 } from './entities/join-request.entity';
 import { InvitesService } from './invites.service';
 import { JoinRequestsService } from './join-requests.service';
-import { MailerService } from '../mailer/mailer.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -66,8 +64,6 @@ describe('JoinRequestsService', () => {
   let dataSource: { transaction: jest.Mock; getRepository: jest.Mock };
   let manager: { getRepository: jest.Mock };
   let platformSettings: { get: jest.Mock };
-  let mailer: { send: jest.Mock };
-  let config: { getOrThrow: jest.Mock };
 
   beforeEach(async () => {
     qb = {
@@ -138,16 +134,6 @@ describe('JoinRequestsService', () => {
         registrationClosedMessage: null,
       }),
     };
-    // Missing entirely before this task: `review()` has always called
-    // `this.mailer.send(...)` (approval email) and `this.config.getOrThrow(...)`
-    // (approval email's invite URL), but this spec never provided either,
-    // meaning approval-email sending was never actually unit-tested. Added
-    // here so the module can even compile, and so Task 2's decline-email
-    // tests have something to assert against.
-    mailer = { send: jest.fn().mockResolvedValue(undefined) };
-    config = {
-      getOrThrow: jest.fn().mockReturnValue('https://queerpulse.example'),
-    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         JoinRequestsService,
@@ -155,8 +141,6 @@ describe('JoinRequestsService', () => {
         { provide: InvitesService, useValue: invites },
         { provide: DataSource, useValue: dataSource },
         { provide: PlatformSettingsService, useValue: platformSettings },
-        { provide: MailerService, useValue: mailer },
-        { provide: ConfigService, useValue: config },
       ],
     }).compile();
     service = module.get(JoinRequestsService);
@@ -686,21 +670,6 @@ describe('JoinRequestsService', () => {
       expect(txRepo.update).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({ declineReason: 'spam_pattern' }),
-      );
-    });
-
-    it('sends a decline notice email after commit', async () => {
-      txRepo.findOne.mockResolvedValue(pendingRow());
-      await service.review(
-        'r1',
-        'admin-1',
-        PlatformJoinRequestStatus.Declined,
-        'other',
-      );
-      expect(mailer.send).toHaveBeenCalledWith(
-        'sam@example.com',
-        'join_request_declined',
-        { applicantName: 'Sam' },
       );
     });
   });

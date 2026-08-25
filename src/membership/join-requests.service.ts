@@ -7,7 +7,6 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
@@ -27,7 +26,6 @@ import {
   toSubmittedJoinRequestView,
 } from './join-request-response';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
-import { MailerService } from '../mailer/mailer.service';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
 
@@ -64,8 +62,6 @@ export class JoinRequestsService {
     private readonly invitesService: InvitesService,
     private readonly dataSource: DataSource,
     private readonly platformSettings: PlatformSettingsService,
-    private readonly mailer: MailerService,
-    private readonly config: ConfigService,
   ) {}
 
   /**
@@ -343,7 +339,7 @@ export class JoinRequestsService {
     // manager: if minting fails the review rolls back, so there is no
     // "approved but no invite" stuck state for an applicant who has no other
     // way in.
-    const result = await this.dataSource.transaction(async (manager) => {
+    return this.dataSource.transaction(async (manager) => {
       const repo = manager.getRepository(PlatformJoinRequest);
       const current = await repo.findOne({ where: { id } });
       if (!current) {
@@ -407,34 +403,8 @@ export class JoinRequestsService {
       current.reviewedAt = reviewedAt;
       current.inviteId = inviteId;
       current.declineReason = resolvedDeclineReason;
-      return {
-        view: toJoinRequestView(current, inviteCode),
-        applicantName: current.name,
-        applicantEmail: current.email,
-        inviteCode,
-      };
+      return toJoinRequestView(current, inviteCode);
     });
-
-    // Sent AFTER the transaction has committed, never inside it: the approval
-    // has already happened by the time this runs, so a mailer failure here can
-    // only ever mean "approved but the applicant has to be told another way",
-    // never "sent an email for an approval that then rolled back".
-    if (status === PlatformJoinRequestStatus.Approved && result.inviteCode) {
-      await this.sendApprovalEmail(
-        id,
-        result.applicantEmail,
-        result.applicantName,
-        result.inviteCode,
-      );
-    } else if (status === PlatformJoinRequestStatus.Declined) {
-      await this.sendDeclineEmail(
-        id,
-        result.applicantEmail,
-        result.applicantName,
-      );
-    }
-
-    return result.view;
   }
 
   /**
@@ -538,65 +508,5 @@ export class JoinRequestsService {
         r.inviteId ? (codeById.get(r.inviteId) ?? null) : null,
       ),
     );
-  }
-
-  /**
-   * Best-effort notification for a just-approved applicant. The approval is
-   * already committed by the time this runs, so a flaky mailer is logged, not
-   * thrown (mirrors `IntakesService.notifySubmitter` and
-   * `NewsletterService.sendConfirmation`). The admin queue still shows the
-   * invite code/link as a manual fallback either way.
-   *
-   * The failure log names the join-request ID, never the address. An applicant
-   * has no account and no consent record with us, and error-level lines are the
-   * ones most likely to be forwarded off-platform (log explorer, Sentry
-   * breadcrumbs) and retained indefinitely. The id resolves to the address in
-   * one query for anyone who legitimately needs it.
-   */
-  private async sendApprovalEmail(
-    joinRequestId: string,
-    applicantEmail: string,
-    applicantName: string,
-    inviteCode: string,
-  ): Promise<void> {
-    const frontendUrl = this.config.getOrThrow<string>('app.frontendUrl');
-    const inviteUrl = new URL(`/auth/invite/${inviteCode}`, frontendUrl);
-    try {
-      await this.mailer.send(applicantEmail, 'join_request_approved', {
-        applicantName,
-        inviteUrl: inviteUrl.toString(),
-      });
-    } catch (error) {
-      this.logger.error(
-        `Join request ${joinRequestId} approved but the invite email ` +
-          `failed to send: ${String(error)}`,
-      );
-    }
-  }
-
-  /**
-   * Best-effort notification for a just-declined applicant. Mirrors
-   * `sendApprovalEmail`'s shape exactly: sent after the transaction has
-   * committed, logged (not thrown) on failure. Deliberately soft and
-   * generic, with no reason field in the params (P7 decision) — an
-   * applicant never learns which specific reason a reviewer picked. The
-   * failure log names the join-request ID, not the address, for the reason
-   * given on `sendApprovalEmail`.
-   */
-  private async sendDeclineEmail(
-    joinRequestId: string,
-    applicantEmail: string,
-    applicantName: string,
-  ): Promise<void> {
-    try {
-      await this.mailer.send(applicantEmail, 'join_request_declined', {
-        applicantName,
-      });
-    } catch (error) {
-      this.logger.error(
-        `Join request ${joinRequestId} declined but the notice email ` +
-          `failed to send: ${String(error)}`,
-      );
-    }
   }
 }

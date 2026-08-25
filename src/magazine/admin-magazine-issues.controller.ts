@@ -8,7 +8,10 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import {
+  ApiBadRequestResponse,
+  ApiConflictResponse,
   ApiCookieAuth,
+  ApiCreatedResponse,
   ApiForbiddenResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
@@ -24,6 +27,7 @@ import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { StaffRolesGuard } from '../auth/guards/staff-roles.guard';
 import { Feature } from '../common/feature.decorator';
+import { CreateIssueDto } from './dto/create-issue.dto';
 import { UpdateCoverDto } from './dto/update-cover.dto';
 import { UpdateDigestDto } from './dto/update-digest.dto';
 import { UpdateRunOrderDto } from './dto/update-run-order.dto';
@@ -49,6 +53,33 @@ import { MagazinePieceService } from './magazine-piece.service';
 @StaffRoles('magazine_editor')
 export class AdminMagazineIssuesController {
   constructor(private readonly magazinePieces: MagazinePieceService) {}
+
+  @Get()
+  @ApiOperation({
+    summary: 'List every issue for the desk switcher, newest number first.',
+  })
+  @ApiOkResponse({
+    description:
+      "Each issue's id, display number, title, theme, publish date, and slot fill. " +
+      'Distinct from the public `GET /magazine/issues`, which omits `id` and `theme`.',
+  })
+  listIssues() {
+    return this.magazinePieces.listIssuesForDesk();
+  }
+
+  @Post()
+  @ApiOperation({ summary: 'Create a magazine issue.' })
+  @ApiCreatedResponse({ description: 'The created issue.' })
+  @ApiBadRequestResponse({ description: 'The issue payload is invalid.' })
+  @ApiConflictResponse({
+    description: 'An issue already exists with this display number.',
+  })
+  createIssue(
+    @Body() dto: CreateIssueDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.magazinePieces.createIssue(dto, user.userId);
+  }
 
   // Declared BEFORE `:number` — Nest matches routes in declaration order,
   // and `current` would otherwise be swallowed as a `:number` value.

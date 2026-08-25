@@ -1,7 +1,7 @@
 import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -81,6 +81,8 @@ describe('VolunteeringService', () => {
   let communityMembership: {
     assertOwnerOrModBySlug: jest.Mock;
     refsByIds: jest.Mock;
+    ownerOrModCommunityIdsForUser: jest.Mock;
+    isOwnerOrMod: jest.Mock;
   };
   let notificationsService: { create: jest.Mock };
   let managerFindOne: jest.Mock;
@@ -155,6 +157,11 @@ describe('VolunteeringService', () => {
     communityMembership = {
       assertOwnerOrModBySlug: jest.fn().mockResolvedValue('community-1'),
       refsByIds: jest.fn().mockResolvedValue(new Map()),
+      // Default: the viewer holds standing nowhere, so `listMine` stays
+      // poster-scoped and the applicant guards fall through to the poster
+      // check. The community-tier tests override these per case.
+      ownerOrModCommunityIdsForUser: jest.fn().mockResolvedValue([]),
+      isOwnerOrMod: jest.fn().mockResolvedValue(false),
     };
     notificationsService = { create: jest.fn().mockResolvedValue(null) };
     managerFindOne = jest.fn();
@@ -903,7 +910,7 @@ describe('VolunteeringService', () => {
       const res = await service.listMine('poster-1');
 
       expect(opportunities.find).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { posterId: 'poster-1' } }),
+        expect.objectContaining({ where: [{ posterId: 'poster-1' }] }),
       );
       expect(res).toEqual([
         expect.objectContaining({
@@ -917,6 +924,69 @@ describe('VolunteeringService', () => {
     it('returns an empty list for a poster with no opportunities', async () => {
       opportunities.find = jest.fn().mockResolvedValue([]);
       expect(await service.listMine('poster-1')).toEqual([]);
+    });
+
+    it('also matches opportunities of communities the viewer organises', async () => {
+      communityMembership.ownerOrModCommunityIdsForUser.mockResolvedValue([
+        'community-1',
+        'community-2',
+      ]);
+      opportunities.find = jest.fn().mockResolvedValue([]);
+
+      await service.listMine('mod-1');
+
+      expect(opportunities.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: [
+            { posterId: 'mod-1' },
+            { communityId: In(['community-1', 'community-2']) },
+          ],
+        }),
+      );
+    });
+  });
+
+  describe('community organisers reviewing applicants', () => {
+    const communityOpportunity = {
+      id: 'opp-1',
+      slug: 'x',
+      posterId: 'poster-1',
+      communityId: 'community-1',
+    };
+
+    it('lets an owner/mod of the attributed community list signups', async () => {
+      opportunities.findOne.mockResolvedValue(communityOpportunity);
+      communityMembership.isOwnerOrMod.mockResolvedValue(true);
+      signups.find.mockResolvedValue([]);
+
+      await expect(service.listSignups('x', 'mod-1')).resolves.toEqual([]);
+      expect(communityMembership.isOwnerOrMod).toHaveBeenCalledWith(
+        'community-1',
+        'mod-1',
+      );
+    });
+
+    it('still rejects a plain member of the attributed community (403)', async () => {
+      opportunities.findOne.mockResolvedValue(communityOpportunity);
+      communityMembership.isOwnerOrMod.mockResolvedValue(false);
+
+      await expect(service.listSignups('x', 'member-1')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+    });
+
+    it('never consults the roster for an opportunity with no community', async () => {
+      opportunities.findOne.mockResolvedValue({
+        id: 'opp-1',
+        slug: 'x',
+        posterId: 'poster-1',
+        communityId: null,
+      });
+
+      await expect(service.listSignups('x', 'intruder')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(communityMembership.isOwnerOrMod).not.toHaveBeenCalled();
     });
   });
 });

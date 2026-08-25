@@ -25,6 +25,10 @@ import {
   ApiOperation,
   ApiTags,
 } from '@nestjs/swagger';
+import {
+  PUBLIC_READ_CACHE,
+  PUBLIC_READ_CDN_CACHE,
+} from '../common/public-read-cache';
 
 /**
  * Public co-op directory. `coops` is a static segment declared before the
@@ -55,7 +59,8 @@ export class HousingController {
   // `caching-and-cost.md`.
   @Public()
   @Get('coops')
-  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({ summary: 'List published co-ops in the public directory' })
   @ApiOkResponse({ description: 'All published co-ops.' })
   listCoops() {

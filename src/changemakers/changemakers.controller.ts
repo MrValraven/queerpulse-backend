@@ -7,6 +7,10 @@ import {
   ApiOperation,
   ApiTags,
 } from '@nestjs/swagger';
+import {
+  PUBLIC_READ_CACHE,
+  PUBLIC_READ_CDN_CACHE,
+} from '../common/public-read-cache';
 
 // Public, read-only directory backing `ChangemakersPage.tsx` and
 // `ChangemakerStoryPage.tsx`. Only published profiles are exposed here.
@@ -26,7 +30,8 @@ export class ChangemakersController {
 
   @Public()
   @Get()
-  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({
     summary: 'List published changemaker profiles with directory stats.',
   })
@@ -40,7 +45,8 @@ export class ChangemakersController {
 
   @Public()
   @Get(':slug')
-  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @Header('Cache-Control', PUBLIC_READ_CACHE)
+  @Header('CDN-Cache-Control', PUBLIC_READ_CDN_CACHE)
   @ApiOperation({ summary: 'Get a single published changemaker by slug.' })
   @ApiOkResponse({ description: 'The published changemaker profile.' })
   @ApiNotFoundResponse({

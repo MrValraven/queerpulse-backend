@@ -631,10 +631,13 @@ export interface DirectoryCardDTO {
   blurb: string;
   tint: DirectoryTint;
   av: string;
+  /** The submitter's OWN "queer-owned" claim (wizard step 1's `badge`), which
+   * every card renders as a plain "Queer-owned" pill. Unconfirmed by anyone:
+   * read `queerOwnedVerified` below for the moderator-checked version. */
   owned: boolean;
   /** Moderator-verified confirmation of the "queer-owned" badge as it
    * CURRENTLY reads — distinct from `owned` (the member's own self-reported
-   * `linkToProfile` claim). `false` until a moderator explicitly confirms it
+   * claim). `false` until a moderator explicitly confirms it
    * (`PATCH /admin/listings/:ref/queer-owned-verified`), and `false` again
    * once that confirmation passes its re-confirmation date: a badge granted
    * years ago must not go on speaking for a business that may have changed
@@ -684,9 +687,14 @@ export function toDirectoryCard(
     blurb: listing.blurb,
     tint: tintForSlug(listing.slug),
     av: initialsForName(listing.name),
-    // A listing linked to its owner's member profile is a community-owned
-    // ("queer-owned") business; unlinked ones are allied/"friendly" venues.
-    owned: listing.linkToProfile,
+    // The submitter's own answer to "how are you connected to this place?"
+    // (wizard step 1), which is what `badge` holds. NOT `linkToProfile`: that
+    // is a step-4 visibility toggle ("show this listing on my profile"), and
+    // reading it here made a queer-owned business whose owner kept their own
+    // profile out of it read as merely allied, and an allied venue whose
+    // submitter linked their profile read as queer-owned. An empty `badge`
+    // (suggested listings, older rows) claims nothing, so it stays false.
+    owned: listing.badge === 'owned',
     queerOwnedVerified: isQueerOwnedCurrentlyVerified(listing),
     // The "run by <first>" line names the owner, so it follows their chosen
     // visibility — null for `anon`/`role` (where `owner.first` is blank).
