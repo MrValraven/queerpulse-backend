@@ -87,7 +87,7 @@ export class CommunityActivityCounterService {
     // Raw SQL because the statement is an UPDATE ... FROM over a LEFT JOIN of a
     // UNIONed grouped subquery, which TypeORM's query builder cannot express.
     // Every value is bound as a parameter; nothing is interpolated.
-    const result = await this.communities.query(
+    const result = await this.communities.query<unknown>(
       `UPDATE communities AS target
           SET active_this_week = activity.author_count,
               activity_counted_at = $1

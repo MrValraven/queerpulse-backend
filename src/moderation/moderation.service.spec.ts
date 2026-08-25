@@ -63,6 +63,27 @@ function userQbStub() {
   return qb;
 }
 
+/**
+ * `expect.any`/`expect.stringContaining` are typed to return `any` in
+ * @types/jest, which poisons the object-literal position they sit in with
+ * `no-unsafe-assignment`. These narrow the return type to what the field
+ * actually is without changing what runs — still `expect.any`/
+ * `expect.stringContaining` underneath.
+ */
+function matchAnyString(): string {
+  return expect.any(String) as string;
+}
+function matchStringContaining(substring: string): string {
+  return expect.stringContaining(substring) as string;
+}
+
+/** `notificationsCreate.mock.calls[n]` — the real `create(...)` arg tuple. */
+type NotificationsCreateArgs = Parameters<NotificationsService['create']>;
+type NotificationsCreateMock = jest.Mock<
+  ReturnType<NotificationsService['create']>,
+  NotificationsCreateArgs
+>;
+
 const baseReport = (overrides: Partial<Report> = {}): Report => ({
   id: 'report-1',
   subjectType: ReportSubjectType.Post,
@@ -113,7 +134,7 @@ describe('ModerationService', () => {
   let users: { findOne: jest.Mock; createQueryBuilder: jest.Mock };
   let profiles: { findOne: jest.Mock; find: jest.Mock };
   let revokeAllForUser: jest.Mock;
-  let notificationsCreate: jest.Mock;
+  let notificationsCreate: NotificationsCreateMock;
   let applyContentAction: jest.Mock;
   let revertContent: jest.Mock;
   let managerUpdate: jest.Mock;
@@ -155,7 +176,9 @@ describe('ModerationService', () => {
       find: jest.fn().mockResolvedValue([]),
     };
     revokeAllForUser = jest.fn().mockResolvedValue(undefined);
-    notificationsCreate = jest.fn().mockResolvedValue(null);
+    notificationsCreate = jest
+      .fn<ReturnType<NotificationsService['create']>, NotificationsCreateArgs>()
+      .mockResolvedValue(null);
     applyContentAction = jest.fn().mockResolvedValue(undefined);
     // An OVERTURNED appeal now undoes the original takedown (BE-COM-08).
     revertContent = jest.fn().mockResolvedValue(undefined);
@@ -937,7 +960,7 @@ describe('ModerationService', () => {
 
       expect(res.updated).toEqual(['report-1']);
       expect(res.failed).toEqual([
-        { id: 'report-2', reason: expect.stringContaining('already') },
+        { id: 'report-2', reason: matchStringContaining('already') },
       ]);
       expect(reports.save).toHaveBeenCalledTimes(1);
       expect(auditLogs.save).toHaveBeenCalledTimes(1);
@@ -984,7 +1007,7 @@ describe('ModerationService', () => {
         expect.objectContaining({
           source: 'moderation',
           action: 'suspend',
-          expiresAt: expect.any(String),
+          expiresAt: matchAnyString(),
         }),
       ]);
     });
@@ -1015,7 +1038,7 @@ describe('ModerationService', () => {
         {
           source: 'report',
           reportId: 'report-1',
-          reference: expect.any(String),
+          reference: matchAnyString(),
           subjectType: ReportSubjectType.Post,
           outcome: ReportStatus.Resolved,
         },
@@ -1572,7 +1595,7 @@ describe('ModerationService', () => {
         expect(call?.[2]).toEqual(
           expect.objectContaining({
             action: 'suspend',
-            expiresAt: expect.any(String),
+            expiresAt: matchAnyString(),
           }),
         );
       });
@@ -1629,7 +1652,7 @@ describe('ModerationService', () => {
         expect(call?.[2]).toEqual(
           expect.objectContaining({
             action: 'restrict',
-            expiresAt: expect.any(String),
+            expiresAt: matchAnyString(),
           }),
         );
       });
@@ -1847,7 +1870,7 @@ describe('ModerationService', () => {
       expect(res.failed).toEqual([
         {
           id: 'report-2',
-          reason: expect.stringContaining('post'),
+          reason: matchStringContaining('post'),
         },
       ]);
       // The report that DID commit still enforces in full — the failed sibling

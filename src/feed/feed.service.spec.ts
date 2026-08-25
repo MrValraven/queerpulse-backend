@@ -3,6 +3,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { decodeCursor, encodeCursor } from '../common/cursor-pagination';
 import {
   CommunityMember,
+  CommunityNotificationLevel,
   RosterRole,
 } from '../communities/entities/community-member.entity';
 import {
@@ -32,25 +33,59 @@ import { FeedService } from './feed.service';
 // (itself adapted from `moderation.service.spec.ts`), extended with `where`
 // since the "gathering" source also filters on status/visibility before the
 // cursor predicate.
-function qbStub(rows: unknown[] = []) {
-  const qb: Record<string, jest.Mock> = {};
-  for (const m of [
-    'where',
-    'andWhere',
-    'innerJoin',
-    'orderBy',
-    'addOrderBy',
-    'take',
-  ]) {
-    qb[m] = jest.fn().mockReturnValue(qb);
-  }
-  qb.getMany = jest.fn().mockResolvedValue(rows);
+//
+// Typed (rather than `Record<string, jest.Mock>`) for two reasons: a named
+// property isn't subject to `noUncheckedIndexedAccess` the way an index
+// signature is (that's what was making `qb.andWhere` read as "possibly
+// undefined"), and giving each mock's call-argument tuple a real type (not
+// `any`) lets `.mock.calls`/`toHaveBeenCalledWith` assertions narrow safely
+// instead of tripping `no-unsafe-*`.
+interface QbStub {
+  where: jest.Mock<QbStub, unknown[]>;
+  andWhere: jest.Mock<QbStub, unknown[]>;
+  innerJoin: jest.Mock<QbStub, unknown[]>;
+  orderBy: jest.Mock<QbStub, unknown[]>;
+  addOrderBy: jest.Mock<QbStub, unknown[]>;
+  take: jest.Mock<QbStub, unknown[]>;
+  getMany: jest.Mock<Promise<unknown[]>, []>;
+}
+
+function qbStub(rows: unknown[] = []): QbStub {
+  const qb: QbStub = {
+    where: jest.fn<QbStub, unknown[]>(),
+    andWhere: jest.fn<QbStub, unknown[]>(),
+    innerJoin: jest.fn<QbStub, unknown[]>(),
+    orderBy: jest.fn<QbStub, unknown[]>(),
+    addOrderBy: jest.fn<QbStub, unknown[]>(),
+    take: jest.fn<QbStub, unknown[]>(),
+    getMany: jest.fn<Promise<unknown[]>, []>(),
+  };
+  qb.where.mockReturnValue(qb);
+  qb.andWhere.mockReturnValue(qb);
+  qb.innerJoin.mockReturnValue(qb);
+  qb.orderBy.mockReturnValue(qb);
+  qb.addOrderBy.mockReturnValue(qb);
+  qb.take.mockReturnValue(qb);
+  qb.getMany.mockResolvedValue(rows);
   return qb;
 }
 
 const t = (iso: string) => new Date(iso);
 
-const basePost = (overrides: Partial<CommunityPost> = {}): CommunityPost => ({
+// Merges a COMPLETE entity default (typed as the entity itself, so TS
+// rejects a default object missing a field the entity declares) with a
+// caller's overrides. This is what actually catches a missing optional-vs-
+// nullable field at compile time: spreading `Partial<T>` overrides directly
+// over an incomplete literal silently widens any field the literal omitted
+// to `T[K] | undefined`, which then fails the `CommunityPost`/`Community`/
+// `CommunityMember` assignability check on properties typed `X | null`
+// (never `X | null | undefined`) — see the `deletedById`/`frozenReason`/
+// `notificationLevel` columns below.
+function withOverrides<T>(defaults: T, overrides: Partial<T> = {}): T {
+  return { ...defaults, ...overrides };
+}
+
+const communityPostDefaults: CommunityPost = {
   id: 'post-1',
   communityId: 'community-1',
   authorId: 'author-1',
@@ -61,8 +96,11 @@ const basePost = (overrides: Partial<CommunityPost> = {}): CommunityPost => ({
   createdAt: t('2026-07-10T00:00:00.000Z'),
   editedAt: null,
   deletedAt: null,
-  ...overrides,
-});
+  deletedById: null,
+};
+
+const basePost = (overrides: Partial<CommunityPost> = {}): CommunityPost =>
+  withOverrides(communityPostDefaults, overrides);
 
 const baseThread = (overrides: Partial<ForumThread> = {}): ForumThread => ({
   id: 'thread-1',
@@ -112,7 +150,7 @@ const baseEvent = (overrides: Partial<Event> = {}): Event => ({
   ...overrides,
 });
 
-const baseCommunity = (overrides: Partial<Community> = {}): Community => ({
+const communityDefaults: Community = {
   id: 'community-1',
   slug: 'trans-nb-network',
   name: 'Trans & Non-Binary Network',
@@ -134,10 +172,25 @@ const baseCommunity = (overrides: Partial<Community> = {}): Community => ({
   updatedAt: t('2026-01-01T00:00:00.000Z'),
   archivedAt: null,
   frozenAt: null,
+  frozenReason: null,
   isFeatured: false,
   needsOwnerReviewAt: null,
-  ...overrides,
-});
+  rulesVersion: 1,
+  welcomeMessage: null,
+  avatarImageUrl: null,
+  city: null,
+  area: null,
+  isOnline: false,
+  languages: [],
+  activeThisWeek: 0,
+  activityCountedAt: null,
+  isPubliclyListed: false,
+  frozenNote: null,
+  frozenByUserId: null,
+};
+
+const baseCommunity = (overrides: Partial<Community> = {}): Community =>
+  withOverrides(communityDefaults, overrides);
 
 const baseProfile = (overrides: Partial<Profile> = {}): Profile =>
   ({
@@ -166,16 +219,21 @@ const baseMemberProfile = (overrides: Partial<Profile> = {}): Profile =>
 
 /** A `community_members` row as the `community_new_member` source itself
  * would return it (the candidate row IS the membership). */
-const baseCommunityMember = (
-  overrides: Partial<CommunityMember> = {},
-): CommunityMember => ({
+const communityMemberDefaults: CommunityMember = {
   id: 'membership-1',
   communityId: 'community-1',
   userId: 'member-1',
   role: RosterRole.Member,
+  notificationLevel: CommunityNotificationLevel.Announcements,
+  rulesAcceptedAt: null,
+  rulesVersionAccepted: null,
+  welcomeSeenAt: null,
   joinedAt: t('2026-07-10T00:00:00.000Z'),
-  ...overrides,
-});
+};
+
+const baseCommunityMember = (
+  overrides: Partial<CommunityMember> = {},
+): CommunityMember => withOverrides(communityMemberDefaults, overrides);
 
 /** Exercises `FeedService`'s private `fetchCandidates` directly for the
  * `community_new_member` source — same qb-stub mocking every other source's
@@ -277,7 +335,7 @@ describe('FeedService', () => {
     // The feed has no tombstone rendering, so a hidden/removed item would
     // surface with its real title, summary and deep link — the takedown has to
     // be enforced here exactly as it is on each source's own browse surface.
-    const predicateOf = (qb: Record<string, jest.Mock>, needle: string) =>
+    const predicateOf = (qb: QbStub, needle: string) =>
       qb.andWhere.mock.calls.find(
         (call) => typeof call[0] === 'string' && call[0].includes(needle),
       );
@@ -761,15 +819,24 @@ describe('FeedService', () => {
         }
       ).toFeedItems(candidates);
 
+      // Split from a single nested
+      // `expect.objectContaining({ ..., actor: expect.objectContaining(...) })`:
+      // `@types/jest` types `objectContaining<E>(obj: E): any`, so the inner
+      // call's `any` flowing into the outer literal's `actor:` property (an
+      // object-literal property assignment, unlike the bare array element
+      // below) trips `no-unsafe-assignment` — and casting that `any` away
+      // trips `no-unnecessary-type-assertion` right back, since `any` is
+      // already assignable to the cast target without one. Asserting
+      // `actor.handle` directly checks the exact same thing.
       expect(items).toEqual([
         expect.objectContaining({
           id: 'membership-2',
           type: 'new_member',
           summary: 'Joined Trans & Non-Binary Network',
           link: '/profile/bilal-kaya',
-          actor: expect.objectContaining({ handle: 'bilal-kaya' }),
         }),
       ]);
+      expect(items[0]?.actor?.handle).toBe('bilal-kaya');
     });
   });
 

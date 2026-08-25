@@ -81,12 +81,26 @@ function uniqueViolation(): Error & { code: string } {
 // The rating aggregate's query-builder stub: chainable, resolving to the
 // "no recommendations yet" raw row by default. Tests that need a rating
 // override `getRawOne`.
-const ratingQbStub = () => {
-  const qb: Record<string, jest.Mock> = {};
-  for (const method of ['select', 'addSelect', 'where']) {
-    qb[method] = jest.fn().mockReturnValue(qb);
-  }
-  qb.getRawOne = jest.fn().mockResolvedValue({ average: null, count: '0' });
+// Declared with the exact method shape (rather than a `Record<string,
+// jest.Mock>` index signature) so `ratingQb.getRawOne.mockResolvedValue(...)`
+// doesn't see `noUncheckedIndexedAccess`'s `| undefined`.
+type RatingQueryBuilderStub = {
+  select: jest.Mock;
+  addSelect: jest.Mock;
+  where: jest.Mock;
+  getRawOne: jest.Mock;
+};
+
+const ratingQbStub = (): RatingQueryBuilderStub => {
+  const qb: RatingQueryBuilderStub = {
+    select: jest.fn(),
+    addSelect: jest.fn(),
+    where: jest.fn(),
+    getRawOne: jest.fn().mockResolvedValue({ average: null, count: '0' }),
+  };
+  qb.select.mockReturnValue(qb);
+  qb.addSelect.mockReturnValue(qb);
+  qb.where.mockReturnValue(qb);
   return qb;
 };
 
@@ -110,6 +124,8 @@ describe('LandlordsService', () => {
     create: jest.Mock;
     save: jest.Mock;
     remove: jest.Mock;
+    delete: jest.Mock;
+    createQueryBuilder: jest.Mock;
   };
   let introRequests: {
     find: jest.Mock;

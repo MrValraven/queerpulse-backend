@@ -97,8 +97,8 @@ describe('MagazineService', () => {
       findOne: jest.fn(),
       // `create` echoes its input like the real TypeORM repository, so the
       // service's ownership check has run before anything is persisted.
-      create: jest.fn((entity) => entity),
-      save: jest.fn(async (entity) => entity),
+      create: jest.fn((entity: Partial<MagazineDeck>) => entity),
+      save: jest.fn(async (entity: Partial<MagazineDeck>) => entity),
     };
 
     const module: TestingModule = await Test.createTestingModule({

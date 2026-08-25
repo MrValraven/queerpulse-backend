@@ -136,7 +136,7 @@ describe('LandingService', () => {
     save: jest.Mock;
     update: jest.Mock;
   };
-  let dataSource: { transaction: jest.Mock };
+  let dataSource: { transaction: jest.Mock; query: jest.Mock };
 
   beforeEach(async () => {
     landingFeatures = {

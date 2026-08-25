@@ -54,14 +54,14 @@ function isBootNoise(optionalParams: unknown[]): boolean {
  */
 export function withQuietBootLogging(delegate: LoggerService): LoggerService {
   const quiet: LoggerService = {
-    log(message: any, ...optionalParams: any[]): void {
+    log(message: unknown, ...optionalParams: unknown[]): void {
       if (isBootNoise(optionalParams)) return;
       delegate.log(message, ...optionalParams);
     },
-    warn(message: any, ...optionalParams: any[]): void {
+    warn(message: unknown, ...optionalParams: unknown[]): void {
       delegate.warn(message, ...optionalParams);
     },
-    error(message: any, ...optionalParams: any[]): void {
+    error(message: unknown, ...optionalParams: unknown[]): void {
       delegate.error(message, ...optionalParams);
     },
   };
@@ -72,17 +72,17 @@ export function withQuietBootLogging(delegate: LoggerService): LoggerService {
   // unconditionally would make Nest believe a level is supported and call into
   // an undefined method.
   if (delegate.fatal) {
-    quiet.fatal = (message: any, ...optionalParams: any[]): void => {
+    quiet.fatal = (message: unknown, ...optionalParams: unknown[]): void => {
       delegate.fatal?.(message, ...optionalParams);
     };
   }
   if (delegate.debug) {
-    quiet.debug = (message: any, ...optionalParams: any[]): void => {
+    quiet.debug = (message: unknown, ...optionalParams: unknown[]): void => {
       delegate.debug?.(message, ...optionalParams);
     };
   }
   if (delegate.verbose) {
-    quiet.verbose = (message: any, ...optionalParams: any[]): void => {
+    quiet.verbose = (message: unknown, ...optionalParams: unknown[]): void => {
       delegate.verbose?.(message, ...optionalParams);
     };
   }

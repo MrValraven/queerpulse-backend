@@ -33,7 +33,7 @@ describe('EventCohostInvitesService', () => {
   let service: EventCohostInvitesService;
   let invites: {
     findOne: jest.Mock;
-    save: jest.Mock;
+    save: jest.Mock<EventCohostInvite, [EventCohostInvite]>;
     createQueryBuilder: jest.Mock;
     manager: { transaction: jest.Mock };
   };
@@ -63,7 +63,7 @@ describe('EventCohostInvitesService', () => {
 
     invites = {
       findOne: jest.fn(),
-      save: jest.fn((invite: unknown) => invite),
+      save: jest.fn((invite: EventCohostInvite) => invite),
       createQueryBuilder: jest.fn(() => insertBuilder),
       // `respond` writes the invite status and the cohost roster row in ONE
       // transaction. The stub runs the callback with a manager whose `save`
@@ -73,7 +73,7 @@ describe('EventCohostInvitesService', () => {
         transaction: jest.fn(
           async (runInTransaction: (manager: unknown) => Promise<unknown>) =>
             runInTransaction({
-              save: (_entity: unknown, entityLike: unknown) =>
+              save: (_entity: unknown, entityLike: EventCohostInvite) =>
                 invites.save(entityLike),
             }),
         ),

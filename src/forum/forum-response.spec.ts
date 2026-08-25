@@ -2,20 +2,27 @@ import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
 import { toForumPostResponse, toForumThreadResponse } from './forum-response';
 
+// A COMPLETE default typed as `ForumPost` itself, so TS rejects it outright
+// if it ever omits a field the entity declares — spreading `Partial<ForumPost>`
+// overrides directly over an incomplete literal instead would silently widen
+// any field the literal omitted (e.g. `deletedById`) to `X | undefined`,
+// which fails assignability against the entity's `X | null` column type.
+const forumPostDefaults: ForumPost = {
+  id: 'post-1',
+  threadId: 'thread-1',
+  parentPostId: null,
+  authorId: 'author-1',
+  body: 'hello',
+  voteCount: 0,
+  isOp: false,
+  createdAt: new Date('2026-07-23T10:00:00Z'),
+  editedAt: null,
+  deletedAt: null,
+  deletedById: null,
+};
+
 function makePost(overrides: Partial<ForumPost> = {}): ForumPost {
-  return {
-    id: 'post-1',
-    threadId: 'thread-1',
-    parentPostId: null,
-    authorId: 'author-1',
-    body: 'hello',
-    voteCount: 0,
-    isOp: false,
-    createdAt: new Date('2026-07-23T10:00:00Z'),
-    editedAt: null,
-    deletedAt: null,
-    ...overrides,
-  };
+  return { ...forumPostDefaults, ...overrides };
 }
 
 function makeThread(overrides: Partial<ForumThread> = {}): ForumThread {

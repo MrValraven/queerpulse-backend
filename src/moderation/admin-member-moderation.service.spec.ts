@@ -6,6 +6,16 @@ import { AdminMemberModerationService } from './admin-member-moderation.service'
 
 const now = new Date('2026-08-05T10:00:00.000Z');
 
+/**
+ * `expect.any` is typed to return `any` in @types/jest, which poisons the
+ * object-literal position it sits in with `no-unsafe-assignment`. This
+ * narrows the return type to what it actually stands in for here without
+ * changing what runs — still `expect.any(Date)` underneath.
+ */
+function matchAnyDate(): Date {
+  return expect.any(Date) as Date;
+}
+
 function profileRow(overrides: Partial<Profile> = {}): Profile {
   return {
     userId: 'member-1',
@@ -76,7 +86,7 @@ describe('AdminMemberModerationService', () => {
         expect.objectContaining({
           verified: true,
           verifiedBy: 'admin-1',
-          verifiedAt: expect.any(Date),
+          verifiedAt: matchAnyDate(),
         }),
       );
       expect(audit.writeAuditLog).toHaveBeenCalledWith(

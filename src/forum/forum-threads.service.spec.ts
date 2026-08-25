@@ -24,21 +24,46 @@ import { ForumThreadsService } from './forum-threads.service';
 // A chainable query-builder stub whose terminal `getMany()` resolves to a
 // configurable row list — mirrors `moderation.service.spec.ts`'s `qbStub`,
 // which itself adapts `cursorPaginate`'s terminal-call shape.
-function qbStub(rows: ForumThread[] = []) {
-  const qb: Record<string, jest.Mock> = {};
-  for (const m of [
-    'andWhere',
-    'orderBy',
-    'addOrderBy',
-    'take',
-    'select',
-    'addSelect',
-    'groupBy',
-  ]) {
-    qb[m] = jest.fn().mockReturnValue(qb);
-  }
-  qb.getMany = jest.fn().mockResolvedValue(rows);
-  qb.getRawMany = jest.fn().mockResolvedValue([]);
+//
+// Typed (rather than `Record<string, jest.Mock>`) for two reasons: a named
+// property isn't subject to `noUncheckedIndexedAccess` the way an index
+// signature is (that's what was making `qb.andWhere!` need a non-null
+// assertion), and giving each mock's call-argument tuple a real type (not
+// `any`) lets `.mock.calls`/`toHaveBeenCalledWith` assertions narrow safely
+// instead of tripping `no-unsafe-*`.
+interface QbStub {
+  andWhere: jest.Mock<QbStub, unknown[]>;
+  orderBy: jest.Mock<QbStub, unknown[]>;
+  addOrderBy: jest.Mock<QbStub, unknown[]>;
+  take: jest.Mock<QbStub, unknown[]>;
+  select: jest.Mock<QbStub, unknown[]>;
+  addSelect: jest.Mock<QbStub, unknown[]>;
+  groupBy: jest.Mock<QbStub, unknown[]>;
+  getMany: jest.Mock<Promise<ForumThread[]>, []>;
+  getRawMany: jest.Mock<Promise<unknown[]>, []>;
+}
+
+function qbStub(rows: ForumThread[] = []): QbStub {
+  const qb: QbStub = {
+    andWhere: jest.fn<QbStub, unknown[]>(),
+    orderBy: jest.fn<QbStub, unknown[]>(),
+    addOrderBy: jest.fn<QbStub, unknown[]>(),
+    take: jest.fn<QbStub, unknown[]>(),
+    select: jest.fn<QbStub, unknown[]>(),
+    addSelect: jest.fn<QbStub, unknown[]>(),
+    groupBy: jest.fn<QbStub, unknown[]>(),
+    getMany: jest.fn<Promise<ForumThread[]>, []>(),
+    getRawMany: jest.fn<Promise<unknown[]>, []>(),
+  };
+  qb.andWhere.mockReturnValue(qb);
+  qb.orderBy.mockReturnValue(qb);
+  qb.addOrderBy.mockReturnValue(qb);
+  qb.take.mockReturnValue(qb);
+  qb.select.mockReturnValue(qb);
+  qb.addSelect.mockReturnValue(qb);
+  qb.groupBy.mockReturnValue(qb);
+  qb.getMany.mockResolvedValue(rows);
+  qb.getRawMany.mockResolvedValue([]);
   return qb;
 }
 
@@ -439,7 +464,7 @@ describe('ForumThreadsService', () => {
 
       await service.list('viewer-1', undefined, undefined, undefined);
 
-      const accessCall = qb.andWhere!.mock.calls.find(
+      const accessCall = qb.andWhere.mock.calls.find(
         (call) =>
           typeof call[0] === 'string' && call[0].includes('access_tier'),
       );
@@ -737,7 +762,7 @@ describe('ForumThreadsService', () => {
   describe('counts', () => {
     it('groups by category and sums an all total, honoring the block filter', async () => {
       const qb = qbStub();
-      qb.getRawMany!.mockResolvedValue([
+      qb.getRawMany.mockResolvedValue([
         { category: 'general', count: '4' },
         { category: 'housing', count: '2' },
       ]);
@@ -756,7 +781,7 @@ describe('ForumThreadsService', () => {
 
     it('returns just { all: 0 } when there are no visible threads', async () => {
       const qb = qbStub();
-      qb.getRawMany!.mockResolvedValue([]);
+      qb.getRawMany.mockResolvedValue([]);
       threads.createQueryBuilder.mockReturnValue(qb);
 
       const result = await service.counts('viewer-1', undefined, undefined);

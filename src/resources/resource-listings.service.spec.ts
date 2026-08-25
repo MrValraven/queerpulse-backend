@@ -7,6 +7,19 @@ import {
 } from './entities/resource-listing.entity';
 import { ResourceListingsService } from './resource-listings.service';
 
+// Matches the exact shape `ResourceListingsService.list` passes to
+// `repo.find` — narrower than TypeORM's polymorphic `FindManyOptions` so
+// `callArgs.where.status` below doesn't need to fan out over every `where`
+// shape TypeORM allows (string, array, ObjectId, ...).
+interface ResourceListingFindArgs {
+  where: {
+    status: ResourceListingStatus;
+    category?: ResourceListingCategory;
+  };
+  order: { title: 'ASC' };
+  take: number;
+}
+
 const activeListing: ResourceListing = {
   id: 'rl-1',
   category: ResourceListingCategory.LegalAid,
@@ -25,10 +38,16 @@ const activeListing: ResourceListing = {
 
 describe('ResourceListingsService', () => {
   let service: ResourceListingsService;
-  let repo: { find: jest.Mock };
+  let repo: {
+    find: jest.Mock<Promise<ResourceListing[]>, [ResourceListingFindArgs]>;
+  };
 
   beforeEach(async () => {
-    repo = { find: jest.fn().mockResolvedValue([activeListing]) };
+    repo = {
+      find: jest
+        .fn<Promise<ResourceListing[]>, [ResourceListingFindArgs]>()
+        .mockResolvedValue([activeListing]),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ResourceListingsService,
@@ -77,7 +96,7 @@ describe('ResourceListingsService', () => {
   it('never queries for archived listings, even implicitly', async () => {
     await service.list(ResourceListingCategory.LegalAid);
 
-    const [[callArgs]] = repo.find.mock.calls;
+    const [callArgs] = repo.find.mock.calls[0]!;
     expect(callArgs.where).not.toEqual(
       expect.objectContaining({ status: ResourceListingStatus.Archived }),
     );

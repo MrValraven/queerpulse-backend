@@ -780,7 +780,7 @@ describe('VerificationService', () => {
       );
 
       expect(saved.signals).toEqual({
-        accountAgeDays: expect.any(Number),
+        accountAgeDays: expect.any(Number) as number,
         priorRejections: 2,
         duplicateProviderRef: null,
       });
@@ -859,7 +859,10 @@ describe('VerificationService', () => {
 
       expect(result.succeeded).toEqual(['request-1']);
       expect(result.failed).toEqual([
-        { id: 'request-2', reason: expect.stringMatching(/cannot move/i) },
+        {
+          id: 'request-2',
+          reason: expect.stringMatching(/cannot move/i) as string,
+        },
       ]);
       // Only the valid request ever entered the transaction's bulk save —
       // the illegal-transition id never touched the DB.
@@ -893,7 +896,10 @@ describe('VerificationService', () => {
 
       expect(result.succeeded).toEqual(['request-1']);
       expect(result.failed).toEqual([
-        { id: 'missing-request', reason: expect.stringMatching(/not found/i) },
+        {
+          id: 'missing-request',
+          reason: expect.stringMatching(/not found/i) as string,
+        },
       ]);
     });
 

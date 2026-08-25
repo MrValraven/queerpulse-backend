@@ -1,5 +1,6 @@
 import { MentionNotificationService } from './mention-notification.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
+import type { NotificationsService } from '../notifications/notifications.service';
 import { RosterRole } from '../communities/entities/community-member.entity';
 import { AccessTier } from '../communities/entities/community.entity';
 import { MemberLookup } from '../common/member-ref';
@@ -23,10 +24,12 @@ function build() {
     // Resolves to the ids it actually notified (the real signature returns
     // `Promise<string[]>`; `notify` reads that array). A stub resolving to
     // `undefined` throws inside the loop and silently swallows every
-    // remaining mention group.
-    createForRecipients: jest.fn((userIds: string[]) =>
-      Promise.resolve(userIds),
-    ),
+    // remaining mention group. Typed against the real method signature so
+    // `.mock.calls[0]` comes back as the real 4-tuple, not a 1-tuple.
+    createForRecipients: jest.fn<
+      Promise<string[]>,
+      Parameters<NotificationsService['createForRecipients']>
+    >((userIds) => Promise.resolve(userIds)),
   };
   const userIdsForSlugs = jest
     .spyOn(MemberLookup.prototype, 'userIdsForSlugs')
@@ -93,13 +96,9 @@ describe('MentionNotificationService.notify', () => {
     await service.notify('shoutout to c/pride', 'author-1', payloadBase);
 
     expect(notifications.createForRecipients).toHaveBeenCalledTimes(1);
-    const [recipients, type, payload, actorId] = notifications
-      .createForRecipients.mock.calls[0] as [
-      string[],
-      NotificationType,
-      Record<string, unknown>,
-      string | undefined,
-    ];
+    // The call count assertion above guarantees this call happened.
+    const [recipients, type, payload, actorId] =
+      notifications.createForRecipients.mock.calls[0]!;
     expect(new Set(recipients)).toEqual(new Set(['owner-1', 'mod-1']));
     expect(type).toBe(NotificationType.Mention);
     expect(payload).toEqual({
@@ -143,13 +142,9 @@ describe('MentionNotificationService.notify', () => {
     );
 
     expect(notifications.createForRecipients).toHaveBeenCalledTimes(1);
-    const [recipients, , payload] = notifications.createForRecipients.mock
-      .calls[0] as [
-      string[],
-      NotificationType,
-      Record<string, unknown>,
-      string | undefined,
-    ];
+    // The call count assertion above guarantees this call happened.
+    const [recipients, , payload] =
+      notifications.createForRecipients.mock.calls[0]!;
     expect(recipients).toEqual(['user-x']);
     expect(payload).toMatchObject({ entityKind: 'member' });
   });
@@ -195,9 +190,8 @@ describe('MentionNotificationService.notify', () => {
       excerpt: 'a private thing said inside a private community',
     });
 
-    const notifiedRecipients = (
-      notifications.createForRecipients.mock.calls as [string[]][]
-    ).flatMap((call) => call[0]);
+    const notifiedRecipients =
+      notifications.createForRecipients.mock.calls.flatMap((call) => call[0]);
     expect(notifiedRecipients).toEqual(['user-insider']);
     expect(notifiedRecipients).not.toContain('user-outsider');
   });
@@ -224,9 +218,8 @@ describe('MentionNotificationService.notify', () => {
       excerpt: 'public content',
     });
 
-    const notifiedRecipients = (
-      notifications.createForRecipients.mock.calls as [string[]][]
-    ).flatMap((call) => call[0]);
+    const notifiedRecipients =
+      notifications.createForRecipients.mock.calls.flatMap((call) => call[0]);
     expect(new Set(notifiedRecipients)).toEqual(
       new Set(['user-alice', 'user-bob']),
     );

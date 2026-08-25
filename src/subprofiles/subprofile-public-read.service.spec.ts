@@ -68,28 +68,50 @@ function makeSubprofile(overrides: Partial<Subprofile> = {}): Subprofile {
 // independently controllable so a test can prove `total` really comes from
 // `getCount()`, not from `rows.length`.
 interface DirectoryQueryBuilderStub {
-  select: jest.Mock;
-  where: jest.Mock;
-  andWhere: jest.Mock;
-  orderBy: jest.Mock;
-  offset: jest.Mock;
-  limit: jest.Mock;
-  getMany: jest.Mock;
-  getCount: jest.Mock;
+  select: jest.Mock<DirectoryQueryBuilderStub, [string[]]>;
+  where: jest.Mock<
+    DirectoryQueryBuilderStub,
+    [string, Record<string, unknown>?]
+  >;
+  andWhere: jest.Mock<
+    DirectoryQueryBuilderStub,
+    [string, Record<string, unknown>?]
+  >;
+  orderBy: jest.Mock<DirectoryQueryBuilderStub, [string, 'ASC' | 'DESC']>;
+  offset: jest.Mock<DirectoryQueryBuilderStub, [number]>;
+  limit: jest.Mock<DirectoryQueryBuilderStub, [number]>;
+  getMany: jest.Mock<Promise<Subprofile[]>, []>;
+  getCount: jest.Mock<Promise<number>, []>;
 }
 function makeSubprofilesQueryBuilderStub(
   rows: Subprofile[],
   count: number = rows.length,
 ): DirectoryQueryBuilderStub {
   const queryBuilder = {} as DirectoryQueryBuilderStub;
-  queryBuilder.select = jest.fn().mockReturnValue(queryBuilder);
-  queryBuilder.where = jest.fn().mockReturnValue(queryBuilder);
-  queryBuilder.andWhere = jest.fn().mockReturnValue(queryBuilder);
-  queryBuilder.orderBy = jest.fn().mockReturnValue(queryBuilder);
-  queryBuilder.offset = jest.fn().mockReturnValue(queryBuilder);
-  queryBuilder.limit = jest.fn().mockReturnValue(queryBuilder);
-  queryBuilder.getMany = jest.fn().mockResolvedValue(rows);
-  queryBuilder.getCount = jest.fn().mockResolvedValue(count);
+  queryBuilder.select = jest
+    .fn<DirectoryQueryBuilderStub, [string[]]>()
+    .mockReturnValue(queryBuilder);
+  queryBuilder.where = jest
+    .fn<DirectoryQueryBuilderStub, [string, Record<string, unknown>?]>()
+    .mockReturnValue(queryBuilder);
+  queryBuilder.andWhere = jest
+    .fn<DirectoryQueryBuilderStub, [string, Record<string, unknown>?]>()
+    .mockReturnValue(queryBuilder);
+  queryBuilder.orderBy = jest
+    .fn<DirectoryQueryBuilderStub, [string, 'ASC' | 'DESC']>()
+    .mockReturnValue(queryBuilder);
+  queryBuilder.offset = jest
+    .fn<DirectoryQueryBuilderStub, [number]>()
+    .mockReturnValue(queryBuilder);
+  queryBuilder.limit = jest
+    .fn<DirectoryQueryBuilderStub, [number]>()
+    .mockReturnValue(queryBuilder);
+  queryBuilder.getMany = jest
+    .fn<Promise<Subprofile[]>, []>()
+    .mockResolvedValue(rows);
+  queryBuilder.getCount = jest
+    .fn<Promise<number>, []>()
+    .mockResolvedValue(count);
   return queryBuilder;
 }
 
@@ -303,9 +325,8 @@ describe('SubprofilePublicReadService', () => {
 
       await service.directory({}, 'viewer-1');
 
-      const moderatedCall = qb.andWhere.mock.calls.find(
-        (call: unknown[]) =>
-          typeof call[0] === 'string' && call[0].includes('NOT EXISTS'),
+      const moderatedCall = qb.andWhere.mock.calls.find((call) =>
+        call[0].includes('NOT EXISTS'),
       );
       expect(moderatedCall).toBeDefined();
       expect(moderatedCall![0]).toEqual(

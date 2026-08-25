@@ -38,14 +38,26 @@ function buildProfile(overrides: Partial<Changemaker> = {}): Changemaker {
 // The published-totals aggregate's query-builder stub: chainable, resolving
 // to "nothing published" by default. Tests that assert on the totals override
 // `getRawOne`.
-const totalsQbStub = () => {
-  const qb: Record<string, jest.Mock> = {};
-  for (const method of ['select', 'addSelect', 'where']) {
-    qb[method] = jest.fn().mockReturnValue(qb);
-  }
-  qb.getRawOne = jest
-    .fn()
-    .mockResolvedValue({ profiled: '0', causeAreas: '0' });
+// Declared with the exact method shape (rather than a `Record<string,
+// jest.Mock>` index signature) so `totalsQb.getRawOne.mockResolvedValue(...)`
+// doesn't see `noUncheckedIndexedAccess`'s `| undefined`.
+type TotalsQueryBuilderStub = {
+  select: jest.Mock;
+  addSelect: jest.Mock;
+  where: jest.Mock;
+  getRawOne: jest.Mock;
+};
+
+const totalsQbStub = (): TotalsQueryBuilderStub => {
+  const qb: TotalsQueryBuilderStub = {
+    select: jest.fn(),
+    addSelect: jest.fn(),
+    where: jest.fn(),
+    getRawOne: jest.fn().mockResolvedValue({ profiled: '0', causeAreas: '0' }),
+  };
+  qb.select.mockReturnValue(qb);
+  qb.addSelect.mockReturnValue(qb);
+  qb.where.mockReturnValue(qb);
   return qb;
 };
 

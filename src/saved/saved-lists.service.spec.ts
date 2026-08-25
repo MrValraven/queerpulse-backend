@@ -39,7 +39,10 @@ describe('SavedListsService', () => {
   let entries: {
     find: jest.Mock;
     create: jest.Mock;
-    save: jest.Mock;
+    save: jest.Mock<
+      Promise<Partial<SavedListEntry>>,
+      [Partial<SavedListEntry>]
+    >;
     delete: jest.Mock;
     createQueryBuilder: jest.Mock;
   };

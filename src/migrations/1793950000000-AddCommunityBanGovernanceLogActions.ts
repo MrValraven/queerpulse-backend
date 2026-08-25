@@ -24,9 +24,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Depends on `AddCommunityBans1793800000000` for the table these actions
  * describe, and touches none of it.
  */
-export class AddCommunityBanGovernanceLogActions1793950000000
-  implements MigrationInterface
-{
+export class AddCommunityBanGovernanceLogActions1793950000000 implements MigrationInterface {
   name = 'AddCommunityBanGovernanceLogActions1793950000000';
 
   transaction = false as const;

@@ -1,8 +1,17 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
+import { Repository } from 'typeorm';
+import { AdminMembersService } from '../admin-members/admin-members.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { Profile } from '../users/entities/profile.entity';
 import { AdminWriterApplicationsService } from './admin-writer-applications.service';
-import { WriterApplicationStatus } from './entities/magazine-writer-application.entity';
+import {
+  MagazineWriterApplication,
+  WriterApplicationStatus,
+} from './entities/magazine-writer-application.entity';
 
-function makeApplication(overrides: Partial<Record<string, unknown>> = {}) {
+function makeApplication(
+  overrides: Partial<MagazineWriterApplication> = {},
+): MagazineWriterApplication {
   return {
     id: 'app-1',
     userId: 'user-1',
@@ -18,7 +27,15 @@ function makeApplication(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
-function makeApplicationsRepo(findOneResult: unknown, claimAffected = 1) {
+/**
+ * A minimal `Repository` double: only the members `triage`/`list` actually
+ * call. Cast once here, via `unknown`, so call sites never repeat their own
+ * `as any` — the service still sees a precisely-typed `Repository`.
+ */
+function makeApplicationsRepo(
+  findOneResult: MagazineWriterApplication | null,
+  claimAffected = 1,
+): Repository<MagazineWriterApplication> & { _execute: jest.Mock } {
   const execute = jest.fn(async () => ({ affected: claimAffected }));
   const where = jest.fn(() => ({ execute }));
   const set = jest.fn(() => ({ where }));
@@ -28,23 +45,37 @@ function makeApplicationsRepo(findOneResult: unknown, claimAffected = 1) {
     findAndCount: jest.fn(async () => [[], 0]),
     createQueryBuilder: jest.fn(() => ({ update })),
     _execute: execute,
+  } as unknown as Repository<MagazineWriterApplication> & {
+    _execute: jest.Mock;
   };
 }
 
-function makeProfilesRepo() {
-  return { find: jest.fn(async () => []) };
+function makeProfilesRepo(): Repository<Profile> {
+  return {
+    find: jest.fn(async () => []),
+  } as unknown as Repository<Profile>;
+}
+
+function makeAdminMembers(
+  grantStaffRole: jest.Mock = jest.fn(),
+): AdminMembersService {
+  return { grantStaffRole } as unknown as AdminMembersService;
+}
+
+function makeNotifications(
+  create: jest.Mock = jest.fn(),
+): NotificationsService {
+  return { create } as unknown as NotificationsService;
 }
 
 describe('AdminWriterApplicationsService', () => {
   describe('triage', () => {
     it('throws NotFoundException when the application does not exist', async () => {
-      const adminMembers = { grantStaffRole: jest.fn() };
-      const notifications = { create: jest.fn() };
       const service = new AdminWriterApplicationsService(
-        makeApplicationsRepo(null) as any,
-        makeProfilesRepo() as any,
-        adminMembers as any,
-        notifications as any,
+        makeApplicationsRepo(null),
+        makeProfilesRepo(),
+        makeAdminMembers(),
+        makeNotifications(),
       );
       await expect(
         service.triage('admin-1', 'missing', { status: 'approved' }),
@@ -52,15 +83,13 @@ describe('AdminWriterApplicationsService', () => {
     });
 
     it('throws ConflictException when already resolved', async () => {
-      const adminMembers = { grantStaffRole: jest.fn() };
-      const notifications = { create: jest.fn() };
       const service = new AdminWriterApplicationsService(
         makeApplicationsRepo(
           makeApplication({ status: WriterApplicationStatus.Approved }),
-        ) as any,
-        makeProfilesRepo() as any,
-        adminMembers as any,
-        notifications as any,
+        ),
+        makeProfilesRepo(),
+        makeAdminMembers(),
+        makeNotifications(),
       );
       await expect(
         service.triage('admin-1', 'app-1', { status: 'declined' }),
@@ -68,24 +97,24 @@ describe('AdminWriterApplicationsService', () => {
     });
 
     it('grants magazine_writer and notifies on approve', async () => {
-      const adminMembers = { grantStaffRole: jest.fn(async () => ({})) };
-      const notifications = { create: jest.fn(async () => null) };
+      const grantStaffRole = jest.fn(async () => ({}));
+      const create = jest.fn(async () => null);
       const applicationsRepo = makeApplicationsRepo(makeApplication());
       const service = new AdminWriterApplicationsService(
-        applicationsRepo as any,
-        makeProfilesRepo() as any,
-        adminMembers as any,
-        notifications as any,
+        applicationsRepo,
+        makeProfilesRepo(),
+        makeAdminMembers(grantStaffRole),
+        makeNotifications(create),
       );
       const dto = await service.triage('admin-1', 'app-1', {
         status: 'approved',
       });
-      expect(adminMembers.grantStaffRole).toHaveBeenCalledWith(
+      expect(grantStaffRole).toHaveBeenCalledWith(
         'admin-1',
         'user-1',
         'magazine_writer',
       );
-      expect(notifications.create).toHaveBeenCalledWith(
+      expect(create).toHaveBeenCalledWith(
         'user-1',
         'writer_application_approved',
         { reviewNote: null },
@@ -94,21 +123,21 @@ describe('AdminWriterApplicationsService', () => {
     });
 
     it('sets the review note and notifies on decline, without granting a role', async () => {
-      const adminMembers = { grantStaffRole: jest.fn() };
-      const notifications = { create: jest.fn(async () => null) };
+      const grantStaffRole = jest.fn();
+      const create = jest.fn(async () => null);
       const applicationsRepo = makeApplicationsRepo(makeApplication());
       const service = new AdminWriterApplicationsService(
-        applicationsRepo as any,
-        makeProfilesRepo() as any,
-        adminMembers as any,
-        notifications as any,
+        applicationsRepo,
+        makeProfilesRepo(),
+        makeAdminMembers(grantStaffRole),
+        makeNotifications(create),
       );
       const dto = await service.triage('admin-1', 'app-1', {
         status: 'declined',
         reviewNote: 'Not a fit right now.',
       });
-      expect(adminMembers.grantStaffRole).not.toHaveBeenCalled();
-      expect(notifications.create).toHaveBeenCalledWith(
+      expect(grantStaffRole).not.toHaveBeenCalled();
+      expect(create).toHaveBeenCalledWith(
         'user-1',
         'writer_application_declined',
         { reviewNote: 'Not a fit right now.' },
@@ -118,14 +147,12 @@ describe('AdminWriterApplicationsService', () => {
     });
 
     it('throws ConflictException when the row was already claimed concurrently', async () => {
-      const adminMembers = { grantStaffRole: jest.fn(async () => ({})) };
-      const notifications = { create: jest.fn() };
       const applicationsRepo = makeApplicationsRepo(makeApplication(), 0);
       const service = new AdminWriterApplicationsService(
-        applicationsRepo as any,
-        makeProfilesRepo() as any,
-        adminMembers as any,
-        notifications as any,
+        applicationsRepo,
+        makeProfilesRepo(),
+        makeAdminMembers(jest.fn(async () => ({}))),
+        makeNotifications(),
       );
       await expect(
         service.triage('admin-1', 'app-1', { status: 'approved' }),

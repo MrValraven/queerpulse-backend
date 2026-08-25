@@ -1,11 +1,33 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
+import { Repository } from 'typeorm';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { WriterApplicationsService } from './writer-applications.service';
-import { WriterApplicationStatus } from './entities/magazine-writer-application.entity';
+import {
+  MagazineWriterApplication,
+  WriterApplicationStatus,
+} from './entities/magazine-writer-application.entity';
 
-function makeApplicationsRepo(overrides: Record<string, jest.Mock> = {}) {
-  return {
-    create: jest.fn((input) => input),
-    save: jest.fn(async (input) => ({
+type ApplicationsRepoOverrides = Partial<{
+  create: jest.Mock;
+  save: jest.Mock;
+  findOne: jest.Mock;
+}>;
+
+/**
+ * A minimal `Repository` double: only the members `create`/`getMine`
+ * actually call. `repository` is cast once here, via `unknown`, so call
+ * sites never repeat their own `as any` — the service still sees a
+ * precisely-typed `Repository`. The individual mocks are also returned
+ * un-cast so assertions can reference them directly, instead of reading a
+ * method off the `Repository`-typed object (which `unbound-method` flags).
+ */
+function makeApplicationsRepo(overrides: ApplicationsRepoOverrides = {}) {
+  const create =
+    overrides.create ??
+    jest.fn((input: Partial<MagazineWriterApplication>) => input);
+  const save =
+    overrides.save ??
+    jest.fn(async (input: Partial<MagazineWriterApplication>) => ({
       id: 'app-1',
       status: WriterApplicationStatus.Pending,
       reviewedBy: null,
@@ -13,22 +35,28 @@ function makeApplicationsRepo(overrides: Record<string, jest.Mock> = {}) {
       createdAt: new Date('2026-08-18T00:00:00.000Z'),
       reviewedAt: null,
       ...input,
-    })),
-    findOne: jest.fn(async () => null),
-    ...overrides,
-  };
+    }));
+  const findOne = overrides.findOne ?? jest.fn(async () => null);
+  const repository = {
+    create,
+    save,
+    findOne,
+  } as unknown as Repository<MagazineWriterApplication>;
+  return { repository, create, save, findOne };
 }
 
-function makeStaffRolesRepo(alreadyWriter = false) {
-  return { exists: jest.fn(async () => alreadyWriter) };
+function makeStaffRolesRepo(alreadyWriter = false): Repository<UserStaffRole> {
+  return {
+    exists: jest.fn(async () => alreadyWriter),
+  } as unknown as Repository<UserStaffRole>;
 }
 
 describe('WriterApplicationsService', () => {
   describe('create', () => {
     it('rejects when neither sampleText nor sampleLink is given', async () => {
       const service = new WriterApplicationsService(
-        makeApplicationsRepo() as any,
-        makeStaffRolesRepo() as any,
+        makeApplicationsRepo().repository,
+        makeStaffRolesRepo(),
       );
       await expect(
         service.create('user-1', { pitchNote: 'Hi' }),
@@ -37,8 +65,8 @@ describe('WriterApplicationsService', () => {
 
     it('rejects when the user already holds magazine_writer', async () => {
       const service = new WriterApplicationsService(
-        makeApplicationsRepo() as any,
-        makeStaffRolesRepo(true) as any,
+        makeApplicationsRepo().repository,
+        makeStaffRolesRepo(true),
       );
       await expect(
         service.create('user-1', { sampleText: 'A paragraph.' }),
@@ -46,7 +74,7 @@ describe('WriterApplicationsService', () => {
     });
 
     it('rejects a duplicate pending application (unique violation)', async () => {
-      const applications = makeApplicationsRepo({
+      const { repository } = makeApplicationsRepo({
         save: jest.fn(async () => {
           // Mirrors the driver's unique-violation error, which the service maps
           // to 409. Thrown as an Error so the mock cannot be mistaken for a
@@ -57,8 +85,8 @@ describe('WriterApplicationsService', () => {
         }),
       });
       const service = new WriterApplicationsService(
-        applications as any,
-        makeStaffRolesRepo() as any,
+        repository,
+        makeStaffRolesRepo(),
       );
       await expect(
         service.create('user-1', { sampleText: 'A paragraph.' }),
@@ -66,16 +94,16 @@ describe('WriterApplicationsService', () => {
     });
 
     it('saves and returns the application on success', async () => {
-      const applications = makeApplicationsRepo();
+      const { repository, save } = makeApplicationsRepo();
       const service = new WriterApplicationsService(
-        applications as any,
-        makeStaffRolesRepo() as any,
+        repository,
+        makeStaffRolesRepo(),
       );
       const dto = await service.create('user-1', {
         pitchNote: '  Why I want to write  ',
         sampleText: '  A paragraph.  ',
       });
-      expect(applications.save).toHaveBeenCalledWith(
+      expect(save).toHaveBeenCalledWith(
         expect.objectContaining({
           userId: 'user-1',
           pitchNote: 'Why I want to write',
@@ -90,14 +118,14 @@ describe('WriterApplicationsService', () => {
   describe('getMine', () => {
     it('returns null when no application exists', async () => {
       const service = new WriterApplicationsService(
-        makeApplicationsRepo() as any,
-        makeStaffRolesRepo() as any,
+        makeApplicationsRepo().repository,
+        makeStaffRolesRepo(),
       );
       expect(await service.getMine('user-1')).toBeNull();
     });
 
     it('returns the latest application, mapped', async () => {
-      const applications = makeApplicationsRepo({
+      const { repository, findOne } = makeApplicationsRepo({
         findOne: jest.fn(async () => ({
           id: 'app-1',
           userId: 'user-1',
@@ -112,12 +140,12 @@ describe('WriterApplicationsService', () => {
         })),
       });
       const service = new WriterApplicationsService(
-        applications as any,
-        makeStaffRolesRepo() as any,
+        repository,
+        makeStaffRolesRepo(),
       );
       const dto = await service.getMine('user-1');
       expect(dto?.id).toBe('app-1');
-      expect(applications.findOne).toHaveBeenCalledWith({
+      expect(findOne).toHaveBeenCalledWith({
         where: { userId: 'user-1' },
         order: { createdAt: 'DESC' },
       });

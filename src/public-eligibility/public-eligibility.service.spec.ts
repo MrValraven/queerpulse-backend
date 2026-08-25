@@ -18,6 +18,7 @@ import { ConnectionsService } from '../connections/connections.service';
 import { SubprofileEndorsementsService } from '../subprofiles/subprofile-endorsements.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { UserStatus } from '../users/entities/user.entity';
+import type { CurrentUserData } from '../auth/decorators/current-user.decorator';
 
 // Minimal query-builder stub: getCount / getMany / getRawMany resolve to fixtures.
 function qbStub(result: { count?: number; many?: unknown[]; raw?: unknown[] }) {
@@ -41,12 +42,12 @@ function qbStub(result: { count?: number; many?: unknown[]; raw?: unknown[] }) {
   return queryBuilder;
 }
 
-const user = {
+const user: CurrentUserData = {
   userId: 'u1',
   email: 'a@b.c',
   status: UserStatus.Active,
   role: 'member',
-} as any;
+};
 
 describe('PublicEligibilityService', () => {
   async function build(overrides: Provider[] = []) {

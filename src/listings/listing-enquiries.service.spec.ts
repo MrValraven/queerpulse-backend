@@ -40,7 +40,10 @@ describe('ListingEnquiriesService', () => {
     findOne: jest.Mock;
     count: jest.Mock;
     create: jest.Mock;
-    save: jest.Mock;
+    save: jest.Mock<
+      Promise<Partial<ListingEnquiry>>,
+      [Partial<ListingEnquiry>]
+    >;
   };
   let users: { findOne: jest.Mock };
   let messaging: {

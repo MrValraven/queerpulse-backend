@@ -862,10 +862,16 @@ describe('MagazinePieceService', () => {
       const dto: UpdateArticleDto = { standfirst: 'Updated lede.' };
       await service.updateArticleDraft('piece-1', dto, 'editor-1');
 
+      // `expect.objectContaining` types its result as `any` (see
+      // node_modules/@types/jest), so nesting it directly as an object-literal
+      // property value (rather than passing it straight to a matcher call)
+      // reads as an unsafe assignment. An `unknown`-typed intermediate keeps
+      // the same runtime matcher while staying honest with the type checker.
+      const pieceIdWhereMatcher: unknown = expect.objectContaining({
+        pieceId: 'piece-1',
+      });
       expect(pieceEvents.findOne).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: expect.objectContaining({ pieceId: 'piece-1' }),
-        }),
+        expect.objectContaining({ where: pieceIdWhereMatcher }),
       );
       expect(pieceEvents.create).not.toHaveBeenCalled();
       expect(pieceEvents.save).toHaveBeenCalledWith(

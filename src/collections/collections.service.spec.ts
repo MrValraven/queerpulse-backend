@@ -79,7 +79,9 @@ function build() {
     create: jest.fn((value: unknown) => value),
     save: jest.fn((value: unknown) => Promise.resolve(value)),
     delete: jest.fn(),
-    update: jest.fn().mockResolvedValue(undefined),
+    update: jest
+      .fn<Promise<unknown>, [string, Partial<Collection>]>()
+      .mockResolvedValue(undefined),
   };
   const collectionItems = {
     find: jest.fn().mockResolvedValue([]),
@@ -263,7 +265,9 @@ describe('CollectionsService', () => {
 
       expect(collections.update).toHaveBeenCalledWith(
         'col-1',
-        expect.objectContaining({ updatedAt: expect.any(Date) }),
+        expect.objectContaining({
+          updatedAt: expect.any(Date) as Date,
+        }),
       );
     });
 

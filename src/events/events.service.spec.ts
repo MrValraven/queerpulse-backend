@@ -35,7 +35,7 @@ describe('EventsService', () => {
   let service: EventsService;
   let events: {
     findOne: jest.Mock;
-    save: jest.Mock;
+    save: jest.Mock<Event, [Event]>;
     exists: jest.Mock;
     find: jest.Mock;
     update: jest.Mock;
@@ -117,7 +117,7 @@ describe('EventsService', () => {
   beforeEach(async () => {
     events = {
       findOne: jest.fn(),
-      save: jest.fn((event: unknown) => event),
+      save: jest.fn((event: Event) => event),
       exists: jest.fn().mockResolvedValue(false),
       // Series scope (`update`/`cancel` with `scope: 'future'`) resolves the
       // later occurrences with `find`; no test here exercises a series, so the
@@ -134,7 +134,7 @@ describe('EventsService', () => {
         transaction: jest.fn(
           async (runInTransaction: (manager: unknown) => Promise<unknown>) =>
             runInTransaction({
-              save: (_entity: unknown, entityLike: unknown) =>
+              save: (_entity: unknown, entityLike: Event) =>
                 events.save(entityLike),
               getRepository: () => events,
             }),

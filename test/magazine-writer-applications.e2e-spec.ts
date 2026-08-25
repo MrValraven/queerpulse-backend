@@ -8,6 +8,10 @@ import { AppModule } from '../src/app.module';
 import { GoogleAuthGuard } from '../src/auth/guards/google-auth.guard';
 import { encodeOAuthState } from '../src/auth/oauth-state';
 import { MagazineWriterApplication } from '../src/magazine/entities/magazine-writer-application.entity';
+import {
+  AdminWriterApplicationsPageDTO,
+  WriterApplicationDTO,
+} from '../src/magazine/writer-application-response';
 import { UserStaffRole } from '../src/users/entities/user-staff-role.entity';
 import { User, UserRole, UserStatus } from '../src/users/entities/user.entity';
 
@@ -121,7 +125,7 @@ describe('Magazine writer applications (e2e)', () => {
       .get('/magazine/writer-applications/mine')
       .set('Cookie', cookies)
       .expect(200);
-    expect(mine.body.status).toBe('pending');
+    expect((mine.body as WriterApplicationDTO).status).toBe('pending');
   });
 
   it('rejects an application with no sample', async () => {
@@ -148,34 +152,33 @@ describe('Magazine writer applications (e2e)', () => {
       await login('g-admin-1', 'admin1@example.com'),
     );
 
-    const created = await request(app.getHttpServer() as App)
+    const createdResponse = await request(app.getHttpServer() as App)
       .post('/magazine/writer-applications')
       .set('Cookie', writer.cookies)
       .set('X-CSRF-Token', writer.csrfToken)
       .send({ sampleLink: 'https://example.com/my-essay' })
       .expect(201);
+    const created = createdResponse.body as WriterApplicationDTO;
 
-    const list = await request(app.getHttpServer() as App)
+    const listResponse = await request(app.getHttpServer() as App)
       .get('/admin/magazine-writer-applications?status=pending')
       .set('Cookie', admin.cookies)
       .expect(200);
-    expect(
-      (list.body.items as { id: string }[]).some(
-        (item) => item.id === created.body.id,
-      ),
-    ).toBe(true);
+    const list = listResponse.body as AdminWriterApplicationsPageDTO;
+    expect(list.items.some((item) => item.id === created.id)).toBe(true);
 
-    const triaged = await request(app.getHttpServer() as App)
-      .patch(`/admin/magazine-writer-applications/${created.body.id}`)
+    const triagedResponse = await request(app.getHttpServer() as App)
+      .patch(`/admin/magazine-writer-applications/${created.id}`)
       .set('Cookie', admin.cookies)
       .set('X-CSRF-Token', admin.csrfToken)
       .send({ status: 'approved' })
       .expect(200);
-    expect(triaged.body.status).toBe('approved');
+    const triaged = triagedResponse.body as WriterApplicationDTO;
+    expect(triaged.status).toBe('approved');
 
     // Triaging the same application again 409s.
     await request(app.getHttpServer() as App)
-      .patch(`/admin/magazine-writer-applications/${created.body.id}`)
+      .patch(`/admin/magazine-writer-applications/${created.id}`)
       .set('Cookie', admin.cookies)
       .set('X-CSRF-Token', admin.csrfToken)
       .send({ status: 'declined' })

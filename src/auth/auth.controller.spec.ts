@@ -32,7 +32,7 @@ function makeRes() {
   return {
     cookie: jest.fn(),
     clearCookie: jest.fn(),
-    redirect: jest.fn(),
+    redirect: jest.fn<void, [string]>(),
   };
 }
 
@@ -290,7 +290,7 @@ describe('AuthController.googleCallback (step-up reauth)', () => {
     // cookies set.
     expect(authService.validateOrCreateGoogleUser).not.toHaveBeenCalled();
     expect(res.cookie).not.toHaveBeenCalled();
-    const redirectedTo = new URL(res.redirect.mock.calls[0][0] as string);
+    const redirectedTo = new URL(res.redirect.mock.calls[0]![0]);
     expect(redirectedTo.origin + redirectedTo.pathname).toBe(
       `${FRONTEND}/settings`,
     );
@@ -319,7 +319,7 @@ describe('AuthController.googleCallback (step-up reauth)', () => {
 
     expect(usersService.findByGoogleId).not.toHaveBeenCalled();
     expect(authService.mintReauthToken).not.toHaveBeenCalled();
-    const redirectedTo = new URL(res.redirect.mock.calls[0][0] as string);
+    const redirectedTo = new URL(res.redirect.mock.calls[0]![0]);
     expect(redirectedTo.origin + redirectedTo.pathname).toBe(
       `${FRONTEND}/settings`,
     );
@@ -354,7 +354,7 @@ describe('AuthController.googleCallback (step-up reauth)', () => {
     await controller.googleCallback(req, res as unknown as Response);
 
     expect(authService.mintReauthToken).not.toHaveBeenCalled();
-    const redirectedTo = new URL(res.redirect.mock.calls[0][0] as string);
+    const redirectedTo = new URL(res.redirect.mock.calls[0]![0]);
     expect(
       new URLSearchParams(redirectedTo.hash.slice(1)).get('reauthError'),
     ).toBe('reauth_failed');

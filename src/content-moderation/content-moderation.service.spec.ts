@@ -1,4 +1,4 @@
-import { EntityManager } from 'typeorm';
+import { EntityManager, ObjectLiteral, SelectQueryBuilder } from 'typeorm';
 import { ContentModerationService } from './content-moderation.service';
 import { ContentModeration } from './entities/content-moderation.entity';
 
@@ -170,13 +170,21 @@ describe('ContentModerationService', () => {
   describe('excludeHidden', () => {
     it('appends a NOT EXISTS predicate bound to the subject types and returns the builder', () => {
       const { service } = build();
-      const qb = { andWhere: jest.fn().mockReturnThis() } as never;
+      // A typed `andWhere` stub so `.mock.calls[0]` destructures into its real
+      // `(sql: string, params: Record<string, unknown>)` shape instead of
+      // `any` — the query builder itself is otherwise unused, hence `as
+      // unknown as SelectQueryBuilder<ObjectLiteral>` rather than a full mock.
+      const andWhere = jest.fn<
+        SelectQueryBuilder<ObjectLiteral>,
+        [string, Record<string, unknown>]
+      >();
+      const qb = { andWhere } as unknown as SelectQueryBuilder<ObjectLiteral>;
+      andWhere.mockReturnValue(qb);
 
       const returned = service.excludeHidden(qb, ['post', 'reply'], '"p"."id"');
 
       expect(returned).toBe(qb);
-      const [sql, params] = (qb as unknown as { andWhere: jest.Mock }).andWhere
-        .mock.calls[0];
+      const [sql, params] = andWhere.mock.calls[0]!;
       expect(sql).toContain('NOT EXISTS');
       expect(sql).toContain('"p"."id"::text');
       expect(params).toEqual({

@@ -1,3 +1,4 @@
+import type { FindManyOptions, FindOptionsWhere } from 'typeorm';
 import {
   Notification,
   NotificationType,
@@ -22,9 +23,20 @@ function mentionRow(
 
 function build() {
   const notifications = {
-    find: jest.fn().mockResolvedValue([]),
-    count: jest.fn().mockResolvedValue(0),
-    update: jest.fn().mockResolvedValue(undefined),
+    find: jest
+      .fn<Promise<Notification[]>, [FindManyOptions<Notification>]>()
+      .mockResolvedValue([]),
+    count: jest
+      .fn<Promise<number>, [FindManyOptions<Notification>]>()
+      .mockResolvedValue(0),
+    // The service discards `update`'s resolved value, so the mock's return
+    // type is left as `unknown` rather than faking a real `UpdateResult`.
+    update: jest
+      .fn<
+        Promise<unknown>,
+        [FindOptionsWhere<Notification>, Partial<Notification>]
+      >()
+      .mockResolvedValue(undefined),
   };
   const profiles = { find: jest.fn().mockResolvedValue([]) };
   const threads = { find: jest.fn().mockResolvedValue([]) };
@@ -48,7 +60,8 @@ describe('MentionsInboxService', () => {
 
       const result = await service.list('me', { page: 2 });
 
-      const findArgs = notifications.find.mock.calls[0][0];
+      // `service.list` always calls `notifications.find` exactly once above.
+      const findArgs = notifications.find.mock.calls[0]![0];
       expect(findArgs.where).toEqual({
         userId: 'me',
         type: NotificationType.Mention,
@@ -65,7 +78,7 @@ describe('MentionsInboxService', () => {
 
       await service.list('me', { unread: true });
 
-      expect(notifications.find.mock.calls[0][0].where).toEqual({
+      expect(notifications.find.mock.calls[0]![0].where).toEqual({
         userId: 'me',
         type: NotificationType.Mention,
         read: false,
@@ -77,7 +90,7 @@ describe('MentionsInboxService', () => {
 
       const result = await service.list('me', {});
 
-      expect(notifications.find.mock.calls[0][0].skip).toBe(0);
+      expect(notifications.find.mock.calls[0]![0].skip).toBe(0);
       expect(result.page).toBe(1);
     });
 

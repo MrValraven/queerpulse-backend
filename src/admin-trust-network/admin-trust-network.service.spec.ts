@@ -147,6 +147,7 @@ function makeVouch(overrides: Partial<Vouch> = {}): Vouch {
     relationships: ['friends'],
     anonymous: false,
     withdrawnAt: null,
+    reactivatedAt: null,
     createdAt: new Date('2026-02-01T00:00:00.000Z'),
     ...overrides,
   };

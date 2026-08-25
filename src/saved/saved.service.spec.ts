@@ -120,7 +120,8 @@ describe('SavedService', () => {
 
       await service.list('u1', { listId: 'list-1' });
 
-      const call = qb.andWhere!.mock.calls[0];
+      type AndWhereCall = [string, Record<string, unknown>];
+      const call = qb.andWhere!.mock.calls[0] as AndWhereCall | undefined;
       expect(call).toBeDefined();
       const predicate = String(call?.[0] ?? '');
       expect(predicate).toContain('EXISTS');

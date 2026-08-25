@@ -523,7 +523,9 @@ describe('VolunteeringService', () => {
       const res = await service.signup('x', 'user-1', {});
       expect(signups.count).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: expect.objectContaining({ status: 'accepted' }),
+          where: expect.objectContaining({
+            status: 'accepted',
+          }) as Partial<VolunteerSignup>,
         }),
       );
       expect(res.status).toBe('pending');

@@ -10,13 +10,21 @@ import {
   ListingEditSuggestion,
   ListingEditSuggestionStatus,
 } from './entities/listing-edit-suggestion.entity';
-import { Listing, ListingStatus } from './entities/listing.entity';
+import {
+  Listing,
+  ListingSocial,
+  ListingStatus,
+} from './entities/listing.entity';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
 import { Profile } from '../users/entities/profile.entity';
 
 describe('ListingEditSuggestionsService', () => {
   let service: ListingEditSuggestionsService;
-  let listings: { findOne: jest.Mock; find: jest.Mock; save: jest.Mock };
+  let listings: {
+    findOne: jest.Mock;
+    find: jest.Mock;
+    save: jest.Mock<Promise<Partial<Listing>>, [Partial<Listing>]>;
+  };
   let suggestions: {
     create: jest.Mock;
     save: jest.Mock;
@@ -30,7 +38,7 @@ describe('ListingEditSuggestionsService', () => {
     listings = {
       findOne: jest.fn(),
       find: jest.fn(),
-      save: jest.fn((listing) => Promise.resolve(listing)),
+      save: jest.fn((listing: Partial<Listing>) => Promise.resolve(listing)),
     };
     suggestions = {
       create: jest.fn((input: Partial<ListingEditSuggestion>) => input),
@@ -347,7 +355,7 @@ describe('ListingEditSuggestionsService', () => {
           social: expect.objectContaining({
             phone: '+351 900 000 000',
             website: 'example.com',
-          }),
+          }) as ListingSocial,
         }),
       );
     });
@@ -435,7 +443,9 @@ describe('ListingEditSuggestionsService', () => {
 
       expect(listings.save).toHaveBeenCalledWith(
         expect.objectContaining({
-          social: expect.objectContaining({ phone: '+351 900 000 000' }),
+          social: expect.objectContaining({
+            phone: '+351 900 000 000',
+          }) as ListingSocial,
         }),
       );
     });

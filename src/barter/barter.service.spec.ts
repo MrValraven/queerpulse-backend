@@ -24,6 +24,22 @@ import {
   BarterProposalStatus,
 } from './entities/barter-proposal.entity';
 
+// A jest-mocked repo/service typed by exactly the method names it needs.
+// Unlike `Record<string, jest.Mock>`, a literal key union produces named
+// properties rather than an index signature, so `noUncheckedIndexedAccess`
+// never widens a method access to `jest.Mock | undefined`.
+type MockMethods<MethodName extends string> = Record<MethodName, jest.Mock>;
+
+// Returns the first row of a list, or fails the test loudly if the service
+// under test returned none — `noUncheckedIndexedAccess` types array
+// destructuring as possibly-`undefined`, and this keeps that honest instead
+// of masking it with a non-null assertion.
+function firstOrThrow<Row>(rows: Row[]): Row {
+  const [row] = rows;
+  if (!row) throw new Error('expected at least one row, got none');
+  return row;
+}
+
 // Chainable query-builder stub whose terminal methods resolve empty by default
 // (mirrors `volunteering.service.spec.ts`'s `qbStub`).
 const qbStub = () => {
@@ -91,12 +107,28 @@ function profileRow(overrides: Record<string, unknown> = {}) {
 
 describe('BarterService', () => {
   let service: BarterService;
-  let listings: Record<string, jest.Mock>;
-  let proposals: Record<string, jest.Mock>;
-  let profiles: Record<string, jest.Mock>;
-  let blockFilter: Record<string, jest.Mock>;
+  let listings: MockMethods<
+    'findOne' | 'find' | 'create' | 'save' | 'createQueryBuilder'
+  >;
+  let proposals: MockMethods<
+    'find' | 'findOne' | 'create' | 'save' | 'createQueryBuilder'
+  >;
+  let profiles: MockMethods<'find' | 'findOne' | 'createQueryBuilder'>;
+  let blockFilter: MockMethods<
+    'isBlockedEitherWay' | 'excludeHidden' | 'hiddenUserIds'
+  >;
   let messaging: { deliverEnquiry: jest.Mock };
-  let notifications: { create: jest.Mock };
+  let notifications: {
+    create: jest.Mock<
+      Promise<null>,
+      [
+        userId: string,
+        type: NotificationType,
+        payload?: Record<string, unknown>,
+        actorId?: string,
+      ]
+    >;
+  };
   let managerFindOne: jest.Mock;
 
   beforeEach(async () => {
@@ -143,7 +175,19 @@ describe('BarterService', () => {
         .fn()
         .mockResolvedValue({ conversationId: 'conversation-1' }),
     };
-    notifications = { create: jest.fn().mockResolvedValue(null) };
+    notifications = {
+      create: jest
+        .fn<
+          Promise<null>,
+          [
+            userId: string,
+            type: NotificationType,
+            payload?: Record<string, unknown>,
+            actorId?: string,
+          ]
+        >()
+        .mockResolvedValue(null),
+    };
     managerFindOne = jest.fn().mockResolvedValue(listingRow());
 
     const manager = {
@@ -330,10 +374,9 @@ describe('BarterService', () => {
 
     it('carries only the listing keys in the payload, never the message', async () => {
       await service.createProposal(LISTING_ID, PROPOSER_ID, dto);
-      const payload = notifications.create.mock.calls[0][2] as Record<
-        string,
-        unknown
-      >;
+      const payload = firstOrThrow(
+        notifications.create.mock.calls,
+      )[2] as Record<string, unknown>;
       // Exactly the routing key plus the two allowlisted display keys.
       expect(payload).toEqual({
         source: 'barter',
@@ -361,13 +404,13 @@ describe('BarterService', () => {
 
     it('resolves the neighbourhood from the owner location', async () => {
       profiles.find.mockResolvedValue([profileRow()]);
-      const [card] = await service.listMine(OWNER_ID);
+      const card = firstOrThrow(await service.listMine(OWNER_ID));
       expect(card.member?.hood).toBe('Anjos');
     });
 
     it('omits the hood when the owner hid it', async () => {
       profiles.find.mockResolvedValue([profileRow({ hoodVisible: false })]);
-      const [card] = await service.listMine(OWNER_ID);
+      const card = firstOrThrow(await service.listMine(OWNER_ID));
       // The rest of the ref still renders — only the hood is withheld.
       expect(card.member?.slug).toBe('nadia-osei');
       expect(card.member?.hood).toBeNull();

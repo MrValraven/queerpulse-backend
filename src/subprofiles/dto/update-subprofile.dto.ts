@@ -32,7 +32,9 @@ export class UpdateSubprofileDTO {
   // field-level 400 (`@MinLength(1)`) rather than slipping through as a blank
   // display name. `@IsOptional()` still skips an omitted field (PATCH).
   @IsOptional()
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
   @IsString()
   @MinLength(1)
   @MaxLength(120)

@@ -112,7 +112,7 @@ describe('HousingListingsService', () => {
     find: jest.Mock;
     exists: jest.Mock;
     create: jest.Mock;
-    save: jest.Mock;
+    save: jest.Mock<Promise<HousingListing>, [HousingListing]>;
     remove: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
@@ -133,7 +133,7 @@ describe('HousingListingsService', () => {
       find: jest.fn().mockResolvedValue([]),
       exists: jest.fn().mockResolvedValue(false),
       create: jest.fn((row: unknown) => row),
-      save: jest.fn((row: unknown) => Promise.resolve(row)),
+      save: jest.fn((row: HousingListing) => Promise.resolve(row)),
       remove: jest.fn().mockResolvedValue(undefined),
       createQueryBuilder: jest.fn(() => makePaginatedBuilder([], 0)),
     };
@@ -316,7 +316,9 @@ describe('HousingListingsService', () => {
       mockOwnedFindOne(
         makeListing({ ownerId: 'owner-1', title: 'Old', city: 'Lisbon' }),
       );
-      listings.save.mockImplementation((row: unknown) => Promise.resolve(row));
+      listings.save.mockImplementation((row: HousingListing) =>
+        Promise.resolve(row),
+      );
 
       const result = await service.update('QPH-2026-0001', 'owner-1', {
         title: 'New title',
@@ -450,7 +452,9 @@ describe('HousingListingsService', () => {
 
       expect(listings.save).toHaveBeenCalledWith(
         expect.objectContaining({
-          riskReasons: expect.arrayContaining(['discriminatory_language']),
+          riskReasons: expect.arrayContaining([
+            'discriminatory_language',
+          ]) as string[],
         }),
       );
     });
@@ -562,7 +566,9 @@ describe('HousingListingsService', () => {
       listings.findOne.mockResolvedValue(
         makeListing({ status: HousingListingStatus.Review }),
       );
-      listings.save.mockImplementation((row: unknown) => Promise.resolve(row));
+      listings.save.mockImplementation((row: HousingListing) =>
+        Promise.resolve(row),
+      );
 
       const result = await service.setStatus(
         'QPH-2026-0001',

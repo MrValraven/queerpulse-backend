@@ -81,7 +81,7 @@ describe('PressKitService', () => {
   let manager: {
     createQueryBuilder: jest.Mock;
     create: jest.Mock;
-    save: jest.Mock;
+    save: jest.Mock<Promise<unknown>, [unknown]>;
   };
   let dataSource: { transaction: jest.Mock };
 
@@ -161,7 +161,9 @@ describe('PressKitService', () => {
       await service.getPressKit();
 
       expect(communities.count).toHaveBeenCalledWith({
-        where: expect.objectContaining({ accessTier: 'public' }),
+        where: expect.objectContaining({
+          accessTier: 'public',
+        }) as Partial<Community>,
       });
       expect(events.count).toHaveBeenCalledWith({
         where: { status: 'published' },
@@ -312,7 +314,7 @@ describe('PressKitService', () => {
       await service.reorderCoverage({ orderedIds: ['c-b', 'c-a'] });
 
       expect(manager.save).toHaveBeenCalledTimes(1);
-      const savedRows = manager.save.mock.calls[0][0] as PressCoverage[];
+      const savedRows = manager.save.mock.calls[0]![0] as PressCoverage[];
       expect(savedRows.map((row) => [row.id, row.position])).toEqual([
         ['c-b', 0],
         ['c-a', 1],

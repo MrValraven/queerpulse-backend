@@ -81,7 +81,7 @@ export class GenesisService {
    * feature deletable in a single commit.
    */
   private async isGenesisConsumed(): Promise<boolean> {
-    const rows = await this.dataSource.query(
+    const rows = await this.dataSource.query<unknown[]>(
       `SELECT 1 FROM "genesis_bootstrap" WHERE "id" = 1 LIMIT 1`,
     );
     return Array.isArray(rows) && rows.length > 0;
@@ -91,7 +91,7 @@ export class GenesisService {
     // Conditional insert: `RETURNING` yields the row only when THIS call won
     // the insert, so a concurrent second claim that hits the conflict gets an
     // empty result and knows it lost the race.
-    const inserted = await manager.query(
+    const inserted = await manager.query<unknown[]>(
       `INSERT INTO "genesis_bootstrap" ("id") VALUES (1)
        ON CONFLICT ("id") DO NOTHING RETURNING "id"`,
     );

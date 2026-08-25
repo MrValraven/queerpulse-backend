@@ -21,6 +21,17 @@ const SMTP_CONNECTION_TIMEOUT_MS = 8000;
 const SMTP_SOCKET_TIMEOUT_MS = 8000;
 
 /**
+ * The slice of nodemailer's per-transport `SentMessageInfo` this service
+ * actually reads. Real SMTP transports (`SMTPTransport.SentMessageInfo`) and
+ * the log-only `jsonTransport` (`JSONTransport.SentMessageInfo`) both carry a
+ * `messageId: string`, so this shape covers either one structurally without
+ * importing both transport-specific types.
+ */
+interface SentMailInfo {
+  messageId?: string;
+}
+
+/**
  * The one transactional mailer for the platform. Transport is pluggable and
  * env-gated:
  *  - `SMTP_URL` set → a real SMTP transport from that connection string.
@@ -37,7 +48,7 @@ const SMTP_SOCKET_TIMEOUT_MS = 8000;
 @Injectable()
 export class MailerService {
   private readonly logger = new Logger(MailerService.name);
-  private readonly transporter: Transporter;
+  private readonly transporter: Transporter<SentMailInfo>;
   private readonly from: string;
   /** True when a real SMTP transport is configured; false = log-only fallback. */
   private readonly deliveringForReal: boolean;

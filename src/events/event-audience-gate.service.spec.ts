@@ -1,6 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
 import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventVisibility } from './entities/event.entity';
+import { EventCohost } from './entities/event-cohost.entity';
 
 function build() {
   const invites = {
@@ -12,7 +13,9 @@ function build() {
     find: jest.fn().mockResolvedValue([]),
   };
   const cohosts = {
-    find: jest.fn().mockResolvedValue([]),
+    find: jest
+      .fn<Promise<Pick<EventCohost, 'eventId'>[]>, [unknown]>()
+      .mockResolvedValue([]),
   };
   const connectionsService = {
     areConnected: jest.fn().mockResolvedValue(false),
@@ -318,7 +321,9 @@ describe('EventAudienceGateService', () => {
       expect(cohosts.find).toHaveBeenCalledTimes(1);
       expect(cohosts.find).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: expect.objectContaining({ userId: VIEWER_ID }),
+          where: expect.objectContaining({
+            userId: VIEWER_ID,
+          }) as Partial<EventCohost>,
         }),
       );
     });

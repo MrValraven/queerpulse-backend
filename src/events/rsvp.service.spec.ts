@@ -173,7 +173,9 @@ describe('RsvpService', () => {
     // Seat-bounded: exactly the one freed seat is filled from the waitlist head.
     expect(rsvpRepo.find).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ status: RsvpStatus.Waitlisted }),
+        where: expect.objectContaining({
+          status: RsvpStatus.Waitlisted,
+        }) as Partial<EventRsvp>,
         take: 1,
       }),
     );
@@ -260,7 +262,9 @@ describe('RsvpService', () => {
     // The `find` is bounded to the free seats (2), earliest waiters first...
     expect(rsvpRepo.find).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ status: RsvpStatus.Waitlisted }),
+        where: expect.objectContaining({
+          status: RsvpStatus.Waitlisted,
+        }) as Partial<EventRsvp>,
         order: { waitlistPosition: 'ASC' },
         take: 2,
       }),

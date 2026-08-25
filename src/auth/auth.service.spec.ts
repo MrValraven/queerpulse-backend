@@ -123,7 +123,11 @@ function buildMocks() {
   };
   // Read-side only — `suspensionInfoFor` reads the member's latest
   // moderation-outcome notification for the reason. Empty by default.
-  const notifications = { findOne: jest.fn().mockResolvedValue(null) };
+  const notifications = {
+    findOne: jest
+      .fn<Promise<Pick<Notification, 'payload'> | null>, [unknown]>()
+      .mockResolvedValue(null),
+  };
   // Read-side only — `staffRolesFor` reads the caller's staff-role grants.
   // Empty by default.
   const staffRoles = { find: jest.fn().mockResolvedValue([]) };
@@ -947,7 +951,9 @@ describe('AuthService.suspensionInfoFor', () => {
 
     expect(mocks.notifications.findOne).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ userId: 'u1' }),
+        where: expect.objectContaining({
+          userId: 'u1',
+        }) as Partial<Notification>,
         order: { createdAt: 'DESC' },
       }),
     );

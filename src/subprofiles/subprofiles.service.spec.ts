@@ -520,13 +520,54 @@ describe('toCardDTO', () => {
   });
 });
 
+// --- typed mock helpers ------------------------------------------------------
+//
+// Every fake below stubs only the handful of Repository/service methods its
+// caller actually exercises (never a full `jest.Mocked<Repository<T>>`,
+// which would require every member), and several of them return fixtures
+// that only ever set the couple of fields the test/mock body actually reads
+// rather than a complete row — so `RepoMockFn` leaves its argument shape as
+// `unknown[]` (never invoked unsafely below) and takes the exact `Return`
+// each fixture set needs; the "real, full entity" cases just pass the real
+// entity's `Promise<Entity[] | Entity | null>` for `Return`. `ServiceMockFn`
+// instead reads a method's args/return straight off an injected NestJS
+// service class, so a mock's `.mock.calls[n]` can never drift from
+// production the way a hand-written tuple type could.
+
+type RepoMockFn<Return> = jest.Mock<Return, unknown[]>;
+
+type ServiceMockFn<Class, Method extends keyof Class> = Class[Method] extends (
+  ...args: infer Args
+) => infer Return
+  ? jest.Mock<Return, Args>
+  : never;
+
+// A `subprofile_members` row as this file's fixtures actually shape it:
+// `subprofileId` is set by every fixture in this file, while every other
+// column is fixture-dependent and often omitted.
+type MemberRowFixture = Pick<SubprofileMember, 'subprofileId'> &
+  Partial<SubprofileMember>;
+
+// A `profiles` row as `profiles.findOne`'s fixtures actually shape it: every
+// non-null fixture in this file sets exactly these four fields (the ones the
+// owner-resolution code below reads) and nothing else.
+type ProfileOwnerFixture = Pick<
+  Profile,
+  'slug' | 'userId' | 'firstName' | 'lastName'
+> &
+  Partial<Profile>;
+
 // --- service (mocked repositories) ------------------------------------------
 
 describe('SubprofilesService', () => {
   let service: SubprofilesService;
   let subprofiles: {
-    find: jest.Mock;
-    findOne: jest.Mock;
+    // Every fixture fed to `find`/`findOne` in this file is either a
+    // complete `makeSubprofile(...)` row or `null`/`[]`, so these carry the
+    // real entity type (unlike `members`/`profiles` below, which also see
+    // ad hoc partial fixtures).
+    find: RepoMockFn<Promise<Subprofile[]>>;
+    findOne: RepoMockFn<Promise<Subprofile | null>>;
     count: jest.Mock;
     exist: jest.Mock;
     create: jest.Mock;
@@ -541,34 +582,57 @@ describe('SubprofilesService', () => {
   // a future list/get endpoint (Task 8) will add.
   let itemRevisions: { find: jest.Mock; findOne: jest.Mock };
   let members: {
-    findOne: jest.Mock;
-    find: jest.Mock;
+    // Unlike `subprofiles` above, this file's `members.findOne` fixtures are
+    // an inconsistent mix of `{ id }`-only and `{ subprofileId, userId }`-only
+    // sentinels (only ever null-checked, never read field-by-field), so its
+    // Return stays a genuine `Partial`. `find`'s fixtures always set
+    // `subprofileId` (the field every consumer below actually reads).
+    findOne: RepoMockFn<Promise<Partial<SubprofileMember> | null>>;
+    find: RepoMockFn<Promise<MemberRowFixture[]>>;
     create: jest.Mock;
     save: jest.Mock;
     count: jest.Mock;
     delete: jest.Mock;
   };
-  let profiles: { findOne: jest.Mock; find: jest.Mock };
-  let handleRegistry: { find: jest.Mock };
+  let profiles: {
+    // `findOne`'s fixtures are always the same `{ slug, userId, firstName,
+    // lastName }` shape (see `ProfileOwnerFixture`); `find`'s are always a
+    // complete `makeProfile(...)` row.
+    findOne: RepoMockFn<Promise<ProfileOwnerFixture | null>>;
+    find: RepoMockFn<Promise<Profile[]>>;
+  };
+  let handleRegistry: { find: RepoMockFn<Promise<Handle[]>> };
   let notifications: { create: jest.Mock };
   let manager: {
     findOne: jest.Mock;
     find: jest.Mock;
-    count: jest.Mock;
+    // The transaction manager stands in for TypeORM's `EntityManager`, whose
+    // `create`/`save`/`count` are dispatched against a DIFFERENT entity
+    // class per call site in this file (Subprofile, SubprofileMember,
+    // SubprofileItem, SubprofileItemRevision) — there is no single Entity to
+    // parameterize `RepoMockFn` with. `count`'s call sites all read its
+    // result as a number, so that one keeps a concrete return type; `create`
+    // and `save`'s call sites only ever read back `.mock.calls[n]` through
+    // their own explicit `as [...]` casts (never assign the return value),
+    // so `unknown` is the honest — not `any` — type for both.
+    count: jest.Mock<Promise<number>, unknown[]>;
     delete: jest.Mock;
     remove: jest.Mock;
-    create: jest.Mock;
-    save: jest.Mock;
+    create: jest.Mock<unknown, unknown[]>;
+    save: jest.Mock<Promise<unknown>, unknown[]>;
     update: jest.Mock;
     query: jest.Mock;
   };
   let dataSource: { transaction: jest.Mock };
   let blockFilter: {
-    isBlockedEitherWay: jest.Mock;
+    isBlockedEitherWay: ServiceMockFn<BlockFilterService, 'isBlockedEitherWay'>;
     excludeBlocked: jest.Mock;
-    blockedUserIds: jest.Mock;
+    blockedUserIds: ServiceMockFn<BlockFilterService, 'blockedUserIds'>;
   };
-  let contentModeration: { stateFor: jest.Mock; statesFor: jest.Mock };
+  let contentModeration: {
+    stateFor: ServiceMockFn<ContentModerationService, 'stateFor'>;
+    statesFor: jest.Mock;
+  };
   let followersService: {
     follow: jest.Mock;
     unfollow: jest.Mock;
@@ -584,13 +648,16 @@ describe('SubprofilesService', () => {
   // that configures those shared mocks keeps exercising the same observable
   // behavior it did before the extraction.
   let membership: {
-    isMember: jest.Mock;
-    getOwned: jest.Mock;
-    assertMember: jest.Mock;
+    isMember: ServiceMockFn<SubprofileMembershipService, 'isMember'>;
+    getOwned: ServiceMockFn<SubprofileMembershipService, 'getOwned'>;
+    assertMember: ServiceMockFn<SubprofileMembershipService, 'assertMember'>;
     listMembers: jest.Mock;
-    leave: jest.Mock;
+    leave: ServiceMockFn<SubprofileMembershipService, 'leave'>;
     removeMember: jest.Mock;
-    loadMemberCountsFor: jest.Mock;
+    loadMemberCountsFor: ServiceMockFn<
+      SubprofileMembershipService,
+      'loadMemberCountsFor'
+    >;
   };
   // `credits` is a plain jest mock, not a reimplementation of
   // `SubprofileCreditsService`'s real diff/self-exclusion/dedup logic — that
@@ -620,8 +687,10 @@ describe('SubprofilesService', () => {
 
   beforeEach(async () => {
     subprofiles = {
-      find: jest.fn().mockResolvedValue([]),
-      findOne: jest.fn().mockResolvedValue(null),
+      find: jest.fn<Promise<Subprofile[]>, unknown[]>().mockResolvedValue([]),
+      findOne: jest
+        .fn<Promise<Subprofile | null>, unknown[]>()
+        .mockResolvedValue(null),
       count: jest.fn().mockResolvedValue(0),
       exist: jest.fn().mockResolvedValue(false),
       // `create` in `create()`'s new transactional path (`manager.save(sp)`)
@@ -651,8 +720,12 @@ describe('SubprofilesService', () => {
     // (which never touched membership) keeps passing unchanged; tests that
     // care about the membership gate itself override this per-case.
     members = {
-      findOne: jest.fn().mockResolvedValue({ id: 'member-1' }),
-      find: jest.fn().mockResolvedValue([]),
+      findOne: jest
+        .fn<Promise<Partial<SubprofileMember> | null>, unknown[]>()
+        .mockResolvedValue({ id: 'member-1' }),
+      find: jest
+        .fn<Promise<MemberRowFixture[]>, unknown[]>()
+        .mockResolvedValue([]),
       create: jest
         .fn()
         .mockImplementation((value: Partial<SubprofileMember>) => ({
@@ -669,18 +742,22 @@ describe('SubprofilesService', () => {
       delete: jest.fn().mockResolvedValue(undefined),
     };
     profiles = {
-      findOne: jest.fn().mockResolvedValue(null),
+      findOne: jest
+        .fn<Promise<ProfileOwnerFixture | null>, unknown[]>()
+        .mockResolvedValue(null),
       // Only reached by `resolveHandles` when `handleRegistry.find` returns at
       // least one `ownerKind: 'profile'` row — every pre-existing test leaves
       // `handleRegistry` at its `[]` default, so this stays unexercised for
       // them; the `subprofile_credit` tests below override it.
-      find: jest.fn().mockResolvedValue([]),
+      find: jest.fn<Promise<Profile[]>, unknown[]>().mockResolvedValue([]),
     };
     // Backs `resolveHandles`'s handle→profile/persona lookups AND
     // `resolveMemberUserIdsByHandle`'s narrower handle→userId lookup.
     // Defaults to "no handles registered" so every pre-existing test (none of
     // which exercise collaboration credits) is unaffected.
-    handleRegistry = { find: jest.fn().mockResolvedValue([]) };
+    handleRegistry = {
+      find: jest.fn<Promise<Handle[]>, unknown[]>().mockResolvedValue([]),
+    };
     // Backs `NotificationsService` — `replaceSection`'s `subprofile_credit`
     // emit (Personas discovery Phase 5, Moment 6).
     notifications = { create: jest.fn().mockResolvedValue(null) };
@@ -701,17 +778,15 @@ describe('SubprofilesService', () => {
       // which touch revisions) is unaffected; the revision-history tests
       // below override this per-case.
       find: jest.fn().mockResolvedValue([]),
-      count: jest.fn().mockResolvedValue(2),
+      count: jest.fn<Promise<number>, unknown[]>().mockResolvedValue(2),
       delete: jest.fn().mockResolvedValue(undefined),
       remove: jest.fn().mockResolvedValue(undefined),
       create: jest
-        .fn()
-        .mockImplementation(
-          (_entity: unknown, value: Partial<SubprofileItem>) => ({
-            ...value,
-          }),
-        ),
-      save: jest.fn().mockResolvedValue(undefined),
+        .fn<unknown, unknown[]>()
+        .mockImplementation((_entity: unknown, value: unknown) => ({
+          ...(value as Record<string, unknown>),
+        })),
+      save: jest.fn<Promise<unknown>, unknown[]>().mockResolvedValue(undefined),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
       // Backs `create()`'s per-user advisory lock
       // (`pg_advisory_xact_lock`) taken at the top of its transaction.
@@ -729,17 +804,23 @@ describe('SubprofilesService', () => {
         ),
     };
     blockFilter = {
-      isBlockedEitherWay: jest.fn().mockResolvedValue(false),
+      isBlockedEitherWay: jest
+        .fn<Promise<boolean>, [string, string]>()
+        .mockResolvedValue(false),
       excludeBlocked: jest.fn(),
       // Only reached by `resolveHandles` when `handleRegistry.find` returns at
       // least one row — see the `profiles.find` comment above.
-      blockedUserIds: jest.fn().mockResolvedValue(new Set<string>()),
+      blockedUserIds: jest
+        .fn<Promise<Set<string>>, [string, string[]]>()
+        .mockResolvedValue(new Set<string>()),
     };
     // Defaults to "fully visible" (no takedown row) so every pre-existing
     // test is unaffected; the `getByHandle`/`getBySlugForProfile` describe
     // blocks below override per-case.
     contentModeration = {
-      stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
+      stateFor: jest
+        .fn<Promise<{ hidden: boolean; removed: boolean }>, [string, string]>()
+        .mockResolvedValue({ hidden: false, removed: false }),
       // Batched takedown lookup used by `dropModeratedSubprofiles`. Empty map =
       // nothing moderated, so every persona passes the filter (individual tests
       // override to hide/remove a specific slug).
@@ -756,7 +837,7 @@ describe('SubprofilesService', () => {
 
     membership = {
       isMember: jest
-        .fn()
+        .fn<Promise<boolean>, [string, string]>()
         .mockImplementation(async (userId: string, subprofileId: string) => {
           const row = await members.findOne({
             where: { subprofileId, userId },
@@ -764,17 +845,17 @@ describe('SubprofilesService', () => {
           });
           return row !== null;
         }),
-      getOwned: jest.fn(),
-      assertMember: jest.fn(),
+      getOwned: jest.fn<Promise<Subprofile>, [string, string]>(),
+      assertMember: jest.fn<Promise<Subprofile>, [string, string]>(),
       listMembers: jest.fn().mockResolvedValue([]),
-      leave: jest.fn(),
+      leave: jest.fn<Promise<void>, [string, string]>(),
       removeMember: jest.fn().mockResolvedValue(undefined),
       // Mirrors SubprofileMembershipService.loadMemberCountsFor's contract
       // (a grouped tally keyed by subprofileId) via members.find rather than
       // its real createQueryBuilder call, since the shared `members` mock
       // only implements the repository-style methods this file already uses.
       loadMemberCountsFor: jest
-        .fn()
+        .fn<Promise<Map<string, number>>, [string[]]>()
         .mockImplementation(async (subprofileIds: string[]) => {
           const counts = new Map<string, number>();
           if (!subprofileIds.length) return counts;
@@ -1153,8 +1234,8 @@ describe('SubprofilesService', () => {
 
     it('appends a numeric suffix on a per-owner slug collision', async () => {
       subprofiles.find.mockResolvedValue([
-        { slug: 'nightform' },
-        { slug: 'nightform-2' },
+        makeSubprofile({ slug: 'nightform' }),
+        makeSubprofile({ slug: 'nightform-2' }),
       ]);
       await service.create('user-1', {
         kind: SubprofileKind.Musician,
@@ -1215,7 +1296,9 @@ describe('SubprofilesService', () => {
   describe('getOwned', () => {
     it('allows any member (not just the creator)', async () => {
       // creatorId owns sp1; memberId is a co-owner via subprofile_members.
-      subprofiles.findOne.mockResolvedValue({ id: 'sp1', userId: 'creatorId' });
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ id: 'sp1', userId: 'creatorId' }),
+      );
       members.findOne.mockResolvedValue({
         subprofileId: 'sp1',
         userId: 'memberId',
@@ -1226,7 +1309,9 @@ describe('SubprofilesService', () => {
     });
 
     it('rejects a non-member with 403', async () => {
-      subprofiles.findOne.mockResolvedValue({ id: 'sp1', userId: 'creatorId' });
+      subprofiles.findOne.mockResolvedValue(
+        makeSubprofile({ id: 'sp1', userId: 'creatorId' }),
+      );
       members.findOne.mockResolvedValue(null);
       await expect(service.getOwned('strangerId', 'sp1')).rejects.toThrow(
         ForbiddenException,
@@ -1333,16 +1418,15 @@ describe('SubprofilesService', () => {
     // (`where: { subprofileId: In(ids) }`) — the mock below branches on that
     // shape to serve each call its own rows.
     it('reports memberCount 1 for a solo persona (creator-only)', async () => {
-      members.find.mockImplementation(
-        (options: { where: { userId?: string } }) => {
-          if (options.where.userId) {
-            return Promise.resolve([
-              { subprofileId: 'sp-solo', userId: 'user-1' },
-            ]);
-          }
-          return Promise.resolve([{ subprofileId: 'sp-solo' }]);
-        },
-      );
+      members.find.mockImplementation((rawOptions: unknown) => {
+        const options = rawOptions as { where: { userId?: string } };
+        if (options.where.userId) {
+          return Promise.resolve([
+            { subprofileId: 'sp-solo', userId: 'user-1' },
+          ]);
+        }
+        return Promise.resolve([{ subprofileId: 'sp-solo' }]);
+      });
       subprofiles.find.mockResolvedValue([
         makeSubprofile({ id: 'sp-solo', userId: 'user-1' }),
       ]);
@@ -1351,20 +1435,19 @@ describe('SubprofilesService', () => {
     });
 
     it('reports the true co-owner headcount for a co-owned persona, via ONE grouped query', async () => {
-      members.find.mockImplementation(
-        (options: { where: { userId?: string } }) => {
-          if (options.where.userId) {
-            return Promise.resolve([
-              { subprofileId: 'sp-co-owned', userId: 'user-1' },
-            ]);
-          }
+      members.find.mockImplementation((rawOptions: unknown) => {
+        const options = rawOptions as { where: { userId?: string } };
+        if (options.where.userId) {
           return Promise.resolve([
             { subprofileId: 'sp-co-owned', userId: 'user-1' },
-            { subprofileId: 'sp-co-owned', userId: 'co-owner-2' },
-            { subprofileId: 'sp-co-owned', userId: 'co-owner-3' },
           ]);
-        },
-      );
+        }
+        return Promise.resolve([
+          { subprofileId: 'sp-co-owned', userId: 'user-1' },
+          { subprofileId: 'sp-co-owned', userId: 'co-owner-2' },
+          { subprofileId: 'sp-co-owned', userId: 'co-owner-3' },
+        ]);
+      });
       subprofiles.find.mockResolvedValue([
         makeSubprofile({ id: 'sp-co-owned', userId: 'user-1' }),
       ]);
