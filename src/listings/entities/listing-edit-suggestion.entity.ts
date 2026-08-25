@@ -65,6 +65,25 @@ export class ListingEditSuggestion {
   @Column({ type: 'text' })
   message!: string;
 
+  /**
+   * The suggester's optional typed replacement value: the exact new phone
+   * number or closing time, rather than only prose describing that the current
+   * one is wrong. `null` when they reported a problem without knowing the fix,
+   * which stays a valid submission (`message` is the required half).
+   *
+   * Validated at submit time against the rules the target `Listing` column
+   * enforces (`accepted-suggestion-value.ts`), and re-validated on accept
+   * before it is written, so a row can never carry a value the create path
+   * would have refused.
+   *
+   * `text`, matching `message`, rather than a per-target width: the column it
+   * eventually lands on depends on `field`, whose own widths (60 for phone, 300
+   * for address) are enforced by the validators instead. Nullable because every
+   * row that existed before this column did carries prose alone.
+   */
+  @Column({ type: 'text', nullable: true })
+  proposedValue!: string | null;
+
   @Index('IDX_listing_edit_suggestions_status')
   @Column({
     type: 'enum',

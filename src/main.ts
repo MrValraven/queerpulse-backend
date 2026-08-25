@@ -13,6 +13,7 @@ import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
 import { DataSource } from 'typeorm';
 import { AppModule } from './app.module';
+import { withQuietBootLogging } from './common/quiet-boot-logger';
 import { VALIDATION_PIPE_OPTIONS } from './common/validation-pipe.options';
 import { DEFAULT_FRONTEND_ORIGIN } from './config/frontend-origins';
 import { ensureDatabaseSchema } from './database/ensure-database-schema';
@@ -30,7 +31,12 @@ async function bootstrap() {
     bufferLogs: true,
   });
   const logger = app.get(Logger);
-  app.useLogger(logger);
+  // Wrapped so Nest's own boot chatter (one line per module, per controller and
+  // per route, ~1,030 lines here, emitted in under a second) never reaches the
+  // log stream. That burst alone exceeded Railway's 500 logs/sec per-replica
+  // ceiling on every deploy, which dropped ~600 lines indiscriminately and could
+  // just as easily have eaten a real startup warning. See quiet-boot-logger.ts.
+  app.useLogger(withQuietBootLogging(logger));
 
   // Before anything is wired up to serve: make sure the database actually has
   // the schema this build expects. The deploy applies migrations in a

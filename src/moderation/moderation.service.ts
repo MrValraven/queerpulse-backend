@@ -43,6 +43,7 @@ import { CreateAppealDto } from './dto/create-appeal.dto';
 import { ModActionCode, ModActionDto } from './dto/mod-action.dto';
 import { ModBulkActionDto } from './dto/mod-bulk-action.dto';
 import { ReasonCode } from '../reports/reason-catalogue';
+import { formatReportReference } from '../reports/report-reference';
 import { ReviewAppealDto } from './dto/review-appeal.dto';
 import { Appeal, AppealStatus } from './entities/appeal.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
@@ -365,21 +366,7 @@ export class ModerationService {
       await this.auth.revokeAllForUser(enforceResult.userId);
     }
 
-    // Tell the reporter their report has been dealt with. Skipped for an
-    // anonymous report (no `reporterId` to reach) and when the acting moderator
-    // is the reporter. No actor — moderation outcomes are the platform's word,
-    // not a member action. Best-effort, post-commit.
-    if (saved.reporterId && saved.reporterId !== actorId) {
-      try {
-        await this.notifications.create(
-          saved.reporterId,
-          NotificationType.ReportResolved,
-          { source: 'report', reportId: saved.id, outcome: saved.status },
-        );
-      } catch {
-        // Intentionally ignored — the report action already committed.
-      }
-    }
+    await this.notifyReporterOfOutcomeBestEffort(saved, actorId);
 
     // Tell the *sanctioned member* the outcome and why (warn/suspend/ban) — the
     // gap the audit named. Best-effort, post-commit, same as the reporter path.
@@ -645,12 +632,18 @@ export class ModerationService {
     // member named in several reports of the same batch hears about each. Same
     // best-effort, post-commit contract as the single-report path. Only for
     // reports that actually committed — `outcomes` never carries a failed one.
+    //
+    // Each REPORTER hears too, through the same method the single-report path
+    // uses. Batch-actioning a queue is how most reports are actually closed, so
+    // leaving this out meant the majority of reporters got nothing at all — see
+    // `notifyReporterOfOutcomeBestEffort` for what they are and are not told.
     for (const { report, enforceResult } of outcomes) {
       await this.notifyModerationOutcome(
         actorId,
         dto,
         await this.resolveOutcomeTarget(report, dto, enforceResult),
       );
+      await this.notifyReporterOfOutcomeBestEffort(report, actorId);
     }
 
     return { updated, failed };
@@ -733,6 +726,59 @@ export class ModerationService {
     report.resolutionDuration = dto.duration ?? null;
     report.resolutionNote = dto.note ?? null;
     report.resolutionNotified = notified;
+  }
+
+  /**
+   * Tell the REPORTER that the thing they reported has been dealt with.
+   *
+   * Reporting used to be a one-way door on the bulk path: `actOnReport` sent
+   * this, `bulkActOnReports` did not, so whether a reporter ever heard anything
+   * depended on whether a moderator happened to tick their row in a batch. Worse,
+   * `applyResolution` wrote `'reporter'` into `resolutionNotified` either way,
+   * so the resolved report claimed a message had gone out that nothing had sent.
+   * Both paths now call this one method, which is also what keeps that claim
+   * honest.
+   *
+   * WHAT THE REPORTER IS TOLD: that their report reached an outcome, which of
+   * their reports it was (`reportId` plus the display `reference` they already
+   * saw on `GET /reports/mine`), the subject type they themselves chose when
+   * filing, and whether it was `resolved` or `escalated`.
+   *
+   * WHAT THEY ARE DELIBERATELY NOT TOLD: the moderator's identity
+   * (`resolutionActorId`), the action taken (`resolutionAction`/
+   * `resolutionDuration`), the moderator's internal note (`resolutionNote`), and
+   * anything at all about the reported party. A reporter is owed the knowledge
+   * that they were heard; they are not owed a consequence report on another
+   * member, which would turn the report form into a way to probe whether someone
+   * has been sanctioned.
+   *
+   * Skipped for an anonymous filing with no `reporterId` to reach and when the
+   * acting moderator is the reporter. No actor is passed, so this bypasses the
+   * block/mute filter and the per-type preference gate exactly like
+   * `notifyModerationOutcome`: the outcome of your own report is the platform's
+   * word, not a member action. Best-effort and post-commit, so a notification
+   * failure can never roll back a decision that has already committed.
+   */
+  private async notifyReporterOfOutcomeBestEffort(
+    report: Report,
+    actorId: string,
+  ): Promise<void> {
+    if (!report.reporterId || report.reporterId === actorId) return;
+    try {
+      await this.notifications.create(
+        report.reporterId,
+        NotificationType.ReportResolved,
+        {
+          source: 'report',
+          reportId: report.id,
+          reference: formatReportReference(report),
+          subjectType: report.subjectType,
+          outcome: report.status,
+        },
+      );
+    } catch {
+      // Intentionally ignored — the report action already committed.
+    }
   }
 
   /**

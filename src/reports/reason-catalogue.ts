@@ -263,6 +263,22 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'off_topic',
     'other',
   ],
+  // A public question (or its answer) on a business listing. Shaped like
+  // `MagazineComment` rather than `Review`: a question box on a venue's page is
+  // where someone gets asked, in public, whether they were at a place or who
+  // they went with, so `outing` and `doxxing` belong here in a way they do not
+  // on a star review. `off_topic` covers the question that is really an
+  // advertisement for somewhere else.
+  [ReportSubjectType.ListingPublicQuestion]: [
+    'outing',
+    'doxxing',
+    'harassment',
+    'hate_speech',
+    'discrimination',
+    'spam',
+    'off_topic',
+    'other',
+  ],
 };
 
 /** The reason options a given subject type should offer, as `{code, label}`. */

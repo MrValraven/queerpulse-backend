@@ -27,6 +27,7 @@ import { MagazineAuthor } from '../magazine/entities/magazine-author.entity';
 import { Changemaker } from '../changemakers/entities/changemaker.entity';
 import { Collection } from '../collections/entities/collection.entity';
 import { Listing } from '../listings/entities/listing.entity';
+import { ListingReview } from '../listings/entities/listing-review.entity';
 import { Company } from '../companies/entities/company.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { FILES_PREFIX, toBareKey } from '../storage/bare-key';
@@ -258,6 +259,23 @@ export const PLAIN_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
     slugColumn: 'slug',
   }),
   plainSource({
+    // A member's optional photo on a directory review. Its own source rather
+    // than a slot inside the `listing` one: a review photo belongs to the
+    // reviewer, not to the business, and it must be independently deletable —
+    // an unused review photo must not be kept alive by a listing that happens
+    // to be nearby in the same module.
+    //
+    // Labelled with the snapshotted `reviewerName` because a review has no
+    // title of its own, and given no `slugColumn` because a review has no route
+    // of its own either (it renders inside its listing's page).
+    type: 'listing-review',
+    field: 'ListingReview.photo',
+    entity: ListingReview,
+    column: 'photo',
+    idColumn: 'id',
+    labelColumns: ['reviewerName'],
+  }),
+  plainSource({
     type: 'collection',
     field: 'Collection.cover',
     entity: Collection,
@@ -468,20 +486,32 @@ function arraySource(config: {
 export const ARRAY_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
   arraySource({
     type: 'listing',
-    field: 'Listing.photos',
+    field: 'Listing.photoGallery',
     entity: Listing,
-    column: 'photos',
+    // Interpolated straight into raw SQL by `arraySource`, so this is the
+    // COLUMN name, not the camelCase entity property (`photoGallery`) the
+    // extractor below reads. `photo_gallery` is left alone by TypeORM's
+    // `alias.property` substitution and resolves against the `listings` alias.
+    column: 'photo_gallery',
     idColumn: 'id',
     labelColumns: ['name'],
     slugColumn: 'slug',
-    // `Listing.photos` is a flat `{ wide, d1, d2, vibe }` jsonb map — the
-    // sibling `alt` column holds alt text, not storage refs, and is
-    // intentionally not read here.
+    // The ordered gallery: `[{ image, alt, caption }]`. Only `image` holds a
+    // storage ref. `alt` and `caption` are prose about the photo, never keys.
+    //
+    // This is the ONLY listing-photo source, and it is complete. The legacy
+    // `photos` column is still written, but only ever as a derived mirror of
+    // the first four gallery entries (`legacySlotsFromGallery`), so every key it
+    // holds is already in `photo_gallery`. A second source over it would report
+    // the same listing twice for one key, since the resolver appends rather
+    // than de-duplicating. The sibling `alt` column holds alt text, not storage
+    // refs, and was never read here.
     extractRefs: (row) =>
-      Object.values((row.photos ?? {}) as Record<string, unknown>).filter(
-        (value): value is string => typeof value === 'string',
-      ),
+      ((row.photoGallery ?? []) as Array<{ image?: unknown }>)
+        .map((photo) => photo?.image)
+        .filter((value): value is string => typeof value === 'string'),
   }),
+
   arraySource({
     type: 'company-work',
     field: 'Company.work[].imageUrl',

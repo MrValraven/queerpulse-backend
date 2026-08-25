@@ -20,8 +20,9 @@ import {
 import { Listing, ListingStatus } from './entities/listing.entity';
 import { EditSuggestionDTO, toEditSuggestionDTO } from './listing-response';
 import {
-  AcceptedSuggestionTarget,
+  collectAcceptedSuggestionValueErrors,
   isAcceptedSuggestionValueValid,
+  resolveAcceptedSuggestionTarget,
 } from './accepted-suggestion-value';
 
 export interface ListEditSuggestionsQueryInput {
@@ -38,35 +39,17 @@ export interface EditSuggestionResult {
 }
 
 /**
- * Maps a suggestion's `field` onto the `Listing` column an accepted value is
- * written to, or `null` when there is no safe column to apply it to. Kept as a
- * plain function so the mapping is stated once and shared by the validation and
- * the write below (they must never disagree about which column is being
- * targeted). See `applyAcceptedBestEffort`'s doc comment for why `hours` lands
- * on `hoursNote` and `description` on `tagline`.
+ * One admin-queue row: the shared `EditSuggestionDTO` widened with the
+ * suggester's typed replacement value, so a moderator sees the exact proposal
+ * next to the prose and can judge both before clicking accept.
+ *
+ * Widened here rather than inside `toEditSuggestionDTO` because this queue is
+ * the only surface that serialises a suggestion, and the mapper stays the
+ * shared shape other listing responses reference.
  */
-// Takes a plain `string`, not `EditSuggestionField`: the entity stores `field`
-// as a varchar on purpose so the frontend's picker can grow without a
-// migration, so a row can legitimately carry a value this build has never
-// heard of. Those fall through to `default` and apply to no column, which is
-// the same handling `'other'` gets.
-function resolveSuggestionTarget(
-  field: string,
-): AcceptedSuggestionTarget | null {
-  switch (field) {
-    case 'address':
-      return 'address';
-    case 'phone':
-      return 'phone';
-    case 'website':
-      return 'website';
-    case 'hours':
-      return 'hoursNote';
-    case 'description':
-      return 'tagline';
-    default:
-      return null;
-  }
+export interface EditSuggestionQueueDTO extends EditSuggestionDTO {
+  /** `null` when the member reported a problem without proposing a fix. */
+  proposedValue: string | null;
 }
 
 /**
@@ -124,12 +107,21 @@ export class ListingEditSuggestionsService {
       throw new BadRequestException('Message cannot be empty');
     }
 
+    // Already trimmed and already validated against the target column's own
+    // create-path rules by `IsValidProposedSuggestionValue` on the DTO. Trimmed
+    // again here for the same reason `message` is: the class-transformer step
+    // is a property of the HTTP pipeline, and this method is also reachable
+    // directly. A blank proposal is stored as `null`, so the column has exactly
+    // one representation of "no value proposed".
+    const proposedValue = dto.proposedValue?.trim() || null;
+
     const saved = await this.suggestions.save(
       this.suggestions.create({
         listingId: listing.id,
         suggestedByUserId: userId,
         field: dto.field,
         message,
+        proposedValue,
         status: ListingEditSuggestionStatus.Pending,
       }),
     );
@@ -143,7 +135,7 @@ export class ListingEditSuggestionsService {
    * admin lists so it can never dump an unbounded table. */
   async listForAdmin(
     query: ListEditSuggestionsQueryInput,
-  ): Promise<EditSuggestionDTO[]> {
+  ): Promise<EditSuggestionQueueDTO[]> {
     const qb = this.suggestions
       .createQueryBuilder('s')
       .orderBy('s.created_at', 'DESC')
@@ -172,18 +164,21 @@ export class ListingEditSuggestionsService {
     // to render a queue row against — skip it rather than throw, since the
     // FK is `ON DELETE CASCADE` and this should be unreachable in practice.
     return rows
-      .map((row): EditSuggestionDTO | null => {
+      .map((row): EditSuggestionQueueDTO | null => {
         const listing = listingById.get(row.listingId);
         if (!listing) return null;
-        return toEditSuggestionDTO(
-          row,
-          listing,
-          row.suggestedByUserId
-            ? (refs.get(row.suggestedByUserId) ?? null)
-            : null,
-        );
+        return {
+          ...toEditSuggestionDTO(
+            row,
+            listing,
+            row.suggestedByUserId
+              ? (refs.get(row.suggestedByUserId) ?? null)
+              : null,
+          ),
+          proposedValue: row.proposedValue,
+        };
       })
-      .filter((dto): dto is EditSuggestionDTO => dto !== null);
+      .filter((dto): dto is EditSuggestionQueueDTO => dto !== null);
   }
 
   /** Moderator/admin-only (`ListingsController.resolveEditSuggestion`'s
@@ -197,7 +192,27 @@ export class ListingEditSuggestionsService {
    * correction (where there's a safe column to apply it to) and notifies the
    * owner, best-effort, AFTER this row's own status commits — see
    * `applyAcceptedBestEffort`. A failure there must never surface as if the
-   * accept/dismiss itself failed. */
+   * accept/dismiss itself failed.
+   *
+   * Which value gets written, highest precedence first:
+   *
+   *   1. `dto.value`, the moderator's explicit override. They are looking at
+   *      the listing and the proposal side by side, so their deliberate typed
+   *      correction outranks anything the row carries.
+   *   2. `suggestion.proposedValue`, the suggester's typed replacement. This is
+   *      the one-click case: a moderator who agrees with the proposal accepts
+   *      with an empty body and it is written as it stands, with nobody
+   *      retyping it.
+   *   3. `suggestion.message`, the prose. The long-standing fallback for rows
+   *      filed before proposals existed, and for members who describe the fix
+   *      in the message instead of typing it into the field.
+   *
+   * A moderator override is checked BEFORE anything is mutated, and a bad one
+   * is a 400 rather than a silent skip. That is the one place this method
+   * refuses outright, and deliberately so: the best-effort silence downstream
+   * exists because a member's unconstrained prose must not be able to jam a
+   * queue row, while a moderator who typed a value and saw nothing happen
+   * cannot tell "applied" from "discarded" and can simply retry. */
   async resolve(
     id: string,
     moderatorUserId: string,
@@ -206,6 +221,15 @@ export class ListingEditSuggestionsService {
     const suggestion = await this.suggestions.findOne({ where: { id } });
     if (!suggestion) {
       throw new NotFoundException('Edit suggestion not found');
+    }
+
+    const moderatorValue = dto.value?.trim() || null;
+    if (moderatorValue !== null) {
+      this.assertModeratorValueApplicable(
+        suggestion,
+        dto.status,
+        moderatorValue,
+      );
     }
 
     suggestion.status =
@@ -218,10 +242,51 @@ export class ListingEditSuggestionsService {
     const saved = await this.suggestions.save(suggestion);
 
     if (saved.status === ListingEditSuggestionStatus.Accepted) {
-      await this.applyAcceptedBestEffort(saved);
+      await this.applyAcceptedBestEffort(saved, moderatorValue);
     }
 
     return { id: saved.id, status: saved.status };
+  }
+
+  /**
+   * Rejects a moderator override that could never be written, before `resolve`
+   * mutates anything. Three ways it fails, each answered with the reason:
+   * dismissing writes nothing at all, `other` (and any future picker entry with
+   * no column behind it yet) has nowhere to write to, and a value that breaks
+   * the target column's own create-path rules is the very thing
+   * `accepted-suggestion-value.ts` exists to keep out of the table.
+   */
+  private assertModeratorValueApplicable(
+    suggestion: ListingEditSuggestion,
+    requestedStatus: ResolveEditSuggestionDto['status'],
+    moderatorValue: string,
+  ): void {
+    if (requestedStatus !== 'accepted') {
+      throw new BadRequestException(
+        'A replacement value only applies when accepting a suggestion. ' +
+          'Dismissing one leaves the listing untouched.',
+      );
+    }
+
+    const target = resolveAcceptedSuggestionTarget(suggestion.field);
+    if (target === null) {
+      throw new BadRequestException(
+        `The "${suggestion.field}" bucket has no listing column a replacement ` +
+          'value can be written to. Accept it without a value and edit the ' +
+          'listing directly.',
+      );
+    }
+
+    const constraintFailures = collectAcceptedSuggestionValueErrors(
+      target,
+      moderatorValue,
+    );
+    if (constraintFailures.length > 0) {
+      throw new BadRequestException(
+        `That value is not valid for "${suggestion.field}": ` +
+          constraintFailures.join('; '),
+      );
+    }
   }
 
   /**
@@ -261,9 +326,19 @@ export class ListingEditSuggestionsService {
    * resolves and the owner is still notified with the raw message, so the
    * moderator's own decision stands and a human can follow up. Refusing the
    * accept outright would instead leave the row stuck in the queue forever.
+   *
+   * `moderatorValue` is the override from the resolve body, already checked
+   * against this suggestion's target in `assertModeratorValueApplicable`, or
+   * `null` when the moderator accepted as-is. It outranks the suggester's
+   * `proposedValue`, which in turn outranks the prose `message`. See
+   * `resolve`'s doc comment for why that order. Whichever value wins still runs
+   * through `isAcceptedSuggestionValueValid` below: a proposal was validated at
+   * submit time, but the rules can be tightened between submit and accept, and
+   * the check protecting the column belongs next to the write.
    */
   private async applyAcceptedBestEffort(
     suggestion: ListingEditSuggestion,
+    moderatorValue: string | null,
   ): Promise<void> {
     try {
       const listing = await this.listings.findOne({
@@ -277,24 +352,27 @@ export class ListingEditSuggestionsService {
       // lands on. `null` is 'other' (or any future field): no column to apply
       // to, so nothing is overwritten and the owner still gets notified below
       // with the raw message.
-      const target = resolveSuggestionTarget(suggestion.field);
+      const target = resolveAcceptedSuggestionTarget(suggestion.field);
 
       if (target !== null) {
-        if (!isAcceptedSuggestionValueValid(target, suggestion.message)) {
+        const valueToWrite =
+          moderatorValue ?? suggestion.proposedValue ?? suggestion.message;
+
+        if (!isAcceptedSuggestionValueValid(target, valueToWrite)) {
           this.logger.warn(
             `Edit suggestion ${suggestion.id} was accepted but not applied: ` +
               `the suggested value fails the validation the create path ` +
               `enforces on "${target}". Listing ${listing.ref} left unchanged.`,
           );
         } else if (target === 'phone') {
-          listing.social = { ...listing.social, phone: suggestion.message };
+          listing.social = { ...listing.social, phone: valueToWrite };
           await this.listings.save(listing);
         } else if (target === 'website') {
-          listing.social = { ...listing.social, website: suggestion.message };
+          listing.social = { ...listing.social, website: valueToWrite };
           await this.listings.save(listing);
         } else {
           // 'address' | 'hoursNote' | 'tagline' — all plain string columns.
-          listing[target] = suggestion.message;
+          listing[target] = valueToWrite;
           await this.listings.save(listing);
         }
       }
@@ -315,13 +393,17 @@ export class ListingEditSuggestionsService {
     }
   }
 
-  /** Mirrors `DirectoryService.loadLiveOr404` exactly (slug + `Live` status) —
-   * kept as a local copy rather than a shared import since `DirectoryService`
-   * doesn't export it, matching how `ListingsService.loadOr404` (by `ref`)
-   * stays private/file-local too. */
+  /** Mirrors `DirectoryService.loadLiveOr404` exactly (slug + `Live` status +
+   * not owner-paused) — kept as a local copy rather than a shared import since
+   * `DirectoryService` doesn't export it, matching how
+   * `ListingsService.loadOr404` (by `ref`) stays private/file-local too.
+   *
+   * Suggestions come from the public detail page, so a listing that page 404s
+   * has to 404 here too: a member cannot be suggesting an edit to a listing
+   * they have no way of reading. */
   private async loadLiveOr404(slug: string): Promise<Listing> {
     const listing = await this.listings.findOne({
-      where: { slug, status: ListingStatus.Live },
+      where: { slug, status: ListingStatus.Live, isHiddenByOwner: false },
     });
     if (!listing) {
       throw new NotFoundException('Listing not found');

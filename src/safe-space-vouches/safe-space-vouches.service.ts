@@ -155,13 +155,18 @@ export class SafeSpaceVouchesService {
   }
 
   /**
-   * The space must exist, be live, and currently be a verified safe space —
-   * vouching for a place that was never reviewed (or lost its badge) is
-   * meaningless, and the FE only surfaces the vouch button on verified spaces.
+   * The space must exist, be live, be publicly shown, and currently be a
+   * verified safe space — vouching for a place that was never reviewed (or
+   * lost its badge) is meaningless, and the FE only surfaces the vouch button
+   * on verified spaces.
+   *
+   * A listing its owner has paused is unreachable on the public page the vouch
+   * button lives on, so it resolves as not-found here for the same reason
+   * `DirectoryService.getSafeSpaceBySlug` 404s it.
    */
   private async resolveVerifiedSpace(slug: string): Promise<Listing> {
     const listing = await this.listings.findOne({
-      where: { slug, status: ListingStatus.Live },
+      where: { slug, status: ListingStatus.Live, isHiddenByOwner: false },
     });
     if (!listing) {
       throw new NotFoundException('Safe space not found');

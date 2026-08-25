@@ -12,7 +12,10 @@ import {
 import { ConversationsService } from './conversations.service';
 import { GroupsService } from './groups.service';
 import { MessageAnnotationsService } from './message-annotations.service';
-import { MessageRequestsService } from './message-requests.service';
+import {
+  EnquiryContactability,
+  MessageRequestsService,
+} from './message-requests.service';
 import { MessagesService } from './messages.service';
 
 /**
@@ -396,6 +399,20 @@ export class MessagingService {
       fromUserId,
       toUserId,
       body,
+    );
+  }
+
+  /** Read-only "may this enquiry be sent, and can the thread be replied to?" —
+   *  see `MessageRequestsService.enquiryContactability`. Lets a domain decide
+   *  whether to offer a contact affordance without duplicating messaging's
+   *  block and connection rules. */
+  enquiryContactability(
+    fromUserId: string,
+    toUserId: string,
+  ): Promise<EnquiryContactability> {
+    return this.messageRequestsService.enquiryContactability(
+      fromUserId,
+      toUserId,
     );
   }
 }

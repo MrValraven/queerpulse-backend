@@ -18,9 +18,9 @@ import { ListingStatus } from './listing.entity';
  * removal (`removeByModerator`/`bulkRemove`), a question asked
  * (`askQuestion`), or a question answered (`answerQuestion`); by
  * `ListingClaimsService.review` on an approved ownership transfer; and by
- * `ListingsService.update` when an OWNER edit to a live listing re-opens its
- * review (the one row here whose `actorId` is the owner rather than a
- * moderator, which is the point: it records who caused the re-review).
+ * `ListingsService.update` when an OWNER edits a live listing (the one row
+ * here whose `actorId` is the owner rather than a moderator, which is the
+ * point: it records who changed an already-published listing).
  */
 export enum ListingModerationAction {
   StatusChanged = 'status_changed',
@@ -41,6 +41,56 @@ export enum ListingModerationAction {
    * `AddListingOwnershipTransferredAction1793530200000`.
    */
   OwnershipTransferred = 'ownership_transferred',
+  /**
+   * The OWNER of a live listing edited it (`ListingsService.update`). This is
+   * the one action here whose `actorId` is the owner rather than a moderator,
+   * which is the point: it records who changed a listing that is already
+   * published, and the `reason` names in plain language what they changed.
+   *
+   * An owner edit does not gate publication. Once a listing has been approved
+   * it stays live through its owner's corrections, so this row is the audit
+   * trail that replaced the forced re-review a moderated-field edit used to
+   * trigger. When the edit restated the listing's identity (name, badge or
+   * ownership link) and cost it its `queerOwnedVerified` badge, the `reason`
+   * says so explicitly.
+   *
+   * `fromStatus`/`toStatus` are both null on this action: an owner edit changes
+   * the listing's content, never its moderation state. See migration
+   * `AddListingOwnerEditedAction1793960000000`.
+   */
+  OwnerEdited = 'owner_edited',
+  /**
+   * A member ACCEPTED an invitation to co-manage this listing
+   * (`ListingCoManagersService.respondToInvite`). Written on the accept rather
+   * than on the invite, because that is the moment access actually begins; an
+   * invitation nobody answered changed nothing about who can edit the page, and
+   * putting invite churn in this table would bury the events that matter.
+   *
+   * `actorId` is the member who accepted, so this joins `owner_edited` as an
+   * action whose actor is not a moderator. The `reason` is composed by the
+   * platform and names the member in plain language, so it is on
+   * `OWNER_VISIBLE_MODERATION_REASON_ACTIONS`: an owner reviewing who has
+   * access to their business page has to be able to read who it is.
+   *
+   * `fromStatus`/`toStatus` are both null: a co-manager change moves no
+   * moderation state. See migration
+   * `AddListingCoManagerEnumValues1794530000000`.
+   */
+  CoManagerAdded = 'co_manager_added',
+  /**
+   * A co-manager seat that was ACTIVE ended: the owner revoked it
+   * (`actorId` is the owner) or the co-manager stepped down (`actorId` is the
+   * co-manager). A pending invitation that was withdrawn or declined writes
+   * nothing here, for the same reason `co_manager_added` is not written on the
+   * invite: nothing was ever granted.
+   *
+   * The mass revocation an approved ownership claim performs is deliberately
+   * NOT logged one row per seat. That transfer already writes exactly one
+   * `ownership_transferred` row, and the count of seats it cleared is recorded
+   * in that row's own `reason` — one event for one act, rather than a burst of
+   * rows a reader has to reassemble.
+   */
+  CoManagerRemoved = 'co_manager_removed',
 }
 
 /**

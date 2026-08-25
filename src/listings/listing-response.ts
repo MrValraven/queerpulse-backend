@@ -1,4 +1,5 @@
 import { toImageUrl } from '../common/image-url';
+import { ListingPublicQuestionDTO } from './dto/listing-public-question.dto';
 import { MemberRef } from '../common/member-ref';
 import { Event } from '../events/entities/event.entity';
 import type { CropRect } from '../media-crops/crop-rect';
@@ -11,7 +12,10 @@ import { ListingReview } from './entities/listing-review.entity';
 import {
   Listing,
   ListingDayHours,
+  ListingHoursException,
+  ListingOperatingState,
   ListingPhotoSet,
+  ListingServiceOffering,
   ListingSocial,
   ListingStatus,
   ListingWitLine,
@@ -19,13 +23,78 @@ import {
   SafeSpaceRemoval,
   SafeSpaceVouch,
 } from './entities/listing.entity';
+import {
+  ListingAccessibilityAnswerMap,
+  normalizeAccessibilityAnswers,
+} from './listing-accessibility';
+import {
+  galleryImageReferences,
+  legacySlotsFromGallery,
+} from './listing-photo-gallery';
 
 /**
- * Response-side shape of `photos` — `normalizePhotoSet` (listings.service.ts)
- * defaults missing slots to `''`, and `toImageUrl('')` returns `null`, so the
- * response widens each field to `string | null`. The entity's own
- * `ListingPhotoSet` (still `string` fields, storage keys/external URLs as
- * persisted) is unchanged.
+ * One photo of a listing's ordered gallery as every response carries it.
+ *
+ * Field names mirror `ListingGalleryPhotoDto` exactly, so the array a client
+ * reads here is the array it PATCHes back: `image` arrives resolved through
+ * `toImageUrl` (a `/files/<key>` URL for one of our uploads), and the upload
+ * interceptor collapses that back to the bare key on the way in.
+ *
+ * `alt` and `caption` are always present and always separate. `alt` describes
+ * the photo for someone who cannot see it; `caption` is copy shown to
+ * everyone. Rendering one in place of the other is a bug in either direction.
+ *
+ * `crop` is absent (never a bare `undefined` key on the wire) when this photo
+ * has no saved crop rect.
+ */
+export interface ListingGalleryPhotoView {
+  image: string | null;
+  alt: string;
+  caption: string;
+  crop?: CropRect;
+}
+
+/**
+ * Maps a listing's stored gallery to its response shape, resolving each image
+ * reference and attaching any pre-loaded crop rect.
+ *
+ * Stays synchronous: the caller batches ONE `MediaCropService.getMany` for a
+ * whole page (see `listingPhotoKeys`) and passes the resulting Map through.
+ */
+export function toGalleryView(
+  listing: Listing,
+  crops: Map<string, CropRect> = new Map(),
+): ListingGalleryPhotoView[] {
+  return (listing.photoGallery ?? []).map((photo) => {
+    const crop = cropFor(photo.image, crops);
+    return {
+      image: toImageUrl(photo.image),
+      alt: photo.alt ?? '',
+      caption: photo.caption ?? '',
+      ...(crop ? { crop } : {}),
+    };
+  });
+}
+
+/**
+ * The listing's cover photo (the first entry of its ordered gallery), or
+ * `null` for a listing with no photos at all.
+ */
+export function toCoverPhoto(
+  listing: Listing,
+  crops: Map<string, CropRect> = new Map(),
+): ListingGalleryPhotoView | null {
+  return toGalleryView(listing, crops)[0] ?? null;
+}
+
+/**
+ * LEGACY response-side shape of `photos`: four named slots, each `string |
+ * null` because `toImageUrl('')` returns `null` for an empty slot.
+ *
+ * Superseded by `ListingGalleryPhotoView[]`, and still emitted (derived from
+ * the first four gallery entries) so a frontend that has not moved to
+ * `photoGallery` keeps rendering. It cannot see past the fourth photo and it
+ * carries no captions.
  */
 export interface ListingPhotoSetView {
   wide: string | null;
@@ -45,9 +114,9 @@ export interface ListingPhotoCropSetView {
   vibe?: CropRect;
 }
 
-/** Builds the per-slot crop lookup for a listing's four photo slots from a
- * pre-loaded `MediaCropService.getMany` Map — the caller batches ONE lookup
- * for the whole page/detail; this stays synchronous. */
+/** LEGACY per-slot crop lookup, derived from the first four gallery entries
+ * so it agrees with `legacyPhotoSetView`. Same batching contract as
+ * `toGalleryView`: the caller does ONE lookup for the whole page/detail. */
 function toPhotoCrops(
   photos: ListingPhotoSet,
   crops: Map<string, CropRect>,
@@ -60,14 +129,231 @@ function toPhotoCrops(
   };
 }
 
-/** The raw stored keys (or external URLs) a listing's four photo slots are
- * about to emit — collected BEFORE `toImageUrl` resolves them, so
+/**
+ * Every raw stored reference (storage key or external URL) a listing's photos
+ * are about to emit — collected BEFORE `toImageUrl` resolves them, so
  * `MediaCropService.getMany` can batch-resolve every crop for a page (or a
- * single listing) in ONE query. */
-export function listingPhotoKeys(photos: ListingPhotoSet): string[] {
-  return [photos.wide, photos.d1, photos.d2, photos.vibe].filter(
-    (key): key is string => Boolean(key),
+ * single listing) in ONE query.
+ *
+ * Reads the ordered gallery, which is the source of truth. The legacy
+ * `photos` slots are a derived mirror of the first four entries, so they add
+ * nothing here.
+ */
+export function listingPhotoKeys(listing: Listing): string[] {
+  return galleryImageReferences(listing.photoGallery);
+}
+
+/** The legacy four-slot photo/alt pair a response still emits, derived from
+ * the ordered gallery rather than read off the mirror columns, so the wire
+ * shape agrees with `photoGallery` even for a row whose mirror has drifted. */
+function legacyPhotoSets(listing: Listing): {
+  photos: ListingPhotoSet;
+  alt: ListingPhotoSet;
+} {
+  return legacySlotsFromGallery(listing.photoGallery ?? []);
+}
+
+/** The legacy `photos` response object (resolved URLs per named slot). */
+function legacyPhotoSetView(photos: ListingPhotoSet): ListingPhotoSetView {
+  return {
+    wide: toImageUrl(photos.wide),
+    d1: toImageUrl(photos.d1),
+    d2: toImageUrl(photos.d2),
+    vibe: toImageUrl(photos.vibe),
+  };
+}
+
+/**
+ * The business's own report of whether it is still trading, in the shape every
+ * listing response carries it. Separate from the moderation `status`, and
+ * separate again from any safe-space badge.
+ *
+ * `setAt` is an ISO-8601 instant (or `null` while the listing is `open`), so
+ * the frontend composes the localized "Temporarily closed since 4 March" line
+ * itself: the backend emits primitives, the same split `UpcomingEventDTO`
+ * already follows.
+ */
+export interface OperatingStateView {
+  state: ListingOperatingState;
+  note: string | null;
+  setAt: string | null;
+  /** Free-text destination of a `moved` business. `null` for every other
+   * state, and for a move whose destination was never written down. */
+  movedToAddress: string | null;
+}
+
+/** Builds the shared operating-state view from a listing row. Reads the
+ * supporting fields only for a non-`open` state, so a listing that reopened
+ * can never leak the note or address of a closure it has left behind, even if
+ * a stale value somehow survived on the row. */
+export function operatingStateView(listing: Listing): OperatingStateView {
+  const isOpen = listing.operatingState === ListingOperatingState.Open;
+  return {
+    state: listing.operatingState,
+    note: isOpen ? null : listing.operatingStateNote || null,
+    setAt: isOpen ? null : (listing.operatingStateSetAt?.toISOString() ?? null),
+    movedToAddress:
+      listing.operatingState === ListingOperatingState.Moved
+        ? listing.movedToAddress || null
+        : null,
+  };
+}
+
+/**
+ * The venue's accessibility answers as every listing response carries them.
+ *
+ * `answers` is always the COMPLETE question set: an unanswered question comes
+ * back as an explicit `"unknown"`, never as a missing key. A client must be
+ * able to render three distinct states — yes, no, and nobody has said — and it
+ * can only do that if `no` and `unknown` arrive as different values. Do not
+ * render `unknown` as a negative and do not drop it: "we have not been told"
+ * is information a member planning around a wheelchair actually uses.
+ *
+ * `note` is the owner's free-text caveat ("two steps at the door"), or `null`
+ * when they wrote none.
+ */
+export interface ListingAccessibilityView {
+  answers: ListingAccessibilityAnswerMap;
+  note: string | null;
+}
+
+/** Builds the shared accessibility view from a listing row, normalizing the
+ * stored map up to the full vocabulary so a row written before a question
+ * existed still answers it (as `unknown`). */
+export function accessibilityView(listing: Listing): ListingAccessibilityView {
+  return {
+    answers: normalizeAccessibilityAnswers(listing.accessibilityAnswers),
+    note: listing.accessibilityNote || null,
+  };
+}
+
+/**
+ * The listing's agreement to the LGBTQ+ affirming baseline, as every listing
+ * response carries it.
+ *
+ * `isAccepted` is `true` on every listing in the directory, because agreeing
+ * is the condition of appearing at all. It is here so a page can STATE the
+ * commitment ("every business here has agreed to welcome and serve LGBTQ+
+ * people"), not so a client can compare listings by it: it must not be
+ * rendered as a per-listing badge that some places earn, and must not be
+ * offered as a browse filter. Both would restate a baseline as an option,
+ * which is the pattern the baseline replaced.
+ *
+ * The commitment is about the business's own conduct toward the people it
+ * serves. It grants nobody permission to exclude anyone over who they are.
+ */
+export interface AffirmingBaselineView {
+  isAccepted: boolean;
+  acceptedAt: string | null;
+}
+
+export function affirmingBaselineView(listing: Listing): AffirmingBaselineView {
+  return {
+    isAccepted: listing.affirmingBaselineAcceptedAt !== null,
+    acceptedAt: listing.affirmingBaselineAcceptedAt?.toISOString() ?? null,
+  };
+}
+
+/**
+ * Today as a `YYYY-MM-DD` string, for comparing against the `date`-typed
+ * `queerOwnedExpiresAt` (which TypeORM hands back as a string, not a Date).
+ * ISO date strings compare correctly with `<`, so no parsing is needed.
+ */
+function todayIsoDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * The evidence behind the queer-owned badge, shaped to read as a sibling of
+ * the safe-space verification block it sits beside.
+ *
+ * `isGranted` is the RAW stored grant and deliberately stays `true` after the
+ * badge expires: the record of who confirmed what, and when, is not deleted by
+ * time passing. The EFFECTIVE badge is the separate top-level
+ * `queerOwnedVerified` field, which is `isGranted && !isExpired`, so an expired
+ * badge stops reading as verified everywhere a client renders it while the
+ * moderation surface can still see that a lapsed grant exists and needs
+ * looking at again.
+ */
+export interface QueerOwnedVerificationView {
+  isGranted: boolean;
+  isExpired: boolean;
+  verifier: string | null;
+  /** `YYYY-MM-DD` the confirmation was last made. */
+  reVerifiedAt: string | null;
+  basis: string | null;
+  /** `YYYY-MM-DD` the confirmation next needs re-making. */
+  expiresAt: string | null;
+}
+
+/** True when a granted badge has passed its re-confirmation date. A badge
+ * that was never granted is never "expired" — it is simply absent. */
+export function isQueerOwnedVerificationExpired(listing: Listing): boolean {
+  if (!listing.queerOwnedVerified) return false;
+  const expiresAt = listing.queerOwnedExpiresAt;
+  return (
+    expiresAt !== null && expiresAt !== undefined && expiresAt < todayIsoDate()
   );
+}
+
+/** The badge as it currently reads: granted, and not yet lapsed. This is the
+ * value every `queerOwnedVerified` field on every response carries. */
+export function isQueerOwnedCurrentlyVerified(listing: Listing): boolean {
+  return (
+    Boolean(listing.queerOwnedVerified) &&
+    !isQueerOwnedVerificationExpired(listing)
+  );
+}
+
+export function queerOwnedVerificationView(
+  listing: Listing,
+): QueerOwnedVerificationView {
+  return {
+    isGranted: Boolean(listing.queerOwnedVerified),
+    isExpired: isQueerOwnedVerificationExpired(listing),
+    // Empty text columns read as "no value", the same `|| null` idiom the
+    // safe-space fields use.
+    verifier: listing.queerOwnedVerifier || null,
+    reVerifiedAt: listing.queerOwnedReVerifiedAt ?? null,
+    basis: listing.queerOwnedBasis || null,
+    expiresAt: listing.queerOwnedExpiresAt ?? null,
+  };
+}
+
+/**
+ * Whether the owner is currently showing their listing in the directory.
+ *
+ * Owner-facing only: a hidden listing never reaches a public response at all,
+ * so there is nothing for the public DTOs to carry. Kept strictly apart from
+ * `OperatingStateView`, which answers the different question of whether the
+ * BUSINESS is trading.
+ */
+export interface DirectoryVisibilityView {
+  isHiddenByOwner: boolean;
+  hiddenAt: string | null;
+}
+
+export function directoryVisibilityView(
+  listing: Listing,
+): DirectoryVisibilityView {
+  const isHiddenByOwner = Boolean(listing.isHiddenByOwner);
+  return {
+    isHiddenByOwner,
+    hiddenAt: isHiddenByOwner
+      ? (listing.ownerHiddenAt?.toISOString() ?? null)
+      : null,
+  };
+}
+
+/**
+ * The successor listing a `moved` business points at, resolved to the two
+ * fields a link needs. `null` whenever there is no successor row, or the
+ * successor is not publicly reachable (not live, or itself permanently
+ * closed), so the banner never offers a link that 404s.
+ */
+export interface MovedToListingView {
+  slug: string;
+  name: string;
 }
 
 /**
@@ -83,7 +369,6 @@ export interface ListingDTO {
   createdAt: string;
 
   path: string;
-  verify: string;
   name: string;
   cats: string[];
   hood: string;
@@ -94,7 +379,14 @@ export interface ListingDTO {
   tagline: string;
   whatItIs: ListingWitLine[];
   tags: string[];
+  /** Atmosphere tags only. Access claims live on `accessibility` below. */
   goodFor: string[];
+  /** The venue's structured accessibility answers plus its free-text note.
+   * Every question is present, `unknown` included. */
+  accessibility: ListingAccessibilityView;
+  /** What the business sells and what it costs. Empty when it prices
+   * nothing. The single `price` band above is unchanged. */
+  services: ListingServiceOffering[];
   langs: string[];
   /** Online-only business (no physical location). */
   online: boolean;
@@ -104,10 +396,23 @@ export interface ListingDTO {
   longitude: number | null;
   hours: Record<string, ListingDayHours>;
   hoursNote: string;
+  /** Per-date overrides of the weekly `hours` grid (holidays, early closes).
+   * Same shape the owner PATCHes back. */
+  hoursExceptions: ListingHoursException[];
   social: ListingSocial;
+  /** The listing's photos, in the owner's chosen order. Index 0 is the cover.
+   * Each entry carries its own `alt` (accessibility description) and its own
+   * `caption` (copy shown to everyone). See `ListingGalleryPhotoView`. */
+  photoGallery: ListingGalleryPhotoView[];
+  /** LEGACY four-slot view, derived from the first four `photoGallery`
+   * entries. Superseded by `photoGallery`; it cannot represent a fifth photo,
+   * an owner-chosen order or a caption. */
   photos: ListingPhotoSetView;
-  /** Per-slot crop rects for `photos` — see `ListingPhotoCropSetView`. */
+  /** LEGACY per-slot crop rects for `photos`, see `ListingPhotoCropSetView`.
+   * Superseded by each `photoGallery` entry's own `crop`. */
   photoCrops: ListingPhotoCropSetView;
+  /** LEGACY per-slot alt text, derived from the first four `photoGallery`
+   * entries. Superseded by each entry's own `alt`. */
   alt: ListingPhotoSet;
   rel: string;
   ownerName: string;
@@ -116,15 +421,52 @@ export interface ListingDTO {
   visibility: string;
   linkToProfile: boolean;
   contactEmail: string;
-  notify: string[];
   consentOuting: boolean;
   consentGuide: boolean;
-  /** Moderator-verified confirmation of the "queer-owned" badge — distinct
-   * from `linkToProfile` (the member's own self-reported claim). Surfaced
-   * here too (alongside the public directory card/detail DTOs) so the
-   * general admin listings queue — which reads/writes this owner-facing
-   * shape, not the public directory one — can render and toggle it. */
+  /** Moderator-verified confirmation of the "queer-owned" badge as it
+   * CURRENTLY reads — distinct from `linkToProfile` (the member's own
+   * self-reported claim). `false` once the grant has passed its
+   * re-confirmation date, even though the grant itself is still on record
+   * (see `queerOwnedVerification`). Surfaced here too (alongside the public
+   * directory card/detail DTOs) so the general admin listings queue — which
+   * reads/writes this owner-facing shape, not the public directory one — can
+   * render and toggle it. */
   queerOwnedVerified: boolean;
+  /** Who confirmed the queer-owned badge, when, on what basis, and when it
+   * next needs re-confirming. Carries `isGranted` (the raw record, which
+   * outlives expiry) alongside `isExpired`, so the moderation queue can tell
+   * a lapsed badge from one that was never granted. */
+  queerOwnedVerification: QueerOwnedVerificationView;
+  /** The listing's agreement to the LGBTQ+ affirming baseline. True on every
+   * listing: agreeing is the condition of appearing. State the commitment;
+   * never render it as a distinguishing per-listing badge or a filter. */
+  affirmingBaseline: AffirmingBaselineView;
+  /** The business's own trading state, owned by the owner rather than by
+   * moderation. Never mirrors or affects `status` above. */
+  operatingState: OperatingStateView;
+  /** Whether the owner is currently showing this listing in the directory.
+   * A separate question from `operatingState` (is the business trading) and
+   * from `status` (what moderation thinks). Owner-facing only. */
+  directoryVisibility: DirectoryVisibilityView;
+  /** The successor listing's id when a `moved` business points at one, so the
+   * owner form can round-trip what it set. `null` otherwise. The public
+   * detail DTO resolves this to a slug/name instead. */
+  movedToListingId: string | null;
+  /** When the owner last asserted these details are still true, ISO-8601.
+   * `null` only if they never have. */
+  detailsConfirmedAt: string | null;
+}
+
+/**
+ * The answer to `POST /listings/:ref/confirm-details`. Deliberately tiny: the
+ * button is meant to be pressed often, so the route reads one row to check
+ * ownership, writes one column, and returns just the new stamp rather than
+ * rebuilding the whole listing payload (which costs a member lookup and a crop
+ * lookup on top).
+ */
+export interface ConfirmedDetailsDTO {
+  ref: string;
+  detailsConfirmedAt: string;
 }
 
 /**
@@ -290,12 +632,14 @@ export interface DirectoryCardDTO {
   tint: DirectoryTint;
   av: string;
   owned: boolean;
-  /** Moderator-verified confirmation of the "queer-owned" badge — distinct
-   * from `owned` (the member's own self-reported `linkToProfile` claim).
-   * `false` until a moderator explicitly confirms it
-   * (`PATCH /listings/:ref/queer-owned-verified`). `DirectoryDetailDTO`
-   * inherits this via `extends DirectoryCardDTO` — no separate detail mapping
-   * needed. */
+  /** Moderator-verified confirmation of the "queer-owned" badge as it
+   * CURRENTLY reads — distinct from `owned` (the member's own self-reported
+   * `linkToProfile` claim). `false` until a moderator explicitly confirms it
+   * (`PATCH /admin/listings/:ref/queer-owned-verified`), and `false` again
+   * once that confirmation passes its re-confirmation date: a badge granted
+   * years ago must not go on speaking for a business that may have changed
+   * hands. `DirectoryDetailDTO` inherits this via `extends DirectoryCardDTO`
+   * — no separate detail mapping needed. */
   queerOwnedVerified: boolean;
   memberFirst: string | null;
   /** Online-only business (no physical location) — the card shows an "Online"
@@ -309,9 +653,27 @@ export interface DirectoryCardDTO {
   // here; see `SafeSpaceDetailDTO`/`RemovedSpaceDetailDTO` for those.
   safeSpaceStatus: 'none' | 'verified' | 'removed';
   safeSpaceTier: number | null;
+  /** The business's own trading state, so a card can badge "Temporarily
+   * closed" or "Moved" without a second request. A `permanently_closed`
+   * listing never reaches a card list at all (`DirectoryService` filters it
+   * out); the value can still be seen here through `DirectoryDetailDTO`,
+   * which inherits this shape and does still resolve for a closed business. */
+  operatingState: OperatingStateView;
+  /** The listing's cover photo: the FIRST entry of its ordered gallery, which
+   * is the one the owner put first. `null` for a listing with no photos, which
+   * is when the card falls back to its `tint` + `av` initials. Carries the
+   * photo's own `alt` so the grid image is never unlabelled. */
+  coverPhoto: ListingGalleryPhotoView | null;
 }
 
-export function toDirectoryCard(listing: Listing): DirectoryCardDTO {
+export function toDirectoryCard(
+  listing: Listing,
+  // Pre-loaded crop lookup (see `listingPhotoKeys`) so `coverPhoto` can carry
+  // its saved crop rect. Defaulted, so a caller that does not render crops
+  // stays a one-argument call. NOTE: never pass this mapper straight to
+  // `Array.prototype.map` — the index would arrive here as the crop Map.
+  crops: Map<string, CropRect> = new Map(),
+): DirectoryCardDTO {
   const owner = ownerIdentity(listing);
   return {
     id: listing.id,
@@ -325,7 +687,7 @@ export function toDirectoryCard(listing: Listing): DirectoryCardDTO {
     // A listing linked to its owner's member profile is a community-owned
     // ("queer-owned") business; unlinked ones are allied/"friendly" venues.
     owned: listing.linkToProfile,
-    queerOwnedVerified: listing.queerOwnedVerified,
+    queerOwnedVerified: isQueerOwnedCurrentlyVerified(listing),
     // The "run by <first>" line names the owner, so it follows their chosen
     // visibility — null for `anon`/`role` (where `owner.first` is blank).
     memberFirst: listing.linkToProfile ? owner.first || null : null,
@@ -334,6 +696,8 @@ export function toDirectoryCard(listing: Listing): DirectoryCardDTO {
     longitude: listing.longitude ?? null,
     safeSpaceStatus: listing.safeSpaceStatus,
     safeSpaceTier: listing.safeSpaceTier ?? null,
+    operatingState: operatingStateView(listing),
+    coverPhoto: toCoverPhoto(listing, crops),
   };
 }
 
@@ -436,7 +800,9 @@ export interface ReviewAuthor {
 
 /** One review row on the detail page. `initials`/`tint` are server-derived. */
 export interface ReviewDTO {
-  /** The review's uuid PK — targets `PATCH :ref/reviews/:reviewId/reply`. */
+  /** The review's uuid PK — targets `PATCH :ref/reviews/:reviewId/reply`
+   * (owner), `PATCH /directory/:slug/reviews/:reviewId` (the reviewer), and
+   * `POST/DELETE /directory/:slug/reviews/:reviewId/helpful` (any member). */
   id: string;
   initials: string;
   name: string;
@@ -444,7 +810,30 @@ export interface ReviewDTO {
   byline: string;
   stars: number;
   text: string;
+  /**
+   * When the review was written, ISO-8601.
+   *
+   * The column has existed since the table did and was simply never exposed,
+   * which left every review on the page undated. That reads as a fairness
+   * problem before it reads as an information one: a complaint from two years
+   * and one refurbishment ago sits at the top of a business's page looking
+   * exactly as current as one from last week, and the business has no way to
+   * say otherwise. A reader deciding where to go needs the same date.
+   */
+  createdAt: string;
+  /** When the reviewer last changed it, ISO-8601, or `null` if never. */
+  editedAt: string | null;
+  /**
+   * True when `editedAt` is later than `ownerRepliedAt` — the review was
+   * changed AFTER the owner answered it, so the reply on screen may be
+   * answering words that are no longer there. Precomputed here rather than
+   * left as a timestamp comparison for each client to get right (or not).
+   * Always `false` when there is no reply or no edit.
+   */
+  isEditedAfterOwnerReply: boolean;
   helpful: number;
+  /** The reviewer's optional photo, resolved to a fetchable URL. */
+  photoUrl: string | null;
   ownerReply: ReviewOwnerReplyDTO | null;
   /** Reviewer's profile photo, when they are a member with one. `null` → the
    * frontend falls back to the tinted `initials` avatar. */
@@ -453,6 +842,20 @@ export interface ReviewDTO {
    * renders the name as plain text (seeded/non-member review); when set it
    * links to `/members/:authorSlug`. */
   authorSlug: string | null;
+}
+
+/**
+ * Was this review changed after its owner reply was written?
+ *
+ * The two timestamps are independent and either can move, so the comparison is
+ * done once, here, and shipped as a boolean. A review with no reply, or a reply
+ * with no subsequent edit, is `false`.
+ */
+function isEditedAfterOwnerReply(review: ListingReview): boolean {
+  if (!review.ownerReplyText || !review.ownerRepliedAt || !review.editedAt) {
+    return false;
+  }
+  return review.editedAt.getTime() > review.ownerRepliedAt.getTime();
 }
 
 export function toReviewDTO(
@@ -467,7 +870,11 @@ export function toReviewDTO(
     byline: review.byline,
     stars: review.stars,
     text: review.text,
+    createdAt: review.createdAt.toISOString(),
+    editedAt: review.editedAt ? review.editedAt.toISOString() : null,
+    isEditedAfterOwnerReply: isEditedAfterOwnerReply(review),
     helpful: review.helpful,
+    photoUrl: toImageUrl(review.photo),
     ownerReply: review.ownerReplyText
       ? {
           text: review.ownerReplyText,
@@ -477,6 +884,34 @@ export function toReviewDTO(
     avatarUrl: author?.avatarUrl ?? null,
     authorSlug: author?.slug ?? null,
   };
+}
+
+/**
+ * How many public questions the DETAIL read embeds. Small on purpose: the Q&A
+ * block is one section of a long page, the answer to the question a reader
+ * actually has is usually recent, and the full list is one request away at
+ * `GET /directory/:slug/questions`. Deliberately far below `DEFAULT_LIST_LIMIT`
+ * (200), which the review array uses because the page derives its star rating
+ * from that array and a truncated one would skew it. Nothing is derived from
+ * the questions, so nothing breaks by capping them tightly.
+ */
+export const DIRECTORY_DETAIL_QUESTION_LIMIT = 10;
+
+/**
+ * What a helpful-vote write answers with: the review it was cast on, the
+ * refreshed count, and whether THIS caller's vote now stands.
+ *
+ * `hasVoted` is deliberately absent from every public read. `GET /directory/:slug`
+ * and `GET /directory/:slug/reviews` are `@Public()` and carry
+ * `Cache-Control: public, s-maxage=60`, so a CDN answers them for everyone from
+ * one stored copy. A per-caller field on those responses would be served to the
+ * next reader as if it were theirs. The vote write is the only place the answer
+ * is caller-specific, so it is the only place the answer is returned.
+ */
+export interface ReviewHelpfulDTO {
+  reviewId: string;
+  helpful: number;
+  hasVoted: boolean;
 }
 
 /** Aggregate star rating for a listing: mean to one decimal + review count. */
@@ -512,20 +947,52 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
    * Europe/Lisbon for its "Open now" computation. */
   timezone: string | null;
   pills: string[];
+  /** LEGACY caption strip: one string per photo, its `caption` when it has one
+   * and its `alt` otherwise. Kept as the fallback the prototype rendered for
+   * listings/demo places without images. Superseded by `photoGallery`, where
+   * caption and alt stay the separate things they are. */
   gallery: string[];
-  /** Real uploaded images (storage-resolved URLs), paired with `alt`. `null`
-   * per empty slot. The FE renders these as a gallery; `gallery` (alt-text
-   * captions) remains the fallback for listings/demo places without photos. */
+  /** The listing's photos, in the owner's chosen order. Index 0 is the cover.
+   * Each entry carries its own image URL, alt text, optional caption and crop
+   * rect. See `ListingGalleryPhotoView`. */
+  photoGallery: ListingGalleryPhotoView[];
+  /** LEGACY four-slot view, derived from the first four `photoGallery`
+   * entries. `null` per empty slot. Superseded by `photoGallery`. */
   photos: ListingPhotoSetView;
-  /** Per-slot crop rects for `photos` — see `ListingPhotoCropSetView`. */
+  /** LEGACY per-slot crop rects for `photos`, see `ListingPhotoCropSetView`.
+   * Superseded by each `photoGallery` entry's own `crop`. */
   photoCrops: ListingPhotoCropSetView;
+  /** LEGACY per-slot alt text. Superseded by each entry's own `alt`. */
   alt: ListingPhotoSet;
   /** Real per-weekday opening hours, keyed by the FE `DAYS` id (`Mon`..`Sun`).
    * The FE computes an open/closed status from this; empty → status unknown. */
   hours: Record<string, ListingDayHours>;
+  /** Per-date overrides of `hours` (holidays, early closes), newest date
+   * last. The frontend does the "open now" arithmetic: an entry whose `date`
+   * is today overrides that weekday's grid entry outright. */
+  hoursExceptions: ListingHoursException[];
   langs: string[];
   whatItIs: string[];
+  /** Atmosphere bullets only, every one a positive check. Accessibility is no
+   * longer in here: it moved to `accessibility` below, which can answer no. */
   goodFor: DirectoryGoodFor[];
+  /** The venue's structured accessibility answers plus its free-text note.
+   * All six questions are always present; `unknown` is a real answer and must
+   * not be rendered as a negative or dropped. */
+  accessibility: ListingAccessibilityView;
+  /** What the business sells and what it costs, in the owner's own words
+   * ("from 25 EUR", "sliding scale"). Empty when it prices nothing. The
+   * inherited `pills` still lead with the at-a-glance `price` band. */
+  services: ListingServiceOffering[];
+  /** The listing's agreement to the LGBTQ+ affirming baseline, so the page can
+   * state the commitment every business here has made. `isAccepted` is true on
+   * every listing by definition; it is not a distinguishing badge and not a
+   * filter. */
+  affirmingBaseline: AffirmingBaselineView;
+  /** Who confirmed the queer-owned badge, when, on what basis, and when it
+   * lapses — the same kind of evidence the safe-space block beside it carries,
+   * so two badges that look equally authoritative can be checked equally. */
+  queerOwnedVerification: QueerOwnedVerificationView;
   hoursType: DirectoryHoursType;
   hoursNote: string;
   owner: DirectoryOwner;
@@ -533,6 +1000,17 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
   address: string;
   rating: { score: string; count: number };
   reviews: ReviewDTO[];
+  /**
+   * The listing's public Q&A, newest first and capped at
+   * `DIRECTORY_DETAIL_QUESTION_LIMIT`, each with its answer inline.
+   *
+   * Capped rather than paginated here because this is the detail read, which
+   * already assembles reviews, events, vouches, crops, a saved count and a
+   * moved-to lookup. The full history is served separately by
+   * `GET /directory/:slug/questions`, exactly as `GET /directory/:slug/reviews`
+   * serves the full review list.
+   */
+  questions: ListingPublicQuestionDTO[];
   upcoming: UpcomingEventDTO[];
   /** Count of `saved_item` rows bookmarking this listing (`SavedKind.Listing`,
    * keyed by slug) — the public "N members saved this" trust signal. */
@@ -550,6 +1028,16 @@ export interface DirectoryDetailDTO extends DirectoryCardDTO {
   safeSpacePromises: SafeSpacePromise[];
   safeSpaceVouches: SafeSpaceVouch[];
   safeSpaceRemoval: SafeSpaceRemoval | null;
+  /** The successor listing of a `moved` business, resolved to a slug and name
+   * so the banner can link to it. `null` unless the state is `moved`, the
+   * owner pointed at a successor, and that successor is still publicly
+   * reachable. The address itself lives on the inherited
+   * `operatingState.movedToAddress`. */
+  movedToListing: MovedToListingView | null;
+  /** When the owner last confirmed these details are still true, ISO-8601, so
+   * the page can print "Confirmed by the owner on 12 August". `null` only for
+   * a listing whose owner has never confirmed and never edited it. */
+  detailsConfirmedAt: string | null;
 }
 
 export function toDirectoryDetail(
@@ -576,10 +1064,19 @@ export function toDirectoryDetail(
   // ONE `MediaCropService.getMany` (see `listingPhotoKeys`) and passes the
   // resulting Map straight through; this mapper stays synchronous.
   crops: Map<string, CropRect> = new Map(),
+  /** The successor listing of a `moved` business, already resolved (and
+   * visibility-checked) by `DirectoryService`. `null` for every other case. */
+  movedToListing: MovedToListingView | null = null,
+  /** The public Q&A block, already loaded, moderation-filtered, capped and
+   * mapped by `DirectoryService`. Defaulted to `[]` so the existing callers and
+   * specs that do not pass it keep compiling and rendering an empty block. */
+  questions: ListingPublicQuestionDTO[] = [],
 ): DirectoryDetailDTO {
   const tint = tintForSlug(listing.slug);
+  const galleryPhotos = toGalleryView(listing, crops);
+  const legacyPhotos = legacyPhotoSets(listing);
   return {
-    ...toDirectoryCard(listing),
+    ...toDirectoryCard(listing, crops),
     ref: listing.ref,
     tagline: listing.tagline,
     // Empty text columns read as "unset" (frontend then defaults to Lisbon /
@@ -588,27 +1085,28 @@ export function toDirectoryDetail(
     timezone: listing.timezone || null,
     // Price tier first (when set), then the listing's own tags, as detail pills.
     pills: [...(listing.price ? [listing.price] : []), ...listing.tags],
-    // The gallery renders caption cells (no images in the prototype), so we
-    // surface the alt-text captions, dropping empty slots.
-    gallery: [
-      listing.alt.wide,
-      listing.alt.d1,
-      listing.alt.d2,
-      listing.alt.vibe,
-    ].filter((caption) => caption.length > 0),
-    photos: {
-      wide: toImageUrl(listing.photos.wide),
-      d1: toImageUrl(listing.photos.d1),
-      d2: toImageUrl(listing.photos.d2),
-      vibe: toImageUrl(listing.photos.vibe),
-    },
-    photoCrops: toPhotoCrops(listing.photos, crops),
-    alt: listing.alt,
+    // LEGACY caption strip (the prototype rendered caption cells, no images).
+    // A photo's own `caption` when it has one, its `alt` otherwise, in gallery
+    // order, with nothing to say dropped.
+    gallery: galleryPhotos
+      .map((photo) => photo.caption || photo.alt)
+      .filter((text) => text.length > 0),
+    photoGallery: galleryPhotos,
+    photos: legacyPhotoSetView(legacyPhotos.photos),
+    photoCrops: toPhotoCrops(legacyPhotos.photos, crops),
+    alt: legacyPhotos.alt,
     hours: listing.hours,
+    hoursExceptions: listing.hoursExceptions ?? [],
     langs: listing.langs,
     whatItIs: listing.whatItIs.map((line) => line.text),
-    // The listing stores positive bullets only, so every one is a "yes".
+    // Atmosphere tags are stored as positive claims only, so every one is a
+    // "yes". Anything that can also be answered "no" belongs in
+    // `accessibility` below rather than here.
     goodFor: listing.goodFor.map((label) => ({ label, yes: true })),
+    accessibility: accessibilityView(listing),
+    services: listing.services ?? [],
+    affirmingBaseline: affirmingBaselineView(listing),
+    queerOwnedVerification: queerOwnedVerificationView(listing),
     hoursType: hoursTypeForCategory(listing.cats[0] ?? ''),
     hoursNote: listing.hoursNote,
     // Redacted per the owner's chosen `visibility` — `anon` reveals nothing,
@@ -641,6 +1139,7 @@ export function toDirectoryDetail(
           : null,
       ),
     ),
+    questions,
     upcoming: upcomingEvents.map(toUpcomingEvent),
     savedCount,
     // Empty-string defaults (never-a-safe-space listings) read as "no value"
@@ -651,6 +1150,11 @@ export function toDirectoryDetail(
     safeSpacePromises: listing.safeSpacePromises,
     safeSpaceVouches: [...listing.safeSpaceVouches, ...memberVouches],
     safeSpaceRemoval: listing.safeSpaceRemoval,
+    movedToListing:
+      listing.operatingState === ListingOperatingState.Moved
+        ? movedToListing
+        : null,
+    detailsConfirmedAt: listing.detailsConfirmedAt?.toISOString() ?? null,
   };
 }
 
@@ -662,6 +1166,7 @@ export function toListingDTO(
   // resulting Map straight through; this mapper stays synchronous.
   crops: Map<string, CropRect> = new Map(),
 ): ListingDTO {
+  const legacyPhotos = legacyPhotoSets(listing);
   return {
     ref: listing.ref,
     slug: listing.slug,
@@ -670,7 +1175,6 @@ export function toListingDTO(
     createdAt: listing.createdAt.toISOString(),
 
     path: listing.path,
-    verify: listing.verify,
     name: listing.name,
     cats: listing.cats,
     hood: listing.hood,
@@ -682,6 +1186,8 @@ export function toListingDTO(
     whatItIs: listing.whatItIs,
     tags: listing.tags,
     goodFor: listing.goodFor,
+    accessibility: accessibilityView(listing),
+    services: listing.services ?? [],
     langs: listing.langs,
     online: listing.online ?? false,
     address: listing.address,
@@ -690,15 +1196,12 @@ export function toListingDTO(
     longitude: listing.longitude ?? null,
     hours: listing.hours,
     hoursNote: listing.hoursNote,
+    hoursExceptions: listing.hoursExceptions ?? [],
     social: listing.social,
-    photos: {
-      wide: toImageUrl(listing.photos.wide),
-      d1: toImageUrl(listing.photos.d1),
-      d2: toImageUrl(listing.photos.d2),
-      vibe: toImageUrl(listing.photos.vibe),
-    },
-    photoCrops: toPhotoCrops(listing.photos, crops),
-    alt: listing.alt,
+    photoGallery: toGalleryView(listing, crops),
+    photos: legacyPhotoSetView(legacyPhotos.photos),
+    photoCrops: toPhotoCrops(legacyPhotos.photos, crops),
+    alt: legacyPhotos.alt,
     rel: listing.rel,
     ownerName: listing.ownerName,
     ownerRole: listing.ownerRole,
@@ -706,10 +1209,21 @@ export function toListingDTO(
     visibility: listing.visibility,
     linkToProfile: listing.linkToProfile,
     contactEmail: listing.contactEmail,
-    notify: listing.notify,
     consentOuting: listing.consentOuting,
     consentGuide: listing.consentGuide,
-    queerOwnedVerified: listing.queerOwnedVerified,
+    // The badge as it currently reads: an expired grant stops saying
+    // "verified" here too, so the owner and the moderation queue see exactly
+    // what a member sees. The grant itself is preserved on the block below.
+    queerOwnedVerified: isQueerOwnedCurrentlyVerified(listing),
+    queerOwnedVerification: queerOwnedVerificationView(listing),
+    affirmingBaseline: affirmingBaselineView(listing),
+    operatingState: operatingStateView(listing),
+    directoryVisibility: directoryVisibilityView(listing),
+    movedToListingId:
+      listing.operatingState === ListingOperatingState.Moved
+        ? (listing.movedToListingId ?? null)
+        : null,
+    detailsConfirmedAt: listing.detailsConfirmedAt?.toISOString() ?? null,
   };
 }
 
@@ -750,6 +1264,9 @@ export interface SafeSpaceCardDTO {
   rating: string;
   reviews: number;
   tier: number | null;
+  /** The business's own trading state, so a safe-space card can badge a venue
+   * that is shut this month. `permanently_closed` never reaches this list. */
+  operatingState: OperatingStateView;
 }
 
 export interface RemovedSpaceCardDTO {
@@ -822,6 +1339,7 @@ export function toSafeSpaceCard(
     rating: rating.score,
     reviews: rating.count,
     tier: listing.safeSpaceTier,
+    operatingState: operatingStateView(listing),
   };
 }
 

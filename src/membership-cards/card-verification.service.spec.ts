@@ -25,6 +25,7 @@ function makeService() {
       issuerId: 'com-1',
       isEnabled: true,
       allowsMemberPhoto: false,
+      photoStyle: 'color',
     }),
   };
   const communities = {
@@ -68,6 +69,9 @@ describe('CardVerificationService.verify', () => {
       serial: 'AQ-7K4M2',
       memberSince: '2026-02-01T00:00:00.000Z',
       hasPhoto: false,
+      holderPronouns: null,
+      holderPhotoUrl: null,
+      photoStyle: 'color',
     });
   });
 

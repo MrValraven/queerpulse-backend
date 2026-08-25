@@ -25,6 +25,7 @@ import {
   ListingModerationEvent,
 } from './entities/listing-moderation-event.entity';
 import { Listing } from './entities/listing.entity';
+import { ListingCoManagersService } from './listing-co-managers.service';
 
 /**
  * "Claim this existing listing" — a member's request to take ownership of a
@@ -58,6 +59,10 @@ export class ListingClaimsService {
     // seam `ListingsService.notifySubmitterBestEffort` already uses to reach a
     // listing's submitter from a moderation action.
     private readonly messaging: MessagingService,
+    // Clears the listing's co-manager seats inside this service's own transfer
+    // transaction (`revokeAllForOwnershipTransfer`). Injected rather than
+    // reached through `ListingsService`, which this file does not depend on.
+    private readonly coManagers: ListingCoManagersService,
   ) {}
 
   /**
@@ -115,6 +120,46 @@ export class ListingClaimsService {
       }
       throw error;
     }
+  }
+
+  /**
+   * The CALLER's own claims, newest first — the other half of telling somebody
+   * how long a claim takes. Knowing the turnaround is only useful next to a
+   * claim you can actually see, and until now a claimant had nowhere to look:
+   * the queue is moderator-only and the filing response was the one and only
+   * time they ever saw their claim. Every row carries the published turnaround,
+   * the date a decision was promised by, and how many days it has been waiting
+   * (see `listing-claim-policy.ts`).
+   *
+   * `claimant` is left null on every row: the caller IS the claimant, so
+   * echoing their own member ref back at them would be noise. Bounded like
+   * `listPending`, and one batched listing lookup rather than N+1.
+   */
+  async listMine(claimantId: string): Promise<ListingClaimDTO[]> {
+    const rows = await this.claims.find({
+      where: { claimantId },
+      order: { createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
+    });
+    if (!rows.length) return [];
+
+    const listingIds = [...new Set(rows.map((row) => row.listingId))];
+    const listingRows = await this.listings.find({
+      where: { id: In(listingIds) },
+    });
+    const listingById = new Map(
+      listingRows.map((listing) => [listing.id, listing]),
+    );
+
+    // Same skip-the-orphan posture as `listPending`: `listingId` carries no FK,
+    // so a hard-deleted listing leaves a claim with nothing to render against.
+    return rows
+      .map((row): ListingClaimDTO | null => {
+        const listing = listingById.get(row.listingId);
+        if (!listing) return null;
+        return toListingClaimDTO(row, listing, null);
+      })
+      .filter((dto): dto is ListingClaimDTO => dto !== null);
   }
 
   /** Moderator/admin-only: every pending claim, oldest first — the review
@@ -201,6 +246,7 @@ export class ListingClaimsService {
       }
 
       const previousOwnerId = listing.ownerId;
+      const reassignedAt = new Date();
       if (status === ListingClaimStatus.Approved) {
         if (!current.claimantId) {
           throw new BadRequestException(
@@ -214,19 +260,44 @@ export class ListingClaimsService {
         // and approve it long after a real member took it over.
         await this.assertClaimable(listing);
         listing.ownerId = current.claimantId;
-        // BE-HSG-05: these five columns are the PREVIOUS owner's personal data,
-        // not the business's — `ListingDTO` hands `contactEmail`, `ownerName`,
-        // `ownerBio`, `notify` and `consentOuting` straight to whoever owns the
-        // listing, and `consentOuting`/`consentGuide` are that person's consent
-        // decisions, which cannot transfer to somebody else. Cleared so the new
-        // owner enters their own rather than inheriting them.
+        // BE-HSG-05: these five columns are the PREVIOUS owner's personal data
+        // rather than the business's. `ListingDTO` hands `contactEmail`,
+        // `ownerName` and `ownerBio` straight to whoever owns the listing, and
+        // `consentOuting`/`consentGuide` are that person's consent decisions,
+        // which cannot transfer to somebody else. Cleared so the new owner
+        // enters their own rather than inheriting them. (`notify` was cleared
+        // here too until it was retired: it is no longer collected or served,
+        // so it is deliberately left alone now.)
         listing.contactEmail = '';
         listing.ownerName = '';
         listing.ownerBio = '';
-        listing.notify = [];
         listing.consentOuting = false;
         listing.consentGuide = false;
         await listingsRepo.save(listing);
+        // EVERY CO-MANAGER SEAT GOES, in this same transaction as the
+        // reassignment above. A claim is adversarial by definition: it is filed
+        // by somebody arguing the listing should be taken off its current
+        // owner, and every co-manager on it was chosen by that owner. Carrying
+        // them across would hand the contested party a standing team on a page
+        // they just lost. The new owner starts clean and re-invites whoever
+        // they actually want.
+        //
+        // Unanswered invitations go too, on the same reasoning: an invitation
+        // sent by the previous owner is that owner's decision about who should
+        // help run the business, and it has no more claim to survive the
+        // transfer than an accepted seat does.
+        //
+        // Same transaction, and that is the point rather than an
+        // implementation detail. A transfer that committed while the previous
+        // owner's appointees kept write access would be worse than either
+        // outcome on its own, and a losing concurrent reviewer's conditional
+        // UPDATE below rolls this back along with everything else.
+        const revokedCoManagerCount =
+          await this.coManagers.revokeAllForOwnershipTransfer(
+            manager,
+            listing.id,
+            reassignedAt,
+          );
         // The audit trail for the transfer, written in the SAME transaction as
         // the reassignment so the two can never disagree. `fromStatus`/
         // `toStatus` stay null: a transfer changes who owns the listing, never
@@ -237,9 +308,21 @@ export class ListingClaimsService {
           action: ListingModerationAction.OwnershipTransferred,
           fromStatus: null,
           toStatus: null,
-          reason: current.note
-            ? `Ownership transferred on an approved claim. Claimant's note: ${current.note}`
-            : 'Ownership transferred on an approved claim.',
+          // The co-manager count rides in the SAME event rather than in a
+          // burst of one `co_manager_removed` row per seat: one act, one row.
+          // It is a count and never a name, so this reason stays as safe to
+          // hold as it was — and it is on nobody's owner-visible allowlist
+          // anyway, because it carries the claimant's own note verbatim.
+          reason: [
+            current.note
+              ? `Ownership transferred on an approved claim. Claimant's note: ${current.note}`
+              : 'Ownership transferred on an approved claim.',
+            revokedCoManagerCount > 0
+              ? `${revokedCoManagerCount} co-manager ${
+                  revokedCoManagerCount === 1 ? 'seat was' : 'seats were'
+                } revoked by the transfer.`
+              : 'The listing had no co-managers to revoke.',
+          ].join(' '),
         });
       }
 

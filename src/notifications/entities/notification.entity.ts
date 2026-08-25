@@ -195,6 +195,43 @@ export enum NotificationType {
   // carries `{ source: 'listing', listingSlug, field }` for the bell copy.
   // See migration `AddListingEditSuggestionAcceptedNotificationType1791900000000`.
   ListingEditSuggestionAccepted = 'listing_edit_suggestion_accepted',
+  // The public Q&A on a business listing (`listing_public_questions`).
+  // `ListingPublicQuestion` goes to the listing's OWNER when a member asks
+  // something on their page (carries `actorId`, the asker, so a blocked/muted
+  // asker is filtered by `NotificationsService.create` like any other
+  // member-driven type). `ListingPublicQuestionAnswered` goes to the ASKER when
+  // the question is answered; it carries an `actorId` only when the OWNER
+  // answered, and deliberately none when a moderator did, because the asker is
+  // owed the answer, not the name of the staff member who wrote it.
+  //
+  // Neither has a preference toggle, matching `ListingReview`/`ListingApproved`
+  // and every other listing type: these are the platform telling you about
+  // something that happened on your own listing, or the answer to a question
+  // you personally asked. See migration
+  // `AddListingPublicQuestionNotificationTypes1794300000000`.
+  ListingPublicQuestion = 'listing_public_question',
+  ListingPublicQuestionAnswered = 'listing_public_question_answered',
+
+  // Co-manager seats on a business directory listing
+  // (`ListingCoManagersService`). A listing has exactly one `owner_id`, so a
+  // venue run by two people shares its page through an invited, accepted
+  // co-manager seat instead.
+  //
+  // `ListingCoManagerInvite` goes to the INVITED member: it is the only way
+  // they learn an owner has asked them, and nothing happens to their access
+  // until they answer it, so it is member-driven and carries the owner as
+  // `actorId`. `ListingCoManagerInviteAccepted`/`...Declined` go back to the
+  // OWNER with the member as `actorId`, closing the loop on an invitation the
+  // owner sent by hand.
+  //
+  // None of the three has a preference toggle, matching every other listing
+  // type here: they are consequences of an act one of the two parties
+  // performed, not a feed. Payloads carry `listingSlug`/`listingName` (and
+  // `inviteId` on the invite), never a note or any other prose. See migration
+  // `AddListingCoManagerEnumValues1794530000000`.
+  ListingCoManagerInvite = 'listing_co_manager_invite',
+  ListingCoManagerInviteAccepted = 'listing_co_manager_invite_accepted',
+  ListingCoManagerInviteDeclined = 'listing_co_manager_invite_declined',
   // Sent to a member who follows a topic (`topic_follows`) when a new post
   // lands on it — a forum thread created with a tag matching that topic
   // (`TopicPostLinkService`, content module). Carries the posting member as

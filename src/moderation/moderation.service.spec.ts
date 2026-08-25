@@ -988,6 +988,101 @@ describe('ModerationService', () => {
         }),
       ]);
     });
+
+    // Closing the loop on a report. Batch-actioning a queue is how most
+    // reports are actually closed, and this path used to notify the sanctioned
+    // member and nobody else, so most reporters heard nothing ever.
+    it('tells every reporter their report reached an outcome', async () => {
+      reports.find.mockResolvedValue([
+        baseReport({ id: 'report-1', reporterId: 'reporter-1' }),
+        baseReport({ id: 'report-2', reporterId: 'reporter-2' }),
+      ]);
+
+      await service.bulkActOnReports('actor-1', {
+        ids: ['report-1', 'report-2'],
+        action: 'dismiss',
+        reasonCode: 'spam',
+        note: 'Internal reasoning the reporter must never see.',
+      });
+
+      const reporterCalls = notificationsCreate.mock.calls.filter(
+        (args) => args[1] === NotificationType.ReportResolved,
+      );
+      expect(reporterCalls).toHaveLength(2);
+      expect(reporterCalls[0]).toEqual([
+        'reporter-1',
+        NotificationType.ReportResolved,
+        {
+          source: 'report',
+          reportId: 'report-1',
+          reference: expect.any(String),
+          subjectType: ReportSubjectType.Post,
+          outcome: ReportStatus.Resolved,
+        },
+      ]);
+    });
+
+    // The boundary that matters more than the notification itself.
+    it('never discloses the moderator, the action, the duration or the note to the reporter', async () => {
+      reports.find.mockResolvedValue([baseReport({ id: 'report-1' })]);
+
+      await service.bulkActOnReports('actor-1', {
+        ids: ['report-1'],
+        action: 'suspend',
+        reasonCode: 'harassment',
+        note: 'Third strike, prior warnings on file.',
+        duration: '7d',
+      });
+
+      const reporterCall = notificationsCreate.mock.calls.find(
+        (args) => args[1] === NotificationType.ReportResolved,
+      );
+      expect(reporterCall).toBeDefined();
+      const payload = JSON.stringify(reporterCall?.[2] ?? {});
+      expect(payload).not.toContain('actor-1');
+      expect(payload).not.toContain('suspend');
+      expect(payload).not.toContain('7d');
+      expect(payload).not.toContain('Third strike');
+      // And no third argument at all, so the block/mute filter and the
+      // preference gate are both bypassed: this is the platform's word.
+      expect(reporterCall?.[3]).toBeUndefined();
+    });
+
+    it('does not notify a reporter who is the acting moderator', async () => {
+      reports.find.mockResolvedValue([
+        baseReport({ id: 'report-1', reporterId: 'actor-1' }),
+      ]);
+
+      await service.bulkActOnReports('actor-1', {
+        ids: ['report-1'],
+        action: 'dismiss',
+        reasonCode: 'spam',
+      });
+
+      expect(
+        notificationsCreate.mock.calls.filter(
+          (args) => args[1] === NotificationType.ReportResolved,
+        ),
+      ).toHaveLength(0);
+    });
+
+    it('does not notify an anonymous filing with no reporter to reach', async () => {
+      reports.find.mockResolvedValue([
+        baseReport({ id: 'report-1', reporterId: null }),
+      ]);
+
+      await service.bulkActOnReports('actor-1', {
+        ids: ['report-1'],
+        action: 'dismiss',
+        reasonCode: 'spam',
+      });
+
+      expect(
+        notificationsCreate.mock.calls.filter(
+          (args) => args[1] === NotificationType.ReportResolved,
+        ),
+      ).toHaveLength(0);
+    });
   });
 
   /**

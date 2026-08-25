@@ -4,6 +4,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { ListSavedQuery } from './dto/list-saved.query';
 import { SavedItemBodyDto } from './dto/saved-item-body.dto';
 import { SavedItem, SavedKind } from './entities/saved-item.entity';
+import { SavedListsService } from './saved-lists.service';
 import { SavedService } from './saved.service';
 
 // Chainable query-builder stub (mirrors `communities.service.spec.ts`'s
@@ -29,6 +30,9 @@ describe('SavedService', () => {
     delete: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
+  // Named lists sit on top of the flat set: every plain save also joins the
+  // member's default list, best-effort.
+  let savedLists: { ensureDefaultMembership: jest.Mock };
 
   const now = new Date('2026-07-15T12:00:00.000Z');
 
@@ -57,11 +61,15 @@ describe('SavedService', () => {
       delete: jest.fn().mockResolvedValue({ affected: 1 }),
       createQueryBuilder: jest.fn(() => qbStub()),
     };
+    savedLists = {
+      ensureDefaultMembership: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         SavedService,
         { provide: getRepositoryToken(SavedItem), useValue: repo },
+        { provide: SavedListsService, useValue: savedLists },
       ],
     }).compile();
 
@@ -104,6 +112,23 @@ describe('SavedService', () => {
         page: 1,
         pageSize: 20,
       });
+    });
+
+    it('narrows to one list with a correlated EXISTS, never a join', async () => {
+      const qb = qbStub();
+      repo.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('u1', { listId: 'list-1' });
+
+      const call = qb.andWhere!.mock.calls[0];
+      expect(call).toBeDefined();
+      const predicate = String(call?.[0] ?? '');
+      expect(predicate).toContain('EXISTS');
+      expect(predicate).toContain('saved_list_entries');
+      // The list is re-checked against the caller, so a guessed id can only
+      // ever return an empty page rather than somebody else's saves.
+      expect(predicate).toContain('list.user_id = :userId');
+      expect(call?.[1]).toEqual({ listId: 'list-1' });
     });
 
     it('filters by kind when provided', async () => {
@@ -180,6 +205,35 @@ describe('SavedService', () => {
         }),
       );
       expect(repo.update).not.toHaveBeenCalled();
+      // A plain save still lands in a list, so nothing saved is outside every
+      // list.
+      expect(savedLists.ensureDefaultMembership).toHaveBeenCalledWith(
+        'u1',
+        'new-id',
+      );
+    });
+
+    it('files a re-saved item in the default list too, so a pre-lists row catches up', async () => {
+      repo.findOne.mockResolvedValue(row());
+
+      await service.put('u1', 'article:coming-out-guide', body);
+
+      expect(savedLists.ensureDefaultMembership).toHaveBeenCalledWith(
+        'u1',
+        'row-1',
+      );
+    });
+
+    it('still succeeds when filing in the default list fails (best-effort)', async () => {
+      repo.findOne.mockResolvedValue(null);
+      savedLists.ensureDefaultMembership.mockRejectedValue(
+        new Error('lists table down'),
+      );
+
+      await expect(
+        service.put('u1', 'article:coming-out-guide', body),
+      ).resolves.toBeUndefined();
+      expect(repo.save).toHaveBeenCalled();
     });
 
     it('updates the existing row instead of inserting a duplicate (idempotent PUT)', async () => {

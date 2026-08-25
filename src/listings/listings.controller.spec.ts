@@ -7,6 +7,7 @@ import { ListingStatus } from './entities/listing.entity';
 import { AdminListingsController } from './admin-listings.controller';
 import { ListingClaimsService } from './listing-claims.service';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
+import { ListingOwnerPendingService } from './listing-owner-pending.service';
 import { ListingsController } from './listings.controller';
 import { ListingsService } from './listings.service';
 
@@ -26,8 +27,12 @@ describe('ListingsController', () => {
     bulkSetStatus: jest.Mock;
     bulkRemove: jest.Mock;
     getListingHistory: jest.Mock;
+    getOwnerListingHistory: jest.Mock;
     answerQuestion: jest.Mock;
+    answerPublicQuestion: jest.Mock;
+    answerPublicQuestionAsModerator: jest.Mock;
   };
+  let ownerPendingService: { getPendingForOwner: jest.Mock };
 
   const user: CurrentUserData = {
     userId: 'owner-1',
@@ -48,14 +53,22 @@ describe('ListingsController', () => {
       bulkSetStatus: jest.fn(),
       bulkRemove: jest.fn(),
       getListingHistory: jest.fn(),
+      getOwnerListingHistory: jest.fn(),
       answerQuestion: jest.fn(),
+      answerPublicQuestion: jest.fn(),
+      answerPublicQuestionAsModerator: jest.fn(),
     };
+    ownerPendingService = { getPendingForOwner: jest.fn() };
     const module: TestingModule = await Test.createTestingModule({
       controllers: [ListingsController, AdminListingsController],
       providers: [
         { provide: ListingsService, useValue: service },
         { provide: ListingEditSuggestionsService, useValue: {} },
         { provide: ListingClaimsService, useValue: {} },
+        {
+          provide: ListingOwnerPendingService,
+          useValue: ownerPendingService,
+        },
       ],
     })
       .overrideGuard(ActiveMemberGuard)
@@ -65,6 +78,53 @@ describe('ListingsController', () => {
       .compile();
     controller = module.get(ListingsController);
     adminController = module.get(AdminListingsController);
+  });
+
+  it('GET /:ref/history passes the caller and page to the owner history read', async () => {
+    const history = {
+      events: [],
+      questions: [],
+      totalEvents: 0,
+      page: 2,
+      pageSize: 20,
+    };
+    service.getOwnerListingHistory.mockResolvedValue(history);
+
+    const result = await controller.getOwnHistory(user, 'QPL-2026-0001', {
+      page: 2,
+    });
+
+    expect(service.getOwnerListingHistory).toHaveBeenCalledWith(
+      'QPL-2026-0001',
+      'owner-1',
+      2,
+    );
+    expect(result).toBe(history);
+  });
+
+  it('GET /:ref/pending scopes the pending read to the caller as owner', async () => {
+    const pending = {
+      counts: {
+        editSuggestions: 0,
+        ownershipClaims: 0,
+        disputes: 0,
+        unansweredQuestions: 0,
+        total: 0,
+      },
+      editSuggestions: [],
+      ownershipClaims: [],
+      disputes: [],
+      unansweredQuestions: [],
+    };
+    ownerPendingService.getPendingForOwner.mockResolvedValue(pending);
+
+    const result = await controller.getOwnPending(user, 'QPL-2026-0001');
+
+    expect(ownerPendingService.getPendingForOwner).toHaveBeenCalledWith(
+      'QPL-2026-0001',
+      'owner-1',
+    );
+    expect(result).toBe(pending);
   });
 
   it('POST / creates a listing owned by the caller', async () => {
@@ -221,5 +281,46 @@ describe('ListingsController', () => {
       { text: 'Thanks!' },
     );
     expect(result).toBe(updated);
+  });
+
+  // The public Q&A answer routes. The point of these two is the SPLIT: the
+  // owner route and the moderator route must reach different service methods,
+  // because only one of them is allowed to speak as the business.
+  it('POST /:ref/public-questions/:id/answer routes the OWNER answer', async () => {
+    service.answerPublicQuestion.mockResolvedValue({ id: 'question-1' });
+
+    await controller.answerPublicQuestion(user, 'QPL-2026-0001', 'question-1', {
+      answer: 'Yes, the entrance is step-free.',
+    });
+
+    expect(service.answerPublicQuestion).toHaveBeenCalledWith(
+      'QPL-2026-0001',
+      'question-1',
+      'owner-1',
+      'Yes, the entrance is step-free.',
+    );
+    // Never the moderator path — that one stamps the answer as staff-written.
+    expect(service.answerPublicQuestionAsModerator).not.toHaveBeenCalled();
+  });
+
+  it('POST /admin/listings/:ref/public-questions/:id/answer routes the MODERATOR answer', async () => {
+    service.answerPublicQuestionAsModerator.mockResolvedValue({
+      id: 'question-1',
+    });
+
+    await adminController.answerPublicQuestion(
+      user,
+      'QPL-2026-0001',
+      'question-1',
+      { answer: 'We have asked the venue and will update this.' },
+    );
+
+    expect(service.answerPublicQuestionAsModerator).toHaveBeenCalledWith(
+      'QPL-2026-0001',
+      'question-1',
+      'owner-1',
+      'We have asked the venue and will update this.',
+    );
+    expect(service.answerPublicQuestion).not.toHaveBeenCalled();
   });
 });

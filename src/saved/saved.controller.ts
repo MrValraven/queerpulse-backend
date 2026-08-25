@@ -32,6 +32,13 @@ import {
 // Always-on member primitive (no @Feature flag) — mirrors the FE's saved.api.ts
 // exactly: `GET /me/saved`, `PUT /me/saved/:id`, `DELETE /me/saved/:id`.
 //
+// This is the FLAT saved set and it is unchanged: `GET /me/saved` still returns
+// everything the member has saved. Named lists sit on top of it on
+// `SavedListsController` (`/me/saved/lists`), and `GET /me/saved?listId=`
+// narrows to one of them. A plain `PUT` here also joins the member's default
+// list, so nothing saved ends up outside every list; a `DELETE` here unsaves
+// the item and therefore drops it from every list it was in.
+//
 // NOTE: `:id` here is deliberately NOT a `ParseUUIDPipe` param. It is the
 // frontend's composite `<kind>:<subjectId>` ref (see `parseSavedRef`), where
 // `subjectId` may be a slug, not a uuid — a UUID pipe would 400 valid requests.

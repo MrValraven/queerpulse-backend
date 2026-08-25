@@ -34,10 +34,18 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   'UpsertCardProgramDto.backgroundMediaKey': 'CommunityCard.backgroundMediaKey',
   'CreateLandlordDto.photo': 'Landlord.photo',
   'UpdateLandlordDto.photo': 'Landlord.photo',
-  'ListingPhotoSetDto.wide': 'Listing.photos',
-  'ListingPhotoSetDto.d1': 'Listing.photos',
-  'ListingPhotoSetDto.d2': 'Listing.photos',
-  'ListingPhotoSetDto.vibe': 'Listing.photos',
+  // A member's own photo on a review, written by both the create and the edit
+  // body. Same underlying column, so both map to the one source.
+  'CreateReviewDto.photo': 'ListingReview.photo',
+  // The ordered gallery: one `@IsImageReference` field per photo.
+  'ListingGalleryPhotoDto.image': 'Listing.photoGallery',
+  // LEGACY four-slot pair, still accepted on the wire. Whatever a client sends
+  // through these slots is stored in the ordered gallery (the `photos` column
+  // is only a derived mirror of it), so the gallery source is what covers them.
+  'ListingPhotoSetDto.wide': 'Listing.photoGallery',
+  'ListingPhotoSetDto.d1': 'Listing.photoGallery',
+  'ListingPhotoSetDto.d2': 'Listing.photoGallery',
+  'ListingPhotoSetDto.vibe': 'Listing.photoGallery',
   'UpdateSubprofileDTO.avatarUrl': 'Subprofile.avatarUrl',
   'UpdateSubprofileDTO.coverUrl': 'Subprofile.coverUrl',
   'SubprofileItemInputDTO.imageUrl': 'SubprofileItem.imageUrl',

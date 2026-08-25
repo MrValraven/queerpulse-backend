@@ -61,6 +61,18 @@ const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   [NotificationType.JobApplication]: 'actorId',
   [NotificationType.InviteAccepted]: 'actorId',
   [NotificationType.ListingReview]: 'actorId',
+  // The member who asked the public question, resolved for the owner's bell.
+  [NotificationType.ListingPublicQuestion]: 'actorId',
+  // The listing OWNER who answered. A moderator-written answer omits `actorId`
+  // from the payload entirely (the emit site only spreads it for an owner
+  // answer), so this yields `null` and the row reads as the platform speaking.
+  [NotificationType.ListingPublicQuestionAnswered]: 'actorId',
+  // The listing OWNER who sent the co-manager invitation, resolved for the
+  // invited member's bell so the ask has a face on it.
+  [NotificationType.ListingCoManagerInvite]: 'actorId',
+  // The invited member, resolved for the owner's bell on their answer.
+  [NotificationType.ListingCoManagerInviteAccepted]: 'actorId',
+  [NotificationType.ListingCoManagerInviteDeclined]: 'actorId',
   [NotificationType.SubprofileInvite]: 'invitedByUserId',
   [NotificationType.SubprofileCoOwnerJoined]: 'joinedUserId',
   [NotificationType.MagazinePieceMessage]: 'authorId',
@@ -176,6 +188,23 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'opportunitySlug',
     ],
     [NotificationType.ListingReview]: ['field'],
+    // The business's own public name, for copy like "someone asked a question
+    // about Lux Cafe". The question BODY and the ANSWER text are deliberately
+    // absent: they are member- and owner-authored prose, this allowlist is the
+    // guarantee they can never reach the bell, and the deep link built from
+    // `source` + `listingSlug` (both in `COMMON_PAYLOAD_KEYS`) lands the
+    // recipient on the page where the words actually live.
+    [NotificationType.ListingPublicQuestion]: ['listingName'],
+    [NotificationType.ListingPublicQuestionAnswered]: ['listingName'],
+    // The business's own public name, for copy like "Ana asked you to help
+    // manage Lux Cafe". `listingSlug` and `inviteId` already ride along in
+    // `COMMON_PAYLOAD_KEYS`, which is what the accept/decline deep link is
+    // built from. `listingRef` is deliberately absent: it is the key to every
+    // management route, and it belongs in the invite response the member
+    // fetches under their own authentication, not in a bell payload.
+    [NotificationType.ListingCoManagerInvite]: ['listingName'],
+    [NotificationType.ListingCoManagerInviteAccepted]: ['listingName'],
+    [NotificationType.ListingCoManagerInviteDeclined]: ['listingName'],
     [NotificationType.ListingEditSuggestionAccepted]: ['field'],
     [NotificationType.CommunityTagRequestResolved]: ['label'],
     [NotificationType.CommunityRoleChanged]: ['communityName', 'role'],

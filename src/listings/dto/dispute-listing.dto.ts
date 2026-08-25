@@ -7,6 +7,18 @@ import {
 } from 'class-validator';
 
 /**
+ * The `reasonCode` every `POST /listings/:ref/dispute` files its report under
+ * (`ReportsService.create`'s taxonomy; see `reports/reason-catalogue.ts`).
+ *
+ * Exported as a constant rather than repeated as a literal because two places
+ * now depend on the exact string: `ListingsService.dispute`, which writes it,
+ * and `ListingOwnerPendingService`, which reads it back to tell a listing's
+ * owner that a dispute is open. A drifting literal there would silently report
+ * "no disputes" forever.
+ */
+export const LISTING_DISPUTE_REASON_CODE = 'listing_dispute';
+
+/**
  * `POST /listings/:ref/dispute` body (item #13). Anyone — including the named
  * business itself — can contest a "friendly"/unowned listing: `reason` is the
  * free-text explanation a moderator reads in the queue, `contactEmail` an

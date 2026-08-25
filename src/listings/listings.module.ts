@@ -12,15 +12,24 @@ import { AdminListingsController } from './admin-listings.controller';
 import { DirectoryController } from './directory.controller';
 import { DirectoryService } from './directory.service';
 import { ListingClaim } from './entities/listing-claim.entity';
+import { ListingCoManager } from './entities/listing-co-manager.entity';
 import { ListingEditSuggestion } from './entities/listing-edit-suggestion.entity';
+import { ListingEnquiry } from './entities/listing-enquiry.entity';
 import { ListingModerationEvent } from './entities/listing-moderation-event.entity';
+import { ListingPublicQuestion } from './entities/listing-public-question.entity';
 import { ListingQuestion } from './entities/listing-question.entity';
+import { ListingReviewHelpfulVote } from './entities/listing-review-helpful-vote.entity';
 import { ListingReview } from './entities/listing-review.entity';
 import { Listing } from './entities/listing.entity';
 import { SafeSpaceMemberVouch } from '../safe-space-vouches/entities/safe-space-vouch.entity';
 import { ReportsModule } from '../reports/reports.module';
 import { ListingClaimsService } from './listing-claims.service';
+import { ListingCoManagersController } from './listing-co-managers.controller';
+import { ListingCoManagersService } from './listing-co-managers.service';
+import { ListingEnquiriesController } from './listing-enquiries.controller';
+import { ListingEnquiriesService } from './listing-enquiries.service';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
+import { ListingOwnerPendingService } from './listing-owner-pending.service';
 import { ListingsController } from './listings.controller';
 import { ListingsService } from './listings.service';
 
@@ -34,6 +43,13 @@ import { ListingsService } from './listings.service';
     TypeOrmModule.forFeature([
       Listing,
       ListingReview,
+      // Real "was this helpful" votes on a review — the rows
+      // `listing_reviews.helpful` now counts.
+      ListingReviewHelpfulVote,
+      // The PUBLIC "ask the owner" Q&A on a listing detail page. NOT
+      // `ListingQuestion` below, which is the moderator-to-submitter channel
+      // used during review; see both entities' doc comments.
+      ListingPublicQuestion,
       ListingEditSuggestion,
       // Moderation audit trail (#16) + Q&A thread (#17) — the admin
       // console overhaul's `ListingModerationEvent`/`ListingQuestion`.
@@ -42,6 +58,14 @@ import { ListingsService } from './listings.service';
       // "Claim this existing listing" (member requests, moderator reviews) —
       // its own entity/service, same reason `ListingEditSuggestion` is.
       ListingClaim,
+      // Co-manager seats: who besides the single `owner_id` may run this
+      // listing day to day. Invited and accepted, never direct-added, and never
+      // present in any public response.
+      ListingCoManager,
+      // "Message this business" — the link between a listing and the 1:1
+      // conversation an enquiry was delivered into. Holds NO message text;
+      // messaging still owns message storage (see the entity's docstring).
+      ListingEnquiry,
       Event,
       SavedItem,
       // Read-only here: `DirectoryService` merges member-written safe-space
@@ -57,12 +81,15 @@ import { ListingsService } from './listings.service';
     // moderator `hide_content`/`remove_content` takedown on a business listing.
     ContentModerationModule,
     // `NotificationsService` — listing approved (submitter, in `ListingsService`),
-    // a new review (owner, in `DirectoryService`), and a reviewed claim
-    // (claimant, in `ListingClaimsService`).
+    // a new review (owner, in `DirectoryService`), a new public question
+    // (owner, in `DirectoryService`), an answered public question (asker, in
+    // `ListingsService`), and a reviewed claim (claimant, in
+    // `ListingClaimsService`).
     NotificationsModule,
     // `StorageService` — delete a listing's photo objects when they are replaced
     // on edit or when the listing itself is removed, so superseded/orphaned
-    // gallery uploads stop living in the bucket forever.
+    // gallery uploads stop living in the bucket forever. `DirectoryService`
+    // uses it for the same reason on a review photo replaced by its author.
     StorageModule,
     // `ReportsService` — a listing dispute/claim and the owner-notify task on
     // creation are filed through the shared report+moderation pipeline (item
@@ -74,16 +101,36 @@ import { ListingsService } from './listings.service';
     MediaCropsModule,
   ],
   controllers: [
+    // FIRST, and that is load-bearing rather than stylistic. Nest resolves
+    // handlers in this array's order, and `ListingsController` declares
+    // `@Get(':ref')` on the same `listings` base path, so the literal
+    // `listings/co-manager-invites` routes have to be registered ahead of it.
+    // Move this line down and every invite route silently becomes a lookup for
+    // a listing whose ref is "co-manager-invites".
+    ListingCoManagersController,
     ListingsController,
     // Every moderator/admin route over listings, split out so the whole class
     // shares one `ActiveMemberGuard + RolesGuard` pair (BE-HSG-29).
     AdminListingsController,
     DirectoryController,
+    // Signed-in "message this business" routes, kept off `DirectoryController`
+    // so that class stays entirely public + CDN-cacheable — see the
+    // controller's own docstring.
+    ListingEnquiriesController,
   ],
   providers: [
     ListingsService,
+    // The second management gate's data source. Injected by `ListingsService`,
+    // `ListingOwnerPendingService` and `ListingClaimsService`; injects none of
+    // them back, so there is no cycle and no `forwardRef`.
+    ListingCoManagersService,
     ListingEditSuggestionsService,
     ListingClaimsService,
+    ListingEnquiriesService,
+    // C8: the owner-facing "what is pending on my listing?" read. Its
+    // `Repository<Report>` comes from `ReportsModule`'s re-exported
+    // `TypeOrmModule`, already imported above.
+    ListingOwnerPendingService,
     DirectoryService,
   ],
   exports: [DirectoryService],

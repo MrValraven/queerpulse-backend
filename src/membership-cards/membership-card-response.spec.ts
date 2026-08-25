@@ -196,14 +196,18 @@ describe('toCardVerification', () => {
       role: 'member',
       hasPhoto: false,
       holderPronouns: null,
+      holderAvatarUrl: null,
+      photoStyle: 'color',
     });
     expect(Object.keys(dto).sort()).toEqual(
       [
         'hasPhoto',
         'holderName',
+        'holderPhotoUrl',
         'holderPronouns',
         'issuerName',
         'memberSince',
+        'photoStyle',
         'role',
         'serial',
         'status',
@@ -221,10 +225,46 @@ describe('toCardVerification', () => {
         role: 'member',
         hasPhoto: false,
         holderPronouns: null,
+        holderAvatarUrl: null,
+        photoStyle: 'color',
       },
     );
     expect(JSON.stringify(dto)).not.toContain('safety report');
     expect(dto.status).toBe('revoked');
+  });
+
+  // The face is the one thing on this payload that identifies a person to a
+  // stranger, and a card that is already refused gives a door no decision the
+  // photo could inform.
+  it('withholds the holder face on a card that is not active', () => {
+    const dto = toCardVerification(
+      card({ status: MembershipCardStatus.Revoked }),
+      'revoked',
+      {
+        issuerName: 'Azores Queer',
+        holderName: 'Rita V',
+        role: 'member',
+        hasPhoto: true,
+        holderPronouns: null,
+        holderAvatarUrl: CREST_KEY,
+        photoStyle: 'color',
+      },
+    );
+    expect(dto.holderPhotoUrl).toBeNull();
+  });
+
+  it('sends the face the card prints on a card that is active', () => {
+    const dto = toCardVerification(card(), 'active', {
+      issuerName: 'Azores Queer',
+      holderName: 'Rita V',
+      role: 'member',
+      hasPhoto: true,
+      holderPronouns: null,
+      holderAvatarUrl: CREST_KEY,
+      photoStyle: 'mono',
+    });
+    expect(dto.holderPhotoUrl).toContain(CREST_KEY);
+    expect(dto.photoStyle).toBe('mono');
   });
 });
 

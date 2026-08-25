@@ -221,7 +221,10 @@ describe('EventsService', () => {
         // lookup resolves to "no such live listing".
         {
           provide: ListingLookupService,
-          useValue: { findLive: jest.fn().mockResolvedValue(null) },
+          useValue: {
+            findLive: jest.fn().mockResolvedValue(null),
+            findLinkable: jest.fn().mockResolvedValue(null),
+          },
         },
       ],
     }).compile();

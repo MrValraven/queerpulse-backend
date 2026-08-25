@@ -76,6 +76,18 @@ export class ReportsController {
       reasonCode: report.reasonCode,
       status: report.status,
       createdAt: report.createdAt.toISOString(),
+      // When the report was closed, or `null` while it is still open. The
+      // companion to the `report_resolved` notification: a reporter who missed
+      // or cleared the bell can still see for themselves that their report was
+      // dealt with, which is the whole point of closing this loop.
+      //
+      // Deliberately the TIMESTAMP only. `resolutionAction`, `resolutionNote`,
+      // `resolutionDuration` and `resolutionActorId` all sit on the same row and
+      // none of them belong here: they are the moderator's reasoning, their
+      // identity, and a consequence report about another member. See
+      // `ModerationService.notifyReporterOfOutcomeBestEffort` for the same
+      // boundary drawn on the notification side.
+      resolvedAt: report.resolvedAt ? report.resolvedAt.toISOString() : null,
     }));
   }
 }

@@ -145,6 +145,23 @@ export interface CardVerificationDTO {
    * nothing about the holder's, which is the same answer the card gives.
    */
   holderPronouns: string | null;
+  /**
+   * The face the card prints, as a fetchable URL, or null.
+   *
+   * Sent so the door compares the person in front of it against the copy the
+   * ISSUER holds rather than against the picture on the object being shown —
+   * a printed card or a phone screen can be doctored, this cannot. Gated by
+   * the same three switches as `hasPhoto` AND by status: only a card that is
+   * currently good hands a stranger a face, because there is no door decision
+   * a revoked card's photo could inform.
+   */
+  holderPhotoUrl: string | null;
+  /**
+   * How the card renders that face. Mirrored here so the portrait a verifier
+   * compares against looks like the one printed on the card in their hand
+   * rather than a differently-treated second image of the same person.
+   */
+  photoStyle: CardPhotoStyle;
 }
 
 export function toCardProgram(program: CommunityCard): CardProgramDTO {
@@ -278,6 +295,9 @@ export function toCardVerification(
     hasPhoto: boolean;
     /** Already gated by the caller, the same way `hasPhoto` is. */
     holderPronouns: string | null;
+    /** The holder's avatar, before the photo gate or the status gate below. */
+    holderAvatarUrl: string | null;
+    photoStyle: CardPhotoStyle;
   },
 ): CardVerificationDTO {
   return {
@@ -289,5 +309,15 @@ export function toCardVerification(
     memberSince: card.issuedAt.toISOString(),
     hasPhoto: context.hasPhoto,
     holderPronouns: context.holderPronouns,
+    // Both gates in one place, the same way `toMyCard` gates the avatar at the
+    // single boundary it can leave through. `hasPhoto` already carries the
+    // programme switch, the member's veto and whether they have a face at all;
+    // the status check is this DTO's own, because this is the only card
+    // payload handed to someone who is not the holder or the issuer.
+    holderPhotoUrl:
+      context.hasPhoto && status === 'active'
+        ? toImageUrl(context.holderAvatarUrl)
+        : null,
+    photoStyle: context.photoStyle,
   };
 }

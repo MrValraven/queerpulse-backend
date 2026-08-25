@@ -20,6 +20,7 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Feature } from '../common/feature.decorator';
 import { UserRole } from '../users/entities/user.entity';
+import { AnswerListingPublicQuestionDto } from './dto/answer-listing-public-question.dto';
 import { AskListingQuestionDto } from './dto/ask-listing-question.dto';
 import { BulkRemoveDto, BulkStatusDto } from './dto/bulk-listing.dto';
 import { ListEditSuggestionsQuery } from './dto/list-edit-suggestions.query';
@@ -219,6 +220,47 @@ export class AdminListingsController {
     return this.listingsService.askQuestion(ref, user.userId, dto.body);
   }
 
+  // Moderator answers a member's PUBLIC question on a listing.
+  //
+  // WHY THIS ROUTE EXISTS AT ALL, given the owner already has one. A large
+  // share of directory listings have no owner: the `friendly` and `suggested`
+  // submission paths create rows with a null `owner_id` for businesses that
+  // never claimed their page, and those are often exactly the venues people
+  // have questions about. Owner-only would make the public question box on
+  // every one of them a form that accepts questions nobody can answer, which is
+  // worse than not offering it. Abandoned owned listings fail the same way,
+  // more slowly.
+  //
+  // It does NOT let staff speak as the business. The answer is stamped
+  // `is_answered_by_moderator` and surfaces as `answeredByRole: 'moderator'`,
+  // so the page labels where it came from — an accessibility or safety answer
+  // attributed to a venue is a commitment BY that venue, and staff must not be
+  // able to make one on its behalf. The individual moderator is never named in
+  // the response.
+  @Post(':ref/public-questions/:id/answer')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Moderator answers a member's public question on a listing",
+  })
+  @ApiOkResponse({
+    description: 'The answered question, labelled as a moderator answer.',
+  })
+  @ApiNotFoundResponse({ description: 'No listing or question found.' })
+  @ApiBadRequestResponse({ description: 'Answer cannot be empty.' })
+  answerPublicQuestion(
+    @CurrentUser() user: CurrentUserData,
+    @Param('ref') ref: string,
+    @Param('id') id: string,
+    @Body() dto: AnswerListingPublicQuestionDto,
+  ) {
+    return this.listingsService.answerPublicQuestionAsModerator(
+      ref,
+      id,
+      user.userId,
+      dto.answer,
+    );
+  }
+
   // Only the moderation surface toggles a listing's safe-space badge.
   @Patch(':ref/safe-space')
   @ApiOperation({ summary: "Toggle a listing's safe-space badge" })
@@ -230,15 +272,24 @@ export class AdminListingsController {
 
   // Only the moderation surface confirms the "queer-owned" badge. Distinct
   // from the member's own self-reported `linkToProfile` claim.
+  //
+  // Grants record their PROVENANCE: who confirmed it, when, on what basis, and
+  // when it next needs re-confirming. The moderator may supply any of those; a
+  // bare `{ verified: true }` still fills them all, naming the acting moderator
+  // as the verifier. A badge whose evidence nobody can inspect is what this
+  // replaced.
   @Patch(':ref/queer-owned-verified')
-  @ApiOperation({ summary: "Toggle a listing's queer-owned verification" })
+  @ApiOperation({
+    summary: "Set a listing's queer-owned verification and its provenance",
+  })
   @ApiOkResponse({ description: 'The updated listing.' })
   @ApiNotFoundResponse({ description: 'No listing with that reference.' })
   setQueerOwnedVerified(
+    @CurrentUser() user: CurrentUserData,
     @Param('ref') ref: string,
     @Body() dto: UpdateQueerOwnedVerifiedDto,
   ) {
-    return this.listingsService.setQueerOwnedVerified(ref, dto.verified);
+    return this.listingsService.setQueerOwnedVerified(ref, user.userId, dto);
   }
 
   // Permanently delete any listing regardless of owner. The owner-only

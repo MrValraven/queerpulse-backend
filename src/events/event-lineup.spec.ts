@@ -117,7 +117,10 @@ describe('EventsService — event lineup (Personas Phase 5, Moment 5)', () => {
         },
         {
           provide: ListingLookupService,
-          useValue: { findLive: jest.fn().mockResolvedValue(null) },
+          useValue: {
+            findLive: jest.fn().mockResolvedValue(null),
+            findLinkable: jest.fn().mockResolvedValue(null),
+          },
         },
       ],
     }).compile();

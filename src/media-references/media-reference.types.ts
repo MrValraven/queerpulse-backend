@@ -10,7 +10,8 @@ export type MediaReferenceType =
   | 'event-photo' // EventPhoto.storageKey
   | 'event-cover' // Event.coverImageUrl
   | 'group-avatar' // Conversation.avatarUrl
-  | 'listing' // Listing.photos.*
+  | 'listing' // Listing.photoGallery[].image
+  | 'listing-review' // ListingReview.photo
   | 'persona-avatar' // Subprofile.avatarUrl
   | 'persona-cover' // Subprofile.coverUrl
   | 'persona-item' // SubprofileItem.imageUrl

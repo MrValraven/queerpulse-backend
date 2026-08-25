@@ -1,13 +1,18 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Header,
+  HttpCode,
+  HttpStatus,
   Param,
+  Patch,
   Post,
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle, seconds } from '@nestjs/throttler';
 import {
   CurrentUser,
   CurrentUserData,
@@ -16,18 +21,22 @@ import { Public } from '../auth/decorators/public.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { DirectoryService } from './directory.service';
+import { AskListingPublicQuestionDto } from './dto/ask-listing-public-question.dto';
 import { CreateEditSuggestionDto } from './dto/create-edit-suggestion.dto';
 import { CreateReviewDto } from './dto/create-review.dto';
 import { ListDirectoryQuery } from './dto/list-directory.query';
+import { UpdateReviewDto } from './dto/update-review.dto';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
 import {
   ApiBadRequestResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
+  ApiForbiddenResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
+  ApiTooManyRequestsResponse,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
@@ -48,8 +57,14 @@ import {
  * can answer repeat anonymous requests without invoking the Function or
  * touching Postgres at all for up to 60s, then serve one more stale response
  * while revalidating in the background for up to 5 more minutes (see
- * `caching-and-cost.md`). The two write routes below stay uncached (POST is
- * never cached regardless).
+ * `caching-and-cost.md`). The write routes below stay uncached (POST/PATCH/
+ * DELETE are never cached regardless).
+ *
+ * That caching is also why no response here carries a per-caller field. A CDN
+ * hit is served to everybody from one stored copy, so a "have I voted on this
+ * review" flag on a cached read would be handed to the next reader as if it
+ * were theirs. The helpful-vote WRITE routes return that answer instead, which
+ * is the only place it is genuinely caller-specific.
  */
 @Feature('listings')
 @ApiTags('Local Directory')
@@ -173,6 +188,143 @@ export class DirectoryController {
     @Body() dto: CreateReviewDto,
   ) {
     return this.directoryService.addReview(slug, user.userId, dto);
+  }
+
+  // Member-gated: the REVIEWER edits their own review. Slug-keyed and living
+  // here rather than under `/listings/:ref`, for the same reason `addReview`
+  // is: `ref` is the OWNER-scoped identifier, a reviewer is by definition not
+  // the owner (owners cannot review their own listing), and this action is
+  // reached from this same public detail page, which only ever holds the slug.
+  //
+  // The owner's `PATCH /listings/:ref/reviews/:reviewId/reply` is the
+  // deliberate mirror image of this: two different people, editing two
+  // different parts of the same row, through the namespace each of them
+  // actually has an identifier for.
+  @Patch(':slug/reviews/:reviewId')
+  @UseGuards(ActiveMemberGuard)
+  @ApiOperation({ summary: 'Edit your own review on a live listing' })
+  @ApiOkResponse({ description: 'The updated review.' })
+  @ApiNotFoundResponse({ description: 'No live listing or review found.' })
+  @ApiForbiddenResponse({ description: 'The review is not yours.' })
+  @ApiBadRequestResponse({ description: 'Review cannot be empty.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  updateReview(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('reviewId') reviewId: string,
+    @Body() dto: UpdateReviewDto,
+  ) {
+    return this.directoryService.updateReview(slug, reviewId, user.userId, dto);
+  }
+
+  // Member-gated: mark a review helpful. Idempotent, so a double-tap answers
+  // with the same count rather than a 409 — see `DirectoryService.voteHelpful`.
+  //
+  // `HttpCode(200)` rather than the POST default of 201: repeating this request
+  // creates nothing the second time, and answering "201 Created" to a call that
+  // created nothing describes the wrong thing.
+  //
+  // Throttled loosely. The write is one `ON CONFLICT DO NOTHING` insert plus a
+  // single-review recount, and the button is meant to be pressed; the limit is
+  // here to stop a script, not to ration honest use. Mirrors
+  // `POST /listings/:ref/confirm-details`, which makes the same argument.
+  @Post(':slug/reviews/:reviewId/helpful')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(ActiveMemberGuard)
+  @Throttle({ default: { limit: 30, ttl: seconds(60) } })
+  @ApiOperation({ summary: 'Mark a review helpful' })
+  @ApiOkResponse({ description: 'The refreshed helpful count.' })
+  @ApiNotFoundResponse({ description: 'No live listing or review found.' })
+  @ApiBadRequestResponse({ description: 'You cannot vote on your own review.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  voteHelpful(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('reviewId') reviewId: string,
+  ) {
+    return this.directoryService.voteHelpful(slug, reviewId, user.userId);
+  }
+
+  // Member-gated: take a helpful vote back. Also idempotent — withdrawing a
+  // vote that was never cast answers with the unchanged count. Returns the
+  // refreshed count rather than 204, so the client can render the new number
+  // without a follow-up read.
+  @Delete(':slug/reviews/:reviewId/helpful')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(ActiveMemberGuard)
+  @Throttle({ default: { limit: 30, ttl: seconds(60) } })
+  @ApiOperation({ summary: 'Withdraw your helpful vote on a review' })
+  @ApiOkResponse({ description: 'The refreshed helpful count.' })
+  @ApiNotFoundResponse({ description: 'No live listing or review found.' })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  withdrawHelpfulVote(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('reviewId') reviewId: string,
+  ) {
+    return this.directoryService.withdrawHelpfulVote(
+      slug,
+      reviewId,
+      user.userId,
+    );
+  }
+
+  // Public: the full Q&A history for a listing, newest first, answers inline.
+  // The detail read embeds only the most recent handful; this is the "see all".
+  // Cached like every other read here — it varies by listing, never by caller.
+  @Public()
+  @Get(':slug/questions')
+  @Header('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300')
+  @ApiOperation({ summary: 'List public questions and answers for a listing' })
+  @ApiOkResponse({ description: 'A page of questions with answers inline.' })
+  @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
+  listQuestions(@Param('slug') slug: string, @Query('page') page?: string) {
+    return this.directoryService.listQuestions(
+      slug,
+      page ? Number(page) : undefined,
+    );
+  }
+
+  // Member-gated: ask the business a question, in public.
+  //
+  // Throttled HARD compared with the review and helpful routes, and that gap is
+  // intentional. This is the one endpoint here that publishes unreviewed member
+  // prose onto a business's page, where the business then has to answer it or
+  // wear it, so a burst is worth stopping outright.
+  //
+  // The HTTP throttle is only the first of three layers, and on its own it is
+  // the weakest: it tracks by IP over a 60-second window, while the shape that
+  // actually hurts a queer venue is a slow drip from one account over days.
+  // `DirectoryService.askQuestion` carries the two counted per-member caps that
+  // cover that, and documents what each is defending against.
+  @Post(':slug/questions')
+  @UseGuards(ActiveMemberGuard)
+  @Throttle({ default: { limit: 5, ttl: seconds(300) } })
+  @ApiOperation({ summary: 'Ask a public question about a live listing' })
+  @ApiCreatedResponse({ description: 'The posted question, not yet answered.' })
+  @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
+  @ApiBadRequestResponse({
+    description: 'You own the listing, or the question is too short.',
+  })
+  @ApiTooManyRequestsResponse({
+    description:
+      'Too many questions: either unanswered ones already outstanding on this listing, or too many asked today.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  askQuestion(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: AskListingPublicQuestionDto,
+  ) {
+    return this.directoryService.askQuestion(slug, user.userId, dto);
   }
 
   // Member-gated: propose a correction to this listing ("suggest an edit"),

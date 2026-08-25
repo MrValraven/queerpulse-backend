@@ -101,6 +101,10 @@ export class CardVerificationService {
         program.allowsPronouns && !card.isPronounsHidden
           ? holder?.pronouns?.trim() || null
           : null,
+      // Handed over raw; `toCardVerification` applies the photo gate and the
+      // status gate, so there is exactly one place a face can leave through.
+      holderAvatarUrl: holder?.avatarUrl ?? null,
+      photoStyle: program.photoStyle,
     });
   }
 }

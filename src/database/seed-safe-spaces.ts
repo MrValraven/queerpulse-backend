@@ -393,11 +393,15 @@ async function seedSafeSpaces(): Promise<void> {
             langs: seed.langs,
             hoursNote: seed.hoursNote,
             hours: seed.hours,
+            // These seeded safe spaces carry no photos of their own: an
+            // empty ordered gallery, and the legacy mirror it derives to.
+            photoGallery: [],
             // Fully shaped jsonb objects — a plain `{}` (the raw column
-            // default) makes `toDirectoryDetail`'s `listing.alt.wide.length`
-            // (src/listings/listing-response.ts) throw on the public
-            // `GET /directory/:slug` route, since these live listings also
-            // surface in the general directory alongside the safe-space page.
+            // default) makes the legacy four-slot response fields
+            // (src/listings/listing-response.ts) read from an object with no
+            // keys on the public `GET /directory/:slug` route, since these live
+            // listings also surface in the general directory alongside the
+            // safe-space page.
             alt: EMPTY_PHOTO_SET,
             photos: EMPTY_PHOTO_SET,
             social: EMPTY_SOCIAL,

@@ -22,13 +22,17 @@ import {
   ListingModerationAction,
   ListingModerationEvent,
 } from './entities/listing-moderation-event.entity';
+import { ListingPublicQuestion } from './entities/listing-public-question.entity';
 import { ListingQuestion } from './entities/listing-question.entity';
 import { ListingReview } from './entities/listing-review.entity';
 import {
   Listing,
+  ListingOperatingState,
   ListingStatus,
   SafeSpaceStatus,
 } from './entities/listing.entity';
+import { emptyAccessibilityAnswers } from './listing-accessibility';
+import { ListingCoManagersService } from './listing-co-managers.service';
 import { ListingsService } from './listings.service';
 
 // A chainable query-builder stub whose terminal methods resolve to empty
@@ -125,7 +129,10 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   longitude: null,
   hours: {},
   hoursNote: '',
+  hoursExceptions: [],
   social: { instagram: '', website: '', email: '', phone: '' },
+  photoGallery: [],
+  // LEGACY derived mirror of the first four `photoGallery` entries.
   photos: { wide: '', d1: '', d2: '', vibe: '' },
   alt: { wide: '', d1: '', d2: '', vibe: '' },
   rel: '',
@@ -151,6 +158,22 @@ const baseListing = (overrides: Partial<Listing> = {}): Listing => ({
   safeSpacePromises: [],
   safeSpaceVouches: [],
   safeSpaceRemoval: null,
+  operatingState: ListingOperatingState.Open,
+  operatingStateNote: '',
+  operatingStateSetAt: null,
+  movedToAddress: '',
+  movedToListingId: null,
+  detailsConfirmedAt: null,
+  accessibilityAnswers: emptyAccessibilityAnswers(),
+  accessibilityNote: '',
+  services: [],
+  queerOwnedVerifier: '',
+  queerOwnedReVerifiedAt: null,
+  queerOwnedBasis: '',
+  queerOwnedExpiresAt: null,
+  affirmingBaselineAcceptedAt: null,
+  isHiddenByOwner: false,
+  ownerHiddenAt: null,
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   updatedAt: new Date('2026-01-01T00:00:00.000Z'),
   ...overrides,
@@ -190,16 +213,34 @@ describe('ListingsService', () => {
   };
   let profiles: { find: jest.Mock; findOne: jest.Mock };
   let reviews: { findOne: jest.Mock; save: jest.Mock };
-  let moderationEvents: { save: jest.Mock; find: jest.Mock };
+  let moderationEvents: {
+    save: jest.Mock;
+    find: jest.Mock;
+    findAndCount: jest.Mock;
+  };
   let questions: {
     findOne: jest.Mock;
     find: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
   };
+  // The PUBLIC Q&A table, deliberately a separate repo mock from `questions`
+  // above (the moderator-to-submitter channel) so a test that confuses the two
+  // fails rather than passing by accident.
+  let publicQuestions: {
+    findOne: jest.Mock;
+    find: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+    count: jest.Mock;
+  };
   let messaging: { deliverEnquiry: jest.Mock };
   let notifications: { create: jest.Mock };
   let dataSource: { query: jest.Mock; transaction: jest.Mock };
+  let coManagers: {
+    isActiveCoManager: jest.Mock;
+    listingIdsCoManagedBy: jest.Mock;
+  };
   // The stub `EntityManager` every `dataSource.transaction(...)` call in a
   // given test is handed — see `buildTransactionManager`'s doc comment for
   // why this must be a single instance rather than built fresh per call.
@@ -238,6 +279,9 @@ describe('ListingsService', () => {
     moderationEvents = {
       save: jest.fn((v: object) => Promise.resolve({ id: 'event-1', ...v })),
       find: jest.fn().mockResolvedValue([]),
+      // Backs `getOwnerListingHistory`'s paginated read (the admin
+      // `getListingHistory` still uses the unpaginated `find`).
+      findAndCount: jest.fn().mockResolvedValue([[], 0]),
     };
     questions = {
       findOne: jest.fn(),
@@ -251,8 +295,25 @@ describe('ListingsService', () => {
         }),
       ),
     };
+    publicQuestions = {
+      findOne: jest.fn(),
+      find: jest.fn().mockResolvedValue([]),
+      create: jest.fn((v: object) => v),
+      save: jest.fn((v: object) =>
+        Promise.resolve({
+          id: 'public-question-1',
+          createdAt: new Date('2026-01-01T00:00:00.000Z'),
+          ...v,
+        }),
+      ),
+      count: jest.fn().mockResolvedValue(0),
+    };
     messaging = { deliverEnquiry: jest.fn() };
     notifications = { create: jest.fn() };
+    coManagers = {
+      isActiveCoManager: jest.fn().mockResolvedValue(false),
+      listingIdsCoManagedBy: jest.fn().mockResolvedValue([]),
+    };
     transactionManager = buildTransactionManager(listings);
     dataSource = {
       query: jest.fn().mockResolvedValue([{ seq: '1' }]),
@@ -278,6 +339,10 @@ describe('ListingsService', () => {
           useValue: moderationEvents,
         },
         { provide: getRepositoryToken(ListingQuestion), useValue: questions },
+        {
+          provide: getRepositoryToken(ListingPublicQuestion),
+          useValue: publicQuestions,
+        },
         { provide: DataSource, useValue: dataSource },
         { provide: MessagingService, useValue: messaging },
         { provide: NotificationsService, useValue: notifications },
@@ -293,6 +358,13 @@ describe('ListingsService', () => {
           provide: MediaCropService,
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
         },
+        // The second management gate's data source. Every case in THIS file is
+        // an owner or a stranger, so the default answer is "no seat" and the
+        // owner-vs-stranger behaviour under test is unchanged. The co-manager
+        // boundary itself is covered in
+        // `listing-co-manager-permissions.spec.ts`, where the answer is varied
+        // deliberately.
+        { provide: ListingCoManagersService, useValue: coManagers },
       ],
     }).compile();
     service = module.get(ListingsService);
@@ -483,6 +555,82 @@ describe('ListingsService', () => {
           }),
         ).rejects.toBeInstanceOf(ForbiddenException);
         expect(listings.save).not.toHaveBeenCalled();
+      });
+
+      it('allows re-sending a gallery photo the listing already carries', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: OWNER_ID,
+            photoGallery: [
+              {
+                image: FOREIGN_KEY,
+                alt: 'Uploaded by a co-editor',
+                caption: '',
+              },
+            ],
+          }),
+        );
+        await expect(
+          service.update('QPL-2026-0001', OWNER_ID, {
+            photoGallery: [
+              { image: FOREIGN_KEY, alt: 'Uploaded by a co-editor' },
+            ],
+          }),
+        ).resolves.toBeDefined();
+      });
+
+      it('rejects a new foreign photo introduced through the gallery', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: OWNER_ID, photoGallery: [] }),
+        );
+        await expect(
+          service.update('QPL-2026-0001', OWNER_ID, {
+            photoGallery: [{ image: FOREIGN_KEY, alt: 'Not mine' }],
+          }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(listings.save).not.toHaveBeenCalled();
+      });
+    });
+
+    // The ordered gallery is the source of truth; the legacy `photos`/`alt`
+    // slot pair is a derived mirror of its first four entries.
+    describe('ordered photo gallery', () => {
+      const galleryOf = (count: number) =>
+        Array.from({ length: count }, (_unused, index) => ({
+          image: `photo-${index}.jpg`,
+          alt: `Photo ${index}`,
+          caption: index === 4 ? 'Open studio night' : '',
+        }));
+
+      it('replaces the gallery wholesale and rewrites the legacy mirror', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: 'owner-1', photoGallery: galleryOf(3) }),
+        );
+
+        const dto = await service.update('QPL-2026-0001', 'owner-1', {
+          photoGallery: [{ image: 'only.jpg', alt: 'The only photo' }],
+        });
+
+        expect(dto.photoGallery).toHaveLength(1);
+        expect(dto.photoGallery[0]?.alt).toBe('The only photo');
+        // The mirror follows the gallery rather than merging with what was
+        // there before, so a removed photo is really removed.
+        expect(dto.photos.d1).toBeNull();
+        expect(dto.photos.d2).toBeNull();
+      });
+
+      it('applies a legacy slot patch without deleting a fifth photo or a caption', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: 'owner-1', photoGallery: galleryOf(5) }),
+        );
+
+        const dto = await service.update('QPL-2026-0001', 'owner-1', {
+          photos: { d1: 'replaced.jpg' },
+        });
+
+        expect(dto.photoGallery).toHaveLength(5);
+        expect(dto.photoGallery[1]?.image).toContain('replaced.jpg');
+        expect(dto.photoGallery[4]?.caption).toBe('Open studio night');
       });
     });
   });
@@ -924,6 +1072,139 @@ describe('ListingsService', () => {
     });
   });
 
+  describe('getOwnerListingHistory', () => {
+    const ownerEditedEvent = {
+      id: 'event-owner-edit',
+      listingId: 'listing-1',
+      actorId: 'owner-1',
+      action: ListingModerationAction.OwnerEdited,
+      fromStatus: null,
+      toStatus: null,
+      reason: 'The owner updated the opening hours.',
+      createdAt: new Date('2026-01-03T00:00:00.000Z'),
+    };
+    const sentBackEvent = {
+      id: 'event-sent-back',
+      listingId: 'listing-1',
+      actorId: 'mod-1',
+      action: ListingModerationAction.StatusChanged,
+      fromStatus: ListingStatus.Live,
+      toStatus: ListingStatus.Review,
+      reason: 'Internal note: owner has a prior warning on file.',
+      createdAt: new Date('2026-01-02T00:00:00.000Z'),
+    };
+    const transferEvent = {
+      id: 'event-transfer',
+      listingId: 'listing-1',
+      actorId: 'mod-1',
+      action: ListingModerationAction.OwnershipTransferred,
+      fromStatus: null,
+      toStatus: null,
+      reason:
+        "Ownership transferred on an approved claim. Claimant's note: I am Ana, I manage the bar.",
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    };
+
+    it('404s a caller who does not own the listing, without reading any event', async () => {
+      scopeFindOneToOwner(
+        listings.findOne,
+        'owner-1',
+        baseListing({ ownerId: 'owner-1' }),
+      );
+
+      await expect(
+        service.getOwnerListingHistory('QPL-2026-0001', 'someone-else'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(moderationEvents.findAndCount).not.toHaveBeenCalled();
+    });
+
+    it('scopes the read to the listing and pages newest-first', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+      moderationEvents.findAndCount.mockResolvedValue([[ownerEditedEvent], 41]);
+
+      const history = await service.getOwnerListingHistory(
+        'QPL-2026-0001',
+        'owner-1',
+        2,
+      );
+
+      expect(listings.findOne).toHaveBeenCalledWith({
+        where: { ref: 'QPL-2026-0001', ownerId: 'owner-1' },
+      });
+      expect(moderationEvents.findAndCount).toHaveBeenCalledWith({
+        where: { listingId: 'listing-1' },
+        order: { createdAt: 'DESC' },
+        skip: 20,
+        take: 20,
+      });
+      expect(history.page).toBe(2);
+      expect(history.pageSize).toBe(20);
+      expect(history.totalEvents).toBe(41);
+    });
+
+    it("shows the platform-composed owner_edited reason, so the owner sees their own edit's audit row", async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+      moderationEvents.findAndCount.mockResolvedValue([[ownerEditedEvent], 1]);
+
+      const history = await service.getOwnerListingHistory(
+        'QPL-2026-0001',
+        'owner-1',
+      );
+
+      expect(history.events[0]?.reason).toBe(
+        'The owner updated the opening hours.',
+      );
+      expect(history.events[0]?.hasModeratorNote).toBe(false);
+    });
+
+    it("withholds a moderator's internal note and the claimant's transfer note, flagging only that a note exists", async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+      moderationEvents.findAndCount.mockResolvedValue([
+        [sentBackEvent, transferEvent],
+        2,
+      ]);
+
+      const history = await service.getOwnerListingHistory(
+        'QPL-2026-0001',
+        'owner-1',
+      );
+
+      expect(history.events[0]?.reason).toBeNull();
+      expect(history.events[0]?.hasModeratorNote).toBe(true);
+      expect(history.events[1]?.reason).toBeNull();
+      expect(history.events[1]?.hasModeratorNote).toBe(true);
+      // The claimant's self-identifying note must not appear anywhere in the
+      // payload, in any field.
+      expect(JSON.stringify(history)).not.toContain('Ana');
+    });
+
+    it('never carries an actor on any row, and never resolves a profile to build one', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+      moderationEvents.findAndCount.mockResolvedValue([[sentBackEvent], 1]);
+      questions.find.mockResolvedValue([
+        {
+          id: 'question-1',
+          listingId: 'listing-1',
+          askedBy: 'mod-1',
+          body: 'What are your hours?',
+          answer: null,
+          answeredAt: null,
+          createdAt: new Date('2026-01-02T00:00:00.000Z'),
+        },
+      ]);
+
+      const history = await service.getOwnerListingHistory(
+        'QPL-2026-0001',
+        'owner-1',
+      );
+
+      expect(history.events[0]).not.toHaveProperty('actor');
+      expect(history.questions[0]).not.toHaveProperty('askedBy');
+      expect(history.questions[0]?.body).toBe('What are your hours?');
+      expect(profiles.find).not.toHaveBeenCalled();
+    });
+  });
+
   describe('answerQuestion', () => {
     it('404s a non-owner', async () => {
       scopeFindOneToOwner(
@@ -979,6 +1260,179 @@ describe('ListingsService', () => {
       expect(moderationEvents.save).toHaveBeenCalledWith(
         expect.objectContaining({ action: ListingModerationAction.Answered }),
       );
+    });
+  });
+
+  describe('answerPublicQuestion', () => {
+    const openQuestion = () => ({
+      id: 'public-question-1',
+      listingId: 'listing-1',
+      askerId: 'asker-1',
+      askerName: 'Ana Silva',
+      body: 'Is the entrance step-free?',
+      answer: null,
+      answeredAt: null,
+      answeredById: null,
+      isAnsweredByModerator: false,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+
+    it('404s a question that belongs to a different listing', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+      // The lookup is scoped to this listing, so a guessed id from another
+      // owner's listing simply does not resolve.
+      publicQuestions.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.answerPublicQuestion(
+          'QPL-2026-0001',
+          'public-question-1',
+          'owner-1',
+          'Yes.',
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('404s when the caller does not own the listing', async () => {
+      // `loadOwnedOr404` folds ownership into the query, so a non-owner gets
+      // nothing back and never learns the listing exists.
+      listings.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.answerPublicQuestion(
+          'QPL-2026-0001',
+          'public-question-1',
+          'someone-else',
+          'Yes.',
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('rejects a whitespace-only answer post-trim', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+      publicQuestions.findOne.mockResolvedValue(openQuestion());
+
+      await expect(
+        service.answerPublicQuestion(
+          'QPL-2026-0001',
+          'public-question-1',
+          'owner-1',
+          '   ',
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(publicQuestions.save).not.toHaveBeenCalled();
+    });
+
+    it("records an owner answer as the OWNER's, and notifies the asker with the owner as actor", async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+      publicQuestions.findOne.mockResolvedValue(openQuestion());
+
+      const dto = await service.answerPublicQuestion(
+        'QPL-2026-0001',
+        'public-question-1',
+        'owner-1',
+        '  Yes, the entrance is step-free.  ',
+      );
+
+      expect(dto.answer).toBe('Yes, the entrance is step-free.');
+      expect(dto.answeredByRole).toBe('owner');
+      expect(publicQuestions.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          answeredById: 'owner-1',
+          isAnsweredByModerator: false,
+        }),
+      );
+      expect(notifications.create).toHaveBeenCalledWith(
+        'asker-1',
+        NotificationType.ListingPublicQuestionAnswered,
+        expect.objectContaining({ actorId: 'owner-1', source: 'listing' }),
+        'owner-1',
+      );
+    });
+
+    it('never lets a moderator answer read as the business speaking', async () => {
+      // `Listing.ownerId` is typed non-nullable on the entity while the column
+      // is nullable in the database (`friendly`/`suggested` rows carry no
+      // owner) — the cast keeps this fixture honest about the real row shape
+      // without changing an entity this work does not own.
+      listings.findOne.mockResolvedValue(
+        baseListing({ ownerId: null as unknown as string }),
+      );
+      publicQuestions.findOne.mockResolvedValue(openQuestion());
+
+      const dto = await service.answerPublicQuestionAsModerator(
+        'QPL-2026-0001',
+        'public-question-1',
+        'moderator-1',
+        'We checked with the venue: yes.',
+      );
+
+      expect(dto.answeredByRole).toBe('moderator');
+      expect(publicQuestions.save).toHaveBeenCalledWith(
+        expect.objectContaining({ isAnsweredByModerator: true }),
+      );
+    });
+
+    it('names no actor on a moderator answer, so the asker is not told which staff member wrote it', async () => {
+      // `Listing.ownerId` is typed non-nullable on the entity while the column
+      // is nullable in the database (`friendly`/`suggested` rows carry no
+      // owner) — the cast keeps this fixture honest about the real row shape
+      // without changing an entity this work does not own.
+      listings.findOne.mockResolvedValue(
+        baseListing({ ownerId: null as unknown as string }),
+      );
+      publicQuestions.findOne.mockResolvedValue(openQuestion());
+
+      await service.answerPublicQuestionAsModerator(
+        'QPL-2026-0001',
+        'public-question-1',
+        'moderator-1',
+        'We checked with the venue: yes.',
+      );
+
+      const call = notifications.create.mock.calls[0] as [
+        string,
+        NotificationType,
+        Record<string, unknown>,
+        string | undefined,
+      ];
+      expect(call[0]).toBe('asker-1');
+      expect(call[2]).not.toHaveProperty('actorId');
+      expect(call[3]).toBeUndefined();
+    });
+
+    it('still answers when the asker erased their account (nobody left to notify)', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+      publicQuestions.findOne.mockResolvedValue({
+        ...openQuestion(),
+        askerId: null,
+      });
+
+      const dto = await service.answerPublicQuestion(
+        'QPL-2026-0001',
+        'public-question-1',
+        'owner-1',
+        'Yes.',
+      );
+
+      expect(dto.answer).toBe('Yes.');
+      expect(dto.askerSlug).toBeNull();
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('never blocks the answer on a failed notification', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+      publicQuestions.findOne.mockResolvedValue(openQuestion());
+      notifications.create.mockRejectedValue(new Error('bell is down'));
+
+      await expect(
+        service.answerPublicQuestion(
+          'QPL-2026-0001',
+          'public-question-1',
+          'owner-1',
+          'Yes.',
+        ),
+      ).resolves.toEqual(expect.objectContaining({ answer: 'Yes.' }));
     });
   });
 });

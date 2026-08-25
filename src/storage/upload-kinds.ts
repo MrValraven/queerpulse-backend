@@ -7,6 +7,7 @@ export type UploadKind =
   | 'avatar'
   | 'work-image'
   | 'story-cover'
+  | 'persona-cover'
   | 'gathering-photo'
   | 'group-avatar'
   | 'listing-photo'
@@ -40,6 +41,28 @@ export const UPLOAD_KIND_SPECS: Readonly<Record<UploadKind, UploadKindSpec>> = {
   'work-image': { prefix: 'work', maxBytes: 10 * MB, requiresSession: false },
   'story-cover': {
     prefix: 'story-covers',
+    maxBytes: 10 * MB,
+    requiresSession: false,
+  },
+  // A persona's banner. Split off from `story-cover` (which it shared until
+  // now) because the two render at completely different shapes: a magazine
+  // cover is a 2:1 plate, a persona banner is a full-bleed strip 4:1-7:1 wide
+  // on desktop. Sharing one kind meant the reframe editor framed persona
+  // banners at 2:1 and the page then sliced an arbitrary centre band out of
+  // that crop. Its own kind gives it its own crop aspect, its own minimum
+  // dimensions, and its own media-library label.
+  //
+  // `requiresSession: false` for the SAME reason as avatars/work-images: a
+  // published persona page is `@Public()` and reachable signed-out, its cover
+  // resolves through `toImageUrl` into `GET /files/*`, and social-link
+  // unfurlers cannot send a cookie — gating it would blank the banner for
+  // every logged-out visitor and every shared link preview. Ownership of the
+  // SET action is unchanged: the key embeds the uploader's user id, the global
+  // StorageKeyOwnershipInterceptor rejects a PATCH referencing someone else's
+  // key, and the subprofile update path re-checks co-ownership before
+  // persisting it. 10 MB matches the other full-bleed heroes.
+  'persona-cover': {
+    prefix: 'persona-covers',
     maxBytes: 10 * MB,
     requiresSession: false,
   },

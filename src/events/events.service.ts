@@ -1241,7 +1241,7 @@ export class EventsService {
   // live listing. Returns the same id back, mirroring `assertMemberBySlug`'s
   // "resolve + authorize, or throw" shape for `communitySlug`.
   private async assertLiveListing(listingId: string): Promise<string> {
-    const listing = await this.listingLookup.findLive(listingId);
+    const listing = await this.listingLookup.findLinkable(listingId);
     if (!listing) {
       throw new BadRequestException('Venue listing not found');
     }

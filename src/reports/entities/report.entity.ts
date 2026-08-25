@@ -41,6 +41,18 @@ export enum ReportSubjectType {
   // `AddMagazineReaderComments1793100000000` (adds the value to
   // `reports_subject_type_enum`).
   MagazineComment = 'magazine_comment',
+  // A member's PUBLIC question on a business listing, or the answer posted
+  // under it (`listing_public_questions`), addressed by the question's uuid.
+  //
+  // ONE subject covers the pair, not two. That follows the `review` precedent
+  // directly above: a review's owner reply is not separately takedown-able
+  // either, because a reply read without the review it answers is not the same
+  // statement. A question and its answer are one exchange on the page, and a
+  // moderator hiding half of it would leave the other half misread.
+  //
+  // Backed by `AddListingPublicQuestionReportSubject1794290000000` (adds the
+  // value to `reports_subject_type_enum`).
+  ListingPublicQuestion = 'listing_public_question',
 }
 
 // Mirrors the frontend's `ReportDTO`/`ModReportDTO` status union
