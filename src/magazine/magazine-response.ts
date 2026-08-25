@@ -37,7 +37,8 @@ export interface IssueResponse {
   number: string;
   title: string;
   dek: string;
-  publishedOn: string;
+  /** `YYYY-MM-DD`, or `null` while the issue is still unscheduled. */
+  publishedOn: string | null;
   coverUrl: string | null;
   /** Crop rect for `coverUrl`, when a staff editor reframed it. */
   crop?: CropRect;

@@ -538,10 +538,12 @@ export class AccountService {
   // --- Sessions (backed by the existing refresh-token store) ----------------
 
   // The presenting `refresh_token` cookie identifies THIS device's session.
-  // We resolve it to a refresh-token row id by the same sha-256 allowlist hash
+  // We resolve it to a refresh-token FAMILY by the same sha-256 allowlist hash
   // `AuthService` uses, so we can flag `current` and exclude it from
-  // "sign out other devices".
-  private async resolveCurrentSessionId(
+  // "sign out other devices". A family, not a row id: rotation replaces the row
+  // roughly every 15 minutes, so a row id names a credential the caller may
+  // already have rotated out of, while the family names the session itself.
+  private async resolveCurrentFamilyId(
     rawRefreshToken: string | undefined,
   ): Promise<string | null> {
     if (!rawRefreshToken) {
@@ -551,26 +553,65 @@ export class AccountService {
       .update(rawRefreshToken)
       .digest('hex');
     const row = await this.refreshTokens.findOne({ where: { tokenHash } });
-    return row?.id ?? null;
+    return row?.familyId ?? null;
   }
 
+  /**
+   * The caller's live sessions, one entry per DEVICE.
+   *
+   * Two filters and one grouping stand between the raw table and this list, and
+   * each of them fixes a way the page used to over-report:
+   *
+   *  - `expiresAt > now`. Revocation was the only condition before, so a token
+   *    that had simply run out its 30-day life still appeared under "active
+   *    now" for the 30 further days the purge job waits before deleting it. It
+   *    could not sign anybody in; it just sat there looking like a device.
+   *  - grouping by `familyId`. One browser can legitimately hold two live rows
+   *    after a rotation race (see `AuthService.issueGraceReplacement`), and it
+   *    was listed twice.
+   *  - newest row per family. Its `createdAt` is the last time that device
+   *    actually rotated a token, which is the closest thing we have to "last
+   *    seen"; the family's `sessionStartedAt` supplies the real sign-in time.
+   */
   async listSessions(
     userId: string,
     rawRefreshToken?: string,
   ): Promise<SessionResponse[]> {
-    const currentId = await this.resolveCurrentSessionId(rawRefreshToken);
+    const currentFamilyId = await this.resolveCurrentFamilyId(rawRefreshToken);
     const rows = await this.refreshTokens.find({
-      where: { userId, revokedAt: IsNull() },
+      where: {
+        userId,
+        revokedAt: IsNull(),
+        expiresAt: MoreThan(new Date()),
+      },
       order: { createdAt: 'DESC' },
     });
-    return rows.map((t) => toSessionResponse(t, t.id === currentId));
+    // Rows arrive newest-first, so the first row seen for a family is its
+    // newest and every later one is a stranded sibling we fold away.
+    const newestPerFamily = new Map<string, RefreshToken>();
+    for (const row of rows) {
+      if (!newestPerFamily.has(row.familyId)) {
+        newestPerFamily.set(row.familyId, row);
+      }
+    }
+    return [...newestPerFamily.values()].map((row) =>
+      toSessionResponse(row, row.familyId === currentFamilyId),
+    );
   }
 
   /**
-   * "Sign out this device": revoke one named session row.
+   * "Sign out this device": revoke one named session.
+   *
+   * `sessionId` is a refresh-token FAMILY id, which is what `listSessions`
+   * hands the frontend. Addressing a row id here would have been unusable: the
+   * row the page was rendered from is rotated out roughly every 15 minutes, so
+   * a member who left the security page open and then clicked Sign out was
+   * revoking a token that had already been replaced, leaving the device signed
+   * in. Revoking the family covers every live row descended from that sign-in,
+   * including a sibling stranded by a rotation race.
    *
    * Emits `USER_SESSION_REVOKED` for the same reason `revokeAllSessions` does.
-   * Revoking the refresh row only stops the NEXT rotation; the access token
+   * Revoking the refresh rows only stops the NEXT rotation; the access token
    * already issued to that device stays valid for its full TTL, and
    * `ChatGateway.authenticate` accepts it, so without this the "signed out"
    * device kept a live socket (messages, presence) for up to 15 minutes.
@@ -579,19 +620,21 @@ export class AccountService {
    * session id, so the gateway can only empty the whole `user:${userId}` room.
    * The member's other devices reconnect immediately with their own still-valid
    * cookies, so the visible cost is a socket reconnect, and the revoked device
-   * cannot come back because its refresh row is gone. Narrowing this to the one
-   * device needs a `sessionId` claim on the access token plus a filtered drop
-   * in the gateway.
+   * cannot come back because its refresh rows are gone. Narrowing this to the
+   * one device needs a `sessionId` claim on the access token plus a filtered
+   * drop in the gateway.
    */
   async revokeSession(userId: string, sessionId: string): Promise<void> {
-    const row = await this.refreshTokens.findOne({
-      where: { id: sessionId, userId },
-    });
-    if (!row || row.revokedAt) {
+    const result = await this.refreshTokens.update(
+      { familyId: sessionId, userId, revokedAt: IsNull() },
+      { revokedAt: new Date() },
+    );
+    // Nothing live under that family: either it was never this member's, or it
+    // was signed out from another tab a moment ago. Both are a 404 here, and
+    // neither confirms whether the id exists for somebody else.
+    if (!result.affected) {
       throw new NotFoundException('Session not found');
     }
-    row.revokedAt = new Date();
-    await this.refreshTokens.save(row);
     this.eventEmitter.emit(USER_SESSION_REVOKED, {
       userId,
     } satisfies UserSessionRevokedEvent);
@@ -599,18 +642,20 @@ export class AccountService {
 
   // "Log out other devices": revoke every live session EXCEPT the presenting
   // one, so the caller stays signed in on this device. FE `revokeOtherSessions`.
+  // Scoped by FAMILY, so the caller keeps every row of their own session (a
+  // rotation race can leave two) and loses every row of every other one.
   // Emits `USER_SESSION_REVOKED` on the same reasoning as `revokeSession`; the
   // caller's own socket reconnects on the cookie it still holds.
   async revokeOtherSessions(
     userId: string,
     rawRefreshToken?: string,
   ): Promise<void> {
-    const currentId = await this.resolveCurrentSessionId(rawRefreshToken);
+    const currentFamilyId = await this.resolveCurrentFamilyId(rawRefreshToken);
     const rows = await this.refreshTokens.find({
       where: { userId, revokedAt: IsNull() },
     });
     const now = new Date();
-    const toRevoke = rows.filter((r) => r.id !== currentId);
+    const toRevoke = rows.filter((r) => r.familyId !== currentFamilyId);
     if (toRevoke.length === 0) {
       return;
     }
@@ -636,7 +681,7 @@ export class AccountService {
    *
    * Emitting `USER_SESSION_REVOKED` closes that window: the gateway already
    * listens for it and drops the member's sockets immediately. This mirrors
-   * what `AuthService.revokeFamily` does on reuse detection.
+   * what `AuthService.revokeAllUserSessions` does on reuse detection.
    */
   async revokeAllSessions(userId: string): Promise<void> {
     await this.refreshTokens.update(

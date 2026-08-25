@@ -355,25 +355,47 @@ describe('toPieceRecordSummary', () => {
       }),
     ];
 
-    const record = toPieceRecordSummary(piece, events);
+    const record = toPieceRecordSummary(
+      piece,
+      events,
+      new Map([['editor-1', 'Marta Ferreira']]),
+    );
 
     expect(record).toMatchObject(toPieceListItem(piece));
     expect(record.brief).toEqual(piece.brief);
     expect(record.care).toEqual(piece.care);
+    // The trail is already on one piece, so the phrases say "this piece"
+    // rather than repeating the title on every line.
     expect(record.audit).toEqual([
       {
+        id: 'event-1',
         actorId: 'editor-1',
-        action: 'stage_changed',
-        detail: 'commissioned -> drafting',
-        createdAt: '2026-08-02T09:00:00.000Z',
+        isSystem: false,
+        who: 'Marta Ferreira',
+        what: 'moved this piece to commissioned -> drafting',
+        when: '2026-08-02T09:00:00.000Z',
       },
       {
+        id: 'event-2',
         actorId: null,
-        action: 'auto_reminder',
-        detail: null,
-        createdAt: '2026-08-03T09:00:00.000Z',
+        isSystem: true,
+        who: 'System',
+        what: 'auto reminder this piece',
+        when: '2026-08-03T09:00:00.000Z',
       },
     ]);
+  });
+
+  it('names an actor the directory does not cover without leaking their id', () => {
+    const events = [makeEvent({ actorId: 'writer-9', action: 'filed' })];
+
+    const record = toPieceRecordSummary(makePiece(), events, new Map());
+
+    expect(record.audit[0]).toMatchObject({
+      actorId: 'writer-9',
+      who: 'Someone on the team',
+      what: 'filed a draft of this piece',
+    });
   });
 });
 
@@ -384,14 +406,20 @@ describe('toDeskSummary', () => {
       makePiece({ id: 'piece-2', stage: 'drafting', editorId: 'editor-1' }),
       makePiece({ id: 'piece-3', stage: 'ready', editorId: 'editor-2' }),
     ];
-    const events = [makeEvent({ id: 'event-1' })];
+    const events = [makeEvent({ id: 'event-1', detail: 'drafting' })];
     const editors = [
       { id: 'editor-1', cap: 5 },
       { id: 'editor-2', cap: 3 },
       { id: 'editor-3', cap: 4 },
     ];
 
-    const summary = toDeskSummary(pieces, events, editors);
+    const summary = toDeskSummary(
+      pieces,
+      events,
+      editors,
+      new Map([['piece-1', 'The chosen-family budget']]),
+      new Map([['editor-1', 'Sara Pinheiro']]),
+    );
 
     expect(summary.stageLoad).toEqual(
       expect.arrayContaining([
@@ -406,10 +434,68 @@ describe('toDeskSummary', () => {
     ]);
     expect(summary.activity).toEqual([
       {
+        id: 'event-1',
         actorId: 'editor-1',
-        action: 'stage_changed',
-        detail: 'commissioned -> drafting',
-        createdAt: '2026-08-02T09:00:00.000Z',
+        who: 'Sara Pinheiro',
+        what: 'moved The chosen-family budget to drafting',
+        when: '2026-08-02T09:00:00.000Z',
+      },
+    ]);
+  });
+
+  it('resolves the actor name and piece title rather than leaking ids, and stays neutral when neither resolves', () => {
+    const pieces = [
+      makePiece({ id: 'piece-1', stage: 'drafting', editorId: 'editor-1' }),
+    ];
+    const events = [
+      makeEvent({
+        id: 'event-1',
+        pieceId: 'piece-gone',
+        actorId: 'writer-9',
+        action: 'article_edited',
+        detail: null,
+      }),
+    ];
+
+    const summary = toDeskSummary(
+      pieces,
+      events,
+      [{ id: 'editor-1', cap: 5 }],
+      new Map(),
+      new Map(),
+    );
+
+    expect(summary.activity).toEqual([
+      {
+        id: 'event-1',
+        actorId: 'writer-9',
+        who: 'Someone on the team',
+        what: 'edited the article draft for a piece',
+        when: '2026-08-02T09:00:00.000Z',
+      },
+    ]);
+  });
+
+  it('reads a null actor as System', () => {
+    const events = [
+      makeEvent({ id: 'event-1', actorId: null, detail: 'ready' }),
+    ];
+
+    const summary = toDeskSummary(
+      [],
+      events,
+      [],
+      new Map([['piece-1', 'Nine rooms in Arroios']]),
+      new Map(),
+    );
+
+    expect(summary.activity).toEqual([
+      {
+        id: 'event-1',
+        actorId: null,
+        who: 'System',
+        what: 'moved Nine rooms in Arroios to ready',
+        when: '2026-08-02T09:00:00.000Z',
       },
     ]);
   });
@@ -451,26 +537,38 @@ describe('toDeskSummary', () => {
     ];
     const editors = [{ id: 'editor-1', cap: 5 }];
 
-    const summary = toDeskSummary(pieces, events, editors);
+    const summary = toDeskSummary(
+      pieces,
+      events,
+      editors,
+      new Map([
+        ['piece-1', 'The chosen-family budget'],
+        ['piece-2', 'What we owe old friends'],
+      ]),
+      new Map([['editor-1', 'Sara Pinheiro']]),
+    );
 
     expect(summary.activity).toEqual([
       {
+        id: 'event-4',
         actorId: 'editor-1',
-        action: 'article_edited',
-        detail: null,
-        createdAt: '2026-08-02T09:06:00.000Z',
+        who: 'Sara Pinheiro',
+        what: 'edited the article draft for The chosen-family budget',
+        when: '2026-08-02T09:06:00.000Z',
       },
       {
+        id: 'event-2',
         actorId: 'editor-1',
-        action: 'article_edited',
-        detail: null,
-        createdAt: '2026-08-02T09:03:00.000Z',
+        who: 'Sara Pinheiro',
+        what: 'edited the article draft for What we owe old friends',
+        when: '2026-08-02T09:03:00.000Z',
       },
       {
+        id: 'event-1',
         actorId: 'editor-1',
-        action: 'article_edited',
-        detail: null,
-        createdAt: '2026-08-02T09:00:00.000Z',
+        who: 'Sara Pinheiro',
+        what: 'edited the article draft for The chosen-family budget',
+        when: '2026-08-02T09:00:00.000Z',
       },
     ]);
   });
@@ -697,9 +795,19 @@ describe('toPieceRecordFull', () => {
     const letters = [makeLetter()];
     const corrections = [makeCorrection()];
 
-    const record = toPieceRecordFull(piece, events, null, letters, corrections);
+    const actorNameById = new Map([['editor-1', 'Marta Ferreira']]);
+    const record = toPieceRecordFull(
+      piece,
+      events,
+      actorNameById,
+      null,
+      letters,
+      corrections,
+    );
 
-    expect(record).toMatchObject(toPieceRecordSummary(piece, events));
+    expect(record).toMatchObject(
+      toPieceRecordSummary(piece, events, actorNameById),
+    );
     expect(record.payment).toBeNull();
     expect(record.letters).toEqual([toLetterResponse(letters[0]!)]);
     expect(record.corrections).toEqual([toCorrectionResponse(corrections[0]!)]);
@@ -710,7 +818,7 @@ describe('toPieceRecordFull', () => {
     const piece = makePiece({ care: makeCare() });
     const payment = makePayment();
 
-    const record = toPieceRecordFull(piece, [], payment, [], []);
+    const record = toPieceRecordFull(piece, [], new Map(), payment, [], []);
 
     expect(record.payment).toEqual(toPaymentResponse(payment));
   });

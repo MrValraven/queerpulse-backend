@@ -71,27 +71,38 @@ export interface PitchResponse {
 }
 
 /**
- * One row of the piece audit trail (spec §3.4), shared by `PieceRecord.audit`
- * and `DeskSummary.activity` — same underlying `MagazinePieceEvent` shape,
- * mapped once so neither leaks a raw entity.
+ * One row of the `magazine_piece_event` trail (spec §3.4), shared by
+ * `PieceRecord.audit` (the piece's History tab) and `DeskSummary.activity`
+ * (the desk sidebar). Resolved down to display strings — the actor's name and
+ * a human phrase for what happened — so neither surface renders a raw uuid or
+ * a raw `action` enum. The two differ only in what the phrase calls the piece:
+ * the desk feed
+ * spans every piece so it names each one by title, while the History tab is
+ * already on one piece and says "this piece". `when` stays the raw ISO
+ * `createdAt` so the frontend formats it itself.
  */
-export interface PieceAuditEntry {
+export interface PieceEventEntry {
+  id: string;
+  /** Matches the editor directory (for an avatar); `null` for a system event.
+   *  The visible attribution is always `who`. */
   actorId: string | null;
-  action: string;
-  detail: string | null;
-  createdAt: string;
+  /** True when nobody did this — a system-recorded event. */
+  isSystem: boolean;
+  who: string;
+  what: string;
+  when: string;
 }
 
 export interface DeskSummary {
   stageLoad: { stage: PieceStage; count: number }[];
   editorLoad: { editorId: string; count: number; cap: number }[];
-  activity: PieceAuditEntry[];
+  activity: PieceEventEntry[];
 }
 
 export interface PieceRecord extends PieceListItem {
   brief: PieceBrief | null;
   care: PieceCare | null;
-  audit: PieceAuditEntry[];
+  audit: PieceEventEntry[];
 }
 
 /**
@@ -215,12 +226,31 @@ function collapseRepeatedEvents(
   return collapsed;
 }
 
-function toPieceAuditEntry(event: MagazinePieceEvent): PieceAuditEntry {
+/**
+ * What the History tab's phrases call the piece. That trail is already on one
+ * piece, so repeating its title on every line would only add noise.
+ */
+const AUDIT_SUBJECT_LABEL = 'this piece';
+
+/**
+ * Pure mapper from one `MagazinePieceEvent` to a display-ready
+ * `PieceEventEntry`. Goes through `toEventActorLabel` and
+ * `describePieceEventAction`, so one event reads identically wherever it
+ * surfaces. `subject` is what the phrase should call the piece — its title on
+ * the desk feed, `AUDIT_SUBJECT_LABEL` on a single piece's History tab.
+ */
+function toPieceEventEntry(
+  event: MagazinePieceEvent,
+  subject: string,
+  actorNameById: Map<string, string>,
+): PieceEventEntry {
   return {
+    id: event.id,
     actorId: event.actorId,
-    action: event.action,
-    detail: event.detail,
-    createdAt: event.createdAt.toISOString(),
+    isSystem: event.actorId === null,
+    who: toEventActorLabel(event.actorId, actorNameById),
+    what: describePieceEventAction(event.action, event.detail, subject),
+    when: event.createdAt.toISOString(),
   };
 }
 
@@ -233,12 +263,15 @@ function toPieceAuditEntry(event: MagazinePieceEvent): PieceAuditEntry {
 export function toPieceRecordSummary(
   piece: MagazinePiece,
   events: MagazinePieceEvent[],
+  actorNameById: Map<string, string>,
 ): PieceRecord {
   return {
     ...toPieceListItem(piece),
     brief: piece.brief,
     care: piece.care,
-    audit: events.map(toPieceAuditEntry),
+    audit: events.map((event) =>
+      toPieceEventEntry(event, AUDIT_SUBJECT_LABEL, actorNameById),
+    ),
   };
 }
 
@@ -372,12 +405,13 @@ export function toCorrectionResponse(
 export function toPieceRecordFull(
   piece: MagazinePiece,
   events: MagazinePieceEvent[],
+  actorNameById: Map<string, string>,
   payment: MagazinePayment | null,
   letters: MagazineLetter[],
   corrections: MagazineCorrection[],
 ): PieceRecordFull {
   return {
-    ...toPieceRecordSummary(piece, events),
+    ...toPieceRecordSummary(piece, events, actorNameById),
     payment: payment === null ? null : toPaymentResponse(payment),
     letters: letters.map(toLetterResponse),
     corrections: corrections.map(toCorrectionResponse),
@@ -388,13 +422,17 @@ export function toPieceRecordFull(
 /**
  * Desk-wide roll-up (spec §3.1 sidebar): how many pieces sit in each stage,
  * how loaded each editor is against their cap, and the most recent audit
- * activity across all pieces. `editors` is passed in (not queried here) so
- * this mapper stays a pure function of its inputs.
+ * activity across all pieces. `editors`, `titleByPieceId` and
+ * `actorNameById` are all passed in (not queried here) so this mapper stays a
+ * pure function of its inputs — the caller batches those lookups, mirroring
+ * `listArticleComments`.
  */
 export function toDeskSummary(
   pieces: MagazinePiece[],
   events: MagazinePieceEvent[],
   editors: { id: string; cap: number }[],
+  titleByPieceId: Map<string, string>,
+  actorNameById: Map<string, string>,
 ): DeskSummary {
   const countByStage = new Map<PieceStage, number>();
   const countByEditorId = new Map<string, number>();
@@ -420,7 +458,13 @@ export function toDeskSummary(
   return {
     stageLoad,
     editorLoad,
-    activity: collapseRepeatedEvents(events).map(toPieceAuditEntry),
+    activity: collapseRepeatedEvents(events).map((event) =>
+      toPieceEventEntry(
+        event,
+        titleByPieceId.get(event.pieceId) ?? UNRESOLVED_TITLE_LABEL,
+        actorNameById,
+      ),
+    ),
   };
 }
 
@@ -791,7 +835,7 @@ export interface MagazineEditorResponse {
  */
 /**
  * Full name from a `Profile`, trimmed — the same "public display name only"
- * shape `toMagazineEditor` exposes. Reused by `listMagazineNotifications`'s
+ * shape `toMagazineEditor` exposes. Reused by `listArticleComments`'s
  * batched fallback lookup for actors the editor directory doesn't recognise
  * (e.g. a writer), so a non-editor actor's `who` resolves to their real name
  * rather than a role-specific "editor" fallback. NEVER exposes email or any
@@ -860,7 +904,8 @@ export interface CurrentIssueSummary {
  */
 export interface IssueSummaryResponse extends CurrentIssueSummary {
   title: string;
-  publishedOn: string;
+  /** `YYYY-MM-DD`, or `null` while the issue is still unscheduled. */
+  publishedOn: string | null;
 }
 
 /**
@@ -911,40 +956,20 @@ export function toArchiveEntryFromDeck(
   };
 }
 
-/**
- * The desk's "Since Friday" notifications panel (Magazine Desk Phase 7, Task
- * C1): a read model over the same `magazine_piece_event` audit trail that
- * feeds `DeskSummary.activity`, resolved down to display strings — never a
- * raw `actorId`, `pieceId`, or `action` enum — so the panel can render
- * without a second round trip. `route` always points at the piece record
- * (`/magazine/editor/piece/:id`, matching `routeMap.ts#magazinePiece`);
- * `when` is the raw ISO `createdAt` so the frontend formats it relative
- * ("2h ago") itself rather than a locale string being baked in here.
- */
-export interface MagazineNotificationResponse {
-  id: string;
-  who: string;
-  what: string;
-  when: string;
-  route: string;
-  isUnread: boolean;
-  tone: 'normal' | 'warn';
-}
-
 /** Neutral fallback labels — NEVER an email or raw uuid (spec §C1). */
 const SYSTEM_ACTOR_LABEL = 'System';
 /**
  * Role-neutral — deliberately NOT "An editor": the actor behind an event is
  * often a writer (e.g. `filed`), not an editor, and this label is only ever
  * reached once both the editor directory AND a batched `Profile` lookup have
- * failed to resolve a name (see `listMagazineNotifications`).
+ * failed to resolve a name (see `listArticleComments`).
  */
 const UNRESOLVED_ACTOR_LABEL = 'Someone on the team';
 const UNRESOLVED_TITLE_LABEL = 'a piece';
 
 /**
  * Resolves an event's `actorId` to a display name via the merged actor-name
- * map the caller builds (`listMagazineNotifications`): the Wave A editor
+ * map the caller builds (`resolveActorDisplayNames`): the Wave A editor
  * directory first, then a batched `Profile` lookup (via `toActorDisplayName`)
  * for any actor the directory doesn't recognise — most commonly a writer,
  * who is never in the editor directory but still has a truthful name to
@@ -954,7 +979,7 @@ const UNRESOLVED_TITLE_LABEL = 'a piece';
  * the role-neutral `UNRESOLVED_ACTOR_LABEL` rather than guessing at a name or
  * leaking the id.
  */
-function toNotificationWho(
+function toEventActorLabel(
   actorId: string | null,
   actorNameById: Map<string, string>,
 ): string {
@@ -973,104 +998,64 @@ function humanizeStage(stage: string): string {
  * {title}"). Every named branch mirrors an `action` string `recordEvent`
  * actually writes elsewhere in this service (`magazine-piece.service.ts`) —
  * an action added later without a branch here still reads sensibly via the
- * default case rather than throwing.
+ * default case rather than throwing. `subject` is whatever the caller wants
+ * the piece called: its title across a multi-piece feed, "this piece" on the
+ * piece's own History tab.
  */
-function describeNotificationAction(
+function describePieceEventAction(
   action: string,
   detail: string | null,
-  title: string,
+  subject: string,
 ): string {
   switch (action) {
     case 'commissioned':
-      return `commissioned ${title}`;
+      return `commissioned ${subject}`;
+    case 'started_writing':
+      return `started writing ${subject}`;
     case 'stage_changed':
-      return `moved ${title} to ${detail ? humanizeStage(detail) : 'a new stage'}`;
+      return `moved ${subject} to ${detail ? humanizeStage(detail) : 'a new stage'}`;
     case 'assigned':
       if (detail === 'writer:unassigned') {
-        return `unassigned the writer from ${title}`;
+        return `unassigned the writer from ${subject}`;
       }
       if (detail?.startsWith('writer:')) {
-        return `assigned ${title} to a writer`;
+        return `assigned ${subject} to a writer`;
       }
       if (detail?.startsWith('editor:')) {
-        return `reassigned the editor on ${title}`;
+        return `reassigned the editor on ${subject}`;
       }
-      return `reassigned ${title}`;
+      return `reassigned ${subject}`;
     case 'deleted':
-      return `deleted ${title}`;
+      return `deleted ${subject}`;
     case 'payment_updated':
-      return `logged a payment on ${title}`;
+      return `logged a payment on ${subject}`;
     case 'correction_published':
-      return `published a correction on ${title}`;
+      return `published a correction on ${subject}`;
     case 'run_order_updated':
-      return `updated the run order for ${title}`;
+      return `updated the run order for ${subject}`;
     case 'issue_shipped':
-      return detail ? `shipped ${title} in ${detail}` : `shipped ${title}`;
+      return detail ? `shipped ${subject} in ${detail}` : `shipped ${subject}`;
     case 'filed':
-      return `filed a draft of ${title}`;
+      return `filed a draft of ${subject}`;
     case 'article_created':
-      return `opened the article draft for ${title}`;
+      return `opened the article draft for ${subject}`;
     case 'article_edited':
-      return `edited the article draft for ${title}`;
+      return `edited the article draft for ${subject}`;
     case 'article_published':
-      return `published ${title}`;
+      return `published ${subject}`;
     case 'article_scheduled':
-      return `scheduled ${title} to publish`;
+      return `scheduled ${subject} to publish`;
     case 'article_unpublished':
-      return `unpublished ${title}`;
+      return `unpublished ${subject}`;
+    case 'commented':
+      return `left a note on ${subject}`;
+    case 'version_restored':
+      return `restored an earlier draft of ${subject}`;
+    case 'converted_to_article':
+      return detail
+        ? `converted ${subject} into an article (${detail})`
+        : `converted ${subject} into an article`;
     default:
-      return `${action.replace(/_/g, ' ')} ${title}`.trim();
+      return `${action.replace(/_/g, ' ')} ${subject}`.trim();
   }
-}
-
-/**
- * `'warn'` for money and lateness/kill-fee actions (spec §C1: "Tone from
- * action (payment/late → warn)"), matched by substring rather than an exact
- * action list — an action added later named e.g. `kill_fee_paid` or
- * `payment_overdue` still surfaces as a warning without this file needing an
- * edit.
- */
-function deriveNotificationTone(action: string): 'normal' | 'warn' {
-  const lowered = action.toLowerCase();
-  const isWarnAction =
-    lowered.includes('payment') ||
-    lowered.includes('late') ||
-    lowered.includes('overdue') ||
-    lowered.includes('kill');
-  return isWarnAction ? 'warn' : 'normal';
-}
-
-/**
- * The FE route to a piece's record (spec §C1) — matches
- * `routeMap.ts#magazinePiece` (`/magazine/editor/piece/:id`) exactly, the
- * same route `PieceRecordPage` already reads.
- */
-function pieceNotificationRoute(pieceId: string): string {
-  return `/magazine/editor/piece/${pieceId}`;
-}
-
-/**
- * Pure mapper from one `MagazinePieceEvent` to `MagazineNotificationResponse`
- * (spec §C1). `title` and `actorNameById` are resolved by the caller
- * (batched lookups, mirroring `searchArchive`'s author/issue resolution) so
- * this stays a pure function of its inputs — `title` is `undefined` when the
- * piece no longer exists (e.g. a stale `deleted` event), in which case it
- * reads as the neutral `UNRESOLVED_TITLE_LABEL` rather than throwing.
- */
-export function toMagazineNotification(
-  event: MagazinePieceEvent,
-  title: string | undefined,
-  actorNameById: Map<string, string>,
-  viewerLastReadAt: Date | null,
-): MagazineNotificationResponse {
-  const resolvedTitle = title ?? UNRESOLVED_TITLE_LABEL;
-  return {
-    id: event.id,
-    who: toNotificationWho(event.actorId, actorNameById),
-    what: describeNotificationAction(event.action, event.detail, resolvedTitle),
-    when: event.createdAt.toISOString(),
-    route: pieceNotificationRoute(event.pieceId),
-    isUnread: viewerLastReadAt === null || event.createdAt > viewerLastReadAt,
-    tone: deriveNotificationTone(event.action),
-  };
 }

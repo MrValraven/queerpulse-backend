@@ -24,7 +24,6 @@ import { MagazineCorrection } from './entities/magazine-correction.entity';
 import { MagazineDeck } from './entities/magazine-deck.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
 import { MagazineLetter } from './entities/magazine-letter.entity';
-import { MagazineNotificationRead } from './entities/magazine-notification-read.entity';
 import { MagazinePayment } from './entities/magazine-payment.entity';
 import { MagazinePieceEvent } from './entities/magazine-piece-event.entity';
 import { MagazinePieceMessage } from './entities/magazine-piece-message.entity';
@@ -54,7 +53,6 @@ import { WriterApplicationsService } from './writer-applications.service';
       MagazineDeck,
       MagazineIssue,
       MagazineLetter,
-      MagazineNotificationRead,
       MagazinePayment,
       MagazinePiece,
       MagazinePieceEvent,

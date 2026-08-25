@@ -65,6 +65,17 @@ export interface TokenPair {
 }
 
 /**
+ * The identity of a SESSION, as opposed to the token that currently represents
+ * it. Minted once at sign-in and carried unchanged through every rotation, so
+ * `refresh_tokens` rows descended from one sign-in stay recognisable as one
+ * device (see `RefreshToken.familyId`).
+ */
+interface SessionIdentity {
+  familyId: string;
+  sessionStartedAt: Date;
+}
+
+/**
  * How long after a refresh token is rotated its PARENT is still accepted.
  *
  * Rotation is a conditional claim on `revoked_at IS NULL`, and the loser used
@@ -428,12 +439,52 @@ export class AuthService {
     return user;
   }
 
+  /**
+   * Mint a pair for a BRAND-NEW session (a sign-in), starting a fresh family.
+   *
+   * Callers holding an existing refresh cookie for the same browser should run
+   * `revokeSessionForToken` first: signing in again overwrites that cookie, so
+   * the session it named becomes unreachable and would otherwise sit in the
+   * member's device list, live, until it expired 30 days later.
+   */
   async issueTokens(user: User, userAgent?: string): Promise<TokenPair> {
     const { accessToken, refreshToken } = await this.issueTokensWithRow(
       user,
+      { familyId: randomUUID(), sessionStartedAt: new Date() },
       userAgent,
     );
     return { accessToken, refreshToken };
+  }
+
+  /**
+   * Revoke the session a raw refresh token belongs to, whoever it belongs to.
+   *
+   * Called from the sign-in path with the cookie the browser is ABOUT to have
+   * overwritten. Silently does nothing when the cookie is missing, unknown or
+   * already dead, because a first-ever sign-in is the common case and a failure
+   * here must never block a login.
+   *
+   * Deliberately does NOT emit `USER_SESSION_REVOKED`. That event drops every
+   * socket the MEMBER has open, on every device, and here the only session
+   * ending is the one on the browser that is signing in again with a fresh
+   * cookie in the same response. Firing it would kick the member's phone off
+   * chat every time they signed in on their laptop.
+   */
+  async revokeSessionForToken(rawRefreshToken?: string): Promise<void> {
+    if (!rawRefreshToken) return;
+    const row = await this.refreshTokens.findOne({
+      where: { tokenHash: this.hashToken(rawRefreshToken) },
+    });
+    if (!row) return;
+    const result = await this.refreshTokens.update(
+      { familyId: row.familyId, revokedAt: IsNull() },
+      { revokedAt: new Date() },
+    );
+    if (result.affected) {
+      this.logger.log(
+        `Replaced the session on this device at sign-in: userId=${row.userId} familyId=${row.familyId} rows=${result.affected}`,
+      );
+    }
   }
 
   /**
@@ -543,7 +594,7 @@ export class AuthService {
       if (this.withinRotationGrace(row)) {
         return this.issueGraceReplacement(row, userAgent);
       }
-      await this.revokeFamily(row.userId, 'reuse-detected', {
+      await this.revokeAllUserSessions(row.userId, 'reuse-detected', {
         rowId: row.id,
         userAgent,
       });
@@ -581,8 +632,14 @@ export class AuthService {
         // that revocation survives instead of being rolled back.
         return { reuse: true as const };
       }
+      // Same family, same start time: this is the SAME session continuing, and
+      // the member's device list must not report it as a new sign-in.
       const tokens = await this.issueTokensWithRow(
         user,
+        {
+          familyId: row.familyId,
+          sessionStartedAt: row.sessionStartedAt,
+        },
         userAgent,
         newRowId,
         manager,
@@ -604,7 +661,7 @@ export class AuthService {
       if (rotated && this.withinRotationGrace(rotated)) {
         return this.issueGraceReplacement(rotated, userAgent);
       }
-      await this.revokeFamily(row.userId, 'reuse-detected', {
+      await this.revokeAllUserSessions(row.userId, 'reuse-detected', {
         rowId: row.id,
         userAgent,
       });
@@ -639,8 +696,18 @@ export class AuthService {
    * refresh tokens are stored, never the tokens themselves. Minting a new pair
    * is equivalent for the client (it ends up holding one working cookie) and
    * costs one extra `refresh_tokens` row that nobody holds the plaintext for —
-   * it simply ages out. Reuse detection outside the window is unchanged, so a
-   * stolen token replayed later still burns the whole family.
+   * it simply ages out, invisibly. Reuse detection outside the window is
+   * unchanged, so a stolen token replayed later still burns every session the
+   * member has.
+   *
+   * The replacement stays in the SAME family as the row that lost the race.
+   * It used to start a fresh one (`issueTokens`), which left the race winner's
+   * still-live row stranded as a second family: one browser, two entries in the
+   * member's device list, and no way to tell which was which. Same family means
+   * the security page shows one session and revoking it kills both rows. We
+   * cannot simply revoke the winner's row instead — its holder is a live client
+   * that would present it after the 10-second grace window and trip reuse
+   * detection, signing the member out everywhere.
    */
   private async issueGraceReplacement(
     row: RefreshToken,
@@ -653,9 +720,14 @@ export class AuthService {
     // `log`, not `warn`: this is an expected multi-client race, and logging it
     // at the same level as a real theft signal is what diluted that signal.
     this.logger.log(
-      `Refresh rotation race absorbed within the grace window: userId=${row.userId} rowId=${row.id}`,
+      `Refresh rotation race absorbed within the grace window: userId=${row.userId} rowId=${row.id} familyId=${row.familyId}`,
     );
-    return this.issueTokens(user, userAgent);
+    const { accessToken, refreshToken } = await this.issueTokensWithRow(
+      user,
+      { familyId: row.familyId, sessionStartedAt: row.sessionStartedAt },
+      userAgent,
+    );
+    return { accessToken, refreshToken };
   }
 
   async revokeRefreshToken(rawRefreshToken: string): Promise<void> {
@@ -666,12 +738,18 @@ export class AuthService {
     if (!row || row.revokedAt) {
       return;
     }
-    await this.refreshTokens.update(
-      { id: row.id, revokedAt: IsNull() },
+    // Revoke the whole FAMILY, not just the presenting row. A device that lost
+    // a rotation race holds one live row while its stranded sibling holds
+    // another (see `issueGraceReplacement`); revoking only the row in hand left
+    // the sibling live and this device still listed as signed in.
+    const result = await this.refreshTokens.update(
+      { familyId: row.familyId, revokedAt: IsNull() },
       { revokedAt: new Date() },
     );
     // Never log the token itself — only that a revocation happened.
-    this.logger.log('Revoked 1 refresh token on logout');
+    this.logger.log(
+      `Revoked ${result.affected ?? 0} refresh token(s) on logout`,
+    );
     // Force-disconnect this member's live WebSocket sockets — an open socket
     // otherwise outlives logout (the chat gateway consumes this event).
     this.eventEmitter.emit(USER_SESSION_REVOKED, {
@@ -681,7 +759,7 @@ export class AuthService {
 
   /** Revoke every live refresh token for a user (logout-all / global sign-out). */
   async revokeAllForUser(userId: string): Promise<void> {
-    await this.revokeFamily(userId, 'logout-all');
+    await this.revokeAllUserSessions(userId, 'logout-all');
   }
 
   // --- internals ---
@@ -691,7 +769,7 @@ export class AuthService {
    * emit a security log line. Used for both explicit logout-all and reuse
    * detection. Logs never include token values/secrets.
    */
-  private async revokeFamily(
+  private async revokeAllUserSessions(
     userId: string,
     reason: 'reuse-detected' | 'logout-all',
     context: { rowId?: string; userAgent?: string } = {},
@@ -715,6 +793,7 @@ export class AuthService {
   private async persistRefreshToken(
     userId: string,
     refreshToken: string,
+    session: SessionIdentity,
     userAgent?: string,
     id?: string,
     manager?: EntityManager,
@@ -728,6 +807,8 @@ export class AuthService {
       // before the new row is inserted, keeping both writes in one transaction.
       ...(id ? { id } : {}),
       userId,
+      familyId: session.familyId,
+      sessionStartedAt: session.sessionStartedAt,
       tokenHash: this.hashToken(refreshToken),
       expiresAt: new Date(decoded.exp * 1000),
       userAgent: userAgent ?? null,
@@ -738,6 +819,7 @@ export class AuthService {
   // Issue tokens AND return the persisted refresh-row id (for replaced_by linkage).
   private async issueTokensWithRow(
     user: User,
+    session: SessionIdentity,
     userAgent?: string,
     rowId?: string,
     manager?: EntityManager,
@@ -771,6 +853,7 @@ export class AuthService {
     const row = await this.persistRefreshToken(
       user.id,
       refreshToken,
+      session,
       userAgent,
       rowId,
       manager,

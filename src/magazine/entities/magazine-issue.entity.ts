@@ -50,9 +50,11 @@ export class MagazineIssue {
   dek!: string;
 
   // Postgres `date` — TypeORM returns this as a plain `YYYY-MM-DD` string,
-  // matching `IssueResponse.publishedOn: string` with no extra conversion.
-  @Column({ type: 'date' })
-  publishedOn!: string;
+  // matching `IssueResponse.publishedOn` with no extra conversion. NULL until
+  // an issue is scheduled: the desk opens a number first and picks the date
+  // later, and `shipIssue` stamps today's date if nobody ever did.
+  @Column({ type: 'date', nullable: true })
+  publishedOn!: string | null;
 
   @Column({ type: 'varchar', nullable: true })
   coverUrl!: string | null;

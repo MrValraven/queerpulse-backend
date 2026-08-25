@@ -30,6 +30,7 @@ import { Feature } from '../common/feature.decorator';
 import { CreateIssueDto } from './dto/create-issue.dto';
 import { UpdateCoverDto } from './dto/update-cover.dto';
 import { UpdateDigestDto } from './dto/update-digest.dto';
+import { UpdateIssueScheduleDto } from './dto/update-issue-schedule.dto';
 import { UpdateRunOrderDto } from './dto/update-run-order.dto';
 import { MagazinePieceService } from './magazine-piece.service';
 
@@ -138,6 +139,22 @@ export class AdminMagazineIssuesController {
     @CurrentUser() user: CurrentUserData,
   ) {
     return this.magazinePieces.updateCover(number, dto, user.userId);
+  }
+
+  @Patch(':number/schedule')
+  @ApiOperation({
+    summary:
+      "Set, move, or clear the issue's publish date (`null` un-schedules it).",
+  })
+  @ApiOkResponse({ description: 'The updated issue production record.' })
+  @ApiBadRequestResponse({ description: 'The publish date is invalid.' })
+  @ApiNotFoundResponse({ description: 'No issue exists for this number.' })
+  updateIssueSchedule(
+    @Param('number') number: string,
+    @Body() dto: UpdateIssueScheduleDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.magazinePieces.updateIssueSchedule(number, dto, user.userId);
   }
 
   @Post(':number/digest/test-send')

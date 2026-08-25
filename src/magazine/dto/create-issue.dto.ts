@@ -47,16 +47,20 @@ export class CreateIssueDto {
   @MaxLength(DESK_SHORT_TEXT_MAX)
   theme!: string;
 
-  /** Postgres `date`. TypeORM reads this column back as a plain `YYYY-MM-DD`
-   *  string, so it is stored and returned verbatim with no Date conversion.
-   *  Both decorators are needed: `@Matches` pins the date-only shape the
-   *  column stores (rejecting a full datetime), `@IsDateString` rejects a
+  /** Postgres `date`, optional. An issue is opened before it is scheduled, so
+   *  an omitted date is persisted as NULL and can be filled in later (or left
+   *  to `shipIssue`, which stamps today's date when it is still unset).
+   *  TypeORM reads the column back as a plain `YYYY-MM-DD` string, so a given
+   *  date is stored and returned verbatim with no Date conversion. Both
+   *  decorators are needed: `@Matches` pins the date-only shape the column
+   *  stores (rejecting a full datetime), `@IsDateString` rejects a
    *  well-shaped but impossible date like "2026-13-45". */
+  @IsOptional()
   @Matches(/^\d{4}-\d{2}-\d{2}$/, {
     message: 'publishedOn must be a YYYY-MM-DD date',
   })
   @IsDateString()
-  publishedOn!: string;
+  publishedOn?: string;
 
   /** Optional at creation: the entity column is `text NOT NULL`, so an
    *  omitted dek is persisted as `''` rather than left null. */

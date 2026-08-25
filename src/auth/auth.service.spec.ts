@@ -212,6 +212,8 @@ describe('AuthService.rotateRefreshToken', () => {
   const liveRow = () => ({
     id: 'old-row',
     userId: 'u1',
+    familyId: 'fam-1',
+    sessionStartedAt: new Date('2026-08-01T10:00:00Z'),
     revokedAt: null,
     expiresAt: new Date(Date.now() + 60_000),
   });
@@ -250,6 +252,22 @@ describe('AuthService.rotateRefreshToken', () => {
       expect.objectContaining({ id: claimReplacement, userId: 'u1' }),
     );
     expect(mocks.repo.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('carries the session family and start time through the rotation', async () => {
+    // The row is a credential; the SESSION is the family. Minting a new family
+    // here would show the member's own device as a brand-new sign-in on the
+    // security page every 15 minutes.
+    mocks.repo.findOne.mockResolvedValue(liveRow());
+
+    await service.rotateRefreshToken('raw-token', 'agent');
+
+    expect(mocks.repo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        familyId: 'fam-1',
+        sessionStartedAt: new Date('2026-08-01T10:00:00Z'),
+      }),
+    );
   });
 
   it('detects reuse of an already-revoked token: revokes the whole family and throws', async () => {
@@ -292,6 +310,15 @@ describe('AuthService.rotateRefreshToken', () => {
     expect(mocks.events.emit).not.toHaveBeenCalledWith('user.session.revoked', {
       userId: 'u1',
     });
+    // The replacement joins the SAME family. Starting a new one stranded the
+    // race winner's still-live row as a second family, so one browser showed up
+    // twice in the member's device list and stayed there for 30 days.
+    expect(mocks.repo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        familyId: 'fam-1',
+        sessionStartedAt: new Date('2026-08-01T10:00:00Z'),
+      }),
+    );
   });
 
   it('still treats a token revoked long ago as reuse', async () => {
@@ -366,6 +393,81 @@ describe('AuthService.rotateRefreshToken', () => {
   });
 });
 
+describe('AuthService.issueTokens / revokeSessionForToken', () => {
+  let service: AuthService;
+  let mocks: ReturnType<typeof buildMocks>;
+
+  const activeUser = {
+    id: 'u1',
+    email: 'a@b.c',
+    status: 'active',
+    role: 'member',
+  } as unknown as Parameters<AuthService['issueTokens']>[0];
+
+  beforeEach(async () => {
+    mocks = buildMocks();
+    service = await buildService(mocks);
+  });
+
+  it('issueTokens starts a NEW family for a sign-in', async () => {
+    await service.issueTokens(activeUser, 'agent');
+    const [created] = mocks.repo.create.mock.calls[0] as [
+      { familyId: string; sessionStartedAt: Date },
+    ];
+    expect(created.familyId).toEqual(expect.any(String));
+    expect(created.sessionStartedAt).toBeInstanceOf(Date);
+  });
+
+  it('revokeSessionForToken revokes the family the presented cookie belongs to', async () => {
+    // The sign-in path calls this with the cookie it is about to overwrite.
+    // Without it, every re-login left the previous session live for the full
+    // 30-day refresh lifetime and listed as another signed-in device.
+    mocks.repo.findOne.mockResolvedValue({
+      id: 'r1',
+      userId: 'u1',
+      familyId: 'fam-1',
+      revokedAt: null,
+    });
+
+    await service.revokeSessionForToken('raw-token');
+
+    expect(mocks.repo.update).toHaveBeenCalledWith(
+      { familyId: 'fam-1', revokedAt: expect.anything() as unknown },
+      expect.objectContaining({ revokedAt: expect.any(Date) as unknown }),
+    );
+  });
+
+  it('revokeSessionForToken never drops the member other devices sockets', async () => {
+    mocks.repo.findOne.mockResolvedValue({
+      id: 'r1',
+      userId: 'u1',
+      familyId: 'fam-1',
+      revokedAt: null,
+    });
+
+    await service.revokeSessionForToken('raw-token');
+
+    // Signing in on the laptop must not kick the phone off chat.
+    expect(mocks.events.emit).not.toHaveBeenCalledWith('user.session.revoked', {
+      userId: 'u1',
+    });
+  });
+
+  it('revokeSessionForToken is a no-op without a cookie (a first sign-in)', async () => {
+    await service.revokeSessionForToken(undefined);
+    expect(mocks.repo.findOne).not.toHaveBeenCalled();
+    expect(mocks.repo.update).not.toHaveBeenCalled();
+  });
+
+  it('revokeSessionForToken is a no-op for an unknown token', async () => {
+    mocks.repo.findOne.mockResolvedValue(null);
+    await expect(
+      service.revokeSessionForToken('raw-token'),
+    ).resolves.toBeUndefined();
+    expect(mocks.repo.update).not.toHaveBeenCalled();
+  });
+});
+
 describe('AuthService.revokeRefreshToken / revokeAllForUser', () => {
   let service: AuthService;
   let mocks: ReturnType<typeof buildMocks>;
@@ -375,18 +477,21 @@ describe('AuthService.revokeRefreshToken / revokeAllForUser', () => {
     service = await buildService(mocks);
   });
 
-  it('revokeRefreshToken looks up the row by hash, revokes it, and drops the session', async () => {
+  it('revokeRefreshToken looks up the row by hash, revokes its family, and drops the session', async () => {
     mocks.repo.findOne.mockResolvedValue({
       id: 'r1',
       userId: 'u1',
+      familyId: 'fam-1',
       revokedAt: null,
     });
     await service.revokeRefreshToken('raw-token');
     expect(mocks.repo.findOne).toHaveBeenCalledWith({
       where: { tokenHash: sha256('raw-token') },
     });
+    // The FAMILY, so a sibling row stranded by a rotation race dies with it
+    // rather than keeping this device listed as signed in.
     expect(mocks.repo.update).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'r1' }),
+      expect.objectContaining({ familyId: 'fam-1' }),
       expect.objectContaining({ revokedAt: expect.any(Date) as unknown }),
     );
     expect(mocks.events.emit).toHaveBeenCalledWith('user.session.revoked', {
@@ -407,6 +512,7 @@ describe('AuthService.revokeRefreshToken / revokeAllForUser', () => {
     mocks.repo.findOne.mockResolvedValue({
       id: 'r1',
       userId: 'u1',
+      familyId: 'fam-1',
       revokedAt: new Date(),
     });
     await service.revokeRefreshToken('raw-token');

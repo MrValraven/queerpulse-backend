@@ -18,6 +18,7 @@ const FRONTEND = 'https://app.example.com';
 interface AuthServiceMock {
   validateOrCreateGoogleUser: jest.Mock;
   issueTokens: jest.Mock;
+  revokeSessionForToken: jest.Mock;
   rotateRefreshToken: jest.Mock;
   revokeRefreshToken: jest.Mock;
   revokeAllForUser: jest.Mock;
@@ -65,6 +66,7 @@ function build(configNodeEnv = 'test', domain?: string) {
   const authService: AuthServiceMock = {
     validateOrCreateGoogleUser: jest.fn(),
     issueTokens: jest.fn(),
+    revokeSessionForToken: jest.fn().mockResolvedValue(undefined),
     rotateRefreshToken: jest.fn(),
     revokeRefreshToken: jest.fn().mockResolvedValue(undefined),
     revokeAllForUser: jest.fn().mockResolvedValue(undefined),
@@ -180,6 +182,54 @@ describe('AuthController.googleCallback', () => {
       expect.objectContaining({ httpOnly: true, secure: true }),
     );
     expect(res.redirect).toHaveBeenCalledWith(`${FRONTEND}/feed`);
+  });
+
+  it('replaces the session this browser was already holding instead of stacking a second one', async () => {
+    // Signing in overwrites the refresh cookie, so the previous session becomes
+    // unreachable from here. Left live it sat in the member's device list for
+    // the full 30-day refresh lifetime, and every re-login added another.
+    const { controller, authService } = build();
+    authService.validateOrCreateGoogleUser.mockResolvedValue({ id: 'u1' });
+    authService.issueTokens.mockResolvedValue({
+      accessToken: 'at',
+      refreshToken: 'rt',
+    });
+    const req = makeReq({
+      query: { state: encodeOAuthState({ nonce: 'match' }) },
+      cookies: { oauth_state: 'match', refresh_token: 'previous-rt' },
+      user: { googleId: 'g', email: 'a@b.c' },
+    });
+    const res = makeRes();
+
+    await controller.googleCallback(req, res as unknown as Response);
+
+    expect(authService.revokeSessionForToken).toHaveBeenCalledWith(
+      'previous-rt',
+    );
+  });
+
+  it('signs in cleanly when the browser holds no previous session', async () => {
+    const { controller, authService } = build();
+    authService.validateOrCreateGoogleUser.mockResolvedValue({ id: 'u1' });
+    authService.issueTokens.mockResolvedValue({
+      accessToken: 'at',
+      refreshToken: 'rt',
+    });
+    const req = makeReq({
+      query: { state: encodeOAuthState({ nonce: 'match' }) },
+      cookies: { oauth_state: 'match' },
+      user: { googleId: 'g', email: 'a@b.c' },
+    });
+    const res = makeRes();
+
+    await controller.googleCallback(req, res as unknown as Response);
+
+    expect(authService.revokeSessionForToken).toHaveBeenCalledWith(undefined);
+    expect(res.cookie).toHaveBeenCalledWith(
+      'refresh_token',
+      'rt',
+      expect.anything(),
+    );
   });
 
   it('maps SignupRejectedError to a frontend ?error redirect', async () => {

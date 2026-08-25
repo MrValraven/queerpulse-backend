@@ -107,6 +107,17 @@ export class AuthController {
     };
   }
 
+  /**
+   * The raw `refresh_token` cookie this request arrived with, read in a typed
+   * way (Express types `req.cookies` as `any`). Present on `/auth/*` routes
+   * only — the cookie is path-scoped to `/auth` (see `auth-cookies.ts`).
+   */
+  private presentingRefreshToken(req: Request): string | undefined {
+    const cookies = req.cookies as
+      Record<string, string | undefined> | undefined;
+    return cookies?.['refresh_token'];
+  }
+
   // Constant-time nonce comparison (both are our own hex strings of equal
   // length; the length guard avoids timingSafeEqual throwing on a mismatch).
   private nonceMatches(a: string, b: string): boolean {
@@ -237,6 +248,18 @@ export class AuthController {
       throw err;
     }
 
+    // End whatever session THIS browser was already holding before starting a
+    // new one. `setAuthCookies` below overwrites the `refresh_token` cookie, so
+    // the old session becomes unreachable from here the moment we respond —
+    // but it stayed live in the database for the full 30-day refresh lifetime,
+    // and the member's security page listed it as another signed-in device.
+    // Every re-login after a cleared cookie, an incognito window, or a lapsed
+    // session added one more. The cookie reaches us because it is scoped to
+    // `/auth` (this route) and `SameSite=Lax` survives the top-level redirect
+    // back from Google.
+    await this.authService.revokeSessionForToken(
+      this.presentingRefreshToken(req),
+    );
     const tokens = await this.authService.issueTokens(
       user,
       req.headers['user-agent'],
@@ -263,9 +286,7 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<{ ok: true }> {
-    const raw = (
-      req.cookies as Record<string, string | undefined> | undefined
-    )?.['refresh_token'];
+    const raw = this.presentingRefreshToken(req);
     if (!raw) {
       clearAuthCookies(res, this.cookieOpts());
       throw new UnauthorizedException('Missing refresh token');
@@ -299,9 +320,7 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<{ ok: true }> {
-    const raw = (
-      req.cookies as Record<string, string | undefined> | undefined
-    )?.['refresh_token'];
+    const raw = this.presentingRefreshToken(req);
     if (raw) {
       try {
         await this.authService.revokeRefreshToken(raw);

@@ -45,6 +45,7 @@ import { TriagePitchDto } from './dto/triage-pitch.dto';
 import { UpdateArticleDto } from './dto/update-article.dto';
 import { UpdateBylineDto } from './dto/update-byline.dto';
 import { UpdateCoverDto } from './dto/update-cover.dto';
+import { UpdateIssueScheduleDto } from './dto/update-issue-schedule.dto';
 import { UpdateDigestDto } from './dto/update-digest.dto';
 import { UpdatePaymentDto } from './dto/update-payment.dto';
 import { UpdatePieceDto } from './dto/update-piece.dto';
@@ -63,7 +64,6 @@ import {
   MagazineIssue,
 } from './entities/magazine-issue.entity';
 import { MagazineLetter } from './entities/magazine-letter.entity';
-import { MagazineNotificationRead } from './entities/magazine-notification-read.entity';
 import { MagazinePayment } from './entities/magazine-payment.entity';
 import { MagazinePieceEvent } from './entities/magazine-piece-event.entity';
 import { MagazinePieceMessage } from './entities/magazine-piece-message.entity';
@@ -81,7 +81,6 @@ import {
   IssueSummaryResponse,
   LetterResponse,
   MagazineEditorResponse,
-  MagazineNotificationResponse,
   PaymentResponse,
   PieceListItem,
   PieceRecord,
@@ -97,7 +96,6 @@ import {
   toLetterResponse,
   toActorDisplayName,
   toMagazineEditor,
-  toMagazineNotification,
   toPaymentResponse,
   toPieceListItem,
   toPieceRecordFull,
@@ -160,10 +158,15 @@ const RECENT_ACTIVITY_LIMIT = 20;
 const ARCHIVE_SEARCH_LIMIT = 20;
 
 /**
- * Default number of rows `listMagazineNotifications` returns (Magazine Desk
- * Phase 7, Task C1) — matches the desk's "Since Friday" panel page size.
+ * The human actors in an event trail, ready for `resolveActorDisplayNames`.
+ * A `null` `actorId` is the entity's documented "System" sentinel (see
+ * `MagazinePieceEvent.actorId`), which resolves to a label without a lookup.
  */
-const NOTIFICATIONS_DEFAULT_LIMIT = 20;
+function auditActorIds(events: MagazinePieceEvent[]): string[] {
+  return events
+    .map((event) => event.actorId)
+    .filter((actorId): actorId is string => actorId !== null);
+}
 
 /**
  * Saved-view predicates as SQL, ANDed into the `listPieces` query builder.
@@ -229,8 +232,6 @@ export class MagazinePieceService {
     private readonly payments: Repository<MagazinePayment>,
     @InjectRepository(MagazineLetter)
     private readonly letters: Repository<MagazineLetter>,
-    @InjectRepository(MagazineNotificationRead)
-    private readonly notificationReads: Repository<MagazineNotificationRead>,
     @InjectRepository(MagazineCorrection)
     private readonly corrections: Repository<MagazineCorrection>,
     @InjectRepository(MagazineArticle)
@@ -346,7 +347,22 @@ export class MagazinePieceService {
   async getPieceById(id: string): Promise<PieceRecord> {
     const piece = await this.loadPieceOr404(id);
     const events = await this.eventsFor(id);
-    return toPieceRecordSummary(piece, events);
+    return this.pieceRecordFor(piece, events);
+  }
+
+  /**
+   * `toPieceRecordSummary` with the audit trail's actor names resolved first
+   * — the History tab renders names, never ids. One batched lookup for the
+   * whole trail (`resolveActorDisplayNames`), never one per event.
+   */
+  private async pieceRecordFor(
+    piece: MagazinePiece,
+    events: MagazinePieceEvent[],
+  ): Promise<PieceRecord> {
+    const actorNameById = await this.resolveActorDisplayNames(
+      auditActorIds(events),
+    );
+    return toPieceRecordSummary(piece, events, actorNameById);
   }
 
   /**
@@ -362,7 +378,17 @@ export class MagazinePieceService {
       this.lettersFor(id),
       this.correctionsFor(id),
     ]);
-    return toPieceRecordFull(piece, events, payment, letters, corrections);
+    const actorNameById = await this.resolveActorDisplayNames(
+      auditActorIds(events),
+    );
+    return toPieceRecordFull(
+      piece,
+      events,
+      actorNameById,
+      payment,
+      letters,
+      corrections,
+    );
   }
 
   /**
@@ -682,16 +708,32 @@ export class MagazinePieceService {
     return toCorrectionResponse(correction);
   }
 
+  /**
+   * Create a piece. Two editorial acts share this one endpoint, told apart by
+   * whether the editor is also the writer:
+   *
+   * - Commissioning someone else (`writerId` unset or another user): the piece
+   *   starts at `commissioned`, because a brief still has to go out and come
+   *   back before anyone drafts anything.
+   * - Writing it yourself (`writerId === editorId`): there is no brief to
+   *   send, so the piece starts at `drafting` and the audit trail says
+   *   "started writing" rather than "commissioned". Nothing downstream needs
+   *   a special case: `deriveWaitingOn` already reads a drafting piece with a
+   *   writer as owed by that writer, who here is you.
+   */
   async createPiece(
     dto: CreatePieceDto,
     actorId: string,
   ): Promise<PieceRecord> {
+    const isSelfWritten =
+      dto.writerId !== undefined && dto.writerId === dto.editorId;
+
     const piece = this.pieces.create({
       format: dto.format,
       title: dto.title,
       section: dto.section,
       kind: dto.kind ?? null,
-      stage: 'commissioned',
+      stage: isSelfWritten ? 'drafting' : 'commissioned',
       editorId: dto.editorId,
       writerId: dto.writerId ?? null,
       byline: dto.byline ?? '',
@@ -712,10 +754,14 @@ export class MagazinePieceService {
       await this.pitches.save(pitch);
     }
 
-    await this.recordEvent(piece.id, actorId, 'commissioned');
+    await this.recordEvent(
+      piece.id,
+      actorId,
+      isSelfWritten ? 'started_writing' : 'commissioned',
+    );
 
     const events = await this.eventsFor(piece.id);
-    return toPieceRecordSummary(piece, events);
+    return this.pieceRecordFor(piece, events);
   }
 
   async updatePiece(
@@ -786,7 +832,7 @@ export class MagazinePieceService {
     }
 
     const events = await this.eventsFor(piece.id);
-    return toPieceRecordSummary(piece, events);
+    return this.pieceRecordFor(piece, events);
   }
 
   /**
@@ -920,7 +966,32 @@ export class MagazinePieceService {
       cap: EDITOR_CAP,
     }));
 
-    return toDeskSummary(pieces, events, editors);
+    // The activity feed renders names and piece titles, never ids — resolve
+    // both in ONE batched query each (same technique as
+    // `listArticleComments`), never per event. The title lookup is its
+    // own query rather than reusing `pieces` above: that projection carries
+    // no `title`, and an event can outlive its piece anyway.
+    const activityPieceIds = [...new Set(events.map((event) => event.pieceId))];
+    const [activityPieces, actorNameById] = await Promise.all([
+      activityPieceIds.length > 0
+        ? this.pieces.find({
+            where: { id: In(activityPieceIds) },
+            select: { id: true, title: true },
+          })
+        : Promise.resolve([]),
+      this.resolveActorDisplayNames(auditActorIds(events)),
+    ]);
+    const titleByPieceId = new Map(
+      activityPieces.map((piece) => [piece.id, piece.title]),
+    );
+
+    return toDeskSummary(
+      pieces,
+      events,
+      editors,
+      titleByPieceId,
+      actorNameById,
+    );
   }
 
   /**
@@ -971,102 +1042,6 @@ export class MagazinePieceService {
     return editors.sort((left, right) => left.name.localeCompare(right.name));
   }
 
-  /**
-   * The desk's "Since Friday" notifications panel (Magazine Desk Phase 7,
-   * Task C1): the most recent `magazine_piece_event` rows — the same audit
-   * trail `deskSummary().activity` reads — resolved down to display strings
-   * (piece title, actor name via the Wave A editor directory, a human phrase
-   * for the action, and the piece-record route). Newest first, limited to
-   * `limit` rows at the SQL level. Batches the piece-title and actor-name
-   * lookups (mirrors `searchArchive`'s author/issue resolution) rather than
-   * querying per event. Actor names resolve editor-directory-first, then fall
-   * back to a second batched `Profile` lookup for any actor the directory
-   * doesn't cover — most notably a writer (e.g. a `filed` event) — so
-   * attribution is truthful instead of misreading a writer's action as an
-   * editor's. `isUnread` compares each event against the viewer's own
-   * `MagazineNotificationRead.lastReadAt` — a viewer who has never dismissed
-   * the panel has no row, so everything reads unread.
-   */
-  async listMagazineNotifications(
-    actorId: string,
-    limit = NOTIFICATIONS_DEFAULT_LIMIT,
-  ): Promise<MagazineNotificationResponse[]> {
-    const events = await this.pieceEvents.find({
-      order: { createdAt: 'DESC' },
-      take: limit,
-    });
-    if (events.length === 0) {
-      return [];
-    }
-
-    const [pieces, editors, ownReadCursor] = await Promise.all([
-      this.pieces.find({
-        where: { id: In([...new Set(events.map((event) => event.pieceId))]) },
-      }),
-      this.listMagazineEditors(),
-      this.notificationReads.findOne({ where: { actorId } }),
-    ]);
-    const lastReadAt = ownReadCursor?.lastReadAt ?? null;
-
-    const titleByPieceId = new Map(
-      pieces.map((piece) => [piece.id, piece.title]),
-    );
-    const actorNameById = new Map(
-      editors.map((editor) => [editor.id, editor.name]),
-    );
-
-    // Non-editor actors (e.g. writers) never appear in the editor directory,
-    // so they'd otherwise misattribute to the "unresolved" fallback. Resolve
-    // them with ONE additional batched `Profile` lookup — never per event.
-    const unresolvedActorIds = [
-      ...new Set(
-        events
-          .map((event) => event.actorId)
-          .filter(
-            (actorId): actorId is string =>
-              actorId !== null && !actorNameById.has(actorId),
-          ),
-      ),
-    ];
-    if (unresolvedActorIds.length > 0) {
-      const unresolvedProfiles = await this.profiles.find({
-        where: { userId: In(unresolvedActorIds) },
-      });
-      for (const profile of unresolvedProfiles) {
-        actorNameById.set(profile.userId, toActorDisplayName(profile));
-      }
-    }
-
-    return events.map((event) =>
-      toMagazineNotification(
-        event,
-        titleByPieceId.get(event.pieceId),
-        actorNameById,
-        lastReadAt,
-      ),
-    );
-  }
-
-  /**
-   * Upserts the viewer's read cursor to now — everything currently in
-   * `listMagazineNotifications` reads unread until they dismiss again.
-   */
-  async markNotificationsRead(actorId: string): Promise<void> {
-    const existing = await this.notificationReads.findOne({
-      where: { actorId },
-    });
-    if (existing) {
-      existing.lastReadAt = new Date();
-      await this.notificationReads.save(existing);
-      return;
-    }
-    const read = this.notificationReads.create({
-      actorId,
-      lastReadAt: new Date(),
-    });
-    await this.notificationReads.save(read);
-  }
-
   // --- article comments / NotesRail (Magazine Desk Phase 7, Task D1) ---
 
   /**
@@ -1075,7 +1050,7 @@ export class MagazinePieceService {
    * draft yet has no comments, so this returns `[]` rather than creating one
    * (unlike `addArticleComment`, a read never has side effects). Author
    * names are resolved with the exact same batched editor-directory ∪
-   * `Profile` lookup as `listMagazineNotifications`, so a writer commenting
+   * `Profile` lookup as `resolveActorDisplayNames`, so a writer commenting
    * on their own piece resolves to their real name rather than the
    * editor-only fallback.
    */
@@ -1125,8 +1100,8 @@ export class MagazinePieceService {
    * `getArticleDraft`/`updateArticleDraft` — so a note can be left the moment
    * the editor opens the (empty) article editor. Records a lightweight
    * `commented` audit event; `action` is a plain string (see
-   * `MagazinePieceEvent.action`), so this reads sensibly via
-   * `describeNotificationAction`'s default case without any new branch.
+   * `MagazinePieceEvent.action`), which `describePieceEventAction` renders as
+   * "left a note on {piece}" wherever the trail surfaces.
    */
   async addArticleComment(
     pieceId: string,
@@ -1450,7 +1425,9 @@ export class MagazinePieceService {
       number: dto.number,
       title: dto.title,
       theme: dto.theme,
-      publishedOn: dto.publishedOn,
+      // NULL, not today's date: an unscheduled issue must read as unscheduled
+      // everywhere rather than quietly claiming a publish day nobody chose.
+      publishedOn: dto.publishedOn ?? null,
       dek: dto.dek ?? '',
       coverUrl: null,
     });
@@ -1740,6 +1717,31 @@ export class MagazinePieceService {
       ...(dto.coverlines !== undefined ? { coverlines: dto.coverlines } : {}),
     });
     await this.issues.save(issue);
+    return this.getIssueProduction(issueNumber);
+  }
+
+  /**
+   * Sets, moves, or clears the issue's publish date. The date is optional at
+   * creation, so this is the surface that fills it in afterwards: a `null`
+   * `publishedOn` un-schedules the issue again rather than being ignored,
+   * which is why the DTO field is required-but-nullable instead of optional.
+   *
+   * Shipping is unaffected either way: `shipIssue` stamps today's date on an
+   * issue that still has none.
+   */
+  async updateIssueSchedule(
+    issueNumber: string,
+    dto: UpdateIssueScheduleDto,
+    actorId: string,
+  ): Promise<IssueProductionResponse> {
+    const issue = await this.loadIssueOr404(issueNumber);
+    issue.publishedOn = dto.publishedOn;
+    await this.issues.save(issue);
+    this.logger.log(
+      `Magazine issue ${issue.number} publish date set to ${
+        dto.publishedOn ?? 'none'
+      } by user ${actorId}`,
+    );
     return this.getIssueProduction(issueNumber);
   }
 
@@ -2255,8 +2257,8 @@ export class MagazinePieceService {
   /**
    * The full thread for a piece (chat order — oldest first), gated by
    * `assertPieceThreadAccess`. Author names are resolved with the same
-   * batched editor-directory ∪ `Profile` lookup as `listArticleComments`/
-   * `listMagazineNotifications`; `fromMe` is computed against `userId` (the
+   * batched editor-directory ∪ `Profile` lookup as `listArticleComments`;
+   * `fromMe` is computed against `userId` (the
    * REQUESTING user), never a client-supplied flag.
    */
   async listPieceMessages(
@@ -2275,7 +2277,7 @@ export class MagazinePieceService {
       return [];
     }
 
-    const authorNameById = await this.resolvePieceMessageAuthorNames(
+    const authorNameById = await this.resolveActorDisplayNames(
       messages.map((message) => message.authorId),
     );
     return messages.map((message) =>
@@ -2330,20 +2332,18 @@ export class MagazinePieceService {
       }
     }
 
-    const authorNameById = await this.resolvePieceMessageAuthorNames([
-      authorId,
-    ]);
+    const authorNameById = await this.resolveActorDisplayNames([authorId]);
     return toPieceMessage(message, authorNameById, authorId);
   }
 
   /**
-   * Batched author-name resolution for the piece message thread — the exact
+   * Batched display-name resolution for any list of actor ids — the exact
    * same editor-directory-first, `Profile`-fallback technique as
-   * `listArticleComments`/`listMagazineNotifications`, generalized to take an
-   * explicit list of ids so both the full-thread read and a single
-   * just-posted message can share it.
+   * `listArticleComments`, generalized to take an
+   * explicit list of ids so the piece message thread (full read and a single
+   * just-posted message) and the desk sidebar's activity feed all share it.
    */
-  private async resolvePieceMessageAuthorNames(
+  private async resolveActorDisplayNames(
     authorIds: string[],
   ): Promise<Map<string, string>> {
     const editors = await this.listMagazineEditors();
@@ -2386,57 +2386,63 @@ export class MagazinePieceService {
     const editorId = dto.editorId;
     const section = dto.section;
 
-    return this.dataSource.transaction(async (manager) => {
-      const pitchRepository = manager.getRepository(MagazinePitch);
-      const pieceRepository = manager.getRepository(MagazinePiece);
-      const eventRepository = manager.getRepository(MagazinePieceEvent);
+    const { piece, events } = await this.dataSource.transaction(
+      async (manager) => {
+        const pitchRepository = manager.getRepository(MagazinePitch);
+        const pieceRepository = manager.getRepository(MagazinePiece);
+        const eventRepository = manager.getRepository(MagazinePieceEvent);
 
-      const pitch = await pitchRepository.findOne({ where: { id } });
-      if (!pitch) {
-        throw new NotFoundException('Pitch not found');
-      }
-      // Guard against a double-submit/retry re-commissioning a pitch that's
-      // already been triaged — without this, a duplicate MagazinePiece would
-      // get created against the same pitchId.
-      if (pitch.status !== 'waiting' && pitch.status !== 'maybe') {
-        throw new ConflictException('This pitch has already been triaged.');
-      }
+        const pitch = await pitchRepository.findOne({ where: { id } });
+        if (!pitch) {
+          throw new NotFoundException('Pitch not found');
+        }
+        // Guard against a double-submit/retry re-commissioning a pitch that's
+        // already been triaged — without this, a duplicate MagazinePiece would
+        // get created against the same pitchId.
+        if (pitch.status !== 'waiting' && pitch.status !== 'maybe') {
+          throw new ConflictException('This pitch has already been triaged.');
+        }
 
-      pitch.status = 'commissioned';
-      await pitchRepository.save(pitch);
+        pitch.status = 'commissioned';
+        await pitchRepository.save(pitch);
 
-      const piece = pieceRepository.create({
-        format: dto.format ?? pitch.suggestFormat ?? 'article',
-        title: pitch.title,
-        section,
-        kind: null,
-        stage: 'commissioned',
-        editorId,
-        writerId: null,
-        byline: pitch.from,
-        dueOn: dto.dueOn ?? null,
-        issueId: pitch.issueId,
-        wordTarget: dto.wordTarget ?? null,
-        slideTarget: null,
-        fresh: pitch.fresh,
-        pitchId: pitch.id,
-      });
-      await pieceRepository.save(piece);
+        const piece = pieceRepository.create({
+          format: dto.format ?? pitch.suggestFormat ?? 'article',
+          title: pitch.title,
+          section,
+          kind: null,
+          stage: 'commissioned',
+          editorId,
+          writerId: null,
+          byline: pitch.from,
+          dueOn: dto.dueOn ?? null,
+          issueId: pitch.issueId,
+          wordTarget: dto.wordTarget ?? null,
+          slideTarget: null,
+          fresh: pitch.fresh,
+          pitchId: pitch.id,
+        });
+        await pieceRepository.save(piece);
 
-      const event = eventRepository.create({
-        pieceId: piece.id,
-        actorId,
-        action: 'commissioned',
-        detail: 'from pitch',
-      });
-      await eventRepository.save(event);
+        const event = eventRepository.create({
+          pieceId: piece.id,
+          actorId,
+          action: 'commissioned',
+          detail: 'from pitch',
+        });
+        await eventRepository.save(event);
 
-      const events = await eventRepository.find({
-        where: { pieceId: piece.id },
-        order: { createdAt: 'ASC' },
-      });
-      return toPieceRecordSummary(piece, events);
-    });
+        const events = await eventRepository.find({
+          where: { pieceId: piece.id },
+          order: { createdAt: 'ASC' },
+        });
+        return { piece, events };
+      },
+    );
+
+    // Name resolution reads the editor directory and profiles — nothing the
+    // transaction above wrote — so it stays outside the write path.
+    return this.pieceRecordFor(piece, events);
   }
 
   private async recordEvent(
@@ -2582,7 +2588,7 @@ export class MagazinePieceService {
    * then a `Profile` fallback) for the single-row comment mutations
    * (`addArticleComment`/`replyToArticleComment`/`resolveArticleComment`).
    * `listArticleComments` does its own BATCHED version of this same
-   * resolution (mirroring `listMagazineNotifications`) since it resolves
+   * resolution (via `resolveActorDisplayNames`) since it resolves
    * many comments' authors at once; this is the one-off equivalent for a
    * single actor.
    */

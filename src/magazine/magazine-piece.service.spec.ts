@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource, In } from 'typeorm';
+import { DataSource } from 'typeorm';
 import { CreateCorrectionDto } from './dto/create-correction.dto';
 import { CreateLetterDto } from './dto/create-letter.dto';
 import { CreatePieceDto } from './dto/create-piece.dto';
@@ -28,7 +28,6 @@ import { MagazineCorrection } from './entities/magazine-correction.entity';
 import { MagazineDeck } from './entities/magazine-deck.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
 import { MagazineLetter } from './entities/magazine-letter.entity';
-import { MagazineNotificationRead } from './entities/magazine-notification-read.entity';
 import { MagazinePayment } from './entities/magazine-payment.entity';
 import { MagazinePieceEvent } from './entities/magazine-piece-event.entity';
 import { MagazinePieceMessage } from './entities/magazine-piece-message.entity';
@@ -202,7 +201,6 @@ describe('MagazinePieceService', () => {
   let sections: RepositoryMock;
   let payments: RepositoryMock;
   let letters: RepositoryMock;
-  let notificationReads: RepositoryMock;
   let corrections: RepositoryMock;
   let articles: RepositoryMock;
   let articleComments: RepositoryMock;
@@ -228,7 +226,6 @@ describe('MagazinePieceService', () => {
     sections = makeRepositoryMock();
     payments = makeRepositoryMock();
     letters = makeRepositoryMock();
-    notificationReads = makeRepositoryMock();
     corrections = makeRepositoryMock();
     articles = makeRepositoryMock();
     articleComments = makeRepositoryMock();
@@ -288,10 +285,6 @@ describe('MagazinePieceService', () => {
         { provide: getRepositoryToken(MagazineSection), useValue: sections },
         { provide: getRepositoryToken(MagazinePayment), useValue: payments },
         { provide: getRepositoryToken(MagazineLetter), useValue: letters },
-        {
-          provide: getRepositoryToken(MagazineNotificationRead),
-          useValue: notificationReads,
-        },
         {
           provide: getRepositoryToken(MagazineCorrection),
           useValue: corrections,
@@ -367,6 +360,37 @@ describe('MagazinePieceService', () => {
       );
       expect(result.id).toBe('piece-1');
       expect(result.audit).toHaveLength(1);
+    });
+
+    it('starts a self-written piece at drafting and records started_writing', async () => {
+      let saved: MagazinePiece | undefined;
+      pieces.save.mockImplementation((entity: MagazinePiece) => {
+        entity.id = 'piece-2';
+        saved = entity;
+        return Promise.resolve(entity);
+      });
+      pieceEvents.find.mockResolvedValue([]);
+
+      // Editor and writer are the same person: no brief goes out, so there is
+      // nothing to wait for before drafting begins.
+      const dto: CreatePieceDto = {
+        format: 'article',
+        title: 'Untitled piece',
+        section: 'Community',
+        editorId: 'editor-1',
+        writerId: 'editor-1',
+      };
+
+      await service.createPiece(dto, 'editor-1');
+
+      expect(saved?.stage).toBe('drafting');
+      expect(pieceEvents.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pieceId: 'piece-2',
+          actorId: 'editor-1',
+          action: 'started_writing',
+        }),
+      );
     });
   });
 
@@ -1746,278 +1770,6 @@ describe('MagazinePieceService', () => {
       expect(articleConditions).toEqual(['article.published_at <= :now']);
       expect(deckQueryBuilder.andWhere).not.toHaveBeenCalled();
       expect(result).toHaveLength(1);
-    });
-  });
-
-  describe('listMagazineNotifications', () => {
-    const PAYMENT_EVENT = {
-      id: 'event-payment',
-      pieceId: 'piece-1',
-      actorId: 'editor-1',
-      action: 'payment_updated',
-      detail: null,
-      createdAt: new Date('2026-08-09T09:00:00.000Z'),
-    };
-
-    const STAGE_EVENT = {
-      id: 'event-stage',
-      pieceId: 'piece-1',
-      actorId: 'editor-1',
-      action: 'stage_changed',
-      detail: 'edit',
-      createdAt: new Date('2026-08-08T09:00:00.000Z'),
-    };
-
-    function stubEditorDirectory() {
-      staffRoles.find.mockResolvedValue([
-        {
-          id: 'grant-1',
-          userId: 'editor-1',
-          role: 'magazine_editor',
-          grantedById: null,
-          grantedAt: new Date('2026-08-01T00:00:00.000Z'),
-        },
-      ]);
-      users.find.mockResolvedValue([]);
-      profiles.find.mockResolvedValue([
-        makeProfile({
-          userId: 'editor-1',
-          firstName: 'Marta',
-          lastName: 'Reis',
-        }),
-      ]);
-    }
-
-    it('returns rows newest-first, limited to the requested count', async () => {
-      stubEditorDirectory();
-      pieceEvents.find.mockResolvedValue([PAYMENT_EVENT, STAGE_EVENT]);
-      pieces.find.mockResolvedValue([
-        { ...PIECE, id: 'piece-1', title: 'The chosen-family budget' },
-      ]);
-
-      const result = await service.listMagazineNotifications('editor-1', 2);
-
-      expect(pieceEvents.find).toHaveBeenCalledWith(
-        expect.objectContaining({
-          order: { createdAt: 'DESC' },
-          take: 2,
-        }),
-      );
-      expect(result.map((row) => row.id)).toEqual([
-        'event-payment',
-        'event-stage',
-      ]);
-    });
-
-    it("resolves the actor's name via the editor directory, never an email or raw uuid", async () => {
-      stubEditorDirectory();
-      pieceEvents.find.mockResolvedValue([STAGE_EVENT]);
-      pieces.find.mockResolvedValue([
-        { ...PIECE, id: 'piece-1', title: 'The chosen-family budget' },
-      ]);
-
-      const [notification] =
-        await service.listMagazineNotifications('editor-1');
-
-      expect(notification?.who).toBe('Marta Reis');
-      expect(notification?.who).not.toContain('@');
-      expect(notification?.who).not.toBe('editor-1');
-    });
-
-    it('resolves a non-editor actor (e.g. a writer) via a batched Profile lookup, not the editor-only fallback', async () => {
-      // `listMagazineEditors()` (called first, inside the outer `Promise.all`)
-      // makes its own `profiles.find` call to resolve editor-1's name; the
-      // fallback lookup below is strictly a SECOND, later call — chain the
-      // mock explicitly so each call gets the right rows regardless of
-      // resolution order.
-      staffRoles.find.mockResolvedValue([
-        {
-          id: 'grant-1',
-          userId: 'editor-1',
-          role: 'magazine_editor',
-          grantedById: null,
-          grantedAt: new Date('2026-08-01T00:00:00.000Z'),
-        },
-      ]);
-      users.find.mockResolvedValue([]);
-      profiles.find
-        .mockResolvedValueOnce([
-          makeProfile({
-            userId: 'editor-1',
-            firstName: 'Marta',
-            lastName: 'Reis',
-          }),
-        ])
-        .mockResolvedValueOnce([
-          makeProfile({
-            userId: 'writer-9',
-            firstName: 'Nina',
-            lastName: 'Costa',
-          }),
-        ]);
-      pieceEvents.find.mockResolvedValue([
-        { ...STAGE_EVENT, actorId: 'writer-9' },
-        { ...PAYMENT_EVENT, id: 'event-payment-2', actorId: 'writer-9' },
-      ]);
-      pieces.find.mockResolvedValue([
-        { ...PIECE, id: 'piece-1', title: 'The chosen-family budget' },
-      ]);
-
-      const [firstNotification, secondNotification] =
-        await service.listMagazineNotifications('editor-1');
-
-      // A writer's `filed`/payment action must attribute to the writer, not
-      // misread as an editor's action — this was the misattribution bug.
-      expect(firstNotification?.who).toBe('Nina Costa');
-      expect(secondNotification?.who).toBe('Nina Costa');
-      expect(firstNotification?.who).not.toBe('An editor');
-      expect(firstNotification?.who).not.toBe('Someone on the team');
-      expect(firstNotification?.who).not.toContain('writer-9');
-      expect(firstNotification?.who).not.toContain('@');
-
-      // Two notifications from the same unresolved actor must still cost
-      // exactly ONE additional batched Profile query (on top of the editor
-      // directory's own lookup) — never a per-event lookup.
-      expect(profiles.find).toHaveBeenCalledTimes(2);
-      expect(profiles.find).toHaveBeenNthCalledWith(2, {
-        where: { userId: In(['writer-9']) },
-      });
-    });
-
-    it('falls back to a role-neutral label when the actor cannot be resolved by either the editor directory or a Profile lookup', async () => {
-      staffRoles.find.mockResolvedValue([]);
-      users.find.mockResolvedValue([]);
-      pieceEvents.find.mockResolvedValue([
-        { ...STAGE_EVENT, actorId: 'ghost-9' },
-      ]);
-      pieces.find.mockResolvedValue([
-        { ...PIECE, id: 'piece-1', title: 'The chosen-family budget' },
-      ]);
-      profiles.find.mockResolvedValue([]);
-
-      const [notification] =
-        await service.listMagazineNotifications('editor-1');
-
-      expect(notification?.who).toBe('Someone on the team');
-      expect(notification?.who).not.toContain('ghost-9');
-      expect(notification?.who).not.toContain('@');
-    });
-
-    it("tags a payment event 'warn' and a stage-move event 'normal'", async () => {
-      stubEditorDirectory();
-      pieceEvents.find.mockResolvedValue([PAYMENT_EVENT, STAGE_EVENT]);
-      pieces.find.mockResolvedValue([
-        { ...PIECE, id: 'piece-1', title: 'The chosen-family budget' },
-      ]);
-
-      const [paymentRow, stageRow] =
-        await service.listMagazineNotifications('editor-1');
-
-      expect(paymentRow?.tone).toBe('warn');
-      expect(stageRow?.tone).toBe('normal');
-      expect(stageRow?.what).toContain('The chosen-family budget');
-      expect(stageRow?.what).toContain('edit');
-    });
-
-    it('points route at the piece record', async () => {
-      stubEditorDirectory();
-      pieceEvents.find.mockResolvedValue([STAGE_EVENT]);
-      pieces.find.mockResolvedValue([
-        { ...PIECE, id: 'piece-1', title: 'The chosen-family budget' },
-      ]);
-
-      const [notification] =
-        await service.listMagazineNotifications('editor-1');
-
-      expect(notification?.route).toBe('/magazine/editor/piece/piece-1');
-    });
-
-    it('returns an empty array when the event log is empty', async () => {
-      pieceEvents.find.mockResolvedValue([]);
-
-      const result = await service.listMagazineNotifications('editor-1');
-
-      expect(result).toEqual([]);
-      expect(pieces.find).not.toHaveBeenCalled();
-    });
-
-    it('flags an event unread when the viewer has never dismissed the panel', async () => {
-      stubEditorDirectory();
-      pieceEvents.find.mockResolvedValue([STAGE_EVENT]);
-      pieces.find.mockResolvedValue([
-        { ...PIECE, id: 'piece-1', title: 'The chosen-family budget' },
-      ]);
-      notificationReads.findOne.mockResolvedValue(null);
-
-      const [notification] =
-        await service.listMagazineNotifications('editor-1');
-
-      expect(notification?.isUnread).toBe(true);
-    });
-
-    it("flags an event unread when it happened after the viewer's last read", async () => {
-      stubEditorDirectory();
-      pieceEvents.find.mockResolvedValue([STAGE_EVENT]);
-      pieces.find.mockResolvedValue([
-        { ...PIECE, id: 'piece-1', title: 'The chosen-family budget' },
-      ]);
-      notificationReads.findOne.mockResolvedValue({
-        actorId: 'editor-1',
-        lastReadAt: new Date('2026-08-01T00:00:00.000Z'),
-      });
-
-      const [notification] =
-        await service.listMagazineNotifications('editor-1');
-
-      expect(notification?.isUnread).toBe(true);
-    });
-
-    it("flags an event read when it happened at or before the viewer's last read", async () => {
-      stubEditorDirectory();
-      pieceEvents.find.mockResolvedValue([STAGE_EVENT]);
-      pieces.find.mockResolvedValue([
-        { ...PIECE, id: 'piece-1', title: 'The chosen-family budget' },
-      ]);
-      notificationReads.findOne.mockResolvedValue({
-        actorId: 'editor-1',
-        lastReadAt: new Date('2026-08-09T00:00:00.000Z'),
-      });
-
-      const [notification] =
-        await service.listMagazineNotifications('editor-1');
-
-      expect(notification?.isUnread).toBe(false);
-    });
-  });
-
-  describe('markNotificationsRead', () => {
-    it('creates a new read-cursor row for a viewer who has never dismissed the panel', async () => {
-      notificationReads.findOne.mockResolvedValue(null);
-
-      await service.markNotificationsRead('editor-1');
-
-      expect(notificationReads.create).toHaveBeenCalledWith(
-        expect.objectContaining({ actorId: 'editor-1' }),
-      );
-      expect(notificationReads.save).toHaveBeenCalled();
-    });
-
-    it("updates the viewer's existing read-cursor row instead of creating a second one", async () => {
-      const existing = {
-        actorId: 'editor-1',
-        lastReadAt: new Date('2026-08-01T00:00:00.000Z'),
-      };
-      notificationReads.findOne.mockResolvedValue(existing);
-
-      await service.markNotificationsRead('editor-1');
-
-      expect(notificationReads.create).not.toHaveBeenCalled();
-      expect(notificationReads.save).toHaveBeenCalledWith(
-        expect.objectContaining({ actorId: 'editor-1' }),
-      );
-      expect(existing.lastReadAt.getTime()).toBeGreaterThan(
-        new Date('2026-08-01T00:00:00.000Z').getTime(),
-      );
     });
   });
 

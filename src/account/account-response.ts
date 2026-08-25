@@ -101,13 +101,25 @@ export function toDsarResponse(r: DsarRequest): DsarResponse {
 // Matches the shape consumed by `SessionsPage.tsx`. The refresh-token store
 // has no `deviceLabel` column, so `deviceLabel` is always `null`. `current`
 // is supplied by the caller (see `AccountService.listSessions`), which
-// resolves the presenting refresh-token id from the `refresh_token` cookie.
+// resolves the presenting session's family from the `refresh_token` cookie.
 export interface SessionResponse {
+  /**
+   * The refresh-token FAMILY id, which is the stable identity of the session.
+   * Deliberately not the row id: rows rotate roughly every 15 minutes, so a row
+   * id would go stale in the page's hands (see `AccountService.revokeSession`).
+   */
   id: string;
   deviceLabel: string | null;
   userAgent: string;
   current: boolean;
+  /** When this device SIGNED IN, unchanged by the rotations since. */
   createdAt: string;
+  /**
+   * The last time this device rotated a token, so the closest thing the store
+   * holds to "last seen". Coarse by nature: an idle tab refreshes on its own
+   * schedule, so this trails real activity by up to one access-token lifetime.
+   */
+  lastUsedAt: string;
   expiresAt: string;
 }
 
@@ -116,11 +128,12 @@ export function toSessionResponse(
   current: boolean,
 ): SessionResponse {
   return {
-    id: t.id,
+    id: t.familyId,
     deviceLabel: null,
     userAgent: t.userAgent ?? '',
     current,
-    createdAt: t.createdAt.toISOString(),
+    createdAt: t.sessionStartedAt.toISOString(),
+    lastUsedAt: t.createdAt.toISOString(),
     expiresAt: t.expiresAt.toISOString(),
   };
 }

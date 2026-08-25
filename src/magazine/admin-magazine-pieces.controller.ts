@@ -494,30 +494,6 @@ export class AdminMagazinePiecesController {
     return this.magazinePieces.listMagazineEditors();
   }
 
-  @Get('notifications')
-  @ApiOperation({
-    summary:
-      'List recent magazine desk notifications (the "Since Friday" panel).',
-  })
-  @ApiOkResponse({
-    description:
-      "Recent piece-event activity, hand-mapped to who/what/when/route/tone/isUnread (against the caller's own read cursor), newest first.",
-  })
-  listMagazineNotifications(@CurrentUser() user: CurrentUserData) {
-    return this.magazinePieces.listMagazineNotifications(user.userId);
-  }
-
-  @Post('notifications/read-all')
-  @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({
-    summary:
-      'Mark every current desk notification read for the caller (advances their read cursor to now).',
-  })
-  @ApiNoContentResponse({ description: 'The read cursor was advanced.' })
-  markNotificationsRead(@CurrentUser() user: CurrentUserData) {
-    return this.magazinePieces.markNotificationsRead(user.userId);
-  }
-
   @Get('archive')
   @ApiOperation({
     summary:
