@@ -11,8 +11,10 @@ import { ForumPostEdit } from './entities/forum-post-edit.entity';
 import { ForumPostVote } from './entities/forum-post-vote.entity';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
+import { ForumThreadSubscription } from './entities/forum-thread-subscription.entity';
 import { ForumController } from './forum.controller';
 import { ForumPostsService } from './forum-posts.service';
+import { ForumSubscriptionsService } from './forum-subscriptions.service';
 import { ForumThreadsService } from './forum-threads.service';
 
 @Module({
@@ -22,6 +24,7 @@ import { ForumThreadsService } from './forum-threads.service';
       ForumPost,
       ForumPostVote,
       ForumPostEdit,
+      ForumThreadSubscription,
     ]),
     // Gives access to `Repository<Profile>` (exported by `UsersModule`) for
     // resolving thread/post authors to `AuthorSummary` — mirrors
@@ -60,7 +63,11 @@ import { ForumThreadsService } from './forum-threads.service';
     ModerationModule,
   ],
   controllers: [ForumController],
-  providers: [ForumThreadsService, ForumPostsService],
-  exports: [ForumThreadsService, ForumPostsService],
+  providers: [
+    ForumThreadsService,
+    ForumPostsService,
+    ForumSubscriptionsService,
+  ],
+  exports: [ForumThreadsService, ForumPostsService, ForumSubscriptionsService],
 })
 export class ForumModule {}

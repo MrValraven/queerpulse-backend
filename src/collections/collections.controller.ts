@@ -38,6 +38,32 @@ import { CollectionsService } from './collections.service';
 // keys off `CurrentUser().userId`, so a collection is only ever visible to its
 // creator. `:id` is always a real uuid → `ParseUUIDPipe`; item `:ref` is the
 // composite `<kind>:<subjectId>` (a slug may not be a uuid) → parsed, not piped.
+/**
+ * DEPRECATED (SOC-12). Superseded by `SavedListsController` (`/me/saved/lists`).
+ *
+ * Collections and saved lists were two answers to the same question, and only
+ * one of them can share. A collection is hardcoded owner-private: there is no
+ * visibility column, no token, no public read, so "here are the eight clinics I
+ * found, take a look" was impossible. `saved_lists` already had a default list,
+ * multi-list membership, revocable share tokens and a public
+ * `GET /saved-lists/:token`, and the frontend now reads and writes that instead.
+ *
+ * RETIREMENT PATH, in order, one deploy apart:
+ *  1. `1794740000000-BackfillCollectionsIntoSavedLists` copies every existing
+ *     `collection` and `collection_item` into `saved_lists` /
+ *     `saved_list_entries`. It only copies; it deletes nothing.
+ *  2. The collections UI moves to the saved-lists API (done: the
+ *     `SavedList*` surfaces in `queerpulse/src/features/members/`).
+ *  3. These routes stay live and unchanged for one release, so a client that
+ *     has not reloaded keeps working.
+ *  4. Once no caller is left, delete this module and drop `collection` /
+ *     `collection_item` in their own migration.
+ *
+ * Add nothing here. A feature that belongs to a member's saved lists belongs on
+ * `SavedListsController`.
+ *
+ * @deprecated Use `SavedListsController` (`/me/saved/lists`) instead.
+ */
 @ApiTags('Collections')
 @ApiCookieAuth('access_token')
 @Controller('me/collections')

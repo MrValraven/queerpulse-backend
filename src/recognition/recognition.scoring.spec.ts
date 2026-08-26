@@ -16,7 +16,7 @@ const ZERO: RecognitionSignals = {
   eventsAttended: 0,
   communityPosts: 0,
   endorsementCount: 0,
-  workshopsTaught: 0,
+  eventsHosted: 0,
   tenureDays: 0,
   verified: false,
   gettingStartedStepsDone: 0,
@@ -92,7 +92,7 @@ describe('recognition scoring', () => {
       vouchCount: 999,
       communityPosts: 999,
       tenureDays: 9999,
-      workshopsTaught: 999,
+      eventsHosted: 999,
       gettingStartedComplete: true,
     };
     expect(qualifyingBadgeKeys(maxed)).not.toContain('founding-member');

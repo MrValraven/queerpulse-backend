@@ -7,6 +7,7 @@ import { CommunityMember } from '../communities/entities/community-member.entity
 import { Listing } from '../listings/entities/listing.entity';
 import { Event } from '../events/entities/event.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
+import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { MentionNotificationService } from './mention-notification.service';
 import { MentionsInboxService } from './mentions-inbox.service';
@@ -30,6 +31,9 @@ import { MentionsController } from './mentions.controller';
       Event,
       ForumThread,
       Profile,
+      // Read-only: restricts a `message`-source mention to the conversation's
+      // own participants, so a DM excerpt never reaches a non-participant.
+      ConversationParticipant,
     ]),
   ],
   controllers: [MentionsController],

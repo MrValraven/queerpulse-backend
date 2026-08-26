@@ -1,6 +1,6 @@
 import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 
-export class CreateJoinRequestDto {
+export class CreateHousingJoinRequestDto {
   @IsString()
   @MinLength(2)
   @MaxLength(120)

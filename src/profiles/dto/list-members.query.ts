@@ -3,13 +3,20 @@ import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 
 /**
  * Directory sort orders. The directory is paginated, so the ordering MUST be
- * applied server-side — a client can only ever see one page and cannot reorder
- * across the whole set. There is no "recently active" option: the platform
- * tracks no last-active timestamp, so it can't be honoured (see the frontend's
- * SortKey, which drops it for the same reason).
+ * applied server-side: a client can only ever see one page and cannot reorder
+ * across the whole set.
+ *
+ * `RecentlyActive` orders by `profile_last_active.last_active_month`, a value
+ * coarsened to the month and never finer (see src/profiles/last-active.ts).
+ * Two members who last signed in three weeks apart therefore tie, and the
+ * ordering within a month is the `slug` tiebreaker every branch ends with, so
+ * this sort cannot be read backwards as a precise last-seen ranking. Members
+ * who opted out, and members with nothing recorded, carry no ordering value
+ * and land at the end under NULLS LAST.
  */
 export enum MemberSort {
   RecentlyJoined = 'recentlyJoined',
+  RecentlyActive = 'recentlyActive',
   ClosestMutuals = 'closestMutuals',
   AToZ = 'aToZ',
   MostVouched = 'mostVouched',

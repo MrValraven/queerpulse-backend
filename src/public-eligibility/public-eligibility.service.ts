@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, IsNull, Repository } from 'typeorm';
 import { Profile } from '../users/entities/profile.entity';
@@ -13,7 +13,6 @@ import {
 } from '../events/entities/event.entity';
 import { EventCohost } from '../events/entities/event-cohost.entity';
 import { EventRsvp, RsvpStatus } from '../events/entities/event-rsvp.entity';
-import { Workshop } from '../workshops/entities/workshop.entity';
 import {
   Subprofile,
   SubprofileStatus,
@@ -28,9 +27,15 @@ import { ContentModerationService } from '../content-moderation/content-moderati
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { UserStatus } from '../users/entities/user.entity';
 import {
+  PublicEligibilityDecisionDto,
   PublicEligibilitySignalsDto,
+  RawSignals,
   toPublicEligibilitySignals,
 } from './public-eligibility-response';
+import {
+  PUBLIC_ELIGIBILITY_REASON_MESSAGE,
+  evaluatePublicEligibility,
+} from './public-eligibility.rules';
 
 const RESULT_CAP = 50;
 const MS_PER_DAY = 1000 * 60 * 60 * 24;
@@ -47,8 +52,6 @@ export class PublicEligibilityService {
     @InjectRepository(EventCohost)
     private readonly cohosts: Repository<EventCohost>,
     @InjectRepository(EventRsvp) private readonly rsvps: Repository<EventRsvp>,
-    @InjectRepository(Workshop)
-    private readonly workshops: Repository<Workshop>,
     @InjectRepository(Subprofile)
     private readonly subprofiles: Repository<Subprofile>,
     @InjectRepository(ForumThread)
@@ -64,18 +67,70 @@ export class PublicEligibilityService {
     private readonly contentModeration: ContentModerationService,
   ) {}
 
+  /**
+   * The full signal set plus the decision the server itself would apply on a
+   * write. One shape, so the tracker the member reads and the gate that stops
+   * the write are answering from the same numbers.
+   */
   async getSignals(
     user: CurrentUserData,
   ): Promise<PublicEligibilitySignalsDto> {
-    const userId = user.userId;
     const now = new Date();
+    const raw = await this.collectSignals(user, now);
+    return toPublicEligibilitySignals(
+      raw,
+      evaluatePublicEligibility(raw, now.toISOString()),
+    );
+  }
+
+  /** The decision on its own, for callers that only need the verdict. */
+  async evaluate(user: CurrentUserData): Promise<PublicEligibilityDecisionDto> {
+    const now = new Date();
+    return evaluatePublicEligibility(
+      await this.collectSignals(user, now),
+      now.toISOString(),
+    );
+  }
+
+  /**
+   * The server-side gate on publishing to the open web. Throws 403 with a
+   * coarse reason code when the member may not publish, and returns the
+   * decision when they may.
+   *
+   * Call this from EVERY path that can set a publication flag to true. Turning
+   * publication OFF must never go through here: a member who has become
+   * ineligible (or suspended, or deactivated) still has to be able to
+   * un-publish, and a switch you can turn on but not off is a trap.
+   */
+  async assertMayGoPublic(
+    user: CurrentUserData,
+  ): Promise<PublicEligibilityDecisionDto> {
+    const decision = await this.evaluate(user);
+    if (!decision.isEligible) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Forbidden',
+        message:
+          PUBLIC_ELIGIBILITY_REASON_MESSAGE[
+            decision.reasonCode ?? 'not_eligible'
+          ],
+        reasonCode: decision.reasonCode ?? 'not_eligible',
+      });
+    }
+    return decision;
+  }
+
+  private async collectSignals(
+    user: CurrentUserData,
+    now: Date,
+  ): Promise<RawSignals> {
+    const userId = user.userId;
 
     const profile = await this.profiles.findOne({ where: { userId } });
     // Only the raw day count is computed here. The 90-day hard gate itself
-    // (TENURE_FLOOR_DAYS: a deliberate trust-first policy, not an arbitrary
-    // number) lives solely in the frontend's `evaluatePublicEligibility`
-    // (queerpulse/src/features/members/publicFigure.ts) — see that file for
-    // the full rationale. This service does not duplicate the threshold.
+    // (`TENURE_FLOOR_DAYS`) is applied by `public-eligibility.rules.ts`, which
+    // is the single source of truth for the whole rule. The frontend keeps the
+    // copy that explains it and renders the numbers this service returns.
     const tenureDays = profile
       ? Math.max(
           0,
@@ -88,7 +143,6 @@ export class PublicEligibilityService {
     const [
       publishedPieces,
       hostedOpenEvents,
-      workshopsTaught,
       subprofileIds,
       connectionCounts,
       eventsAttended,
@@ -101,7 +155,6 @@ export class PublicEligibilityService {
     ] = await Promise.all([
       this.publishedPieceTimestamps(userId),
       this.hostedOpenEventTimestamps(userId),
-      this.workshops.count({ where: { hostId: userId } }),
       this.publishedSubprofileIds(userId),
       this.connections.counts(userId),
       this.attendedEventCount(userId, now),
@@ -134,12 +187,11 @@ export class PublicEligibilityService {
     const standingOk =
       user.status === (UserStatus.Active as string) && !blocked;
 
-    return toPublicEligibilitySignals({
+    return {
       verified: profile?.verified === true,
       tenureDays,
       publishedPieces,
       hostedOpenEvents,
-      workshopsTaught,
       publishedSubprofiles: subprofileIds.length,
       vouchCount: profile?.vouchCount ?? 0,
       vouchesGivenCount,
@@ -153,7 +205,7 @@ export class PublicEligibilityService {
         communityReplyCount,
       lastActiveDaysAgo: 0,
       standingOk,
-    });
+    };
   }
 
   private async publishedPieceTimestamps(userId: string): Promise<string[]> {

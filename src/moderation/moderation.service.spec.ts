@@ -10,6 +10,7 @@ import { DataSource } from 'typeorm';
 import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
 import { AuthService } from '../auth/auth.service';
 import { CommunityMembershipService } from '../communities/community-membership.service';
+import { ReportSubjectResolverService } from './report-subject-resolver.service';
 import {
   Report,
   ReportSeverity,
@@ -24,6 +25,8 @@ import { ModAuditLog } from './entities/mod-audit-log.entity';
 import { AccountEnforcementService } from './account-enforcement.service';
 import { ModAuditService } from './mod-audit.service';
 import { ModerationService } from './moderation.service';
+import { BanRatificationService } from './ban-ratification.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -119,12 +122,17 @@ describe('ModerationService', () => {
     count: jest.Mock;
   };
   let appeals: {
+    createQueryBuilder: jest.Mock;
     findOne: jest.Mock;
     find: jest.Mock;
     save: jest.Mock;
     create: jest.Mock;
     count: jest.Mock;
   };
+  // TS-11: the appeals queue is keyset-paged now, so its tests read the query
+  // builder the same way the reports-queue tests do. One shared instance per
+  // test so an assertion can look at what `listAppeals` described.
+  let appealsQb: Record<string, jest.Mock>;
   let auditLogs: {
     save: jest.Mock;
     create: jest.Mock;
@@ -144,7 +152,13 @@ describe('ModerationService', () => {
     communityIdForReply: jest.Mock;
     authorIdForPost: jest.Mock;
     authorIdForReply: jest.Mock;
+    slugById: jest.Mock;
+    refsByIds: jest.Mock;
   };
+  // TS-02/TS-03/TS-14 all read the report's subject through this one service.
+  let subjectResolver: { resolve: jest.Mock; resolveMany: jest.Mock };
+  // TS-06: the raw `DataSource.query` behind the queue's subject clusters.
+  let dataSourceQuery: jest.Mock;
 
   beforeEach(async () => {
     reports = {
@@ -154,7 +168,9 @@ describe('ModerationService', () => {
       save: jest.fn((r: unknown) => Promise.resolve(r)),
       count: jest.fn().mockResolvedValue(0),
     };
+    appealsQb = qbStub();
     appeals = {
+      createQueryBuilder: jest.fn(() => appealsQb),
       findOne: jest.fn(),
       find: jest.fn().mockResolvedValue([]),
       save: jest.fn((a: unknown) => Promise.resolve(a)),
@@ -196,6 +212,23 @@ describe('ModerationService', () => {
       // Defaults to "someone else wrote it".
       authorIdForPost: jest.fn().mockResolvedValue('author-1'),
       authorIdForReply: jest.fn().mockResolvedValue('author-1'),
+      // TS-14: community id -> slug for the queue rows. Defaults to "no such
+      // community", so a test only sees a community on a row when it says so.
+      slugById: jest.fn().mockResolvedValue(null),
+      refsByIds: jest.fn().mockResolvedValue(new Map()),
+    };
+
+    dataSourceQuery = jest.fn().mockResolvedValue([]);
+
+    // Defaults to "nothing resolved", so a `warn` or a `suspend` on a content
+    // report fails closed in every pre-existing test unless it opts in.
+    subjectResolver = {
+      resolve: jest.fn().mockResolvedValue({
+        authorUserId: null,
+        excerpt: null,
+        communityId: null,
+      }),
+      resolveMany: jest.fn().mockResolvedValue(new Map()),
     };
 
     // `actOnReport`/`bulkActOnReports`/`reviewAppeal` now run inside
@@ -246,6 +279,11 @@ describe('ModerationService', () => {
           provide: DataSource,
           useValue: {
             transaction: (cb: (m: unknown) => unknown) => cb(manager),
+            // TS-06: `clustersFor` runs one raw grouped aggregate per page.
+            // Defaults to "no pile anywhere", so every pre-existing `list`
+            // test sees an empty `clusters` array and only a test that opts in
+            // sees a cluster.
+            query: dataSourceQuery,
           },
         },
         { provide: AuthService, useValue: { revokeAllForUser } },
@@ -260,6 +298,25 @@ describe('ModerationService', () => {
         {
           provide: CommunityMembershipService,
           useValue: communityMembership,
+        },
+        {
+          provide: ReportSubjectResolverService,
+          useValue: subjectResolver,
+        },
+        // `actOnReport` emits `ACCOUNT_REMOVED` post-commit (TS-05). The spec
+        // never imported `EventEmitterModule`, so the token needs a stub or
+        // Nest cannot construct the service at all.
+        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        // TS-12: the second-moderator hold. Defaults to "nothing to withdraw",
+        // so every pre-existing appeal test is unaffected.
+        {
+          provide: BanRatificationService,
+          useValue: {
+            list: jest.fn().mockResolvedValue([]),
+            decide: jest.fn(),
+            withdrawPendingHold: jest.fn().mockResolvedValue(false),
+            expireDueHolds: jest.fn().mockResolvedValue([]),
+          },
         },
       ],
     }).compile();
@@ -857,24 +914,236 @@ describe('ModerationService', () => {
         expect(reports.save).not.toHaveBeenCalled();
       });
 
-      it('forbids a community owner/mod from taking any action other than dismiss, even within their own community', async () => {
-        reports.findOne.mockResolvedValue(
+      // The carve-out is three actions wide since TS-07/TS-08 (dismiss,
+      // remove_content, escalate). Everything else is an account-level or
+      // platform-wide consequence and stays staff-only.
+      it.each(['warn', 'restrict', 'suspend', 'ban', 'hide_content'] as const)(
+        'forbids a community owner/mod from applying %s, even within their own community',
+        async (action) => {
+          reports.findOne.mockResolvedValue(
+            baseReport({
+              subjectType: ReportSubjectType.Post,
+              subjectId: 'post-1',
+            }),
+          );
+          communityMembership.communityIdForPost.mockResolvedValue(
+            'community-1',
+          );
+          communityMembership.isOwnerOrMod.mockResolvedValue(true);
+
+          await expect(
+            service.actOnReport(
+              'report-1',
+              'community-mod-1',
+              UserRole.Member,
+              {
+                action,
+                reasonCode: 'hate_speech',
+                note: 'Acting on the post.',
+              },
+            ),
+          ).rejects.toBeInstanceOf(ForbiddenException);
+          expect(reports.save).not.toHaveBeenCalled();
+        },
+      );
+
+      // TS-07. `report-severity.ts` maps outing/doxxing to Emergency, and the
+      // dismissal a community mod could file was platform-wide and terminal.
+      describe('an emergency report is not the community’s to settle (TS-07)', () => {
+        const emergencyPostReport = () =>
           baseReport({
             subjectType: ReportSubjectType.Post,
             subjectId: 'post-1',
-          }),
-        );
-        communityMembership.communityIdForPost.mockResolvedValue('community-1');
-        communityMembership.isOwnerOrMod.mockResolvedValue(true);
+            reasonCode: 'outing',
+            severity: ReportSeverity.Emergency,
+          });
 
-        await expect(
-          service.actOnReport('report-1', 'community-mod-1', UserRole.Member, {
-            action: 'remove_content',
-            reasonCode: 'hate_speech',
-            note: 'Removed the post.',
-          }),
-        ).rejects.toBeInstanceOf(ForbiddenException);
-        expect(reports.save).not.toHaveBeenCalled();
+        it.each(['dismiss', 'remove_content'] as const)(
+          'forbids a community owner/mod from applying %s to an emergency report, and says where it is going',
+          async (action) => {
+            reports.findOne.mockResolvedValue(emergencyPostReport());
+            communityMembership.communityIdForPost.mockResolvedValue(
+              'community-1',
+            );
+            communityMembership.isOwnerOrMod.mockResolvedValue(true);
+
+            await expect(
+              service.actOnReport(
+                'report-1',
+                'community-mod-1',
+                UserRole.Member,
+                { action, reasonCode: 'outing', note: 'Handled internally.' },
+              ),
+            ).rejects.toThrow(/trained platform staff/i);
+            expect(reports.save).not.toHaveBeenCalled();
+            expect(applyContentAction).not.toHaveBeenCalled();
+          },
+        );
+
+        it('still lets a community owner/mod ESCALATE an emergency report, so the refusal is not a dead end', async () => {
+          reports.findOne.mockResolvedValue(emergencyPostReport());
+          communityMembership.communityIdForPost.mockResolvedValue(
+            'community-1',
+          );
+          communityMembership.isOwnerOrMod.mockResolvedValue(true);
+
+          const res = await service.actOnReport(
+            'report-1',
+            'community-mod-1',
+            UserRole.Member,
+            {
+              action: 'escalate',
+              reasonCode: 'outing',
+              note: 'This needs staff.',
+            },
+          );
+
+          expect(res.status).toBe(ReportStatus.Escalated);
+          // Escalating settles nothing, so the report keeps no resolution
+          // block and nobody is sanctioned.
+          expect(res).not.toHaveProperty('resolution');
+          expect(userUpdates()).toHaveLength(0);
+          // Still redacted: escalating grants no report visibility either.
+          expect(res.reporter).toEqual({ anonymous: true });
+        });
+
+        it('lets a community owner/mod escalate a report about their OWN post — sending it up is never self-dealing', async () => {
+          reports.findOne.mockResolvedValue(emergencyPostReport());
+          communityMembership.communityIdForPost.mockResolvedValue(
+            'community-1',
+          );
+          communityMembership.isOwnerOrMod.mockResolvedValue(true);
+          communityMembership.authorIdForPost.mockResolvedValue(
+            'community-mod-1',
+          );
+
+          const res = await service.actOnReport(
+            'report-1',
+            'community-mod-1',
+            UserRole.Member,
+            {
+              action: 'escalate',
+              reasonCode: 'outing',
+              note: 'This is about me. Staff should decide.',
+            },
+          );
+
+          expect(res.status).toBe(ReportStatus.Escalated);
+        });
+      });
+
+      // TS-08. The console used to delete the post through the community
+      // endpoint and then close the report as `dismiss` with an empty note, so
+      // the audit trail read "Dismissed" for the most common community action
+      // and no `content_moderation` row was ever written.
+      describe('a community removal is recorded as a removal (TS-08)', () => {
+        it('lets a community owner/mod remove the reported post, writing the takedown and the mod’s own reason', async () => {
+          reports.findOne.mockResolvedValue(
+            baseReport({
+              subjectType: ReportSubjectType.Post,
+              subjectId: 'post-1',
+            }),
+          );
+          communityMembership.communityIdForPost.mockResolvedValue(
+            'community-1',
+          );
+          communityMembership.isOwnerOrMod.mockResolvedValue(true);
+
+          const res = await service.actOnReport(
+            'report-1',
+            'community-mod-1',
+            UserRole.Member,
+            {
+              action: 'remove_content',
+              reasonCode: 'hate_speech',
+              note: 'This breaks rule 2.',
+            },
+          );
+
+          expect(res.status).toBe(ReportStatus.Resolved);
+          // The takedown goes through the same transaction as the report
+          // close, exactly as the platform path already does.
+          expect(applyContentAction).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({
+              subjectType: ReportSubjectType.Post,
+              subjectId: 'post-1',
+              action: 'remove_content',
+              actorId: 'community-mod-1',
+              reportId: 'report-1',
+              reasonCode: 'hate_speech',
+              note: 'This breaks rule 2.',
+            }),
+          );
+          const saveCalls = reports.save.mock.calls as [Report][];
+          const savedReport = saveCalls[0]?.[0];
+          expect(savedReport?.resolutionAction).toBe('remove_content');
+          expect(savedReport?.resolutionNote).toBe('This breaks rule 2.');
+        });
+
+        it('lets a community owner/mod remove a reported REPLY the same way', async () => {
+          reports.findOne.mockResolvedValue(
+            baseReport({
+              subjectType: ReportSubjectType.Reply,
+              subjectId: 'reply-1',
+            }),
+          );
+          communityMembership.communityIdForReply.mockResolvedValue(
+            'community-1',
+          );
+          communityMembership.isOwnerOrMod.mockResolvedValue(true);
+
+          const res = await service.actOnReport(
+            'report-1',
+            'community-mod-1',
+            UserRole.Member,
+            {
+              action: 'remove_content',
+              reasonCode: 'spam',
+              note: 'Spam reply.',
+            },
+          );
+
+          expect(res.status).toBe(ReportStatus.Resolved);
+          expect(applyContentAction).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({
+              subjectType: ReportSubjectType.Reply,
+              subjectId: 'reply-1',
+              action: 'remove_content',
+            }),
+          );
+        });
+
+        it('forbids a community owner/mod from removing their OWN post through the report', async () => {
+          reports.findOne.mockResolvedValue(
+            baseReport({
+              subjectType: ReportSubjectType.Post,
+              subjectId: 'post-1',
+            }),
+          );
+          communityMembership.communityIdForPost.mockResolvedValue(
+            'community-1',
+          );
+          communityMembership.isOwnerOrMod.mockResolvedValue(true);
+          communityMembership.authorIdForPost.mockResolvedValue(
+            'community-mod-1',
+          );
+
+          await expect(
+            service.actOnReport(
+              'report-1',
+              'community-mod-1',
+              UserRole.Member,
+              {
+                action: 'remove_content',
+                reasonCode: 'spam',
+                note: 'Nothing to see here.',
+              },
+            ),
+          ).rejects.toBeInstanceOf(ForbiddenException);
+          expect(applyContentAction).not.toHaveBeenCalled();
+        });
       });
     });
   });
@@ -1271,12 +1540,108 @@ describe('ModerationService', () => {
   });
 
   describe('listAppeals', () => {
-    it('lists appeals newest first', async () => {
-      await service.listAppeals();
-      expect(appeals.find).toHaveBeenCalledWith({
-        order: { createdAt: 'DESC' },
-        take: 20,
+    // TS-11 replaced the one unpaginated `find` with two keyset-paged tabs, so
+    // the assertion moved from "what did it ask the repository for" to "which
+    // tab did the query builder describe". `appeals.createQueryBuilder` is the
+    // shared mock builder, the same one the reports-queue tests read.
+    it('pages the awaiting tab, soonest-due first', async () => {
+      await service.listAppeals({});
+      expect(appealsQb.andWhere).toHaveBeenCalledWith('a.status = :awaiting', {
+        awaiting: AppealStatus.Awaiting,
       });
+    });
+
+    it('pages the decided tab as everything already decided', async () => {
+      await service.listAppeals({ tab: 'decided' });
+      expect(appealsQb.andWhere).toHaveBeenCalledWith('a.status != :awaiting', {
+        awaiting: AppealStatus.Awaiting,
+      });
+    });
+
+    it('narrows to appeals whose decision window has closed', async () => {
+      await service.listAppeals({ tab: 'awaiting', filter: 'overdue' });
+      expect(appealsQb.andWhere).toHaveBeenCalledWith('a.slaDueAt < :now', {
+        now: expect.any(Date) as Date,
+      });
+    });
+
+    // The overdue filter is meaningless on the decided tab and must not narrow
+    // it: a decided appeal has no window left to be outside of.
+    it('ignores the overdue filter on the decided tab', async () => {
+      await service.listAppeals({ tab: 'decided', filter: 'overdue' });
+      expect(appealsQb.andWhere).not.toHaveBeenCalledWith(
+        'a.slaDueAt < :now',
+        expect.anything(),
+      );
+    });
+  });
+
+  describe('submitAppeal (TS-11)', () => {
+    const auditRow = (createdAt: Date) => ({
+      id: 'log-1',
+      reportId: null,
+      actorId: 'mod-1',
+      action: 'community_ban_applied',
+      targetUserId: 'member-1',
+      createdAt,
+    });
+
+    beforeEach(() => {
+      profiles.findOne.mockResolvedValue(null);
+      reports.find.mockResolvedValue([]);
+      appeals.findOne.mockResolvedValue(null);
+    });
+
+    // Step 5, and the highest-value half of TS-11: a community ban writes a
+    // report-less `mod_audit_logs` row with the barred member in
+    // `target_user_id`, and used to be unappealable because the resolver only
+    // ever looked through `member`-subject reports.
+    it('resolves a report-less community ban as the appealed decision', async () => {
+      auditLogs.findOne.mockResolvedValue(auditRow(new Date()));
+      dataSourceQuery.mockResolvedValue([{ slug: 'lisbon-queers' }]);
+
+      await service.submitAppeal('member-1', {
+        reason: 'I was barred for a post that was not mine.',
+      });
+
+      expect(appeals.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          actionId: 'log-1',
+          reportId: null,
+          // Hardcoded `null` before TS-11, so every appeal reached the queue
+          // with no idea which room it came out of.
+          community: 'lisbon-queers',
+          slaDueAt: expect.any(Date) as Date,
+          decidedAt: null,
+        }),
+      );
+    });
+
+    it('refuses a filing more than 14 days after the decision', async () => {
+      const longAgo = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+      auditLogs.findOne.mockResolvedValue(auditRow(longAgo));
+      dataSourceQuery.mockResolvedValue([]);
+
+      await expect(
+        service.submitAppeal('member-1', {
+          reason: 'This was a mistake and I would like it looked at again.',
+        }),
+      ).rejects.toThrow(/14 days/);
+      expect(appeals.create).not.toHaveBeenCalled();
+    });
+
+    // No resolvable action means the software cannot say when the decision was
+    // taken, so it has no honest basis for calling the member late.
+    it('applies no deadline to a cold appeal', async () => {
+      auditLogs.findOne.mockResolvedValue(null);
+
+      await service.submitAppeal('member-1', {
+        reason: 'Nobody told me what I did and I want it reviewed.',
+      });
+
+      expect(appeals.create).toHaveBeenCalledWith(
+        expect.objectContaining({ actionId: null, community: null }),
+      );
     });
   });
 
@@ -1291,6 +1656,8 @@ describe('ModerationService', () => {
       argument: 'I was not spamming.',
       status: AppealStatus.Awaiting,
       decision: null,
+      slaDueAt: new Date('2026-01-09T00:00:00.000Z'),
+      decidedAt: null,
       createdAt: new Date('2026-01-02T00:00:00.000Z'),
       ...overrides,
     });
@@ -1506,6 +1873,14 @@ describe('ModerationService', () => {
         id: 'user-1',
         role: UserRole.Member,
         status: UserStatus.Active,
+      });
+      // `warn` resolves its target through the shared subject resolver now
+      // (TS-02), so a member report has to resolve there as well as through
+      // `profiles.findOne`.
+      subjectResolver.resolve.mockResolvedValue({
+        authorUserId: 'user-1',
+        excerpt: null,
+        communityId: null,
       });
     });
 
@@ -1965,6 +2340,380 @@ describe('ModerationService', () => {
       expect(res.status).toBe(UserStatus.Active);
       expect(userUpdates()).toHaveLength(0);
       expect(auditLogs.save).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * TS-02 / TS-03 / TS-14: a report about CONTENT is most of the queue, and
+   * until now it was the half of the queue where nothing could reach the person
+   * behind it. `warn` notified nobody, `suspend`/`ban`/`restrict` threw a 400,
+   * and the row could not name the community it came from.
+   */
+  describe('acting on the author of reported content', () => {
+    const postReport = () =>
+      baseReport({
+        subjectType: ReportSubjectType.Post,
+        subjectId: '11111111-2222-3333-4444-555555555555',
+      });
+
+    beforeEach(() => {
+      reports.findOne.mockResolvedValue(postReport());
+      subjectResolver.resolve.mockResolvedValue({
+        authorUserId: 'author-9',
+        excerpt: 'the reported body',
+        communityId: 'community-1',
+      });
+      users.findOne.mockResolvedValue({
+        id: 'author-9',
+        role: UserRole.Member,
+        status: UserStatus.Active,
+      });
+    });
+
+    const memberCall = () =>
+      notificationsCreate.mock.calls.find(
+        (args) => args[1] === NotificationType.ModerationOutcome,
+      );
+
+    it('warn reaches the post author (TS-02)', async () => {
+      await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+        action: 'warn',
+        reasonCode: 'harassment',
+        note: 'Please stop.',
+      });
+
+      expect(memberCall()?.[0]).toBe('author-9');
+    });
+
+    it('warn notifies nobody when the subject has no resolvable author', async () => {
+      subjectResolver.resolve.mockResolvedValue({
+        authorUserId: null,
+        excerpt: null,
+        communityId: null,
+      });
+
+      await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+        action: 'warn',
+        reasonCode: 'harassment',
+        note: 'n',
+      });
+
+      expect(memberCall()).toBeUndefined();
+    });
+
+    it('suspend lands on the post author instead of 400ing (TS-03)', async () => {
+      await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+        action: 'suspend',
+        reasonCode: 'harassment',
+        note: 'Seven days.',
+        duration: '7d',
+      });
+
+      const [, where, patch] = userUpdates()[0]!;
+      expect(where).toEqual({ id: 'author-9' });
+      expect(patch.status).toBe(UserStatus.Suspended);
+    });
+
+    it('links the sanction to the report, so it is appealable as that decision', async () => {
+      await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+        action: 'ban',
+        reasonCode: 'harassment',
+        note: 'Out.',
+      });
+
+      expect(auditLogs.save).toHaveBeenCalledWith(
+        expect.objectContaining({ reportId: 'report-1', action: 'ban' }),
+      );
+    });
+
+    it('restrict does not revoke the author’s sessions', async () => {
+      await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+        action: 'restrict',
+        reasonCode: 'harassment',
+        note: 'A week.',
+        duration: '7d',
+      });
+
+      expect(revokeAllForUser).not.toHaveBeenCalled();
+    });
+
+    it('still refuses to sanction a staff account reached through content', async () => {
+      users.findOne.mockResolvedValue({
+        id: 'author-9',
+        role: UserRole.Moderator,
+        status: UserStatus.Active,
+      });
+
+      await expect(
+        service.actOnReport('report-1', 'actor-1', UserRole.Admin, {
+          action: 'ban',
+          reasonCode: 'harassment',
+          note: 'Out.',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('still refuses to sanction the house account reached through content', async () => {
+      users.findOne.mockResolvedValue({
+        id: 'author-9',
+        role: UserRole.Member,
+        status: UserStatus.Active,
+        isSystem: true,
+      });
+
+      await expect(
+        service.actOnReport('report-1', 'actor-1', UserRole.Admin, {
+          action: 'ban',
+          reasonCode: 'harassment',
+          note: 'Out.',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('400s when the subject resolves to no account at all', async () => {
+      subjectResolver.resolve.mockResolvedValue({
+        authorUserId: null,
+        excerpt: null,
+        communityId: null,
+      });
+
+      await expect(
+        service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+          action: 'ban',
+          reasonCode: 'harassment',
+          note: 'Out.',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('shows the reported content, not only the complaint about it', async () => {
+      profiles.findOne.mockResolvedValue({
+        userId: 'author-9',
+        slug: 'author-nine',
+      });
+
+      const row = await service.getById('report-1');
+
+      expect(row.detail).toEqual(
+        expect.objectContaining({
+          contentAuthor: 'author-nine',
+          excerpt: 'the reported body',
+        }),
+      );
+    });
+
+    it('names the community a post report came from (TS-14)', async () => {
+      communityMembership.slugById.mockResolvedValue('porto-queers');
+
+      const row = await service.getById('report-1');
+
+      expect(row.community).toBe('porto-queers');
+      expect(communityMembership.slugById).toHaveBeenCalledWith('community-1');
+    });
+
+    it('leaves the community null when the subject belongs to none', async () => {
+      subjectResolver.resolve.mockResolvedValue({
+        authorUserId: 'author-9',
+        excerpt: null,
+        communityId: null,
+      });
+
+      const row = await service.getById('report-1');
+
+      expect(row.community).toBeNull();
+      expect(communityMembership.slugById).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the queue names each report’s community (TS-14)', () => {
+    it('batch-resolves a page in one resolver call plus one slug lookup', async () => {
+      const rows = [
+        baseReport({ id: 'report-1', subjectId: 'post-a' }),
+        baseReport({ id: 'report-2', subjectId: 'post-b' }),
+      ];
+      reports.createQueryBuilder.mockReturnValue(qbStub(rows));
+      subjectResolver.resolveMany.mockResolvedValue(
+        new Map([
+          [
+            'report-1',
+            { authorUserId: 'a', excerpt: null, communityId: 'community-1' },
+          ],
+          [
+            'report-2',
+            { authorUserId: 'b', excerpt: null, communityId: 'community-1' },
+          ],
+        ]),
+      );
+      communityMembership.refsByIds.mockResolvedValue(
+        new Map([['community-1', { slug: 'porto-queers', name: 'Porto' }]]),
+      );
+
+      const page = await service.list({});
+
+      expect(page.data.map((row) => row.community)).toEqual([
+        'porto-queers',
+        'porto-queers',
+      ]);
+      expect(subjectResolver.resolveMany).toHaveBeenCalledTimes(1);
+      expect(communityMembership.refsByIds).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads a community-subject report’s slug straight off the row', async () => {
+      const rows = [
+        baseReport({
+          id: 'report-1',
+          subjectType: ReportSubjectType.Community,
+          subjectId: 'trans-and-friends',
+        }),
+      ];
+      reports.createQueryBuilder.mockReturnValue(qbStub(rows));
+
+      const page = await service.list({});
+
+      expect(page.data[0]?.community).toBe('trans-and-friends');
+      // A community subject needs no lookup: its `subjectId` IS the slug.
+      expect(subjectResolver.resolveMany).toHaveBeenCalledWith([]);
+    });
+
+    it('narrows the queue to one community when asked', async () => {
+      const qb = qbStub([]);
+      reports.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list({ community: 'porto-queers' });
+
+      const andWhere = qb.andWhere as jest.Mock;
+      const communityWhere = (andWhere.mock.calls as [string, unknown][])
+        .map(([sql]) => sql)
+        .find((sql) => sql.includes('community_posts'));
+      expect(communityWhere).toBeDefined();
+    });
+  });
+
+  describe('the queue clusters a pile-on by subject (TS-06)', () => {
+    const clusterRow = (overrides: Record<string, unknown> = {}) => ({
+      subjectType: ReportSubjectType.Member,
+      subjectId: 'reported-member',
+      openCount: 30,
+      distinctReporterCount: 30,
+      overdueCount: 4,
+      severityRank: 1,
+      firstReportedAt: new Date('2026-01-01T10:00:00.000Z'),
+      lastReportedAt: new Date('2026-01-01T10:10:00.000Z'),
+      reportIds: ['report-1', 'report-2'],
+      ...overrides,
+    });
+
+    it('summarizes every open report about the page’s subjects, not just the ones on the page', async () => {
+      const qb = qbStub([
+        baseReport({
+          id: 'report-1',
+          subjectType: ReportSubjectType.Member,
+          subjectId: 'reported-member',
+        }),
+      ]);
+      reports.createQueryBuilder.mockReturnValue(qb);
+      dataSourceQuery.mockResolvedValue([clusterRow()]);
+
+      const page = await service.list({ tab: 'open' });
+
+      expect(page.clusters).toEqual([
+        {
+          subjectType: ReportSubjectType.Member,
+          subjectId: 'reported-member',
+          openCount: 30,
+          distinctReporterCount: 30,
+          overdueCount: 4,
+          highestSeverity: ReportSeverity.High,
+          firstReportedAt: '2026-01-01T10:00:00.000Z',
+          lastReportedAt: '2026-01-01T10:10:00.000Z',
+          isSurge: true,
+          reportIds: ['report-1', 'report-2'],
+        },
+      ]);
+      // One statement for the whole page, whatever its size.
+      expect(dataSourceQuery).toHaveBeenCalledTimes(1);
+    });
+
+    it('drops an aggregate row that is not actually on this page', async () => {
+      const qb = qbStub([
+        baseReport({
+          subjectType: ReportSubjectType.Member,
+          subjectId: 'reported-member',
+        }),
+      ]);
+      reports.createQueryBuilder.mockReturnValue(qb);
+      // Same id, different subject type: the two `ANY(...)` lists are matched
+      // independently, so the aggregate can be very slightly wider than the
+      // page. It is narrowed back before anything is returned.
+      dataSourceQuery.mockResolvedValue([
+        clusterRow({ subjectType: ReportSubjectType.Post }),
+      ]);
+
+      const page = await service.list({ tab: 'open' });
+
+      expect(page.clusters).toEqual([]);
+    });
+
+    it('does not call a pile a surge when one person filed all of it', async () => {
+      const qb = qbStub([
+        baseReport({
+          subjectType: ReportSubjectType.Member,
+          subjectId: 'reported-member',
+        }),
+      ]);
+      reports.createQueryBuilder.mockReturnValue(qb);
+      dataSourceQuery.mockResolvedValue([
+        clusterRow({ openCount: 6, distinctReporterCount: 1 }),
+      ]);
+
+      const page = await service.list({ tab: 'open' });
+
+      expect(page.clusters[0]?.isSurge).toBe(false);
+      // The cluster is still reported: six open reports about one subject is
+      // worth seeing as one thing even when one member filed them all.
+      expect(page.clusters[0]?.openCount).toBe(6);
+    });
+
+    it('asks for no clusters at all on an empty page', async () => {
+      reports.createQueryBuilder.mockReturnValue(qbStub([]));
+
+      const page = await service.list({ tab: 'open' });
+
+      expect(page.clusters).toEqual([]);
+      expect(dataSourceQuery).not.toHaveBeenCalled();
+    });
+
+    it('narrows the queue to overdue reports when asked', async () => {
+      const qb = qbStub([]);
+      reports.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list({ tab: 'open', filter: 'overdue' });
+
+      expect(qb.andWhere).toHaveBeenCalledWith('r.slaDueAt < now()');
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        'r.status != :resolvedForOverdue',
+        {
+          resolvedForOverdue: ReportStatus.Resolved,
+        },
+      );
+    });
+
+    it('narrows the queue to surges using the auto-freeze thresholds', async () => {
+      const qb = qbStub([]);
+      reports.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list({ tab: 'open', filter: 'surge' });
+
+      const andWhere = qb.andWhere as jest.Mock;
+      const surgeCall = (
+        andWhere.mock.calls as [string, Record<string, unknown>?][]
+      ).find(([sql]) => sql.includes('surgeMinReporters'));
+      expect(surgeCall).toBeDefined();
+      expect(surgeCall?.[1]).toEqual({
+        surgeOpenStatuses: [ReportStatus.Open, ReportStatus.Escalated],
+        surgeMinOpen: 5,
+        surgeMinReporters: 3,
+      });
     });
   });
 });

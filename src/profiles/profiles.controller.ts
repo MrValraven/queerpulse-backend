@@ -15,6 +15,7 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { ConnectionsService } from '../connections/connections.service';
 import { CloseBoardItemDto } from './dto/close-board-item.dto';
+import { UpdateActivityVisibilityDto } from './dto/update-activity-visibility.dto';
 import { ListMembersQuery } from './dto/list-members.query';
 import { ReplaceBoardDto } from './dto/replace-board.dto';
 import { ReplaceGroupsDto } from './dto/replace-groups.dto';
@@ -24,6 +25,7 @@ import { ReplaceSocialsDto } from './dto/replace-socials.dto';
 import { ReplaceWorkDto } from './dto/replace-work.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UpdateUsernameDto } from './dto/update-username.dto';
+import { LastActiveService } from './last-active.service';
 import { ProfilesService } from './profiles.service';
 import {
   ApiBadRequestResponse,
@@ -45,6 +47,7 @@ export class ProfilesController {
   constructor(
     private readonly profilesService: ProfilesService,
     private readonly connectionsService: ConnectionsService,
+    private readonly lastActive: LastActiveService,
   ) {}
 
   // pending-ok: edit your own draft profile.
@@ -83,6 +86,39 @@ export class ProfilesController {
     @Body() dto: UpdateUsernameDto,
   ) {
     return this.profilesService.updateUsername(user.userId, dto.username);
+  }
+
+  // The caller's own coarse "recently active" band plus their opt-out, so the
+  // privacy switch can show what it is actually hiding. Declared with the other
+  // 'me/...' routes so 'me' is never captured by ':slug'.
+  @ApiOperation({
+    summary: "The caller's own activity band and its opt-out",
+  })
+  @ApiOkResponse({
+    description:
+      'The band the caller currently reads as (null when nothing is recorded yet) and whether it is hidden from other members.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @Get('me/activity-visibility')
+  async getActivityVisibility(@CurrentUser() user: CurrentUserData) {
+    const signal = await this.lastActive.getSignal(user.userId);
+    return { band: signal.band, isHidden: signal.isHidden };
+  }
+
+  @ApiOperation({
+    summary: "Hide or show the caller's activity band to other members",
+  })
+  @ApiOkResponse({
+    description: "The stored preference and the caller's own band after it.",
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @Patch('me/activity-visibility')
+  async updateActivityVisibility(
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: UpdateActivityVisibilityDto,
+  ) {
+    const signal = await this.lastActive.setHidden(user.userId, dto.isHidden);
+    return { band: signal.band, isHidden: signal.isHidden };
   }
 
   @ApiOperation({ summary: "Replace the caller's social links" })

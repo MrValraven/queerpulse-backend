@@ -13,10 +13,12 @@ import {
 import { requireAuthorSummary } from '../messaging/message-response';
 import { NotificationPreferenceCategory } from '../notifications/notification-preferences';
 import { NotificationPreferencesService } from '../notifications/notification-preferences.service';
+import { NotificationDeliveryService } from '../notifications/notification-delivery.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { isStorageKey } from '../storage/storage-key';
 import { Profile } from '../users/entities/profile.entity';
-import { PushService } from './push.service';
+import { GENERIC_PUSH_COPY } from './generic-push-copy';
+import { PushPreviewPrivacyService } from './push-preview-privacy.service';
 
 const PREVIEW_MAX = 120;
 
@@ -39,9 +41,10 @@ export class PushMessageListener {
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
     private readonly presence: PresenceService,
-    private readonly pushService: PushService,
+    private readonly previewPrivacy: PushPreviewPrivacyService,
     private readonly blockFilter: BlockFilterService,
     private readonly notificationPreferences: NotificationPreferencesService,
+    private readonly notificationDelivery: NotificationDeliveryService,
   ) {}
 
   @OnEvent(MESSAGE_CREATED)
@@ -105,8 +108,20 @@ export class PushMessageListener {
           NotificationPreferenceCategory.NewMessages,
         ),
       );
-      const pushable = deliverable.filter((participant) =>
-        pushEnabledUserIds.has(participant.userId),
+      // Quiet hours, on top of the category switch above. A DM landing at 3am
+      // is the case the setting exists for, so the buzz is withheld here too.
+      // Nothing is lost: the message is already in the conversation and the
+      // Messages inbox badge still counts it, exactly as it does for a
+      // recipient who simply has push turned off.
+      const audibleUserIds = new Set(
+        await this.notificationDelivery.recipientsOutsideQuietHours(
+          deliverable.map((participant) => participant.userId),
+        ),
+      );
+      const pushable = deliverable.filter(
+        (participant) =>
+          pushEnabledUserIds.has(participant.userId) &&
+          audibleUserIds.has(participant.userId),
       );
       if (pushable.length === 0) return;
 
@@ -130,9 +145,15 @@ export class PushMessageListener {
           ? rawSenderAvatar
           : undefined;
 
-      // One subscription lookup for every deliverable participant instead of
-      // one per participant — `sendToUsers` batches the `find` with `IN (...)`.
-      await this.pushService.sendToUsers(
+      // ID-13: split by `member_preferences.hide_push_previews` rather than
+      // calling `sendToUsers` directly. This is the payload the split exists
+      // for: a DM push puts the SENDER'S NAME in `title` and THE MESSAGE
+      // ITSELF in `body`, and iOS renders both straight onto the lock screen
+      // without ever running the service worker that used to redact them.
+      // Recipients hiding previews get "QueerPulse / You have a new message."
+      // with no name, no text and no avatar; everyone else gets this payload
+      // unchanged. Still one subscription lookup per group, not per recipient.
+      await this.previewPrivacy.sendSplitByPreviewPreference(
         pushable.map((participant) => participant.userId),
         {
           title: senderName,
@@ -150,6 +171,9 @@ export class PushMessageListener {
           // "N new messages" notification.
           timestamp: message.createdAt.getTime(),
         },
+        // "A new message" rather than "a new notification": the most the copy
+        // can narrow without leaking who or what.
+        GENERIC_PUSH_COPY.message,
       );
     } catch (error) {
       // Push is best-effort and must never affect message delivery.

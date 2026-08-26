@@ -35,8 +35,6 @@ import { MagazinePiece, PieceCare } from './entities/magazine-piece.entity';
 import { MagazinePitch } from './entities/magazine-pitch.entity';
 import { MagazineSection } from './entities/magazine-section.entity';
 import { MagazinePieceService } from './magazine-piece.service';
-import { EventEmitter2 } from '@nestjs/event-emitter';
-import { MailerService } from '../mailer/mailer.service';
 import { NewsletterSubscription } from '../newsletter/entities/newsletter-subscription.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -132,6 +130,7 @@ const ARTICLE: MagazineArticle = {
   metaDescription: '',
   socialImage: '',
   canonicalUrl: '',
+  heroImageKey: '',
   contentNotes: [],
   blocks: [],
   authorId: 'author-1',
@@ -139,6 +138,17 @@ const ARTICLE: MagazineArticle = {
   tags: [],
   readMinutes: 1,
   publishedAt: null,
+  // CON-16 — a piece that has never left `live`, in the language it was
+  // written in. What every row looked like before the lifecycle and
+  // translation columns existed.
+  lifecycle: 'live',
+  lifecycleNote: '',
+  lifecycleChangedAt: null,
+  reviewDueOn: null,
+  supersededByArticleId: null,
+  locale: 'en',
+  translationOfArticleId: null,
+  translatorAuthorId: null,
   version: 0,
   createdAt: new Date('2026-08-01T00:00:00.000Z'),
   updatedAt: new Date('2026-08-01T00:00:00.000Z'),
@@ -189,6 +199,7 @@ const PITCH: MagazinePitch = {
   passTemplate: null,
   passNote: null,
   submitterId: null,
+  storySubmissionId: null,
   createdAt: new Date('2026-08-01T00:00:00.000Z'),
 };
 
@@ -212,11 +223,9 @@ describe('MagazinePieceService', () => {
   let users: RepositoryMock;
   let profiles: RepositoryMock;
   let newsletterSubscriptions: RepositoryMock;
-  let eventEmitter: { emitAsync: jest.Mock };
   let transactionManager: { getRepository: jest.Mock };
   let dataSource: { transaction: jest.Mock };
   let notifications: { create: jest.Mock };
-  let mailer: { send: jest.Mock };
 
   beforeEach(async () => {
     pieces = makeRepositoryMock();
@@ -237,7 +246,6 @@ describe('MagazinePieceService', () => {
     users = makeRepositoryMock();
     profiles = makeRepositoryMock();
     newsletterSubscriptions = makeRepositoryMock();
-    eventEmitter = { emitAsync: jest.fn().mockResolvedValue([]) };
 
     // The commission/ship flows run inside `dataSource.transaction`,
     // resolving per-entity repos off the transactional `EntityManager` —
@@ -267,7 +275,6 @@ describe('MagazinePieceService', () => {
         ),
     };
     notifications = { create: jest.fn().mockResolvedValue(null) };
-    mailer = { send: jest.fn().mockResolvedValue(undefined) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -310,10 +317,6 @@ describe('MagazinePieceService', () => {
         },
         { provide: DataSource, useValue: dataSource },
         { provide: NotificationsService, useValue: notifications },
-        { provide: MailerService, useValue: mailer },
-        // Shipping an issue announces `newsletter.digest_due` and returns; the
-        // newsletter module queues and mails it (BE-MSG-14).
-        { provide: EventEmitter2, useValue: eventEmitter },
       ],
     }).compile();
 
@@ -521,7 +524,7 @@ describe('MagazinePieceService', () => {
   describe('upsertPayment', () => {
     it('throws NotFoundException when the piece does not exist', async () => {
       pieces.findOne.mockResolvedValue(null);
-      const dto: UpdatePaymentDto = { fee: '€420' };
+      const dto: UpdatePaymentDto = { fee: '420' };
       await expect(
         service.upsertPayment('missing', dto, 'editor-1'),
       ).rejects.toBeInstanceOf(NotFoundException);
@@ -531,11 +534,11 @@ describe('MagazinePieceService', () => {
       pieces.findOne.mockResolvedValue({ ...PIECE });
       payments.findOne.mockResolvedValue(null);
 
-      const dto: UpdatePaymentDto = { fee: '€420', invoice: 'INV-2026-084' };
+      const dto: UpdatePaymentDto = { fee: '420', invoice: 'INV-2026-084' };
       const result = await service.upsertPayment('piece-1', dto, 'editor-1');
 
       expect(payments.create).toHaveBeenCalledWith(
-        expect.objectContaining({ pieceId: 'piece-1', fee: '€420' }),
+        expect.objectContaining({ pieceId: 'piece-1', feeAmount: '420' }),
       );
       expect(payments.save).toHaveBeenCalled();
       expect(pieceEvents.create).toHaveBeenCalledWith(
@@ -545,7 +548,7 @@ describe('MagazinePieceService', () => {
           action: 'payment_updated',
         }),
       );
-      expect(result.fee).toBe('€420');
+      expect(result.fee).toBe('420');
       expect(result.invoice).toBe('INV-2026-084');
     });
 
@@ -553,7 +556,7 @@ describe('MagazinePieceService', () => {
       pieces.findOne.mockResolvedValue({ ...PIECE });
       payments.findOne.mockResolvedValue(null);
 
-      const dto: UpdatePaymentDto = { fee: '€1', status: 'paid' };
+      const dto: UpdatePaymentDto = { fee: '1', status: 'paid' };
       const result = await service.upsertPayment('piece-1', dto, 'editor-1');
 
       expect(result.paidOn).not.toBeNull();
@@ -565,8 +568,11 @@ describe('MagazinePieceService', () => {
       const existingPayment: MagazinePayment = {
         id: 'payment-1',
         pieceId: 'piece-1',
-        fee: '€420',
-        expenses: null,
+        currency: 'EUR',
+        feeAmount: '420.00',
+        feeText: null,
+        expensesAmount: null,
+        expensesText: null,
         invoice: null,
         filedOn: null,
         terms: '21 days',
@@ -593,8 +599,11 @@ describe('MagazinePieceService', () => {
       const existingPayment: MagazinePayment = {
         id: 'payment-1',
         pieceId: 'piece-1',
-        fee: '€420',
-        expenses: null,
+        currency: 'EUR',
+        feeAmount: '420.00',
+        feeText: null,
+        expensesAmount: null,
+        expensesText: null,
         invoice: null,
         filedOn: null,
         terms: '21 days',
@@ -618,8 +627,11 @@ describe('MagazinePieceService', () => {
       const existingPayment: MagazinePayment = {
         id: 'payment-1',
         pieceId: 'piece-1',
-        fee: '€420',
-        expenses: null,
+        currency: 'EUR',
+        feeAmount: '420.00',
+        feeText: null,
+        expensesAmount: null,
+        expensesText: null,
         invoice: null,
         filedOn: null,
         terms: '21 days',
@@ -732,9 +744,9 @@ describe('MagazinePieceService', () => {
 
     it('stores the headline as plain text, stripping the contentEditable markup', async () => {
       // `RichText` hands the server the headline's raw `innerHTML`. The column
-      // is plain text — the reader, the archive list, search and the digest
-      // email all render it as text — so the markup is stripped once, here, on
-      // write.
+      // is plain text — the reader, the archive list, search and the issue
+      // contents panel all render it as text — so the markup is stripped once,
+      // here, on write.
       const piece = { ...PIECE, articleId: 'article-1' };
       pieces.findOne.mockResolvedValue(piece);
       const article = { ...ARTICLE, title: 'Old headline', publishedAt: null };
@@ -1175,7 +1187,7 @@ describe('MagazinePieceService', () => {
         { label: 'Every piece past the publish gate', done: true },
         { label: 'Cover art set', done: true },
         { label: 'Coverlines written', done: true },
-        { label: 'Digest has at least one piece', done: true },
+        { label: '"In this issue" panel lists at least one piece', done: true },
       ]);
     });
 

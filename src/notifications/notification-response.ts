@@ -28,6 +28,13 @@ export interface NotificationResponse {
   read: boolean;
   createdAt: Date;
   actor: NotificationActor | null;
+  /**
+   * How many FURTHER members did the same thing to the same subject after this
+   * row was written, so the client can render "Ana and 39 others replied" from
+   * one row. `0` on an ordinary row. `actor` is always the most recent of them,
+   * which is why the copy names them and counts the rest.
+   */
+  otherActorCount: number;
 }
 
 /**
@@ -76,6 +83,9 @@ const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   [NotificationType.SubprofileInvite]: 'invitedByUserId',
   [NotificationType.SubprofileCoOwnerJoined]: 'joinedUserId',
   [NotificationType.MagazinePieceMessage]: 'authorId',
+  // The host or co-host who posted the announcement, so the bell shows
+  // whose gathering just changed and who said so (LOC-06).
+  [NotificationType.EventAnnouncement]: 'actorId',
   [NotificationType.VolunteerApplicationReceived]: 'actorId',
   // The voucher, resolved for the bell + push. An ANONYMOUS safe-space vouch
   // omits `voucherId` from the payload entirely (the emit site only spreads it
@@ -141,6 +151,32 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     [NotificationType.TopicNewPost]: ['topicSlug', 'topicLabel', 'threadTitle'],
     [NotificationType.ModerationOutcome]: ['action', 'note'],
     [NotificationType.ConcernUpdate]: ['status', 'category'],
+    // The outcome of a non-concern intake form, read back to the member. Only
+    // `status` (the terminal outcome the copy branches on) and `kind` (the
+    // FORM's own name, a closed vocabulary from `INTAKE_KINDS`, which the copy
+    // turns into "your playlist submission"). Everything the member actually
+    // typed lives in the submission's opaque `payload` jsonb and appears in no
+    // entry here, so none of it can reach the bell.
+    [NotificationType.IntakeReviewed]: ['status', 'kind'],
+    // The outcome of a data-subject request. `reference` is the member's OWN
+    // case number, already shown to them on the data-request page when they
+    // filed, and it is the only thing that tells one request from another. The
+    // request's scope, its free-text detail and any operator note stay off this
+    // wire: they are read behind the member's own authentication.
+    [NotificationType.DsarResolved]: ['status', 'reference'],
+    // The new-device sign-in alert (ID-06). Both fields are the copy's
+    // interpolation tokens: the coarse server-composed device name, never the
+    // raw User-Agent, and the ISO instant the frontend formats in the member's
+    // own language. Without this entry the alert reaches the bell reading "a
+    // device we don't recognise, recently", which is the fallback wording for a
+    // broken payload rather than an answerable alert. `familyId` stays off the
+    // wire: the deep link to /account/sessions needs no id, and a session
+    // identifier is not something a bell payload has to carry.
+    [NotificationType.SecurityNewSignIn]: ['deviceLabel', 'signedInAt'],
+    // The countdown on a scheduled account deletion. `daysRemaining` is a
+    // NUMBER and the copy is CLDR-pluralised on it, so without this entry the
+    // row would forward no count and fall back to the vague flat string.
+    [NotificationType.AccountDeletionFinalWarning]: ['daysRemaining'],
     [NotificationType.VerificationUpdate]: [
       'fromLevel',
       'toLevel',
@@ -172,6 +208,18 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     [NotificationType.SubprofileMemberRemoved]: ['subprofileName'],
     [NotificationType.SafeSpaceVouch]: ['spaceName', 'spaceSlug'],
     [NotificationType.HousingListingMatch]: ['title', 'area', 'slug'],
+    // The moderator's decision on the member's OWN housing listing, plus the
+    // reason they were given. `reason` is moderator-authored prose written TO
+    // this recipient (the same class of value `CommunityBanned`'s `reason` and
+    // `ModerationOutcome`'s `note` already forward), never member content, and
+    // it is the substance of the notification: without it the bell can only say
+    // "a decision was made". `slug` carries the deep link to the listing.
+    [NotificationType.HousingListingDecision]: [
+      'title',
+      'slug',
+      'decision',
+      'reason',
+    ],
     [NotificationType.WriterApplicationApproved]: ['reviewNote'],
     [NotificationType.WriterApplicationDeclined]: ['reviewNote'],
     [NotificationType.ChangemakerNominationApproved]: [
@@ -188,6 +236,17 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'opportunitySlug',
     ],
     [NotificationType.ListingReview]: ['field'],
+    // The verdict on a reader's story, plus the member's OWN working title so
+    // the row says which one. The decider's reply note stays off the wire here
+    // on purpose: it is staff-authored prose, and the member reads it on their
+    // tracker card, which they fetch under their own authentication.
+    [NotificationType.StorySubmissionDecided]: ['decision', 'workingTitle'],
+    // The issue-shipped announcement. `issueNumber` is both the copy token and
+    // the deep-link segment (`/magazine/issue/:number`) — it rides here rather
+    // than in `COMMON_PAYLOAD_KEYS` because no other type uses it. Both fields
+    // are desk-authored editorial headline text that went public the instant
+    // the issue shipped, so neither is content this boundary has to withhold.
+    [NotificationType.MagazineIssuePublished]: ['issueNumber', 'issueTitle'],
     // The business's own public name, for copy like "someone asked a question
     // about Lux Cafe". The question BODY and the ANSWER text are deliberately
     // absent: they are member- and owner-authored prose, this allowlist is the
@@ -206,6 +265,19 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     [NotificationType.ListingCoManagerInviteAccepted]: ['listingName'],
     [NotificationType.ListingCoManagerInviteDeclined]: ['listingName'],
     [NotificationType.ListingEditSuggestionAccepted]: ['field'],
+    // LOC-16, "a gathering has been listed at your venue". The business's own
+    // public name and the gathering's own public title, which is exactly what
+    // the owner needs to decide whether to confirm the attachment or detach
+    // it. Both are already public on the two pages this row links between, and
+    // this type is only ever raised for a PUBLISHED gathering scoped `public`
+    // or `members`, so neither field can carry a private gathering's title.
+    //
+    // The deep link is built from `source` + `listingSlug` + `eventSlug`, all
+    // three already in `COMMON_PAYLOAD_KEYS`. There is no actor entry for this
+    // type in `ACTOR_PAYLOAD_KEY` above and no `actorId` in the payload: see
+    // the enum member's own doc for why naming the host here would let a block
+    // suppress the warning.
+    [NotificationType.VenueEventAttachment]: ['listingName', 'eventTitle'],
     [NotificationType.CommunityTagRequestResolved]: ['label'],
     [NotificationType.CommunityRoleChanged]: ['communityName', 'role'],
     [NotificationType.CommunityMemberRemoved]: ['communityName'],
@@ -223,7 +295,22 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     [NotificationType.CommunityAnnouncement]: ['communityName'],
     // Sent to the member who was barred. No actor field is listed, so the bell
     // never names the moderator who acted.
-    [NotificationType.CommunityBanned]: ['communityName'],
+    //
+    // `reason` is moderator-authored prose written TO this recipient, the same
+    // class of value `HousingListingDecision.reason` forwards. `expiresAt` and
+    // `ruleText` are the terms of the sanction: without them the member cannot
+    // tell a week's timeout from a life ban, and cannot see which house rule
+    // they are said to have broken. There is no other surface they can read any
+    // of it from, because QueerPulse sends no email and the product offers no
+    // way to message a community's moderators.
+    [NotificationType.CommunityBanned]: [
+      'communityName',
+      'reason',
+      'expiresAt',
+      'ruleText',
+      'ruleIndex',
+      'ruleVersion',
+    ],
     // The resource's own title, which is owner-authored and already public on
     // the community's shelf to anyone who can see this notification.
     [NotificationType.CommunityResourceAdded]: ['communityName', 'title'],
@@ -245,6 +332,72 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     [NotificationType.BarterProposalReceived]: [
       'barterListingId',
       'listingOffer',
+    ],
+    // Staff duty mail on a newly filed report (TS-04). The write sites
+    // restrict recipients to platform `Moderator`/`Admin` and to a
+    // community's own owner/co-owners/mods, so these keys never reach an
+    // ordinary member.
+    //
+    // `severity` is what the bell keys its urgent presentation off (the
+    // 1-hour outing/doxxing SLA), `reasonCode` is the server-derived taxonomy
+    // code the queue filters on, and `subjectType` says what kind of thing was
+    // reported. `reportId` rides along so a future queue deep-link can select
+    // the row.
+    //
+    // What is absent matters as much: the reporter's id appears in NO payload
+    // (the bell never names who filed, anonymously or not) and the reporter's
+    // free-text `detail` appears in none either. Both live behind the
+    // moderation queue's own authentication, which is where a responder reads
+    // them.
+    [NotificationType.ReportFiled]: [
+      'reportId',
+      'severity',
+      'reasonCode',
+      'subjectType',
+    ],
+    // Same fields plus the community's own public name for the copy;
+    // `communitySlug` already rides along in `COMMON_PAYLOAD_KEYS` and is what
+    // the mod-tools deep link is built from.
+    [NotificationType.CommunityReportFiled]: [
+      'reportId',
+      'severity',
+      'reasonCode',
+      'subjectType',
+      'communityName',
+    ],
+
+    // --- The four approval queues (LOC-19) ---------------------------------
+    // Each carries the `decision` its copy branches on, the member's own
+    // submitted title read back to them, and the moderator's `reason` where one
+    // was given. `reason` is listed for the same reason `CommunityBanned` and
+    // `CommunityOwnerReviewRequested` list theirs: a refusal with no sentence
+    // attached is exactly what these queues exist to stop being. Nothing else
+    // the member wrote (a listing's description, price or accessibility text,
+    // an intro request's note) appears in any of them.
+    [NotificationType.ReadingGroupProposalDecided]: [
+      'decision',
+      'book',
+      'communityName',
+      'reason',
+    ],
+    [NotificationType.GroupListingDecided]: [
+      'decision',
+      'groupSlug',
+      'groupName',
+      'listingTitle',
+      'reason',
+    ],
+    [NotificationType.LandlordSuggestionDecided]: [
+      'decision',
+      'landlordSlug',
+      'landlordName',
+      'reason',
+    ],
+    [NotificationType.LandlordIntroRequestDecided]: [
+      'decision',
+      'landlordSlug',
+      'landlordName',
+      'reason',
     ],
   };
 
@@ -284,6 +437,7 @@ export function toNotificationResponse(
     payload: toClientPayload(notification),
     read: notification.read,
     createdAt: notification.createdAt,
+    otherActorCount: notification.otherActorCount ?? 0,
     actor: actorProfile
       ? {
           slug: actorProfile.slug,

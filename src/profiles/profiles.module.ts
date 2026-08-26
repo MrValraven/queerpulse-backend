@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Community } from '../communities/entities/community.entity';
+import { Event as GatheringEvent } from '../events/entities/event.entity';
+import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { ConnectionsModule } from '../connections/connections.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
@@ -15,12 +17,16 @@ import { BoardPost } from './entities/board-post.entity';
 import { Group } from './entities/group.entity';
 import { GroupMembership } from './entities/group-membership.entity';
 import { ProfileFeaturedCommunity } from './entities/profile-featured-community.entity';
+import { ProfileLastActive } from './entities/profile-last-active.entity';
 import { Shaping } from './entities/shaping.entity';
 import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
 import { WorkItem } from './entities/work-item.entity';
 import { ActivityListener } from './activity.listener';
+import { ActivityVisibilityService } from './activity-visibility.service';
 import { ActivityService } from './activity.service';
+import { LastActiveListener } from './last-active.listener';
+import { LastActiveService } from './last-active.service';
 import { DiscoverableIdentitiesController } from './discoverable-identities.controller';
 import { DiscoverableIdentitiesService } from './discoverable-identities.service';
 import { MembersController, ProfilesController } from './profiles.controller';
@@ -38,8 +44,15 @@ import { ProfilesService } from './profiles.service';
       Group,
       GroupMembership,
       ProfileFeaturedCommunity,
+      ProfileLastActive,
       Community,
       CommunityMember,
+      // Read-only, for the activity privacy gate: `ActivityVisibilityService`
+      // re-checks that an activity row's subject (a gathering, a persona) is
+      // still public, and `ActivityListener` reads the community a join event
+      // names. Neither ever writes to these tables.
+      GatheringEvent,
+      Subprofile,
     ]),
     UsersModule,
     VouchModule,
@@ -69,10 +82,19 @@ import { ProfilesService } from './profiles.service';
     ProfilesService,
     DiscoverableIdentitiesService,
     // Writes profile "Recent activity" rows off domain events (event RSVPs,
-    // forum threads, public-community posts). The listener is discovered
-    // globally by @nestjs/event-emitter once registered here.
+    // forum threads, public-community posts and joins, persona publishes).
+    // The listener is discovered globally by @nestjs/event-emitter once
+    // registered here.
     ActivityService,
     ActivityListener,
+    // The read half of that gate: drops (and purges) rows whose subject has
+    // stopped being public since the row was written.
+    ActivityVisibilityService,
+    // The coarse "recently active" signal. The listener is the ONLY writer:
+    // it coarsens `auth.session_refreshed` to a month and writes at most once
+    // a day per member. See last-active.ts for what the signal may say.
+    LastActiveService,
+    LastActiveListener,
   ],
   exports: [ProfilesService],
 })

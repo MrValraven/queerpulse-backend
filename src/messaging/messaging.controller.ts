@@ -22,7 +22,7 @@ import { Feature } from '../common/feature.decorator';
 import { AddMembersDto } from './dto/add-members.dto';
 import { ChangeMemberRoleDto } from './dto/change-member-role.dto';
 import { CreateConversationDto } from './dto/create-conversation.dto';
-import { CreateGroupDto } from './dto/create-group.dto';
+import { CreateGroupConversationDto } from './dto/create-group.dto';
 import { EditMessageDto } from './dto/edit-message.dto';
 import { GetMessagesQuery } from './dto/get-messages.query';
 import { MarkReadDto } from './dto/mark-read.dto';
@@ -140,7 +140,7 @@ export class ConversationsController {
   })
   createGroup(
     @CurrentUser() user: CurrentUserData,
-    @Body() dto: CreateGroupDto,
+    @Body() dto: CreateGroupConversationDto,
   ) {
     return this.messagingService.createGroup(
       user.userId,
@@ -431,15 +431,17 @@ export class ConversationsController {
   }
 
   /**
-   * PATCH a conversation. `muted` sets this caller's per-conversation preference
-   * (any thread). `title`/`avatarUrl` edit a GROUP's info — owner/admin-gated in
-   * the service, which posts a `group_renamed` pill on a title change.
+   * PATCH a conversation. `muted`/`pinned`/`favorite`/`archived` set this
+   * caller's per-conversation preferences (any thread); `draft` syncs this
+   * caller's own unsent composer text. `title`/`avatarUrl` edit a GROUP's info
+   * — owner/admin-gated in the service, which posts a `group_renamed` pill on a
+   * title change.
    */
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Patch(':id')
   @ApiOperation({
     summary:
-      "Update a conversation: this caller's mute, or a group's title/avatar",
+      "Update a conversation: this caller's mute/pin/favorite/archive/draft, or a group's title/avatar",
   })
   @ApiOkResponse({ description: 'The updated conversation.' })
   @ApiBadRequestResponse({
@@ -460,14 +462,17 @@ export class ConversationsController {
         avatarUrl: dto.avatarUrl,
       });
     }
-    // Per-caller preferences: mute, pin, favorite. A single PATCH may carry one
-    // or more; each provided field is applied (and awaited) in turn — so a
-    // pin-cap ConflictException from setPinned propagates as a real 409 rather
-    // than a floating rejection. Nothing provided -> 400.
+    // Per-caller preferences: mute, pin, favorite, archive, draft. A single
+    // PATCH may carry one or more; each provided field is applied (and
+    // awaited) in turn — so a pin-cap ConflictException from setPinned
+    // propagates as a real 409 rather than a floating rejection. Nothing
+    // provided -> 400.
     if (
       dto.muted === undefined &&
       dto.pinned === undefined &&
-      dto.favorite === undefined
+      dto.favorite === undefined &&
+      dto.archived === undefined &&
+      dto.draft === undefined
     ) {
       throw new BadRequestException('Nothing to update');
     }
@@ -488,6 +493,16 @@ export class ConversationsController {
         user.userId,
         dto.favorite,
       );
+    }
+    if (dto.archived !== undefined) {
+      result = await this.messagingService.setArchived(
+        id,
+        user.userId,
+        dto.archived,
+      );
+    }
+    if (dto.draft !== undefined) {
+      result = await this.messagingService.setDraft(id, user.userId, dto.draft);
     }
     return result;
   }

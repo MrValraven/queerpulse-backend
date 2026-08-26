@@ -29,7 +29,15 @@ export class CreateHousingListingDto {
 
   @IsOptional() @IsString() @MaxLength(200) blurb?: string;
 
-  @IsString() @MinLength(1) @MaxLength(120) city!: string;
+  /**
+   * OPTIONAL, and the value is NOT trusted. QueerPulse housing is Lisbon-only,
+   * so the backend is the authority: an omitted, empty or unrecognised city all
+   * store `"Lisbon"` (`resolveHousingLocation`, `housing-city.ts`). A client
+   * that sends a NEIGHBOURHOOD here (the old form sent `city: area.trim()`)
+   * has that value moved into `area` when `area` is otherwise empty, so the
+   * neighbourhood survives instead of corrupting the city column.
+   */
+  @IsOptional() @IsString() @MaxLength(120) city?: string;
 
   @IsOptional() @IsString() @MaxLength(120) area?: string;
 

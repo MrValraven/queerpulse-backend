@@ -371,7 +371,7 @@ export class RecognitionAwardingService {
       eventsAttended: signalsDto.eventsAttended,
       communityPosts: signalsDto.communityPosts,
       endorsementCount: signalsDto.endorsementCount,
-      workshopsTaught: signalsDto.workshopsTaught,
+      eventsHosted: signalsDto.hostedOpenEvents.length,
       tenureDays: signalsDto.tenureDays,
       verified: signalsDto.verified,
       gettingStartedStepsDone,

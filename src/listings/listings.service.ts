@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { resolveListingLocation, resolveListingTimezone } from './listing-city';
 import { toImageUrl } from '../common/image-url';
 import {
   Brackets,
@@ -17,6 +18,7 @@ import {
 } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
 import { MemberLookup, toMemberRef } from '../common/member-ref';
+import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { StorageService } from '../storage/storage.service';
@@ -283,13 +285,19 @@ function normalizeCreate(dto: CreateListingDto): Omit<
   | 'detailsConfirmedAt'
 > {
   const gallery = galleryFromCreateInput(dto);
+  // The city and the timezone are the backend's to decide (LOC-15). The wizard
+  // sends neither, and `?? ''` stored an empty city on every member-created
+  // listing plus an empty timezone that silently disables opening hours.
+  // `resolveListingLocation` also rescues a neighbourhood name submitted in the
+  // city field rather than discarding it.
+  const location = resolveListingLocation(dto);
   return {
     path: dto.path ?? '',
     name: dto.name,
     cats: dto.cats ?? [],
-    hood: dto.hood ?? '',
-    city: dto.city ?? '',
-    timezone: dto.timezone ?? '',
+    hood: location.hood ?? '',
+    city: location.city,
+    timezone: resolveListingTimezone(dto.timezone),
     badge: dto.badge ?? '',
     evidence: dto.evidence ?? '',
     price: dto.price ?? '',
@@ -368,9 +376,21 @@ function applyUpdate(listing: Listing, dto: UpdateListingDto): void {
     ...(dto.path !== undefined ? { path: dto.path } : {}),
     ...(dto.name !== undefined ? { name: dto.name } : {}),
     ...(dto.cats !== undefined ? { cats: dto.cats } : {}),
-    ...(dto.hood !== undefined ? { hood: dto.hood } : {}),
-    ...(dto.city !== undefined ? { city: dto.city } : {}),
-    ...(dto.timezone !== undefined ? { timezone: dto.timezone } : {}),
+    // Same rule on update as on create (LOC-15): a submitted city is normalised
+    // to the one city rather than stored verbatim, and a neighbourhood sent in
+    // the city field moves to `hood` instead of overwriting it.
+    ...(dto.hood !== undefined || dto.city !== undefined
+      ? (() => {
+          const location = resolveListingLocation(dto);
+          return {
+            city: location.city,
+            ...(location.hood !== undefined ? { hood: location.hood } : {}),
+          };
+        })()
+      : {}),
+    ...(dto.timezone !== undefined
+      ? { timezone: resolveListingTimezone(dto.timezone) }
+      : {}),
     ...(dto.badge !== undefined ? { badge: dto.badge } : {}),
     ...(dto.evidence !== undefined ? { evidence: dto.evidence } : {}),
     ...(dto.price !== undefined ? { price: dto.price } : {}),
@@ -1010,8 +1030,11 @@ export class ListingsService {
 
     return paginate(qb, page, async (rows) => {
       if (!rows.length) return [];
+      // `ownerId` is NULL for an entry whose owner erased their account
+      // (`SetNullContentAuthorFksOnUserErasure1794610000000`): the venue
+      // record stays live and unclaimed, with no member to name on it.
       const refs = await new MemberLookup(this.profiles).byUserIds(
-        rows.map((row) => row.ownerId),
+        presentActorIds(rows.map((row) => row.ownerId)),
       );
       // ONE batched crop lookup for every row's gallery photos on the
       // page — never a per-row query.
@@ -1020,7 +1043,7 @@ export class ListingsService {
       );
       return rows.map((row) =>
         toManagedListingDTO(
-          toListingDTO(row, refs.get(row.ownerId) ?? null, crops),
+          toListingDTO(row, actorFromLookup(refs, row.ownerId) ?? null, crops),
           row.ownerId === userId,
         ),
       );
@@ -1048,7 +1071,7 @@ export class ListingsService {
       paginate(qb, page, async (rows) => {
         if (!rows.length) return [];
         const refs = await new MemberLookup(this.profiles).byUserIds(
-          rows.map((row) => row.ownerId),
+          presentActorIds(rows.map((row) => row.ownerId)),
         );
         // ONE batched crop lookup for every row's gallery photos on the
         // page — never a per-row query.
@@ -1056,7 +1079,7 @@ export class ListingsService {
           rows.flatMap((row) => listingPhotoKeys(row)),
         );
         return rows.map((row) =>
-          toListingDTO(row, refs.get(row.ownerId) ?? null, crops),
+          toListingDTO(row, actorFromLookup(refs, row.ownerId) ?? null, crops),
         );
       }),
       this.computeQueueCounts(trimmedSearch),
@@ -2604,10 +2627,16 @@ export class ListingsService {
 
   private async buildDTO(listing: Listing): Promise<ListingDTO> {
     const [refs, crops] = await Promise.all([
-      new MemberLookup(this.profiles).byUserIds([listing.ownerId]),
+      new MemberLookup(this.profiles).byUserIds(
+        presentActorIds([listing.ownerId]),
+      ),
       this.mediaCropService.getMany(listingPhotoKeys(listing)),
     ]);
-    return toListingDTO(listing, refs.get(listing.ownerId) ?? null, crops);
+    return toListingDTO(
+      listing,
+      actorFromLookup(refs, listing.ownerId) ?? null,
+      crops,
+    );
   }
 
   /** `QPL-<year>-<4-digit seq>` (e.g. `QPL-2026-0007`), matching the

@@ -131,8 +131,12 @@ export class MailerService {
    * send site, and putting it in the one place every message passes through
    * means a future bulk template cannot ship without it. A bulk send whose
    * recipient has no resolvable unsubscribe token is REFUSED rather than sent
-   * naked — the digest loop already catches and logs per subscriber, so a
-   * stray address is skipped instead of taking the whole list down.
+   * naked, so a caller looping a list has to catch per recipient and skip the
+   * stray address instead of shipping it an opt-out-less message.
+   *
+   * {@link BULK_TEMPLATE_KEYS} is currently EMPTY — QueerPulse sends members no
+   * bulk mail — so this branch never runs today. It stays as the standing
+   * guarantee for anything added to that set later.
    */
   async send<K extends MailTemplateKey>(
     to: string,

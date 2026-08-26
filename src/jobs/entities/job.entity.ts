@@ -152,9 +152,16 @@ export class Job {
   @Column({ type: 'varchar', nullable: true })
   link!: string | null;
 
+  // Nullable since `SetNullContentAuthorFksOnUserErasure1794610000000`: the FK
+  // to `users` was `ON DELETE CASCADE`, so erasing one member's account
+  // deleted the role along with every application members had already sent. It is now `ON DELETE SET NULL`, so
+  // NULL here means "the poster's account was erased" rather than "no such row".
+  // Read paths must render a removed-member placeholder instead of assuming
+  // a non-null id. See `ContentOwnerErasureService` for what happens to the
+  // row itself when the account goes.
   @Index('IDX_jobs_poster_id')
-  @Column({ type: 'uuid' })
-  posterId!: string;
+  @Column({ type: 'uuid', nullable: true })
+  posterId!: string | null;
 
   @Column({
     type: 'enum',

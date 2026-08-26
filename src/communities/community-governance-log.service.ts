@@ -1,10 +1,39 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, SelectQueryBuilder } from 'typeorm';
+import { DataSource, Repository, SelectQueryBuilder } from 'typeorm';
+import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
+import { Profile } from '../users/entities/profile.entity';
 import {
   CommunityGovernanceLog,
   GovernanceLogAction,
 } from './entities/community-governance-log.entity';
+
+/**
+ * The `mod_audit_logs.action` strings a community ban writes (TS-10).
+ *
+ * A community ban used to write nothing into `mod_audit_logs` at all, which is
+ * why it was unappealable: `POST /appeals` resolves the thing being appealed
+ * out of that table, so an act that leaves no row there cannot be argued with.
+ * These two rows are what make a community ban reachable by the appeal path.
+ *
+ * Both are report-less (`reportId: null`) and member-directed
+ * (`targetUserId` + `targetName`), the same shape
+ * `AdminMemberModerationService.citeMember` and
+ * `AdminMembersService.updateRole` already write.
+ */
+export const COMMUNITY_BAN_AUDIT_ACTION = 'community_ban_applied';
+export const COMMUNITY_BAN_LIFTED_AUDIT_ACTION = 'community_ban_lifted';
+
+/** One `mod_audit_logs` row for a community-level sanction. */
+export interface CommunityModAuditInput {
+  actorUserId: string;
+  action: string;
+  targetUserId: string;
+  reasonCode?: string | null;
+  note?: string | null;
+  /** e.g. `"7d"`, matching the `duration` a platform restrict/suspend writes. */
+  duration?: string | null;
+}
 
 export interface LogGovernanceActionInput {
   communityId: string;
@@ -38,9 +67,17 @@ export interface LogGovernanceActionInput {
  */
 @Injectable()
 export class CommunityGovernanceLogService {
+  private readonly logger = new Logger(CommunityGovernanceLogService.name);
+
   constructor(
     @InjectRepository(CommunityGovernanceLog)
     private readonly governanceLogs: Repository<CommunityGovernanceLog>,
+    // `mod_audit_logs` and `profiles` are reached through the shared
+    // `DataSource` rather than an injected repository, so this service needs no
+    // new `TypeOrmModule.forFeature` entry and `CommunitiesModule` needs no
+    // import of `ModerationModule`. Same reasoning `ReportSubjectResolverService`
+    // records for its own cross-module reads: the module graph stays as it is.
+    private readonly dataSource: DataSource,
   ) {}
 
   async log(input: LogGovernanceActionInput): Promise<void> {
@@ -58,6 +95,58 @@ export class CommunityGovernanceLogService {
         metadata: input.metadata ?? null,
       }),
     );
+  }
+
+  /**
+   * Mirror a community-level sanction into `mod_audit_logs`, the table
+   * `POST /appeals` resolves an appeal's target from.
+   *
+   * This is what makes a community ban appealable (TS-10). The community's own
+   * `community_governance_log` answers "what did this room's staff do"; it is
+   * not reachable by the appeal path, and duplicating the record into the
+   * platform audit table is the smallest change that gives a barred member
+   * somewhere to argue.
+   *
+   * `targetName` is a write-time snapshot of the member's display name, so the
+   * row still says who it is about after their account is erased (the FK is
+   * `ON DELETE SET NULL`) or after they change their name. Written directly
+   * rather than through `ModAuditService.writeAuditLog`, which carries no
+   * target-member parameter, exactly as
+   * `AdminMemberModerationService.citeMember` already does and documents.
+   *
+   * Best effort with its own try/catch, the contract every logging helper in
+   * this module follows: the sanction has already committed, and a failed
+   * audit write must never be reported to the moderator as a failed ban.
+   */
+  async logModerationAudit(input: CommunityModAuditInput): Promise<void> {
+    try {
+      const profiles = this.dataSource.getRepository(Profile);
+      const auditLogs = this.dataSource.getRepository(ModAuditLog);
+      const profile = await profiles.findOne({
+        where: { userId: input.targetUserId },
+        select: { firstName: true, lastName: true },
+      });
+      const targetName = profile
+        ? `${profile.firstName} ${profile.lastName}`.trim() || null
+        : null;
+
+      await auditLogs.save(
+        auditLogs.create({
+          reportId: null,
+          actorId: input.actorUserId,
+          action: input.action,
+          targetUserId: input.targetUserId,
+          targetName,
+          reasonCode: input.reasonCode ?? null,
+          note: input.note ?? null,
+          duration: input.duration ?? null,
+        }),
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Community sanction "${input.action}" against user ${input.targetUserId} committed, but the mod_audit_logs mirror could not be written: ${String(error)}.`,
+      );
+    }
   }
 
   /**

@@ -65,6 +65,18 @@ export class MagazinePitch {
   @Column({ type: 'uuid', nullable: true })
   submitterId!: string | null;
 
+  /**
+   * The reader story submission this pitch was commissioned FROM
+   * (`AdminStorySubmissionsService.decide` with a `commissioned` decision).
+   * Null for every pitch that arrived any other way. It is what turns a
+   * member's "submit a story" into a row the desk's pitch inbox can act on,
+   * and it keeps the provenance so the desk can open the full piece the member
+   * actually wrote rather than just the summary carried in `note`.
+   */
+  @Index('IDX_magazine_pitch_story_submission')
+  @Column({ type: 'uuid', nullable: true })
+  storySubmissionId!: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 }

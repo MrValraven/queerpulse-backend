@@ -6,7 +6,7 @@ import { GovernanceLogAction } from '../entities/community-governance-log.entity
  * Query for `GET /communities/:slug/governance-log`: offset-paginated, newest
  * first, optionally narrowed to one action. Deliberately the same two fields,
  * in the same shape, as the admin-side
- * `ListCommunityGovernanceLogQuery`
+ * `ListAdminCommunityGovernanceLogQuery`
  * (`src/admin-communities/dto/list-community-governance-log.query.ts`), so the
  * community-facing reader and the platform-staff reader are paged and filtered
  * identically. Kept as its own class in this module rather than imported from

@@ -200,9 +200,17 @@ export class Listing {
   @Column({ type: 'varchar' })
   slug!: string;
 
+  // Nullable since `SetNullContentAuthorFksOnUserErasure1794610000000`: the FK
+  // to `users` was `ON DELETE CASCADE`, so erasing one member's account
+  // deleted the directory entry for a real venue that has nothing to do
+  // with the member leaving. It is now `ON DELETE SET NULL`, so
+  // NULL here means "the listing is unclaimed, which the `listing_claims` flow can resolve" rather than "no such row".
+  // Read paths must render a removed-member placeholder instead of assuming
+  // a non-null id. See `ContentOwnerErasureService` for what happens to the
+  // row itself when the account goes.
   @Index('IDX_listings_owner_id')
-  @Column({ type: 'uuid' })
-  ownerId!: string;
+  @Column({ type: 'uuid', nullable: true })
+  ownerId!: string | null;
 
   // Filtered on nearly every directory read (`DirectoryService`'s
   // `status = live` gates) and the admin moderation queue
@@ -301,6 +309,13 @@ export class Listing {
    * step-free entrance" and "nobody has ever asked us" are different facts,
    * and a member planning their evening around a wheelchair needs to be able
    * to tell them apart.
+   *
+   * Searchable: the directory's `access=` filter tests containment
+   * (`accessibility_answers @> '{"step-free-entrance":"yes"}'`), served by the
+   * `jsonb_path_ops` GIN index `IDX_listings_accessibility_answers` (see
+   * `AddListingAccessibilityAnswersIndex1794710000000`). The index lives in
+   * that migration alone because `@Index` cannot express an index method.
+   * Only `yes` ever matches a filter; `unknown` is not a match.
    */
   @Column({ type: 'jsonb', default: () => "'{}'" })
   accessibilityAnswers!: ListingAccessibilityAnswerMap;

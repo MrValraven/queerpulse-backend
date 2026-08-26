@@ -283,8 +283,16 @@ export class ListingEnquiriesService {
     if (listing.ownerId === viewerUserId) {
       return { isReachable: false, reason: 'own_listing' };
     }
+    // NULL since `SetNullContentAuthorFksOnUserErasure1794610000000`: the
+    // owning account was erased and the entry stayed live. Same outcome the
+    // `!owner` branch below already gave for a row that had gone missing, now
+    // reachable without a query.
+    const ownerId = listing.ownerId;
+    if (ownerId === null) {
+      return { isReachable: false, reason: 'no_owner_account' };
+    }
     const owner = await this.users.findOne({
-      where: { id: listing.ownerId },
+      where: { id: ownerId },
       select: { id: true, isSystem: true, status: true },
     });
     // No row means the owning account was erased; a system account is the house

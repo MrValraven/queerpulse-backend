@@ -20,9 +20,11 @@ import { UserRole } from '../users/entities/user.entity';
 import { AuditFeedQuery } from './dto/audit-feed.query';
 import { AuditLogQuery } from './dto/audit-log.query';
 import { LiftSuspensionDto } from './dto/lift-suspension.dto';
+import { ListAppealsQuery } from './dto/list-appeals.query';
 import { ListModReportsQuery } from './dto/list-mod-reports.query';
 import { ModActionDto } from './dto/mod-action.dto';
 import { ModBulkActionDto } from './dto/mod-bulk-action.dto';
+import { ListRatificationsQuery, RatifyBanDto } from './dto/ratify-ban.dto';
 import { ReportAssignmentDto } from './dto/report-assignment.dto';
 import { ReviewAppealDto } from './dto/review-appeal.dto';
 import { ModerationService } from './moderation.service';
@@ -123,6 +125,11 @@ export class ModerationController {
   // This literal route MUST be declared before `reports/:id` below: both are
   // now @Patch, so with `:id` first a PATCH to `/mod/reports/bulk` would match
   // `reports/:id` with id="bulk" and fail the ParseUUIDPipe.
+  //
+  // TS-12: a bulk `ban` opens one ratification hold per MEMBER (not per
+  // report), and removes nobody until a second moderator confirms each one.
+  // That is the exact hole this closes: 100 reports used to be 100 permanent
+  // bans in one call, by one person.
   @Patch('reports/bulk')
   @ApiOperation({ summary: 'Apply one moderation action to many reports' })
   @ApiOkResponse({
@@ -148,6 +155,12 @@ export class ModerationController {
   // NOT loosen `GET /mod/reports*` or `PATCH /mod/reports/bulk` above —
   // those keep the class-level guard, so a community mod still cannot see or
   // bulk-act on the platform-wide queue.
+  //
+  // TS-12: a `ban` on this route no longer removes the account. It takes the
+  // content action immediately, suspends the member for the length of a
+  // ratification hold, and waits for a second, different moderator to confirm
+  // it on `PATCH /mod/ratifications/:id`. If nobody does, the hold lapses and
+  // the suspension lapses with it.
   @Patch('reports/:id')
   @Roles()
   @ApiOperation({ summary: 'Apply a moderation action to one report' })
@@ -155,9 +168,10 @@ export class ModerationController {
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({
     description:
-      'Requires a moderator or admin role — except `dismiss`, which a ' +
-      'community owner/mod may also apply to a report on their own ' +
-      "community's post or reply.",
+      'Requires a moderator or admin role, except `dismiss`, `remove_content` ' +
+      'and `escalate`, which a community owner/mod may also apply to a report ' +
+      "on their own community's post or reply. An emergency-severity report " +
+      '(outing/doxxing) accepts only `escalate` from them.',
   })
   @ApiConflictResponse({
     description:
@@ -223,13 +237,81 @@ export class ModerationController {
     );
   }
 
-  @Get('appeals')
-  @ApiOperation({ summary: 'List appeals awaiting review' })
-  @ApiOkResponse({ description: 'The appeals queue, newest first.' })
+  // TS-12. The permanent bans one moderator has asked for and no second
+  // moderator has confirmed yet. Declared before `ratifications/:id` so there
+  // is no route-order concern, and kept under the class-level
+  // `@Roles(Moderator, Admin)` guard: a hold names a member and carries the
+  // requesting moderator's internal reason, so it is staff-only in the same way
+  // the report queue is. A community owner/mod has no carve-out here, because
+  // a platform ban is never theirs to confirm.
+  @Get('ratifications')
+  @ApiOperation({
+    summary: 'List permanent bans waiting on a second moderator',
+  })
+  @ApiOkResponse({
+    description:
+      'The holds, soonest to lapse first, each carrying the requesting moderator and their reason.',
+  })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
   @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
-  listAppeals() {
-    return this.moderationService.listAppeals();
+  listRatifications(@Query() query: ListRatificationsQuery) {
+    return this.moderationService.listRatifications(query.status);
+  }
+
+  /**
+   * PATCH /mod/ratifications/:id — the second signature Article VIII promises,
+   * or the refusal.
+   *
+   * The moderator who ASKED for the ban cannot decide it, and neither can an
+   * admin who asked: the guard compares against `requested_by`, with no role
+   * carve-out. See `BanRatificationService` for why an admin exemption would
+   * put the hole exactly where the risk is.
+   */
+  @Patch('ratifications/:id')
+  @ApiOperation({ summary: "Confirm or refuse another moderator's ban" })
+  @ApiOkResponse({ description: 'The decided hold.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({
+    description:
+      'Requires a moderator or admin role, and you may not confirm a ban you asked for yourself.',
+  })
+  @ApiNotFoundResponse({ description: 'No such hold.' })
+  @ApiConflictResponse({
+    description: 'The hold has already been decided, or it has lapsed.',
+  })
+  decideRatification(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: RatifyBanDto,
+  ) {
+    return this.moderationService.decideRatification(
+      id,
+      user.userId,
+      user.role,
+      dto,
+    );
+  }
+
+  /**
+   * GET /mod/appeals — the appeals queue, split into `awaiting` and `decided`
+   * tabs (TS-11).
+   *
+   * The awaiting tab is ordered by §05's 7-day decision deadline, soonest
+   * first, so the appeal the platform is closest to being late on is the one at
+   * the top. It used to be one unpaginated list of everything, newest first,
+   * with decided appeals mixed in — which put the most urgent appeal at the
+   * BOTTOM.
+   */
+  @Get('appeals')
+  @ApiOperation({ summary: 'List appeals, awaiting or decided' })
+  @ApiOkResponse({
+    description:
+      'A page of appeals: awaiting ones soonest-due first, decided ones newest first, with the awaiting/decided/overdue totals alongside.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
+  listAppeals(@Query() query: ListAppealsQuery) {
+    return this.moderationService.listAppeals(query);
   }
 
   @Patch('appeals/:id')

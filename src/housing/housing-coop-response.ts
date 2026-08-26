@@ -8,10 +8,6 @@ import {
   CoopJoinRequest,
   JoinRequestStatus,
 } from './entities/coop-join-request.entity';
-import {
-  CoopRelocationRequest,
-  RelocationRequestStatus,
-} from './entities/coop-relocation-request.entity';
 
 // Mirrors the frontend `HousingCoopDTO` (economy/api/housingCoop.api.ts) field
 // for field. Deliberately drops the entity's `createdAt`/`updatedAt` and the
@@ -94,36 +90,6 @@ export function toAdminJoinRequestDTO(
     householdSize: request.householdSize,
     note: request.note,
     status: request.status,
-    createdAt: request.createdAt,
-    coop: request.coop
-      ? { slug: request.coop.slug, name: request.coop.name }
-      : null,
-  };
-}
-
-// A relocation / conflict-resolution request as an operator/steward triages it.
-// Exposes the situation and logged outcome, never the raw FK columns.
-export interface AdminRelocationRequestDTO {
-  id: string;
-  name: string;
-  situation: string;
-  status: RelocationRequestStatus;
-  outcome: string | null;
-  resolvedAt: Date | null;
-  createdAt: Date;
-  coop: CoopReferenceDTO | null;
-}
-
-export function toAdminRelocationRequestDTO(
-  request: CoopRelocationRequest,
-): AdminRelocationRequestDTO {
-  return {
-    id: request.id,
-    name: request.name,
-    situation: request.situation,
-    status: request.status,
-    outcome: request.outcome,
-    resolvedAt: request.resolvedAt,
     createdAt: request.createdAt,
     coop: request.coop
       ? { slug: request.coop.slug, name: request.coop.name }

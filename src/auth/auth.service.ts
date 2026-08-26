@@ -12,6 +12,7 @@ import { AccountReauthToken } from '../account/entities/account-reauth-token.ent
 import { User, UserStatus } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { UsersService } from '../users/users.service';
+import { CURRENT_TERMS_VERSION } from '../consent/policy-versions';
 import { USER_PROMOTED, UserPromotedEvent } from '../users/user.events';
 import {
   INVITE_ACCEPTED,
@@ -36,6 +37,19 @@ import {
 } from '../account/entities/deletion-request.entity';
 import { SignupRejectedError } from './errors/signup-rejected.error';
 import { RefreshToken } from './entities/refresh-token.entity';
+import { deviceLabelFromUserAgent } from './device-label';
+import {
+  SECURITY_NEW_SIGN_IN,
+  SecurityNewSignInEvent,
+} from './security.events';
+import {
+  SESSION_REFRESHED,
+  SessionRefreshedEvent,
+} from './session-activity.events';
+import {
+  DEFAULT_LOGIN_ALERTS_ENABLED,
+  MemberPreferences,
+} from '../preferences/entities/member-preferences.entity';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import {
   Notification,
@@ -73,6 +87,20 @@ export interface TokenPair {
 interface SessionIdentity {
   familyId: string;
   sessionStartedAt: Date;
+}
+
+/**
+ * What the refresh-token history says about the device presenting a sign-in.
+ *
+ * Two booleans rather than one because "I do not recognise this device" and "I
+ * have nothing to recognise it against" are different answers, and only the
+ * first is worth waking somebody up for. See `AuthService.recogniseDevice`.
+ */
+interface DeviceRecognition {
+  /** At least one earlier row for this member carries a device label. */
+  hasDeviceHistory: boolean;
+  /** An earlier row carries this exact label. */
+  isKnownDevice: boolean;
 }
 
 /**
@@ -118,6 +146,13 @@ export class AuthService {
     private readonly deactivations: Repository<AccountDeactivation>,
     @InjectRepository(DeletionRequest)
     private readonly deletionRequests: Repository<DeletionRequest>,
+    // Read-only, and for exactly one column: `login_alerts_enabled`, consulted
+    // before a new-device sign-in alert is emitted. Registered as a repository
+    // rather than injecting `PreferencesService` for the reason the entities
+    // above are — `PreferencesModule` would be a new edge out of AuthModule,
+    // which most of the platform already imports.
+    @InjectRepository(MemberPreferences)
+    private readonly memberPreferences: Repository<MemberPreferences>,
     // Read-side only (registered on AuthModule, not via NotificationsModule) —
     // reads the member's latest moderation-outcome reason for `suspensionInfoFor`.
     @InjectRepository(Notification)
@@ -287,7 +322,11 @@ export class AuthService {
             status: UserStatus.Active,
             invitedBy: inviterId,
             ageAttestedAt: attestedAt,
-            termsVersion: attestation.termsVersion ?? null,
+            // The revision the client actually showed them wins; the
+            // server's own current revision is the fallback so a signup can
+            // never land with a NULL Terms version just because the OAuth
+            // state lost the query param (ID-14).
+            termsVersion: attestation.termsVersion ?? CURRENT_TERMS_VERSION,
           });
         } catch (err) {
           // Backstop for the check above losing a race. `createGoogleUser`
@@ -448,12 +487,115 @@ export class AuthService {
    * member's device list, live, until it expired 30 days later.
    */
   async issueTokens(user: User, userAgent?: string): Promise<TokenPair> {
+    const session: SessionIdentity = {
+      familyId: randomUUID(),
+      sessionStartedAt: new Date(),
+    };
+    const deviceLabel = deviceLabelFromUserAgent(userAgent);
+    // Asked BEFORE the new row is written, or the row we are about to write
+    // would itself count as prior history and every device would look familiar.
+    const recognition = await this.recogniseDevice(user.id, deviceLabel);
     const { accessToken, refreshToken } = await this.issueTokensWithRow(
       user,
-      { familyId: randomUUID(), sessionStartedAt: new Date() },
+      session,
       userAgent,
     );
+    await this.announceNewDeviceSignIn(
+      user.id,
+      recognition,
+      deviceLabel,
+      session,
+    );
     return { accessToken, refreshToken };
+  }
+
+  /**
+   * Does this member's refresh-token history already contain this device?
+   *
+   * Deliberately reads EVERY row for the member, revoked and expired included:
+   * signing out and back in on the same laptop is not a new device, and
+   * `AuthController.googleCallback` revokes this browser's previous session a
+   * moment before minting the new one, so the row that proves the device is
+   * familiar is usually one that was revoked seconds ago.
+   *
+   * One caveat, stated rather than hidden: `AuthMaintenanceService` purges rows
+   * one refresh lifetime after they die, so a device left unused for months
+   * eventually falls out of history and reads as new. Being told about a
+   * long-dormant device signing in is a reasonable thing to be told about.
+   */
+  private async recogniseDevice(
+    userId: string,
+    deviceLabel: string,
+  ): Promise<DeviceRecognition> {
+    const rows = await this.refreshTokens
+      .createQueryBuilder('token')
+      .select('token.deviceLabel', 'deviceLabel')
+      .distinct(true)
+      .where('token.userId = :userId', { userId })
+      .getRawMany<{ deviceLabel: string | null }>();
+    const knownLabels = rows
+      .map((row) => row.deviceLabel)
+      .filter((label): label is string => typeof label === 'string');
+    return {
+      // Rows written before `device_label` existed carry NULL. A member whose
+      // whole history predates the column has no device history we can compare
+      // against, and alerting them about their own everyday laptop the first
+      // time they sign in after the deploy would teach exactly the wrong
+      // reflex. They get no alert until the first labelled row exists, which is
+      // the sign-in happening right now.
+      hasDeviceHistory: knownLabels.length > 0,
+      isKnownDevice: knownLabels.includes(deviceLabel),
+    };
+  }
+
+  /**
+   * Tell the member their account was just signed in to from a device they have
+   * not used before.
+   *
+   * BEST-EFFORT AND SILENT ON FAILURE. This runs inside the sign-in request,
+   * and nothing here may stop somebody logging in: a preferences read that
+   * times out must cost a notification, never a session.
+   *
+   * The event carries a coarse device label and a timestamp, and nothing else.
+   * `NotificationsListener` turns it into the bell row; the payload is
+   * deliberately thin enough that its push preview cannot out anyone.
+   */
+  private async announceNewDeviceSignIn(
+    userId: string,
+    recognition: DeviceRecognition,
+    deviceLabel: string,
+    session: SessionIdentity,
+  ): Promise<void> {
+    try {
+      if (recognition.isKnownDevice || !recognition.hasDeviceHistory) {
+        return;
+      }
+      if (!(await this.loginAlertsEnabled(userId))) {
+        return;
+      }
+      this.eventEmitter.emit(SECURITY_NEW_SIGN_IN, {
+        userId,
+        deviceLabel,
+        signedInAt: session.sessionStartedAt,
+        familyId: session.familyId,
+      } satisfies SecurityNewSignInEvent);
+      this.logger.log(
+        `New-device sign-in alert emitted: userId=${userId} familyId=${session.familyId}`,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `New-device sign-in alert failed for userId=${userId}: ${String(error)}`,
+      );
+    }
+  }
+
+  /** The member's own switch, defaulting ON when they have no preferences row. */
+  private async loginAlertsEnabled(userId: string): Promise<boolean> {
+    const row = await this.memberPreferences.findOne({
+      where: { userId },
+      select: { userId: true, loginAlertsEnabled: true },
+    });
+    return row?.loginAlertsEnabled ?? DEFAULT_LOGIN_ALERTS_ENABLED;
   }
 
   /**
@@ -668,10 +810,28 @@ export class AuthService {
       throw new UnauthorizedException('Refresh token reuse detected');
     }
 
+    this.announceSessionRefreshed(row.userId);
     return {
       accessToken: outcome.accessToken,
       refreshToken: outcome.refreshToken,
     };
+  }
+
+  /**
+   * Announce a successful refresh so the profiles module can coarsen it into
+   * the member's "recently active" month (see `session-activity.events.ts`).
+   *
+   * Fire-and-forget by design: the listener owns its own once-a-day guard and
+   * swallows its own failures, and a refresh must never fail because a
+   * directory ornament could not be written. Emitted from BOTH refresh
+   * outcomes, the ordinary rotation and the grace-window replacement, since
+   * both mean the same thing about the member: they are here right now.
+   */
+  private announceSessionRefreshed(userId: string): void {
+    this.eventEmitter.emit(SESSION_REFRESHED, {
+      userId,
+      at: new Date(),
+    } satisfies SessionRefreshedEvent);
   }
 
   /**
@@ -727,6 +887,7 @@ export class AuthService {
       { familyId: row.familyId, sessionStartedAt: row.sessionStartedAt },
       userAgent,
     );
+    this.announceSessionRefreshed(row.userId);
     return { accessToken, refreshToken };
   }
 
@@ -812,6 +973,14 @@ export class AuthService {
       tokenHash: this.hashToken(refreshToken),
       expiresAt: new Date(decoded.exp * 1000),
       userAgent: userAgent ?? null,
+      // Derived here rather than passed in, so every row that carries a UA
+      // carries the matching label — a rotation cannot leave a family half
+      // labelled, and `recogniseDevice` never has to fall back to re-parsing.
+      deviceLabel: deviceLabelFromUserAgent(userAgent),
+      // Stamped on every mint, so the newest row in a family always answers
+      // "when was this session last seen?" without the caller having to know
+      // that rotation is what mints rows.
+      lastSeenAt: new Date(),
     });
     return repo.save(row);
   }

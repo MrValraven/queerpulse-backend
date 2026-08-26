@@ -25,6 +25,7 @@ import { CommunityGovernanceHistoryController } from './community-governance-his
 import { CommunityGovernanceHistoryService } from './community-governance-history.service';
 import { CommunityInvitesController } from './community-invites.controller';
 import { CommunityInvitesService } from './community-invites.service';
+import { CommunityOwnerInactivityService } from './community-owner-inactivity.service';
 import { CommunityOwnerReviewController } from './community-owner-review.controller';
 import { CommunityOwnerReviewService } from './community-owner-review.service';
 import { CommunityResourcesController } from './community-resources.controller';
@@ -86,8 +87,10 @@ import { MeCommunitiesController } from './me-communities.controller';
       // The owner-editable link shelf on the About tab, which until now could
       // only ever show demo fixtures.
       CommunityResource,
-      // Moderators jointly flagging an unreachable owner. Stamps the
-      // community's existing `needsOwnerReviewAt` for the admin surface.
+      // Any roster member flagging an unreachable owner (GOV-02; it was
+      // moderators only, which left a room with no moderator no route at
+      // all). Stamps the community's existing `needsOwnerReviewAt` for the
+      // admin surface.
       CommunityOwnerReviewRequest,
       Profile,
       // Read-only, for the auto-freeze listener's open-report count. Same
@@ -199,6 +202,16 @@ import { MeCommunitiesController } from './me-communities.controller';
     // `AppModule`, so a `@Cron` provider only needs to appear here (same
     // precedent as `HousingListingExpirySweeperService`).
     CommunityActivityCounterService,
+    // GOV-02: daily `@Cron` that stamps `needs_owner_review_at` on any
+    // community whose owner's sessions have gone quiet past the inactivity
+    // cutoff, so an abandoned room reaches the admin queue even when nobody
+    // in it thinks to report it. Registered as a plain provider for the same
+    // reason as the counter above: `ScheduleModule.forRoot()` is already
+    // registered once app-wide in `AppModule` and must not be imported here.
+    // It reads `refresh_tokens` through a raw query on the `Community`
+    // repository's connection, so it needs no extra `forFeature` entry and
+    // pulls in no dependency on `AuthModule`.
+    CommunityOwnerInactivityService,
     CommunityResourcesService,
     CommunityInvitesService,
     CommunityBansService,

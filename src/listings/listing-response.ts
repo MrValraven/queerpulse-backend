@@ -1,7 +1,8 @@
 import { toImageUrl } from '../common/image-url';
+import { listingCityOrDefault } from './listing-city';
 import { ListingPublicQuestionDTO } from './dto/listing-public-question.dto';
 import { MemberRef } from '../common/member-ref';
-import { Event } from '../events/entities/event.entity';
+import { Event, EventVenueConfirmation } from '../events/entities/event.entity';
 import type { CropRect } from '../media-crops/crop-rect';
 import { cropFor } from '../media-crops/crop-response';
 import {
@@ -21,6 +22,7 @@ import {
   ListingWitLine,
   SafeSpacePromise,
   SafeSpaceRemoval,
+  SafeSpaceStatus,
   SafeSpaceVouch,
 } from './entities/listing.entity';
 import {
@@ -31,6 +33,10 @@ import {
   galleryImageReferences,
   legacySlotsFromGallery,
 } from './listing-photo-gallery';
+// Pure date arithmetic over the published safe-space promises. A constants +
+// functions module with no Nest provider and no entity of its own, so importing
+// it here couples the two features by policy only, never by module graph.
+import { isDueForReReview } from '../safe-space-nominations/safe-space-policy';
 
 /**
  * One photo of a listing's ordered gallery as every response carries it.
@@ -611,6 +617,49 @@ function ownerIdentity(listing: Listing): OwnerIdentityView {
 }
 
 /**
+ * How many days ahead of "today" a directory CARD carries dated hours
+ * exceptions for. The card only needs enough to answer "is it open right now,
+ * and is it about to close"; the complete list (capped at
+ * `MAX_HOURS_EXCEPTIONS`, which is 60) stays on the detail read.
+ *
+ * The window also reaches one day BACK, for two reasons: a venue that opens at
+ * 22:00 and closes at 03:00 is still inside yesterday's interval at 01:00, and
+ * the venue's own calendar day can sit up to fourteen hours either side of UTC.
+ * Both cases need yesterday's entry to be present.
+ */
+export const DIRECTORY_CARD_HOURS_EXCEPTION_DAYS_AHEAD = 7;
+
+/** `YYYY-MM-DD` for an instant, offset by whole days, in UTC. */
+function utcCalendarDate(instant: Date, dayOffset: number): string {
+  const shifted = new Date(instant.getTime() + dayOffset * 86_400_000);
+  return shifted.toISOString().slice(0, 10);
+}
+
+/**
+ * The near-term slice of a listing's dated hours exceptions, for the card.
+ *
+ * A listing may store up to `MAX_HOURS_EXCEPTIONS` (60) of these. Shipping all
+ * sixty on every card of a paginated grid would put kilobytes per row on the
+ * wire to answer a question that only ever consults today's date, so the card
+ * carries the days around now and the detail carries the rest.
+ *
+ * Dates are `YYYY-MM-DD` strings, which sort lexicographically in calendar
+ * order, so a plain string comparison is the right range test here.
+ */
+function nearTermHoursExceptions(
+  listing: Listing,
+  now: Date,
+): ListingHoursException[] {
+  const exceptions = listing.hoursExceptions ?? [];
+  if (!exceptions.length) return [];
+  const from = utcCalendarDate(now, -1);
+  const to = utcCalendarDate(now, DIRECTORY_CARD_HOURS_EXCEPTION_DAYS_AHEAD);
+  return exceptions.filter(
+    (exception) => exception.date >= from && exception.date <= to,
+  );
+}
+
+/**
  * Compact card for the public `/local/directory` grid (`GET /directory`).
  * `tint`/`av` are presentation primitives (colour + initials); the frontend
  * resolves the category label and badge copy. `memberFirst` is non-null only
@@ -645,6 +694,13 @@ export interface DirectoryCardDTO {
    * — no separate detail mapping needed. */
   queerOwnedVerified: boolean;
   memberFirst: string | null;
+  /** The owner's real profile photo, so the card's "run by <first>" line shows
+   * the member's face rather than initials over a tint. Resolved by
+   * `DirectoryService` from `ownerId` in ONE batched query per page, and gated
+   * exactly like `memberFirst`: `null` for an unlinked listing, for `anon`/
+   * `role` visibility, and for a member who turned their photo off
+   * (`photoVisible`). Mirrors `DirectoryDetailDTO`'s `owner.avatarUrl`. */
+  memberAvatarUrl: string | null;
   /** Online-only business (no physical location) — the card shows an "Online"
    *  badge instead of a neighbourhood and never pins the map. */
   online: boolean;
@@ -654,8 +710,38 @@ export interface DirectoryCardDTO {
   // Safe-space badge primitives for the card. Deliberately lean — detail-only
   // fields (promises/vouches/removal/verifier/re-verified-at) are NOT surfaced
   // here; see `SafeSpaceDetailDTO`/`RemovedSpaceDetailDTO` for those.
-  safeSpaceStatus: 'none' | 'verified' | 'removed';
+  /**
+   * The badge as it CURRENTLY speaks for the place, which is a wider set than
+   * the `listings.safe_space_status` column holds.
+   *
+   * `suspended` is the fourth value and the reason this field is derived
+   * rather than copied. Three member flags (or a moderator) pause a badge
+   * immediately, and while that review is open the column still reads
+   * `verified` on purpose: the grant happened and is not being rewritten (see
+   * `SafeSpaceBadgeSuspension`). Serialising that column straight onto a card
+   * would render "verified" for a space the platform has just stopped
+   * vouching for, which is the exact failure the whole badge mechanism exists
+   * to prevent. `DirectoryService` resolves the open suspensions for a whole
+   * page in ONE query and passes the answer in.
+   *
+   * A reader that only knows the old three values fails safe: `suspended`
+   * matches neither `verified` nor `removed`, so the badge simply does not
+   * render rather than rendering a claim that is no longer true.
+   */
+  safeSpaceStatus: 'none' | 'verified' | 'suspended' | 'removed';
   safeSpaceTier: number | null;
+  /**
+   * True when a badge that is still speaking has been doing so for more than a
+   * year and is due its annual re-review (`SAFE_SPACE_RE_REVIEW_INTERVAL_DAYS`).
+   *
+   * NOT a suspension: an overdue re-review does not take a badge down, so
+   * `safeSpaceStatus` stays `verified` and the card still shows it. What this
+   * carries is the age of the claim, so a surface can say when it was last
+   * checked instead of implying it was checked this morning. Derived from the
+   * row already in hand, so it costs no query. Always `false` for a badge that
+   * is suspended, absent or removed.
+   */
+  isBadgeDueForReReview: boolean;
   /** The business's own trading state, so a card can badge "Temporarily
    * closed" or "Moved" without a second request. A `permanently_closed`
    * listing never reaches a card list at all (`DirectoryService` filters it
@@ -667,6 +753,78 @@ export interface DirectoryCardDTO {
    * is when the card falls back to its `tint` + `av` initials. Carries the
    * photo's own `alt` so the grid image is never unlabelled. */
   coverPhoto: ListingGalleryPhotoView | null;
+  /**
+   * IANA timezone the venue's `hours` are expressed in. `null` ⇒ the client
+   * defaults to `Europe/Lisbon`, the only city this directory covers.
+   *
+   * Present on the CARD (not only the detail) because "is it open?" is the
+   * first question anyone asks a local directory, and answering it in the
+   * VENUE's timezone rather than the reader's is the whole difference between
+   * a correct answer and a plausible one.
+   */
+  timezone: string | null;
+  /**
+   * The weekly opening-hours grid, keyed by weekday id (`Mon`..`Sun`). `{}` for
+   * a listing whose owner never filled hours in, which the client renders as
+   * "hours unknown" rather than as closed.
+   *
+   * Deliberately the RAW grid rather than a server-computed `openState` string.
+   * This response is CDN-cacheable for 60 seconds and the client renders it for
+   * far longer than that, so a precomputed "open now" / "closing soon" would be
+   * stale the moment it was stored: "closing soon" is true for a matter of
+   * minutes, and one cached copy is handed to every reader of that minute and
+   * the next. The raw grid is evaluated against the reader's live clock, so it
+   * cannot go stale in cache, and it is also what lets an "open now" chip
+   * filter the loaded grid with no second request.
+   */
+  hours: Record<string, ListingDayHours>;
+  /**
+   * Dated overrides of `hours` (a public holiday, an early close), for the days
+   * around now only — see `DIRECTORY_CARD_HOURS_EXCEPTION_DAYS_AHEAD`. An entry
+   * whose `date` matches the venue's local today beats that weekday's grid
+   * entry outright.
+   *
+   * `DirectoryDetailDTO` re-declares this field and fills it with the COMPLETE
+   * list; the narrowing is a card-only payload measure.
+   */
+  hoursExceptions: ListingHoursException[];
+  /**
+   * The venue's answers to the six canonical accessibility questions
+   * (`LISTING_ACCESSIBILITY_QUESTION_SLUGS`), always a complete map.
+   *
+   * All three values reach the card. `unknown` means nobody has asked the venue
+   * and it is a different fact from `no`: it must never be rendered as a met
+   * need, and it never matches the `access=` filter. Someone planning an
+   * evening around a wheelchair needs "we have no step-free entrance" and
+   * "nobody has told us" to look different, on the card as much as on the page.
+   *
+   * The free-text `accessibilityNote` is deliberately NOT here: it runs to 500
+   * characters and belongs on the detail page (`DirectoryDetailDTO.accessibility`).
+   */
+  accessibilityAnswers: ListingAccessibilityAnswerMap;
+}
+
+/**
+ * The single place a `listings.safe_space_status` column value becomes the
+ * badge state a public card serialises.
+ *
+ * The whole rule is one line: a granted badge with an open suspension against
+ * it reads `suspended`, never `verified`. It lives in a named function rather
+ * than inline so every card mapper, list filter and count in this file quotes
+ * the SAME rule, and so a future read path cannot accidentally re-introduce
+ * the raw column.
+ */
+export function directorySafeSpaceStatus(
+  listing: Pick<Listing, 'safeSpaceStatus'>,
+  isBadgeSuspended: boolean,
+): DirectoryCardDTO['safeSpaceStatus'] {
+  if (
+    isBadgeSuspended &&
+    listing.safeSpaceStatus === SafeSpaceStatus.Verified
+  ) {
+    return 'suspended';
+  }
+  return listing.safeSpaceStatus;
 }
 
 export function toDirectoryCard(
@@ -676,8 +834,24 @@ export function toDirectoryCard(
   // stays a one-argument call. NOTE: never pass this mapper straight to
   // `Array.prototype.map` — the index would arrive here as the crop Map.
   crops: Map<string, CropRect> = new Map(),
+  // "Now", only ever used to pick the near-term slice of `hoursExceptions`.
+  // A parameter rather than a bare `new Date()` so a spec can pin the window.
+  now: Date = new Date(),
+  // The owner's public profile photo, already resolved (and `photoVisible`-
+  // filtered) by the caller — `DirectoryService` batches ONE profile query per
+  // page rather than one per card. Redaction still happens HERE, against the
+  // owner's chosen visibility, so no caller can leak a face this DTO's own
+  // `memberFirst` would have withheld.
+  ownerAvatarUrl: string | null = null,
+  // Whether an OPEN badge suspension stands against this listing, resolved by
+  // the caller for the whole page in one query (see
+  // `DirectoryService.suspendedBadgeListingIds`). A parameter rather than a
+  // lookup here so this mapper stays synchronous and never fans out per card.
+  // Defaulted to `false`, which is the honest default: no suspension known.
+  isBadgeSuspended = false,
 ): DirectoryCardDTO {
   const owner = ownerIdentity(listing);
+  const safeSpaceStatus = directorySafeSpaceStatus(listing, isBadgeSuspended);
   return {
     id: listing.id,
     slug: listing.slug,
@@ -699,13 +873,30 @@ export function toDirectoryCard(
     // The "run by <first>" line names the owner, so it follows their chosen
     // visibility — null for `anon`/`role` (where `owner.first` is blank).
     memberFirst: listing.linkToProfile ? owner.first || null : null,
+    // The photo names the owner just as plainly as the first name does, so it
+    // follows the same redaction: `inQueerPulse` is already false for `anon`
+    // and `role`, and for a listing that was never linked to a profile.
+    memberAvatarUrl: owner.inQueerPulse ? ownerAvatarUrl : null,
     online: listing.online ?? false,
     latitude: listing.latitude ?? null,
     longitude: listing.longitude ?? null,
-    safeSpaceStatus: listing.safeSpaceStatus,
+    safeSpaceStatus,
     safeSpaceTier: listing.safeSpaceTier ?? null,
+    isBadgeDueForReReview:
+      safeSpaceStatus === 'verified' &&
+      isDueForReReview(listing.safeSpaceReVerifiedAt ?? null, now),
     operatingState: operatingStateView(listing),
     coverPhoto: toCoverPhoto(listing, crops),
+    // Empty column reads as "unset", same `|| null` idiom the detail uses; the
+    // client then defaults to Europe/Lisbon.
+    timezone: listing.timezone || null,
+    hours: listing.hours ?? {},
+    hoursExceptions: nearTermHoursExceptions(listing, now),
+    // Normalized up to the full vocabulary, so a row written before a question
+    // existed still answers it — as `unknown`, which is the honest answer.
+    accessibilityAnswers: normalizeAccessibilityAnswers(
+      listing.accessibilityAnswers,
+    ),
   };
 }
 
@@ -779,6 +970,18 @@ export interface UpcomingEventDTO {
   slug: string;
   startAt: string;
   title: string;
+  /**
+   * Whether this venue's owner has agreed to carry this gathering (LOC-16).
+   *
+   * Always `true` in the anonymous variant of the detail response: that
+   * variant is CDN-cached and search-indexable, so it carries confirmed
+   * attachments only. A signed-in member also sees pending ones, and this flag
+   * is what lets the card say a member listed it and the venue has not
+   * confirmed it, instead of presenting one member's claim as the business's
+   * own programme. See `DirectoryService.getDirectoryBySlug` for the full
+   * reasoning behind the split.
+   */
+  venueConfirmed: boolean;
 }
 
 export function toUpcomingEvent(event: Event): UpcomingEventDTO {
@@ -787,6 +990,8 @@ export function toUpcomingEvent(event: Event): UpcomingEventDTO {
     slug: event.slug,
     startAt: event.startAt.toISOString(),
     title: event.title,
+    venueConfirmed:
+      event.venueConfirmation === EventVenueConfirmation.Confirmed,
   };
 }
 
@@ -1079,12 +1284,25 @@ export function toDirectoryDetail(
    * mapped by `DirectoryService`. Defaulted to `[]` so the existing callers and
    * specs that do not pass it keep compiling and rendering an empty block. */
   questions: ListingPublicQuestionDTO[] = [],
+  /** Whether an open badge suspension stands against this listing. Flows
+   * straight into the inherited card fields, so the detail page and the grid
+   * card can never disagree about whether the badge currently speaks. */
+  isBadgeSuspended = false,
 ): DirectoryDetailDTO {
   const tint = tintForSlug(listing.slug);
   const galleryPhotos = toGalleryView(listing, crops);
   const legacyPhotos = legacyPhotoSets(listing);
   return {
-    ...toDirectoryCard(listing, crops),
+    // `undefined` for `now` keeps the mapper's own default (this read has no
+    // pinned clock); the owner photo the detail resolved is the same one the
+    // card field carries, so the two never disagree on one page.
+    ...toDirectoryCard(
+      listing,
+      crops,
+      undefined,
+      ownerAvatarUrl,
+      isBadgeSuspended,
+    ),
     ref: listing.ref,
     tagline: listing.tagline,
     // Empty text columns read as "unset" (frontend then defaults to Lisbon /
@@ -1261,6 +1479,21 @@ export function mapSafeSpaceCategory(
 }
 
 export interface SafeSpaceCardDTO {
+  /**
+   * The discriminant of `AnySafeSpaceDetailDTO`, against
+   * `RemovedSpaceCardDTO`'s `'removed'`. Deliberately NOT widened to carry
+   * `'suspended'`: a client picks its layout off this field, and a third value
+   * would drop a suspended space into the removed-space branch, which says
+   * "the badge was taken away" when the platform means "we are looking into
+   * it". Those are different acts with different consequences for a venue, and
+   * confusing them is a worse error than the one being fixed.
+   *
+   * Read `isBadgeSuspended` below for whether the badge currently speaks. The
+   * safe-spaces LIST never carries a suspended card at all
+   * (`DirectoryService.listSafeSpaces` excludes them from `verified` and from
+   * `stats.verified`), so the only shape that can arrive with
+   * `isBadgeSuspended: true` is the DETAIL, where there is room to say why.
+   */
   status: 'verified';
   slug: string;
   cat: SafeSpaceCategory;
@@ -1272,6 +1505,21 @@ export interface SafeSpaceCardDTO {
   rating: string;
   reviews: number;
   tier: number | null;
+  /**
+   * True while an open review stands against this badge: three members flagged
+   * the space, or a moderator paused it directly. The grant itself is
+   * untouched and comes back when the review closes.
+   *
+   * A surface that renders a badge MUST read this field. A space carrying
+   * `isBadgeSuspended: true` has to read as under review, never as verified.
+   * Carries no flag count and names no flagger, for the reason
+   * `SafeSpaceBadgeStateResponse` sets out: a public tally would turn a safety
+   * mechanism into a pillory and make flagging unsafe for the person doing it.
+   */
+  isBadgeSuspended: boolean;
+  /** The badge is still speaking, and has been for more than a year, so it is
+   * due its annual re-review. Not a suspension: the badge still shows. */
+  isBadgeDueForReReview: boolean;
   /** The business's own trading state, so a safe-space card can badge a venue
    * that is shut this month. `permanently_closed` never reaches this list. */
   operatingState: OperatingStateView;
@@ -1332,6 +1580,12 @@ function safeSpaceTypeLabel(cat: SafeSpaceCategory): string {
 export function toSafeSpaceCard(
   listing: Listing,
   reviews: ListingReview[],
+  // Resolved by the caller for the whole page in ONE query (see
+  // `DirectoryService.suspendedBadgeListingIds`), never looked up here.
+  isBadgeSuspended = false,
+  // "Now", only for the annual-re-review arithmetic. A parameter so a spec can
+  // pin the clock.
+  now: Date = new Date(),
 ): SafeSpaceCardDTO {
   const cat = mapSafeSpaceCategory(listing.cats, listing.tags);
   const rating = ratingFromReviews(reviews);
@@ -1347,6 +1601,10 @@ export function toSafeSpaceCard(
     rating: rating.score,
     reviews: rating.count,
     tier: listing.safeSpaceTier,
+    isBadgeSuspended,
+    isBadgeDueForReReview:
+      !isBadgeSuspended &&
+      isDueForReReview(listing.safeSpaceReVerifiedAt ?? null, now),
     operatingState: operatingStateView(listing),
   };
 }
@@ -1374,8 +1632,13 @@ export function toSafeSpaceDetail(
   /** Normalized member-written vouches (raw `SafeSpaceVouch` shape), merged
    * AFTER the curated jsonb vouches so both surface on the hub detail page. */
   memberVouches: SafeSpaceVouch[] = [],
+  /** Whether an open badge suspension stands against this space, resolved by
+   * `DirectoryService` in the same read. The detail is the ONE safe-space
+   * shape that can carry `true`: the list excludes suspended spaces outright,
+   * and this page is where there is room to say a review is open. */
+  isBadgeSuspended = false,
 ): SafeSpaceDetailDTO {
-  const card = toSafeSpaceCard(listing, reviews);
+  const card = toSafeSpaceCard(listing, reviews, isBadgeSuspended);
   const glance: { label: string; value: string; accent?: boolean }[] = [
     { label: 'Type', value: card.typeLabel },
     { label: 'Neighbourhood', value: listing.hood, accent: true },
@@ -1389,7 +1652,13 @@ export function toSafeSpaceDetail(
   }
   return {
     ...card,
-    eyebrow: `${card.typeLabel} · ${listing.hood} · ${listing.city || 'Lisbon'}`,
+    // No `|| 'Lisbon'` fallback here any more (LOC-15). It papered over an
+    // empty `city` column that the write path now fills, so the fallback made
+    // the rendered string look right while anything QUERYING the column saw
+    // nothing. A legacy row written before that fix still resolves, via
+    // `listingCityOrDefault`, which says so in one place instead of at each
+    // render site.
+    eyebrow: `${card.typeLabel} · ${listing.hood} · ${listingCityOrDefault(listing.city)}`,
     sub: listing.safeSpaceSub || listing.blurb,
     verifier: listing.safeSpaceVerifier,
     reVerified: listing.safeSpaceReVerifiedAt ?? '',

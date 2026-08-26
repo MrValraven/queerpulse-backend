@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Not, Repository } from 'typeorm';
+import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { ConnectionsService } from '../connections/connections.service';
 import { EventCohost } from './entities/event-cohost.entity';
@@ -200,18 +201,25 @@ export class EventAudienceGateService {
         )
       : new Set<string>();
 
-    const extendedNetworkHostIdsNeedingMutualCheck = [
+    // `hostId` is NULL once the host's account is erased
+    // (`SetNullContentAuthorFksOnUserErasure1794610000000`). There is no
+    // network relationship to an erased member, so a NULL host is filtered
+    // out here and reads as "not connected, no mutuals" below. That keeps a
+    // network-only gathering closed rather than letting an erased host
+    // quietly widen its audience.
+    const extendedNetworkHostIdsNeedingMutualCheck = presentActorIds([
       ...new Set(
         events
           .filter(
             (event) =>
               needsTierCheck(event) &&
               event.visibility === EventVisibility.ExtendedNetwork &&
+              event.hostId !== null &&
               !viewerConnectionIds.has(event.hostId),
           )
           .map((event) => event.hostId),
       ),
-    ];
+    ]);
     const mutualCounts = extendedNetworkHostIdsNeedingMutualCheck.length
       ? await this.connectionsService.mutualCountsByUserIds(
           viewerId,
@@ -235,9 +243,10 @@ export class EventAudienceGateService {
             isOrganizer: false,
             isInvited: invitedEventIds.has(event.id),
             hasLiveRsvp: rsvpedEventIds.has(event.id),
-            isConnectedToHost: viewerConnectionIds.has(event.hostId),
+            isConnectedToHost:
+              event.hostId !== null && viewerConnectionIds.has(event.hostId),
             hasMutualConnectionWithHost:
-              (mutualCounts.get(event.hostId) ?? 0) > 0,
+              (actorFromLookup(mutualCounts, event.hostId) ?? 0) > 0,
             isCommunityMember:
               event.communityId !== null &&
               viewerCommunityIds.has(event.communityId),
@@ -329,10 +338,11 @@ export class EventAudienceGateService {
         };
       }
       case EventVisibility.Network: {
-        const connected = await this.connectionsService.areConnected(
-          viewerId,
-          event.hostId,
-        );
+        // An erased host (NULL `hostId`) has no connections, so the tier
+        // stays closed rather than opening up.
+        const connected =
+          event.hostId !== null &&
+          (await this.connectionsService.areConnected(viewerId, event.hostId));
         return {
           isOrganizer: false,
           ...NO_SIGNAL,
@@ -340,17 +350,17 @@ export class EventAudienceGateService {
         };
       }
       case EventVisibility.ExtendedNetwork: {
-        const connected = await this.connectionsService.areConnected(
-          viewerId,
-          event.hostId,
-        );
+        const hostId = event.hostId;
+        const connected =
+          hostId !== null &&
+          (await this.connectionsService.areConnected(viewerId, hostId));
         let hasMutual = false;
-        if (!connected) {
+        if (hostId !== null && !connected) {
           const mutualCounts =
             await this.connectionsService.mutualCountsByUserIds(viewerId, [
-              event.hostId,
+              hostId,
             ]);
-          hasMutual = (mutualCounts.get(event.hostId) ?? 0) > 0;
+          hasMutual = (mutualCounts.get(hostId) ?? 0) > 0;
         }
         return {
           isOrganizer: false,

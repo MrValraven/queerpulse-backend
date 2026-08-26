@@ -7,6 +7,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { MemberLookup, MemberRef } from '../common/member-ref';
+import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -90,8 +91,11 @@ export class HousingReviewsService {
           submittedAt: new Date(),
         }),
       );
-      const authors = await this.hydrate([saved.authorId]);
-      return toHousingReviewDTO(saved, authors.get(saved.authorId) ?? null);
+      const authors = await this.hydrate(presentActorIds([saved.authorId]));
+      return toHousingReviewDTO(
+        saved,
+        actorFromLookup(authors, saved.authorId) ?? null,
+      );
     } catch (err) {
       // Two distinct uniqueness rules land here, and they mean different things
       // to the member, so they get different messages (BE-HSG-09).
@@ -125,9 +129,14 @@ export class HousingReviewsService {
     const theirsRevealed =
       theirs !== null && this.isRevealed(theirs, bothSubmitted);
 
-    const authorIds = [yours, theirs]
-      .filter((row): row is HousingReview => row !== null)
-      .map((row) => row.authorId);
+    // `authorId` is NULL once the reviewer erased their account
+    // (`SetNullContentAuthorFksOnUserErasure1794610000000`): the review
+    // survives, unattributed, because the next tenant still needs to read it.
+    const authorIds = presentActorIds(
+      [yours, theirs]
+        .filter((row): row is HousingReview => row !== null)
+        .map((row) => row.authorId),
+    );
     const authors = await this.hydrate(authorIds);
 
     return {
@@ -136,12 +145,18 @@ export class HousingReviewsService {
         viewing.status === HousingViewingStatus.Completed && yours === null,
       youReviewed: yours !== null,
       yourReview: yours
-        ? toHousingReviewDTO(yours, authors.get(yours.authorId) ?? null)
+        ? toHousingReviewDTO(
+            yours,
+            actorFromLookup(authors, yours.authorId) ?? null,
+          )
         : null,
       counterpartySubmitted: theirs !== null,
       counterpartyReview:
         theirs && theirsRevealed
-          ? toHousingReviewDTO(theirs, authors.get(theirs.authorId) ?? null)
+          ? toHousingReviewDTO(
+              theirs,
+              actorFromLookup(authors, theirs.authorId) ?? null,
+            )
           : null,
       revealsAt:
         theirs && !theirsRevealed
@@ -220,7 +235,9 @@ export class HousingReviewsService {
     // A taken-down review never renders AND never skews the average, mirroring
     // `DirectoryService.dropModeratedReviews` on the business side.
     const revealed = await this.dropModeratedReviews(candidates);
-    const authors = await this.hydrate(revealed.map((row) => row.authorId));
+    const authors = await this.hydrate(
+      presentActorIds(revealed.map((row) => row.authorId)),
+    );
     const averageRating =
       revealed.length === 0
         ? null
@@ -233,7 +250,7 @@ export class HousingReviewsService {
       averageRating,
       count: revealed.length,
       reviews: revealed.map((row) =>
-        toHousingReviewDTO(row, authors.get(row.authorId) ?? null),
+        toHousingReviewDTO(row, actorFromLookup(authors, row.authorId) ?? null),
       ),
     };
   }

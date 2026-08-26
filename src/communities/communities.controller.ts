@@ -21,6 +21,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { CommunitiesService } from './communities.service';
 import { CommunityPostsService } from './community-posts.service';
@@ -36,9 +37,9 @@ import { ReplyDto } from './dto/reply.dto';
 import { ListCommunityPostsQuery } from './dto/list-community-posts.query';
 import { RosterQuery } from './dto/roster.query';
 import { TransferOwnershipDto } from './dto/transfer-ownership.dto';
-import { TriageJoinRequestDto } from './dto/triage-join-request.dto';
+import { TriageCommunityJoinRequestDto } from './dto/triage-join-request.dto';
 import { UpdateCommunityDto } from './dto/update-community.dto';
-import { UpdateMemberRoleDto } from './dto/update-member-role.dto';
+import { UpdateCommunityMemberRoleDto } from './dto/update-member-role.dto';
 import { UpdatePostDto } from './dto/update-post.dto';
 import { ReactionKey } from './entities/community-post-reaction.entity';
 import {
@@ -144,6 +145,7 @@ export class CommunitiesController {
   }
 
   @Post()
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Create a community (caller becomes owner).' })
   @ApiCreatedResponse({ description: 'The created community detail.' })
   @ApiBadRequestResponse({ description: 'The community payload is invalid.' })
@@ -158,6 +160,7 @@ export class CommunitiesController {
   }
 
   @Patch(':slug')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary:
       'Update a community (owner/mod; access tier and roster visibility are owner-only).',
@@ -187,6 +190,7 @@ export class CommunitiesController {
   }
 
   @Post(':slug/tag-requests')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary:
       'Suggest a tag for this community (owner/mod only, informational).',
@@ -307,7 +311,28 @@ export class CommunitiesController {
     );
   }
 
+  @Get(':slug/posts/:id')
+  @ApiOperation({
+    summary: 'Read one community post by id, for its permalink page.',
+  })
+  @ApiOkResponse({ description: 'The community post.' })
+  @ApiBadRequestResponse({ description: 'Malformed post id.' })
+  @ApiNotFoundResponse({
+    description:
+      'Unknown slug or post, a private community the viewer is not in, or a ' +
+      'post withheld from this viewer (blocked/muted author, or a ' +
+      'moderator-hidden post and the viewer is not staff).',
+  })
+  getPost(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.communityPostsService.getPost(slug, id, user.userId);
+  }
+
   @Post(':slug/posts')
+  @UseGuards(NotRestrictedGuard)
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @ApiOperation({ summary: 'Create a post in a community (members only).' })
   @ApiCreatedResponse({ description: 'The created community post.' })
@@ -323,6 +348,7 @@ export class CommunitiesController {
   }
 
   @Patch(':slug/posts/:id')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: 'Update a post (author edits body/kind; owner/mod pins).',
   })
@@ -389,6 +415,7 @@ export class CommunitiesController {
   }
 
   @Post(':slug/posts/:id/replies')
+  @UseGuards(NotRestrictedGuard)
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @ApiOperation({ summary: 'Reply to a community post.' })
   @ApiCreatedResponse({ description: 'The created reply.' })
@@ -484,7 +511,9 @@ export class CommunitiesController {
   })
   @ApiOkResponse({
     description:
-      'Open reports whose subject is a post or reply in this community.',
+      'Open reports whose subject is a post or reply in this community, each ' +
+      'carrying the reported content: excerpt, author, thread id, severity, ' +
+      'SLA state and current moderation state.',
   })
   @ApiForbiddenResponse({ description: 'Owner/moderator role required.' })
   @ApiNotFoundResponse({ description: 'No such community.' })
@@ -496,6 +525,7 @@ export class CommunitiesController {
   }
 
   @Patch(':slug/posts/:id/replies/:replyId')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Edit a reply (author only).' })
   @ApiOkResponse({ description: 'The updated reply.' })
   @ApiBadRequestResponse({ description: 'Malformed id or invalid payload.' })
@@ -699,7 +729,7 @@ export class CommunitiesController {
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: TriageJoinRequestDto,
+    @Body() dto: TriageCommunityJoinRequestDto,
   ) {
     return this.communitiesService.triageJoinRequest(slug, id, user.userId, {
       action: dto.action,
@@ -718,7 +748,9 @@ export class CommunitiesController {
     description:
       'The member was removed. Unless `allowReturn=true`, the removal also ' +
       'bars them from re-joining at any access tier. A member removing ' +
-      'THEMSELVES is never barred, whatever the query says.',
+      'THEMSELVES is never barred, whatever the query says. `banDays` makes ' +
+      'that bar temporary (absent means permanent), and `ruleIndex` cites one ' +
+      "of the community's own house rules as the grounds.",
   })
   @ApiBadRequestResponse({
     description: 'The owner cannot be removed, or the query is invalid.',
@@ -739,6 +771,8 @@ export class CommunitiesController {
     return this.communitiesService.removeMember(slug, user.userId, memberSlug, {
       allowReturn: query.allowReturn,
       reason: query.reason,
+      banDays: query.banDays,
+      ruleIndex: query.ruleIndex,
     });
   }
 
@@ -765,7 +799,7 @@ export class CommunitiesController {
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
     @Param('memberSlug') memberSlug: string,
-    @Body() dto: UpdateMemberRoleDto,
+    @Body() dto: UpdateCommunityMemberRoleDto,
   ) {
     return this.communitiesService.setMemberRole(
       slug,

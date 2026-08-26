@@ -11,9 +11,7 @@ export type MailTemplateKey =
   | 'listing_draft_resume_link'
   | 'newsletter_confirm'
   | 'ops_inquiry_received'
-  | 'concern_update'
-  | 'digest_test'
-  | 'digest';
+  | 'concern_update';
 
 /** The params each template key requires. */
 export interface MailTemplateParams {
@@ -35,21 +33,6 @@ export interface MailTemplateParams {
   concern_update: {
     status: 'resolved' | 'dismissed';
   };
-  /** Members' digest for one issue (CNT-6 "Send test" / "Schedule with
-   *  issue"). `digest_test` goes to the requesting admin's own inbox as a
-   *  one-off preview; `digest` is the real send to every confirmed
-   *  newsletter subscriber once the issue ships. Same shape for both — only
-   *  the subject/intro line differs, see `renderDigestMail`. */
-  digest_test: DigestEmailParams;
-  digest: DigestEmailParams;
-}
-
-/** Shared params for `digest_test`/`digest` — see {@link MailTemplateParams}. */
-interface DigestEmailParams {
-  issueNumber: string;
-  issueTitle: string;
-  /** Only the curated ("on") entries, already resolved to their piece title. */
-  items: { title: string; blurb: string }[];
 }
 
 export interface RenderedMail {
@@ -62,19 +45,23 @@ export interface RenderedMail {
  * Template keys that are BULK mail — sent to a subscriber list rather than to
  * one person about something they just did.
  *
- * `MailerService.send` refuses to dispatch any of these without a resolvable
- * per-recipient unsubscribe link, and attaches `List-Unsubscribe` /
- * `List-Unsubscribe-Post` headers plus an in-body opt-out. Bulk email with no
- * self-serve opt-out breaches CAN-SPAM, GDPR Art. 21 / ePrivacy and CASL, and
- * burns the sending domain's reputation under the 2024 Gmail/Yahoo bulk-sender
- * rules.
+ * EMPTY, and that is the product decision rather than an oversight: QueerPulse
+ * delivers no bulk mail to members. The one entry this set ever held was the
+ * members' digest, whose whole send path (the newsletter module's queue, its
+ * once-a-minute drain, and the `digest`/`digest_test` templates) has been
+ * deleted in favour of an in-app issue panel plus one notification per member.
+ * Every remaining key above is transactional: one message, to one person,
+ * about something they just did.
  *
- * `digest_test` is deliberately NOT here: it is a one-off preview to the
- * requesting admin's own inbox, not a list send.
+ * The machinery below stays wired up because it is the guarantee, not the
+ * feature: if a bulk template is ever added to this set, `MailerService.send`
+ * refuses to dispatch it without a resolvable per-recipient unsubscribe link
+ * and attaches `List-Unsubscribe` / `List-Unsubscribe-Post` headers plus an
+ * in-body opt-out. Bulk email with no self-serve opt-out breaches CAN-SPAM,
+ * GDPR Art. 21 / ePrivacy and CASL, and burns the sending domain's reputation
+ * under the 2024 Gmail/Yahoo bulk-sender rules.
  */
-export const BULK_TEMPLATE_KEYS: ReadonlySet<MailTemplateKey> = new Set([
-  'digest',
-]);
+export const BULK_TEMPLATE_KEYS: ReadonlySet<MailTemplateKey> = new Set();
 
 /**
  * Appends the human-facing opt-out to a rendered bulk message, in BOTH the
@@ -104,38 +91,6 @@ function escapeHtml(value: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
-}
-
-/** Shared renderer for `digest_test`/`digest` — see {@link MailTemplateParams}. */
-function renderDigestMail(
-  isTest: boolean,
-  params: DigestEmailParams,
-): RenderedMail {
-  const { issueNumber, issueTitle, items } = params;
-  const subject = isTest
-    ? `[Test] The digest for issue ${issueNumber}: ${issueTitle}`
-    : `Issue ${issueNumber}: ${issueTitle}`;
-  const intro = isTest
-    ? `This is a one-off test send of the members' digest for issue ${issueNumber} (${issueTitle}) — only you are getting this copy.`
-    : `The digest for issue ${issueNumber} (${issueTitle}) is here.`;
-  const itemsText =
-    items.length > 0
-      ? items.map((item) => `${item.title}\n${item.blurb}`).join('\n\n')
-      : 'Nothing is curated for this issue yet.';
-  const itemsHtml =
-    items.length > 0
-      ? items
-          .map(
-            (item) =>
-              `<p><b>${escapeHtml(item.title)}</b><br/>${escapeHtml(item.blurb)}</p>`,
-          )
-          .join('')
-      : '<p>Nothing is curated for this issue yet.</p>';
-  return {
-    subject,
-    text: `${intro}\n\n${itemsText}`,
-    html: `<p>${escapeHtml(intro)}</p>${itemsHtml}`,
-  };
 }
 
 export function renderTemplate<K extends MailTemplateKey>(
@@ -233,15 +188,6 @@ export function renderTemplate<K extends MailTemplateKey>(
           `you have more to add, submit another concern from the governance ` +
           `page. Thank you for helping keep the community safe.</p>`,
       };
-    }
-    case 'digest_test': {
-      return renderDigestMail(
-        true,
-        params as MailTemplateParams['digest_test'],
-      );
-    }
-    case 'digest': {
-      return renderDigestMail(false, params as MailTemplateParams['digest']);
     }
     default: {
       // Exhaustiveness guard: a new MailTemplateKey without a case above is a

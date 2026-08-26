@@ -59,6 +59,20 @@ export class LandlordIntroRequest {
   })
   status!: LandlordIntroRequestStatus;
 
+  // The triage decision's audit trail (LOC-19). A member asked to be put in
+  // touch with a landlord and, until now, the only record of the answer was
+  // the row's own `status` — no who, no when, no why, and the member was never
+  // told at all. `decisionReason` is REQUIRED by the service on a decline and
+  // is the text the requester reads.
+  @Column({ type: 'timestamptz', nullable: true })
+  decidedAt!: Date | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  decidedBy!: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  decisionReason!: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 }

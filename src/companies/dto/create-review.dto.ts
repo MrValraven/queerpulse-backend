@@ -9,7 +9,7 @@ import {
   MinLength,
 } from 'class-validator';
 
-export class CreateReviewDto {
+export class CreateCompanyReviewDto {
   @IsString() @MinLength(1) @MaxLength(200) title!: string;
   @IsInt() @Min(1) @Max(5) stars!: number;
   @IsString() @MinLength(1) @MaxLength(200) byline!: string;

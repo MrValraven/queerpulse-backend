@@ -13,9 +13,29 @@ import {
  * moderator/admin moves a listing out of `Review`); `create()` forces `Review`.
  */
 export enum HousingListingStatus {
+  /** Waiting on a human. Every create lands here, and so does every owner edit
+   * that changes a field a moderator actually reviewed. */
   Review = 'review',
+  /** Changes requested: a moderator sent it back to the lister with a reason.
+   * The lister fixes it and their next content edit returns it to `Review`. */
   Question = 'question',
+  /** Approved and publicly browsable. */
   Live = 'live',
+  /**
+   * Refused by a moderator, with a required reason. Never publicly browsable.
+   * Not a grave: an owner edit that changes moderated content returns the
+   * listing to `Review`, so a lister who fixes the problem can be re-reviewed.
+   * Added by `AddHousingModerationDecisionEnums1794720000000`.
+   */
+  Rejected = 'rejected',
+  /**
+   * Was live, then pulled by a moderator, with a required reason. Distinct from
+   * `Rejected` so the lister's notification and the console can tell "we never
+   * published this" from "we removed something that was published" — different
+   * facts, and only one of them was ever visible to the community.
+   * Added by `AddHousingModerationDecisionEnums1794720000000`.
+   */
+  TakenDown = 'taken_down',
 }
 
 /** The kind of housing offered. Mirrors the frontend's housing filter chips
@@ -74,9 +94,16 @@ export class HousingListing {
   @Column({ type: 'varchar' })
   slug!: string;
 
+  // Nullable since `SetNullContentAuthorFksOnUserErasure1794610000000`: the FK
+  // to `users` was `ON DELETE CASCADE`, so erasing one member's account
+  // deleted the home listing plus every viewing and review attached to it. It is now `ON DELETE SET NULL`, so
+  // NULL here means "the lister's account was erased" rather than "no such row".
+  // Read paths must render a removed-member placeholder instead of assuming
+  // a non-null id. See `ContentOwnerErasureService` for what happens to the
+  // row itself when the account goes.
   @Index('IDX_housing_listings_owner_id')
-  @Column({ type: 'uuid' })
-  ownerId!: string;
+  @Column({ type: 'uuid', nullable: true })
+  ownerId!: string | null;
 
   @Index('IDX_housing_listings_status')
   @Column({
@@ -189,6 +216,28 @@ export class HousingListing {
 
   @Column({ type: 'text', array: true, default: '{}' })
   riskReasons!: string[];
+
+  // ── Moderation decision trail (LOC-01) ─────────────────────────────────────
+  // The LAST decision a moderator recorded on this listing. The immutable
+  // cross-listing trail lives in `mod_audit_logs` (one row per decision, written
+  // by `HousingListingModerationService.decide`); these three columns are the
+  // denormalised "what happened most recently", so the lister's own management
+  // view and the review console can render it without a join.
+  //
+  // PRIVACY: `decisionReason` is moderator-authored prose ABOUT this listing.
+  // It reaches the owner and moderators only — `toHousingListingDTO` attaches it
+  // behind an explicit `includeDecision` flag that public browse never sets.
+  @Column({ type: 'text', nullable: true })
+  decisionReason!: string | null;
+
+  // NULL once the deciding moderator erases their account (FK is
+  // `ON DELETE SET NULL`), mirroring `mod_audit_logs.actor_id`: a decision
+  // outlives the person who made it.
+  @Column({ type: 'uuid', nullable: true })
+  decidedById!: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  decidedAt!: Date | null;
 
   @Column({ type: 'date', nullable: true })
   availableFrom!: string | null;

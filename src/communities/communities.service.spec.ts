@@ -137,7 +137,7 @@ describe('CommunitiesService', () => {
   // flows, so a no-op stub suffices.
   let contentModeration: { stateFor: jest.Mock };
   let notifications: { create: jest.Mock; createForRecipients: jest.Mock };
-  let governanceLog: { log: jest.Mock };
+  let governanceLog: { log: jest.Mock; logModerationAudit: jest.Mock };
   // `suggestedCommunities`'s social-graph signal and `unfreeze`'s
   // automatic-freeze gate (BE-COM-04). Neither is exercised by the flows
   // below beyond needing to resolve, so both default to the permissive
@@ -216,6 +216,9 @@ describe('CommunitiesService', () => {
     };
     governanceLog = {
       log: jest.fn().mockResolvedValue(undefined),
+      // `removeMember` now also writes a `mod_audit_logs` row, which is what
+      // makes a community ban appealable at all.
+      logModerationAudit: jest.fn().mockResolvedValue(undefined),
     };
     connections = {
       allAcceptedConnectionUserIds: jest.fn().mockResolvedValue([]),

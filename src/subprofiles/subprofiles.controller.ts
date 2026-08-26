@@ -20,13 +20,14 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { Public } from '../auth/decorators/public.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { AnonymousPublicCacheInterceptor } from './anonymous-public-cache.interceptor';
 import { CreateSubprofileDTO } from './dto/create-subprofile.dto';
 import { EndorseDTO } from './dto/endorse.dto';
 import { InviteCollaboratorDTO } from './dto/invite-collaborator.dto';
 import { ListAudienceQuery } from './dto/list-audience.query';
-import { ListDirectoryQuery } from './dto/list-directory.query';
+import { ListSubprofileDirectoryQuery } from './dto/list-directory.query';
 import { ReplaceAffiliationsDTO } from './dto/replace-affiliations.dto';
 import { ReplaceItemsDTO } from './dto/replace-items.dto';
 import { ReplaceSocialLinksDTO } from './dto/replace-social-links.dto';
@@ -88,7 +89,7 @@ export class SubprofilesController {
   })
   directory(
     @CurrentUser() user: CurrentUserData,
-    @Query() query: ListDirectoryQuery,
+    @Query() query: ListSubprofileDirectoryQuery,
   ) {
     return this.subprofilesService.directory(query, user.userId);
   }
@@ -320,6 +321,7 @@ export class SubprofilesController {
   }
 
   @Post(':id/publish')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Publish a subprofile' })
   @ApiCreatedResponse({
     description: 'The published subprofile (owner-facing view).',
@@ -441,6 +443,7 @@ export class SubprofilesController {
   }
 
   @Post(':id/invites')
+  @UseGuards(NotRestrictedGuard)
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @ApiOperation({ summary: 'Invite a member to co-own a subprofile' })
   @ApiCreatedResponse({ description: 'The newly created pending invite.' })
@@ -505,6 +508,7 @@ export class SubprofilesController {
 
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Post(':id/endorse')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Endorse a subprofile (optionally with a note)' })
   @ApiCreatedResponse({ description: 'The updated endorsement standing.' })
   @ApiBadRequestResponse({

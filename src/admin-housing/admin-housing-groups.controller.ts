@@ -28,7 +28,7 @@ import {
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { HousingModerationGuard } from '../auth/guards/housing-moderation.guard';
 import { HousingGroupsService } from '../housing-groups/housing-groups.service';
-import { CreateGroupDto } from '../housing-groups/dto/create-group.dto';
+import { CreateHousingGroupDto } from '../housing-groups/dto/create-group.dto';
 import { UpdateGroupDto } from '../housing-groups/dto/update-group.dto';
 import { TriageGroupJoinRequestDto } from '../housing-groups/dto/triage-group-join-request.dto';
 import { HideGroupListingDto } from '../housing-groups/dto/hide-group-listing.dto';
@@ -65,7 +65,7 @@ export class AdminHousingGroupsController {
   @ApiBadRequestResponse({ description: 'Malformed request body.' })
   @ApiConflictResponse({ description: 'Slug already in use.' })
   @Post()
-  createGroup(@Body() dto: CreateGroupDto) {
+  createGroup(@Body() dto: CreateHousingGroupDto) {
     return this.groups.createGroup(dto);
   }
 

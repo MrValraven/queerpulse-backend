@@ -7,6 +7,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, EntityManager, MoreThan, Repository } from 'typeorm';
+import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import type { UpdateRsvpDetailsDto } from './dto/update-rsvp-details.dto';
 import {
@@ -17,6 +18,7 @@ import {
 } from './event.events';
 import { RsvpDetailsView, toRsvpDetailsView } from './event-response';
 import { EventAudienceGateService } from './event-audience-gate.service';
+import { EventBan } from './entities/event-ban.entity';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
 import { Event, EventStatus } from './entities/event.entity';
@@ -55,6 +57,12 @@ export class RsvpService {
     // `pessimistic_write` event lock every other write in this service takes.
     @InjectRepository(Event) private readonly events: Repository<Event>,
     @InjectRepository(EventRsvp) private readonly rsvps: Repository<EventRsvp>,
+    // LOC-08. A block was honoured when RENDERING an attendee list and never
+    // checked on the way IN, so someone a member had blocked could still walk
+    // onto their gathering's roster and simply not appear in the list they
+    // were standing next to. Checked in `assertMayRsvp` now, in both
+    // directions.
+    private readonly blockFilter: BlockFilterService,
   ) {}
 
   async rsvp(
@@ -84,7 +92,11 @@ export class RsvpService {
       // yet, or a previously cancelled one being revived) — never on a
       // going↔maybe toggle of a live row, which would spam the host. A host
       // RSVPing to their own event notifies no one.
+      // A NULL `hostId` is a gathering whose host erased their account
+      // (`SetNullContentAuthorFksOnUserErasure1794610000000`): there is
+      // nobody left to tell, so the notify path is skipped entirely.
       const notifyHost =
+        event.hostId !== null &&
         event.hostId !== userId &&
         (!existing || existing.status === RsvpStatus.Cancelled);
       const hostRsvp = {
@@ -117,17 +129,28 @@ export class RsvpService {
       }
 
       // 'going' — apply capacity → waitlist.
-      const goingCount = await rsvpRepo.count({
-        where: { eventId: event.id, status: RsvpStatus.Going },
-      });
-      // An existing 'going' row for this user shouldn't count against capacity.
+      //
+      // SEATS, NOT ROWS (LOC-07). `guest_count` is the extra people an
+      // attendee said they are bringing, and it never counted against
+      // capacity: a 20-seat gathering where ten members each brought a
+      // plus-one reported ten free seats while thirty people arrived. The
+      // capacity check now measures the same number the response reports as
+      // `seatsTaken`: one seat per going member, plus their declared guests.
+      const seatsTaken = await this.goingSeatCount(rsvpRepo, event.id);
+      // An existing 'going' row for this user shouldn't count against
+      // capacity — neither their own seat nor the guests they already
+      // declared, which are about to be re-counted below.
       const alreadyGoing = existing?.status === RsvpStatus.Going;
-      const effectiveGoing = alreadyGoing ? goingCount - 1 : goingCount;
+      const mySeats = 1 + (existing?.guestCount ?? 0);
+      const effectiveSeats = alreadyGoing ? seatsTaken - mySeats : seatsTaken;
 
       let resolved: RsvpStatus;
       let waitlistPosition: number | null = null;
 
-      if (event.capacity !== null && effectiveGoing >= event.capacity) {
+      if (
+        event.capacity !== null &&
+        effectiveSeats + mySeats > event.capacity
+      ) {
         // Full. A re-RSVP by someone already waitlisted keeps their spot — never
         // send them to the back of the line for pressing the button again.
         if (existing?.status === RsvpStatus.Waitlisted) {
@@ -183,7 +206,7 @@ export class RsvpService {
     // After commit (a mid-transaction emit would survive a rollback): tell the
     // host someone RSVPed. Fire-and-forget on the same bus as the waitlist
     // promotions above; the listener writes + pushes the notification.
-    if (outcome.notifyHost) {
+    if (outcome.notifyHost && outcome.hostId !== null) {
       this.eventEmitter.emit(EVENT_RSVPED, {
         eventId: outcome.eventId,
         eventSlug: outcome.eventSlug,
@@ -282,6 +305,11 @@ export class RsvpService {
     const wasGoing = mine.status === RsvpStatus.Going;
     mine.status = RsvpStatus.Cancelled;
     mine.waitlistPosition = null;
+    // The MEMBER ended this one. Explicitly cleared, not merely left alone:
+    // changing your mind must never leave you looking removed, or a member
+    // who cancels once could never come back (LOC-08).
+    mine.removedByHostAt = null;
+    mine.checkedInAt = null;
     await rsvpRepo.save(mine);
 
     // A freed 'going' seat pulls the head(s) of the waitlist up.
@@ -351,6 +379,12 @@ export class RsvpService {
       const wasGoing = target.status === RsvpStatus.Going;
       target.status = RsvpStatus.Cancelled;
       target.waitlistPosition = null;
+      // THE HOST ended this one (LOC-08). Without this stamp the row was
+      // indistinguishable from a self-cancellation, so the removed member
+      // could press "going" again a second later and removal was worth
+      // nothing. `assertMayRsvp` reads it.
+      target.removedByHostAt = new Date();
+      target.checkedInAt = null;
       await rsvpRepo.save(target);
 
       const promoted = wasGoing
@@ -401,10 +435,11 @@ export class RsvpService {
         throw new BadRequestException('That member is not on the waitlist');
       }
       if (event.capacity !== null) {
-        const goingCount = await rsvpRepo.count({
-          where: { eventId: event.id, status: RsvpStatus.Going },
-        });
-        if (goingCount >= event.capacity) {
+        // Seats, not rows (LOC-07) — and the promoted member's own party has
+        // to fit, not just their single row.
+        const seatsTaken = await this.goingSeatCount(rsvpRepo, event.id);
+        const seatsNeeded = 1 + target.guestCount;
+        if (seatsTaken + seatsNeeded > event.capacity) {
           throw new BadRequestException('The event is at capacity');
         }
       }
@@ -444,6 +479,25 @@ export class RsvpService {
       throw new NotFoundException(
         'You do not have an active RSVP to this event',
       );
+    }
+    // Raising the guest count is a capacity change (LOC-07): every extra
+    // guest occupies a seat, so an unchecked edit here would walk straight
+    // past the check `rsvp()` now performs. Only a RAISE is checked, and only
+    // for a 'going' row: lowering always fits, and a waitlisted member is not
+    // taking a seat yet.
+    if (
+      dto.guestCount !== undefined &&
+      dto.guestCount > rsvp.guestCount &&
+      rsvp.status === RsvpStatus.Going &&
+      event.capacity !== null
+    ) {
+      const seatsTaken = await this.goingSeatCount(this.rsvps, event.id);
+      const extraSeats = dto.guestCount - rsvp.guestCount;
+      if (seatsTaken + extraSeats > event.capacity) {
+        throw new BadRequestException(
+          'There is not enough room left for that many guests',
+        );
+      }
     }
     Object.assign(rsvp, {
       ...(dto.guestCount !== undefined ? { guestCount: dto.guestCount } : {}),
@@ -516,6 +570,58 @@ export class RsvpService {
         where: { eventId: event.id, userId },
       }));
     await this.audienceGate.assertViewable(event, userId, isOrganizer);
+
+    // ── LOC-08: the host's own door ──────────────────────────────────────
+    // An organiser can always reach their own gathering, so neither check
+    // below can lock a host out of an event they are running.
+    if (isOrganizer) return;
+
+    // A ban is one host saying "not at my table", scoped to this gathering.
+    // Answered with an explicit, renderable message rather than a 404: the
+    // member already knows the gathering exists (they were on the page), and
+    // pretending otherwise would just make them press the button again.
+    const isBanned = await manager.exists(EventBan, {
+      where: { eventId: event.id, userId },
+    });
+    if (isBanned) {
+      throw new ForbiddenException(
+        'The host has removed you from this gathering',
+      );
+    }
+
+    // A block, in EITHER direction, between this member and the host. The
+    // attendee list has always dropped blocked members from what a viewer
+    // sees; until now nothing stopped them joining it. A blocked member
+    // showing up in person is the failure that matters.
+    if (event.hostId !== null) {
+      const isBlocked = await this.blockFilter.isBlockedEitherWay(
+        userId,
+        event.hostId,
+      );
+      if (isBlocked) {
+        throw new ForbiddenException(
+          'You cannot RSVP to a gathering hosted by someone you have blocked, or who has blocked you',
+        );
+      }
+    }
+
+    // Removed by the host earlier (LOC-08 hole 1). A cancelled row used to
+    // read as "never RSVPed", so pressing the button again put the member
+    // straight back on the roster and removal was worth nothing. A member who
+    // cancelled THEMSELVES is untouched by this: `cancelRsvpOne` clears the
+    // stamp, so changing your mind twice is still allowed.
+    const removed = await manager.getRepository(EventRsvp).findOne({
+      where: { eventId: event.id, userId },
+    });
+    if (
+      removed &&
+      removed.status === RsvpStatus.Cancelled &&
+      removed.removedByHostAt !== null
+    ) {
+      throw new ForbiddenException(
+        'The host has removed you from this gathering',
+      );
+    }
   }
 
   // Promotes waitlist heads to 'going' while seats remain (or unconditionally
@@ -560,18 +666,31 @@ export class RsvpService {
     // (ordered by waitlist_position, so the earliest waiters win the freed
     // seats) picks the exact rows to promote, then one bulk UPDATE by id
     // flips all of them at once.
-    const goingCount = await rsvpRepo.count({
-      where: { eventId: event.id, status: RsvpStatus.Going },
-    });
-    const freeSeats = event.capacity - goingCount;
+    //
+    // SEATS, NOT ROWS (LOC-07): both sides of this subtraction now count
+    // declared guests. Two free seats admit one waiting member bringing a
+    // friend, or two waiting alone, and never two members bringing four
+    // people between them.
+    const seatsTaken = await this.goingSeatCount(rsvpRepo, event.id);
+    const freeSeats = event.capacity - seatsTaken;
     if (freeSeats <= 0) {
       return [];
     }
-    const waitlistHeads = await rsvpRepo.find({
+    const waitingInOrder = await rsvpRepo.find({
       where: { eventId: event.id, status: RsvpStatus.Waitlisted },
       order: { waitlistPosition: 'ASC' },
-      take: freeSeats,
     });
+    // Strictly in queue order, and a party that does not fit does NOT let a
+    // smaller party behind it jump the line: the member at the head of the
+    // waitlist keeps their place until the room genuinely has room for them.
+    const waitlistHeads: EventRsvp[] = [];
+    let remainingSeats = freeSeats;
+    for (const waiting of waitingInOrder) {
+      const seatsNeeded = 1 + waiting.guestCount;
+      if (seatsNeeded > remainingSeats) break;
+      waitlistHeads.push(waiting);
+      remainingSeats -= seatsNeeded;
+    }
     if (!waitlistHeads.length) {
       return [];
     }
@@ -585,6 +704,28 @@ export class RsvpService {
     return waitlistHeads.map((rsvp) => rsvp.userId);
   }
 
+  /**
+   * How many SEATS this event's 'going' RSVPs occupy: one per member, plus
+   * every extra guest they declared (`event_rsvps.guest_count`).
+   *
+   * The single definition of "how full is it" on the write side, matching
+   * `EventsService.rosterCounts` on the read side. Before LOC-07 both were a
+   * plain row count, so a gathering could be sold as having ten free seats to
+   * thirty people.
+   */
+  private async goingSeatCount(
+    rsvpRepo: Repository<EventRsvp>,
+    eventId: string,
+  ): Promise<number> {
+    const row = await rsvpRepo
+      .createQueryBuilder('r')
+      .select('COUNT(*) + COALESCE(SUM(r.guest_count), 0)', 'seats')
+      .where('r.event_id = :eventId', { eventId })
+      .andWhere('r.status = :status', { status: RsvpStatus.Going })
+      .getRawOne<{ seats: string | null }>();
+    return Number(row?.seats ?? 0);
+  }
+
   private async persistRsvp(
     rsvpRepo: Repository<EventRsvp>,
     existing: EventRsvp | null,
@@ -595,6 +736,11 @@ export class RsvpService {
     if (existing) {
       existing.status = next.status;
       existing.waitlistPosition = next.waitlistPosition;
+      // Reaching here means `assertMayRsvp` let them through, so any earlier
+      // host removal has been lifted (or was never there). Clearing it keeps
+      // "was this row ended by the host" answerable about the CURRENT row
+      // rather than about its history (LOC-08).
+      existing.removedByHostAt = null;
       await rsvpRepo.save(existing);
     } else {
       await rsvpRepo.save(

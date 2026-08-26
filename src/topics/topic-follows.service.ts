@@ -1,6 +1,7 @@
 import { ConflictException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { Topic } from '../content/entities/topic.entity';
 import {
   TopicFollowsResponse,
   toTopicFollowsResponse,
@@ -8,9 +9,10 @@ import {
 import { TopicFollow } from './entities/topic-follow.entity';
 
 /**
- * Hard ceiling on how many topics one member can follow (BE-COM-35). There is
- * no topics table to bound the slug space against, so without a cap a single
- * member could accumulate unbounded rows — every one of which `listFollows`
+ * Hard ceiling on how many topics one member can follow (BE-COM-35). A follow
+ * is not bounded by the topics table (the slug is shape-validated, never
+ * resolved to a row), so without a cap a single member could accumulate
+ * unbounded rows — every one of which `listFollows`
  * returns to the client on every page load. Set far above any plausible real
  * use of the topics directory, so this only ever fires on abuse.
  */
@@ -27,6 +29,12 @@ export class TopicFollowsService {
   constructor(
     @InjectRepository(TopicFollow)
     private readonly follows: Repository<TopicFollow>,
+    // Written, never read, by this service: `topics.follower_count` is the
+    // denormalized "Members following" stat `GET /topics/:slug` returns, and
+    // this is the only place a follow is created or destroyed. See
+    // `bumpFollowerCount`.
+    @InjectRepository(Topic)
+    private readonly topics: Repository<Topic>,
   ) {}
 
   /**
@@ -53,13 +61,23 @@ export class TopicFollowsService {
       }
     }
 
-    await this.follows
+    const insertResult = await this.follows
       .createQueryBuilder()
       .insert()
       .into(TopicFollow)
       .values({ userId, topicSlug: slug })
       .orIgnore()
       .execute();
+
+    // `raw` holds the rows Postgres actually returned, so it is empty exactly
+    // when `ON CONFLICT DO NOTHING` absorbed the insert. Counting off that
+    // rather than off the `exists` check above keeps a double-tap (two
+    // requests that both read "not following yet") from counting twice.
+    const wasInserted =
+      Array.isArray(insertResult.raw) && insertResult.raw.length > 0;
+    if (wasInserted) {
+      await this.bumpFollowerCount(slug, 1);
+    }
     return { following: true };
   }
 
@@ -70,7 +88,15 @@ export class TopicFollowsService {
    * nothing).
    */
   async unfollow(userId: string, slug: string): Promise<{ following: false }> {
-    await this.follows.delete({ userId, topicSlug: slug });
+    const deleteResult = await this.follows.delete({
+      userId,
+      topicSlug: slug,
+    });
+    // Only a delete that actually removed a row moves the counter, so
+    // unfollowing something you never followed stays the no-op it reports.
+    if ((deleteResult.affected ?? 0) > 0) {
+      await this.bumpFollowerCount(slug, -1);
+    }
     return { following: false };
   }
 
@@ -89,5 +115,31 @@ export class TopicFollowsService {
       take: MAX_TOPIC_FOLLOWS,
     });
     return toTopicFollowsResponse(rows);
+  }
+
+  /**
+   * Move `topics.follower_count` by one, in SQL on the row itself, so
+   * concurrent follows never read-modify-write over each other. The decrement
+   * floors at zero: the column predates this maintenance and every row seeded
+   * or created before it starts at 0, so an early unfollow must not drive it
+   * negative and print a nonsense stat.
+   *
+   * A slug with no topic row updates nothing. Follows are shape-validated
+   * rather than resolved against the table, so following a tag that has no
+   * directory entry is allowed and simply has no counter to move. Archived
+   * topics still count, so restoring one brings its real audience back.
+   */
+  private async bumpFollowerCount(slug: string, delta: 1 | -1): Promise<void> {
+    await this.topics
+      .createQueryBuilder()
+      .update(Topic)
+      .set({
+        followerCount: () =>
+          delta === 1
+            ? '"follower_count" + 1'
+            : 'GREATEST("follower_count" - 1, 0)',
+      })
+      .where('tag = :tag', { tag: slug })
+      .execute();
   }
 }

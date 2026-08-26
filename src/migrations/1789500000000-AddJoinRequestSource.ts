@@ -14,7 +14,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * request page directly with no originating CTA, legitimately have no source.
  * The value is a closed-set key owned by the frontend catalogue
  * (`features/auth/api/joinRequestSource.ts`) and length-capped by
- * `CreateJoinRequestDto`, so a `varchar(64)` rather than a Postgres enum that
+ * `CreateMembershipJoinRequestDto`, so a `varchar(64)` rather than a Postgres enum that
  * would need a migration per new CTA.
  */
 export class AddJoinRequestSource1789500000000 implements MigrationInterface {

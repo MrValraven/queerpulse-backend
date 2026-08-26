@@ -510,20 +510,25 @@ export class ListingCoManagersService {
     );
 
     // Post-commit, best-effort, never rethrown. The owner sent this invitation
-    // by hand and is the one person waiting on the answer.
-    await this.notifyBestEffort(
-      listing.ownerId,
-      isAccepted
-        ? NotificationType.ListingCoManagerInviteAccepted
-        : NotificationType.ListingCoManagerInviteDeclined,
-      {
-        actorId: userId,
-        source: 'listing',
-        listingSlug: listing.slug,
-        listingName: listing.name,
-      },
-      userId,
-    );
+    // by hand and is the one person waiting on the answer. A NULL `ownerId`
+    // is an entry whose owner erased their account
+    // (`SetNullContentAuthorFksOnUserErasure1794610000000`) between sending
+    // the invite and its answer, so there is nobody left to tell.
+    if (listing.ownerId !== null) {
+      await this.notifyBestEffort(
+        listing.ownerId,
+        isAccepted
+          ? NotificationType.ListingCoManagerInviteAccepted
+          : NotificationType.ListingCoManagerInviteDeclined,
+        {
+          actorId: userId,
+          source: 'listing',
+          listingSlug: listing.slug,
+          listingName: listing.name,
+        },
+        userId,
+      );
+    }
 
     const invitedBy = seat.invitedByUserId
       ? ((

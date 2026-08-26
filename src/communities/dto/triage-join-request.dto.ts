@@ -1,7 +1,7 @@
 import { IsEnum, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 import { CommunityJoinRequestDeclineKind } from '../entities/community-join-request.entity';
 
-export class TriageJoinRequestDto {
+export class TriageCommunityJoinRequestDto {
   @IsIn(['approve', 'decline'])
   action!: 'approve' | 'decline';
 

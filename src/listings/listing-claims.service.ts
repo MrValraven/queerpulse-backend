@@ -219,7 +219,7 @@ export class ListingClaimsService {
     decision: 'approved' | 'declined',
   ): Promise<ListingClaimDTO> {
     // `decision` mirrors `ReviewListingClaimDto`'s plain string-literal shape
-    // (`TriageJoinRequestDto`'s precedent); `ListingClaimStatus` shares the
+    // (`TriageHousingJoinRequestDto`'s precedent); `ListingClaimStatus` shares the
     // same underlying string values, so this is the one place the two are
     // reconciled.
     const status =
@@ -492,7 +492,11 @@ export class ListingClaimsService {
       if (listing.path === 'suggest' || listing.badge === 'friendly') return;
 
       // Parked on a non-human platform account (the house account seeded
-      // content is attributed to), or on an account that has since been erased.
+      // content is attributed to), or on an account that has since been
+      // erased. Erasure now shows up as a NULL `ownerId`
+      // (`SetNullContentAuthorFksOnUserErasure1794610000000`) rather than a
+      // missing row, and means the same thing here: the entry is claimable.
+      if (listing.ownerId === null) return;
       const owner = await this.users.findOne({
         where: { id: listing.ownerId },
         select: { id: true, isSystem: true },

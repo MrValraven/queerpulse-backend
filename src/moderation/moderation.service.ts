@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -11,10 +12,12 @@ import {
   FindOptionsWhere,
   In,
   IsNull,
+  LessThan,
   Not,
   Repository,
   SelectQueryBuilder,
 } from 'typeorm';
+import { SUPPORT_OPEN_REPORT_THRESHOLD } from '../admin-communities/admin-communities-response';
 import { AuthService } from '../auth/auth.service';
 import { isUniqueViolation } from '../common/db-errors';
 import { CursorKeyset, cursorPaginate } from '../common/cursor-pagination';
@@ -49,15 +52,37 @@ import { Appeal, AppealStatus } from './entities/appeal.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
 import { ModAuditService } from './mod-audit.service';
 import { statusForAction } from './mod-action-status';
+import { COMMUNITY_BAN_AUDIT_ACTION } from '../communities/community-governance-log.service';
+import { BAN_PENDING_AUDIT_ACTION } from './ban-ratification-window';
+import { BanRatificationService } from './ban-ratification.service';
+import { BanRatificationStatus } from './entities/ban-ratification.entity';
+import { RatifyBanDto } from './dto/ratify-ban.dto';
+import {
+  APPEAL_FILING_WINDOW_DAYS,
+  appealDecisionDueAt,
+  appealFilingWindowClosesAt,
+  isWithinAppealFilingWindow,
+} from './appeal-window';
+import { ListAppealsQuery, ModAppealsTab } from './dto/list-appeals.query';
+import { ReportSubjectResolverService } from './report-subject-resolver.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import {
+  ACCOUNT_REMOVED,
+  AccountRemovedEvent,
+} from '../ban-evasion/ban-evasion.events';
+import { RemovalKind } from '../ban-evasion/entities/removed-account-signal.entity';
 import {
   AppealAppellant,
   AppealDTO,
   AppealOriginal,
   AuditEntryDTO,
+  BanRatificationDTO,
   AuditFeedResponseDTO,
   MemberAppealDTO,
+  ModAppealsResponse,
   ModCounts,
   ModReportDetail,
+  ModReportClusterDTO,
   ModReportDTO,
   ModReportedDTO,
   ModReporterDTO,
@@ -73,10 +98,61 @@ import {
 
 const DEFAULT_LIMIT = 20;
 
+/**
+ * TS-06 surge thresholds: how big a pile on ONE `(subjectType, subjectId)`
+ * pair has to be before the queue calls it a surge.
+ *
+ * These are the auto-freeze thresholds, deliberately. `CommunityAutoFreezeService`
+ * already decides "this is a pile-up, not thirty independent complaints" with
+ * exactly this pair of numbers one layer down (`isReportPileUp`: at least
+ * SUPPORT_OPEN_REPORT_THRESHOLD open reports AND at least three DIFFERENT
+ * people behind them), and a queue that drew the line somewhere else would
+ * disagree with the freeze a moderator is looking at.
+ *
+ * `MIN_PILEUP_REPORTERS` is module-private over there, so the value is
+ * restated here rather than imported. The distinct-reporter floor is the half
+ * that matters: without it, one determined member filing under five different
+ * reason codes reads as a surge.
+ */
+const SURGE_MIN_OPEN_REPORTS = SUPPORT_OPEN_REPORT_THRESHOLD;
+const SURGE_MIN_DISTINCT_REPORTERS = 3;
+
+/**
+ * How many report ids one cluster carries back. Matches `ModBulkActionDto`'s
+ * `@ArrayMaxSize(100)`, so "action the whole pile" is always a single
+ * `PATCH /mod/reports/bulk` the server will accept.
+ */
+const CLUSTER_ID_CAP = 100;
+
+/** One raw row of the TS-06 cluster aggregate (see `clustersFor`). Every
+ *  count is cast to `int` in SQL so it arrives as a number rather than the
+ *  string node-postgres returns for a `bigint`. */
+interface ClusterAggregateRow {
+  subjectType: ReportSubjectType;
+  subjectId: string;
+  openCount: number;
+  distinctReporterCount: number;
+  overdueCount: number;
+  severityRank: number;
+  firstReportedAt: string | Date;
+  lastReportedAt: string | Date;
+  reportIds: string[] | null;
+}
+
+/** Severity, ranked most severe first, for the `MIN(...)` in the cluster
+ *  aggregate. Postgres enum ordering follows label creation order, which is
+ *  not something a query should quietly depend on. */
+const SEVERITY_RANK: ReportSeverity[] = [
+  ReportSeverity.Emergency,
+  ReportSeverity.High,
+  ReportSeverity.Medium,
+  ReportSeverity.Low,
+];
+
 // The moderator actions a member can actually appeal — the ones that land on
-// an account or its content. `dismiss`/`escalate`/`shield` and the appeal
-// bookkeeping actions (`appeal_upheld`, `suspension_lifted`, …) are not
-// contestable outcomes, so they never become the target of a fresh appeal.
+// an account or its content. `dismiss`/`escalate` and the appeal bookkeeping
+// actions (`appeal_upheld`, `suspension_lifted`, `restriction_lifted`, …) are
+// not contestable outcomes, so they never become the target of a fresh appeal.
 const APPEALABLE_ACTIONS = [
   'warn',
   'hide_content',
@@ -84,6 +160,20 @@ const APPEALABLE_ACTIONS = [
   'restrict',
   'suspend',
   'ban',
+  // TS-12. A ban held for a second moderator's signature has already suspended
+  // the member (see `BAN_INTERIM_SUSPENSION`), so it is a real consequence they
+  // are living under and must be contestable while it stands. An overturned
+  // appeal against it also withdraws the hold, so the second moderator cannot
+  // ratify a ban the appeal has already reversed
+  // (`revertOriginalAction`).
+  BAN_PENDING_AUDIT_ACTION,
+  // TS-11, step 5, and the reason this list is not just platform actions any
+  // more. A community ban writes `community_ban_applied` with no report and the
+  // barred member in `target_user_id` (wave 2,
+  // `community-governance-log.service.ts`). Until it was appealable here, the
+  // member was told to "contact its moderators", which the product offers no
+  // way to do.
+  COMMUNITY_BAN_AUDIT_ACTION,
 ];
 
 // Loose enough to guard `Repository.findOne({ where: { userId: subjectId } })`
@@ -121,10 +211,24 @@ export class ModerationService {
     private readonly accountEnforcement: AccountEnforcementService,
     private readonly contentModeration: ContentModerationService,
     private readonly notifications: NotificationsService,
-    // Backs the community-owner/mod dismiss carve-out in `actOnReport` — see
-    // `assertCanActOnReport`. Read-only, entity-registration-only module
-    // (`CommunityMembershipModule`), not the full `CommunitiesModule`.
+    // Backs the community-owner/mod carve-out in `actOnReport` — see
+    // `assertCanActOnReport` — and, since TS-14, the community-id -> slug
+    // lookup the queue rows carry (`refsByIds`/`slugById`). Read-only,
+    // entity-registration-only module (`CommunityMembershipModule`), not the
+    // full `CommunitiesModule`.
     private readonly communityMembership: CommunityMembershipService,
+    // Resolves a report's subject to its author, its excerpt and its owning
+    // community, for every subject type. Read-only, holds only the
+    // `DataSource`, so it adds no edge to the module graph.
+    private readonly subjectResolver: ReportSubjectResolverService,
+    // Emits `ACCOUNT_REMOVED` after a permanent ban commits, so the ban-evasion
+    // module can keep correlation material for the invite review queue.
+    private readonly eventEmitter: EventEmitter2,
+    // TS-12. The queue's link to the second-moderator hold a `ban` now opens:
+    // this facade exposes the pending queue and the ratify/decline decision on
+    // `/mod/ratifications`, and withdraws a hold when an appeal overturns the
+    // ban it was for.
+    private readonly banRatification: BanRatificationService,
   ) {}
 
   // The two actions whose whole point is to change the target content's
@@ -139,7 +243,8 @@ export class ModerationService {
   // The actions that produce a member-facing outcome the sanctioned member
   // should be told about. `warn` has no account effect (so `enforceAgainstUser`
   // returns null for it) but is still an outcome the member must hear — the
-  // audit named "warned" first. `restrict` was added once `enforceAgainstUser`
+  // audit named "warned" first, and since TS-02 it reaches the author of
+  // reported content, not only the subject of a `member` report. `restrict` was added once `enforceAgainstUser`
   // started giving it a real, time-boxed effect (previously a no-op, so there
   // was nothing to report) — it reuses the exact suspend/ban notification path
   // via `resolveOutcomeTarget`'s `enforceResult` fallback below.
@@ -148,6 +253,33 @@ export class ModerationService {
     'restrict',
     'suspend',
     'ban',
+  ]);
+
+  /**
+   * What a community owner/mod may do to a report on their own community's
+   * post or reply, without holding a platform Moderator/Admin role. See
+   * `assertCanActOnReport` for every condition attached to it.
+   *
+   * `remove_content` is here since TS-08. The community console used to take a
+   * post down through the community delete endpoint and then close the report
+   * with `dismiss`, so the audit log, the resolution block and the admin badge
+   * all read "Dismissed" for the single most common community action, and no
+   * `content_moderation` row was ever written. Anyone auditing that community
+   * read "dismissed" over and over and concluded its moderators did nothing.
+   * Sending the real action instead means the takedown and the report close
+   * commit together in one transaction, exactly as the platform path already
+   * does, and the appeal machinery finally has a true record to rest on.
+   *
+   * `escalate` is here since TS-07, so an emergency report a community mod may
+   * not settle has somewhere to go.
+   *
+   * Everything else (warn/suspend/ban/restrict/hide_content) stays platform
+   * staff only: those are account-level or platform-wide consequences.
+   */
+  private static readonly COMMUNITY_MOD_ACTIONS = new Set<ModActionCode>([
+    'dismiss',
+    'remove_content',
+    'escalate',
   ]);
 
   // GET /mod/reports — filterable, cursor-paginated queue. `tab` (not
@@ -174,6 +306,9 @@ export class ModerationService {
     if (query.severity) {
       qb.andWhere('r.severity = :severity', { severity: query.severity });
     }
+    if (query.community) {
+      this.applyCommunityFilter(qb, query.community);
+    }
     if (query.filter === 'emergencies') {
       qb.andWhere('r.severity = :emergencySeverity', {
         emergencySeverity: ReportSeverity.Emergency,
@@ -190,6 +325,18 @@ export class ModerationService {
       qb.andWhere('r.assignedModeratorId = :actorId', {
         actorId: actorId ?? null,
       });
+    }
+    // TS-06's two triage filters. `overdue` is the SLA window that has already
+    // closed on a report nobody has decided yet; `surge` is the pile-on shape
+    // the flat queue could not show.
+    if (query.filter === 'overdue') {
+      qb.andWhere('r.slaDueAt < now()').andWhere(
+        'r.status != :resolvedForOverdue',
+        { resolvedForOverdue: ReportStatus.Resolved },
+      );
+    }
+    if (query.filter === 'surge') {
+      this.applySurgeFilter(qb);
     }
     // `sort` is now actually honoured (BE-COM-11): it was validated by the
     // DTO and then never read, so every listing came back newest-first
@@ -208,12 +355,13 @@ export class ModerationService {
       ModerationService.keysetForSort(query.sort),
     );
 
-    const [items, counts] = await Promise.all([
+    const [items, counts, clusters] = await Promise.all([
       this.toRows(rows),
       this.computeCounts(),
+      this.clustersFor(rows),
     ]);
 
-    return { data: items, pageInfo: { nextCursor, hasMore }, counts };
+    return { data: items, pageInfo: { nextCursor, hasMore }, counts, clusters };
   }
 
   /**
@@ -268,8 +416,9 @@ export class ModerationService {
   // The controller only requires an active member for this one route (its
   // class-level `@Roles(Moderator, Admin)` is overridden here) — see
   // `assertCanActOnReport` for the actual authorization: platform
-  // Moderator/Admin (unchanged), OR a community owner/mod dismissing a report
-  // scoped to a post/reply in the community they moderate.
+  // Moderator/Admin (unchanged), OR a community owner/mod dismissing,
+  // removing or escalating a report scoped to a post/reply in the community
+  // they moderate.
   async actOnReport(
     id: string,
     actorId: string,
@@ -317,21 +466,43 @@ export class ModerationService {
           manager,
           report,
           dto,
+          actorId,
         );
+
+        // TS-12. A `ban` that is waiting on a second moderator has not banned
+        // anyone, and the immutable trail must say so. The audit row reads
+        // `ban_pending_ratification` and carries the hold's expiry as its
+        // duration; the canonical `ban` row is written later, by the moderator
+        // who actually ratifies it.
+        const auditAction =
+          enforceResult?.kind === 'ban_pending'
+            ? BAN_PENDING_AUDIT_ACTION
+            : dto.action;
+        const auditDuration =
+          enforceResult?.kind === 'ban_pending'
+            ? (enforceResult.suspendedUntil?.toISOString() ?? undefined)
+            : dto.duration;
 
         report.status = statusForAction(dto.action);
         if (report.status === ReportStatus.Resolved) {
-          await this.applyResolution(report, actorId, dto, enforceResult);
+          await this.applyResolution(
+            report,
+            actorId,
+            dto,
+            enforceResult,
+            auditAction,
+            auditDuration,
+          );
         }
         const saved = await manager.save(report);
 
         await this.audit.writeAuditLog(
           saved.id,
           actorId,
-          dto.action,
+          auditAction,
           dto.reasonCode,
           dto.note,
-          dto.duration,
+          auditDuration,
           manager,
         );
 
@@ -366,6 +537,30 @@ export class ModerationService {
       await this.auth.revokeAllForUser(enforceResult.userId);
     }
 
+    // Ban evasion (TS-05). A permanent ban is the enforcement that means "this
+    // account is gone", so it is the one that leaves correlation material
+    // behind for the invite review queue. Emitted post-commit and deliberately
+    // outside the transaction: failing to record a signal must never roll back
+    // a ban that has already taken effect.
+    //
+    // SINCE TS-12 THIS CANNOT FIRE FROM HERE, and the branch is kept so that
+    // stays visible rather than becoming a silent hole. `enforceAgainstUser`
+    // answers `ban_pending` for a `ban` now: the account has been suspended for
+    // the length of a ratification hold and nothing has been removed. The emit
+    // moved to `BanRatificationService.decide`, which runs it at the instant a
+    // second moderator confirms the ban, because "this account is gone" is only
+    // true then. Emitting on the hold would seed the invite review queue with
+    // correlation material about members whose bans lapse unratified.
+    if (enforceResult && enforceResult.kind === 'ban') {
+      const removed: AccountRemovedEvent = {
+        userId: enforceResult.userId,
+        removalKind: RemovalKind.PlatformBan,
+        communityId: null,
+        removedAt: new Date(),
+      };
+      this.eventEmitter.emit(ACCOUNT_REMOVED, removed);
+    }
+
     await this.notifyReporterOfOutcomeBestEffort(saved, actorId);
 
     // Tell the *sanctioned member* the outcome and why (warn/suspend/ban) — the
@@ -374,6 +569,7 @@ export class ModerationService {
       actorId,
       dto,
       await this.resolveOutcomeTarget(report, dto, enforceResult),
+      enforceResult?.kind,
     );
 
     // `hasFullReportVisibility` is false exactly when the caller authorized
@@ -394,14 +590,12 @@ export class ModerationService {
    *
    * A platform Moderator/Admin may take any action on any report, unchanged,
    * and gets the full response (`true`). Everything else is a narrow,
-   * community-scoped carve-out: a community owner/mod may only `dismiss`
-   * (never warn/suspend/ban/hide_content/remove_content/restrict/shield/
-   * escalate — those are account- or platform-wide consequences, not a
-   * community queue action) a report whose subject resolves to a post or
-   * reply in the community they own or moderate — and gets back `false`.
-   * Everyone else — including a community mod acting outside their own
-   * community, or against a non-community-post/reply report (member,
-   * message, venue, ...) — is forbidden. This grants no report *visibility*:
+   * community-scoped carve-out over three actions
+   * ({@link COMMUNITY_MOD_ACTIONS}) on a report whose subject resolves to a
+   * post or reply in the community they own or moderate — and gets back
+   * `false`. Everyone else, including a community mod acting outside their own
+   * community or against a non-community-post/reply report (member, message,
+   * venue, ...), is forbidden. This grants no report *visibility*:
    * `GET /mod/reports` and `GET /mod/reports/:id` are untouched and still
    * require the platform role, and the community-mod carve-out's own PATCH
    * response is redacted by `toRow` using the `false` returned here.
@@ -420,40 +614,76 @@ export class ModerationService {
       return true;
     }
 
-    if (action === 'dismiss') {
-      // The carve-out is narrower than the role check above in three ways
-      // (BE-COM-03):
-      //  - only while the report is still OPEN. A report a PLATFORM moderator
-      //    escalated is out of a community mod's hands by definition —
+    if (ModerationService.COMMUNITY_MOD_ACTIONS.has(action)) {
+      // The carve-out is narrower than the role check above in four ways:
+      //  - only while the report is still OPEN (BE-COM-03). A report a PLATFORM
+      //    moderator escalated is out of a community mod's hands by definition:
       //    `escalated` means "send this up", and letting the community it came
       //    from close it undoes that decision.
-      //  - never on their OWN content. `isOwnerOrMod` says the actor moderates
-      //    the community, not that they are impartial about this report; a
-      //    community moderator reported for their own post could otherwise
-      //    close the report about themselves in one call, platform-wide.
+      //  - never at EMERGENCY severity, except to escalate it (TS-07). See
+      //    `assertCommunityModMaySettle`.
+      //  - never on their OWN content, for the two actions that settle the
+      //    report. `isOwnerOrMod` says the actor moderates the community, not
+      //    that they are impartial about this report; a community moderator
+      //    reported for their own post could otherwise close the report about
+      //    themselves in one call, platform-wide.
       //  - unchanged: only for a post/reply inside a community they moderate.
       if (report.status !== ReportStatus.Open) {
         throw new ForbiddenException(
           'This report is no longer open to a community moderator. Platform staff will decide it.',
         );
       }
+      ModerationService.assertCommunityModMaySettle(report, action);
       const communityId = await this.communityIdForReportSubject(report);
       if (
         communityId &&
         (await this.communityMembership.isOwnerOrMod(communityId, actorId))
       ) {
-        const subjectAuthorId = await this.authorIdForReportSubject(report);
-        if (subjectAuthorId === actorId) {
-          throw new ForbiddenException(
-            'You cannot dismiss a report about your own post. Platform staff will decide it.',
-          );
+        // Escalating is the one action that hands the report to somebody else
+        // rather than settling it, so it stays available on the moderator's
+        // own content: sending a report about yourself upward is never
+        // self-dealing, and blocking it would leave that report stuck.
+        if (action !== 'escalate') {
+          const subjectAuthorId = await this.authorIdForReportSubject(report);
+          if (subjectAuthorId === actorId) {
+            throw new ForbiddenException(
+              'You cannot close a report about your own post. Platform staff will decide it.',
+            );
+          }
         }
         return false;
       }
     }
 
     throw new ForbiddenException(
-      "Requires a moderator or admin role, or ownership/moderation of the report's community to dismiss it.",
+      "Requires a moderator or admin role, or ownership/moderation of the report's community to dismiss, remove or escalate it.",
+    );
+  }
+
+  /**
+   * TS-07: an EMERGENCY report is not a community moderator's to settle.
+   *
+   * `report-severity.ts` maps `outing` and `doxxing` to
+   * `ReportSeverity.Emergency`, and both are the report a community's own
+   * moderators are least able to decide: the community whose mods are the
+   * problem, or who are simply out of their depth, could close it before
+   * trained staff ever saw it, and a dismissal is platform-wide and terminal.
+   * The carve-out never guarded against that. It only guarded against a mod
+   * closing a report about their own post.
+   *
+   * `escalate` is deliberately still allowed, and is why this refusal can name
+   * an alternative rather than being a dead end: the community moderator who
+   * finds an outing post keeps a way to put it in front of the people trained
+   * for it, immediately.
+   */
+  private static assertCommunityModMaySettle(
+    report: Report,
+    action: ModActionCode,
+  ): void {
+    if (report.severity !== ReportSeverity.Emergency) return;
+    if (action === 'escalate') return;
+    throw new ForbiddenException(
+      'This report is about outing or doxxing, so it goes to trained platform staff. Escalate it and they will pick it up.',
     );
   }
 
@@ -477,7 +707,7 @@ export class ModerationService {
   }
 
   // The member who wrote the reported post/reply, for the conflict-of-interest
-  // check on the community-mod dismiss carve-out. Null for any other subject
+  // check on the community-mod carve-out. Null for any other subject
   // type, an unresolvable id, or an erased author — none of which can equal a
   // live `actorId`, so the check fails open to "not your own content" only
   // when there genuinely is no author to match.
@@ -542,7 +772,7 @@ export class ModerationService {
       enforceResult: {
         userId: string;
         suspendedUntil: Date | null;
-        kind: 'suspend' | 'ban' | 'restrict';
+        kind: 'suspend' | 'ban' | 'restrict' | 'ban_pending';
       } | null;
     }> = [];
 
@@ -573,21 +803,43 @@ export class ModerationService {
                 manager,
                 report,
                 dto,
+                actorId,
               );
+
+            // TS-12, and the half of it that matters most: a bulk `ban` across
+            // 100 reports opens 100 ratification HOLDS, never 100 removals.
+            // `enforceAgainstUser` is idempotent per member, so thirty reports
+            // about one person join one hold rather than stacking thirty. The
+            // audit row on each report says the ban is pending.
+            const auditAction =
+              enforceResult?.kind === 'ban_pending'
+                ? BAN_PENDING_AUDIT_ACTION
+                : dto.action;
+            const auditDuration =
+              enforceResult?.kind === 'ban_pending'
+                ? (enforceResult.suspendedUntil?.toISOString() ?? undefined)
+                : dto.duration;
 
             report.status = status;
             if (status === ReportStatus.Resolved) {
-              await this.applyResolution(report, actorId, dto, enforceResult);
+              await this.applyResolution(
+                report,
+                actorId,
+                dto,
+                enforceResult,
+                auditAction,
+                auditDuration,
+              );
             }
             await manager.save(report);
 
             await this.audit.writeAuditLog(
               report.id,
               actorId,
-              dto.action,
+              auditAction,
               dto.reasonCode,
               dto.note,
-              dto.duration,
+              auditDuration,
               manager,
             );
 
@@ -642,6 +894,7 @@ export class ModerationService {
         actorId,
         dto,
         await this.resolveOutcomeTarget(report, dto, enforceResult),
+        enforceResult?.kind,
       );
       await this.notifyReporterOfOutcomeBestEffort(report, actorId);
     }
@@ -653,11 +906,17 @@ export class ModerationService {
    * The member an outcome notification should reach, plus a suspension's expiry
    * when there is one.
    *
-   * `warn` does no account enforcement (so `enforceResult` is null for it) — it
-   * resolves the reported member directly, and yields nothing when the subject
-   * can't be tied to an account (a warn on a content report). `suspend`/`ban`
-   * reuse the account the enforcement already landed on, carrying its expiry
-   * (`null` = permanent ban). Any non-outcome action yields null.
+   * `warn` does no account enforcement (so `enforceResult` is null for it), so
+   * it resolves the member itself: the reported member on a `member` report,
+   * and the AUTHOR of the reported content on every other subject type
+   * (TS-02). Before that, a `warn` on a post, reply, message, comment or review
+   * — most of the queue — closed the report and logged "warned" while notifying
+   * nobody at all, so the team believed it was running a graduated ladder while
+   * the member heard nothing. `suspend`/`ban`/`restrict` reuse the account the
+   * enforcement already landed on, carrying its expiry (`null` = permanent
+   * ban). Any non-outcome action yields null, as does a subject with no
+   * resolvable author (a `venue` report describing a place in prose, an erased
+   * author) — the honest answer, rather than warning the wrong person.
    */
   private async resolveOutcomeTarget(
     report: Report,
@@ -666,9 +925,10 @@ export class ModerationService {
   ): Promise<{ userId: string; expiresAt: Date | null } | null> {
     if (!ModerationService.OUTCOME_ACTIONS.has(dto.action)) return null;
     if (dto.action === 'warn') {
-      const profile =
-        await this.accountEnforcement.resolveReportedProfile(report);
-      return profile ? { userId: profile.userId, expiresAt: null } : null;
+      const resolution = await this.subjectResolver.resolve(report);
+      return resolution.authorUserId
+        ? { userId: resolution.authorUserId, expiresAt: null }
+        : null;
     }
     return enforceResult
       ? {
@@ -705,7 +965,17 @@ export class ModerationService {
       duration?: string;
     },
     enforceResult: { userId: string; suspendedUntil: Date | null } | null,
+    // What the trail should RECORD, which is not always what the moderator
+    // asked for: a `ban` waiting on ratification is recorded as
+    // `ban_pending_ratification` with the hold's expiry, so the resolved
+    // report's outcome badge cannot claim a member was removed while a second
+    // moderator has yet to confirm it (TS-12). Defaults to the action itself.
+    recordedAction: string = dto.action,
+    recordedDuration: string | undefined = dto.duration,
   ): Promise<void> {
+    // Resolved from the action the moderator ASKED for, never the recorded one:
+    // this decides WHO hears about the outcome, and a pending ban still lands
+    // on the same member a full ban would have.
     const outcomeTarget = await this.resolveOutcomeTarget(
       report,
       dto,
@@ -722,8 +992,8 @@ export class ModerationService {
 
     report.resolvedAt = new Date();
     report.resolutionActorId = actorId;
-    report.resolutionAction = dto.action;
-    report.resolutionDuration = dto.duration ?? null;
+    report.resolutionAction = recordedAction;
+    report.resolutionDuration = recordedDuration ?? null;
     report.resolutionNote = dto.note ?? null;
     report.resolutionNotified = notified;
   }
@@ -797,16 +1067,25 @@ export class ModerationService {
     actorId: string,
     dto: { action: ModActionCode; reasonCode: ReasonCode; note?: string },
     target: { userId: string; expiresAt: Date | null } | null,
+    // The kind of enforcement that actually landed. A `ban` waiting on a
+    // second moderator (TS-12) is told to the member as the SUSPENSION it
+    // currently is, with the hold's expiry, because that is what is true about
+    // their account right now. They hear again, as a ban, if and when a second
+    // moderator confirms it (`BanRatificationService.decide`). Telling them
+    // they had been banned while the decision is still open would be a
+    // statement the software cannot stand behind.
+    enforcementKind?: string,
   ): Promise<void> {
     // A moderator acting on their own report never notifies themselves.
     if (!target || target.userId === actorId) return;
+    const action = enforcementKind === 'ban_pending' ? 'suspend' : dto.action;
     try {
       await this.notifications.create(
         target.userId,
         NotificationType.ModerationOutcome,
         {
           source: 'moderation',
-          action: dto.action,
+          action,
           reasonCode: dto.reasonCode,
           // Always a string (never omitted) so the client's `{note}` copy token
           // resolves to "" rather than rendering the literal placeholder — a
@@ -841,17 +1120,89 @@ export class ModerationService {
     return this.audit.auditFeedCsv(query);
   }
 
-  // GET /mod/appeals — newest first, mirrors every other list in this
-  // codebase (`orderBy(..., 'DESC')`).
-  async listAppeals(): Promise<AppealDTO[]> {
-    // Bounded page, matching `DEFAULT_LIMIT` used by the reports queue: an
-    // unbounded `find` would fan a per-appeal name/audit lookup out across the
-    // entire table. Newest first is preserved.
-    const rows = await this.appeals.find({
-      order: { createdAt: 'DESC' },
-      take: DEFAULT_LIMIT,
-    });
-    return this.toAppealRows(rows);
+  /**
+   * GET /mod/appeals — the appeals queue, split into the two tabs the published
+   * process actually has (TS-11).
+   *
+   * WHAT THIS REPLACED: one unfiltered, unpaginated `find` capped at 200 rows,
+   * newest first, with decided appeals mixed in among the awaiting ones. Newest
+   * first is the wrong ordering for a queue with a deadline, because the appeal
+   * closest to breaching §05's 7-day window is the OLDEST one, so it sat at the
+   * bottom of the list under every appeal that still had a week to run. And a
+   * moderator working the queue had to read past decided cases to find the ones
+   * that still needed them.
+   *
+   *  - `awaiting` pages on `sla_due_at` ASC: soonest-due first, so the top of
+   *    the list is always the appeal the platform is closest to being late on.
+   *  - `decided` pages on the default `(created_at, id) DESC` keyset. It is a
+   *    history view, and newest first is the useful order there. It cannot page
+   *    on `decided_at` because that column is deliberately NULL for every
+   *    appeal decided before it existed (see the entity), and a keyset tuple
+   *    comparison against NULL silently drops those rows from every page.
+   *
+   * Both go through the SAME `cursorPaginate` helper the reports queue uses,
+   * with the same millisecond-precision contract behind it, rather than a
+   * second pagination scheme that could drift from it.
+   */
+  async listAppeals(query: ListAppealsQuery = {}): Promise<ModAppealsResponse> {
+    const tab: ModAppealsTab = query.tab ?? 'awaiting';
+    const now = new Date();
+
+    const qb = this.appeals.createQueryBuilder('a');
+    if (tab === 'awaiting') {
+      qb.andWhere('a.status = :awaiting', { awaiting: AppealStatus.Awaiting });
+    } else {
+      qb.andWhere('a.status != :awaiting', { awaiting: AppealStatus.Awaiting });
+    }
+    // Overdue only ever narrows the awaiting tab: a decided appeal has no
+    // window left to be outside of. Whether it was decided late is a fact its
+    // own `decidedAt`/`slaDueAt` pair carries, row by row.
+    if (query.filter === 'overdue' && tab === 'awaiting') {
+      qb.andWhere('a.slaDueAt < :now', { now });
+    }
+
+    const { rows, nextCursor, hasMore } = await cursorPaginate(
+      qb,
+      query.cursor,
+      query.limit ?? DEFAULT_LIMIT,
+      'a',
+      // `appeals.created_at` is `timestamptz(3)` since
+      // `AddAppealDecisionWindows1794920000000`, so the default path orders on
+      // the raw column instead of a non-indexable `date_trunc`.
+      true,
+      tab === 'awaiting'
+        ? {
+            columnExpr: '"a"."sla_due_at"',
+            direction: 'ASC',
+            kind: 'date',
+            getValue: (row) => row.slaDueAt,
+          }
+        : undefined,
+    );
+
+    const [data, counts] = await Promise.all([
+      this.toAppealRows(rows, now),
+      this.appealCounts(now),
+    ]);
+    return { data, pageInfo: { nextCursor, hasMore }, counts };
+  }
+
+  /**
+   * The three numbers the appeals header shows. Filter-independent, like
+   * `computeCounts()` for the reports queue: a tab count that changed when you
+   * filtered would stop being a total.
+   */
+  private async appealCounts(
+    now: Date,
+  ): Promise<{ awaiting: number; decided: number; overdue: number }> {
+    const [awaiting, decided, overdue] = await Promise.all([
+      this.appeals.count({ where: { status: AppealStatus.Awaiting } }),
+      this.appeals.count({ where: { status: Not(AppealStatus.Awaiting) } }),
+      this.appeals.count({
+        where: { status: AppealStatus.Awaiting, slaDueAt: LessThan(now) },
+      }),
+    ]);
+    return { awaiting, decided, overdue };
   }
 
   // POST /appeals — a member (crucially, possibly a SUSPENDED one, via
@@ -862,6 +1213,7 @@ export class ModerationService {
     appellantUserId: string,
     dto: CreateAppealDto,
   ): Promise<SubmittedAppealDTO> {
+    const now = new Date();
     const target = await this.resolveAppealTarget(
       appellantUserId,
       dto.actionId,
@@ -886,6 +1238,28 @@ export class ModerationService {
       );
     }
 
+    // TS-11: §05 publishes a 14-day filing window, and nothing enforced it.
+    // See `appeal-window.ts` for exactly which instant starts the clock and
+    // why it is the audit row's `created_at` rather than the report's
+    // `resolved_at` or the notification's timestamp.
+    //
+    // WHERE THERE IS NO RESOLVABLE ACTION, THERE IS NO DEADLINE. A cold appeal
+    // (nothing in `mod_audit_logs` matches this member) is let through
+    // untouched, deliberately: the software cannot say when the decision was
+    // taken, so it has no honest basis for saying the member is late. Refusing
+    // one on an invented deadline would turn a gap in our own record into a
+    // refusal aimed at the member.
+    if (target) {
+      const closesAt = appealFilingWindowClosesAt(target.actionAt);
+      if (!isWithinAppealFilingWindow(target.actionAt, now)) {
+        throw new BadRequestException(
+          `Appeals are open for ${APPEAL_FILING_WINDOW_DAYS} days after a decision, and the window for this one closed on ` +
+            `${closesAt.toISOString().slice(0, 10)}. If something has changed since, or you could not reach this form in time, ` +
+            'write to the moderation team and ask them to look again.',
+        );
+      }
+    }
+
     try {
       const saved = await this.appeals.save(
         this.appeals.create({
@@ -893,9 +1267,18 @@ export class ModerationService {
           actionId: target?.actionId ?? null,
           reportId: target?.reportId ?? null,
           severity: target?.severity ?? ReportSeverity.Medium,
-          community: null,
+          // TS-11: hardcoded `null` until now, so every appeal arrived in the
+          // moderator queue with no idea which room it came out of. Resolved
+          // through the same `ReportSubjectResolverService` the reports queue
+          // uses, so an appeal and the report behind it can never disagree
+          // about which community they belong to.
+          community: target?.community ?? null,
           argument: dto.reason,
           status: AppealStatus.Awaiting,
+          // The published 7-day decision window, computed at filing exactly the
+          // way `reports.sla_due_at` is computed at report creation.
+          slaDueAt: appealDecisionDueAt(now),
+          decidedAt: null,
         }),
       );
       return toSubmittedAppealDTO(saved);
@@ -930,27 +1313,44 @@ export class ModerationService {
   /**
    * Resolves which enforcement action a member's appeal is really about, so the
    * appeal lands in the moderator queue with the same context a moderator-side
-   * `AppealDTO` carries (`actionId`/`reportId`/`severity`).
+   * `AppealDTO` carries (`actionId`/`reportId`/`severity`/`community`), and so
+   * the 14-day filing window has an instant to be measured from.
    *
-   * Two paths:
-   *  - `actionId` supplied — the member deep-linked a specific action. It is
-   *    trusted only after confirming the action is tied to a report ABOUT THIS
-   *    MEMBER (ownership scoping): a member may appeal a decision made against
-   *    themselves, never someone else's. A mismatch is a 403, not a silent
-   *    re-resolve, because the member asked to appeal a specific thing.
-   *  - no `actionId` — the common suspended-member case. Falls back to the most
-   *    recent appealable action against them.
+   * TWO WAYS AN ACTION BELONGS TO A MEMBER, and TS-11 added the second:
+   *
+   *  1. Through a `member`-subject REPORT about them. This was the only path,
+   *     and it is why every sanction recorded without a report was unappealable
+   *     in practice however loudly the Code of Conduct said otherwise.
+   *  2. Through `mod_audit_logs.target_user_id` naming them directly. This is
+   *     what makes wave 2's community bans (`community_ban_applied`, written
+   *     report-less by `community-governance-log.service.ts` with the barred
+   *     member in `target_user_id`) and the direct admin restriction from the
+   *     member drawer appealable at all. Backed by
+   *     `IDX_mod_audit_logs_target_created_at`.
+   *
+   * Two entry points, both covering both ways:
+   *  - `actionId` supplied — the member deep-linked a specific action. Accepted
+   *    only if that action is about THEM, by either route (ownership scoping).
+   *    A mismatch is a 403, never a silent re-resolve, because the member asked
+   *    to appeal a specific thing.
+   *  - no `actionId` — the common locked-out case. Takes the most recent
+   *    appealable action against them, whichever route it came by.
    *
    * Returns `null` when nothing resolvable is found (a cold appeal): the appeal
-   * still stands, unlinked, rather than being rejected on a lookup miss.
+   * still stands, unlinked, rather than being rejected on a lookup miss, and
+   * `submitAppeal` deliberately applies no filing deadline to it.
    */
   private async resolveAppealTarget(
     appellantUserId: string,
     actionId?: string,
   ): Promise<{
     actionId: string;
-    reportId: string;
+    reportId: string | null;
     severity: ReportSeverity;
+    /** When the appealed decision was TAKEN. Starts the 14-day filing clock. */
+    actionAt: Date;
+    /** The community the decision came out of, as a slug, when there is one. */
+    community: string | null;
   } | null> {
     // Reports about this member are addressed by their slug or their userId
     // (see `Report.subjectId`'s doc) — match both.
@@ -975,37 +1375,138 @@ export class ModerationService {
       const log = await this.auditLogs.findOne({ where: { id: actionId } });
       const report =
         log && log.reportId ? reportsById.get(log.reportId) : undefined;
-      if (!log || !report) {
+      // The audit row is theirs if it is linked to a report about them OR it
+      // names them directly. Either is proof enough that they are appealing a
+      // decision made about themselves.
+      const isTargetedAtMember = log?.targetUserId === appellantUserId;
+      if (!log || (!report && !isTargetedAtMember)) {
         throw new ForbiddenException(
           'That moderation action is not one you can appeal.',
         );
       }
-      return {
-        actionId: log.id,
-        reportId: report.id,
-        severity: report.severity,
-      };
+      return this.describeAppealTarget(log, report ?? null);
     }
 
-    if (!reportsById.size) return null;
+    // The two candidate sets, read in parallel and reconciled by recency: a
+    // member may hold both a report-backed sanction and a report-less one (a
+    // platform warning last month, a community ban yesterday), and the appeal
+    // should land on whichever actually happened last.
+    const [latestByReport, latestByTarget] = await Promise.all([
+      reportsById.size
+        ? this.auditLogs.findOne({
+            where: {
+              reportId: In([...reportsById.keys()]),
+              action: In(APPEALABLE_ACTIONS),
+            },
+            order: { createdAt: 'DESC' },
+          })
+        : Promise.resolve(null),
+      this.auditLogs.findOne({
+        where: {
+          targetUserId: appellantUserId,
+          action: In(APPEALABLE_ACTIONS),
+        },
+        order: { createdAt: 'DESC' },
+      }),
+    ]);
 
-    const latestAction = await this.auditLogs.findOne({
-      where: {
-        reportId: In([...reportsById.keys()]),
-        action: In(APPEALABLE_ACTIONS),
-      },
-      order: { createdAt: 'DESC' },
-    });
-    if (!latestAction || !latestAction.reportId) return null;
+    const candidates = [latestByReport, latestByTarget].filter(
+      (log): log is ModAuditLog => log !== null,
+    );
+    if (!candidates.length) return null;
+    const latestAction = candidates.reduce((newest, log) =>
+      log.createdAt.getTime() > newest.createdAt.getTime() ? log : newest,
+    );
 
-    const report = reportsById.get(latestAction.reportId);
-    if (!report) return null;
+    const report = latestAction.reportId
+      ? (reportsById.get(latestAction.reportId) ?? null)
+      : null;
+    return this.describeAppealTarget(latestAction, report);
+  }
 
+  /**
+   * Fills in the queue context for one resolved audit row.
+   *
+   * `severity` comes from the report when there is one. A report-less sanction
+   * has no severity of its own, so it takes `Medium` — the entity's own default
+   * — rather than an invented one. A community ban is not automatically an
+   * emergency, and treating it as one would push it to the top of a queue
+   * ordered by exactly that field.
+   */
+  private async describeAppealTarget(
+    log: ModAuditLog,
+    report: Report | null,
+  ): Promise<{
+    actionId: string;
+    reportId: string | null;
+    severity: ReportSeverity;
+    actionAt: Date;
+    community: string | null;
+  }> {
+    const community = report
+      ? await this.communitySlugForAppealReport(report)
+      : await this.communitySlugForCommunityBan(log);
     return {
-      actionId: latestAction.id,
-      reportId: report.id,
-      severity: report.severity,
+      actionId: log.id,
+      reportId: report ? report.id : null,
+      severity: report ? report.severity : ReportSeverity.Medium,
+      actionAt: log.createdAt,
+      community,
     };
+  }
+
+  /**
+   * The community a report-backed appeal belongs to.
+   *
+   * A `community`-subject report carries the slug in `subjectId` itself, which
+   * is the same short-circuit `toModReportDTO` takes; everything else goes
+   * through the shared subject resolver.
+   */
+  private async communitySlugForAppealReport(
+    report: Report,
+  ): Promise<string | null> {
+    if (report.subjectType === ReportSubjectType.Community) {
+      return report.subjectId;
+    }
+    return this.communitySlugForReport(report);
+  }
+
+  /**
+   * The community behind a report-less community ban.
+   *
+   * Wave 2's `community_ban_applied` audit row is deliberately report-less and
+   * carries no community id of its own (see `handoff-B2`), so the only way back
+   * to the room is the ban itself. Read through the shared `DataSource` with a
+   * parameterized statement rather than by importing `CommunitiesModule`, for
+   * exactly the reason `ReportSubjectResolverService` gives: the module graph
+   * already has `CommunitiesModule -> ContentModerationModule <- this module`,
+   * and reaching the other way would close a real cycle.
+   *
+   * Most recent ban wins, matching what the handoff recommends for a member
+   * barred from more than one community. Returns `null` for any other action,
+   * and for a ban that has since been deleted: an appeal with no community is
+   * the state the column was in before TS-11 and is handled everywhere.
+   */
+  private async communitySlugForCommunityBan(
+    log: ModAuditLog,
+  ): Promise<string | null> {
+    if (
+      log.action !== COMMUNITY_BAN_AUDIT_ACTION ||
+      !log.targetUserId ||
+      !UUID_RE.test(log.targetUserId)
+    ) {
+      return null;
+    }
+    const rows = await this.dataSource.query<{ slug: string }[]>(
+      `SELECT c.slug AS "slug"
+         FROM community_bans b
+         JOIN communities c ON c.id = b.community_id
+        WHERE b.user_id = $1
+        ORDER BY b.created_at DESC
+        LIMIT 1`,
+      [log.targetUserId],
+    );
+    return rows[0]?.slug ?? null;
   }
 
   // PATCH /mod/appeals/:id — uphold or overturn. Also writes an audit log
@@ -1050,6 +1551,7 @@ export class ModerationService {
     const decidedStatus =
       dto.decision === 'uphold' ? AppealStatus.Upheld : AppealStatus.Overturned;
     const decision = dto.note ?? dto.decision;
+    const decidedAtInstant = new Date();
 
     const saved = await this.dataSource.transaction(async (manager) => {
       // Re-check the status *inside* the transaction and flip it in one
@@ -1061,7 +1563,12 @@ export class ModerationService {
       const updateResult = await manager.update(
         Appeal,
         { id, status: AppealStatus.Awaiting },
-        { status: decidedStatus, decision },
+        // TS-11: `decided_at` is written in the SAME conditional update that
+        // claims the decision, so the timestamp and the status can never
+        // disagree. §05 promises a decision inside 7 days; before this column
+        // there was no way to tell whether that had happened, so the promise
+        // could be neither reported on nor missed visibly.
+        { status: decidedStatus, decision, decidedAt: decidedAtInstant },
       );
       if (updateResult.affected !== 1) {
         throw new ConflictException('Appeal has already been decided');
@@ -1090,6 +1597,7 @@ export class ModerationService {
       // response, matching what the conditional `update` just persisted.
       appeal.status = decidedStatus;
       appeal.decision = decision;
+      appeal.decidedAt = decidedAtInstant;
       return appeal;
     });
 
@@ -1198,6 +1706,43 @@ export class ModerationService {
       manager,
       appeal.reportId,
     );
+
+    // TS-12. An overturned appeal has to close the door the pending hold left
+    // open. Without this a member could win their appeal on Tuesday and still
+    // be permanently banned on Wednesday, by a second moderator ratifying a
+    // hold nobody had told about the overturn. Runs inside the same transaction
+    // as the overturn, so the two commit together or not at all.
+    if (appeal.appellantId) {
+      await this.banRatification.withdrawPendingHold(
+        manager,
+        appeal.appellantId,
+      );
+    }
+  }
+
+  /**
+   * GET /mod/ratifications — the permanent bans waiting on a second moderator
+   * (TS-12). Delegates to {@link BanRatificationService}.
+   */
+  listRatifications(
+    status?: BanRatificationStatus,
+  ): Promise<BanRatificationDTO[]> {
+    return this.banRatification.list(status);
+  }
+
+  /**
+   * PATCH /mod/ratifications/:id — confirm or refuse another moderator's
+   * permanent ban. Delegates to {@link BanRatificationService}, which enforces
+   * that the ratifier is not the moderator who asked (including when that
+   * moderator is an admin).
+   */
+  decideRatification(
+    id: string,
+    actorId: string,
+    actorRole: string,
+    dto: RatifyBanDto,
+  ): Promise<BanRatificationDTO> {
+    return this.banRatification.decide(id, actorId, actorRole, dto);
   }
 
   // PATCH /mod/users/:userId/suspension — lift a suspension or ban. Delegates
@@ -1313,6 +1858,178 @@ export class ModerationService {
     // (C4): the frontend never sends one on first load.
   }
 
+  /**
+   * Narrows the queue to one community, by slug (TS-14).
+   *
+   * `reports` carries no community foreign key, so attribution is the
+   * `(subjectType, subjectId)` pair — the exact rules
+   * `admin-communities/community-report-scope.ts` documents, reused here rather
+   * than re-invented:
+   *
+   *  - a `community` report: `subjectId` IS the slug.
+   *  - a `post` or `reply` report: `subjectId` is a content id, resolved
+   *    through `community_posts` / `community_post_replies`.
+   *  - an `event` report: `subjectId` is the gathering's slug, and a gathering
+   *    hosted inside a community carries `community_id`.
+   *  - `member`, `message` and `venue` reports have no community and are
+   *    excluded rather than guessed at, matching that file exactly.
+   *
+   * The slug resolves inside the statement, so an unknown slug makes every
+   * content arm compare against NULL (never true) while the `community`-subject
+   * arm still matches: a report filed against a community that has since been
+   * deleted is still a report about that slug.
+   *
+   * The uuid columns are compared as `::text` against the `varchar`
+   * `subject_id` so a slug or the `"unspecified"` sentinel sitting in that
+   * column can never make Postgres throw "invalid input syntax for type uuid" —
+   * the same hazard `UUID_RE` guards on the entity side.
+   */
+  private applyCommunityFilter(
+    qb: SelectQueryBuilder<Report>,
+    communitySlug: string,
+  ): void {
+    qb.andWhere(
+      `(
+        (r.subjectType = :communitySubjectType AND r.subjectId = :communitySlug)
+        OR (r.subjectType = :postSubjectType AND EXISTS (
+              SELECT 1 FROM community_posts cp
+              WHERE cp.id::text = r.subject_id
+                AND cp.community_id = (SELECT co.id FROM communities co WHERE co.slug = :communitySlug)))
+        OR (r.subjectType = :replySubjectType AND EXISTS (
+              SELECT 1 FROM community_post_replies cpr
+              JOIN community_posts cpp ON cpp.id = cpr.post_id
+              WHERE cpr.id::text = r.subject_id
+                AND cpp.community_id = (SELECT co.id FROM communities co WHERE co.slug = :communitySlug)))
+        OR (r.subjectType = :eventSubjectType AND EXISTS (
+              SELECT 1 FROM events ev
+              WHERE ev.slug = r.subject_id
+                AND ev.community_id = (SELECT co.id FROM communities co WHERE co.slug = :communitySlug)))
+      )`,
+      {
+        communitySubjectType: ReportSubjectType.Community,
+        postSubjectType: ReportSubjectType.Post,
+        replySubjectType: ReportSubjectType.Reply,
+        eventSubjectType: ReportSubjectType.Event,
+        communitySlug,
+      },
+    );
+  }
+
+  /**
+   * TS-06: narrows the queue to reports that are part of a SURGE — several
+   * different people reporting the same subject.
+   *
+   * A pile-on is the highest-volume event the queue will ever see and the one
+   * where the right action is most often against the reporters, and the flat
+   * list showed it as thirty unrelated complaints with thirty SLA clocks. This
+   * filter is the moderator asking "show me only the piles".
+   *
+   * The predicate is a grouped semi-join on `(subject_type, subject_id)` over
+   * every UNRESOLVED report, with the same two thresholds
+   * `CommunityAutoFreezeService.isReportPileUp` uses (see the constants at the
+   * top of this file). A reporter with no account counts as their own distinct
+   * person via the `COALESCE(..., 'anon:' || id)` trick that file established,
+   * so a wave of account-less reports is still visible as a wave rather than
+   * collapsing to one.
+   */
+  private applySurgeFilter(qb: SelectQueryBuilder<Report>): void {
+    qb.andWhere(
+      `(r.subject_type, r.subject_id) IN (
+        SELECT sibling.subject_type, sibling.subject_id
+        FROM reports sibling
+        WHERE sibling.status IN (:...surgeOpenStatuses)
+        GROUP BY sibling.subject_type, sibling.subject_id
+        HAVING COUNT(*) >= :surgeMinOpen
+          AND COUNT(DISTINCT COALESCE(sibling.reporter_id::text, 'anon:' || sibling.id::text)) >= :surgeMinReporters
+      )`,
+      {
+        surgeOpenStatuses: [ReportStatus.Open, ReportStatus.Escalated],
+        surgeMinOpen: SURGE_MIN_OPEN_REPORTS,
+        surgeMinReporters: SURGE_MIN_DISTINCT_REPORTERS,
+      },
+    );
+  }
+
+  /**
+   * TS-06: the piles behind the rows on one page.
+   *
+   * Grouped over EVERY unresolved report about the page's subjects, never over
+   * the page itself: the whole point is that twenty-nine of the thirty reports
+   * are somewhere the moderator cannot see. One statement for the page, so
+   * this costs a single extra query whatever the page size.
+   *
+   * A pair with exactly one open report gets no cluster at all: its own row
+   * already says everything a cluster would, and a queue where every row wears
+   * a "1 report" badge teaches a moderator to stop reading badges.
+   *
+   * `subject_type` and `subject_id` are matched with two separate `ANY(...)`
+   * lists rather than a tuple list, so both stay index-friendly. That is
+   * slightly wider than the page (it admits a same-id-different-type pair that
+   * cannot actually happen, since every subject id is a uuid or a slug from
+   * one domain), so the result is narrowed back to the page's real pairs in
+   * TypeScript before anything is returned.
+   */
+  private async clustersFor(reports: Report[]): Promise<ModReportClusterDTO[]> {
+    if (!reports.length) return [];
+
+    const subjectTypes = [
+      ...new Set(reports.map((report) => report.subjectType)),
+    ];
+    const subjectIds = [...new Set(reports.map((report) => report.subjectId))];
+    const pageKeys = new Set(
+      reports.map((report) => `${report.subjectType}\u0000${report.subjectId}`),
+    );
+
+    // `CLUSTER_ID_CAP` is a module constant, never client input, so it is
+    // spliced into the array slice rather than bound (Postgres will not take a
+    // parameter as a subscript bound here).
+    const rows = await this.dataSource.query<ClusterAggregateRow[]>(
+      `SELECT subject_type AS "subjectType",
+              subject_id AS "subjectId",
+              COUNT(*)::int AS "openCount",
+              COUNT(DISTINCT COALESCE(reporter_id::text, 'anon:' || id::text))::int AS "distinctReporterCount",
+              COUNT(*) FILTER (WHERE sla_due_at < now())::int AS "overdueCount",
+              MIN(CASE severity::text
+                    WHEN 'emergency' THEN 0
+                    WHEN 'high' THEN 1
+                    WHEN 'medium' THEN 2
+                    ELSE 3
+                  END)::int AS "severityRank",
+              MIN(created_at) AS "firstReportedAt",
+              MAX(created_at) AS "lastReportedAt",
+              (array_agg(id::text ORDER BY created_at ASC, id ASC))[1:${CLUSTER_ID_CAP}] AS "reportIds"
+         FROM reports
+        WHERE subject_type = ANY($1::reports_subject_type_enum[])
+          AND subject_id = ANY($2::varchar[])
+          AND status = ANY($3::reports_status_enum[])
+        GROUP BY subject_type, subject_id
+       HAVING COUNT(*) > 1`,
+      [subjectTypes, subjectIds, [ReportStatus.Open, ReportStatus.Escalated]],
+    );
+
+    return rows
+      .filter((row) => pageKeys.has(`${row.subjectType}\u0000${row.subjectId}`))
+      .map((row) => ({
+        subjectType: row.subjectType,
+        subjectId: row.subjectId,
+        openCount: row.openCount,
+        distinctReporterCount: row.distinctReporterCount,
+        overdueCount: row.overdueCount,
+        highestSeverity: SEVERITY_RANK[row.severityRank] ?? ReportSeverity.Low,
+        firstReportedAt: new Date(row.firstReportedAt).toISOString(),
+        lastReportedAt: new Date(row.lastReportedAt).toISOString(),
+        isSurge:
+          row.openCount >= SURGE_MIN_OPEN_REPORTS &&
+          row.distinctReporterCount >= SURGE_MIN_DISTINCT_REPORTERS,
+        reportIds: row.reportIds ?? [],
+      }))
+      .sort(
+        (left, right) =>
+          right.distinctReporterCount - left.distinctReporterCount ||
+          right.openCount - left.openCount,
+      );
+  }
+
   private async computeCounts(): Promise<ModCounts> {
     const [open, resolved, appeals] = await Promise.all([
       this.reports.count({
@@ -1339,25 +2056,37 @@ export class ModerationService {
     withDetail = false,
     hasFullReportVisibility = true,
   ): Promise<ModReportDTO> {
-    const [reporter, reported, assignedModeratorName, resolutionActorName] =
-      await Promise.all([
-        hasFullReportVisibility
-          ? this.describeReporter(report)
-          : Promise.resolve<ModReporterDTO>({ anonymous: true }),
-        hasFullReportVisibility
-          ? this.describeReported(report)
-          : Promise.resolve<ModReportedDTO>({
-              id: report.subjectId,
-              handle: report.subjectId,
-              priorReports: 0,
-            }),
-        hasFullReportVisibility && report.assignedModeratorId
-          ? this.audit.nameForUserId(report.assignedModeratorId)
-          : undefined,
-        report.resolvedAt
-          ? this.audit.nameForUserId(report.resolutionActorId)
-          : undefined,
-      ]);
+    const [
+      reporter,
+      reported,
+      assignedModeratorName,
+      resolutionActorName,
+      communitySlug,
+    ] = await Promise.all([
+      hasFullReportVisibility
+        ? this.describeReporter(report)
+        : Promise.resolve<ModReporterDTO>({ anonymous: true }),
+      hasFullReportVisibility
+        ? this.describeReported(report)
+        : Promise.resolve<ModReportedDTO>({
+            id: report.subjectId,
+            handle: report.subjectId,
+            priorReports: 0,
+          }),
+      hasFullReportVisibility && report.assignedModeratorId
+        ? this.audit.nameForUserId(report.assignedModeratorId)
+        : undefined,
+      report.resolvedAt
+        ? this.audit.nameForUserId(report.resolutionActorId)
+        : undefined,
+      // TS-14: which community this report came from. A community mod acting
+      // through the carve-out already knows which community they moderate, and
+      // the redacted response withholds everything else about the report, so
+      // this is resolved only for the full-visibility path.
+      hasFullReportVisibility
+        ? this.communitySlugForReport(report)
+        : Promise.resolve(null),
+    ]);
     const detail =
       withDetail && hasFullReportVisibility
         ? await this.buildDetail(report, reporter, reported)
@@ -1373,7 +2102,23 @@ export class ModerationService {
       assignedModeratorName,
       resolution,
       hasFullReportVisibility,
+      communitySlug,
     );
+  }
+
+  /**
+   * The slug of the community ONE report came from, or `null`.
+   *
+   * A `community`-subject report needs no lookup at all (`toModReportDTO`
+   * short-circuits on `subjectId`, which is already the slug). Everything else
+   * goes through the shared subject resolver and then one id -> slug lookup,
+   * which is what `toRows` does in bulk for a whole page.
+   */
+  private async communitySlugForReport(report: Report): Promise<string | null> {
+    if (report.subjectType === ReportSubjectType.Community) return null;
+    const { communityId } = await this.subjectResolver.resolve(report);
+    if (!communityId) return null;
+    return this.communityMembership.slugById(communityId);
   }
 
   /**
@@ -1414,12 +2159,14 @@ export class ModerationService {
       priorReportCounts,
       moderatorNames,
       reporterCredibility,
+      communitySlugs,
     ] = await Promise.all([
       this.audit.namesForUserIds(reporterUserIds),
       this.resolveReportedProfiles(reports),
       this.priorReportCountsBySubject(reports),
       this.audit.namesForUserIds(moderatorIds),
       this.reporterCredibilityByReporterId(reports),
+      this.communitySlugsByReportId(reports),
     ]);
 
     return reports.map((report) => {
@@ -1455,8 +2202,56 @@ export class ModerationService {
         undefined,
         assignedModeratorName,
         resolution,
+        true,
+        communitySlugs.get(report.id) ?? null,
       );
     });
+  }
+
+  /**
+   * TS-14: the community every report on a page came from, keyed by report id.
+   *
+   * Community context is the triage signal a moderator most wants and the queue
+   * had none of: `ModReportDTO.community` was populated only when the subject
+   * was literally a community, so a post, reply or gathering report — most of
+   * the queue — showed nothing. Two queries for a whole page: the shared
+   * subject resolver batches the content lookups, then one `refsByIds` turns
+   * the community ids into the slugs the rows display.
+   *
+   * A `member` or `message` report resolves to `null` here, deliberately. That
+   * is the same line `admin-communities/community-report-scope.ts` draws: a DM
+   * belongs to no community, and a member belongs to many, so naming one would
+   * be a guess dressed as a fact.
+   */
+  private async communitySlugsByReportId(
+    reports: Report[],
+  ): Promise<Map<string, string>> {
+    const slugsByReportId = new Map<string, string>();
+
+    // A `community`-subject report already carries its slug as `subjectId`;
+    // `toModReportDTO` reads it straight off the row, so it needs no lookup.
+    const resolvable = reports.filter(
+      (report) => report.subjectType !== ReportSubjectType.Community,
+    );
+    if (!resolvable.length) return slugsByReportId;
+
+    const resolutions = await this.subjectResolver.resolveMany(resolvable);
+    const communityIds = [
+      ...new Set(
+        [...resolutions.values()]
+          .map((resolution) => resolution.communityId)
+          .filter((communityId): communityId is string => communityId != null),
+      ),
+    ];
+    if (!communityIds.length) return slugsByReportId;
+
+    const refs = await this.communityMembership.refsByIds(communityIds);
+    for (const [reportId, resolution] of resolutions) {
+      if (!resolution.communityId) continue;
+      const ref = refs.get(resolution.communityId);
+      if (ref) slugsByReportId.set(reportId, ref.slug);
+    }
+    return slugsByReportId;
   }
 
   // Sync twin of `describeReporter` fed from a pre-resolved name map — the
@@ -1716,9 +2511,19 @@ export class ModerationService {
     // reason as its own field (over and above the shared `excerpt`).
     const listingEnrichment = await this.buildListingEnrichment(report);
 
+    // What was actually reported, resolved from the subject itself. The drawer
+    // used to show only the reporter's own free text under "excerpt", so a
+    // moderator judging a post read the complaint about it and never the post.
+    // Degrades to the reporter's text when the subject has no readable body
+    // (a member, a venue), which is what it always showed.
+    const subject = await this.subjectResolver.resolve(report);
+    const contentAuthorHandle = subject.authorUserId
+      ? await this.handleForUserId(subject.authorUserId)
+      : null;
+
     return {
-      contentAuthor: reported.handle,
-      excerpt: report.detail ?? '',
+      contentAuthor: contentAuthorHandle ?? reported.handle,
+      excerpt: subject.excerpt ?? report.detail ?? '',
       ...(report.anonymous
         ? { redactionNote: 'Reporter identity withheld.' }
         : {}),
@@ -1746,6 +2551,19 @@ export class ModerationService {
         ? { evidence: report.evidence }
         : {}),
     };
+  }
+
+  /**
+   * A member's public handle (their profile slug), for the drawer's
+   * "content author" line. `null` for an id with no profile row, so the caller
+   * falls back to what it showed before rather than printing a bare uuid.
+   */
+  private async handleForUserId(userId: string): Promise<string | null> {
+    const profile = await this.profiles.findOne({
+      where: { userId },
+      select: { slug: true },
+    });
+    return profile?.slug ?? null;
   }
 
   /** The `disputeReason` + `listingEvidence` + `contactEmail` fields for a
@@ -1793,12 +2611,15 @@ export class ModerationService {
     };
   }
 
-  private async toAppealRow(appeal: Appeal): Promise<AppealDTO> {
+  private async toAppealRow(
+    appeal: Appeal,
+    now: Date = new Date(),
+  ): Promise<AppealDTO> {
     const [appellant, original] = await Promise.all([
       this.describeAppellant(appeal),
       this.describeOriginalAction(appeal),
     ]);
-    return toAppealDTO(appeal, appellant, original);
+    return toAppealDTO(appeal, appellant, original, now);
   }
 
   /**
@@ -1809,7 +2630,13 @@ export class ModerationService {
    * rows in one more, and every one of those rows' actor names in a single
    * `namesForUserIds` — so a page is three queries regardless of size.
    */
-  private async toAppealRows(appeals: Appeal[]): Promise<AppealDTO[]> {
+  private async toAppealRows(
+    appeals: Appeal[],
+    // Passed in rather than read per row so every appeal on a page is judged
+    // overdue against the SAME instant. Reading `new Date()` inside the map
+    // would let a slow page straddle a due date.
+    now: Date = new Date(),
+  ): Promise<AppealDTO[]> {
     if (!appeals.length) return [];
 
     const appellantUserIds = appeals
@@ -1832,7 +2659,7 @@ export class ModerationService {
     return appeals.map((appeal) => {
       const appellant = this.buildAppellant(appeal, appellantProfiles);
       const original = this.buildOriginalAction(appeal, actionLogs, actorNames);
-      return toAppealDTO(appeal, appellant, original);
+      return toAppealDTO(appeal, appellant, original, now);
     });
   }
 

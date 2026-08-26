@@ -10,7 +10,7 @@ import {
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 
 /** Body for `POST /directory/:slug/reviews` — a member leaving a review. */
-export class CreateReviewDto {
+export class CreateListingReviewDto {
   @IsInt()
   @Min(1)
   @Max(5)

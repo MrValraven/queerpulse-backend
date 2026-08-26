@@ -57,6 +57,12 @@ function build() {
     {
       statesForAnyType: jest.fn().mockResolvedValue(new Map()),
     } as never,
+    // SOC-13 thread following — stubbed so the reply path can auto-subscribe
+    // and fan out without a repository.
+    {
+      subscribe: jest.fn(),
+      subscriberIdsToNotify: jest.fn().mockResolvedValue([]),
+    } as never,
   );
   return { service, post, posts, edits, byUserIds, notifications, managerSave };
 }
@@ -194,6 +200,10 @@ function buildVote(options: { isOp: boolean; voteCount: number }) {
     {} as never, // edits
     {} as never, // mentions
     { statesForAnyType: jest.fn() } as never,
+    {
+      subscribe: jest.fn(),
+      subscriberIdsToNotify: jest.fn().mockResolvedValue([]),
+    } as never, // subscriptions
   );
   return { service, post, threadUpdate };
 }
@@ -226,5 +236,178 @@ describe('ForumPostsService vote → op_vote_count denorm', () => {
       { id: 't1' },
       { opVoteCount: 0 },
     );
+  });
+});
+
+// --- SOC-08: reply bodies as a search type -----------------------------------
+// Its own builder: the query-builder path below is untouched by the
+// authorization fakes above, and the visibility gates are the whole point of
+// these tests.
+function buildSearch() {
+  const queryBuilder: Record<string, jest.Mock> = {};
+  for (const method of [
+    'select',
+    'addSelect',
+    'innerJoin',
+    'where',
+    'andWhere',
+    'orderBy',
+    'addOrderBy',
+    'limit',
+    'offset',
+  ]) {
+    queryBuilder[method] = jest.fn().mockReturnValue(queryBuilder);
+  }
+  queryBuilder.getRawMany = jest.fn().mockResolvedValue([]);
+  const posts = { createQueryBuilder: jest.fn(() => queryBuilder) };
+  const blockFilter = { excludeHidden: jest.fn() };
+  const service = new ForumPostsService(
+    posts as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    blockFilter as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+  );
+  const andWhereCalls = (): unknown[][] =>
+    (queryBuilder.andWhere as jest.Mock<unknown, unknown[]>).mock.calls;
+  const predicates = () =>
+    andWhereCalls()
+      .map((call) => String(call[0]))
+      .join('\n');
+  return { service, queryBuilder, blockFilter, predicates, andWhereCalls };
+}
+
+describe('ForumPostsService.searchByText visibility', () => {
+  it('drops posts whose author the viewer blocked or muted', async () => {
+    const { service, queryBuilder, blockFilter } = buildSearch();
+
+    await service.searchByText('viewer-1', 'gp', 6);
+
+    expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
+      queryBuilder,
+      'viewer-1',
+      '"p"."author_id"',
+    );
+  });
+
+  it('drops posts inside a thread whose AUTHOR the viewer blocked or muted', async () => {
+    const { service, predicates } = buildSearch();
+
+    await service.searchByText('viewer-1', 'gp', 6);
+
+    const sql = predicates();
+    expect(sql).toContain('"__thread_author_block"');
+    expect(sql).toContain('"__thread_author_mute"');
+    expect(sql).toContain('"t"."author_id"');
+  });
+
+  it('never surfaces a Private community thread to a non-member', async () => {
+    const { service, predicates, andWhereCalls } = buildSearch();
+
+    await service.searchByText('viewer-1', 'gp', 6);
+
+    expect(predicates()).toContain('"__search_com"."access_tier" != ');
+    expect(predicates()).toContain(
+      '"__search_mem"."user_id" = :searchViewerId',
+    );
+    const communityCall = andWhereCalls().find((call) =>
+      String(call[0]).includes('__search_com'),
+    );
+    expect(communityCall?.[1]).toEqual({ searchPrivateTier: 'private' });
+  });
+
+  it('never surfaces a tombstoned post body', async () => {
+    const { service, predicates } = buildSearch();
+
+    await service.searchByText('viewer-1', 'gp', 6);
+
+    expect(predicates()).toContain('p.deletedAt IS NULL');
+  });
+
+  it('drops both hidden AND removed moderation subjects, under either taxonomy code', async () => {
+    const { service, predicates, andWhereCalls } = buildSearch();
+
+    await service.searchByText('viewer-1', 'gp', 6);
+
+    const sql = predicates();
+    // A read path keeps a removed post as a visible `[removed]` tombstone.
+    // Search must not: surfacing it means surfacing the text a moderator took
+    // down.
+    expect(sql).toContain('"__search_moderation"."hidden_at" IS NOT NULL');
+    expect(sql).toContain('"__search_moderation"."removed_at" IS NOT NULL');
+    const moderationCall = andWhereCalls().find((call) =>
+      String(call[0]).includes('__search_moderation'),
+    );
+    expect(moderationCall?.[1]).toEqual({
+      searchModerationSubjectTypes: ['post', 'reply'],
+    });
+  });
+
+  it('matches accent-folded full text and ranks by relevance', async () => {
+    const { service, queryBuilder } = buildSearch();
+
+    await service.searchByText('viewer-1', 'sao', 6);
+
+    const [predicate, parameters] = (queryBuilder.where as jest.Mock).mock
+      .calls[0] as [string, Record<string, string>];
+    expect(predicate).toContain('websearch_to_tsquery');
+    expect(predicate).toContain('translate(lower(');
+    expect(parameters.searchTerm).toBe('sao');
+    expect(queryBuilder.addSelect).toHaveBeenCalledWith(
+      expect.stringContaining('ts_rank'),
+      'search_rank',
+    );
+    expect(queryBuilder.orderBy).toHaveBeenCalledWith('search_rank', 'DESC');
+  });
+
+  it('pages with a flat limit/offset', async () => {
+    const { service, queryBuilder } = buildSearch();
+
+    await service.searchByText('viewer-1', 'gp', 11, 20);
+
+    expect(queryBuilder.limit).toHaveBeenCalledWith(11);
+    expect(queryBuilder.offset).toHaveBeenCalledWith(20);
+  });
+
+  it('returns the matching part of the reply, keyed to its thread', async () => {
+    const { service, queryBuilder } = buildSearch();
+    const body = `${'x'.repeat(400)} the GP at the health centre was wonderful ${'y'.repeat(400)}`;
+    (queryBuilder.getRawMany as jest.Mock).mockResolvedValue([
+      {
+        threadSlug: 'gp-lisbon',
+        threadTitle: 'Trans-friendly GP in Lisbon?',
+        threadCategory: 'health',
+        postBody: body,
+      },
+    ]);
+
+    const rows = await service.searchByText('viewer-1', 'health centre', 6);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.threadSlug).toBe('gp-lisbon');
+    expect(rows[0]?.threadTitle).toBe('Trans-friendly GP in Lisbon?');
+    expect(rows[0]?.excerpt).toContain('health centre');
+    expect(rows[0]?.excerpt.length).toBeLessThanOrEqual(162);
+  });
+
+  it('centres the excerpt on an accented match found by the folded query', async () => {
+    const { service, queryBuilder } = buildSearch();
+    const body = `${'x'.repeat(400)} fui ao centro de saúde em São Bento ${'y'.repeat(400)}`;
+    (queryBuilder.getRawMany as jest.Mock).mockResolvedValue([
+      {
+        threadSlug: 'sao-bento',
+        threadTitle: 'Clinicas',
+        threadCategory: 'health',
+        postBody: body,
+      },
+    ]);
+
+    const rows = await service.searchByText('viewer-1', 'Sao Bento', 6);
+
+    expect(rows[0]?.excerpt).toContain('São Bento');
   });
 });

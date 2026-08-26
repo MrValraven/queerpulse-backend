@@ -47,7 +47,14 @@ import { LandingModule } from './landing/landing.module';
 import { PressKitModule } from './press-kit/press-kit.module';
 import { AdminCommunitiesModule } from './admin-communities/admin-communities.module';
 import { AdminMembersModule } from './admin-members/admin-members.module';
+import { AdminDsarModule } from './admin-dsar/admin-dsar.module';
+import { AdminStatusModule } from './admin-status/admin-status.module';
+import { StatusModule } from './status/status.module';
 import { AdminInvitesModule } from './admin-invites/admin-invites.module';
+import { BanEvasionModule } from './ban-evasion/ban-evasion.module';
+import { ModResponseTemplatesModule } from './mod-response-templates/mod-response-templates.module';
+import { TransparencyModule } from './transparency/transparency.module';
+import { AdminTopicsModule } from './admin-topics/admin-topics.module';
 import { AdminTrustNetworkModule } from './admin-trust-network/admin-trust-network.module';
 import { AdminOverviewModule } from './admin-overview/admin-overview.module';
 import { AdminReportsModule } from './admin-reports/admin-reports.module';
@@ -62,7 +69,6 @@ import { PushModule } from './push/push.module';
 import { EventsModule } from './events/events.module';
 import { CalendarFeedModule } from './calendar-feed/calendar-feed.module';
 import { JobsModule } from './jobs/jobs.module';
-import { WorkshopsModule } from './workshops/workshops.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PartnersModule } from './partners/partners.module';
 import { OrgTiersModule } from './org-tiers/org-tiers.module';
@@ -83,6 +89,7 @@ import { ConsentModule } from './consent/consent.module';
 import { NudgesModule } from './nudges/nudges.module';
 import { SavedModule } from './saved/saved.module';
 import { CollectionsModule } from './collections/collections.module';
+import { MemberSuggestionsModule } from './member-suggestions/member-suggestions.module';
 import { TopicsModule } from './topics/topics.module';
 import { NewsletterModule } from './newsletter/newsletter.module';
 import { SafeSpaceNominationsModule } from './safe-space-nominations/safe-space-nominations.module';
@@ -233,7 +240,6 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     CommunitiesModule,
     CompaniesModule,
     JobsModule,
-    WorkshopsModule,
     PartnersModule,
     InquiriesModule,
     OrgTiersModule,
@@ -282,6 +288,10 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     MagazineModule,
     ResourcesModule,
     TopicsModule,
+    // "Members you might know" (SOC-05). Its controller is
+    // `members/suggested`, a literal segment ProfilesController does not claim,
+    // so module order does not affect routing.
+    MemberSuggestionsModule,
     ContentModule,
     CultureModule,
     GovernanceModule,
@@ -293,6 +303,23 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     AdminCommunitiesModule,
     AdminMembersModule,
     AdminInvitesModule,
+    // A privacy-preserving signal that a new account may belong to someone
+    // already removed (TS-05). Read-only: it raises a flag for a human
+    // reviewer in the invite console and never blocks anyone by itself.
+    BanEvasionModule,
+    // The reason-keyed library moderators prefill a decision note from
+    // (TS-16). No template id is ever stored on an action, so editing a
+    // template later cannot rewrite what a member was already told.
+    ModResponseTemplatesModule,
+    // The public, aggregate-only transparency report the constitution names
+    // but never had (TS-13).
+    TransparencyModule,
+    AdminDsarModule,
+    AdminStatusModule,
+    StatusModule,
+    // Staff CRUD for the topic directory (SOC-01). Routes live under
+    // /admin/topics, which no other controller claims.
+    AdminTopicsModule,
     AdminTrustNetworkModule,
     AdminOverviewModule,
     AdminReportsModule,

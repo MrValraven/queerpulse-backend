@@ -30,6 +30,8 @@ import { Shaping, ShapingKind } from './entities/shaping.entity';
 import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
 import { WorkItem } from './entities/work-item.entity';
+import { ActivityVisibilityService } from './activity-visibility.service';
+import { LastActiveService } from './last-active.service';
 import { ProfilesService } from './profiles.service';
 
 // A chainable query-builder stub whose terminal methods resolve to [].
@@ -165,6 +167,29 @@ describe('ProfilesService.getBySlug visibility', () => {
         {
           provide: MediaCropService,
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
+        },
+        {
+          // The activity privacy gate is read-only here and has its own spec.
+          // Passing rows straight through keeps every existing assertion about
+          // the activity section exactly as it was before the gate existed.
+          provide: ActivityVisibilityService,
+          useValue: {
+            filterVisible: jest
+              .fn()
+              .mockImplementation((rows: unknown[]) => Promise.resolve(rows)),
+          },
+        },
+        {
+          // The coarse "recently active" band is read-only here and its own
+          // spec covers it; a member with nothing recorded reads as no band,
+          // which is the state every assertion in this file assumes.
+          provide: LastActiveService,
+          useValue: {
+            getSignal: jest
+              .fn()
+              .mockResolvedValue({ band: null, isHidden: false }),
+            getSignals: jest.fn().mockResolvedValue(new Map()),
+          },
         },
       ],
     }).compile();
@@ -558,6 +583,100 @@ describe('ProfilesService.getBySlug visibility', () => {
       );
     });
 
+    it('searches the bio and the Portuguese bio, accent-folded and ranked (SOC-08)', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount.mockResolvedValue([[], 0]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.searchMembers({ query: 'sao' }, 'viewer-1');
+
+      const andWhereCalls: unknown[][] = (
+        qb.andWhere as jest.Mock<unknown, unknown[]>
+      ).mock.calls;
+      const searchCall = andWhereCalls.find(
+        (call: unknown[]) =>
+          typeof call[0] === 'string' &&
+          call[0].includes('websearch_to_tsquery'),
+      );
+      expect(searchCall).toBeDefined();
+      const [predicate, parameters] = searchCall as [
+        string,
+        Record<string, string>,
+      ];
+      // Both bios reach the haystack — member search used to skip them.
+      expect(predicate).toContain('"p"."bio"');
+      expect(predicate).toContain('"p"."bio_pt"');
+      // Accent folding on BOTH sides, so "sao" finds "São".
+      expect(predicate).toContain('translate(lower(');
+      // The substring branch survives alongside full text, so "trans" still
+      // finds "transfeminine".
+      expect(predicate).toContain('LIKE');
+      expect(parameters.memberSearchTerm).toBe('sao');
+      expect(parameters.memberSearchPattern).toBe('%sao%');
+    });
+
+    it('orders by relevance when a term is given and no sort was chosen', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount.mockResolvedValue([[], 0]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.searchMembers({ query: 'sao' }, 'viewer-1');
+
+      expect(qb.addSelect).toHaveBeenCalledWith(
+        expect.stringContaining('ts_rank'),
+        'member_search_rank',
+      );
+      expect(qb.orderBy).toHaveBeenCalledWith('member_search_rank', 'DESC');
+    });
+
+    it('keeps the newest-first default when there is no term to rank by', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount.mockResolvedValue([[], 0]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.searchMembers({}, 'viewer-1');
+
+      expect(qb.orderBy).toHaveBeenCalledWith('p.joinedAt', 'DESC');
+      expect(qb.addSelect).not.toHaveBeenCalledWith(
+        expect.stringContaining('ts_rank'),
+        'member_search_rank',
+      );
+    });
+
+    it('takes a flat offset/limit from global search instead of the page window', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount.mockResolvedValue([[], 0]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.searchMembers({ query: 'sao' }, 'viewer-1', {
+        offset: 50,
+        limit: 11,
+      });
+
+      expect(qb.skip).toHaveBeenCalledWith(50);
+      expect(qb.take).toHaveBeenCalledWith(11);
+    });
+
+    it('still applies every privacy gate when global search paginates deeply', async () => {
+      const qb = qbStub();
+      qb.getManyAndCount.mockResolvedValue([[], 0]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+
+      await service.searchMembers({ query: 'sao' }, 'viewer-1', {
+        offset: 50,
+        limit: 11,
+      });
+
+      expect(blockFilter.excludeBlocked).toHaveBeenCalledWith(
+        qb,
+        'viewer-1',
+        '"p"."user_id"',
+      );
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        '("p"."hidden_until" IS NULL OR "p"."hidden_until" <= now())',
+      );
+    });
+
     it("excludes members with a live hiddenUntil from every viewer's search, unconditionally (member profile v2 Task 6)", async () => {
       const qb = qbStub();
       qb.getManyAndCount.mockResolvedValue([[], 0]);
@@ -788,6 +907,28 @@ describe('ProfilesService replace-list endpoints', () => {
         {
           provide: MediaCropService,
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
+        },
+        {
+          // The activity privacy gate is read-only here and has its own spec.
+          // Passing rows straight through keeps every existing assertion about
+          // the activity section exactly as it was before the gate existed.
+          provide: ActivityVisibilityService,
+          useValue: {
+            filterVisible: jest
+              .fn()
+              .mockImplementation((rows: unknown[]) => Promise.resolve(rows)),
+          },
+        },
+        {
+          // Same read-only stub as the module above: nothing recorded, so no
+          // band, which is what every assertion in this file assumes.
+          provide: LastActiveService,
+          useValue: {
+            getSignal: jest
+              .fn()
+              .mockResolvedValue({ band: null, isHidden: false }),
+            getSignals: jest.fn().mockResolvedValue(new Map()),
+          },
         },
       ],
     }).compile();

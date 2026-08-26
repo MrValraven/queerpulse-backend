@@ -1,7 +1,8 @@
 import { IsString, MaxLength, MinLength } from 'class-validator';
 
 /**
- * Body for `POST /communities/:slug/owner-review` (moderators and co-owners).
+ * Body for `POST /communities/:slug/owner-review` (any roster member except
+ * the community's owner).
  *
  * `reason` is REQUIRED, unlike the nullable column behind it (which is
  * nullable so a future staff-side or automated route can write a row without

@@ -9,7 +9,8 @@ export interface RecognitionSignals {
   eventsAttended: number;
   communityPosts: number;
   endorsementCount: number;
-  workshopsTaught: number;
+  /** Open, published gatherings this member hosts or co-hosts. */
+  eventsHosted: number;
   tenureDays: number;
   verified: boolean;
   gettingStartedStepsDone: number; // 0..6
@@ -31,7 +32,6 @@ export type XpSourceKey =
   | 'events'
   | 'posts'
   | 'endorsements'
-  | 'workshops'
   | 'tenure'
   | 'verified'
   | 'gettingStarted';
@@ -93,12 +93,6 @@ export const XP_RULES: SignalRule[] = [
     perUnit: 20,
     cap: 10,
     units: (signals) => signals.endorsementCount,
-  },
-  {
-    key: 'workshops',
-    perUnit: 80,
-    cap: 5,
-    units: (signals) => signals.workshopsTaught,
   },
   {
     key: 'tenure',
@@ -199,8 +193,8 @@ export const BADGE_REQUIREMENTS: Record<string, BadgeRequirement> = {
   'two-homes': { units: (s) => s.communitiesJoined, target: 2 },
   decade: { units: (s) => s.tenureDays, target: 365 },
   sustainer: { units: (s) => s.tenureDays, target: 180 },
-  'event-host': { units: (s) => s.workshopsTaught, target: 1 },
-  'serial-host': { units: (s) => s.workshopsTaught, target: 5 },
+  'event-host': { units: (s) => s.eventsHosted, target: 1 },
+  'serial-host': { units: (s) => s.eventsHosted, target: 5 },
   'first-steps': {
     units: (s) => (s.gettingStartedComplete ? 1 : 0),
     target: 1,

@@ -41,7 +41,14 @@ function build() {
       Promise.resolve({ ...row, id: 'audit-1', createdAt: now }),
     ),
   };
-  const enforcement = { restrictMember: jest.fn() };
+  // Mirrors exactly what this service calls on `AccountEnforcementService`.
+  // `restrictionState`/`liftRestriction` arrived with the un-restrict endpoint;
+  // without them every lift test throws "not a function".
+  const enforcement = {
+    restrictMember: jest.fn(),
+    restrictionState: jest.fn().mockResolvedValue(null),
+    liftRestriction: jest.fn().mockResolvedValue(undefined),
+  };
   const audit = { writeAuditLog: jest.fn().mockResolvedValue(undefined) };
   const notifications = { create: jest.fn().mockResolvedValue(undefined) };
   const auth = { revokeAllForUser: jest.fn().mockResolvedValue(undefined) };

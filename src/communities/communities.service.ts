@@ -52,6 +52,16 @@ import {
   toJoinRequestDTO,
   toRosterEntry,
 } from './community-response';
+import {
+  ACCOUNT_REMOVED,
+  AccountRemovedEvent,
+} from '../ban-evasion/ban-evasion.events';
+import { RemovalKind } from '../ban-evasion/entities/removed-account-signal.entity';
+import {
+  banExpiryFromDays,
+  resolveRuleSnapshot,
+} from './community-bans-response';
+import { COMMUNITY_BAN_AUDIT_ACTION } from './community-governance-log.service';
 import { CommunityBan } from './entities/community-ban.entity';
 import {
   CommunityJoinRequest,
@@ -237,14 +247,23 @@ export interface TriageJoinRequestInput {
 
 /** Options of `removeMember`. `allowReturn` opts OUT of the ban a removal
  * writes by default; it is ignored for a self-leave. `reason` is stored on
- * the ban row for the mod panel and the governance log. */
+ * the ban row, shown on the mod panel, carried into the governance log, and
+ * sent to the removed member.
+ *
+ * `banDays` makes the bar temporary (absent means permanent, the behaviour
+ * every caller had before timed bans existed). `ruleIndex` cites one of the
+ * community's own house rules, 0-based into `Community.rules`; the server
+ * snapshots the version and wording alongside it so the citation survives a
+ * later rules rewrite. Both are ignored when no ban is written at all. */
 export interface RemoveMemberOptions {
   allowReturn?: boolean;
   reason?: string;
+  banDays?: number;
+  ruleIndex?: number;
 }
 
 /** The only roles `setMemberRole` can assign — `owner` is not grantable here
- * (ownership moves through `transferOwnership`; see `UpdateMemberRoleDto`).
+ * (ownership moves through `transferOwnership`; see `UpdateCommunityMemberRoleDto`).
  * `co_owner` is grantable, by the owner alone. */
 export type AssignableRole =
   RosterRole.Member | RosterRole.Mod | RosterRole.CoOwner;
@@ -1636,29 +1655,58 @@ export class CommunitiesService {
   }
 
   /**
-   * Refuses a join by someone this community has barred. Applies to EVERY
+   * Refuses a join by someone this community currently bars. Applies to EVERY
    * access tier, and runs before every other gate in `join`.
    *
-   * The message is deliberately plain and carries no reason, no moderator
-   * name and no date: a person being told they cannot enter a room does not
-   * also need to be lectured about it, and the moderator's `reason` is
-   * written for the mod panel and the audit trail, not for them. It does say
-   * where to go next, because a mistaken ban has to be appealable.
+   * Expiry is enforced by QUERY, never by a sweep job: the predicate is
+   * `expires_at IS NULL OR expires_at > now()`, so a timed ban stops biting
+   * the instant it runs out whether or not anything has deleted the row. The
+   * spent row is then deleted on the way past, which is lazy expiry with
+   * write-through, the pattern `JwtStrategy.liftExpiredRestriction` uses for
+   * `users.restricted_until`. The DELETE is guarded on the row still being
+   * expired, so a moderator re-banning the member between the read and the
+   * write is never clobbered by a stale decision.
+   *
+   * The refusal now carries the terms. It used to be a bare "you cannot join,
+   * contact its moderators", which named a route the product does not offer:
+   * there is no way to message a community's moderators, and the ban reached
+   * the member as nothing at all. So the reason the moderator wrote, the rule
+   * they cited, and the date the bar lifts all travel with the 403. A member
+   * who can read the terms of a sanction can decide whether to wait it out or
+   * appeal it; a member who cannot can do neither.
    */
   private async assertNotBanned(
     community: Community,
     userId: string,
   ): Promise<void> {
-    const isBanned = await this.bans.exists({
+    const ban = await this.bans.findOne({
       where: { communityId: community.id, userId },
     });
-    if (isBanned) {
-      throw new ForbiddenException({
-        code: 'BANNED_FROM_COMMUNITY',
-        message:
-          'You are not able to join this community. If you think that is a mistake, you can contact its moderators.',
-      });
+    if (!ban) return;
+
+    const now = new Date();
+    if (ban.expiresAt !== null && ban.expiresAt.getTime() <= now.getTime()) {
+      await this.bans
+        .createQueryBuilder()
+        .delete()
+        .from(CommunityBan)
+        .where('id = :id AND expires_at IS NOT NULL AND expires_at <= :now', {
+          id: ban.id,
+          now,
+        })
+        .execute();
+      return;
     }
+
+    throw new ForbiddenException({
+      code: 'BANNED_FROM_COMMUNITY',
+      message: ban.expiresAt
+        ? `You cannot join this community until ${ban.expiresAt.toISOString().slice(0, 10)}.`
+        : 'You cannot join this community.',
+      reason: ban.reason,
+      expiresAt: ban.expiresAt?.toISOString() ?? null,
+      rule: ban.ruleText,
+    });
   }
 
   /**
@@ -1977,6 +2025,16 @@ export class CommunitiesService {
       throw new ConflictException('Join request already resolved');
     }
 
+    // A live ban bars admission through this door too. `join` has always
+    // checked `community_bans` first, but approving a pending request skipped
+    // the table entirely, so a barred member with a request already in flight
+    // could be waved back in by a moderator who had no way of knowing. Checked
+    // on approve only: declining a barred applicant's request is always fine,
+    // and `assertNotBanned` treats an expired ban as no ban and clears it.
+    if (action === 'approve') {
+      await this.assertNotBanned(community, request.userId);
+    }
+
     // Second-vouch gate at admission: even a mod can't approve until a current
     // member holds a vouch for the applicant (a mod is a member, so they can
     // vouch first, then approve). Only enforced on approve — declining is always
@@ -2249,10 +2307,14 @@ export class CommunitiesService {
     // param is client-supplied and "leaving banned me from my own community"
     // is the worst possible way to be wrong here.
     const banReason = options.reason?.trim() || null;
-    const hasBarredReturn =
+    const ban =
       !isSelfLeave && !options.allowReturn
-        ? await this.barReturn(community, actorId, targetUserId, banReason)
-        : false;
+        ? await this.barReturn(community, actorId, targetUserId, banReason, {
+            banDays: options.banDays,
+            ruleIndex: options.ruleIndex,
+          })
+        : null;
+    const hasBarredReturn = ban !== null;
 
     // One entry, under the action that describes what actually happened. A
     // removal that bars the return and one that does not differ in whether the
@@ -2268,15 +2330,44 @@ export class CommunitiesService {
       {
         removedBySelf: isSelfLeave,
         ...(hasBarredReturn && banReason ? { reason: banReason } : {}),
+        // The terms of the bar, so the community's own governance log answers
+        // "for how long, and under which rule" without a join onto
+        // `community_bans` (a lifted ban deletes that row; this entry stays).
+        ...(ban
+          ? {
+              banExpiresAt: ban.expiresAt?.toISOString() ?? null,
+              ...(ban.ruleText !== null
+                ? {
+                    ruleIndex: ban.ruleIndex,
+                    ruleVersion: ban.ruleVersion,
+                    ruleText: ban.ruleText,
+                  }
+                : {}),
+            }
+          : {}),
       },
     );
+    // A community ban is now written into `mod_audit_logs` as well (TS-10).
+    // That table is what `POST /appeals` resolves an appeal's target from, so
+    // until this row existed a community ban was the one sanction on the
+    // platform that could not be argued with. Best effort inside the helper:
+    // the removal has already committed.
+    if (ban) {
+      await this.governanceLog.logModerationAudit({
+        actorUserId: actorId,
+        action: COMMUNITY_BAN_AUDIT_ACTION,
+        targetUserId,
+        note: banReason,
+        duration: ban.expiresAt ? ban.expiresAt.toISOString() : null,
+      });
+    }
     // A self-leave doesn't need a "you were removed" notification telling the
     // member the thing they themselves just did. One notification per
     // removal: `CommunityBanned` when the return was barred, the plain
     // `CommunityMemberRemoved` for the tidy-up case, never both.
     if (!isSelfLeave) {
-      if (hasBarredReturn) {
-        await this.notifyMemberBanned(community, actorId, targetUserId);
+      if (ban) {
+        await this.notifyMemberBanned(community, actorId, ban);
       } else {
         await this.notifyMemberRemoved(community, actorId, targetUserId);
       }
@@ -2284,21 +2375,37 @@ export class CommunitiesService {
   }
 
   /**
-   * Writes the `community_bans` row a removal leaves behind, and reports
-   * whether the bar is now in place. `ON CONFLICT DO NOTHING` against the
+   * Writes the `community_bans` row a removal leaves behind, and hands the
+   * caller the row that is now in force. `ON CONFLICT DO NOTHING` against the
    * unique (community, user) index, so re-removing someone already banned is
-   * a no-op rather than a 23505; that still counts as barred, since the
-   * outcome the caller asked for holds.
+   * a no-op rather than a 23505; the ban already on file is what stands, and
+   * that is the row returned.
    *
-   * Only the WRITE lives here. Listing and lifting bans is a separate surface
-   * with its own service.
+   * `banDays` is the lighter rung (TS-10): with it the bar ends by the clock,
+   * without it the bar is permanent, which is what every community ban was
+   * until now. `ruleIndex` cites one of the community's house rules (TS-15);
+   * the version and the rule's exact wording are snapshotted with it, so the
+   * record still reads correctly after the rules are rewritten. An index that
+   * falls outside the current rules is dropped rather than stored.
+   *
+   * Only the WRITE lives here. Listing, revising and lifting bans is a
+   * separate surface with its own service.
    */
   private async barReturn(
     community: Community,
     actorId: string,
     targetUserId: string,
     reason: string | null,
-  ): Promise<boolean> {
+    terms: { banDays?: number; ruleIndex?: number },
+  ): Promise<CommunityBan | null> {
+    const expiresAt =
+      terms.banDays !== undefined ? banExpiryFromDays(terms.banDays) : null;
+    const rule = resolveRuleSnapshot(
+      community.rules,
+      community.rulesVersion,
+      terms.ruleIndex,
+    );
+
     await this.bans
       .createQueryBuilder()
       .insert()
@@ -2308,10 +2415,32 @@ export class CommunitiesService {
         userId: targetUserId,
         bannedByUserId: actorId,
         reason,
+        expiresAt,
+        ruleIndex: rule?.ruleIndex ?? null,
+        ruleVersion: rule?.ruleVersion ?? null,
+        ruleText: rule?.ruleText ?? null,
       })
       .orIgnore()
       .execute();
-    return true;
+
+    // Ban evasion (TS-05). The bar is in place; record the correlation
+    // material for the invite review queue. Emitted after the insert, never
+    // awaited into it.
+    const removed: AccountRemovedEvent = {
+      userId: targetUserId,
+      removalKind: RemovalKind.CommunityBan,
+      communityId: community.id,
+      removedAt: new Date(),
+    };
+    this.eventEmitter.emit(ACCOUNT_REMOVED, removed);
+
+    // Read back rather than trusting the values just sent: on the conflict
+    // path nothing was written and the ban already on file is the one whose
+    // terms the member is actually serving, so it is the one the notification
+    // and the audit rows have to describe.
+    return this.bans.findOne({
+      where: { communityId: community.id, userId: targetUserId },
+    });
   }
 
   /**
@@ -2878,24 +3007,36 @@ export class CommunitiesService {
    * try/catch, exactly like every other notify helper here: a notification
    * failure must never surface as a failed removal.
    *
-   * The payload carries no `reason`. The moderator's words on a ban are
-   * written for the mod panel and the audit trail, and a removed member is
-   * told the fact plainly rather than handed a justification they cannot
-   * reply to.
+   * The payload now carries the TERMS (TS-10): the reason the moderator
+   * recorded, the rule they cited, and the date the bar lifts when it is a
+   * timed one. A ban used to reach the member as a bare fact, which left them
+   * unable to tell a week's timeout from a life sentence and gave them nothing
+   * to appeal against. This is the platform's only channel to them, since
+   * QueerPulse sends no email and there is no way to message a community's
+   * moderators.
+   *
+   * `actorId` still travels as the block/mute argument so that gate holds, and
+   * is deliberately absent from the payload: the bell names the community and
+   * never the moderator who acted.
    */
   private async notifyMemberBanned(
     community: Community,
     actorId: string,
-    targetUserId: string,
+    ban: CommunityBan,
   ): Promise<void> {
     try {
       await this.notifications.create(
-        targetUserId,
+        ban.userId,
         NotificationType.CommunityBanned,
         {
-          actorId,
           source: 'community',
           communitySlug: community.slug,
+          communityName: community.name,
+          reason: ban.reason,
+          expiresAt: ban.expiresAt?.toISOString() ?? null,
+          ruleText: ban.ruleText,
+          ruleIndex: ban.ruleIndex,
+          ruleVersion: ban.ruleVersion,
         },
         actorId,
       );

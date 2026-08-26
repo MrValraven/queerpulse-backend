@@ -34,10 +34,13 @@ import {
  * independently once the Safe Spaces migration lands.
  */
 
-// `listings.owner_id` is a NOT NULL column with a real FK to `users(id)`
-// (`ON DELETE CASCADE` — see migration `AddListings`), so a bare placeholder
+// `listings.owner_id` carries a real FK to `users(id)`, so a bare placeholder
 // UUID with no backing row would fail the insert; some real user row must
-// back it. These are moderator-vetted safe spaces, not member-run
+// back it. (The column became nullable and `ON DELETE SET NULL` in
+// `SetNullContentAuthorFksOnUserErasure1794610000000`, so an owner erasing
+// their account leaves the venue entry live and unclaimed rather than
+// deleting it. NULL still is not a sensible thing to seed: a seeded listing
+// with no owner would land in the unclaimed pile from day one.) These are moderator-vetted safe spaces, not member-run
 // businesses (`linkToProfile: false` below), so WHO owns the row doesn't
 // matter to the product — it only needs to be a valid, existing member.
 // This intentionally reuses any existing member rather than minting a

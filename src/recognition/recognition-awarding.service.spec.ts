@@ -157,7 +157,10 @@ function signalsToDto(signals: RecognitionSignals) {
     connectionCount: signals.connectionCount,
     eventsAttended: signals.eventsAttended,
     communityPosts: signals.communityPosts,
-    workshopsTaught: signals.workshopsTaught,
+    hostedOpenEvents: Array.from(
+      { length: signals.eventsHosted },
+      () => '2026-06-01T00:00:00.000Z',
+    ),
     publishedSubprofiles: signals.personasPublished,
   };
 }
@@ -171,7 +174,7 @@ const BASE: RecognitionSignals = {
   eventsAttended: 0,
   communityPosts: 0,
   endorsementCount: 0,
-  workshopsTaught: 0,
+  eventsHosted: 0,
   tenureDays: 0,
   verified: false,
   gettingStartedStepsDone: 1,

@@ -13,6 +13,25 @@ export interface ListingRef {
 }
 
 /**
+ * What the ATTACH path needs on top of the display ref (LOC-16): the listing's
+ * own id, and the member who owns it, so a gathering that has just linked
+ * itself to a business can ask that business's owner whether they agree.
+ *
+ * Deliberately a SEPARATE interface rather than extra keys on `ListingRef`.
+ * `ListingRef` is spread straight into `EventDetail.venueListing`, which is a
+ * public response, so widening it would have published a listing's internal id
+ * and its owner's user id on every gathering page.
+ *
+ * `ownerId` is null for a listing nobody has claimed yet. See
+ * `EventsService.notifyVenueOwnerBestEffort` for what happens then (nothing:
+ * there is no one to ask, so the attachment simply stays pending).
+ */
+export interface AttachableListingRef extends ListingRef {
+  id: string;
+  ownerId: string | null;
+}
+
+/**
  * Shared "resolve a listing id to its public slug/name" step, reused by
  * feature modules (events, ...) that need to validate/display a
  * `listingId` FK without importing the whole `ListingsModule` — mirrors
@@ -59,6 +78,23 @@ export class ListingLookupService {
    * through `findLive` above.
    */
   async findLinkable(listingId: string): Promise<ListingRef | null> {
+    const listing = await this.findAttachable(listingId);
+    return listing ? { slug: listing.slug, name: listing.name } : null;
+  }
+
+  /**
+   * The same "valid as a NEW link target" test as `findLinkable`, returning
+   * the listing's id and owner alongside its display ref so the caller can ask
+   * the owner for consent (LOC-16).
+   *
+   * `findLinkable` now delegates here, so the two can never drift into
+   * disagreeing about what is linkable, which is the one way this pair could
+   * go wrong: an event attaching through a laxer predicate than the one that
+   * decides whether the venue page will ever show it.
+   */
+  async findAttachable(
+    listingId: string,
+  ): Promise<AttachableListingRef | null> {
     const listing = await this.listings.findOne({
       where: {
         id: listingId,
@@ -67,6 +103,13 @@ export class ListingLookupService {
         isHiddenByOwner: false,
       },
     });
-    return listing ? { slug: listing.slug, name: listing.name } : null;
+    return listing
+      ? {
+          id: listing.id,
+          slug: listing.slug,
+          name: listing.name,
+          ownerId: listing.ownerId,
+        }
+      : null;
   }
 }

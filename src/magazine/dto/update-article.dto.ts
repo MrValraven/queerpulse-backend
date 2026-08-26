@@ -66,6 +66,20 @@ export class UpdateArticleDto {
   // An uploaded storage key or an `https://` URL — the same rule every other
   // image field in the codebase follows, so the global storage-key ownership
   // check and `toImageUrl` both understand it. `''` clears it.
+  /**
+   * CON-04 — the piece's lead art. An uploaded storage key, or our own
+   * resolved `/files/<key>` URL, which the editor's upload field re-sends
+   * verbatim and the global `StorageKeyOwnershipInterceptor` collapses back to
+   * a bare key before this DTO is validated. `''` clears it.
+   *
+   * Separate from `socialImage` below on purpose: this is the art ON the page,
+   * that is the share-card override. An editor may set either without the
+   * other.
+   */
+  @IsOptional()
+  @IsImageReference()
+  heroImageKey?: string;
+
   @IsOptional()
   @IsImageReference()
   socialImage?: string;

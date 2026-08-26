@@ -18,6 +18,29 @@ export const DEFAULT_SAFE_ONLY = true;
 export const DEFAULT_PUBLIC_PROFILE_ENABLED = false;
 
 /**
+ * Login alerts default ON — the opposite of `publicProfileEnabled`, and for the
+ * same reason it is off: the safe default is the one a member would pick if
+ * they had read the setting. Nobody opts in to being told their account was
+ * signed in to from a device they do not recognise.
+ */
+export const DEFAULT_LOGIN_ALERTS_ENABLED = true;
+
+/**
+ * Lock-screen previews are HIDDEN by default (ID-13).
+ *
+ * The safe default is the one a member would pick if they had read the setting,
+ * and the cost of being wrong is not symmetric: a hidden preview costs a member
+ * one extra tap, while a shown preview can out them to whoever is standing next
+ * to their phone. A push that says "QueerPulse, you have a new notification"
+ * still gets them to the app; a push that says "Mariana: are you still coming to
+ * the trans peer group?" cannot be taken back.
+ *
+ * A member who has never opened settings therefore has no row and gets hidden
+ * previews, and `PushPreviewPrivacyService` treats an absent row the same way.
+ */
+export const DEFAULT_HIDE_PUSH_PREVIEWS = true;
+
+/**
  * One row per member holding the owner-only SAFETY and VISIBILITY switches.
  *
  * Kept off `profiles` on purpose. Everything on `profiles` is loaded by every
@@ -95,6 +118,57 @@ export class MemberPreferences {
    */
   @Column({ type: 'boolean', default: DEFAULT_PUBLIC_PROFILE_ENABLED })
   publicProfileEnabled!: boolean;
+
+  // --- Account security (GET/PUT /me/login-alerts) --------------------------
+
+  /**
+   * Whether to tell this member when their account is signed in to from a
+   * device they have not used before.
+   *
+   * Read at the EMIT site (`AuthService.issueTokens`), not in
+   * `NotificationsService`, so switching it off silences the bell and the push
+   * in one place rather than leaving a row written that nothing renders.
+   *
+   * It lives here rather than as a `NotificationPreferenceCategory` because
+   * those categories are content volume controls — "gathering invites",
+   * "replies to my threads" — and a sign-in alert is not content. Putting it in
+   * that list would also have put it on the Notifications pane, when the member
+   * looking for it is on the Account pane, next to their active sessions.
+   *
+   * Defaults ON (see `DEFAULT_LOGIN_ALERTS_ENABLED`), which is why a member
+   * with no row at all still gets alerted.
+   */
+  @Column({ type: 'boolean', default: DEFAULT_LOGIN_ALERTS_ENABLED })
+  loginAlertsEnabled!: boolean;
+
+  // --- Lock-screen privacy (GET/PUT /me/push-previews) ----------------------
+
+  /**
+   * Whether a push notification for this member may name who it is from and
+   * what it said, or must arrive as "QueerPulse, you have a new notification".
+   *
+   * THIS COLUMN IS THE AUTHORITY, and it has to be, because of one platform
+   * detail: iOS never runs the service worker's push handler. Every other
+   * engine lets `sw.ts` rewrite a payload before `showNotification`, so the
+   * IndexedDB mirror this used to live in was enough. On an iPhone the payload's
+   * plain `title`/`body` are rendered verbatim by the OS, so the ONLY place the
+   * sender's name can be removed is the composer, here, before the push is
+   * ever encrypted. See `PushPreviewPrivacyService`.
+   *
+   * Being server-side is also what carries the choice across devices: a member
+   * who hides previews on their phone does not have to remember to do it again
+   * on a tablet, and the app mirrors this value back into IndexedDB on boot so
+   * the service worker keeps degrading payloads as a second line of defence.
+   *
+   * Read on the SEND path, never at the emit site: unlike `loginAlertsEnabled`
+   * this does not suppress anything, it changes what a notification says. The
+   * bell row is written in full either way, and the app shows everything once
+   * it is open and unlocked.
+   *
+   * Defaults to TRUE (see `DEFAULT_HIDE_PUSH_PREVIEWS`).
+   */
+  @Column({ type: 'boolean', default: DEFAULT_HIDE_PUSH_PREVIEWS })
+  hidePushPreviews!: boolean;
 
   @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt!: Date;

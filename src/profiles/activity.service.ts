@@ -1,7 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Activity, ActivityKind } from './entities/activity.entity';
+import {
+  Activity,
+  ActivityKind,
+  ActivitySubjectKind,
+} from './entities/activity.entity';
 
 export interface RecordActivityInput {
   userId: string;
@@ -9,15 +13,20 @@ export interface RecordActivityInput {
   title: string;
   sub?: string | null;
   toLink?: string | null;
+  // What the row is ABOUT, so the read path can re-check that the subject is
+  // still public. Both null for a subject with no visibility dimension (a
+  // forum thread). See `ActivitySubjectKind`.
+  subjectKind?: ActivitySubjectKind | null;
+  subjectId?: string | null;
   occurredAt?: Date;
 }
 
 // A member's activity feed is a rolling window, not a permanent log: the profile
-// only ever reads the newest handful (`ProfilesService.ACTIVITY_LIMIT` = 6, and
-// the public endpoint reads the same page size). This bounds each member's row
+// only ever reads the newest handful (`ProfilesService.ACTIVITY_LIMIT`, and
+// the public endpoint reads its own page size). This bounds each member's row
 // count so a heavy poster can't grow the table without limit — after every
 // insert we trim everything past the newest `MAX_ROWS_PER_USER`.
-const MAX_ROWS_PER_USER = 40;
+const MAX_ROWS_PER_USER = 60;
 
 /**
  * Writes rows to the `activities` table on genuine, publicly-visible member
@@ -47,6 +56,8 @@ export class ActivityService {
           title: input.title,
           sub: input.sub ?? null,
           toLink: input.toLink ?? null,
+          subjectKind: input.subjectKind ?? null,
+          subjectId: input.subjectId ?? null,
           occurredAt: input.occurredAt ?? new Date(),
         }),
       );

@@ -1,3 +1,4 @@
+import { ForbiddenException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import {
@@ -5,6 +6,17 @@ import {
   OutAtWork,
 } from './entities/member-preferences.entity';
 import { PreferencesService } from './preferences.service';
+import { PublicEligibilityService } from '../public-eligibility/public-eligibility.service';
+import { UserStatus } from '../users/entities/user.entity';
+import type { CurrentUserData } from '../auth/decorators/current-user.decorator';
+
+/** The caller `PUT /me/public-profile` receives from `@CurrentUser()`. */
+const CALLER: CurrentUserData = {
+  userId: 'u1',
+  email: 'a@b.c',
+  status: UserStatus.Active,
+  role: 'member',
+};
 
 describe('PreferencesService', () => {
   let service: PreferencesService;
@@ -12,6 +24,9 @@ describe('PreferencesService', () => {
     findOne: jest.Mock;
     save: jest.Mock;
   };
+  // The server-side publication gate. Resolves (eligible) by default; the
+  // ineligible cases make it throw, exactly as `assertMayGoPublic` does.
+  let eligibility: { assertMayGoPublic: jest.Mock };
 
   const now = new Date('2026-07-18T12:00:00.000Z');
 
@@ -33,11 +48,13 @@ describe('PreferencesService', () => {
       findOne: jest.fn().mockResolvedValue(null),
       save: jest.fn((v: MemberPreferences) => Promise.resolve(v)),
     };
+    eligibility = { assertMayGoPublic: jest.fn().mockResolvedValue(undefined) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PreferencesService,
         { provide: getRepositoryToken(MemberPreferences), useValue: repo },
+        { provide: PublicEligibilityService, useValue: eligibility },
       ],
     }).compile();
 
@@ -246,7 +263,9 @@ describe('PreferencesService', () => {
     it('inserts a row keyed to the caller when none exists', async () => {
       repo.findOne.mockResolvedValue(null);
 
-      const result = await service.updatePublicProfile('u1', { enabled: true });
+      const result = await service.updatePublicProfile(CALLER, {
+        enabled: true,
+      });
 
       expect(repo.save).toHaveBeenCalledWith(
         expect.objectContaining({ userId: 'u1', publicProfileEnabled: true }),
@@ -259,7 +278,7 @@ describe('PreferencesService', () => {
     it('persists disabling an already-enabled profile', async () => {
       repo.findOne.mockResolvedValue(row({ publicProfileEnabled: true }));
 
-      const result = await service.updatePublicProfile('u1', {
+      const result = await service.updatePublicProfile(CALLER, {
         enabled: false,
       });
 
@@ -272,7 +291,7 @@ describe('PreferencesService', () => {
     it('leaves the work-safety settings untouched', async () => {
       repo.findOne.mockResolvedValue(row());
 
-      await service.updatePublicProfile('u1', { enabled: false });
+      await service.updatePublicProfile(CALLER, { enabled: false });
 
       expect(repo.save).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -288,7 +307,7 @@ describe('PreferencesService', () => {
     it('uses work-preference defaults when creating the row', async () => {
       repo.findOne.mockResolvedValue(null);
 
-      await service.updatePublicProfile('u1', { enabled: true });
+      await service.updatePublicProfile(CALLER, { enabled: true });
 
       expect(repo.save).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -297,6 +316,69 @@ describe('PreferencesService', () => {
           safeOnly: true,
         }),
       );
+    });
+
+    // ---- The server-side publication gate (SOC-11) ------------------------
+    //
+    // The whole point: this switch reaches the open web, so the rule has to be
+    // enforced where the write happens. It used to be assigned straight from
+    // the DTO with the entire 90-day / 100-point rule living in frontend JS.
+
+    it('runs the eligibility gate before enabling, passing the whole caller', async () => {
+      repo.findOne.mockResolvedValue(null);
+
+      await service.updatePublicProfile(CALLER, { enabled: true });
+
+      expect(eligibility.assertMayGoPublic).toHaveBeenCalledWith(CALLER);
+    });
+
+    it('refuses to enable for an ineligible member and writes nothing', async () => {
+      repo.findOne.mockResolvedValue(row({ publicProfileEnabled: false }));
+      eligibility.assertMayGoPublic.mockRejectedValue(
+        new ForbiddenException({ reasonCode: 'tenure_too_short' }),
+      );
+
+      await expect(
+        service.updatePublicProfile(CALLER, { enabled: true }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    // The asymmetry is the safety property. A member who has become
+    // ineligible, been suspended, or deactivated must still be able to pull
+    // their profile back off the open web.
+    it('never gates disabling, even when the member is ineligible', async () => {
+      repo.findOne.mockResolvedValue(row({ publicProfileEnabled: true }));
+      eligibility.assertMayGoPublic.mockRejectedValue(
+        new ForbiddenException({ reasonCode: 'not_eligible' }),
+      );
+
+      const result = await service.updatePublicProfile(
+        { ...CALLER, status: UserStatus.Suspended },
+        { enabled: false },
+      );
+
+      expect(eligibility.assertMayGoPublic).not.toHaveBeenCalled();
+      expect(repo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ publicProfileEnabled: false }),
+      );
+      expect(result).toEqual({ enabled: false });
+    });
+
+    // Re-asserting `true` on an already-published profile is still a publish
+    // request, so it is checked again: standing can change under a member.
+    it('re-checks eligibility when enabling an already-enabled profile', async () => {
+      repo.findOne.mockResolvedValue(row({ publicProfileEnabled: true }));
+      eligibility.assertMayGoPublic.mockRejectedValue(
+        new ForbiddenException({ reasonCode: 'not_eligible' }),
+      );
+
+      await expect(
+        service.updatePublicProfile(CALLER, { enabled: true }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+
+      expect(repo.save).not.toHaveBeenCalled();
     });
   });
 });

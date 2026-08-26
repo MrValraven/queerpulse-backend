@@ -26,6 +26,8 @@ import { Shaping } from './entities/shaping.entity';
 import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
 import { WorkItem } from './entities/work-item.entity';
+import { ActivityVisibilityService } from './activity-visibility.service';
+import { LastActiveService } from './last-active.service';
 import { ProfilesService } from './profiles.service';
 
 // Board-item lifecycle (Task 3 of the member-profile-v2-backend plan): status,
@@ -153,6 +155,26 @@ describe('ProfilesService board lifecycle', () => {
         {
           provide: MediaCropService,
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
+        },
+        {
+          // The activity privacy gate: read-only here, with its own spec.
+          provide: ActivityVisibilityService,
+          useValue: {
+            filterVisible: jest
+              .fn()
+              .mockImplementation((rows: unknown[]) => Promise.resolve(rows)),
+          },
+        },
+        {
+          // The coarse "recently active" band: read-only here, with its own
+          // spec. Nothing recorded, so no band.
+          provide: LastActiveService,
+          useValue: {
+            getSignal: jest
+              .fn()
+              .mockResolvedValue({ band: null, isHidden: false }),
+            getSignals: jest.fn().mockResolvedValue(new Map()),
+          },
         },
       ],
     }).compile();

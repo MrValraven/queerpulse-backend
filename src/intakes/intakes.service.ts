@@ -162,6 +162,14 @@ export class IntakesService {
    * (mirrors `InquiriesService.notifyOps` and `RoadmapAdminService`). No
    * `actorId`: an admin decision is the platform's word, so block/mute must not
    * suppress it.
+   *
+   * The notification type branches on the KIND. `governance_concern` is the one
+   * kind this table holds that actually is a concern, and it keeps
+   * `ConcernUpdate`. Every other kind — a Culture playlist submission, a
+   * micro-grant application, a sober-host listing, a glossary edit — now gets
+   * `IntakeReviewed`, because they all used to land in the member's bell
+   * reading "The concern you raised has been reviewed", which is wrong for the
+   * form they filled in and unsettling for a member who never raised anything.
    */
   private async notifySubmitter(
     submission: IntakeSubmission,
@@ -169,12 +177,17 @@ export class IntakesService {
   ): Promise<void> {
     const rawCategory = submission.payload.category;
     const category = typeof rawCategory === 'string' ? rawCategory : undefined;
+    const isGovernanceConcern = submission.kind === 'governance_concern';
     try {
       if (submission.submitterId) {
         await this.notifications.create(
           submission.submitterId,
-          NotificationType.ConcernUpdate,
-          { source: 'concern', status, ...(category ? { category } : {}) },
+          isGovernanceConcern
+            ? NotificationType.ConcernUpdate
+            : NotificationType.IntakeReviewed,
+          isGovernanceConcern
+            ? { source: 'concern', status, ...(category ? { category } : {}) }
+            : { source: 'intake', kind: submission.kind, status },
         );
         return;
       }

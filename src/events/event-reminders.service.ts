@@ -3,6 +3,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Between, In, IsNull, Repository } from 'typeorm';
 import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationDeliveryService } from '../notifications/notification-delivery.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PushService } from '../push/push.service';
 import { isStorageKey } from '../storage/storage-key';
@@ -36,6 +37,7 @@ export class EventRemindersService {
     private readonly preferences: Repository<MemberEventReminderPreferences>,
     private readonly notifications: NotificationsService,
     private readonly push: PushService,
+    private readonly notificationDelivery: NotificationDeliveryService,
   ) {}
 
   // Every 5 minutes, not every 30. The sweep fires a reminder once `now` has
@@ -248,7 +250,15 @@ export class EventRemindersService {
       rawCover && !isStorageKey(rawCover) && rawCover.startsWith('https://')
         ? rawCover
         : undefined;
-    await this.push.sendToUsers(userIds, {
+    // Honour the member's quiet hours here too. This is the one push path
+    // that does not travel through `PushNotificationListener`, so without this
+    // filter a reminder could still buzz at 3am for someone who had explicitly
+    // asked for silence. The in-app notification row is written by the caller
+    // regardless: quiet hours withhold the buzz, never the record.
+    const audibleUserIds =
+      await this.notificationDelivery.recipientsOutsideQuietHours(userIds);
+    if (audibleUserIds.length === 0) return;
+    await this.push.sendToUsers(audibleUserIds, {
       title: event.title,
       body: 'Starting soon — tap to see the details.',
       tag: `event-reminder-${event.id}`,

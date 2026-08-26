@@ -14,12 +14,37 @@ import {
 export enum GovernanceProposalType {
   CouncilRemoval = 'council_removal',
   FundingChange = 'funding_change',
+  /** A motion filed by an ordinary member rather than opened by an admin
+   *  (GOV-01). It has to gather co-signatures and pass staff screening before
+   *  it ever reaches a vote, so it enters at `gathering` and only becomes an
+   *  `open` ballot once an admin approves it with a voting window. */
+  MemberMotion = 'member_motion',
 }
 
+/**
+ * The lifecycle a proposal moves through.
+ *
+ * Admin-opened proposals (`POST /governance/proposals`) still start at `open`
+ * and end at `passed`/`failed`, unchanged. A member motion adds the three
+ * states in front of that ballot plus the two ways it can end without one:
+ *
+ *   gathering -> screening -> open -> passed | failed
+ *   gathering -> rejected          (staff declined it before it was screened)
+ *   screening -> rejected          (staff declined it after the drive closed)
+ *   gathering -> lapsed            (the co-signature window ran out)
+ */
 export enum GovernanceProposalStatus {
   Open = 'open',
   Passed = 'passed',
   Failed = 'failed',
+  /** Collecting co-signatures. Visible to members, not yet votable. */
+  Gathering = 'gathering',
+  /** Threshold reached; waiting on a staff decision. */
+  Screening = 'screening',
+  /** Staff declined to put it to a vote. `screeningNote` says why. */
+  Rejected = 'rejected',
+  /** The co-signature window closed short of the threshold. */
+  Lapsed = 'lapsed',
 }
 
 /**
@@ -101,6 +126,65 @@ export class GovernanceProposal {
 
   @Column({ type: 'int', nullable: true })
   finalAgainst!: number | null;
+
+  /**
+   * The quorum the outcome was judged against, frozen by
+   * `GovernanceProposalService.resolveIfClosed` in the SAME write as
+   * `finalFor`/`finalAgainst`. Quorum is a percentage of the live active
+   * member count, so re-deriving it at render time would silently re-judge an
+   * already-decided proposal every time the community grows or shrinks.
+   *
+   * NULL for every proposal resolved before this column existed, which is why
+   * `failedForQuorum` on the DTO is false whenever it is NULL: we cannot claim
+   * a proposal missed a bar nobody recorded.
+   */
+  @Column({ type: 'int', nullable: true })
+  finalQuorumRequired!: number | null;
+
+  // ── Member motions (GOV-01) ──────────────────────────────────────────────
+  // All NULL on an admin-opened proposal.
+
+  /**
+   * The member who FILED this motion, distinct from `createdByMemberId` (the
+   * admin who opened an admin proposal). Keeping them apart matters: the
+   * proposer is the person the approve/reject notification goes to and the one
+   * who may not withdraw their founding co-signature, while
+   * `createdByMemberId` stays the staff audit pointer.
+   *
+   * `ON DELETE SET NULL` like every other actor pointer in this module: the
+   * motion outlives the erasure of the account that filed it.
+   */
+  @Index('IDX_governance_proposals_proposed_by_member_id')
+  @Column({ type: 'uuid', nullable: true })
+  proposedByMemberId!: string | null;
+
+  /**
+   * The number of co-signatures this motion needs, FROZEN at filing time from
+   * `COSIGNATURE_THRESHOLD`. Stored rather than read from the constant so
+   * raising or lowering the platform-wide bar cannot move the target under a
+   * drive that is already running.
+   */
+  @Column({ type: 'int', nullable: true })
+  cosignatureThreshold!: number | null;
+
+  // When the co-signature drive runs out. Indexed: the daily lapse sweep
+  // (`GovernanceMotionSweeperService`) filters `gathering` motions by it.
+  @Index('IDX_governance_proposals_gathering_closes_at')
+  @Column({ type: 'timestamptz', nullable: true })
+  gatheringClosesAt!: Date | null;
+
+  // When staff approved or rejected the motion, and who did.
+  @Column({ type: 'timestamptz', nullable: true })
+  screeningDecidedAt!: Date | null;
+
+  // `ON DELETE SET NULL`, same reasoning as `proposedByMemberId`.
+  @Column({ type: 'uuid', nullable: true })
+  screeningDecidedByMemberId!: string | null;
+
+  /** Required on a rejection, optional on an approval: the reason staff give
+   *  the proposer, surfaced back to them on the motion. */
+  @Column({ type: 'text', nullable: true })
+  screeningNote!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

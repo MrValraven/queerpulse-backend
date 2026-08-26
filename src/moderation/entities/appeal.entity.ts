@@ -91,6 +91,47 @@ export class Appeal {
   @Column({ type: 'text', nullable: true })
   decision!: string | null;
 
-  @CreateDateColumn({ type: 'timestamptz' })
+  /**
+   * When this appeal must be decided by, computed at filing from the published
+   * 7-day window in `../appeal-window.ts`. TS-11.
+   *
+   * Millisecond precision, and for exactly the reason `reports.sla_due_at`
+   * carries it: the awaiting queue pages on this raw column through
+   * `cursorPaginate`'s alternate-keyset path, and that path compares a
+   * millisecond-resolution JS `Date` cursor against the stored value. A
+   * microsecond tail would re-serve the boundary row on the next page. See
+   * `1793520300000-NarrowReportCursorPrecision.ts` for the full write-up.
+   *
+   * NOT NULL: `1794920000000-AddAppealDecisionWindows` backfills every existing
+   * row with `created_at + 7 days` (the published window, applied
+   * retroactively) precisely so the keyset never meets a NULL, which the tuple
+   * comparison would silently drop from every page.
+   */
+  @Column({ type: 'timestamptz', precision: 3 })
+  slaDueAt!: Date;
+
+  /**
+   * When a moderator upheld or overturned this appeal. NULL means still
+   * awaiting, and is the only thing that makes the published 7-day promise
+   * measurable at all: before this column, `status` said whether an appeal was
+   * decided and nothing said when, so the transparency report had to attribute
+   * appeal outcomes to the period the appeal was FILED in
+   * (`transparency.service.ts` says so on the page).
+   *
+   * Deliberately NOT backfilled. An appeal decided before this column existed
+   * has no recoverable decision timestamp, and reconstructing one from
+   * `mod_audit_logs` would silently miss every cold appeal (no `reportId` means
+   * no `appeal_upheld`/`appeal_overturned` row). A decided appeal with a NULL
+   * `decidedAt` is "decided, time unrecorded", which is the truth.
+   */
+  @Index('IDX_appeals_decided_at')
+  @Column({ type: 'timestamptz', precision: 3, nullable: true })
+  decidedAt!: Date | null;
+
+  // Millisecond precision, same argument as `slaDueAt` above: the DECIDED tab
+  // pages on the default `(created_at, id) DESC` keyset, and `cursorPaginate`
+  // can only use the raw column (rather than a non-indexable `date_trunc`
+  // wrapper) once the column itself is `timestamptz(3)`.
+  @CreateDateColumn({ type: 'timestamptz', precision: 3 })
   createdAt!: Date;
 }

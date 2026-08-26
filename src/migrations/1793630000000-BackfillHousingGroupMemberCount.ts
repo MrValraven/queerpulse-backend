@@ -3,7 +3,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 /**
  * BE-HSG-28: makes `housing_groups.member_count` agree with the roster.
  *
- * The column was an admin-typed integer accepted straight off `CreateGroupDto`,
+ * The column was an admin-typed integer accepted straight off `CreateHousingGroupDto`,
  * while `HousingGroupsService.computeMutualConnections` already treated the
  * approved `group_join_requests` rows as the actual membership. Two sources of
  * truth, and the public "N members" figure was whichever number a steward last

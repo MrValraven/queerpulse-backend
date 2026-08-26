@@ -15,6 +15,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { BrowseLandlordsQuery } from './dto/browse-landlords.query';
 import { CreateIntroRequestDto } from './dto/create-intro-request.dto';
@@ -68,6 +69,7 @@ export class LandlordsController {
   }
 
   @Post()
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Suggest a landlord directory entry for review' })
   @ApiCreatedResponse({ description: 'The suggested landlord entry.' })
   @ApiConflictResponse({
@@ -84,6 +86,7 @@ export class LandlordsController {
   }
 
   @Post(':slug/recommendations')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: 'Recommend a landlord (creates or updates your rating)',
   })
@@ -121,6 +124,7 @@ export class LandlordsController {
   }
 
   @Post(':slug/intro-requests')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Request an introduction to a landlord' })
   @ApiCreatedResponse({
     description: 'The created intro request id and status.',

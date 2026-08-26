@@ -1,8 +1,10 @@
 import {
   Body,
   Controller,
+  Get,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -26,6 +28,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminMemberModerationService } from './admin-member-moderation.service';
 import { CiteMemberDto } from './dto/cite-member.dto';
+import { LiftRestrictionDto } from './dto/lift-restriction.dto';
 import { RestrictMemberDto } from './dto/restrict-member.dto';
 
 /**
@@ -92,5 +95,38 @@ export class AdminMemberModerationController {
     @Body() dto: RestrictMemberDto,
   ) {
     return this.service.restrictMember(currentUser.userId, id, dto);
+  }
+
+  @ApiOperation({
+    summary:
+      "Read a member's scoped restriction (users.restricted), so the drawer knows whether there is one to lift.",
+  })
+  @ApiOkResponse({ description: "The member's restriction state." })
+  @ApiNotFoundResponse({ description: 'Member not found.' })
+  @Get(':id/restriction')
+  restriction(@Param('id', ParseUUIDPipe) id: string) {
+    return this.service.restrictionState(id);
+  }
+
+  /**
+   * The way back out of a `restrict`, which had none: the only route was
+   * winning an appeal, or waiting for `restricted_until` to lapse (TS-09).
+   * Mirrors `PATCH /mod/users/:userId/suspension` — a PATCH, idempotent,
+   * audited, and it tells the member.
+   */
+  @ApiOperation({ summary: "Lift a member's scoped restriction." })
+  @ApiOkResponse({
+    description:
+      "The member's resulting restriction state. Idempotent: lifting a restriction that is not in force is a no-op, not a 409.",
+  })
+  @ApiBadRequestResponse({ description: 'Malformed body.' })
+  @ApiNotFoundResponse({ description: 'Member not found.' })
+  @Patch(':id/restriction')
+  liftRestriction(
+    @CurrentUser() currentUser: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: LiftRestrictionDto,
+  ) {
+    return this.service.liftRestriction(currentUser.userId, id, dto);
   }
 }

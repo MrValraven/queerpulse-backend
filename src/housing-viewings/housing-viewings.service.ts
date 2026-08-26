@@ -72,6 +72,14 @@ export class HousingViewingsService {
     if (!listing) {
       throw new NotFoundException('Housing listing not found');
     }
+    // NULL once the lister erased their account
+    // (`SetNullContentAuthorFksOnUserErasure1794610000000`). Nobody can show
+    // the home, so the request is refused rather than filed against no one.
+    if (listing.ownerId === null) {
+      throw new BadRequestException(
+        'This listing no longer has a lister to arrange a viewing with',
+      );
+    }
     if (listing.ownerId === requesterId) {
       throw new BadRequestException(
         'You cannot request a viewing on your own listing',
@@ -116,7 +124,11 @@ export class HousingViewingsService {
     }
 
     try {
-      return await this.createRequest(listing, requesterId, dto);
+      return await this.createRequest(
+        listing as HousingListing & { ownerId: string },
+        requesterId,
+        dto,
+      );
     } catch (error) {
       // Lost the insert race against a concurrent identical request.
       if (isUniqueViolation(error, 'UQ_housing_viewings_open')) {
@@ -131,7 +143,10 @@ export class HousingViewingsService {
   /** The insert half of `request`, split out so the unique-violation retry
    * boundary above stays readable. */
   private async createRequest(
-    listing: HousingListing,
+    // `listing.ownerId` is already proven non-null by `request`'s guard; the
+    // narrowed lister id is passed in rather than re-derived so this half
+    // keeps its own type guarantee.
+    listing: HousingListing & { ownerId: string },
     requesterId: string,
     dto: RequestHousingViewingDto,
   ): Promise<HousingViewingDTO> {

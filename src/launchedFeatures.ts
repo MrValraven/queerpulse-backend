@@ -31,7 +31,6 @@ export const launchedFeatures = {
   communities: { launched: true },
   companies: { launched: true },
   jobs: { launched: true },
-  workshops: { launched: true },
   partners: { launched: true },
   volunteering: { launched: true },
   barter: { launched: true },

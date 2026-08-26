@@ -7,6 +7,7 @@ import {
 } from '../listings/entities/listing.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { SafeSpaceNomination } from '../safe-space-nominations/entities/safe-space-nomination.entity';
 import { SafeSpaceMemberVouch } from './entities/safe-space-vouch.entity';
 import { SafeSpaceVouchesService } from './safe-space-vouches.service';
 
@@ -39,12 +40,18 @@ function build(listing: Listing) {
   const notifications = {
     create: jest.fn().mockResolvedValue(null),
   };
+  // No open nomination by default: these cases all describe an ALREADY
+  // verified space, which short-circuits before the nomination lookup.
+  const nominations = {
+    count: jest.fn().mockResolvedValue(0),
+  };
   const service = new SafeSpaceVouchesService(
     memberVouches as unknown as Repository<SafeSpaceMemberVouch>,
     listings as unknown as Repository<Listing>,
     notifications as unknown as NotificationsService,
+    nominations as unknown as Repository<SafeSpaceNomination>,
   );
-  return { service, memberVouches, listings, notifications };
+  return { service, memberVouches, listings, notifications, nominations };
 }
 
 describe('SafeSpaceVouchesService.createVouch', () => {

@@ -14,7 +14,13 @@ import {
  * `collection_item` join (one row per saved subject in the collection).
  *
  * Owner-scoped: every read/write is filtered by `ownerId`, so a collection is
- * only ever visible to its creator. `emoji`/`cover` are optional presentation
+ * only ever visible to its creator.
+ *
+ * DEPRECATED (SOC-12): superseded by `SavedList`, which this table's rows were
+ * copied into by `1794740000000-BackfillCollectionsIntoSavedLists`. Owner-only
+ * with no way to turn that off is exactly the limitation that made collections
+ * unshareable. Do not add columns here. The table stays until the collections
+ * endpoints are removed; see `CollectionsController` for the retirement path. `emoji`/`cover` are optional presentation
  * chrome the member can attach (a folder glyph or a cover colour/image key).
  */
 @Entity('collection')

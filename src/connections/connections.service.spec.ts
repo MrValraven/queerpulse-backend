@@ -13,6 +13,7 @@ import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { CONNECTION_ACCEPTED } from './connection.events';
 import { Connection, ConnectionStatus } from './entities/connection.entity';
+import { ConnectionNote } from './entities/connection-note.entity';
 import { VouchService } from '../vouch/vouch.service';
 import { ConnectionsService } from './connections.service';
 
@@ -42,6 +43,12 @@ describe('ConnectionsService', () => {
     find: jest.Mock;
     findAndCount: jest.Mock;
     count: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
+  let connectionNotes: {
+    find: jest.Mock;
+    delete: jest.Mock;
+    upsert: jest.Mock;
   };
   let profiles: { findOne: jest.Mock; find: jest.Mock };
   let vouchService: {
@@ -69,6 +76,40 @@ describe('ConnectionsService', () => {
     return qb;
   };
 
+  // Chainable SELECT query-builder stub for the searched/sorted list path
+  // (`.setParameter().innerJoin().where().andWhere().orderBy()...`). `clone()`
+  // returns the same object, so a test can assert on every call the service
+  // made regardless of which clone made it.
+  const selectQbStub = (
+    rows: unknown[] = [],
+    total = 0,
+  ): Record<string, jest.Mock> => {
+    const qb: Record<string, jest.Mock> = {};
+    for (const method of [
+      'setParameter',
+      'innerJoin',
+      'where',
+      'andWhere',
+      'orderBy',
+      'addOrderBy',
+      'offset',
+      'limit',
+      'clone',
+    ]) {
+      qb[method] = jest.fn().mockReturnValue(qb);
+    }
+    qb.getManyAndCount = jest.fn().mockResolvedValue([rows, total]);
+    qb.getMany = jest.fn().mockResolvedValue(rows);
+    qb.getCount = jest.fn().mockResolvedValue(total);
+    return qb;
+  };
+
+  /** Every SQL fragment the service handed to `andWhere`, joined for matching. */
+  const whereFragments = (qb: Record<string, jest.Mock>): string =>
+    [...qb.where!.mock.calls, ...qb.andWhere!.mock.calls]
+      .map((call) => String(call[0]))
+      .join(' | ');
+
   beforeEach(async () => {
     connections = {
       findOne: jest.fn(),
@@ -82,6 +123,7 @@ describe('ConnectionsService', () => {
       find: jest.fn().mockResolvedValue([]),
       findAndCount: jest.fn().mockResolvedValue([[], 0]),
       count: jest.fn().mockResolvedValue(0),
+      createQueryBuilder: jest.fn(() => selectQbStub()),
     };
     manager = {
       update: jest.fn().mockResolvedValue({ affected: 1 }),
@@ -95,6 +137,11 @@ describe('ConnectionsService', () => {
           (runInTransaction: (entityManager: typeof manager) => unknown) =>
             runInTransaction(manager),
         ),
+    };
+    connectionNotes = {
+      find: jest.fn().mockResolvedValue([]),
+      delete: jest.fn().mockResolvedValue({ affected: 0 }),
+      upsert: jest.fn().mockResolvedValue({ identifiers: [] }),
     };
     profiles = { findOne: jest.fn(), find: jest.fn().mockResolvedValue([]) };
     vouchService = {
@@ -110,6 +157,10 @@ describe('ConnectionsService', () => {
       providers: [
         ConnectionsService,
         { provide: getRepositoryToken(Connection), useValue: connections },
+        {
+          provide: getRepositoryToken(ConnectionNote),
+          useValue: connectionNotes,
+        },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: VouchService, useValue: vouchService },
         { provide: EventEmitter2, useValue: emitter },
@@ -737,6 +788,270 @@ describe('ConnectionsService', () => {
 
       const { items } = await service.list('me', 'all');
       expect(items[0]?.vouchBadge).toBe('mutual');
+    });
+  });
+
+  describe('list: search and sort (SOC-14)', () => {
+    const acceptedRow = (id: string, otherUserId: string) => ({
+      id,
+      status: ConnectionStatus.Accepted,
+      requesterId: 'me',
+      addresseeId: otherUserId,
+      introducedBy: null,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      respondedAt: new Date('2026-01-02T00:00:00.000Z'),
+      requestMessage: null,
+      requestReason: null,
+    });
+
+    it('leaves the plain list untouched: no term and the default sort still use findAndCount', async () => {
+      await service.list('me', 'all', { page: 1 });
+      expect(connections.findAndCount).toHaveBeenCalled();
+      expect(connections.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('q: joins the other profile and matches name, handle, and headline through one folded LIKE', async () => {
+      const qb = selectQbStub([], 0);
+      connections.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('me', 'all', { q: 'Sao' });
+
+      expect(connections.createQueryBuilder).toHaveBeenCalledWith('connection');
+      expect(qb.innerJoin).toHaveBeenCalled();
+      const fragments = whereFragments(qb);
+      // Both sides of the comparison go through the same fold, which is what
+      // makes "Sao" find "Sao Paulo" and "Sao Paulo" alike.
+      expect(fragments).toContain('translate(lower(');
+      expect(fragments).toContain('other.first_name');
+      expect(fragments).toContain('other.slug');
+      expect(fragments).toContain('other.tagline');
+      expect(fragments).toContain('LIKE');
+    });
+
+    it('q: LIKE-escapes the term so a typed % searches for a percent sign', async () => {
+      const qb = selectQbStub([], 0);
+      connections.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('me', 'all', { q: '100%' });
+
+      const boundSearch = qb
+        .andWhere!.mock.calls.map((call) => call[1])
+        .find(
+          (params): params is { searchPattern: string } =>
+            !!params && 'searchPattern' in (params as object),
+        );
+      expect(boundSearch?.searchPattern).toBe('%100\\%%');
+    });
+
+    it('q: pages with offset/limit, never skip/take, because the query joins and orders on the join', async () => {
+      const qb = selectQbStub([], 0);
+      connections.createQueryBuilder.mockReturnValue(qb);
+
+      const res = await service.list('me', 'all', { q: 'ana', page: 3 });
+
+      expect(qb.offset).toHaveBeenCalledWith(40);
+      expect(qb.limit).toHaveBeenCalledWith(20);
+      expect(res).toEqual({ items: [], total: 0, page: 3, pageSize: 20 });
+    });
+
+    it('sort=alphabetical: orders by the folded profile name, so accents sort with their plain letter', async () => {
+      const qb = selectQbStub([], 0);
+      connections.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list('me', 'all', { sort: 'alphabetical' });
+
+      const orderExpression = String(qb.orderBy!.mock.calls[0]?.[0]);
+      expect(orderExpression).toContain('translate(lower(other.first_name)');
+      expect(qb.orderBy).toHaveBeenCalledWith(
+        expect.stringContaining('other.first_name'),
+        'ASC',
+      );
+      // A stable tiebreak keeps a row from swapping pages between fetches.
+      expect(qb.addOrderBy).toHaveBeenCalledWith('connection.id', 'ASC');
+    });
+
+    it('sort=mutuals: ranks by shared connections and keeps the true total', async () => {
+      const qb = selectQbStub(
+        [acceptedRow('ca', 'a'), acceptedRow('cb', 'b')],
+        2,
+      );
+      connections.createQueryBuilder.mockReturnValue(qb);
+      // `a` shares one connection with the viewer (x); `b` shares two (x, y).
+      connections.find.mockResolvedValue([
+        { requesterId: 'me', addresseeId: 'x', status: 'accepted' },
+        { requesterId: 'me', addresseeId: 'y', status: 'accepted' },
+        { requesterId: 'a', addresseeId: 'x', status: 'accepted' },
+        { requesterId: 'b', addresseeId: 'x', status: 'accepted' },
+        { requesterId: 'b', addresseeId: 'y', status: 'accepted' },
+      ]);
+      profiles.find.mockResolvedValue([
+        { userId: 'a', slug: 'a', firstName: 'A', lastName: 'One' },
+        { userId: 'b', slug: 'b', firstName: 'B', lastName: 'Two' },
+      ]);
+
+      const res = await service.list('me', 'all', { sort: 'mutuals' });
+
+      expect(res.items.map((item) => item.id)).toEqual(['cb', 'ca']);
+      expect(res.items[0]?.mutuals).toBe(2);
+      expect(res.items[1]?.mutuals).toBe(1);
+      expect(res.total).toBe(2);
+    });
+
+    it('vouched + q: short-circuits when the viewer has vouched for nobody', async () => {
+      vouchService.getActiveVoucheeIds.mockResolvedValue([]);
+      const res = await service.list('me', 'vouched', { q: 'ana' });
+      expect(connections.createQueryBuilder).not.toHaveBeenCalled();
+      expect(res).toEqual({ items: [], total: 0, page: 1, pageSize: 20 });
+    });
+  });
+
+  describe('requestReason on an accepted row (SOC-14)', () => {
+    it('reports who sent the request, so the reason can be attributed after acceptance', async () => {
+      connections.findAndCount.mockResolvedValue([
+        [
+          {
+            id: 'c1',
+            status: ConnectionStatus.Accepted,
+            requesterId: 'them',
+            addresseeId: 'me',
+            introducedBy: null,
+            createdAt: new Date(),
+            respondedAt: new Date(),
+            requestMessage: 'We met at the workshop.',
+            requestReason: 'collaborate',
+          },
+        ],
+        1,
+      ]);
+      profiles.find.mockResolvedValue([
+        { userId: 'them', slug: 'them', firstName: 'T', lastName: 'Hem' },
+      ]);
+
+      const { items } = await service.list('me', 'all');
+      expect(items[0]?.requestReason).toBe('collaborate');
+      expect(items[0]?.isRequestedByYou).toBe(false);
+    });
+
+    it('marks the viewer as the requester on a connection they started', async () => {
+      connections.findAndCount.mockResolvedValue([
+        [
+          {
+            id: 'c1',
+            status: ConnectionStatus.Accepted,
+            requesterId: 'me',
+            addresseeId: 'them',
+            introducedBy: null,
+            createdAt: new Date(),
+            respondedAt: new Date(),
+            requestMessage: null,
+            requestReason: 'custom:same choir',
+          },
+        ],
+        1,
+      ]);
+      profiles.find.mockResolvedValue([
+        { userId: 'them', slug: 'them', firstName: 'T', lastName: 'Hem' },
+      ]);
+
+      const { items } = await service.list('me', 'all');
+      expect(items[0]?.isRequestedByYou).toBe(true);
+    });
+  });
+
+  describe('private connection notes (SOC-14)', () => {
+    const sharedRow = {
+      id: 'c1',
+      status: ConnectionStatus.Accepted,
+      requesterId: 'me',
+      addresseeId: 'them',
+      introducedBy: null,
+      createdAt: new Date(),
+      respondedAt: new Date(),
+      requestMessage: null,
+      requestReason: null,
+    };
+
+    beforeEach(() => {
+      connections.findAndCount.mockResolvedValue([[sharedRow], 1]);
+      profiles.find.mockResolvedValue([
+        { userId: 'them', slug: 'them', firstName: 'T', lastName: 'Hem' },
+      ]);
+    });
+
+    it('surfaces the viewer own note, read under their own author id', async () => {
+      connectionNotes.find.mockResolvedValue([
+        { connectionId: 'c1', authorId: 'me', body: 'Met at the choir night.' },
+      ]);
+
+      const { items } = await service.list('me', 'all');
+
+      expect(connectionNotes.find).toHaveBeenCalledWith({
+        where: { authorId: 'me', connectionId: In(['c1']) },
+      });
+      expect(items[0]?.note).toBe('Met at the choir night.');
+    });
+
+    it('never leaks a note to the other party: their page reads under THEIR author id and comes back empty', async () => {
+      // The same connection, viewed by the other member. The note written by
+      // `me` is not loaded at all, so nothing downstream can map it.
+      connectionNotes.find.mockResolvedValue([]);
+
+      const { items } = await service.list('them', 'all');
+
+      expect(connectionNotes.find).toHaveBeenCalledWith({
+        where: { authorId: 'them', connectionId: In(['c1']) },
+      });
+      const [whereClause] = connectionNotes.find.mock.calls.map(
+        (call) => (call[0] as { where: { authorId: string } }).where,
+      );
+      expect(whereClause?.authorId).toBe('them');
+      expect(items[0]?.note).toBeNull();
+    });
+
+    it('setNote: stores the note as plain text for a party to the connection', async () => {
+      connections.findOne.mockResolvedValue(sharedRow);
+
+      const res = await service.setNote('c1', 'me', '  <b>Runs the choir</b> ');
+
+      expect(res).toEqual({ note: 'Runs the choir' });
+      expect(connectionNotes.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          connectionId: 'c1',
+          authorId: 'me',
+          body: 'Runs the choir',
+        }),
+        { conflictPaths: ['connectionId', 'authorId'] },
+      );
+    });
+
+    it('setNote: an empty body clears the note instead of storing a blank', async () => {
+      connections.findOne.mockResolvedValue(sharedRow);
+
+      const res = await service.setNote('c1', 'me', '   ');
+
+      expect(res).toEqual({ note: null });
+      expect(connectionNotes.delete).toHaveBeenCalledWith({
+        connectionId: 'c1',
+        authorId: 'me',
+      });
+      expect(connectionNotes.upsert).not.toHaveBeenCalled();
+    });
+
+    it('setNote: a member who is not a party to the connection cannot annotate it', async () => {
+      connections.findOne.mockResolvedValue(sharedRow);
+
+      await expect(service.setNote('c1', 'stranger', 'hi')).rejects.toThrow(
+        ForbiddenException,
+      );
+      expect(connectionNotes.upsert).not.toHaveBeenCalled();
+    });
+
+    it('setNote: 404s on a connection that does not exist', async () => {
+      connections.findOne.mockResolvedValue(null);
+
+      await expect(service.setNote('nope', 'me', 'hi')).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 

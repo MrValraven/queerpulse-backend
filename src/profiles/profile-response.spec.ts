@@ -118,6 +118,24 @@ describe('profile-response mappers', () => {
     expect(dto.bio).toBe('a bio');
   });
 
+  it('toFullProfile passes the mutual voucher count straight through', () => {
+    // The mapper never decides whether the count may be shown, exactly like
+    // `activityBand`: `ProfilesService.loadMutualVoucherCount` has already
+    // applied the owner and hidden-roster gates. Defaulting to null keeps a
+    // caller that forgets the argument on the safe side.
+    expect(
+      toFullProfile(profile(), emptyRels, 2, false, undefined, null, 3)
+        .mutualVoucherCount,
+    ).toBe(3);
+    expect(
+      toFullProfile(profile(), emptyRels, 2, false, undefined, null, null)
+        .mutualVoucherCount,
+    ).toBeNull();
+    expect(
+      toFullProfile(profile(), emptyRels, 2).mutualVoucherCount,
+    ).toBeNull();
+  });
+
   it('toFullProfile exposes private Interests fields only to the owner', () => {
     const owned = toFullProfile(profile(), emptyRels, 2, true);
     expect(owned.identities).toEqual(['Queer']);
@@ -338,6 +356,10 @@ describe('profile-response mappers', () => {
       vouchersVisible: true,
       verified: true,
       joinedAt: '2024-03-01T00:00:00.000Z',
+      // The limited card carries the trust cue too: it IS the "should I ask to
+      // connect?" surface. Null here because this call passes no count, which
+      // is the mapper's default. See MutualVoucherCount.
+      mutualVoucherCount: null,
       openTo: [],
       socials: [],
       work: [],

@@ -24,6 +24,14 @@ export enum GroupListingStatus {
   Review = 'review',
   Question = 'question',
   Live = 'live',
+  // "This will not be published." Added by LOC-19: the enum previously had no
+  // way to record a refusal at all, so a moderator could only leave a listing
+  // in `review` forever or reach for `hidden`, which is the POST-publication
+  // norm takedown and a different decision entirely. A poster whose room is
+  // never going up is entitled to be told that, with a reason, rather than
+  // watching a queue they have no view of. Backed by migration
+  // `AddApprovalQueueNotificationTypes1794740000000`.
+  Declined = 'declined',
 }
 
 /**
@@ -115,6 +123,26 @@ export class GroupListing {
 
   @Column({ type: 'uuid', nullable: true })
   postedByUserId!: string | null;
+
+  // The pre-publication decision's audit trail (LOC-19). Until these existed
+  // the review recorded only its outcome (`status`), so a poster asking "why
+  // was my room not published?" had no answer and the next moderator to open
+  // the queue had no history. All three are null while the listing still sits
+  // in `review` with nobody having decided.
+  //
+  // `decisionReason` is REQUIRED by the service when the decision is
+  // `declined` and optional otherwise, and it is the text the poster is sent.
+  @Column({ type: 'timestamptz', nullable: true })
+  decidedAt!: Date | null;
+
+  // The moderator (`users.id`) who made the current decision. No FK, matching
+  // `reading_group_proposal.decided_by`: a decision is history that must
+  // outlive a staff account's deletion.
+  @Column({ type: 'uuid', nullable: true })
+  decidedBy!: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  decisionReason!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

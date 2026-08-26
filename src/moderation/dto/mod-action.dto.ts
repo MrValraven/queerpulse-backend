@@ -1,6 +1,16 @@
 import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 import { REASON_CODES, ReasonCode } from '../../reports/reason-catalogue';
 
+/**
+ * `shield` is deliberately absent. It was a selectable action code with no
+ * implementation anywhere: picking it resolved the report, wrote an audit row
+ * reading "shielded member", and did nothing to anyone. A moderator running the
+ * graduated ladder believed a protective step had been taken when none had.
+ * Removing it is the honest half of TS-02; the other half is `warn` now
+ * actually reaching the member. Old `mod_audit_logs` rows carrying the code
+ * still read fine: `outcomeLabelFor` falls through to the raw code for anything
+ * it has no label for.
+ */
 export const MOD_ACTION_CODES = [
   'dismiss',
   'warn',
@@ -9,7 +19,6 @@ export const MOD_ACTION_CODES = [
   'restrict',
   'suspend',
   'ban',
-  'shield',
   'escalate',
 ] as const;
 

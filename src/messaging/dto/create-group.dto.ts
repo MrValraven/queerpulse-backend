@@ -16,7 +16,7 @@ import { IsImageReference } from '../../common/validators/is-image-reference.dec
  * `avatarUrl` is an optional storage key/URL for the group photo (Phase 1 leaves
  * it optional; cohost upload UI is deferred).
  */
-export class CreateGroupDto {
+export class CreateGroupConversationDto {
   @IsString()
   @MinLength(1)
   @MaxLength(80)

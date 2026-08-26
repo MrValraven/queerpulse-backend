@@ -79,6 +79,27 @@ export class EventRsvp {
   @Column({ type: 'varchar', length: 20, nullable: true })
   visibility!: RsvpDetailsVisibility | null;
 
+  // ── Day-of check-in (LOC-03) ─────────────────────────────────────────────
+  // When a host or co-host marked this attendee as arrived, or null when they
+  // have not. Set by `EventCheckInService`, cleared again by its undo path,
+  // and never written by the attendee themselves: this is the host's record
+  // of who came through the door, not a self-declaration.
+  @Column({ type: 'timestamptz', nullable: true })
+  checkedInAt!: Date | null;
+
+  // ── Who ended this RSVP (LOC-08) ─────────────────────────────────────────
+  // `status = 'cancelled'` used to mean two very different things: "the
+  // member changed their mind" and "the host removed them". Because
+  // `RsvpService.rsvp` treated any cancelled row as a first RSVP, a removed
+  // attendee could press the button again and walk straight back onto the
+  // roster, which made removal useless as a safety tool.
+  //
+  // Set when a host or co-host cancels somebody else's RSVP, cleared whenever
+  // the member cancels their own. A row carrying this stamp cannot re-RSVP;
+  // the host lifts it (or bans, see `EventBan`) deliberately.
+  @Column({ type: 'timestamptz', nullable: true })
+  removedByHostAt!: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 

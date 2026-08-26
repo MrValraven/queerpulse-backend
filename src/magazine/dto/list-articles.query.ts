@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, IsString, Min } from 'class-validator';
+import { IsInt, IsOptional, IsString, MaxLength, Min } from 'class-validator';
 
 export class ListArticlesQuery {
   // Issue display number, e.g. "09" (matches `MagazineIssue.number`).
@@ -26,6 +26,34 @@ export class ListArticlesQuery {
   @IsOptional()
   @IsString()
   author?: string;
+
+  // CON-12 — free-text search across the magazine's own archive. Matched
+  // against the `search_vector` generated column (title, dek, standfirst,
+  // tags, and both body representations) with `to_tsquery`, and results are
+  // ranked by `ts_rank_cd` rather than returned in publish order. See
+  // `MagazineService.listArticles`.
+  //
+  // Length-capped because the term is tokenized into a `to_tsquery` string:
+  // 200 characters is far past any real search and keeps a pathological
+  // paste from building a huge AND-chain of prefix terms.
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  q?: string;
+
+  // CON-16 — the reader's language. When a piece in the result has a
+  // published translation in this locale, the translation is served in its
+  // place; pieces with no translation stay in the language they were written
+  // in, and each row states its own `locale`.
+  //
+  // Deliberately NOT validated against the locale set: a shared link carrying
+  // `?lang=fr` must return the magazine, not a 400. `toArticleLocale`
+  // narrows it and treats anything unrecognised as "no preference".
+  // Length-capped so the value stays a language tag.
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  lang?: string;
 
   @IsOptional()
   @Type(() => Number)

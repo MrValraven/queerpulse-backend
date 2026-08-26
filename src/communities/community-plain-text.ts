@@ -75,3 +75,34 @@ export function toStoredPlainTextOrNull(
   const stored = toStoredPlainText(value);
   return stored.length ? stored : null;
 }
+
+/**
+ * A short, display-ready plain-text excerpt of a longer member-authored body,
+ * for a surface that shows evidence rather than the whole post (the community
+ * moderation queue's `CommunityReportContentDTO.excerpt`).
+ *
+ * Strips markup through the same fixed-point pass `toStoredPlainText` uses,
+ * collapses every run of whitespace (including the newlines a post body is
+ * full of) to a single space so the excerpt stays one line, then cuts at
+ * `maxLength`. The cut prefers the last word boundary in the final quarter of
+ * the window, so a truncated excerpt ends on a whole word wherever one is
+ * close enough.
+ *
+ * Returns the text WITHOUT an ellipsis and reports the cut separately, so the
+ * caller decides how truncation is rendered (a DTO carries the boolean and
+ * the frontend draws its own affordance).
+ */
+export function toPlainTextExcerpt(
+  value: string,
+  maxLength: number,
+): { text: string; isTruncated: boolean } {
+  const collapsed = toStoredPlainText(value).replace(/\s+/g, ' ').trim();
+  if (collapsed.length <= maxLength) {
+    return { text: collapsed, isTruncated: false };
+  }
+  const window = collapsed.slice(0, maxLength);
+  const lastSpace = window.lastIndexOf(' ');
+  const text =
+    lastSpace > maxLength * 0.75 ? window.slice(0, lastSpace) : window;
+  return { text: text.trimEnd(), isTruncated: true };
+}

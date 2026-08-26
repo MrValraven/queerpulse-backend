@@ -5,6 +5,7 @@ import {
   IsIn,
   IsInt,
   IsISO8601,
+  IsObject,
   IsOptional,
   IsString,
   IsTimeZone,
@@ -16,8 +17,41 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
+import { IsAccessibilityAnswerMap } from '../../listings/dto/accessibility-answers.validator';
+import {
+  ListingAccessibilityAnswer,
+  MAX_ACCESSIBILITY_NOTE_LENGTH,
+} from '../../listings/listing-accessibility';
 import { EventStatus, EventVisibility } from '../entities/event.entity';
 import { RecurrenceDto } from './recurrence.dto';
+
+/**
+ * A gathering's accessibility answers plus the host's free-text note.
+ *
+ * The SAME shape a business listing uses (`ListingAccessibilityDto`), reading
+ * the same vocabulary out of `listings/listing-accessibility.ts` and reusing
+ * the same `IsAccessibilityAnswerMap` validator, deliberately rather than as
+ * a convenience: a member who uses a wheelchair should learn the same six
+ * facts in the same three-valued language whether they are reading a bar's
+ * page or a Tuesday supper club's, and "unknown" has to stay distinct from
+ * "no" in both.
+ *
+ * `answers` is partial on the wire: a client sends what it has an answer for
+ * and the service fills the rest with a real `unknown`. On PATCH the answers
+ * MERGE per question, so a host correcting one answer does not blank the
+ * other five; the note replaces wholesale.
+ */
+export class EventAccessibilityDto {
+  @IsOptional()
+  @IsObject()
+  @IsAccessibilityAnswerMap()
+  answers?: Partial<Record<string, ListingAccessibilityAnswer>>;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(MAX_ACCESSIBILITY_NOTE_LENGTH)
+  note?: string;
+}
 
 export class CreateEventDto {
   @IsString() @MinLength(1) @MaxLength(200) title!: string;
@@ -47,6 +81,25 @@ export class CreateEventDto {
   @IsOptional() @IsIn([EventStatus.Draft, EventStatus.Published]) status?:
     EventStatus.Draft | EventStatus.Published;
   @IsOptional() @IsImageReference() coverImageUrl?: string;
+  // ── Where it actually is (LOC-04) — see `Event.address`'s doc ───────────
+  // Every one of these is `string | null` rather than merely optional, for
+  // the same reason `communitySlug` below is: on UPDATE, `null` (or `''`)
+  // clears the stored value, which is a different instruction from omitting
+  // the field ("leave it alone"). `create()` treats null/''/absent alike.
+  @IsOptional() @IsString() @MaxLength(300) address?: string | null;
+  @IsOptional() @IsString() @MaxLength(500) arrivalNotes?: string | null;
+  @IsOptional() @IsString() @MaxLength(120) neighbourhood?: string | null;
+  @IsOptional() @IsString() @MaxLength(80) language?: string | null;
+  @IsOptional() @IsString() @MaxLength(80) eventType?: string | null;
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => EventAccessibilityDto)
+  accessibility?: EventAccessibilityDto;
+  // Free-text door price (LOC-18) — "5 to 15 EUR sliding scale", "pay what
+  // you can", "free". DISPLAY ONLY: this platform has no payment
+  // integration, so neither this field nor any message about it may promise
+  // a charge, a ticket or a refund.
+  @IsOptional() @IsString() @MaxLength(120) cost?: string | null;
   // `string | null` (not just optional): on UPDATE, `null` (or `''`) is a
   // meaningful "detach the community" signal, distinct from omitting the
   // field entirely ("leave unchanged") — see `EventsService.update`.

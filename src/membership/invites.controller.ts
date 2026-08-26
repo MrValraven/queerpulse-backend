@@ -16,9 +16,10 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Public } from '../auth/decorators/public.decorator';
 import { CreateInviteDto } from './dto/create-invite.dto';
-import { PaginationQuery } from './dto/pagination.query';
+import { PaginationQuery } from '../common/pagination.query';
 import {
   InviteQuotaView,
   MyInviteView,
@@ -49,7 +50,7 @@ export class InvitesController {
   // routes do (auth/refresh uses 10/60s).
   @Post()
   @HttpCode(HttpStatus.CREATED)
-  @UseGuards(ActiveMemberGuard)
+  @UseGuards(ActiveMemberGuard, NotRestrictedGuard)
   @Throttle({ default: { limit: 10, ttl: seconds(60) } })
   @ApiOperation({ summary: 'Mint a personal invite for the current member' })
   @ApiCreatedResponse({ description: 'The newly created invite.' })
@@ -132,7 +133,7 @@ export class InvitesController {
   // per IP to match the create route's write posture.
   @Post(':code/resend')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(ActiveMemberGuard)
+  @UseGuards(ActiveMemberGuard, NotRestrictedGuard)
   @Throttle({ default: { limit: 10, ttl: seconds(60) } })
   @ApiOperation({
     summary: "Resend (re-mint) one of the current member's expired invites",

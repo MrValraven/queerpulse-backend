@@ -1,19 +1,24 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { In, Repository } from 'typeorm';
-import { MemberLookup } from '../common/member-ref';
+import { MemberLookup, MemberRef } from '../common/member-ref';
 import {
   DEFAULT_LIST_LIMIT,
   normalizePage,
+  PAGE_SIZE,
   paginate,
   Paginated,
 } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
@@ -22,7 +27,11 @@ import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.ser
 import { CreateIntroRequestDto } from './dto/create-intro-request.dto';
 import { CreateLandlordDto } from './dto/create-landlord.dto';
 import { CreateRecommendationDto } from './dto/create-recommendation.dto';
+import { ListAdminLandlordsQuery } from './dto/list-admin-landlords.query';
+import { ListIntroRequestsQuery } from './dto/list-intro-requests.query';
+import { TriageIntroRequestDto } from './dto/triage-intro-request.dto';
 import { UpdateLandlordDto } from './dto/update-landlord.dto';
+import { UpdateLandlordStatusDto } from './dto/update-landlord-status.dto';
 import {
   LandlordIntroRequest,
   LandlordIntroRequestStatus,
@@ -31,11 +40,15 @@ import { LandlordRecommendation } from './entities/landlord-recommendation.entit
 import { Landlord, LandlordStatus } from './entities/landlord.entity';
 import { BrowseLandlordsQuery } from './dto/browse-landlords.query';
 import {
+  AdminLandlordDTO,
+  AdminRecommendationDTO,
   IntroRequestDTO,
   LandlordCardDTO,
   LandlordDetailDTO,
   ratingFromRecommendations,
   RecommendationDTO,
+  toAdminLandlordDTO,
+  toAdminRecommendationDTO,
   toIntroRequestDTO,
   toLandlordCardDTO,
   toLandlordDetailDTO,
@@ -65,6 +78,8 @@ function applyLandlord(
  */
 @Injectable()
 export class LandlordsService {
+  private readonly logger = new Logger(LandlordsService.name);
+
   constructor(
     @InjectRepository(Landlord)
     private readonly landlords: Repository<Landlord>,
@@ -75,6 +90,9 @@ export class LandlordsService {
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly verification: VerificationService,
     private readonly affirmingPledge: AffirmingPledgeService,
+    // LOC-19: the member who suggested an entry, or asked for an
+    // introduction, is told what was decided. In-app plus push, never email.
+    private readonly notifications: NotificationsService,
   ) {}
 
   /** Batched recommendation-author verification levels (honest badge). Missing
@@ -245,16 +263,65 @@ export class LandlordsService {
 
   // --- admin ops ---
 
-  async listAllForAdmin(): Promise<LandlordCardDTO[]> {
-    const rows = await this.landlords.find({
-      order: { createdAt: 'DESC' },
-      take: DEFAULT_LIST_LIMIT,
+  /**
+   * The landlord directory console's list (LOC-19).
+   *
+   * Replaces an uncapped slab of public cards with the page a moderator can
+   * actually work: filtered by review state, neighbourhood and name, paginated,
+   * and carrying the four things the slab omitted — the row `id` every admin
+   * mutation is keyed by, the `status`, the member who suggested the entry, and
+   * the decision already recorded on it.
+   *
+   * Newest first: unlike the housing queue there is no risk score to sort on
+   * here, and a suggestion that has been waiting longest is the one most owed
+   * an answer. The submitter refs are ONE batched profile lookup for the whole
+   * page, never one query per row.
+   */
+  async listForAdmin(
+    query: ListAdminLandlordsQuery,
+  ): Promise<Paginated<AdminLandlordDTO>> {
+    const page = normalizePage(query.page);
+    const qb = this.landlords.createQueryBuilder('l');
+    if (query.status) {
+      qb.andWhere('l.status = :status', { status: query.status });
+    }
+    if (query.hood) {
+      qb.andWhere('LOWER(l.hood) = LOWER(:hood)', { hood: query.hood });
+    }
+    if (query.q) {
+      qb.andWhere('l.name ILIKE :q', { q: `%${query.q}%` });
+    }
+    qb.orderBy('l.created_at', 'DESC');
+
+    return paginate(qb, page, async (rows) => {
+      if (!rows.length) return [];
+      const ratings = await this.ratingsFor(rows.map((row) => row.id));
+      const submitters = await this.submittersFor(rows);
+      return rows.map((row) =>
+        toAdminLandlordDTO(
+          row,
+          ratings.get(row.id) ?? { score: '0', count: 0 },
+          row.submittedByUserId
+            ? (submitters.get(row.submittedByUserId) ?? null)
+            : null,
+        ),
+      );
     });
-    if (!rows.length) return [];
-    const ratings = await this.ratingsFor(rows.map((r) => r.id));
-    return rows.map((r) =>
-      toLandlordCardDTO(r, ratings.get(r.id) ?? { score: '0', count: 0 }),
-    );
+  }
+
+  /** userId -> MemberRef for every row that carries a submitter. One query. */
+  private async submittersFor(
+    rows: Landlord[],
+  ): Promise<Map<string, MemberRef>> {
+    const submitterIds = [
+      ...new Set(
+        rows
+          .map((row) => row.submittedByUserId)
+          .filter((userId): userId is string => Boolean(userId)),
+      ),
+    ];
+    if (!submitterIds.length) return new Map();
+    return new MemberLookup(this.profiles).byUserIds(submitterIds);
   }
 
   async adminCreate(
@@ -290,19 +357,133 @@ export class LandlordsService {
     return this.detailFromEntity(saved);
   }
 
+  /**
+   * Publish a suggested entry, or hold it back for review (LOC-19).
+   *
+   * IDEMPOTENT: an entry already in the requested state is returned unchanged,
+   * with no second decision stamped and no second notification, so a
+   * double-clicked approve or two moderators working the same queue cannot
+   * tell the same member the same thing twice.
+   *
+   * A move back to `review` REQUIRES a reason whenever a member suggested the
+   * entry, because that is the decision they need to be able to act on. Going
+   * `live` does not: the notification is good news and the entry speaks for
+   * itself.
+   */
   async setStatus(
     id: string,
-    status: LandlordStatus,
+    dto: UpdateLandlordStatusDto,
+    adminUserId: string,
   ): Promise<LandlordDetailDTO> {
     const landlord = await this.loadByIdOr404(id);
-    landlord.status = status;
+    if (landlord.status === dto.status) {
+      return this.detailFromEntity(landlord);
+    }
+
+    const reason = LandlordsService.trimToNull(dto.reason);
+    if (
+      dto.status === LandlordStatus.Review &&
+      landlord.submittedByUserId &&
+      !reason
+    ) {
+      throw new BadRequestException(
+        'Say why the entry is being held back. The member who suggested it reads this.',
+      );
+    }
+
+    landlord.status = dto.status;
+    landlord.decidedAt = new Date();
+    landlord.decidedBy = adminUserId;
+    landlord.decisionReason = reason;
     const saved = await this.landlords.save(landlord);
+
+    await this.notifySuggester(saved, dto.status, reason);
+
     return this.detailFromEntity(saved);
   }
 
-  async remove(id: string): Promise<void> {
+  /**
+   * Remove a directory entry (LOC-19).
+   *
+   * A member-suggested entry cannot be removed silently: the reason is
+   * REQUIRED and is sent to the member who suggested it. A staff-created entry
+   * has nobody to tell, so no reason is demanded of the moderator deleting it.
+   *
+   * The notification is built from values captured BEFORE the delete and sent
+   * after it, so the member is only ever told about a removal that actually
+   * happened, and the row is gone by the time they tap through.
+   */
+  async remove(id: string, reason?: string): Promise<void> {
     const landlord = await this.loadByIdOr404(id);
+    const trimmedReason = LandlordsService.trimToNull(reason);
+    if (landlord.submittedByUserId && !trimmedReason) {
+      throw new BadRequestException(
+        'Say why the entry is being removed. The member who suggested it reads this.',
+      );
+    }
+
+    const suggesterUserId = landlord.submittedByUserId;
+    const removed = {
+      slug: landlord.slug,
+      name: landlord.name,
+    };
+    // Nothing is stamped with the deciding moderator here, deliberately: the
+    // row those columns live on is the row being deleted. The audit trail for
+    // a removal is the removal.
     await this.landlords.remove(landlord);
+
+    if (suggesterUserId) {
+      await this.notifyDecision(
+        suggesterUserId,
+        NotificationType.LandlordSuggestionDecided,
+        {
+          source: 'landlord',
+          decision: 'removed',
+          landlordSlug: removed.slug,
+          landlordName: removed.name,
+          ...(trimmedReason ? { reason: trimmedReason } : {}),
+        },
+        `landlord ${id}`,
+      );
+    }
+  }
+
+  /**
+   * The recommendations on one landlord entry, as a moderator sees them
+   * (LOC-19).
+   *
+   * `removeRecommendation` below is keyed by a recommendation id that no
+   * response in the API carried: the public landlord detail returns
+   * `RecommendationDTO`, which has no `id`, so the DELETE route was
+   * unreachable from any client. This is the admin-side read that supplies it,
+   * and it stays admin-side so a public reader is never handed the key to
+   * somebody else's row.
+   *
+   * Capped at `DEFAULT_LIST_LIMIT` and newest first, matching the public
+   * detail read, and it 404s on an unknown landlord rather than answering an
+   * empty list for an id that does not exist.
+   */
+  async listRecommendationsForAdmin(
+    landlordId: string,
+  ): Promise<AdminRecommendationDTO[]> {
+    await this.loadByIdOr404(landlordId);
+    const recs = await this.recommendations.find({
+      where: { landlordId },
+      order: { createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
+    });
+    const authorUserIds = recs.map((rec) => rec.authorUserId);
+    const members = await new MemberLookup(this.profiles).byUserIds(
+      authorUserIds,
+    );
+    const levels = await this.recLevels(authorUserIds);
+    return recs.map((rec) =>
+      toAdminRecommendationDTO(
+        rec,
+        members.get(rec.authorUserId) ?? null,
+        levels.get(rec.authorUserId) ?? VerificationLevel.Email,
+      ),
+    );
   }
 
   async removeRecommendation(id: string): Promise<void> {
@@ -313,44 +494,196 @@ export class LandlordsService {
     await this.recommendations.remove(rec);
   }
 
-  async listIntroRequests(landlordSlug?: string): Promise<IntroRequestDTO[]> {
+  /**
+   * The introduction queue a moderator works (LOC-19): filtered by landlord
+   * and by state, paginated, with the asking member resolved so the row is
+   * about a person rather than a self-entered name.
+   *
+   * An unknown `landlord` slug returns an EMPTY page rather than a 404,
+   * unchanged from before: the filter is a narrowing, and a console asking
+   * about a landlord that has since been removed should see "nothing here".
+   */
+  async listIntroRequests(
+    query: ListIntroRequestsQuery,
+  ): Promise<Paginated<IntroRequestDTO>> {
+    const page = normalizePage(query.page);
     let landlordId: string | undefined;
-    if (landlordSlug) {
+    if (query.landlord) {
       const landlord = await this.landlords.findOne({
-        where: { slug: landlordSlug },
+        where: { slug: query.landlord },
       });
-      if (!landlord) return [];
+      if (!landlord) {
+        return { items: [], total: 0, page, pageSize: PAGE_SIZE };
+      }
       landlordId = landlord.id;
     }
-    const requests = await this.introRequests.find({
-      where: landlordId ? { landlordId } : {},
-      order: { createdAt: 'DESC' },
-      take: DEFAULT_LIST_LIMIT,
+
+    const qb = this.introRequests.createQueryBuilder('request');
+    if (landlordId) {
+      qb.andWhere('request.landlordId = :landlordId', { landlordId });
+    }
+    if (query.status) {
+      qb.andWhere('request.status = :status', { status: query.status });
+    }
+    qb.orderBy('request.created_at', 'DESC');
+
+    return paginate(qb, page, async (rows) => {
+      if (!rows.length) return [];
+      const landlordById = await this.landlordsByIds(
+        rows.map((row) => row.landlordId),
+      );
+      const requesterIds = [
+        ...new Set(
+          rows
+            .map((row) => row.userId)
+            .filter((userId): userId is string => Boolean(userId)),
+        ),
+      ];
+      const requesters = requesterIds.length
+        ? await new MemberLookup(this.profiles).byUserIds(requesterIds)
+        : new Map<string, MemberRef>();
+      return rows.map((request) =>
+        toIntroRequestDTO(
+          request,
+          landlordById.get(request.landlordId) ?? null,
+          request.userId ? (requesters.get(request.userId) ?? null) : null,
+        ),
+      );
     });
-    if (!requests.length) return [];
-    const landlordById = await this.landlordsByIds(
-      requests.map((r) => r.landlordId),
-    );
-    return requests.map((request) =>
-      toIntroRequestDTO(request, landlordById.get(request.landlordId) ?? null),
-    );
   }
 
+  /**
+   * Answer a request for an introduction (LOC-19).
+   *
+   * A landlord is not a platform member, so nobody but the staff team can
+   * answer this, and until now the answer went nowhere: the requester's row
+   * flipped to `accepted` or `declined` and they were never told either way,
+   * having handed over their name, a note and a contact detail to ask.
+   *
+   * A decline REQUIRES a reason. IDEMPOTENT on a repeat of the same answer.
+   */
   async triageIntroRequest(
     id: string,
-    action: 'accepted' | 'declined',
+    dto: TriageIntroRequestDto,
+    adminUserId: string,
   ): Promise<IntroRequestDTO> {
     const request = await this.introRequests.findOne({ where: { id } });
     if (!request) {
       throw new NotFoundException('Intro request not found');
     }
-    request.status =
-      action === 'accepted'
+
+    const status =
+      dto.action === 'accepted'
         ? LandlordIntroRequestStatus.Accepted
         : LandlordIntroRequestStatus.Declined;
+
+    if (request.status === status && request.decidedAt) {
+      return this.introRequestDTO(request);
+    }
+
+    const reason = LandlordsService.trimToNull(dto.reason);
+    if (dto.action === 'declined' && !reason) {
+      throw new BadRequestException(
+        'Say why the introduction is not happening. The member who asked reads this.',
+      );
+    }
+
+    request.status = status;
+    request.decidedAt = new Date();
+    request.decidedBy = adminUserId;
+    request.decisionReason = reason;
     const saved = await this.introRequests.save(request);
-    const landlordById = await this.landlordsByIds([saved.landlordId]);
-    return toIntroRequestDTO(saved, landlordById.get(saved.landlordId) ?? null);
+
+    if (saved.userId) {
+      const landlord = (await this.landlordsByIds([saved.landlordId])).get(
+        saved.landlordId,
+      );
+      await this.notifyDecision(
+        saved.userId,
+        NotificationType.LandlordIntroRequestDecided,
+        {
+          source: 'landlord',
+          decision: dto.action,
+          landlordSlug: landlord?.slug ?? '',
+          landlordName: landlord?.name ?? '',
+          ...(reason ? { reason } : {}),
+        },
+        `landlord intro request ${saved.id}`,
+      );
+    }
+
+    return this.introRequestDTO(saved);
+  }
+
+  /** Hand-map one intro request with its landlord and requester resolved. */
+  private async introRequestDTO(
+    request: LandlordIntroRequest,
+  ): Promise<IntroRequestDTO> {
+    const landlordById = await this.landlordsByIds([request.landlordId]);
+    const requester = request.userId
+      ? ((
+          await new MemberLookup(this.profiles).byUserIds([request.userId])
+        ).get(request.userId) ?? null)
+      : null;
+    return toIntroRequestDTO(
+      request,
+      landlordById.get(request.landlordId) ?? null,
+      requester,
+    );
+  }
+
+  /**
+   * "Your landlord suggestion was decided" to the member who suggested it.
+   * Silent when nobody suggested it (a staff-created entry has no submitter).
+   */
+  private async notifySuggester(
+    landlord: Landlord,
+    status: LandlordStatus,
+    reason: string | null,
+  ): Promise<void> {
+    if (!landlord.submittedByUserId) return;
+    await this.notifyDecision(
+      landlord.submittedByUserId,
+      NotificationType.LandlordSuggestionDecided,
+      {
+        source: 'landlord',
+        decision: status,
+        landlordSlug: landlord.slug,
+        landlordName: landlord.name,
+        ...(reason ? { reason } : {}),
+      },
+      `landlord ${landlord.id}`,
+    );
+  }
+
+  /**
+   * Best-effort in-app plus push delivery of a decision to the member it is
+   * about. NEVER throws: the decision has already committed by the time this
+   * runs, and a notification failure must not turn a completed moderation into
+   * a 500 the moderator retries into a second decision. QueerPulse sends no
+   * email, so there is no other channel involved.
+   */
+  private async notifyDecision(
+    userId: string,
+    type: NotificationType,
+    payload: Record<string, unknown>,
+    subject: string,
+  ): Promise<void> {
+    try {
+      await this.notifications.create(userId, type, payload);
+    } catch (error) {
+      this.logger.warn(
+        `Failed to notify member of ${subject}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /** Empty or whitespace-only free text stores as NULL, never as a blank. */
+  private static trimToNull(value: string | undefined | null): string | null {
+    const trimmed = value?.trim();
+    return trimmed ? trimmed : null;
   }
 
   // --- internals ---

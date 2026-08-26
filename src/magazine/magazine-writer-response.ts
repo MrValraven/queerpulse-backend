@@ -4,6 +4,7 @@ import {
   MagazinePayment,
   PaymentStatus,
 } from './entities/magazine-payment.entity';
+import { moneyDisplay } from './magazine-money';
 
 /**
  * Response shapes below are hand-mapped and deliberately SEPARATE from the
@@ -102,6 +103,20 @@ function stageToWriterState(stage: PieceStage): string {
   }
 }
 
+/**
+ * The fee as the writer should read it (CON-18): the priced amount with its
+ * currency ("€420.00"), falling back to whatever the desk wrote before the
+ * row was ever priced, and to an empty string when no payment row exists.
+ * Both writer surfaces show a display string rather than a raw amount, so
+ * the formatting happens once, here.
+ */
+function writerFacingFee(payment: MagazinePayment | null): string {
+  if (payment === null) {
+    return '';
+  }
+  return moneyDisplay(payment.currency, payment.feeAmount, payment.feeText);
+}
+
 export function toWriterAssignment(
   piece: MagazinePiece,
   payment: MagazinePayment | null,
@@ -115,7 +130,7 @@ export function toWriterAssignment(
     stage: piece.stage,
     words: piece.brief?.filedWords ?? null,
     target: piece.brief?.wordCount ?? null,
-    fee: payment?.fee ?? '',
+    fee: writerFacingFee(payment),
     pay: payment?.status ?? 'agreed',
     note: piece.brief?.angle ?? '',
     byline: piece.byline,
@@ -200,7 +215,7 @@ export function toWriterPayment(
   return {
     title: piece.title,
     issue: piece.issueId,
-    fee: payment?.fee ?? '',
+    fee: writerFacingFee(payment),
     state: paymentStatusToWriterState(payment),
   };
 }

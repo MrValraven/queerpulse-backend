@@ -27,6 +27,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { InviteListingCoManagerDto } from './dto/invite-listing-co-manager.dto';
 import { ListingCoManagersService } from './listing-co-managers.service';
@@ -162,6 +163,7 @@ export class ListingCoManagersController {
   // somebody else's bell, so the limit is here to stop a script doing that in
   // bulk, not to ration a real owner adding their colleagues.
   @Post(':ref/co-managers')
+  @UseGuards(NotRestrictedGuard)
   @Throttle({ default: { limit: 10, ttl: seconds(60) } })
   @ApiOperation({ summary: 'Invite a member to co-manage a listing' })
   @ApiCreatedResponse({ description: 'The pending invitation.' })

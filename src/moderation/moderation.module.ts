@@ -9,14 +9,17 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { ReportsModule } from '../reports/reports.module';
 import { UsersModule } from '../users/users.module';
 import { Appeal } from './entities/appeal.entity';
+import { BanRatification } from './entities/ban-ratification.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
 import { AccountEnforcementService } from './account-enforcement.service';
+import { BanRatificationService } from './ban-ratification.service';
 import { AdminMemberModerationController } from './admin-member-moderation.controller';
 import { AdminMemberModerationService } from './admin-member-moderation.service';
 import { AppealsController } from './appeals.controller';
 import { ModAuditService } from './mod-audit.service';
 import { ModerationController } from './moderation.controller';
 import { ModerationService } from './moderation.service';
+import { ReportSubjectResolverService } from './report-subject-resolver.service';
 
 @Module({
   imports: [
@@ -34,6 +37,8 @@ import { ModerationService } from './moderation.service';
     // by `ListingsModule`.
     TypeOrmModule.forFeature([
       Appeal,
+      // TS-12: where a permanent ban waits for its second moderator.
+      BanRatification,
       ModAuditLog,
       AccountDeactivation,
       Listing,
@@ -91,6 +96,27 @@ import { ModerationService } from './moderation.service';
     ModAuditService,
     AccountEnforcementService,
     AdminMemberModerationService,
+    // `ReportSubjectResolverService` answers "who wrote this, what does it say,
+    // which community owns it" for every report subject type. It is the shared
+    // foundation under three behaviours: `warn` reaching the author of reported
+    // content, `suspend`/`ban`/`restrict` landing on that author, and the queue
+    // naming the community a report came from.
+    //
+    // NO MODULE IMPORT IS ADDED FOR IT, on purpose. The seventeen subject types
+    // it covers span twelve feature modules, and importing them would create
+    // real cycles: `CommunitiesModule` imports `ContentModerationModule`, which
+    // this module also imports, and `ForumModule` imports THIS module for the
+    // exported `ModAuditService`. The resolver injects only the shared
+    // `DataSource` and reads through scoped, parameterized queries, so the
+    // module graph is unchanged.
+    ReportSubjectResolverService,
+    // TS-12. Owns the pending-ratification queue, the ratify/decline decision,
+    // and the lazy expiry of a hold nobody confirmed. It injects
+    // `AccountEnforcementService` (to apply or undo the ban) rather than the
+    // other way round; the enforcement service opens the hold row through the
+    // `BanRatification` repository directly, so the two never form a service
+    // cycle and no `forwardRef` is needed anywhere.
+    BanRatificationService,
   ],
   // `ModAuditService` is the single writer into `mod_audit_logs` and the
   // reader behind `GET /mod/audit` + its CSV export. `ForumModule` imports

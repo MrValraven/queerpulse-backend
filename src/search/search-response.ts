@@ -3,11 +3,11 @@ import type { DirectoryCardDTO } from '../listings/listing-response';
 import type { CommunityCardDTO } from '../communities/community-response';
 import type { EventSummary } from '../events/event-response';
 import type { ForumThreadResponse } from '../forum/forum-response';
+import type { ForumPostSearchRow } from '../forum/forum-posts.service';
 import type { ArticleSearchRow } from '../magazine/magazine-response';
 import type { JobSearchRow } from '../jobs/job-response';
 import type { HousingSearchRow } from '../housing-listings/housing-listing-response';
 import type { ResourceSearchRow } from '../resources/resource-response';
-import type { WorkshopSearchRow } from '../workshops/workshop-response';
 import type { SubprofileSearchRow } from '../subprofiles/subprofile-response';
 import type { TopicSearchRow } from '../content/topic-response';
 import { SearchResultType } from './dto/search.query';
@@ -24,6 +24,12 @@ export interface SearchResultDTO {
 export interface SearchResponseDTO {
   query: string;
   results: SearchResultDTO[];
+  /**
+   * True when the requested `type` has results beyond this page (SOC-08).
+   * Always false on the unfiltered, all-types view, which caps each group at
+   * six and points at the type's own tab instead of paging.
+   */
+  hasMore: boolean;
 }
 
 const joinSub = (...parts: (string | null | undefined)[]): string =>
@@ -69,6 +75,20 @@ export function forumToResult(thread: ForumThreadResponse): SearchResultDTO {
   };
 }
 
+/**
+ * A reply-body hit. Named by its THREAD, because that is the page it opens and
+ * the thing a member recognises; the `sub` carries the excerpt of the reply
+ * that matched, which is the part that actually answered the question.
+ */
+export function forumPostToResult(row: ForumPostSearchRow): SearchResultDTO {
+  return {
+    type: 'forumPost',
+    slug: row.threadSlug,
+    name: row.threadTitle,
+    sub: joinSub(row.excerpt),
+  };
+}
+
 export function businessToResult(card: DirectoryCardDTO): SearchResultDTO {
   return {
     type: 'business',
@@ -111,15 +131,6 @@ export function resourceToResult(row: ResourceSearchRow): SearchResultDTO {
     slug: row.slug,
     name: row.title,
     sub: joinSub(row.category),
-  };
-}
-
-export function workshopToResult(row: WorkshopSearchRow): SearchResultDTO {
-  return {
-    type: 'workshop',
-    slug: row.slug,
-    name: row.title,
-    sub: joinSub(row.cat),
   };
 }
 

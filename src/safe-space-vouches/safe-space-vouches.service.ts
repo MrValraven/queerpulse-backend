@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import {
   Listing,
@@ -14,6 +14,10 @@ import {
 } from '../listings/entities/listing.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import {
+  SafeSpaceNomination,
+  SAFE_SPACE_NOMINATION_OPEN_STATUSES,
+} from '../safe-space-nominations/entities/safe-space-nomination.entity';
 import {
   SafeSpaceMemberVouch,
   type SafeSpaceVouchRelationship,
@@ -40,6 +44,8 @@ export class SafeSpaceVouchesService {
     @InjectRepository(Listing)
     private readonly listings: Repository<Listing>,
     private readonly notifications: NotificationsService,
+    @InjectRepository(SafeSpaceNomination)
+    private readonly nominations: Repository<SafeSpaceNomination>,
   ) {}
 
   /**
@@ -53,7 +59,7 @@ export class SafeSpaceVouchesService {
     slug: string,
     input?: CreateSafeSpaceVouchInput,
   ): Promise<{ vouchCount: number }> {
-    const listing = await this.resolveVerifiedSpace(slug);
+    const listing = await this.resolveVouchableSpace(slug);
 
     // A space's own owner cannot vouch for it: a vouch is a community member's
     // independent endorsement, and letting the owner +1 their own public
@@ -140,7 +146,7 @@ export class SafeSpaceVouchesService {
 
   /** Withdraw the current member's active vouch for a space (soft-delete). */
   async withdrawVouch(voucherId: string, slug: string): Promise<{ ok: true }> {
-    const listing = await this.resolveVerifiedSpace(slug);
+    const listing = await this.resolveVouchableSpace(slug);
     const active = await this.memberVouches.findOne({
       where: { listingId: listing.id, voucherId, withdrawnAt: IsNull() },
     });
@@ -155,24 +161,45 @@ export class SafeSpaceVouchesService {
   }
 
   /**
-   * The space must exist, be live, be publicly shown, and currently be a
-   * verified safe space — vouching for a place that was never reviewed (or
-   * lost its badge) is meaningless, and the FE only surfaces the vouch button
-   * on verified spaces.
+   * The space must exist, be live and be publicly shown, and must be somewhere
+   * a vouch means something.
+   *
+   * TWO ways it can be. The first is the original one: the space already
+   * carries a verified badge, and a vouch is a member adding their name to it.
+   * The second is new and is the point of this change: the space is UNDER
+   * REVIEW — a nomination has been acknowledged or assigned for visits and
+   * points at this listing — and a vouch is one of the three independent member
+   * visits the published copy promises before a badge is granted.
+   *
+   * Refusing the second case is what made the promise unkeepable. Vouching used
+   * to require an already-verified space, so the visits that were supposed to
+   * EARN a badge could only be recorded after it had been granted, and the
+   * three-visit step existed in the copy alone.
    *
    * A listing its owner has paused is unreachable on the public page the vouch
    * button lives on, so it resolves as not-found here for the same reason
    * `DirectoryService.getSafeSpaceBySlug` 404s it.
    */
-  private async resolveVerifiedSpace(slug: string): Promise<Listing> {
+  private async resolveVouchableSpace(slug: string): Promise<Listing> {
     const listing = await this.listings.findOne({
       where: { slug, status: ListingStatus.Live, isHiddenByOwner: false },
     });
     if (!listing) {
       throw new NotFoundException('Safe space not found');
     }
-    if (listing.safeSpaceStatus !== SafeSpaceStatus.Verified) {
-      throw new BadRequestException('This space is not a verified safe space');
+    if (listing.safeSpaceStatus === SafeSpaceStatus.Verified) {
+      return listing;
+    }
+    const openNominationCount = await this.nominations.count({
+      where: {
+        listingId: listing.id,
+        status: In(SAFE_SPACE_NOMINATION_OPEN_STATUSES),
+      },
+    });
+    if (openNominationCount === 0) {
+      throw new BadRequestException(
+        'This space is not a verified safe space and is not under review',
+      );
     }
     return listing;
   }

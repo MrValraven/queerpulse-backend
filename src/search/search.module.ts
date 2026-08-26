@@ -8,7 +8,6 @@ import { MagazineModule } from '../magazine/magazine.module';
 import { JobsModule } from '../jobs/jobs.module';
 import { HousingListingsModule } from '../housing-listings/housing-listings.module';
 import { ResourcesModule } from '../resources/resources.module';
-import { WorkshopsModule } from '../workshops/workshops.module';
 import { SubprofilesModule } from '../subprofiles/subprofiles.module';
 import { ContentModule } from '../content/content.module';
 import { SearchController } from './search.controller';
@@ -25,7 +24,6 @@ import { SearchService } from './search.service';
     JobsModule,
     HousingListingsModule,
     ResourcesModule,
-    WorkshopsModule,
     SubprofilesModule,
     ContentModule,
   ],

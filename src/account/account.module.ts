@@ -4,15 +4,19 @@ import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { CommunitiesModule } from '../communities/communities.module';
 import { Connection } from '../connections/entities/connection.entity';
 import { ConsentRecord } from '../consent/entities/consent-record.entity';
+import { EventCohost } from '../events/entities/event-cohost.entity';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
+import { EventSeries } from '../events/entities/event-series.entity';
 import { Event } from '../events/entities/event.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
+import { Job } from '../jobs/entities/job.entity';
 import { Listing } from '../listings/entities/listing.entity';
 import { MembershipCardsModule } from '../membership-cards/membership-cards.module';
 import { Message } from '../messaging/entities/message.entity';
 import { Notification } from '../notifications/entities/notification.entity';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { Activity } from '../profiles/entities/activity.entity';
 import { SavedItem } from '../saved/entities/saved-item.entity';
 import { StorageModule } from '../storage/storage.module';
@@ -20,12 +24,14 @@ import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { UsersModule } from '../users/users.module';
+import { VolunteerOpportunity } from '../volunteering/entities/volunteer-opportunity.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import { AccountDeletionProcessorService } from './account-deletion-processor.service';
 import { AccountExportService } from './account-export.service';
 import { AccountRetentionService } from './account-retention.service';
 import { AccountController } from './account.controller';
 import { AccountService } from './account.service';
+import { ContentOwnerErasureService } from './content-owner-erasure.service';
 import {
   DATA_EXPORT_CONTRIBUTORS,
   DataExportContribution,
@@ -62,6 +68,12 @@ import { EmailPreference } from './entities/email-preference.entity';
     // directly. Plain import, no `forwardRef`: `MembershipCardsModule` does
     // not import `AccountModule`, directly or transitively.
     MembershipCardsModule,
+    // `NotificationsService`: `ContentOwnerErasureService` fans an existing
+    // `EventCancelled` notification out to everyone holding an RSVP when an
+    // erased member's gathering has no co-host to inherit it. Plain import, no
+    // `forwardRef`: `NotificationsModule` does not import `AccountModule`,
+    // directly or transitively.
+    NotificationsModule,
     TypeOrmModule.forFeature([
       DeletionRequest,
       DsarRequest,
@@ -90,6 +102,17 @@ import { EmailPreference } from './entities/email-preference.entity';
       ForumPost,
       Event,
       EventRsvp,
+      // Write-side sources for `ContentOwnerErasureService`: the erased
+      // member's future gatherings are handed to a co-host (`EventCohost`) or
+      // cancelled, and a series they were running follows its occurrences
+      // (`EventSeries`). Same cross-module registration pattern as the
+      // entities above.
+      EventCohost,
+      EventSeries,
+      // Open postings the erased member left behind, closed by
+      // `ContentOwnerErasureService` so nobody applies into a void.
+      Job,
+      VolunteerOpportunity,
       Connection,
       Vouch,
       Activity,
@@ -112,6 +135,10 @@ import { EmailPreference } from './entities/email-preference.entity';
     // Cron-only; nothing injects it. Registering it here is what starts the
     // daily erasure sweep.
     AccountDeletionProcessorService,
+    // Injected by the erasure sweep above: hands an erased member's future
+    // gatherings to a co-host or cancels them, and closes the postings they
+    // left open. See its own docstring for the ordering rule.
+    ContentOwnerErasureService,
     // Cron-only; registering it starts the data-export-archive and reauth-token
     // retention sweeps.
     AccountRetentionService,

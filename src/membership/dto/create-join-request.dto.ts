@@ -15,7 +15,7 @@ import {
  * of the spam story (throttle by IP + one open request per email + bounded
  * payload), not just hygiene.
  */
-export class CreateJoinRequestDto {
+export class CreateMembershipJoinRequestDto {
   @IsString()
   @MinLength(1)
   @MaxLength(120)

@@ -8,6 +8,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import {
   CurrentUser,
   CurrentUserData,
@@ -40,6 +41,7 @@ export class EventPhotosController {
   constructor(private readonly eventPhotos: EventPhotosService) {}
 
   @Post(':slug/photos')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: "Attach an uploaded photo to an event's album." })
   @ApiCreatedResponse({ description: 'The attached photo view.' })
   @ApiForbiddenResponse({

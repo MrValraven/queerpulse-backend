@@ -26,6 +26,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { BarterService } from './barter.service';
 import { CreateBarterListingDto } from './dto/create-barter-listing.dto';
@@ -79,6 +80,7 @@ export class BarterController {
 
   @Throttle({ default: { limit: 10, ttl: seconds(60) } })
   @Post()
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Post a swap to the exchange' })
   @ApiCreatedResponse({ description: 'The created listing.' })
   create(
@@ -102,6 +104,7 @@ export class BarterController {
 
   @Throttle({ default: { limit: 10, ttl: seconds(60) } })
   @Post(':id/proposals')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: "Propose a swap against someone else's listing" })
   @ApiCreatedResponse({
     description:

@@ -20,7 +20,9 @@ import {
  * and is a different, heavier thing: this one says "not in this room" and says
  * nothing about the member's standing anywhere else on QueerPulse.
  *
- * Paired migration `1793800000000-AddCommunityBans`.
+ * Paired migrations: `1793800000000-AddCommunityBans`,
+ * `1794910000000-AddCommunityBanExpiry` (the `expires_at` end date) and
+ * `1794911000000-AddCommunityBanRuleCitation` (the cited house rule).
  */
 @Entity('community_bans')
 @Index('UQ_community_bans_community_user', ['communityId', 'userId'], {
@@ -52,11 +54,50 @@ export class CommunityBan {
   @Column({ type: 'uuid', nullable: true })
   bannedByUserId!: string | null;
 
-  // Moderator-authored, optional. Shown to owner/mods on the ban list and
-  // carried into the governance log; whether any of it reaches the banned
-  // member is a decision for the notification/response layer, not this column.
+  // Moderator-authored, optional. Shown to owner/mods on the ban list, carried
+  // into the governance log, and (since TS-10) sent to the barred member with
+  // their notification: a sanction nobody explains is the unexplained
+  // enforcement the notification pipeline exists to prevent.
   @Column({ type: 'text', nullable: true })
   reason!: string | null;
+
+  // When the bar lifts by itself. NULL means permanent, which is what every
+  // ban written before `AddCommunityBanExpiry1794910000000` was.
+  //
+  // A timed ban is the rung the community ladder was missing. Removal used to
+  // be all-or-nothing, so a moderator facing someone having a bad week chose
+  // between doing nothing and barring them for life. A ban with an end date is
+  // the same act with a horizon on it.
+  //
+  // Enforcement is by QUERY, never by a sweep job: every read that asks "is
+  // this member barred" filters on `expires_at IS NULL OR expires_at > now()`,
+  // so an expired row stops biting the instant it expires even if nothing has
+  // deleted it yet. `CommunitiesService.assertNotBanned` additionally deletes
+  // the spent row on the way past (lazy expiry with write-through, the pattern
+  // `JwtStrategy.liftExpiredRestriction` uses for `users.restricted_until`),
+  // which keeps the ban list honest without a scheduled job.
+  @Column({ type: 'timestamptz', nullable: true })
+  expiresAt!: Date | null;
+
+  // The house rule this ban rests on, snapshotted at the moment of the action.
+  //
+  // `Community.rules` is a plain `string[]` and `Community.rulesVersion` is
+  // bumped on every edit, so an index alone is unstable: rule 3 today can be a
+  // different rule tomorrow. Storing the version AND the exact wording means
+  // the record still reads correctly after the rules are rewritten, and a
+  // reader can see at a glance whether they have been.
+  //
+  // All three are NULL together. Citing a rule is optional (a ban can rest on
+  // conduct no rule anticipated), and a community with no rules has nothing to
+  // cite.
+  @Column({ type: 'int', nullable: true })
+  ruleIndex!: number | null;
+
+  @Column({ type: 'int', nullable: true })
+  ruleVersion!: number | null;
+
+  @Column({ type: 'text', nullable: true })
+  ruleText!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

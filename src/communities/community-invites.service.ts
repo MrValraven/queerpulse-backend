@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, IsNull, MoreThan, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -235,8 +235,14 @@ export class CommunityInvitesService {
     userIds: string[],
   ): Promise<Set<string>> {
     if (!userIds.length) return new Set<string>();
+    // An array of `where` objects is TypeORM's OR. A ban with no `expiresAt`
+    // is permanent; a timed one stops barring the member the moment it lapses,
+    // so an expired row must not keep somebody un-invitable forever.
     const rows = await this.bans.find({
-      where: { communityId, userId: In(userIds) },
+      where: [
+        { communityId, userId: In(userIds), expiresAt: IsNull() },
+        { communityId, userId: In(userIds), expiresAt: MoreThan(new Date()) },
+      ],
       select: { userId: true },
     });
     return new Set(rows.map((row) => row.userId));

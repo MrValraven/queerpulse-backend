@@ -9,6 +9,7 @@ import { WorkItem } from '../profiles/entities/work-item.entity';
 import { MagazineArticle } from '../magazine/entities/magazine-article.entity';
 import { MagazineDeck } from '../magazine/entities/magazine-deck.entity';
 import { MagazineIssue } from '../magazine/entities/magazine-issue.entity';
+import { MagazineStorySubmission } from '../magazine/entities/magazine-story-submission.entity';
 import { Message } from '../messaging/entities/message.entity';
 import { EventPhoto } from '../events/entities/event-photo.entity';
 import { Conversation } from '../messaging/entities/conversation.entity';
@@ -16,6 +17,7 @@ import { Event } from '../events/entities/event.entity';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { SubprofileItem } from '../subprofiles/entities/subprofile-item.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
+import { ForumPost } from '../forum/entities/forum-post.entity';
 import { Community } from '../communities/entities/community.entity';
 import {
   CardIssuerType,
@@ -130,6 +132,18 @@ export const PLAIN_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
     // No slug column on MagazineIssue — label-only reference on the frontend.
   }),
   plainSource({
+    // Shares the `story-cover` display type with `MagazineIssue.coverUrl`: to a
+    // member looking at "where is this image used?", both read as a story
+    // cover, and neither links anywhere (see the frontend's route mapping).
+    type: 'story-cover',
+    field: 'MagazineStorySubmission.coverImageKey',
+    entity: MagazineStorySubmission,
+    column: 'coverImageKey',
+    idColumn: 'id',
+    labelColumns: ['workingTitle'],
+    // No slug column — label-only reference on the frontend.
+  }),
+  plainSource({
     type: 'event-photo',
     field: 'EventPhoto.storageKey',
     entity: EventPhoto,
@@ -179,6 +193,16 @@ export const PLAIN_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
     column: 'image',
     idColumn: 'id',
     labelColumns: [],
+  }),
+  plainSource({
+    type: 'forum-post',
+    field: 'ForumPost.image',
+    entity: ForumPost,
+    column: 'image',
+    idColumn: 'id',
+    // A forum post has no title of its own, so the body doubles as the label
+    // the way `CommunityPost` uses none at all.
+    labelColumns: ['body'],
   }),
   plainSource({
     type: 'community-cover',
@@ -238,6 +262,20 @@ export const PLAIN_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
     column: 'imageUrl',
     idColumn: 'id',
     labelColumns: ['name'],
+    slugColumn: 'slug',
+  }),
+  plainSource({
+    // CON-04 — the piece's lead art. Its own source rather than a second
+    // column on the social-image one: `plainSource` matches exactly one
+    // column, and the two are independently deletable (a hero with no other
+    // references must not be kept alive by a share image that happens to sit
+    // in the same row).
+    type: 'magazine-article',
+    field: 'MagazineArticle.heroImageKey',
+    entity: MagazineArticle,
+    column: 'heroImageKey',
+    idColumn: 'id',
+    labelColumns: ['title'],
     slugColumn: 'slug',
   }),
   plainSource({

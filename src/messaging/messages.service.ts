@@ -8,6 +8,7 @@ import { In, Not, Repository } from 'typeorm';
 import { decodeCursor } from '../common/cursor-pagination';
 import { escapeLikeTerm } from '../common/like-escape';
 import { ConnectionsService } from '../connections/connections.service';
+import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole, UserStatus } from '../users/entities/user.entity';
@@ -87,6 +88,7 @@ export class MessagesService {
     private readonly connectionsService: ConnectionsService,
     private readonly blockFilter: BlockFilterService,
     private readonly usersService: UsersService,
+    private readonly mentions: MentionNotificationService,
   ) {}
 
   async getMessages(
@@ -478,7 +480,7 @@ export class MessagesService {
     // frontend-contract response once (reused here and in the MESSAGE_CREATED
     // broadcast) and dedupes on `clientMessageId` so a retry / dual HTTP+WS
     // write can't duplicate.
-    const { response } = await this.core.postMessage(
+    const { response, isNew } = await this.core.postMessage(
       conversationId,
       userId,
       body,
@@ -488,6 +490,24 @@ export class MessagesService {
       kind,
       attachment,
     );
+    // `@`-mention fan-out: the same best-effort `MentionNotificationService`
+    // community posts and forum threads already use, wired into the ONE write
+    // path both the HTTP `POST` and the gateway's `message:send` funnel
+    // through (`MessagingService.sendMessage` -> here), so a mention notifies
+    // its target regardless of which transport sent it. Reuses the existing
+    // `mention` notification type (no migration) and its block/mute filtering
+    // and cross-mention dedup. `isNew` gates this to a genuinely fresh insert
+    // — an idempotency-key replay (retry, or the dual HTTP+WS write path
+    // racing itself) must not re-notify a mention that already fired once.
+    if (isNew) {
+      await this.mentions.notify(body, userId, {
+        actorId: userId,
+        source: 'message',
+        conversationId,
+        messageId: response.id,
+        excerpt: body.slice(0, 140),
+      });
+    }
     return response;
   }
 

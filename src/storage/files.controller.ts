@@ -21,7 +21,7 @@ import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 // A ban is a permanent suspension (`AccountEnforcementService` sets
 // `status = Suspended`, `suspendedUntil = null` for both `suspend` and `ban`),
 // so gating on `Suspended` covers both — there is no separate `Banned` status.
-import { OptionalJwtAuthGuard } from './optional-jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { PRESIGN_EXPIRY_SECONDS, StorageService } from './storage.service';
 import { parseStorageKey, storageKeyOwnerId } from './storage-key';
 import { UPLOAD_KIND_SPECS } from './upload-kinds';

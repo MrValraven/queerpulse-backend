@@ -11,7 +11,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import { DataSource, In, Repository } from 'typeorm';
-import { CreateJoinRequestDto } from './dto/create-join-request.dto';
+import { CreateMembershipJoinRequestDto } from './dto/create-join-request.dto';
 import { Invite } from './entities/invite.entity';
 import {
   PlatformJoinRequest,
@@ -71,7 +71,7 @@ export class JoinRequestsService {
    * address. An address the applicant does not control yields an invite they
    * cannot redeem.
    */
-  async submit(dto: CreateJoinRequestDto): Promise<SubmittedJoinRequestView> {
+  async submit(dto: CreateMembershipJoinRequestDto): Promise<SubmittedJoinRequestView> {
     // Join-request kill switch. First statement in the method, before any
     // query: this endpoint is the unauthenticated one, so it is where a spam
     // flood lands, and a rejected submission should not still cost a

@@ -25,7 +25,9 @@ export class UpdateHousingListingDto {
   @IsOptional() @IsEnum(HousingListingType) type?: HousingListingType;
   @IsOptional() @IsString() @MinLength(1) @MaxLength(200) title?: string;
   @IsOptional() @IsString() @MaxLength(200) blurb?: string;
-  @IsOptional() @IsString() @MinLength(1) @MaxLength(120) city?: string;
+  /** Accepted and normalised the same way as on create: the stored city is
+   * always `"Lisbon"`. See `CreateHousingListingDto.city`. */
+  @IsOptional() @IsString() @MaxLength(120) city?: string;
   @IsOptional() @IsString() @MaxLength(120) area?: string;
   @IsOptional() @IsInt() @Min(0) rentEuros?: number;
   @IsOptional() @IsInt() @Min(0) @Max(20) bedrooms?: number;

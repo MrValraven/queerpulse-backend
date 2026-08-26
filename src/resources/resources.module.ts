@@ -12,6 +12,10 @@ import {
 } from './resources.controller';
 import { ResourceGuideRatingsController } from './resource-guide-ratings.controller';
 import { AdminResourceGuideRatingsController } from './admin-resource-guide-ratings.controller';
+import { AdminGlossaryController } from './admin-glossary.controller';
+import { AdminGlossaryService } from './admin-glossary.service';
+import { AdminResourcesController } from './admin-resources.controller';
+import { AdminResourcesService } from './admin-resources.service';
 import { AdminResourceListingsController } from './admin-resource-listings.controller';
 import { AdminResourceListingsService } from './admin-resource-listings.service';
 import { AdminResourceSuggestionsController } from './admin-resource-suggestions.controller';
@@ -43,6 +47,8 @@ import { AdminResourceGuideRatingsService } from './admin-resource-guide-ratings
     AdminResourceGuideRatingsController,
     AdminResourceListingsController,
     AdminResourceSuggestionsController,
+    AdminResourcesController,
+    AdminGlossaryController,
   ],
   providers: [
     ResourcesService,
@@ -52,6 +58,8 @@ import { AdminResourceGuideRatingsService } from './admin-resource-guide-ratings
     ResourceSuggestionsService,
     AdminResourceListingsService,
     AdminResourceSuggestionsService,
+    AdminResourcesService,
+    AdminGlossaryService,
   ],
   // Exported for the cross-entity SearchModule (resource search).
   exports: [ResourcesService],

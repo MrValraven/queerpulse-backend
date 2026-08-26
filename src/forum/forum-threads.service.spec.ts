@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   NotFoundException,
@@ -19,6 +20,7 @@ import { ForumPostEdit } from './entities/forum-post-edit.entity';
 import { ForumPostVote } from './entities/forum-post-vote.entity';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
+import { ForumSubscriptionsService } from './forum-subscriptions.service';
 import { ForumThreadsService } from './forum-threads.service';
 
 // A chainable query-builder stub whose terminal `getMany()` resolves to a
@@ -32,7 +34,10 @@ import { ForumThreadsService } from './forum-threads.service';
 // `any`) lets `.mock.calls`/`toHaveBeenCalledWith` assertions narrow safely
 // instead of tripping `no-unsafe-*`.
 interface QbStub {
+  where: jest.Mock<QbStub, unknown[]>;
   andWhere: jest.Mock<QbStub, unknown[]>;
+  limit: jest.Mock<QbStub, unknown[]>;
+  offset: jest.Mock<QbStub, unknown[]>;
   orderBy: jest.Mock<QbStub, unknown[]>;
   addOrderBy: jest.Mock<QbStub, unknown[]>;
   take: jest.Mock<QbStub, unknown[]>;
@@ -45,7 +50,10 @@ interface QbStub {
 
 function qbStub(rows: ForumThread[] = []): QbStub {
   const qb: QbStub = {
+    where: jest.fn<QbStub, unknown[]>(),
     andWhere: jest.fn<QbStub, unknown[]>(),
+    limit: jest.fn<QbStub, unknown[]>(),
+    offset: jest.fn<QbStub, unknown[]>(),
     orderBy: jest.fn<QbStub, unknown[]>(),
     addOrderBy: jest.fn<QbStub, unknown[]>(),
     take: jest.fn<QbStub, unknown[]>(),
@@ -55,7 +63,10 @@ function qbStub(rows: ForumThread[] = []): QbStub {
     getMany: jest.fn<Promise<ForumThread[]>, []>(),
     getRawMany: jest.fn<Promise<unknown[]>, []>(),
   };
+  qb.where.mockReturnValue(qb);
   qb.andWhere.mockReturnValue(qb);
+  qb.limit.mockReturnValue(qb);
+  qb.offset.mockReturnValue(qb);
   qb.orderBy.mockReturnValue(qb);
   qb.addOrderBy.mockReturnValue(qb);
   qb.take.mockReturnValue(qb);
@@ -92,6 +103,7 @@ const baseThread = (overrides: Partial<ForumThread> = {}): ForumThread => ({
   isLocked: false,
   lockReason: null,
   isOfficial: false,
+  acceptedPostId: null,
   tags: [],
   opVoteCount: 0,
   replyCount: 0,
@@ -277,6 +289,18 @@ describe('ForumThreadsService', () => {
           useValue: { linkThread: jest.fn() },
         },
         { provide: ModAuditService, useValue: { writeAuditLog: jest.fn() } },
+        // SOC-13 thread following — the service resolves `isSubscribed` on
+        // every read path and auto-subscribes an author on create.
+        {
+          provide: ForumSubscriptionsService,
+          useValue: {
+            isSubscribed: jest.fn().mockResolvedValue(false),
+            subscribedThreadIds: jest.fn().mockResolvedValue(new Set()),
+            subscribe: jest.fn(),
+            subscribeQuietly: jest.fn(),
+            unsubscribe: jest.fn(),
+          },
+        },
       ],
     }).compile();
     service = module.get(ForumThreadsService);
@@ -1140,7 +1164,7 @@ describe('ForumThreadsService', () => {
         body: 'b',
       });
 
-      const res = await service.updateThreadTitle(
+      const res = await service.updateThread(
         'hello-world',
         { userId: 'author-1', email: '', status: 'active', role: 'member' },
         'New title',
@@ -1159,13 +1183,263 @@ describe('ForumThreadsService', () => {
         body: 'b',
       });
 
-      const res = await service.updateThreadTitle(
+      const res = await service.updateThread(
         'hello-world',
         { userId: 'author-1', email: '', status: 'active', role: 'member' },
         'New title',
       );
 
       expect(res.tags).toEqual(['keep']);
+    });
+  });
+
+  // ── SOC-13: accepted answer, tag permissions, unanswered ─────────────────
+  describe('accepted answer and tag editing', () => {
+    const actor = (userId: string, role = 'member'): CurrentUserData => ({
+      userId,
+      email: '',
+      status: 'active',
+      role,
+    });
+
+    it('lets the thread author mark a reply as the answer', async () => {
+      threads.findOne.mockResolvedValue(baseThread());
+      posts.findOne.mockResolvedValue({
+        id: 'reply-1',
+        threadId: 'thread-1',
+        isOp: false,
+        deletedAt: null,
+      });
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const res = await service.setAcceptedPost(
+        'hello-world',
+        actor('author-1'),
+        'reply-1',
+      );
+
+      expect(res.acceptedPostId).toBe('reply-1');
+    });
+
+    it('lets a moderator who is not the author accept, so a quiet thread can still resolve', async () => {
+      threads.findOne.mockResolvedValue(baseThread());
+      posts.findOne.mockResolvedValue({
+        id: 'reply-1',
+        threadId: 'thread-1',
+        isOp: false,
+        deletedAt: null,
+      });
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      await expect(
+        service.setAcceptedPost(
+          'hello-world',
+          actor('someone-else', 'moderator'),
+          'reply-1',
+        ),
+      ).resolves.toMatchObject({ acceptedPostId: 'reply-1' });
+    });
+
+    it('refuses an accept from anyone else', async () => {
+      threads.findOne.mockResolvedValue(baseThread());
+
+      await expect(
+        service.setAcceptedPost('hello-world', actor('stranger'), 'reply-1'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('refuses to make the opening post its own answer', async () => {
+      threads.findOne.mockResolvedValue(baseThread());
+      posts.findOne.mockResolvedValue({
+        id: 'op-1',
+        threadId: 'thread-1',
+        isOp: true,
+        deletedAt: null,
+      });
+
+      await expect(
+        service.setAcceptedPost('hello-world', actor('author-1'), 'op-1'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('clears the mark when no post id is sent', async () => {
+      threads.findOne.mockResolvedValue(
+        baseThread({ acceptedPostId: 'reply-1' }),
+      );
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const res = await service.setAcceptedPost(
+        'hello-world',
+        actor('author-1'),
+        null,
+      );
+
+      expect(res.acceptedPostId).toBeNull();
+      expect(posts.findOne).not.toHaveBeenCalled();
+    });
+
+    it('narrows the unanswered sort on the accepted mark, not on the reply count', async () => {
+      const qb = qbStub([]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+
+      await service.list(
+        'viewer-1',
+        undefined,
+        undefined,
+        undefined,
+        'unanswered',
+      );
+
+      expect(qb.andWhere).toHaveBeenCalledWith('t.accepted_post_id IS NULL');
+      expect(qb.andWhere).not.toHaveBeenCalledWith('t.reply_count = 0');
+    });
+
+    it('lets a moderator re-file a thread they did not write', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ tags: ['old'] }));
+      profiles.find.mockResolvedValue([baseProfile()]);
+      posts.findOne.mockResolvedValue({
+        id: 'op-1',
+        threadId: 'thread-1',
+        body: 'b',
+      });
+
+      const res = await service.updateThread(
+        'hello-world',
+        actor('someone-else', 'moderator'),
+        undefined,
+        ['Filed'],
+      );
+
+      expect(res.tags).toEqual(['filed']);
+    });
+
+    it('still refuses a title edit from a moderator who is not the author', async () => {
+      threads.findOne.mockResolvedValue(baseThread());
+
+      await expect(
+        service.updateThread(
+          'hello-world',
+          actor('someone-else', 'moderator'),
+          'Rewritten by staff',
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('writes no edit revision for a tags-only patch', async () => {
+      threads.findOne.mockResolvedValue(baseThread({ tags: ['old'] }));
+      profiles.find.mockResolvedValue([baseProfile()]);
+      // The service stamps `editedAt` on the OP in the SAME branch that writes
+      // the revision, so an untouched `editedAt` is the observable proof that
+      // no phantom "edited" mark was left by a tags-only patch.
+      const opPost: {
+        id: string;
+        threadId: string;
+        body: string;
+        editedAt?: Date;
+      } = { id: 'op-1', threadId: 'thread-1', body: 'b' };
+      posts.findOne.mockResolvedValue(opPost);
+
+      await service.updateThread('hello-world', actor('author-1'), undefined, [
+        'new',
+      ]);
+
+      expect(opPost.editedAt).toBeUndefined();
+    });
+  });
+
+  // --- SOC-08: ranked, accent-insensitive thread search ---------------------
+  describe('searchByText', () => {
+    const searchQb = () => {
+      const qb = qbStub([]);
+      threads.createQueryBuilder.mockReturnValue(qb);
+      return qb;
+    };
+
+    it('matches accent-folded full text OR the folded substring', async () => {
+      const qb = searchQb();
+
+      await service.searchByText('viewer-1', 'sao', 6);
+
+      const [predicate, parameters] = qb.where.mock.calls[0] as [
+        string,
+        Record<string, string>,
+      ];
+      expect(predicate).toContain('websearch_to_tsquery');
+      // Accent folding on both sides, so "sao" reaches "São".
+      expect(predicate).toContain('translate(lower(');
+      // The substring branch survives, so "trans" still finds "transfeminine".
+      expect(predicate).toContain('LIKE');
+      expect(parameters.searchTerm).toBe('sao');
+      expect(parameters.searchPattern).toBe('%sao%');
+    });
+
+    it('escapes LIKE metacharacters in the substring branch', async () => {
+      const qb = searchQb();
+
+      await service.searchByText('viewer-1', '100% cotton', 6);
+
+      const [, parameters] = qb.where.mock.calls[0] as [
+        string,
+        Record<string, string>,
+      ];
+      expect(parameters.searchPattern).toBe('%100\\% cotton%');
+    });
+
+    it('ranks by relevance before recency', async () => {
+      const qb = searchQb();
+
+      await service.searchByText('viewer-1', 'sao', 6);
+
+      expect(qb.addSelect).toHaveBeenCalledWith(
+        expect.stringContaining('ts_rank'),
+        'search_rank',
+      );
+      expect(qb.orderBy).toHaveBeenCalledWith('search_rank', 'DESC');
+      expect(qb.addOrderBy).toHaveBeenCalledWith('t.last_activity_at', 'DESC');
+    });
+
+    it('keeps the block/mute filter on the thread author', async () => {
+      const qb = searchQb();
+
+      await service.searchByText('viewer-1', 'sao', 6);
+
+      expect(blockFilter.excludeHidden).toHaveBeenCalledWith(
+        qb,
+        'viewer-1',
+        '"t"."author_id"',
+      );
+    });
+
+    it('keeps the Private-community gate', async () => {
+      const qb = searchQb();
+
+      await service.searchByText('viewer-1', 'sao', 6);
+
+      const communityCall = qb.andWhere.mock.calls.find((call: unknown[]) =>
+        String(call[0]).includes('community_members'),
+      );
+      expect(communityCall).toBeDefined();
+      expect(communityCall?.[1]).toEqual({
+        privateTier: AccessTier.Private,
+        viewerId: 'viewer-1',
+      });
+    });
+
+    it('pages with a flat limit/offset', async () => {
+      const qb = searchQb();
+
+      await service.searchByText('viewer-1', 'sao', 11, 20);
+
+      expect(qb.limit).toHaveBeenCalledWith(11);
+      expect(qb.offset).toHaveBeenCalledWith(20);
+    });
+
+    it('defaults the offset to zero', async () => {
+      const qb = searchQb();
+
+      await service.searchByText('viewer-1', 'sao', 6);
+
+      expect(qb.offset).toHaveBeenCalledWith(0);
     });
   });
 });

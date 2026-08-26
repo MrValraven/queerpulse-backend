@@ -11,14 +11,19 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle, seconds } from '@nestjs/throttler';
 import {
   CurrentUser,
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
+import { CheckInDto } from './dto/check-in.dto';
 import { CohostDto } from './dto/cohost.dto';
 import { CreateCohostInviteDto } from './dto/create-cohost-invite.dto';
+import { CreateEventAnnouncementDto } from './dto/create-event-announcement.dto';
+import { CreateEventBanDto } from './dto/create-event-ban.dto';
 import { CreateEventDto } from './dto/create-event.dto';
 import { InviteEventDto } from './dto/invite-event.dto';
 import { ListAttendeesQuery } from './dto/list-attendees.query';
@@ -30,7 +35,10 @@ import { RsvpDto } from './dto/rsvp.dto';
 import { SeriesScopeQuery } from './dto/series-scope.query';
 import { UpdateEventDto } from './dto/update-event.dto';
 import { UpdateRsvpDetailsDto } from './dto/update-rsvp-details.dto';
+import { EventAnnouncementsService } from './event-announcements.service';
+import { EventBansService } from './event-bans.service';
 import { EventBookmarksService } from './event-bookmarks.service';
+import { EventCheckInService } from './event-check-in.service';
 import { EventCohostInvitesService } from './event-cohost-invites.service';
 import { EventInvitesService } from './event-invites.service';
 import { EventsService } from './events.service';
@@ -63,6 +71,9 @@ export class EventsController {
     private readonly eventInvitesService: EventInvitesService,
     private readonly eventBookmarksService: EventBookmarksService,
     private readonly eventCohostInvitesService: EventCohostInvitesService,
+    private readonly eventAnnouncementsService: EventAnnouncementsService,
+    private readonly eventBansService: EventBansService,
+    private readonly eventCheckInService: EventCheckInService,
   ) {}
 
   @Get()
@@ -70,7 +81,11 @@ export class EventsController {
     summary: 'List events (filtered, paginated).',
     description:
       '`filter=saved` returns the caller\'s bookmarked ("saved") events, ' +
-      'most-recently-saved first. Every summary carries `isBookmarked`.',
+      'most-recently-saved first. Every summary carries `isBookmarked`. ' +
+      '`from`/`to`/`hood`/`type`/`q`/`cost` are the discovery filters ' +
+      '(LOC-17), applied in SQL so a filtered browse survives pagination; ' +
+      'they narrow `filter=upcoming` (and `from`/`to`/`q` also narrow ' +
+      '`filter=past`).',
   })
   @ApiOkResponse({ description: 'Event summaries for the requested filter.' })
   list(@CurrentUser() user: CurrentUserData, @Query() query: ListEventsQuery) {
@@ -78,11 +93,21 @@ export class EventsController {
       user.userId,
       query.filter ?? 'upcoming',
       query.page ?? 1,
-      { hostSlug: query.hostSlug, excludeSlug: query.excludeSlug },
+      {
+        hostSlug: query.hostSlug,
+        excludeSlug: query.excludeSlug,
+        from: query.from,
+        to: query.to,
+        hood: query.hood,
+        type: query.type,
+        q: query.q,
+        cost: query.cost,
+      },
     );
   }
 
   @Post()
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Create an event.' })
   @ApiCreatedResponse({ description: 'The created event detail.' })
   @ApiBadRequestResponse({
@@ -103,6 +128,7 @@ export class EventsController {
   }
 
   @Patch(':slug')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: 'Update an event you organize.',
     description:
@@ -299,6 +325,7 @@ export class EventsController {
   }
 
   @Post(':slug/cohosts')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Add a co-host to an event you organize.' })
   @ApiCreatedResponse({ description: 'The co-host was added (idempotent).' })
   @ApiBadRequestResponse({ description: 'Co-hosts must be active members.' })
@@ -330,6 +357,7 @@ export class EventsController {
   }
 
   @Post(':slug/invites')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Invite members to an event you organize.' })
   @ApiCreatedResponse({ description: 'How many invites were created.' })
   @ApiBadRequestResponse({
@@ -348,6 +376,7 @@ export class EventsController {
   }
 
   @Post(':slug/cohost-invites')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: 'Invite a member to co-host an event you organize.',
   })
@@ -372,6 +401,7 @@ export class EventsController {
   }
 
   @Put(':slug/lineup')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary:
       'Replace an event\'s lineup ("who performed") — host/co-host only.',
@@ -389,6 +419,179 @@ export class EventsController {
     @Body() dto: PutLineupDto,
   ) {
     return this.eventsService.replaceLineup(slug, user.userId, dto.entries);
+  }
+
+  // ── Host announcements (LOC-06) ─────────────────────────────────────────
+
+  @Post(':slug/announcements')
+  @UseGuards(NotRestrictedGuard)
+  // A gathering-wide fan-out is a loud act, so it is rate-limited the way
+  // every other member-initiated broadcast on this platform is. Ten a minute
+  // is far more than "we moved to the back room, and here is the door code"
+  // ever needs, and far less than a channel worth abusing.
+  @Throttle({ default: { limit: 10, ttl: seconds(60) } })
+  @ApiOperation({
+    summary: 'Send an announcement to everyone coming — host/co-host only.',
+    description:
+      'Reaches everyone holding a live RSVP (going, maybe or waitlisted) ' +
+      'plus everyone holding a standing invite, minus the sender. Delivered ' +
+      'as an in-app notification and a push, and stored on the gathering so ' +
+      'a host can see what they already sent and an attendee can find it ' +
+      'again at the door.',
+  })
+  @ApiCreatedResponse({ description: 'The stored announcement.' })
+  @ApiBadRequestResponse({ description: 'The announcement body was empty.' })
+  @ApiForbiddenResponse({
+    description: 'Only the host or a co-host can do that.',
+  })
+  @ApiNotFoundResponse({ description: 'No event with that slug.' })
+  createAnnouncement(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: CreateEventAnnouncementDto,
+  ) {
+    return this.eventAnnouncementsService.create(slug, user.userId, dto.body);
+  }
+
+  @Get(':slug/announcements')
+  @ApiOperation({
+    summary: "An event's announcements, newest first.",
+    description:
+      'Readable by the organisers and by anyone holding a live RSVP or a ' +
+      'standing invite. Everyone else gets 403.',
+  })
+  @ApiOkResponse({ description: 'The announcements.' })
+  @ApiForbiddenResponse({
+    description: 'You have no stake in this gathering.',
+  })
+  @ApiNotFoundResponse({ description: 'No event with that slug.' })
+  listAnnouncements(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.eventAnnouncementsService.list(slug, user.userId);
+  }
+
+  // ── The host's own door (LOC-08) ────────────────────────────────────────
+
+  @Post(':slug/bans')
+  @UseGuards(NotRestrictedGuard)
+  @ApiOperation({
+    summary: 'Bar a member from an event you organize — host/co-host only.',
+    description:
+      'Cancels any RSVP they hold and stops them RSVPing again. The barred ' +
+      'member is not notified, and the `reason` never leaves the organisers.',
+  })
+  @ApiCreatedResponse({ description: 'The stored bar.' })
+  @ApiBadRequestResponse({
+    description: 'You cannot bar the host, yourself, or a co-host.',
+  })
+  @ApiForbiddenResponse({
+    description: 'Only the host or a co-host can do that.',
+  })
+  @ApiNotFoundResponse({ description: 'No such event or member.' })
+  banFromEvent(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: CreateEventBanDto,
+  ) {
+    return this.eventBansService.ban(
+      slug,
+      user.userId,
+      dto.memberSlug,
+      dto.reason,
+    );
+  }
+
+  @Delete(':slug/bans/:memberSlug')
+  @ApiOperation({
+    summary: 'Lift a bar — host/co-host only. Idempotent.',
+    description:
+      'Lifting does not re-add them to the guest list; they choose whether ' +
+      'to come back.',
+  })
+  @ApiOkResponse({ description: 'The bar was lifted (idempotent).' })
+  @ApiForbiddenResponse({
+    description: 'Only the host or a co-host can do that.',
+  })
+  @ApiNotFoundResponse({ description: 'No such event or member.' })
+  liftEventBan(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('memberSlug') memberSlug: string,
+  ) {
+    return this.eventBansService.lift(slug, user.userId, memberSlug);
+  }
+
+  @Get(':slug/bans')
+  @ApiOperation({
+    summary: 'List the members barred from an event — host/co-host only.',
+  })
+  @ApiOkResponse({ description: 'The barred members.' })
+  @ApiForbiddenResponse({
+    description: 'Only the host or a co-host can do that.',
+  })
+  @ApiNotFoundResponse({ description: 'No event with that slug.' })
+  listEventBans(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.eventBansService.list(slug, user.userId);
+  }
+
+  // ── Day-of check-in (LOC-03) ────────────────────────────────────────────
+
+  @Post(':slug/check-ins')
+  @ApiOperation({
+    summary: 'Check an attendee in at the door — host/co-host only.',
+    description:
+      'Send exactly one of `memberSlug` (the host tapped a name) or ' +
+      '`cardToken` (the host scanned the QR on their membership card). ' +
+      'Idempotent: a second check-in keeps the first arrival time.',
+  })
+  // A door desk taps fast and scans faster. Generous, and still a ceiling.
+  @Throttle({ default: { limit: 120, ttl: seconds(60) } })
+  @ApiCreatedResponse({
+    description: "The attendee's row plus the door's four counts.",
+  })
+  @ApiBadRequestResponse({
+    description:
+      'Both or neither identifier was sent, the card could not be read, or ' +
+      'that member has no seat yet.',
+  })
+  @ApiForbiddenResponse({
+    description: 'Only the host or a co-host can do that.',
+  })
+  @ApiNotFoundResponse({
+    description: 'No such event, or that member is not on the guest list.',
+  })
+  checkIn(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: CheckInDto,
+  ) {
+    return this.eventCheckInService.checkIn(slug, user.userId, dto);
+  }
+
+  @Delete(':slug/check-ins/:memberSlug')
+  @ApiOperation({
+    summary: 'Undo a check-in — host/co-host only. Idempotent.',
+  })
+  @ApiOkResponse({
+    description: "The attendee's row plus the door's four counts.",
+  })
+  @ApiForbiddenResponse({
+    description: 'Only the host or a co-host can do that.',
+  })
+  @ApiNotFoundResponse({
+    description: 'No such event, or that member is not on the guest list.',
+  })
+  undoCheckIn(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('memberSlug') memberSlug: string,
+  ) {
+    return this.eventCheckInService.undoCheckIn(slug, user.userId, memberSlug);
   }
 
   @Get(':slug/lineup')
@@ -451,6 +654,9 @@ export class EventInvitesController {
 export class EventCohostInvitesController {
   constructor(
     private readonly eventCohostInvitesService: EventCohostInvitesService,
+    private readonly eventAnnouncementsService: EventAnnouncementsService,
+    private readonly eventBansService: EventBansService,
+    private readonly eventCheckInService: EventCheckInService,
   ) {}
 
   @Get(':id')

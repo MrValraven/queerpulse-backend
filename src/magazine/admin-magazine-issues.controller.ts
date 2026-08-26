@@ -32,6 +32,7 @@ import { UpdateCoverDto } from './dto/update-cover.dto';
 import { UpdateDigestDto } from './dto/update-digest.dto';
 import { UpdateIssueScheduleDto } from './dto/update-issue-schedule.dto';
 import { UpdateRunOrderDto } from './dto/update-run-order.dto';
+import { MagazineIssueCostsService } from './magazine-issue-costs.service';
 import { MagazinePieceService } from './magazine-piece.service';
 
 // ActiveMemberGuard runs first (a suspended moderator is locked out), then
@@ -53,7 +54,12 @@ import { MagazinePieceService } from './magazine-piece.service';
 @UseGuards(ActiveMemberGuard, StaffRolesGuard)
 @StaffRoles('magazine_editor')
 export class AdminMagazineIssuesController {
-  constructor(private readonly magazinePieces: MagazinePieceService) {}
+  constructor(
+    private readonly magazinePieces: MagazinePieceService,
+    // CON-18 — the issue-cost roll-up lives on its own service beside
+    // `MagazinePieceService`, the way `MagazineIssueContentsService` does.
+    private readonly issueCosts: MagazineIssueCostsService,
+  ) {}
 
   @Get()
   @ApiOperation({
@@ -96,11 +102,30 @@ export class AdminMagazineIssuesController {
     return this.magazinePieces.getCurrentIssueSummary();
   }
 
+  // CON-18 — the money roll-up the desk could not run while every amount was
+  // free text. One more path segment than `:number`, so it never competes
+  // with the production record for a match.
+  @Get(':number/costs')
+  @ApiOperation({
+    summary: 'What this issue cost: fees, expenses, paid and outstanding.',
+  })
+  @ApiOkResponse({
+    description:
+      'Totals per currency across every payment row on the issue, each a ' +
+      'decimal string summed in Postgres. `unpricedCount` is how many ' +
+      'payment rows carry no amount and so sit outside the totals.',
+  })
+  @ApiNotFoundResponse({ description: 'No issue exists for this number.' })
+  getIssueCosts(@Param('number') number: string) {
+    return this.issueCosts.getIssueCosts(number);
+  }
+
   @Get(':number')
   @ApiOperation({ summary: 'Get the issue production record.' })
   @ApiOkResponse({
     description:
-      'The issue with its running order, cover, digest, and ship checklist.',
+      'The issue with its running order, cover, issue-panel curation, and ' +
+      'ship checklist.',
   })
   @ApiNotFoundResponse({ description: 'No issue exists for this number.' })
   getIssueProduction(@Param('number') number: string) {
@@ -121,7 +146,9 @@ export class AdminMagazineIssuesController {
 
   @Patch(':number/digest')
   @ApiOperation({
-    summary: "Replace the issue's members' digest and social curation.",
+    summary:
+      "Replace the issue's in-app issue-panel and social curation (the " +
+      'curated order and per-piece blurbs the public issue page renders).',
   })
   @ApiOkResponse({ description: 'The updated issue production record.' })
   @ApiNotFoundResponse({ description: 'No issue exists for this number.' })
@@ -155,23 +182,6 @@ export class AdminMagazineIssuesController {
     @CurrentUser() user: CurrentUserData,
   ) {
     return this.magazinePieces.updateIssueSchedule(number, dto, user.userId);
-  }
-
-  @Post(':number/digest/test-send')
-  @ApiOperation({
-    summary:
-      "Send a one-off preview of the issue's current members' digest to the caller's own inbox.",
-  })
-  @ApiOkResponse({
-    description:
-      'The test email was sent (or logged, if SMTP delivery is not configured).',
-  })
-  @ApiNotFoundResponse({ description: 'No issue exists for this number.' })
-  sendDigestTest(
-    @Param('number') number: string,
-    @CurrentUser() user: CurrentUserData,
-  ) {
-    return this.magazinePieces.sendDigestTest(number, user.email);
   }
 
   @Post(':number/ship')

@@ -31,11 +31,14 @@ describe('StorySubmissionsService', () => {
   });
 
   describe('create', () => {
-    it('saves a submission scoped to the submitting user and maps the response', async () => {
+    it('stores deck, body and the cover key as their own fields', async () => {
       const dto: CreateStorySubmissionDto = {
         format: 'Personal essay',
         workingTitle: 'The city keeps changing around us',
         pitch: 'A short pitch about displacement.',
+        deck: '  A standfirst.  ',
+        body: '  The piece itself.  ',
+        coverImageKey: 'story-covers/user-1/cover.webp',
       };
       const createdAt = new Date('2026-07-15T12:00:00.000Z');
       submissions.save.mockResolvedValue({
@@ -44,7 +47,13 @@ describe('StorySubmissionsService', () => {
         format: dto.format,
         workingTitle: dto.workingTitle,
         pitch: dto.pitch,
+        deck: 'A standfirst.',
+        body: 'The piece itself.',
+        coverImageKey: null,
         status: SubmissionStatus.Submitted,
+        decision: null,
+        decisionNote: null,
+        decidedAt: null,
         createdAt,
       });
 
@@ -55,14 +64,57 @@ describe('StorySubmissionsService', () => {
         format: dto.format,
         workingTitle: dto.workingTitle,
         pitch: dto.pitch,
+        deck: 'A standfirst.',
+        body: 'The piece itself.',
+        coverImageKey: 'story-covers/user-1/cover.webp',
       });
       expect(result).toEqual({
         id: 'sub-1',
         format: 'Personal essay',
         workingTitle: 'The city keeps changing around us',
         pitch: 'A short pitch about displacement.',
+        deck: 'A standfirst.',
+        coverUrl: null,
         status: SubmissionStatus.Submitted,
+        decision: null,
+        decisionNote: null,
+        decidedAt: null,
         createdAt: '2026-07-15T12:00:00.000Z',
+      });
+    });
+
+    it('normalises an absent deck/body/cover to null', async () => {
+      const dto: CreateStorySubmissionDto = {
+        format: 'Opinion',
+        workingTitle: 'Why our archives cannot wait',
+        pitch: 'An argument for funding queer memory work now.',
+      };
+      submissions.save.mockResolvedValue({
+        id: 'sub-2',
+        userId: 'user-1',
+        format: dto.format,
+        workingTitle: dto.workingTitle,
+        pitch: dto.pitch,
+        deck: null,
+        body: null,
+        coverImageKey: null,
+        status: SubmissionStatus.Submitted,
+        decision: null,
+        decisionNote: null,
+        decidedAt: null,
+        createdAt: new Date('2026-07-15T12:00:00.000Z'),
+      });
+
+      await service.create('user-1', dto);
+
+      expect(submissions.create).toHaveBeenCalledWith({
+        userId: 'user-1',
+        format: dto.format,
+        workingTitle: dto.workingTitle,
+        pitch: dto.pitch,
+        deck: null,
+        body: null,
+        coverImageKey: null,
       });
     });
   });
@@ -77,7 +129,13 @@ describe('StorySubmissionsService', () => {
           format: 'Interview',
           workingTitle: 'A conversation about staying',
           pitch: 'Pitch text.',
-          status: SubmissionStatus.InReview,
+          deck: null,
+          body: null,
+          coverImageKey: null,
+          status: SubmissionStatus.Rejected,
+          decision: 'declined',
+          decisionNote: 'Not for this issue, please send the next one.',
+          decidedAt: new Date('2026-07-12T00:00:00.000Z'),
           createdAt,
         },
       ]);
@@ -94,7 +152,12 @@ describe('StorySubmissionsService', () => {
           format: 'Interview',
           workingTitle: 'A conversation about staying',
           pitch: 'Pitch text.',
-          status: SubmissionStatus.InReview,
+          deck: null,
+          coverUrl: null,
+          status: SubmissionStatus.Rejected,
+          decision: 'declined',
+          decisionNote: 'Not for this issue, please send the next one.',
+          decidedAt: '2026-07-12T00:00:00.000Z',
           createdAt: '2026-07-10T00:00:00.000Z',
         },
       ]);

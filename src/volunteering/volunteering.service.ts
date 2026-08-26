@@ -364,7 +364,11 @@ export class VolunteeringService {
     userId: string,
     dto: CreateSignupInput,
   ): Promise<VolunteerSignupDTO> {
-    let posterId = '';
+    // Null both before the transaction resolves it and when the poster has
+    // erased their account
+    // (`SetNullContentAuthorFksOnUserErasure1794610000000`): the opportunity
+    // outlives them, so a signup still records, it just notifies nobody.
+    let posterId: string | null = null;
     const saved = await this.dataSource.transaction(async (manager) => {
       const opportunity = await manager.findOne(VolunteerOpportunity, {
         where: { slug },
@@ -374,7 +378,7 @@ export class VolunteeringService {
         throw new NotFoundException('Opportunity not found');
       }
       posterId = opportunity.posterId;
-      if (posterId === userId) {
+      if (posterId !== null && posterId === userId) {
         throw new ForbiddenException(
           'You cannot apply to your own opportunity',
         );
@@ -428,12 +432,14 @@ export class VolunteeringService {
     // failure must never surface as a failed signup (mirrors
     // `CommunitiesService.triageJoinRequest`'s identical try/catch-swallow).
     try {
-      await this.notifications.create(
-        posterId,
-        NotificationType.VolunteerApplicationReceived,
-        { source: 'volunteering', opportunitySlug: slug },
-        userId,
-      );
+      if (posterId !== null) {
+        await this.notifications.create(
+          posterId,
+          NotificationType.VolunteerApplicationReceived,
+          { source: 'volunteering', opportunitySlug: slug },
+          userId,
+        );
+      }
     } catch {
       // Intentionally ignored.
     }
@@ -696,7 +702,9 @@ export class VolunteeringService {
     ] = await Promise.all([
       this.spotsFilledFor(opportunity.id),
       this.team.find({ where: { opportunityId: opportunity.id } }),
-      this.profiles.findOne({ where: { userId: opportunity.posterId } }),
+      opportunity.posterId === null
+        ? null
+        : this.profiles.findOne({ where: { userId: opportunity.posterId } }),
       this.signups.exists({
         where: {
           opportunityId: opportunity.id,

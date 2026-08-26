@@ -17,7 +17,7 @@ import { RosterRole } from '../entities/community-member.entity';
  * enforced in `CommunitiesService.setMemberRole`, which is where the whole
  * permission model is written down.
  */
-export class UpdateMemberRoleDto {
+export class UpdateCommunityMemberRoleDto {
   @IsIn([RosterRole.Member, RosterRole.Mod, RosterRole.CoOwner])
   role!: RosterRole.Member | RosterRole.Mod | RosterRole.CoOwner;
 }

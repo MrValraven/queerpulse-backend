@@ -89,4 +89,20 @@ export class ReadingGroupProposal {
   // decision (e.g. why a proposal was declined).
   @Column({ type: 'varchar', length: 500, nullable: true })
   decisionNote!: string | null;
+
+  // The slug of the community an APPROVAL actually created (LOC-19). Until
+  // this column existed, approving a proposal only changed a varchar: no
+  // group, no community, no event, and the proposer was never told. Approval
+  // now creates a real community owned by the proposer, and this slug is both
+  // the deep link the proposer is sent and the idempotency key: a second
+  // approve on a row that already carries one is a no-op, so a double-click
+  // can never mint two communities.
+  //
+  // A slug rather than a uuid FK, deliberately: a community's `handle` is
+  // creation-time only (`UpdateCommunityInput` omits it), so the slug is
+  // immutable, it is directly usable as a deep link and a notification payload
+  // field, and like `decidedBy` it is decision history that must outlive the
+  // thing it points at rather than being nulled out with it.
+  @Column({ type: 'varchar', length: 200, nullable: true })
+  createdCommunitySlug!: string | null;
 }

@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConnectionsModule } from '../connections/connections.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
+import { MentionsModule } from '../mentions/mentions.module';
 import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
 import { ConversationsService } from './conversations.service';
@@ -55,6 +56,12 @@ import { MessagingService } from './messaging.service';
     // Batched crop lookup (`MediaCropService.getMany`) for a group's
     // `avatarUrl` sibling `avatarCrop`.
     MediaCropsModule,
+    // Exports `MentionNotificationService` — `MessagesService.sendMessage`
+    // fires it on every genuinely new send so an `@`-mention inside a DM/group
+    // message notifies its target, mirroring forum/community posts. Plain
+    // import, no `forwardRef`: `MentionsModule` does not depend on
+    // `MessagingModule`.
+    MentionsModule,
   ],
   controllers: [ConversationsController, MessageRequestController],
   providers: [

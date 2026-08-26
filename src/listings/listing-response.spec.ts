@@ -126,6 +126,40 @@ describe('directory owner visibility', () => {
       toDirectoryCard(makeDirectoryListing({ visibility: 'role' })).memberFirst,
     ).toBeNull();
   });
+
+  it('redacts the owner photo exactly as it redacts the first name', () => {
+    const photo = 'https://cdn.example/ines.jpg';
+    expect(
+      toDirectoryCard(makeDirectoryListing(), new Map(), undefined, photo)
+        .memberAvatarUrl,
+    ).toBe(photo);
+    // A face names its owner as plainly as a first name does, so every case
+    // that withholds the name withholds the photo with it.
+    expect(
+      toDirectoryCard(
+        makeDirectoryListing({ visibility: 'anon' }),
+        new Map(),
+        undefined,
+        photo,
+      ).memberAvatarUrl,
+    ).toBeNull();
+    expect(
+      toDirectoryCard(
+        makeDirectoryListing({ visibility: 'role' }),
+        new Map(),
+        undefined,
+        photo,
+      ).memberAvatarUrl,
+    ).toBeNull();
+    expect(
+      toDirectoryCard(
+        makeDirectoryListing({ linkToProfile: false }),
+        new Map(),
+        undefined,
+        photo,
+      ).memberAvatarUrl,
+    ).toBeNull();
+  });
 });
 
 describe('toDirectoryDetail', () => {

@@ -92,9 +92,12 @@ describe('ModerationController', () => {
     });
   });
 
-  it('lists appeals', async () => {
-    await controller.listAppeals();
-    expect(service.listAppeals).toHaveBeenCalled();
+  it('lists appeals for the requested tab', async () => {
+    // TS-11: the route takes a query now (awaiting/decided + overdue +
+    // cursor), and the controller passes the whole DTO through the way
+    // `listReports` does.
+    await controller.listAppeals({ tab: 'decided' });
+    expect(service.listAppeals).toHaveBeenCalledWith({ tab: 'decided' });
   });
 
   it('reviews an appeal as the current actor', async () => {

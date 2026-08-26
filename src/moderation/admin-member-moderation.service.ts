@@ -9,6 +9,7 @@ import { UserStatus } from '../users/entities/user.entity';
 import { AccountEnforcementService } from './account-enforcement.service';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
 import { ModAuditService } from './mod-audit.service';
+import { LiftRestrictionDto } from './dto/lift-restriction.dto';
 import { RestrictMemberDto } from './dto/restrict-member.dto';
 
 /** `POST /admin/members/:id/verify` response — the fields the drawer re-reads. */
@@ -25,6 +26,20 @@ export interface RestrictedMemberDTO {
   status: UserStatus;
   /** ISO expiry; `null` = permanent (a ban). */
   suspendedUntil: string | null;
+}
+
+/**
+ * `GET`/`PATCH /admin/members/:id/restriction` response — the member's scoped
+ * restriction (`users.restricted`), which is a different thing from the
+ * suspension `RestrictedMemberDTO` above reports. A restriction leaves the
+ * account `Active` and only gates the specific write paths `NotRestrictedGuard`
+ * covers.
+ */
+export interface MemberRestrictionDTO {
+  id: string;
+  restricted: boolean;
+  /** ISO expiry; `null` when there is no restriction in force. */
+  restrictedUntil: string | null;
 }
 
 /** `POST /admin/members/:id/cite` response (ADM-9). */
@@ -171,6 +186,75 @@ export class AdminMemberModerationService {
   }
 
   /**
+   * The member's live scoped-restriction state, so the drawer knows whether
+   * there is a restriction to offer a lift for. Read-only.
+   */
+  async restrictionState(memberId: string): Promise<MemberRestrictionDTO> {
+    const state = await this.enforcement.restrictionState(memberId);
+    return toMemberRestrictionDTO(state);
+  }
+
+  /**
+   * Lift a member's scoped restriction — the way back out of a `restrict` that
+   * did not exist before (TS-09). Delegates the state change + audit row to
+   * `AccountEnforcementService.liftRestriction` (the single owner of the
+   * restriction model), then tells the member, best-effort and post-commit.
+   *
+   * No session revocation, mirroring how applying a restriction does not revoke
+   * either: a restriction is deliberately not a lockout, so neither direction
+   * touches the member's devices.
+   */
+  async liftRestriction(
+    actorId: string,
+    memberId: string,
+    dto: LiftRestrictionDto,
+  ): Promise<MemberRestrictionDTO> {
+    const before = await this.enforcement.restrictionState(memberId);
+    const result = await this.enforcement.liftRestriction(
+      memberId,
+      actorId,
+      dto,
+    );
+
+    // Idempotent lift: nothing changed, so nothing is announced. Telling a
+    // member their restriction was lifted when they never had one would be a
+    // notification about a decision that was not taken.
+    if (before.restricted) {
+      await this.notifyRestrictionLifted(actorId, memberId, dto);
+    }
+
+    return toMemberRestrictionDTO(result);
+  }
+
+  /**
+   * Tell the member their restriction is over and why. Same channel and same
+   * "the platform's word, not a member action" reasoning as
+   * {@link notifyOutcome}: no actor is passed, so the block/mute filter and the
+   * per-type preference gate are bypassed. Best-effort and post-commit.
+   */
+  private async notifyRestrictionLifted(
+    actorId: string,
+    memberId: string,
+    dto: LiftRestrictionDto,
+  ): Promise<void> {
+    if (memberId === actorId) return;
+    try {
+      await this.notifications.create(
+        memberId,
+        NotificationType.ModerationOutcome,
+        {
+          source: 'moderation',
+          action: 'restriction_lifted',
+          reasonCode: dto.reasonCode,
+          note: dto.note,
+        },
+      );
+    } catch {
+      // Intentionally ignored — the lift already committed.
+    }
+  }
+
+  /**
    * Tell the restricted member the outcome and why. Best-effort and
    * post-commit: the restriction already committed and must not roll back on a
    * notification failure. No actor is passed to `notifications.create`, so this
@@ -203,4 +287,18 @@ export class AdminMemberModerationService {
       // Intentionally ignored — the restriction already committed.
     }
   }
+}
+
+/** Entity-shaped restriction state to its wire DTO. Hand-mapped, like every
+ *  other response in this module: there is no global serializer. */
+function toMemberRestrictionDTO(state: {
+  userId: string;
+  restricted: boolean;
+  restrictedUntil: Date | null;
+}): MemberRestrictionDTO {
+  return {
+    id: state.userId,
+    restricted: state.restricted,
+    restrictedUntil: state.restrictedUntil?.toISOString() ?? null,
+  };
 }

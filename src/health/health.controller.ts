@@ -1,9 +1,5 @@
 import { Controller, Get, UseGuards, VERSION_NEUTRAL } from '@nestjs/common';
-import {
-  HealthCheck,
-  HealthCheckService,
-  TypeOrmHealthIndicator,
-} from '@nestjs/terminus';
+import { HealthCheck, HealthCheckService } from '@nestjs/terminus';
 import {
   ApiForbiddenResponse,
   ApiOkResponse,
@@ -15,6 +11,7 @@ import { SkipThrottle, Throttle, seconds } from '@nestjs/throttler';
 import { Public } from '../auth/decorators/public.decorator';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 import { MetricsTokenGuard } from '../metrics/metrics-token.guard';
+import { PlatformProbesService } from './platform-probes.service';
 
 /**
  * The LIVENESS probe is never rate-limited. The throttler guard does not honour
@@ -46,7 +43,7 @@ import { MetricsTokenGuard } from '../metrics/metrics-token.guard';
 export class HealthController {
   constructor(
     private readonly health: HealthCheckService,
-    private readonly db: TypeOrmHealthIndicator,
+    private readonly probes: PlatformProbesService,
   ) {}
 
   /**
@@ -69,7 +66,7 @@ export class HealthController {
       'A health indicator failed (e.g. the database is unreachable).',
   })
   check() {
-    return this.health.check([() => this.db.pingCheck('database')]);
+    return this.health.check(this.probes.dependencyIndicators());
   }
 
   /**
@@ -104,6 +101,6 @@ export class HealthController {
     description: 'The database is unreachable; stop routing traffic here.',
   })
   ready() {
-    return this.health.check([() => this.db.pingCheck('database')]);
+    return this.health.check(this.probes.dependencyIndicators());
   }
 }

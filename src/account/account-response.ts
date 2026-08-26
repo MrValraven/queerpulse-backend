@@ -98,9 +98,11 @@ export function toDsarResponse(r: DsarRequest): DsarResponse {
   };
 }
 
-// Matches the shape consumed by `SessionsPage.tsx`. The refresh-token store
-// has no `deviceLabel` column, so `deviceLabel` is always `null`. `current`
-// is supplied by the caller (see `AccountService.listSessions`), which
+// Matches the shape consumed by `SessionsPage.tsx`. `deviceLabel` is the coarse
+// label ("Chrome on macOS") stamped at sign-in by `deviceLabelFromUserAgent` and
+// carried through every rotation; it is null only for families created before
+// that column existed, which the frontend falls back to parsing locally.
+// `current` is supplied by the caller (see `AccountService.listSessions`), which
 // resolves the presenting session's family from the `refresh_token` cookie.
 export interface SessionResponse {
   /**
@@ -129,11 +131,13 @@ export function toSessionResponse(
 ): SessionResponse {
   return {
     id: t.familyId,
-    deviceLabel: null,
+    deviceLabel: t.deviceLabel,
     userAgent: t.userAgent ?? '',
     current,
     createdAt: t.sessionStartedAt.toISOString(),
-    lastUsedAt: t.createdAt.toISOString(),
+    // `lastSeenAt` is stamped on every rotation. Families predating that column
+    // have none, so fall back to this row's own creation time.
+    lastUsedAt: (t.lastSeenAt ?? t.createdAt).toISOString(),
     expiresAt: t.expiresAt.toISOString(),
   };
 }

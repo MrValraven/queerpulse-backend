@@ -27,7 +27,7 @@ import { UserStatus } from '../users/entities/user.entity';
 import {
   DIRECTORY_DEFAULT_LIMIT,
   DIRECTORY_MAX_LIMIT,
-  ListDirectoryQuery,
+  ListSubprofileDirectoryQuery,
 } from './dto/list-directory.query';
 import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
 import {
@@ -429,7 +429,7 @@ export class SubprofilePublicReadService {
 
   // Directory of standalone (unlinked + published + open) personas.
   async directory(
-    query: ListDirectoryQuery,
+    query: ListSubprofileDirectoryQuery,
     viewerId: string,
   ): Promise<{
     items: SubprofileCardView[];

@@ -5,6 +5,7 @@ import { EntityManager, In, Repository } from 'typeorm';
 import { Profile } from './entities/profile.entity';
 import { User, UserRole, UserStatus } from './entities/user.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
+import { CURRENT_GUIDELINES_VERSION } from '../consent/policy-versions';
 
 // Bounds the slug-collision retry loop (see insertProfileWithUniqueSlug). This
 // caps CONCURRENT contention only — each retry recomputes the next slug from the
@@ -30,18 +31,33 @@ const ACTIVE_MEMBER_COUNT_TTL_MS = 60_000;
 
 /**
  * The community-guidelines revision a member agrees to when they finish
- * onboarding, used when the client does not send an explicit version. Bump this
- * whenever the guidelines change materially so the stamped `guidelinesVersion`
- * reflects what was actually agreed to. Kept ≤ 32 chars (the column length).
+ * onboarding, used when the client does not send an explicit version.
  *
- * Also read by `PlatformStatusController` (`GET /platform-status`), which is
- * the single source of truth the frontend reads instead of keeping its own
- * hardcoded copy (`GUIDELINES_VERSION` previously lived in
- * `queerpulse/src/features/auth/api/auth.api.ts` and only stayed in sync by a
- * comment reminding whoever edited one to bump the other). Bumping this
- * constant is now the only edit needed; the frontend follows automatically.
+ * DECLARED IN `consent/policy-versions.ts` and merely re-exported here, so that
+ * every policy revision (Terms, Guidelines, Privacy) lives in one file instead
+ * of three that can drift — see the essay in that file (ID-14). This re-export
+ * keeps every existing importer (`PlatformStatusController`, `markOnboarded`,
+ * the specs) working unchanged, and the frontend still reads the live value off
+ * `GET /platform-status` rather than hardcoding its own copy.
+ *
+ * (Imported at the top of the file as well as re-exported here, because
+ * `markOnboarded` below reads it — a bare `export … from` would re-publish the
+ * name without binding it in this module's scope.)
  */
-export const CURRENT_GUIDELINES_VERSION = '1.0';
+export { CURRENT_GUIDELINES_VERSION };
+
+/**
+ * The versions a policy acceptance stamped onto a member, plus what they had on
+ * file immediately before it — the half `recordPolicyAcceptance` overwrites, and
+ * the half `policy_acceptance` preserves.
+ */
+export interface PolicyAcceptanceStamp {
+  termsVersion: string;
+  guidelinesVersion: string;
+  previousTermsVersion: string | null;
+  previousGuidelinesVersion: string | null;
+  acceptedAt: Date;
+}
 
 /** The outcome of `markOnboarded` — the effective onboarding + guidelines
  *  agreement stamps for the member. */
@@ -189,6 +205,55 @@ export class UsersService {
       { onboardedAt: now, guidelinesAcceptedAt: now, guidelinesVersion },
     );
     return { onboardedAt: now, guidelinesAcceptedAt: now, guidelinesVersion };
+  }
+
+  /**
+   * Advance the member's stored policy revisions to the ones now in effect,
+   * because they just agreed to them in the re-acceptance sheet (ID-14).
+   *
+   * The counterpart to `markOnboarded`, and deliberately the OPPOSITE of it in
+   * one respect: `markOnboarded` is monotonic and first-write-wins, because
+   * finishing onboarding happens once. Agreeing to the policies happens again
+   * every time they materially change, so this OVERWRITES. Both columns move
+   * together and `guidelinesAcceptedAt` is re-stamped, so "when did they last
+   * agree to anything" stays answerable from the user row alone.
+   *
+   * `termsVersion` is the same column the 18+ attestation writes at signup. That
+   * is correct rather than a collision: it has always meant "the Terms revision
+   * this member has agreed to", and re-acceptance is exactly that act happening
+   * again. The revision they attested against originally is not lost — it comes
+   * back as `previousTermsVersion` and is written to the append-only
+   * `policy_acceptance` row by `PolicyAcceptanceService`. `ageAttestedAt` is
+   * never touched: they are not re-attesting their age, only re-agreeing to the
+   * document.
+   *
+   * Returns the before/after pair. A missing row (impossible in practice — the
+   * caller is the authenticated member) reports the new versions with no prior.
+   */
+  async recordPolicyAcceptance(
+    id: string,
+    versions: { termsVersion: string; guidelinesVersion: string },
+  ): Promise<PolicyAcceptanceStamp> {
+    const existing = await this.usersRepo.findOne({
+      where: { id },
+      select: { id: true, termsVersion: true, guidelinesVersion: true },
+    });
+    const acceptedAt = new Date();
+    await this.usersRepo.update(
+      { id },
+      {
+        termsVersion: versions.termsVersion,
+        guidelinesVersion: versions.guidelinesVersion,
+        guidelinesAcceptedAt: acceptedAt,
+      },
+    );
+    return {
+      termsVersion: versions.termsVersion,
+      guidelinesVersion: versions.guidelinesVersion,
+      previousTermsVersion: existing?.termsVersion ?? null,
+      previousGuidelinesVersion: existing?.guidelinesVersion ?? null,
+      acceptedAt,
+    };
   }
 
   /**

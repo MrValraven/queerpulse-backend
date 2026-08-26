@@ -74,6 +74,7 @@ function makePitch(overrides: Partial<MagazinePitch> = {}): MagazinePitch {
     passTemplate: null,
     passNote: null,
     submitterId: null,
+    storySubmissionId: null,
     createdAt: new Date('2026-08-05T09:00:00Z'),
     ...overrides,
   };
@@ -95,8 +96,11 @@ function makePayment(
   return {
     id: 'payment-1',
     pieceId: 'piece-1',
-    fee: '€420',
-    expenses: '€18 travel',
+    currency: 'EUR',
+    feeAmount: '420.00',
+    feeText: null,
+    expensesAmount: '18.00',
+    expensesText: '€18 travel',
     invoice: 'INV-2026-084',
     filedOn: '2026-07-29',
     terms: '21 days',
@@ -747,8 +751,14 @@ describe('toPaymentResponse', () => {
     const payment = makePayment();
 
     expect(toPaymentResponse(payment)).toEqual({
-      fee: '€420',
-      expenses: '€18 travel',
+      // CON-18 — amounts come off `numeric` as decimal STRINGS, with the
+      // currency in its own field and the desk's original wording preserved
+      // beside them.
+      currency: 'EUR',
+      fee: '420.00',
+      feeText: null,
+      expenses: '18.00',
+      expensesText: '€18 travel',
       invoice: 'INV-2026-084',
       filedOn: '2026-07-29',
       terms: '21 days',
@@ -840,6 +850,7 @@ function makeArticle(
     metaDescription: '',
     socialImage: '',
     canonicalUrl: '',
+    heroImageKey: '',
     contentNotes: [],
     blocks: [],
     authorId: 'author-1',
@@ -847,6 +858,17 @@ function makeArticle(
     tags: ['family', 'belonging'],
     readMinutes: 4,
     publishedAt: new Date('2026-08-01T00:00:00.000Z'),
+    // CON-16 — a piece that has never left `live`, in the language it was
+    // written in. What every row looked like before the lifecycle and
+    // translation columns existed.
+    lifecycle: 'live',
+    lifecycleNote: '',
+    lifecycleChangedAt: null,
+    reviewDueOn: null,
+    supersededByArticleId: null,
+    locale: 'en',
+    translationOfArticleId: null,
+    translatorAuthorId: null,
     version: 0,
     createdAt: new Date('2026-07-01T00:00:00.000Z'),
     updatedAt: new Date('2026-07-01T00:00:00.000Z'),

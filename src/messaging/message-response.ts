@@ -347,6 +347,17 @@ export interface ConversationResponse {
   // most-recent first sorts pins); `favorite` is whether the caller favorited it.
   pinnedAt?: string | null;
   favorite?: boolean;
+  /** When THIS caller archived the thread out of their main inbox (like
+   *  `pinnedAt`), present only where a participant row was loaded (the list
+   *  path). NULL = not archived. Auto-cleared server-side the instant a new
+   *  message lands — see `ConversationParticipant.archivedAt`'s own doc. */
+  archivedAt?: string | null;
+  /** THIS caller's own unsent composer text for the thread, synced from
+   *  whichever device last wrote it (present only where a participant row was
+   *  loaded — the list path). NULL = no stored draft. The client's
+   *  `features/messages/drafts.ts` localStorage copy is the instant local
+   *  layer; this is the cross-device layer it debounce-syncs to. */
+  draft?: string | null;
   /** For a group: whether THIS caller has left it (`left_at` set). A left member
    *  keeps read access to history but the composer is severed. Absent/false for
    *  DMs and active group members. */

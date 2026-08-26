@@ -1,4 +1,4 @@
-import { Provider } from '@nestjs/common';
+import { ForbiddenException, Provider } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { PublicEligibilityService } from './public-eligibility.service';
@@ -7,7 +7,6 @@ import { MagazinePiece } from '../magazine/entities/magazine-piece.entity';
 import { Event } from '../events/entities/event.entity';
 import { EventCohost } from '../events/entities/event-cohost.entity';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
-import { Workshop } from '../workshops/entities/workshop.entity';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
@@ -19,6 +18,17 @@ import { SubprofileEndorsementsService } from '../subprofiles/subprofile-endorse
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { UserStatus } from '../users/entities/user.entity';
 import type { CurrentUserData } from '../auth/decorators/current-user.decorator';
+import {
+  PUBLIC_ELIGIBILITY_REASON,
+  type PublicEligibilityReasonCode,
+} from './public-eligibility-response';
+import { TENURE_FLOOR_DAYS } from './public-eligibility.rules';
+
+/** The coarse code the 403 body carries, for the assertions below. */
+function reasonCodeOf(error: unknown): PublicEligibilityReasonCode | undefined {
+  const body = (error as ForbiddenException).getResponse();
+  return (body as { reasonCode?: PublicEligibilityReasonCode }).reasonCode;
+}
 
 // Minimal query-builder stub: getCount / getMany / getRawMany resolve to fixtures.
 function qbStub(result: { count?: number; many?: unknown[]; raw?: unknown[] }) {
@@ -100,10 +110,6 @@ describe('PublicEligibilityService', () => {
           }),
         },
         {
-          provide: getRepositoryToken(Workshop),
-          useValue: repoMock({ count: async () => 1 }),
-        },
-        {
           provide: getRepositoryToken(Subprofile),
           useValue: repoMock({
             find: async () => [{ id: 's1' }, { id: 's2' }],
@@ -166,7 +172,6 @@ describe('PublicEligibilityService', () => {
     expect(dto.tenureDays).toBeGreaterThan(365);
     expect(dto.publishedPieces).toEqual(['2026-07-01T00:00:00.000Z']);
     expect(dto.hostedOpenEvents).toEqual(['2026-06-01T00:00:00.000Z']);
-    expect(dto.workshopsTaught).toBe(1);
     expect(dto.publishedSubprofiles).toBe(2);
     expect(dto.endorsementCount).toBe(4); // 2 subprofiles × 2
     expect(dto.connectionCount).toBe(12);
@@ -231,5 +236,135 @@ describe('PublicEligibilityService', () => {
     const service = await build([cohostedEventRepo, cohostedEventQuery]);
     const dto = await service.getSignals(user);
     expect(dto.hostedOpenEvents).toContain('2026-04-01T00:00:00.000Z');
+  });
+
+  // ---- The server-side publication gate (SOC-11) --------------------------
+  //
+  // The rule used to live only in frontend JavaScript, so `PUT
+  // /me/public-profile` published to the open web on request. These pin the
+  // decision to the server. The arithmetic itself is pinned separately in
+  // `public-eligibility.rules.spec.ts`; here we only check that the service
+  // applies it and that the gate throws.
+
+  describe('the decision', () => {
+    it('ships the decision alongside the signals so the client cannot drift', async () => {
+      const service = await build();
+
+      const dto = await service.getSignals(user);
+
+      expect(dto.decision).toBeDefined();
+      expect(dto.decision.gates.isVerifiedMet).toBe(true);
+      expect(dto.decision.gates.tenureFloorDays).toBe(TENURE_FLOOR_DAYS);
+      expect(dto.decision.score.target).toBe(100);
+      expect(dto.decision.score.families).toHaveLength(3);
+      expect(dto.decision.isStandingOk).toBe(true);
+    });
+
+    it('agrees with getSignals when asked for the verdict alone', async () => {
+      const service = await build();
+
+      const [dto, decision] = await Promise.all([
+        service.getSignals(user),
+        service.evaluate(user),
+      ]);
+
+      expect(decision.isEligible).toBe(dto.decision.isEligible);
+      expect(decision.gates).toEqual(dto.decision.gates);
+    });
+  });
+
+  describe('assertMayGoPublic', () => {
+    it('refuses an unverified member and names the gate they can act on', async () => {
+      const unverifiedProfile = {
+        provide: getRepositoryToken(Profile),
+        useValue: {
+          count: async () => 0,
+          find: async () => [],
+          findOne: async () => ({
+            userId: 'u1',
+            slug: 'ada',
+            verified: false,
+            vouchCount: 3,
+            joinedAt: new Date('2024-01-01T00:00:00Z'),
+          }),
+          createQueryBuilder: () => qbStub({}),
+        },
+      };
+      const service = await build([unverifiedProfile]);
+
+      expect.assertions(2);
+      try {
+        await service.assertMayGoPublic(user);
+      } catch (error) {
+        expect(error).toBeInstanceOf(ForbiddenException);
+        expect(reasonCodeOf(error)).toBe(PUBLIC_ELIGIBILITY_REASON.NotVerified);
+      }
+    });
+
+    it('refuses a member who has not served the tenure floor', async () => {
+      const brandNewProfile = {
+        provide: getRepositoryToken(Profile),
+        useValue: {
+          count: async () => 0,
+          find: async () => [],
+          findOne: async () => ({
+            userId: 'u1',
+            slug: 'ada',
+            verified: true,
+            vouchCount: 3,
+            joinedAt: new Date(),
+          }),
+          createQueryBuilder: () => qbStub({}),
+        },
+      };
+      const service = await build([brandNewProfile]);
+
+      expect.assertions(2);
+      try {
+        await service.assertMayGoPublic(user);
+      } catch (error) {
+        expect(error).toBeInstanceOf(ForbiddenException);
+        expect(reasonCodeOf(error)).toBe(
+          PUBLIC_ELIGIBILITY_REASON.TenureTooShort,
+        );
+      }
+    });
+
+    // Publishing to the open web while suspended must be impossible, whatever
+    // the member's score. `CurrentUserData.status` is re-read from the row on
+    // every request by `JwtStrategy.validate`, so this is not a stale claim.
+    it('vetoes a suspended account on standing', async () => {
+      const service = await build();
+      const suspended = { ...user, status: UserStatus.Suspended };
+
+      const decision = await service.evaluate(suspended);
+      expect(decision.isStandingOk).toBe(false);
+      expect(decision.isEligible).toBe(false);
+
+      await expect(service.assertMayGoPublic(suspended)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+    });
+
+    // Same for a member under a moderator takedown, and the reason stays the
+    // generic catch-all: this endpoint must never confirm a takedown.
+    it('vetoes a member under a moderation takedown', async () => {
+      const service = await build([
+        {
+          provide: ContentModerationService,
+          useValue: {
+            statesForAnyType: async () =>
+              new Map([['ada', { hidden: true, removed: false }]]),
+          },
+        },
+      ]);
+
+      const decision = await service.evaluate(user);
+      expect(decision.isStandingOk).toBe(false);
+
+      await expect(service.assertMayGoPublic(user)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+    });
   });
 });

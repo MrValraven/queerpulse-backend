@@ -13,6 +13,10 @@ export enum DsarStatus {
 }
 
 @Entity('dsar_request')
+// Serves the admin review queue's one sort: open requests, closest statutory
+// deadline first (`GET /admin/dsar`, `AdminDsarService.list`). See migration
+// `AddDsarOutcome1794570000000`.
+@Index('IDX_dsar_request_status_due_by', ['status', 'dueBy'])
 export class DsarRequest {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -56,4 +60,17 @@ export class DsarRequest {
 
   @Column({ type: 'timestamptz', nullable: true })
   respondedAt!: Date | null;
+
+  // What the reviewing operator decided, in their own words. Written by
+  // `PATCH /admin/dsar/:id` and required before a request can be closed, so a
+  // resolved/rejected row always says what was actually done. Null while the
+  // request is still open.
+  @Column({ type: 'text', nullable: true })
+  outcomeNote!: string | null;
+
+  // The moderator/admin who closed the request. `ON DELETE SET NULL` (see the
+  // migration): losing the reviewer's account must never delete the record of
+  // a statutory request being answered.
+  @Column({ type: 'uuid', nullable: true })
+  resolvedByUserId!: string | null;
 }

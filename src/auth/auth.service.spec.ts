@@ -20,10 +20,12 @@ import { PlatformSettingsService } from '../platform-settings/platform-settings.
 import { User, UserStatus } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Notification } from '../notifications/entities/notification.entity';
+import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { UsersService } from '../users/users.service';
 import { AuthService } from './auth.service';
 import { SignupRejectedError } from './errors/signup-rejected.error';
 import { RefreshToken } from './entities/refresh-token.entity';
+import { SECURITY_NEW_SIGN_IN } from './security.events';
 
 const sha256 = (v: string) => createHash('sha256').update(v).digest('hex');
 
@@ -32,6 +34,8 @@ interface RepoMock {
   update: jest.Mock;
   create: jest.Mock;
   save: jest.Mock;
+  /** Backs `recogniseDevice`'s distinct-device-label read on the sign-in path. */
+  createQueryBuilder: jest.Mock;
 }
 interface JwtMock {
   verifyAsync: jest.Mock;
@@ -58,6 +62,17 @@ function buildMocks() {
         ...v,
       }),
     ),
+    // `recogniseDevice` asks for this member's distinct stored device labels
+    // before a sign-in mints its family. Empty by default, which is the
+    // "no device history on record" case: no alert is emitted, so the tests
+    // below exercise the token path without also asserting notification
+    // behaviour. A test that wants the alert sets `getRawMany` itself.
+    createQueryBuilder: jest.fn(() => ({
+      select: jest.fn().mockReturnThis(),
+      distinct: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      getRawMany: jest.fn().mockResolvedValue([]),
+    })),
   };
   const jwt: JwtMock = {
     verifyAsync: jest.fn().mockResolvedValue({ sub: 'u1' }),
@@ -131,6 +146,9 @@ function buildMocks() {
   // Read-side only — `staffRolesFor` reads the caller's staff-role grants.
   // Empty by default.
   const staffRoles = { find: jest.fn().mockResolvedValue([]) };
+  // Read-side only, one column — the new-device sign-in alert's own switch.
+  // `null` is the no-row case, which defaults the switch ON.
+  const memberPreferences = { findOne: jest.fn().mockResolvedValue(null) };
   // Registration kill switch — on by default, so signup is unaffected unless
   // a test explicitly turns it off.
   const platformSettings = {
@@ -152,6 +170,7 @@ function buildMocks() {
     reauthTokens,
     notifications,
     staffRoles,
+    memberPreferences,
     platformSettings,
   };
 }
@@ -199,6 +218,11 @@ async function buildService(
         // Read-side only — backs `staffRolesFor`'s grant lookup.
         provide: getRepositoryToken(UserStaffRole),
         useValue: mocks.staffRoles,
+      },
+      {
+        // Read-side only — backs `loginAlertsEnabled`'s single-column read.
+        provide: getRepositoryToken(MemberPreferences),
+        useValue: mocks.memberPreferences,
       },
       {
         provide: PlatformSettingsService,
@@ -420,6 +444,91 @@ describe('AuthService.issueTokens / revokeSessionForToken', () => {
     ];
     expect(created.familyId).toEqual(expect.any(String));
     expect(created.sessionStartedAt).toBeInstanceOf(Date);
+  });
+
+  // The sign-in alert (ID-06). Three cases, and the two SILENT ones are the
+  // ones worth pinning: a security alert that fires on a member's own everyday
+  // laptop is an alert they learn to swipe away.
+  it('issueTokens says nothing when the device label is already on record', async () => {
+    mocks.repo.createQueryBuilder.mockReturnValue({
+      select: jest.fn().mockReturnThis(),
+      distinct: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      getRawMany: jest
+        .fn()
+        .mockResolvedValue([{ deviceLabel: 'Chrome on macOS' }]),
+    });
+
+    await service.issueTokens(
+      activeUser,
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    );
+
+    expect(mocks.events.emit).not.toHaveBeenCalledWith(
+      SECURITY_NEW_SIGN_IN,
+      expect.anything(),
+    );
+  });
+
+  it('issueTokens says nothing when the member has no device history at all', async () => {
+    // The default mock returns no labels: a first-ever session, or a member
+    // whose whole history predates the `device_label` column. Neither is
+    // something to wake anybody up about.
+    await service.issueTokens(activeUser, 'agent');
+
+    expect(mocks.events.emit).not.toHaveBeenCalledWith(
+      SECURITY_NEW_SIGN_IN,
+      expect.anything(),
+    );
+  });
+
+  it('issueTokens alerts on a device label the member has not used before', async () => {
+    mocks.repo.createQueryBuilder.mockReturnValue({
+      select: jest.fn().mockReturnThis(),
+      distinct: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      getRawMany: jest
+        .fn()
+        .mockResolvedValue([{ deviceLabel: 'Safari on iPhone' }]),
+    });
+
+    await service.issueTokens(
+      activeUser,
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    );
+
+    expect(mocks.events.emit).toHaveBeenCalledWith(
+      SECURITY_NEW_SIGN_IN,
+      expect.objectContaining({
+        userId: 'u1',
+        deviceLabel: 'Chrome on Windows',
+      }),
+    );
+  });
+
+  it('issueTokens honours the member turning login alerts off', async () => {
+    mocks.repo.createQueryBuilder.mockReturnValue({
+      select: jest.fn().mockReturnThis(),
+      distinct: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      getRawMany: jest
+        .fn()
+        .mockResolvedValue([{ deviceLabel: 'Safari on iPhone' }]),
+    });
+    mocks.memberPreferences.findOne.mockResolvedValue({
+      userId: 'u1',
+      loginAlertsEnabled: false,
+    });
+
+    await service.issueTokens(
+      activeUser,
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    );
+
+    expect(mocks.events.emit).not.toHaveBeenCalledWith(
+      SECURITY_NEW_SIGN_IN,
+      expect.anything(),
+    );
   });
 
   it('revokeSessionForToken revokes the family the presented cookie belongs to', async () => {

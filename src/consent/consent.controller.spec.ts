@@ -3,6 +3,7 @@ import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { CURRENT_POLICY_VERSION } from './consent.constants';
 import { ConsentController } from './consent.controller';
 import { ConsentService } from './consent.service';
+import { PolicyAcceptanceService } from './policy-acceptance.service';
 import { ConsentAction, ConsentSource } from './entities/consent-record.entity';
 
 describe('ConsentController', () => {
@@ -23,7 +24,13 @@ describe('ConsentController', () => {
     };
     const module: TestingModule = await Test.createTestingModule({
       controllers: [ConsentController],
-      providers: [{ provide: ConsentService, useValue: service }],
+      providers: [
+        { provide: ConsentService, useValue: service },
+        // The controller now also injects the ID-14 policy-acceptance service;
+        // these cases never exercise it, so a bare stub is enough to satisfy
+        // Nest's dependency resolution.
+        { provide: PolicyAcceptanceService, useValue: { accept: jest.fn() } },
+      ],
     }).compile();
     controller = module.get(ConsentController);
   });

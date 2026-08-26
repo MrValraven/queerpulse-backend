@@ -26,6 +26,7 @@ import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
 import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventRsvp } from './entities/event-rsvp.entity';
+import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventSeries } from './entities/event-series.entity';
 import { Event, EventStatus, EventVisibility } from './entities/event.entity';
 import { EventsService } from './events.service';
@@ -639,6 +640,7 @@ describe('EventsService.addCohostByUserId', () => {
       {} as unknown as Repository<EventInvite>,
       {} as unknown as Repository<EventLineupEntry>,
       {} as unknown as Repository<EventSeries>,
+      {} as unknown as Repository<EventAnnouncement>,
       {} as unknown as Repository<Profile>,
       {} as unknown as UsersService,
       {} as unknown as RsvpService,

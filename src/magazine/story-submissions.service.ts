@@ -9,10 +9,10 @@ import {
 } from './magazine-response';
 
 /**
- * The one write this module exposes: a reader pitching a story
- * (`SubmitStoryPage.tsx` "Submit for review"). No moderation/editorial
- * workflow lives here — authoring/admin CRUD for editorial content is out of
- * scope (spec §3 Tier 5 note).
+ * The member-facing side of story submissions: writing one, and reading your
+ * own back with whatever the desk decided. The editorial DECISION lives on
+ * `AdminStorySubmissionsService` (accept / decline / commission), guarded
+ * separately — this service never mutates a status.
  */
 @Injectable()
 export class StorySubmissionsService {
@@ -25,12 +25,20 @@ export class StorySubmissionsService {
     userId: string,
     dto: CreateStorySubmissionDto,
   ): Promise<StorySubmissionResponse> {
+    const deck = dto.deck?.trim() || null;
+    const body = dto.body?.trim() || null;
     const saved = await this.submissions.save(
       this.submissions.create({
         userId,
         format: dto.format,
         workingTitle: dto.workingTitle,
         pitch: dto.pitch,
+        deck,
+        body,
+        // An empty string means "no cover" on every form in this codebase (see
+        // `IsImageReference`), so normalise it to null rather than storing a
+        // blank key that `toImageUrl` would then have to defend against.
+        coverImageKey: dto.coverImageKey?.trim() || null,
       }),
     );
     return toStorySubmissionResponse(saved);

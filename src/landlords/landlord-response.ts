@@ -106,6 +106,30 @@ export function toRecommendationDTO(
   };
 }
 
+/**
+ * A moderator's view of one recommendation (LOC-19).
+ *
+ * `DELETE /admin/landlords/recommendations/:id` shipped unreachable: the id it
+ * is keyed by appeared in no response the API produced. `RecommendationDTO` is
+ * the shape a PUBLIC reader gets on a landlord page, and a public reader has
+ * no use for the row's primary key, so the handle is added here instead of
+ * there. This DTO is only ever returned from behind the moderator/admin guard.
+ */
+export interface AdminRecommendationDTO extends RecommendationDTO {
+  id: string;
+}
+
+export function toAdminRecommendationDTO(
+  rec: LandlordRecommendation,
+  member: MemberRef | null,
+  verificationLevel: VerificationLevel,
+): AdminRecommendationDTO {
+  return {
+    ...toRecommendationDTO(rec, member, verificationLevel),
+    id: rec.id,
+  };
+}
+
 export interface LandlordDetailDTO extends LandlordCardDTO {
   about: string[];
   areas: string[];
@@ -129,7 +153,56 @@ export function toLandlordDetailDTO(
   };
 }
 
-/** Admin-facing intro-request row (includes the landlord it targets). */
+/**
+ * A moderator's row in the landlord directory console (LOC-19).
+ *
+ * The admin list used to hand back the same `LandlordCardDTO` the public
+ * browse returns, which made the console impossible to build: no `id` (every
+ * admin mutation is keyed by `:id`), no `status`, no submitter and no decision
+ * history. Those five fields are what this adds, and nothing else — the card's
+ * public fields are already the right summary of the entry itself.
+ *
+ * `decidedBy` is the raw staff `users.id`; this response is behind the
+ * moderator/admin role guard, and it is the audit key.
+ */
+export interface AdminLandlordDTO extends LandlordCardDTO {
+  id: string;
+  status: Landlord['status'];
+  /** The member who suggested the entry, `null` for a staff-created one. */
+  submittedBy: MemberRef | null;
+  decidedAt: string | null;
+  decidedBy: string | null;
+  decisionReason: string | null;
+  createdAt: string;
+}
+
+export function toAdminLandlordDTO(
+  landlord: Landlord,
+  rating: { score: string; count: number },
+  submittedBy: MemberRef | null,
+): AdminLandlordDTO {
+  return {
+    ...toLandlordCardDTO(landlord, rating),
+    id: landlord.id,
+    status: landlord.status,
+    submittedBy,
+    decidedAt: landlord.decidedAt ? landlord.decidedAt.toISOString() : null,
+    decidedBy: landlord.decidedBy,
+    decisionReason: landlord.decisionReason,
+    createdAt: landlord.createdAt.toISOString(),
+  };
+}
+
+/**
+ * Admin-facing intro-request row (includes the landlord it targets).
+ *
+ * `requester`, `decidedAt`, `decidedBy` and `decisionReason` are the LOC-19
+ * additions. A moderator answering "can you introduce me?" was working from a
+ * self-entered `name` and nothing else: no way to see which member is asking,
+ * and no record of who answered, when, or what they said. `contactEmail` is
+ * the requester's own submitted contact detail and stays on this staff-only
+ * row, exactly as before.
+ */
 export interface IntroRequestDTO {
   id: string;
   landlordSlug: string;
@@ -139,11 +212,17 @@ export interface IntroRequestDTO {
   contactEmail: string | null;
   status: LandlordIntroRequest['status'];
   createdAt: string;
+  /** The member who asked, `null` when the account has since been erased. */
+  requester: MemberRef | null;
+  decidedAt: string | null;
+  decidedBy: string | null;
+  decisionReason: string | null;
 }
 
 export function toIntroRequestDTO(
   request: LandlordIntroRequest,
   landlord: Pick<Landlord, 'slug' | 'name'> | null,
+  requester: MemberRef | null = null,
 ): IntroRequestDTO {
   return {
     id: request.id,
@@ -154,5 +233,9 @@ export function toIntroRequestDTO(
     contactEmail: request.contactEmail,
     status: request.status,
     createdAt: request.createdAt.toISOString(),
+    requester,
+    decidedAt: request.decidedAt ? request.decidedAt.toISOString() : null,
+    decidedBy: request.decidedBy,
+    decisionReason: request.decisionReason,
   };
 }

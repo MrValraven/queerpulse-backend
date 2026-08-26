@@ -2,15 +2,15 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AdminMembersModule } from '../admin-members/admin-members.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
-import { MailerModule } from '../mailer/mailer.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
-import { NewsletterSubscription } from '../newsletter/entities/newsletter-subscription.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
+import { AdminMagazineAuthorsController } from './admin-magazine-authors.controller';
 import { AdminMagazineDecksController } from './admin-magazine-decks.controller';
 import { AdminMagazineIssuesController } from './admin-magazine-issues.controller';
+import { AdminMagazineLifecycleController } from './admin-magazine-lifecycle.controller';
 import { AdminMagazinePiecesController } from './admin-magazine-pieces.controller';
 import { AdminStorySubmissionsController } from './admin-story-submissions.controller';
 import { AdminStorySubmissionsService } from './admin-story-submissions.service';
@@ -34,6 +34,12 @@ import { MagazineSection } from './entities/magazine-section.entity';
 import { MagazineStorySubmission } from './entities/magazine-story-submission.entity';
 import { MagazineWriterApplication } from './entities/magazine-writer-application.entity';
 import { MagazineController } from './magazine.controller';
+import { MagazineFrontController } from './magazine-front.controller';
+import { MagazineFrontService } from './magazine-front.service';
+import { MagazineIssueContentsController } from './magazine-issue-contents.controller';
+import { MagazineIssueContentsService } from './magazine-issue-contents.service';
+import { MagazineIssueCostsService } from './magazine-issue-costs.service';
+import { MagazineLifecycleService } from './magazine-lifecycle.service';
 import { MagazinePieceService } from './magazine-piece.service';
 import { MagazineReaderCommentsService } from './magazine-reader-comments.service';
 import { MagazineWriterController } from './magazine-writer.controller';
@@ -62,15 +68,16 @@ import { WriterApplicationsService } from './writer-applications.service';
       MagazineSection,
       MagazineStorySubmission,
       MagazineWriterApplication,
-      NewsletterSubscription,
       Profile,
       User,
       UserStaffRole,
     ]),
     NotificationsModule,
     MediaCropsModule,
-    MailerModule,
     ContentModerationModule,
+    // `NotificationsService` is already imported above for the piece/issue
+    // bells; `AdminStorySubmissionsService` uses the same provider to tell a
+    // submitter their story was accepted, declined, or commissioned.
     // `AdminMembersService.grantStaffRole` — writer-application approval
     // grants `magazine_writer` through the same mechanism the manual admin
     // role-assignment screen uses (see `AdminWriterApplicationsService`).
@@ -78,8 +85,14 @@ import { WriterApplicationsService } from './writer-applications.service';
   ],
   controllers: [
     MagazineController,
+    MagazineFrontController,
+    MagazineIssueContentsController,
+    AdminMagazineAuthorsController,
     AdminMagazineDecksController,
     AdminMagazineIssuesController,
+    // CON-16 — the content lifecycle desk (archive, supersede, re-review,
+    // translations). Its own controller, per the admin-CRUD convention.
+    AdminMagazineLifecycleController,
     AdminMagazinePiecesController,
     AdminStorySubmissionsController,
     MagazineWriterController,
@@ -88,6 +101,10 @@ import { WriterApplicationsService } from './writer-applications.service';
   ],
   providers: [
     MagazineService,
+    MagazineFrontService,
+    MagazineIssueContentsService,
+    MagazineIssueCostsService,
+    MagazineLifecycleService,
     StorySubmissionsService,
     AdminStorySubmissionsService,
     MagazinePieceService,

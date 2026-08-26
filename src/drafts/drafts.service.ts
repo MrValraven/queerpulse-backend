@@ -122,6 +122,19 @@ export class DraftsService {
     return toDraftDTO(saved);
   }
 
+  /**
+   * One draft by its client-minted id, or 404.
+   *
+   * Added for autosaving composers (SOC-13's forum composer is the first): a
+   * surface that saves under a KNOWN id needs to ask "is there already one of
+   * these?" on mount, and paging `list()` looking for it is both wrong (the
+   * draft can fall off page one) and wasteful. Scoped to the caller by the
+   * composite `(id, user_id)` key, exactly like `update`/`remove`.
+   */
+  async get(userId: string, id: string): Promise<DraftDTO> {
+    return toDraftDTO(await this.loadOr404(userId, id));
+  }
+
   async remove(userId: string, id: string): Promise<void> {
     const draft = await this.loadOr404(userId, id);
     await this.drafts.remove(draft);

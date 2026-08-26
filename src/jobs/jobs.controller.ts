@@ -14,6 +14,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateJobApplicationDto } from './dto/create-application.dto';
 import { CreateJobDto } from './dto/create-job.dto';
@@ -64,6 +65,7 @@ export class JobsController {
   }
 
   @Post()
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Create a job posting' })
   @ApiCreatedResponse({ description: 'The newly created job detail.' })
   @ApiBadRequestResponse({
@@ -82,6 +84,7 @@ export class JobsController {
   }
 
   @Patch(':slug')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Update a job posting (poster only)' })
   @ApiOkResponse({ description: 'The updated job detail.' })
   @ApiNotFoundResponse({ description: 'No job with that slug.' })
@@ -110,6 +113,7 @@ export class JobsController {
   }
 
   @Post(':slug/applications')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Apply to a job posting' })
   @ApiCreatedResponse({ description: 'The created job application.' })
   @ApiNotFoundResponse({ description: 'No job with that slug.' })

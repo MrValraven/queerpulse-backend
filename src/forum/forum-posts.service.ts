@@ -21,7 +21,15 @@ import { ForumPostEdit } from './entities/forum-post-edit.entity';
 import { ForumPostVote } from './entities/forum-post-vote.entity';
 import { ForumPost } from './entities/forum-post.entity';
 import { ForumThread } from './entities/forum-thread.entity';
+import { ForumSubscriptionsService } from './forum-subscriptions.service';
 import { ForumThreadsService } from './forum-threads.service';
+import { AccessTier } from '../communities/entities/community.entity';
+import {
+  FORUM_POST_SEARCH_FIELDS,
+  foldSearchText,
+  foldedSearchQuery,
+  weightedSearchVector,
+} from '../search/search-text';
 import {
   ForumPostHistoryResponse,
   ForumPostResponse,
@@ -31,6 +39,46 @@ import {
 } from './forum-response';
 
 const DEFAULT_LIMIT = 20;
+
+/** How many characters of a matching reply the search card shows. */
+const SEARCH_EXCERPT_LENGTH = 160;
+
+/**
+ * One reply-body hit for global search (SOC-08). Carries the THREAD's slug and
+ * title, because that is where the card links and what a member recognises:
+ * the post itself has no page of its own. `excerpt` is the part of the reply
+ * that matched.
+ */
+export interface ForumPostSearchRow {
+  threadSlug: string;
+  threadTitle: string;
+  threadCategory: string;
+  excerpt: string;
+}
+
+interface ForumPostSearchRawRow {
+  threadSlug: string;
+  threadTitle: string;
+  threadCategory: string;
+  postBody: string;
+}
+
+/**
+ * A short window of `body` around the first place `term` matches, so the card
+ * shows the sentence that answered the question instead of whatever the reply
+ * happened to open with. Falls back to the head of the body when the match came
+ * from stemming/tokenisation rather than a literal substring.
+ */
+function buildSearchExcerpt(body: string, term: string): string {
+  const collapsed = body.replace(/\s+/g, ' ').trim();
+  if (collapsed.length <= SEARCH_EXCERPT_LENGTH) return collapsed;
+  const matchIndex = foldSearchText(collapsed).indexOf(foldSearchText(term));
+  if (matchIndex < 0)
+    return `${collapsed.slice(0, SEARCH_EXCERPT_LENGTH)}\u2026`;
+  const start = Math.max(0, matchIndex - Math.floor(SEARCH_EXCERPT_LENGTH / 3));
+  const window = collapsed.slice(start, start + SEARCH_EXCERPT_LENGTH);
+  return `${start > 0 ? '\u2026' : ''}${window}${start + SEARCH_EXCERPT_LENGTH < collapsed.length ? '\u2026' : ''}`;
+}
 
 export interface VoteResult {
   voteCount: number;
@@ -62,6 +110,9 @@ export class ForumPostsService {
     private readonly edits: Repository<ForumPostEdit>,
     private readonly mentions: MentionNotificationService,
     private readonly contentModeration: ContentModerationService,
+    // SOC-13 — thread following: auto-subscribe the replier and fan a new
+    // reply out to everyone else already following the thread.
+    private readonly subscriptions: ForumSubscriptionsService,
   ) {}
 
   // A forum post can be reported (and thus taken down) under either taxonomy
@@ -77,6 +128,121 @@ export class ForumPostsService {
   // authorship and replies — no separate thread-table lookup needed.
   async hasEverPosted(userId: string): Promise<boolean> {
     return this.posts.exists({ where: { authorId: userId } });
+  }
+
+  /**
+   * Cross-entity global search over REPLY BODIES (SOC-08). Before this, forum
+   * search read thread titles only, so "has anyone found a trans-friendly GP in
+   * Lisbon?" was unanswerable: the answer was always in a reply.
+   *
+   * Full text only, no substring branch. Post bodies were not searchable at all
+   * before this, so there is no `ILIKE` behaviour to preserve, and a GIN trigram
+   * index over long bodies is by far the most expensive index the search work
+   * would have added. See `1795100000000-AddSearchTextIndexes`.
+   *
+   * Visibility is enforced entirely in-query, and this method is the one place
+   * post bodies escape a thread page, so every gate a thread page applies is
+   * re-applied here:
+   *
+   *  - the post's author is not blocked either way, and not muted by the viewer
+   *    (`BlockFilterService.excludeHidden`, same as `listPosts`);
+   *  - the THREAD's author is not blocked or muted either — `ForumThreadsService.list`
+   *    hides those threads, so a reply inside one must not be a side door back in;
+   *  - the thread's community is public/request/invite, or the viewer is on a
+   *    Private community's roster (the same H1 gate as thread search);
+   *  - the post is not tombstoned (`deleted_at`), whose body is retained only so
+   *    a moderator can restore it;
+   *  - the post is not hidden OR removed by moderation. Read paths keep a
+   *    removed post as a visible `[removed]` tombstone; search must not, because
+   *    surfacing it means surfacing the text a moderator took down.
+   */
+  async searchByText(
+    viewerId: string,
+    term: string,
+    limit: number,
+    offset = 0,
+  ): Promise<ForumPostSearchRow[]> {
+    const searchVector = weightedSearchVector('p', FORUM_POST_SEARCH_FIELDS);
+    const searchTsQuery = foldedSearchQuery('searchTerm');
+    const qb = this.posts
+      .createQueryBuilder('p')
+      .select('t.slug', 'threadSlug')
+      .addSelect('t.title', 'threadTitle')
+      .addSelect('t.category', 'threadCategory')
+      .addSelect('p.body', 'postBody')
+      .innerJoin(ForumThread, 't', 't.id = p.threadId')
+      .where(`${searchVector} @@ ${searchTsQuery}`, { searchTerm: term })
+      // A tombstoned post keeps its body for restore; it is not content.
+      .andWhere('p.deletedAt IS NULL');
+
+    // Post author: blocked either way, or muted by the viewer.
+    this.blockFilter.excludeHidden(qb, viewerId, '"p"."author_id"');
+
+    // Thread author: same rule, expressed inline because `excludeHidden` binds
+    // one fixed parameter name and can only be called once per query builder.
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "blocks" "__thread_author_block"
+        WHERE ("__thread_author_block"."blocker_id" = :searchViewerId AND "__thread_author_block"."blocked_id" = "t"."author_id")
+           OR ("__thread_author_block"."blocked_id" = :searchViewerId AND "__thread_author_block"."blocker_id" = "t"."author_id")
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM "mutes" "__thread_author_mute"
+        WHERE "__thread_author_mute"."muter_id" = :searchViewerId
+          AND "__thread_author_mute"."muted_id" = "t"."author_id"
+      )`,
+      { searchViewerId: viewerId },
+    );
+
+    // Private-community gate, mirroring `ForumThreadsService.applyCommunityAccessFilter`.
+    qb.andWhere(
+      `(
+        "t"."community_id" IS NULL
+        OR EXISTS (
+          SELECT 1 FROM "communities" "__search_com"
+          WHERE "__search_com"."id" = "t"."community_id"
+            AND "__search_com"."access_tier" != :searchPrivateTier
+        )
+        OR EXISTS (
+          SELECT 1 FROM "community_members" "__search_mem"
+          WHERE "__search_mem"."community_id" = "t"."community_id"
+            AND "__search_mem"."user_id" = :searchViewerId
+        )
+      )`,
+      { searchPrivateTier: AccessTier.Private },
+    );
+
+    // Moderation takedowns, both kinds. `ContentModerationService.excludeHidden`
+    // drops hidden-but-not-removed only; search additionally drops removed, so
+    // this is written out rather than delegated.
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "content_moderation" "__search_moderation"
+        WHERE "__search_moderation"."subject_type" IN (:...searchModerationSubjectTypes)
+          AND "__search_moderation"."subject_id" = "p"."id"::text
+          AND ("__search_moderation"."hidden_at" IS NOT NULL OR "__search_moderation"."removed_at" IS NOT NULL)
+      )`,
+      { searchModerationSubjectTypes: ForumPostsService.SUBJECT_TYPES },
+    );
+
+    // Relevance first, newest reply as the tiebreaker. The rank alias is
+    // dot-free so TypeORM's ORDER BY re-parse leaves it alone. Several replies
+    // in one thread can each match; they stay as separate cards, because their
+    // excerpts are what differ and each is a distinct answer.
+    const rows = await qb
+      .addSelect(`ts_rank(${searchVector}, ${searchTsQuery})`, 'search_rank')
+      .orderBy('search_rank', 'DESC')
+      .addOrderBy('p.created_at', 'DESC')
+      .limit(limit)
+      .offset(offset)
+      .getRawMany<ForumPostSearchRawRow>();
+
+    return rows.map((row) => ({
+      threadSlug: row.threadSlug,
+      threadTitle: row.threadTitle,
+      threadCategory: row.threadCategory,
+      excerpt: buildSearchExcerpt(row.postBody ?? '', term),
+    }));
   }
 
   // GET /forum/threads/:slug/posts?cursor= — OP + replies, oldest-first.
@@ -100,9 +266,22 @@ export class ForumPostsService {
   ): Promise<CursorPage<ForumPostResponse>> {
     const thread = await this.threadsService.loadOr404(threadSlug, user.userId);
 
+    const acceptedPostId = thread.acceptedPostId;
+
     const qb = this.posts
       .createQueryBuilder('p')
       .where('p.threadId = :threadId', { threadId: thread.id });
+    // The accepted answer is lifted OUT of the ordinary oldest-first stream and
+    // re-inserted at the top of the first page below, so it is never rendered
+    // twice across a "Load more" session. Excluding it on every page (not just
+    // the first) is what makes that safe: the cursor keyset stays a plain
+    // `(created_at, id)` seek, which an `ORDER BY (id = :accepted) DESC, ...`
+    // could not be. This is the server-side ordering that replaces the old
+    // client-side "most helpful" heuristic, which only ever ranked the replies
+    // that happened to have loaded (SOC-13).
+    if (acceptedPostId) {
+      qb.andWhere('p.id != :acceptedPostId', { acceptedPostId });
+    }
     // Posts by a blocked (either way) or muted author are dropped in-query, so
     // the keyset page below fills to `limit` with visible posts instead of
     // coming back short (see `BlockFilterService.excludeHidden`). NB: this can
@@ -119,10 +298,45 @@ export class ForumPostsService {
       'p',
     );
 
+    const orderedRows =
+      cursor || !acceptedPostId
+        ? rows
+        : await this.hoistAcceptedPost(rows, acceptedPostId, user);
+
     return {
-      data: await this.toPostResponses(rows, user),
+      data: await this.toPostResponses(orderedRows, user, acceptedPostId),
       pageInfo: { nextCursor, hasMore },
     };
+  }
+
+  /**
+   * Puts the thread's accepted answer at the top of the FIRST page of replies,
+   * immediately after the opening post.
+   *
+   * Runs only when there is no cursor (page one) — `listPosts` has already
+   * excluded the accepted post from the paginated stream, so this is the single
+   * place it enters the response. The post goes through the same block/mute
+   * filter as every other row: an accepted answer written by someone the viewer
+   * has since blocked or muted stays hidden, exactly as it would in the stream.
+   *
+   * Index 1, not 0: the frontend contract is "the first post of the first page
+   * is the OP" (`threadDetail` destructures it that way), so the answer slots
+   * in behind it. If the first row is not the OP — a thread whose author the
+   * viewer has muted, so the OP itself was filtered out — the answer leads.
+   */
+  private async hoistAcceptedPost(
+    rows: ForumPost[],
+    acceptedPostId: string,
+    user: CurrentUserData,
+  ): Promise<ForumPost[]> {
+    const acceptedQb = this.posts
+      .createQueryBuilder('p')
+      .where('p.id = :acceptedPostId', { acceptedPostId });
+    this.blockFilter.excludeHidden(acceptedQb, user.userId, '"p"."author_id"');
+    const accepted = await acceptedQb.getOne();
+    if (!accepted) return rows;
+    const insertAt = rows[0]?.isOp ? 1 : 0;
+    return [...rows.slice(0, insertAt), accepted, ...rows.slice(insertAt)];
   }
 
   // Resolves each post's moderation state and applies the read policy: a member
@@ -167,6 +381,7 @@ export class ForumPostsService {
     user: CurrentUserData,
     body: string,
     parentPostId?: string,
+    image?: string,
   ): Promise<ForumPostResponse> {
     // Passing the replier as viewer 404s the thread when its author is blocked
     // either way — a block is a hard severance, so it has to gate the write
@@ -196,6 +411,7 @@ export class ForumPostsService {
           threadId: thread.id,
           authorId: user.userId,
           body,
+          image: image ?? null,
           voteCount: 0,
           // A reply is never the OP — that's created alongside the thread in
           // `ForumThreadsService`. Set explicitly (the entity default is also
@@ -206,6 +422,11 @@ export class ForumPostsService {
         }),
       );
       await this.threadsService.markActivity(thread.id, manager);
+      // SOC-13 — replying IS following: the member has committed to this
+      // conversation, so the rest of it should reach them. Idempotent, and
+      // inside the reply's own transaction so a follow can never survive a
+      // rolled-back reply.
+      await this.subscriptions.subscribe(thread.id, user.userId, manager);
       return created;
     });
 
@@ -253,6 +474,21 @@ export class ForumPostsService {
       });
     }
 
+    // SOC-13 — everyone ELSE following this thread. The three notifies above
+    // are the targeted ones (mentioned members, the parent post's author, the
+    // thread's author); this is the open subscription. `alreadyNotified` is
+    // what keeps a follower who is also one of those three from being told
+    // about the same reply twice.
+    const alreadyNotified = new Set(mentionNotifiedUserIds);
+    if (parentPost) alreadyNotified.add(parentPost.authorId);
+    if (!parentPost) alreadyNotified.add(thread.authorId);
+    await this.notifySubscribers(
+      thread,
+      saved.id,
+      user.userId,
+      alreadyNotified,
+    );
+
     const authors = await new MemberLookup(this.profiles).byUserIds([
       user.userId,
     ]);
@@ -261,7 +497,45 @@ export class ForumPostsService {
       authors.get(user.userId) ?? null,
       0,
       viewerOf(user),
+      undefined,
+      thread.acceptedPostId,
     );
+  }
+
+  /**
+   * Tells a thread's followers about a new reply, reusing the EXISTING
+   * `forum_thread_reply` notification type rather than minting a new one: the
+   * bell copy, the deep link, the push handling and the preference category are
+   * all already wired for "someone replied in this thread", and a follower is
+   * asking for exactly that signal. No notification-type migration (SOC-13).
+   *
+   * `alreadyNotified` carries the recipients the targeted notifies above have
+   * already covered, so nobody is told twice about one reply. Block and mute
+   * are enforced one level down, inside `NotificationsService.create`, which
+   * drops a notification whose actor the recipient has hidden.
+   *
+   * Best-effort throughout: `notifyThreadReply` swallows its own failures, and
+   * the reply has already committed by the time this runs.
+   */
+  private async notifySubscribers(
+    thread: ForumThread,
+    postId: string,
+    actorId: string,
+    alreadyNotified: Set<string>,
+  ): Promise<void> {
+    const subscriberIds = await this.subscriptions.subscriberIdsToNotify(
+      thread.id,
+      actorId,
+    );
+    for (const subscriberId of subscriberIds) {
+      if (alreadyNotified.has(subscriberId)) continue;
+      await this.mentions.notifyThreadReply(subscriberId, actorId, {
+        actorId,
+        source: 'forum',
+        threadSlug: thread.slug,
+        postId,
+      });
+    }
   }
 
   // POST /forum/posts/:id/vote — `value` is +1 (upvote) or 0 (remove vote).
@@ -350,6 +624,7 @@ export class ForumPostsService {
     postId: string,
     user: CurrentUserData,
     body: string,
+    image?: string,
   ): Promise<ForumPostResponse> {
     const post = await this.loadPostOr404(postId);
     if (post.deletedAt) {
@@ -364,6 +639,12 @@ export class ForumPostsService {
     // for an edit that never landed (a phantom revision).
     const previousBody = post.body;
     post.body = body;
+    // Omitted leaves the existing photo alone; an explicit empty string clears
+    // it. `forum_post_edit` snapshots the body only, so an image swap is not
+    // itself a revision — same as `community_post_edit`.
+    if (image !== undefined) {
+      post.image = image === '' ? null : image;
+    }
     post.editedAt = new Date();
     await this.posts.manager.transaction(async (manager) => {
       await manager.save(
@@ -393,6 +674,15 @@ export class ForumPostsService {
       // delete apart from a moderator takedown (BE-COM-01).
       post.deletedById = user.userId;
       await this.posts.save(post);
+      // A tombstoned post is no longer an answer. The FK only clears on a HARD
+      // delete, so the soft-delete path has to release the mark itself, leaving
+      // the thread genuinely unanswered again rather than pointing at an empty
+      // tombstone (SOC-13).
+      await this.posts.manager.update(
+        ForumThread,
+        { id: post.threadId, acceptedPostId: post.id },
+        { acceptedPostId: null },
+      );
     }
     return this.mapOne(post, user);
   }
@@ -516,13 +806,19 @@ export class ForumPostsService {
     const authors = await new MemberLookup(this.profiles).byUserIds([
       post.authorId,
     ]);
-    const [vote, moderation] = await Promise.all([
+    const [vote, moderation, thread] = await Promise.all([
       this.votes.findOne({
         where: { postId: post.id, userId: user.userId },
       }),
       this.contentModeration.statesForAnyType(ForumPostsService.SUBJECT_TYPES, [
         post.id,
       ]),
+      // Only the accepted-answer pointer is needed here, so this reads the one
+      // column rather than hydrating the whole thread row.
+      this.posts.manager.findOne(ForumThread, {
+        where: { id: post.threadId },
+        select: ['id', 'acceptedPostId'],
+      }),
     ]);
     return toForumPostResponse(
       post,
@@ -530,6 +826,7 @@ export class ForumPostsService {
       vote?.value ?? 0,
       viewerOf(user),
       moderation.get(post.id) ?? { hidden: false, removed: false },
+      thread?.acceptedPostId ?? null,
     );
   }
 
@@ -565,6 +862,7 @@ export class ForumPostsService {
   private async toPostResponses(
     rows: ForumPost[],
     user: CurrentUserData,
+    acceptedPostId: string | null = null,
   ): Promise<ForumPostResponse[]> {
     if (!rows.length) return [];
     const viewer = viewerOf(user);
@@ -594,6 +892,7 @@ export class ForumPostsService {
         myVoteByPost.get(post.id) ?? 0,
         viewer,
         moderation,
+        acceptedPostId,
       ),
     );
   }

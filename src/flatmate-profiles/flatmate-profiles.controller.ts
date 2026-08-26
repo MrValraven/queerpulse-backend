@@ -15,6 +15,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { SayHelloDto } from './dto/say-hello.dto';
 import { UpsertFlatmateProfileDto } from './dto/upsert-flatmate-profile.dto';
@@ -47,6 +48,7 @@ export class FlatmateProfilesController {
   constructor(private readonly service: FlatmateProfilesService) {}
 
   @Put('mine')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: "Create or replace the caller's flatmate profile" })
   @ApiOkResponse({ description: 'The saved flatmate profile.' })
   @ApiConflictResponse({
@@ -79,6 +81,7 @@ export class FlatmateProfilesController {
   }
 
   @Post(':slug/hello')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: "Say hello to a flatmate profile's owner (opens a conversation)",
   })

@@ -12,7 +12,7 @@ import {
 } from 'class-validator';
 import { ScreeningQuestionDto } from './screening-question.dto';
 
-export class CreateGroupDto {
+export class CreateHousingGroupDto {
   @IsString()
   @Matches(/^[a-z0-9-]+$/)
   slug!: string;

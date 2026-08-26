@@ -5,12 +5,12 @@ import {
 } from './entities/community-owner-review-request.entity';
 
 /**
- * One owner-review request, as its community's moderators see it. Hand-mapped
+ * One owner-review request, as the community's roster sees it. Hand-mapped
  * from `CommunityOwnerReviewRequest` (no global serializer in this repo), so
  * `requestedByUserId` is resolved to the compact `MemberRef` every other
  * community response embeds and never leaves the server as a raw id.
  *
- * `requestedBy` is null when the moderator who filed it has since erased their
+ * `requestedBy` is null when the member who filed it has since erased their
  * account: the FK is `ON DELETE SET NULL` because the request is about the
  * community's governance and has to outlive whoever raised it.
  */
@@ -47,13 +47,18 @@ export function toCommunityOwnerReviewRequestDTO(
  * present object is the shape that survives the trip.
  *
  * `needsOwnerReviewAt` is the community's own stamp, which the admin surface
- * queries. It is exposed here because it can also be set by the automatic
- * orphan path (`CommunityOwnerOrphanService`, an owner who erased their
- * account with no moderator to promote) with no request row behind it, so
- * "flagged" and "has an open request" are genuinely two different states.
+ * queries. It is exposed here because it can also be set by two automatic
+ * paths with no request row behind them (`CommunityOwnerOrphanService`, an
+ * owner who erased their account with nobody to promote, and
+ * `CommunityOwnerInactivityService`, an owner whose sessions have gone quiet
+ * past the inactivity cutoff), so "flagged" and "has an open request" are
+ * genuinely two different states.
  *
  * `canOpen`/`canWithdraw` are computed for the asking viewer, so the client
  * never has to reimplement the role rules to decide which button to show.
+ * Since GOV-02 `canOpen` is true for ANY roster member who is not the owner
+ * while no request is open, and the client gates its report control purely on
+ * that flag.
  */
 export interface CommunityOwnerReviewStateDTO {
   request: CommunityOwnerReviewRequestDTO | null;

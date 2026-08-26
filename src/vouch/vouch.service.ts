@@ -29,6 +29,12 @@ import { VOUCH_CREATED, VouchCreatedEvent } from './vouch.events';
 // Bounds an otherwise-unbounded list read; callers may narrow with limit/offset.
 const DEFAULT_PAGE_SIZE = 20;
 
+// How many of a member's newest named vouchers `getNamedVoucherIds` will scan.
+// Bounds the `IN (...)` list the viewer-relative mutual-voucher intersection
+// builds from it, so one very heavily vouched member can never turn a profile
+// read into an unbounded query. See that method for what the cap means.
+const NAMED_VOUCHER_SCAN_CAP = 500;
+
 // Caps how many *new* vouches a single member can give in a day (COM-26):
 // vouching has only ever had a per-minute throttle
 // (`vouch.controller.ts`'s `@Throttle`), which stops rapid-fire bursts but not
@@ -487,6 +493,37 @@ export class VouchService {
       select: { voucheeId: true },
     });
     return rows.map((vouch) => vouch.voucheeId);
+  }
+
+  /**
+   * The user ids who currently hold an ACTIVE, NON-ANONYMOUS vouch for
+   * `voucheeId`, newest first and capped at `NAMED_VOUCHER_SCAN_CAP`.
+   *
+   * Two exclusions carry the whole privacy contract of this read, and they live
+   * here rather than in the caller so no later caller can forget them:
+   *
+   *  - `withdrawnAt IS NULL` — a withdrawn vouch is excluded everywhere else
+   *    (see `getVouchCount`), and must be here too.
+   *  - `anonymous = false` — an anonymous voucher is shielded from the vouchee
+   *    in `listVouchers` and from the connections badge in
+   *    `getVouchDirections`. Handing their id to a viewer-relative intersection
+   *    would de-anonymize them the moment that viewer's connection set is
+   *    small, which is exactly the common case.
+   *
+   * The cap bounds the `IN (...)` list the caller builds from this set. A
+   * member with more named vouchers than the cap yields a count over their
+   * newest `NAMED_VOUCHER_SCAN_CAP` vouchers, which is a lower bound, never an
+   * over-count. The trust cue this backs ("members you know vouched for them")
+   * reads the same at 8 as at 80.
+   */
+  async getNamedVoucherIds(voucheeId: string): Promise<string[]> {
+    const rows = await this.vouches.find({
+      where: { voucheeId, withdrawnAt: IsNull(), anonymous: false },
+      select: { voucherId: true },
+      order: { createdAt: 'DESC' },
+      take: NAMED_VOUCHER_SCAN_CAP,
+    });
+    return rows.map((vouch) => vouch.voucherId);
   }
 
   /**

@@ -5,7 +5,6 @@ import { MagazinePiece } from '../magazine/entities/magazine-piece.entity';
 import { Event } from '../events/entities/event.entity';
 import { EventCohost } from '../events/entities/event-cohost.entity';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
-import { Workshop } from '../workshops/entities/workshop.entity';
 import { Subprofile } from '../subprofiles/entities/subprofile.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
@@ -34,7 +33,6 @@ import { PublicEligibilityService } from './public-eligibility.service';
       Event,
       EventCohost,
       EventRsvp,
-      Workshop,
       Subprofile,
       ForumThread,
       ForumPost,

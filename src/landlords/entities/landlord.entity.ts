@@ -77,6 +77,27 @@ export class Landlord {
   @Column({ type: 'jsonb', default: () => "'[]'" })
   stats!: LandlordStat[];
 
+  // The moderation decision's audit trail (LOC-19). Until these existed the
+  // directory recorded only its outcome (`status`), so a member who suggested
+  // an entry could not be told why it was held back, and the next moderator to
+  // open the queue had no history. All three are null on an entry nobody has
+  // decided on yet, and on an admin-created one that went straight to `live`.
+  //
+  // `decisionReason` is the text the suggesting member is sent. It is REQUIRED
+  // by the service when the decision goes against them (held back to `review`,
+  // or the entry removed) and optional when the entry goes live.
+  @Column({ type: 'timestamptz', nullable: true })
+  decidedAt!: Date | null;
+
+  // The moderator (`users.id`) who made the current decision. No FK, matching
+  // `reading_group_proposal.decided_by`: a decision is history that must
+  // outlive a staff account's deletion.
+  @Column({ type: 'uuid', nullable: true })
+  decidedBy!: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  decisionReason!: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 

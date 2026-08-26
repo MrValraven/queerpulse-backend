@@ -1,8 +1,8 @@
-import { CreateReviewDto } from './create-review.dto';
+import { CreateListingReviewDto } from './create-review.dto';
 
 /**
  * Body for `PATCH /directory/:slug/reviews/:reviewId` — the REVIEWER editing
- * their own review. Same shape as `CreateReviewDto` on purpose: a member gets
+ * their own review. Same shape as `CreateListingReviewDto` on purpose: a member gets
  * exactly one review per listing, so an edit replaces the whole thing rather
  * than patching a field of it, and the edit form sends back the same three
  * values it was seeded with.
@@ -14,4 +14,4 @@ import { CreateReviewDto } from './create-review.dto';
  *    reading (omitted means "keep whatever is there") would make clearing the
  *    photo unexpressible without a second endpoint.
  */
-export class UpdateReviewDto extends CreateReviewDto {}
+export class UpdateReviewDto extends CreateListingReviewDto {}

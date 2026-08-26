@@ -770,7 +770,7 @@ export class MessagingCoreService {
     forwarded?: boolean,
     kind?: 'user' | 'gif' | 'image',
     attachment?: GifAttachment,
-  ): Promise<{ view: MessageView; response: MessageResponse }> {
+  ): Promise<{ view: MessageView; response: MessageResponse; isNew: boolean }> {
     if (clientMessageId) {
       const existing = await this.messages.findOne({
         where: { conversationId, clientMessageId },
@@ -950,18 +950,41 @@ export class MessagingCoreService {
     message: Message,
     senderId: string,
     emit: boolean,
-  ): Promise<{ view: MessageView; response: MessageResponse }> {
+  ): Promise<{ view: MessageView; response: MessageResponse; isNew: boolean }> {
     const view = toMessageView(message);
     const [response] = await this.toMessageResponses([message], senderId);
     // invariant: toMessageResponses returns one response per input row.
     if (emit) {
+      // Unarchive for EVERY participant (sender included) the instant a
+      // genuinely new message lands. "Archived" means "nothing new here" —
+      // the moment something new happens, that stops being true, mirroring
+      // this same conversation's own `clearedAt` "delete for me" semantics
+      // (a newer message already resurrects a cleared thread) and the
+      // WhatsApp/Gmail default: an archive is never the reason a reply goes
+      // unseen. A no-op UPDATE (the common case: nobody had archived it) is
+      // cheap — one indexed match on `conversation_id`, filtered to rows that
+      // actually need clearing.
+      await this.participants
+        .createQueryBuilder()
+        .update(ConversationParticipant)
+        .set({ archivedAt: null })
+        .where('conversation_id = :conversationId', {
+          conversationId: message.conversationId,
+        })
+        .andWhere('archived_at IS NOT NULL')
+        .execute();
       this.eventEmitter.emit(MESSAGE_CREATED, {
         conversationId: message.conversationId,
         message: view,
         response: response!,
       } satisfies MessageCreatedEvent);
     }
-    return { view, response: response! };
+    // `emit` is true only for a genuinely fresh insert (never for an
+    // idempotency-key dedup hit or a race loser fetched back), so it doubles
+    // as the "is this a first-time send" signal callers need to gate
+    // side effects that must not repeat on a retried/duplicated send — e.g.
+    // `MessagesService.sendMessage`'s `@`-mention notification fan-out.
+    return { view, response: response!, isNew: emit };
   }
 
   pairKey(a: string, b: string): string {

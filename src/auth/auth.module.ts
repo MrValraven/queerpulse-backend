@@ -8,6 +8,7 @@ import { AccountReauthToken } from '../account/entities/account-reauth-token.ent
 import { DeletionRequest } from '../account/entities/deletion-request.entity';
 import { EmailSuppression } from '../account/entities/email-suppression.entity';
 import { Notification } from '../notifications/entities/notification.entity';
+import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
 import { UsersModule } from '../users/users.module';
 import { MembershipModule } from '../membership/membership.module';
@@ -63,6 +64,12 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     // frontend capability layer (`useMyStaffRoles`) has them without a second
     // fetch. `UsersModule` isn't the owner of this entity's writes (that's
     // `AdminMembersModule`), so it registers its own copy too.
+    // MemberPreferences: read-side only, and for one column —
+    // `login_alerts_enabled`, checked before `AuthService.issueTokens` emits a
+    // new-device sign-in alert. Registered here for the same reason as
+    // everything above it: importing `PreferencesModule` would add an edge out
+    // of AuthModule, which most of the platform already imports.
+    // `PreferencesService` still owns every write to this row.
     TypeOrmModule.forFeature([
       RefreshToken,
       User,
@@ -71,6 +78,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
       DeletionRequest,
       Notification,
       UserStaffRole,
+      MemberPreferences,
       // Write-side here (unlike the read-only entities above): the step-up
       // reauth OAuth round trip (`AuthController.googleCallback`'s `reauth`
       // branch, via `AuthService.mintReauthToken`) is what writes this row.

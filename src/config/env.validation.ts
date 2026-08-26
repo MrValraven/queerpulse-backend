@@ -153,6 +153,13 @@ export class EnvironmentVariables {
   @IsOptional() @IsString() CARD_SIGNING_PRIVATE_KEY?: string;
   @IsOptional() @IsString() CARD_SIGNING_PUBLIC_KEY?: string;
 
+  // Ban-evasion correlation pepper (TS-05). Optional: unset means sign-in
+  // identifiers are not hashed at all and identifier signals are disabled with
+  // a startup warning (see BanEvasionService). Inviter-lineage signals still
+  // work without it. Rotating it invalidates every stored hash, so treat it as
+  // write-once.
+  @IsOptional() @IsString() BAN_EVASION_PEPPER?: string;
+
   // Transactional email (SMTP). All optional: with none set the mailer runs
   // log-only (dev/test). Set SMTP_URL (a connection string) OR the discrete
   // SMTP_HOST/PORT/USER/PASSWORD fields to deliver for real. SMTP_SECURE is the

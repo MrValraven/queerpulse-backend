@@ -64,8 +64,19 @@ export class DraftsController {
     return this.draftsService.create(user.userId, dto);
   }
 
+  // Declared BEFORE `@Patch(':id')` purely for readability; Nest routes by
+  // method + path, so ordering between different verbs never matters.
   // `:id` is the caller-supplied opaque draft id (not a uuid) — no
-  // ParseUUIDPipe here, unlike most other owned-resource routes.
+  // ParseUUIDPipe on any of these three, unlike most other owned-resource
+  // routes.
+  @Get(':id')
+  @ApiOperation({ summary: 'Get one of your drafts by its id.' })
+  @ApiOkResponse({ description: 'The draft.' })
+  @ApiNotFoundResponse({ description: 'No draft with that id for the caller.' })
+  get(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
+    return this.draftsService.get(user.userId, id);
+  }
+
   @Patch(':id')
   @ApiOperation({ summary: 'Update a draft.' })
   @ApiOkResponse({ description: 'The updated draft.' })

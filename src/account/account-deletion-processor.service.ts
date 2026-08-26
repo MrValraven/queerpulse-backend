@@ -1,9 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, LessThanOrEqual, Repository } from 'typeorm';
+import { DataSource, IsNull, LessThanOrEqual, Repository } from 'typeorm';
 import { CommunityOwnerOrphanService } from '../communities/community-owner-orphan.service';
+import { DAY_MS, DELETION_FINAL_WARNING_LEAD_DAYS } from './account.constants';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { StorageService } from '../storage/storage.service';
+import { ContentOwnerErasureService } from './content-owner-erasure.service';
 import { User } from '../users/entities/user.entity';
 import {
   EmailSuppression,
@@ -37,6 +41,14 @@ export class AccountDeletionProcessorService {
     // for admin review) — see the call site in `eraseAccount` for why this
     // has to run before the `User` row is deleted.
     private readonly communityOwnerOrphan: CommunityOwnerOrphanService,
+    // Resolves the gatherings, jobs, volunteering and housing listings the
+    // erased member left other people depending on, under the same ordering
+    // requirement as `communityOwnerOrphan` above, for the same reason.
+    private readonly contentOwnerErasure: ContentOwnerErasureService,
+    // Sends the final warning below. `NotificationsModule` is already imported
+    // by `AccountModule` (for `ContentOwnerErasureService`'s cancellation
+    // fan-out), so this needs no new module wiring.
+    private readonly notifications: NotificationsService,
   ) {}
 
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
@@ -50,6 +62,88 @@ export class AccountDeletionProcessorService {
       this.logger.error(
         `Account erasure sweep failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       );
+    }
+    // Warn AFTER erasing, in its own try: the two sweeps are independent, and a
+    // failure to warn must never stop an erasure the member has a statutory
+    // right to, nor the reverse. Running second also means a row that came due
+    // on this very tick has already left `grace`, so nobody is warned about a
+    // deletion that just happened.
+    try {
+      await this.warnUpcomingDeletions();
+    } catch (err) {
+      this.logger.error(
+        `Account deletion warning sweep failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Tell a member their account is about to be deleted, while cancelling is
+   * still possible. This is the emit site `NotificationType
+   * .AccountDeletionFinalWarning` was defined for and never had: the grace
+   * period ran silently for thirty days and the account simply vanished.
+   *
+   * Fires ONCE per member. The daily tick is what makes that the hard part, so
+   * the row is CLAIMED first with a conditional UPDATE — `finalWarningSentAt IS
+   * NULL` in the WHERE, exactly the shape `eraseDueAccounts` uses to claim a
+   * `grace` row — and a run that loses the race sees `affected === 0` and skips.
+   *
+   * `daysRemaining` is a NUMBER, never a composed sentence: the frontend
+   * mirrors it onto `count` and lets CLDR pick the plural in the member's own
+   * language. It is rounded to whole days and floored at 1, so a row the sweep
+   * reaches late reads "in 1 day" rather than "in 0 days".
+   *
+   * IN-APP (plus push). QueerPulse sends no email, so nothing here is described
+   * as one.
+   */
+  private async warnUpcomingDeletions(): Promise<void> {
+    const now = new Date();
+    const warningHorizon = new Date(
+      now.getTime() + DELETION_FINAL_WARNING_LEAD_DAYS * DAY_MS,
+    );
+    const upcoming = await this.deletionRequests.find({
+      where: {
+        status: DeletionRequestStatus.Grace,
+        // Inside the lead window, and not already due — a due row belongs to
+        // the erasure sweep above, not to a countdown.
+        scheduledFor: LessThanOrEqual(warningHorizon),
+        finalWarningSentAt: IsNull(),
+      },
+    });
+    for (const request of upcoming) {
+      if (request.scheduledFor.getTime() <= now.getTime()) {
+        continue;
+      }
+      const claim = await this.deletionRequests.update(
+        {
+          id: request.id,
+          status: DeletionRequestStatus.Grace,
+          finalWarningSentAt: IsNull(),
+        },
+        { finalWarningSentAt: now },
+      );
+      if (claim.affected !== 1) {
+        continue;
+      }
+      const daysRemaining = Math.max(
+        1,
+        Math.round((request.scheduledFor.getTime() - now.getTime()) / DAY_MS),
+      );
+      try {
+        await this.notifications.create(
+          request.userId,
+          NotificationType.AccountDeletionFinalWarning,
+          { source: 'account', daysRemaining },
+        );
+      } catch (err) {
+        // The claim stands. Re-warning on tomorrow's tick would mean dropping
+        // the marker, which reopens the double-send this column exists to
+        // close; the member still sees the countdown on the delete-account page
+        // the notification would have linked them to.
+        this.logger.error(
+          `Deletion request ${request.id} was claimed for its final warning but notifying failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+        );
+      }
     }
   }
 
@@ -111,8 +205,8 @@ export class AccountDeletionProcessorService {
    * bucket storage (step 4). This lives outside the transaction on purpose — see
    * the comment there.
    *
-   * BEFORE any of that, resolve community ownership (step 0) — see the call
-   * below.
+   * BEFORE any of that, resolve community ownership and the content other
+   * members depend on (step 0) — see the calls below.
    */
   private async eraseAccount(userId: string): Promise<void> {
     // 0. Resolve any community ownership BEFORE the user row is deleted.
@@ -139,6 +233,25 @@ export class AccountDeletionProcessorService {
     //    communities still owned by `userId`, so a second call for the same
     //    user finds nothing left to do).
     await this.communityOwnerOrphan.handleOwnerErasure(userId);
+
+    // 0b. Resolve the CONTENT other members depend on, for the same reason and
+    //     under the same ordering rule. Every content-actor FK this touches
+    //     (`events.host_id`, `event_series.host_id`, `jobs.poster_id`,
+    //     `volunteer_opportunities.poster_id`, `housing_listings.owner_id`) is
+    //     `ON DELETE SET NULL` as of
+    //     `SetNullContentAuthorFksOnUserErasure1794610000000`, so once step 3
+    //     runs there is no way left to tell which gatherings this member was
+    //     hosting. `ContentOwnerErasureService.eraseFor` hands each future
+    //     gathering to a co-host or cancels it with an `EventCancelled`
+    //     fan-out to everyone holding an RSVP, and closes the open postings
+    //     nobody is left to answer.
+    //
+    //     Outside the transaction for the same reason `handleOwnerErasure` is:
+    //     it commits per step and its notification fan-out must run against
+    //     committed state. Every step is idempotent (each matches only rows
+    //     still attributed to `userId` AND still in the state that needs
+    //     changing), so the retry path `eraseDueAccounts` leaves open is safe.
+    await this.contentOwnerErasure.eraseFor(userId);
 
     await this.dataSource.transaction(async (manager) => {
       // `addSelect('user.email')` re-includes the `select: false` email column:
@@ -206,6 +319,14 @@ export class AccountDeletionProcessorService {
       //    loop (which is why a grep for their literal constraint names finds
       //    nothing). They cascade correctly; no explicit delete is needed, and
       //    adding one would imply a missing FK that is in fact present.
+      //
+      //    Eleven of those FKs are no longer CASCADE: as of
+      //    `SetNullContentAuthorFksOnUserErasure1794610000000`, content other
+      //    members depend on (gatherings, directory and housing
+      //    listings, jobs, volunteering, companies, reviews, safe-space
+      //    nominations) is `ON DELETE SET NULL` and survives this delete with
+      //    a NULL byline. Step 0b above is what makes that survival sensible
+      //    rather than merely non-destructive.
       //
       //    `deletion_request` itself is the one table that must NOT cascade —
       //    its FK was dropped in the same migration so this erasure ledger

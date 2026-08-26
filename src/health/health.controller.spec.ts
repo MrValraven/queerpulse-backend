@@ -2,6 +2,7 @@ import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { HealthCheckService, TypeOrmHealthIndicator } from '@nestjs/terminus';
 import { HealthController } from './health.controller';
+import { PlatformProbesService } from './platform-probes.service';
 
 describe('HealthController', () => {
   let controller: HealthController;
@@ -28,6 +29,11 @@ describe('HealthController', () => {
           provide: TypeOrmHealthIndicator,
           useValue: { pingCheck },
         },
+        // The real probe registry, wired to the mocked indicator above: the
+        // controller no longer names `pingCheck('database')` itself, it asks
+        // `PlatformProbesService` for the indicator list, so the assertions
+        // below still prove the DB ping is what gets registered.
+        PlatformProbesService,
         // The two DB-pinging probes sit behind `MetricsTokenGuard`, which
         // Nest instantiates for the controller even though these tests call
         // the handlers directly. Its only dependency is the config.

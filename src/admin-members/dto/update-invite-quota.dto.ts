@@ -2,7 +2,7 @@ import { IsInt, Min, ValidateIf } from 'class-validator';
 
 /**
  * Body for `PATCH /admin/members/:id/invite-quota`. `quota` is the member's
- * new monthly invite allowance in full, mirroring `UpdateMemberRoleDto`'s
+ * new monthly invite allowance in full, mirroring `UpdatePlatformMemberRoleDto`'s
  * "set the value you want" shape:
  *  - a non-negative integer sets a per-member override, taking precedence
  *    over the platform-wide `INVITE_MONTHLY_QUOTA` default

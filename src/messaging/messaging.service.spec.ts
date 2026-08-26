@@ -10,6 +10,7 @@ import { DataSource, FindOperator, QueryFailedError } from 'typeorm';
 import { ConnectionsService } from '../connections/connections.service';
 import { encodeCursor } from '../common/cursor-pagination';
 import { MediaCropService } from '../media-crops/media-crops.service';
+import { MentionNotificationService } from '../mentions/mention-notification.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { ContentModeration } from '../content-moderation/entities/content-moderation.entity';
 import { Profile } from '../users/entities/profile.entity';
@@ -280,6 +281,13 @@ describe('MessagingService', () => {
         {
           provide: MediaCropService,
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
+        },
+        {
+          provide: MentionNotificationService,
+          // Best-effort fan-out `sendMessage` now fires on every fresh send —
+          // mirrors how forum/community specs stub it out; the notify() call
+          // itself is covered by `MentionNotificationService`'s own spec.
+          useValue: { notify: jest.fn().mockResolvedValue(new Set()) },
         },
       ],
     }).compile();

@@ -2,7 +2,9 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AffirmingPledgeModule } from '../affirming-pledge/affirming-pledge.module';
 import { Connection } from '../connections/entities/connection.entity';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { VerificationModule } from '../verification/verification.module';
+import { Profile } from '../users/entities/profile.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { GroupJoinRequest } from './entities/group-join-request.entity';
 import { GroupListing } from './entities/group-listing.entity';
@@ -25,6 +27,10 @@ import { HousingGroupsService } from './housing-groups.service';
       GroupListing,
       Connection,
       UserStaffRole,
+      // Read-only, so the moderator queue can resolve a listing's poster into
+      // a `MemberRef` (LOC-19) without depending on ProfilesModule. Overlapping
+      // `forFeature` registrations are permitted.
+      Profile,
     ]),
     // Mandatory LGBTQ+ affirming pledge gate (group-listing create; group join
     // when the applicant is a signed-in member).
@@ -32,6 +38,9 @@ import { HousingGroupsService } from './housing-groups.service';
     // Step-up gate + lister assurance signal for the group-listing create path
     // (BE-HSG-01), matching the sibling member-listing surface.
     VerificationModule,
+    // LOC-19: the poster of a group listing is told the review's outcome,
+    // in-app plus push. No cycle — NotificationsModule does not import this one.
+    NotificationsModule,
   ],
   controllers: [HousingGroupsController, AdminHousingGroupListingsController],
   providers: [HousingGroupsService],

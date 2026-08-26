@@ -43,7 +43,7 @@ import {
   CommunityReportTotals,
   summariseReportsByCommunity,
 } from './community-report-scope';
-import { ListCommunityGovernanceLogQuery } from './dto/list-community-governance-log.query';
+import { ListAdminCommunityGovernanceLogQuery } from './dto/list-community-governance-log.query';
 import { UpdateAdminCommunitySettingsDto } from './dto/update-admin-community-settings.dto';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -298,7 +298,7 @@ export class AdminCommunitiesService {
    */
   async getGovernanceLog(
     slug: string,
-    query: ListCommunityGovernanceLogQuery,
+    query: ListAdminCommunityGovernanceLogQuery,
   ): Promise<Paginated<AdminGovernanceLogEntryDTO>> {
     const community = await this.communities.findOne({ where: { slug } });
     if (!community) {

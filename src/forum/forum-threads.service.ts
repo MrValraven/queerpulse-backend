@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -23,6 +24,15 @@ import {
   cursorPaginate,
 } from '../common/cursor-pagination';
 import { escapeLikeTerm } from '../common/like-escape';
+import {
+  FORUM_THREAD_SEARCH_COLUMNS,
+  FORUM_THREAD_SEARCH_FIELDS,
+  foldedHaystack,
+  foldedSearchQuery,
+  foldedSearchTerm,
+  searchRankExpression,
+  weightedSearchVector,
+} from '../search/search-text';
 import { MemberLookup } from '../common/member-ref';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
@@ -36,6 +46,7 @@ import { TopicPostLinkService } from '../content/topic-post-link.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole } from '../users/entities/user.entity';
+import { ForumSubscriptionsService } from './forum-subscriptions.service';
 import { ForumPostEdit } from './entities/forum-post-edit.entity';
 import { ForumPostVote } from './entities/forum-post-vote.entity';
 import { ForumPost } from './entities/forum-post.entity';
@@ -119,6 +130,8 @@ export interface CreateThreadInput {
   tags?: string[];
   communitySlug?: string;
   isOfficial?: boolean;
+  /** Storage key of one optional photo on the opening post (SOC-13). */
+  image?: string;
 }
 
 @Injectable()
@@ -150,6 +163,11 @@ export class ForumThreadsService {
     // silently missing them. Exported by `ModerationModule`, imported by
     // `ForumModule`.
     private readonly modAudit: ModAuditService,
+    // SOC-13 — thread following. Owned by this module, so a plain constructor
+    // injection: it exists to be shared between `ForumThreadsService` (auto
+    // -subscribe the author on create, resolve `isSubscribed` on every read)
+    // and `ForumPostsService` (auto-subscribe the replier, fan the reply out).
+    private readonly subscriptions: ForumSubscriptionsService,
   ) {}
 
   // GET /forum/threads?category=&cursor=&sort=&tag=&q= — a cursor page ordered
@@ -186,10 +204,18 @@ export class ForumThreadsService {
     // rules first, then narrow the visible set by title text / tag membership.
     this.applyTextAndTagFilters(qb, q, tag);
     // `unanswered` is not a distinct sort column — it's the default
-    // `(createdAt, id)` keyset narrowed to reply-less threads, so it keeps
+    // `(createdAt, id)` keyset narrowed to UNRESOLVED threads, so it keeps
     // `keysetForSort` returning undefined below.
+    //
+    // It used to narrow on `reply_count = 0`, which made the label a lie: a
+    // question with forty replies and no resolution counted as answered, and
+    // the one sort that could have surfaced the forum's open questions instead
+    // surfaced only the ones nobody had spoken in yet. It now means what it
+    // says — no accepted answer — backed by the partial keyset index
+    // `IDX_forum_thread_unanswered_created_at_id`, which covers exactly the
+    // rows this branch can return (SOC-13).
     if (sort === 'unanswered') {
-      qb.andWhere('t.reply_count = 0');
+      qb.andWhere('t.accepted_post_id IS NULL');
     }
 
     // `keyset` swaps the leading sort column for `top`/`active`; for
@@ -457,25 +483,57 @@ export class ForumThreadsService {
     return this.toThreadResponses(rows, viewerId, viewerIsModerator);
   }
 
-  // Cross-entity global search (SearchService) — ILIKE over thread `title`
-  // only (post-body search is deferred). Reuses the same block filter as
-  // `list()`. Most-recently-active first.
+  // Cross-entity global search (SearchService). Ranked and accent-insensitive
+  // since SOC-08: a full-text branch over the accent-folded title supplies
+  // relevance, and the old substring branch is kept OR'd alongside it so
+  // "trans" still finds "transfeminine" (full text matches whole tokens, so
+  // replacing the substring test outright would have been a regression).
+  // Reply bodies live in `ForumPostsService.searchByText`, a separate result
+  // type. Reuses the same block filter and Private-community gate as `list()`.
   async searchByText(
     viewerId: string,
     term: string,
     limit: number,
+    offset = 0,
   ): Promise<ForumThreadResponse[]> {
     const pattern = `%${escapeLikeTerm(term)}%`;
+    const searchVector = weightedSearchVector('t', FORUM_THREAD_SEARCH_FIELDS);
+    const searchHaystack = foldedHaystack('t', FORUM_THREAD_SEARCH_COLUMNS);
+    const searchTsQuery = foldedSearchQuery('searchTerm');
+    const foldedTerm = foldedSearchTerm('searchTerm');
+    const foldedPattern = foldedSearchTerm('searchPattern');
     const qb = this.threads
       .createQueryBuilder('t')
-      .where('t.title ILIKE :pattern', { pattern });
+      .where(
+        `(${searchVector} @@ ${searchTsQuery} OR ${searchHaystack} LIKE ${foldedPattern})`,
+        { searchTerm: term, searchPattern: pattern },
+      );
     this.blockFilter.excludeHidden(qb, viewerId, '"t"."author_id"');
     // Same Private-community gate as `list` (H1): global search must not
     // surface a Private community's thread titles to a non-member.
     this.applyCommunityAccessFilter(qb, viewerId);
+    // Relevance first, recency as the tiebreaker. Selected under a DOT-FREE
+    // alias and ordered by that alias for the same reason
+    // `ProfilesService.searchMembers` does it: TypeORM re-parses every ORDER BY
+    // term as `alias.column`, and a raw expression full of dots would be
+    // mistaken for one.
     const rows = await qb
-      .orderBy('t.last_activity_at', 'DESC')
-      .take(limit)
+      .addSelect(
+        searchRankExpression(
+          searchVector,
+          searchTsQuery,
+          searchHaystack,
+          foldedTerm,
+        ),
+        'search_rank',
+      )
+      .orderBy('search_rank', 'DESC')
+      .addOrderBy('t.last_activity_at', 'DESC')
+      // `.limit()`/`.offset()` rather than `.take()`/`.skip()`: this query
+      // orders by a selected expression alias, and `.take()`'s DISTINCT-id
+      // rewrite cannot carry one.
+      .limit(limit)
+      .offset(offset)
       .getMany();
     // Search cards don't surface OP moderation actions; the caller
     // (`SearchService`) has only the viewer id, so treat as non-moderator.
@@ -493,9 +551,10 @@ export class ForumThreadsService {
     const thread = await this.loadOr404(slug, viewerId, {
       bypassCommunityAccess: viewerIsModerator,
     });
-    const [authors, op] = await Promise.all([
+    const [authors, op, isSubscribed] = await Promise.all([
       new MemberLookup(this.profiles).byUserIds([thread.authorId]),
       this.resolveOp(thread.id, viewerId),
+      this.subscriptions.isSubscribed(thread.id, viewerId),
     ]);
     return toForumThreadResponse(
       thread,
@@ -503,6 +562,7 @@ export class ForumThreadsService {
       { userId: viewerId, isModerator: viewerIsModerator },
       op.opPost,
       op.myVote,
+      isSubscribed,
     );
   }
 
@@ -543,6 +603,10 @@ export class ForumThreadsService {
       threadSlug: thread.slug,
       title: thread.title,
     } satisfies ForumThreadCreatedEvent);
+    // SOC-13 — the author follows their own thread from the moment it exists,
+    // so the replies to a question they asked reach them without a second
+    // deliberate act. Best-effort: the thread has already committed.
+    await this.subscriptions.subscribeQuietly(thread.id, authorId);
     // DISC-5 — best-effort, never throws (see `TopicPostLinkService.linkThread`);
     // a matching tag materializes a `topic_post` row and fans out DISC-3's
     // topic-follow notification (`TOPIC_POST_LINKED`, topics module).
@@ -564,6 +628,9 @@ export class ForumThreadsService {
       { userId: authorId, isModerator: viewerIsModerator },
       opPost,
       0,
+      // The author was just auto-subscribed above, so the echo can say so
+      // without a read-back.
+      true,
     );
   }
 
@@ -676,18 +743,43 @@ export class ForumThreadsService {
     await this.dataSource.transaction(run);
   }
 
-  // PATCH /forum/threads/:slug — author-only title edit. The title lives on the
-  // thread; edit-history is anchored to the OP post (the oldest `ForumPost`),
-  // so a title change is snapshotted there with `previousTitle` set.
-  async updateThreadTitle(
+  /**
+   * PATCH /forum/threads/:slug — the thread's title and/or its tag set.
+   *
+   * TWO DIFFERENT PERMISSIONS, deliberately. The TITLE stays author-only: a
+   * moderator rewriting the words someone chose is an editorial act the forum
+   * has no appeal path for. TAGS are author-or-moderator: filing a thread under
+   * the right topic is janitorial, it is what makes the archive findable, and
+   * until SOC-13 the frontend never sent a tag edit at all even though the
+   * backend already accepted one.
+   *
+   * Both fields are optional. Omitting `title` leaves it untouched (and writes
+   * no edit revision); omitting `tags` leaves the tag set untouched, while an
+   * explicit `[]` clears it.
+   *
+   * The title lives on the thread; edit-history is anchored to the OP post (the
+   * `is_op` `ForumPost`), so a title change is snapshotted there with
+   * `previousTitle` set.
+   */
+  async updateThread(
     slug: string,
     user: CurrentUserData,
-    title: string,
+    title?: string,
     tags?: string[],
   ): Promise<ForumThreadResponse> {
     const thread = await this.loadOr404(slug, user.userId);
-    if (thread.authorId !== user.userId) {
+    const isAuthor = thread.authorId === user.userId;
+    const isModerator = isModeratorRole(user.role);
+    if (title !== undefined && !isAuthor) {
       throw new ForbiddenException('Only the author can edit this thread');
+    }
+    if (tags !== undefined && !isAuthor && !isModerator) {
+      throw new ForbiddenException(
+        "Only the author or a moderator can edit this thread's tags",
+      );
+    }
+    if (title === undefined && tags === undefined) {
+      throw new BadRequestException('Nothing to update');
     }
 
     // The OP is the `is_op` post — one source of truth with every other path
@@ -701,7 +793,14 @@ export class ForumThreadsService {
     // together, or a failure leaves a phantom revision for an edit that never
     // committed. `previousTitle` is captured before mutating `thread.title`.
     const previousTitle = thread.title;
-    thread.title = title;
+    // A tags-only patch (the moderator/janitorial path) must not stamp an edit
+    // revision on the OP: nothing about the post's words changed, and an
+    // "edited" mark that appears because someone re-filed the thread would be
+    // false on its face.
+    const isTitleChanged = title !== undefined && title !== thread.title;
+    if (title !== undefined) {
+      thread.title = title;
+    }
     // `tags` is an optional replacement set: only touch the column when the
     // caller sent the field (an explicit `[]` clears them; omitting it leaves
     // the existing tags untouched).
@@ -709,7 +808,7 @@ export class ForumThreadsService {
       thread.tags = normalizeTags(tags);
     }
     await this.dataSource.transaction(async (manager) => {
-      if (opPost) {
+      if (opPost && isTitleChanged) {
         await manager.save(
           manager.create(ForumPostEdit, {
             postId: opPost.id,
@@ -738,9 +837,105 @@ export class ForumThreadsService {
     return toForumThreadResponse(
       thread,
       authors.get(thread.authorId) ?? null,
-      { userId: user.userId, isModerator: isModeratorRole(user.role) },
+      { userId: user.userId, isModerator },
       opPost,
       myVote,
+      await this.subscriptions.isSubscribed(thread.id, user.userId),
+    );
+  }
+
+  /**
+   * POST /forum/threads/:slug/accepted-answer — mark (or clear) the reply that
+   * answers this thread (SOC-13).
+   *
+   * Settable by the thread's AUTHOR, and by a platform Moderator/Admin. The
+   * author is the person who knows which reply actually solved their problem;
+   * a moderator can resolve a thread whose author has gone quiet, which is the
+   * case that otherwise leaves a useful answer permanently unmarked.
+   *
+   * `postId` omitted/null clears the mark. Otherwise the post must belong to
+   * THIS thread, must not be the opening post (a thread cannot answer itself),
+   * and must not be tombstoned (nothing useful to point at).
+   */
+  async setAcceptedPost(
+    slug: string,
+    user: CurrentUserData,
+    postId: string | null | undefined,
+  ): Promise<ForumThreadResponse> {
+    const thread = await this.loadOr404(slug, user.userId);
+    const isModerator = isModeratorRole(user.role);
+    if (thread.authorId !== user.userId && !isModerator) {
+      throw new ForbiddenException(
+        'Only the thread author or a moderator can accept an answer',
+      );
+    }
+
+    if (!postId) {
+      thread.acceptedPostId = null;
+    } else {
+      const post = await this.posts.findOne({ where: { id: postId } });
+      if (!post || post.threadId !== thread.id) {
+        throw new NotFoundException('Post not found in this thread');
+      }
+      if (post.isOp) {
+        throw new BadRequestException(
+          'The opening post cannot be its own accepted answer',
+        );
+      }
+      if (post.deletedAt) {
+        throw new BadRequestException('A deleted post cannot be the answer');
+      }
+      thread.acceptedPostId = post.id;
+    }
+    await this.threads.save(thread);
+
+    const [authors, op, isSubscribed] = await Promise.all([
+      new MemberLookup(this.profiles).byUserIds([thread.authorId]),
+      this.resolveOp(thread.id, user.userId),
+      this.subscriptions.isSubscribed(thread.id, user.userId),
+    ]);
+    return toForumThreadResponse(
+      thread,
+      authors.get(thread.authorId) ?? null,
+      { userId: user.userId, isModerator },
+      op.opPost,
+      op.myVote,
+      isSubscribed,
+    );
+  }
+
+  /**
+   * POST /forum/threads/:slug/follow | /unfollow — the manual Follow toggle
+   * (SOC-13).
+   *
+   * Goes through `loadOr404` with the caller's id, so following a thread is
+   * gated by exactly the same visibility rules as reading it: a private
+   * community's thread cannot be followed by a non-member, and a blocked
+   * author's thread cannot be followed at all. Idempotent in both directions.
+   */
+  async setSubscribed(
+    slug: string,
+    user: CurrentUserData,
+    isSubscribed: boolean,
+  ): Promise<ForumThreadResponse> {
+    const thread = await this.loadOr404(slug, user.userId);
+    if (isSubscribed) {
+      await this.subscriptions.subscribe(thread.id, user.userId);
+    } else {
+      await this.subscriptions.unsubscribe(thread.id, user.userId);
+    }
+
+    const [authors, op] = await Promise.all([
+      new MemberLookup(this.profiles).byUserIds([thread.authorId]),
+      this.resolveOp(thread.id, user.userId),
+    ]);
+    return toForumThreadResponse(
+      thread,
+      authors.get(thread.authorId) ?? null,
+      { userId: user.userId, isModerator: isModeratorRole(user.role) },
+      op.opPost,
+      op.myVote,
+      isSubscribed,
     );
   }
 
@@ -812,6 +1007,7 @@ export class ForumThreadsService {
               threadId: thread.id,
               authorId,
               body: input.body,
+              image: input.image ?? null,
               voteCount: 0,
               // Mark this as the thread's opening post: lets the list page
               // batch-load every OP in one `WHERE is_op AND thread_id IN (...)`
@@ -980,9 +1176,12 @@ export class ForumThreadsService {
     const authorIds = [...new Set(rows.map((t) => t.authorId))];
     const threadIds = rows.map((t) => t.id);
 
-    const [authors, opPosts] = await Promise.all([
+    const [authors, opPosts, subscribedThreadIds] = await Promise.all([
       new MemberLookup(this.profiles).byUserIds(authorIds),
       this.posts.find({ where: { isOp: true, threadId: In(threadIds) } }),
+      // One `user_id = :viewer AND thread_id IN (...)` query for the whole
+      // page, never a per-row existence probe.
+      this.subscriptions.subscribedThreadIds(threadIds, viewerId),
     ]);
     const opByThread = new Map(opPosts.map((post) => [post.threadId, post]));
 
@@ -1004,6 +1203,7 @@ export class ForumThreadsService {
         viewer,
         op,
         op ? (myVoteByPost.get(op.id) ?? 0) : 0,
+        subscribedThreadIds.has(t.id),
       );
     });
   }

@@ -7,7 +7,7 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, In, QueryFailedError } from 'typeorm';
-import { CreateJoinRequestDto } from './dto/create-join-request.dto';
+import { CreateMembershipJoinRequestDto } from './dto/create-join-request.dto';
 import {
   PlatformJoinRequest,
   PlatformJoinRequestStatus,
@@ -23,7 +23,7 @@ const uniqueViolation = () =>
     code: '23505',
   } as unknown as Error);
 
-const dto = (overrides: Partial<CreateJoinRequestDto> = {}) =>
+const dto = (overrides: Partial<CreateMembershipJoinRequestDto> = {}) =>
   ({
     name: 'Sam Costa',
     email: 'sam@example.com',
@@ -32,7 +32,7 @@ const dto = (overrides: Partial<CreateJoinRequestDto> = {}) =>
     ageAttested: true,
     termsVersion: '2.4',
     ...overrides,
-  }) as CreateJoinRequestDto;
+  }) as CreateMembershipJoinRequestDto;
 
 describe('JoinRequestsService', () => {
   let service: JoinRequestsService;

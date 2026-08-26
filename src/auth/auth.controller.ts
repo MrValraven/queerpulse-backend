@@ -57,6 +57,10 @@ import {
 import { Throttle, seconds } from '@nestjs/throttler';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 import { toImageUrl } from '../common/image-url';
+import {
+  CURRENT_GUIDELINES_VERSION,
+  CURRENT_TERMS_VERSION,
+} from '../consent/policy-versions';
 import { cropFor } from '../media-crops/crop-response';
 import { MediaCropService } from '../media-crops/media-crops.service';
 
@@ -420,6 +424,29 @@ export class AuthController {
           }
         : null,
       staffRoles,
+      /**
+       * The re-acceptance signal (ID-14). Hand-mapped like every other field
+       * here, never a spread.
+       *
+       * `users.terms_version` / `guidelines_version` were written once at
+       * signup and then never read again, so a member could be moderated under
+       * a rule added after they joined with nothing on record showing they had
+       * ever seen it. Pairing what the member has on file with what is
+       * currently in effect is the whole signal the frontend gate needs: when
+       * `accepted*` is behind `current*`, the re-acceptance sheet opens.
+       *
+       * Both `accepted*` are NULL for an account that predates the columns
+       * (deliberately never backfilled — agreeing is a specific act, so a
+       * manufactured version would be a lie). The frontend treats NULL as
+       * "behind", which is correct: we have no evidence they agreed to
+       * anything, so we ask.
+       */
+      policyVersions: {
+        currentTerms: CURRENT_TERMS_VERSION,
+        currentGuidelines: CURRENT_GUIDELINES_VERSION,
+        acceptedTerms: user.termsVersion,
+        acceptedGuidelines: user.guidelinesVersion,
+      },
       // { suspendedUntil, suspension } — both null unless the member is suspended.
       ...suspensionInfo,
     };

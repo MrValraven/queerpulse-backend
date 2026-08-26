@@ -114,7 +114,7 @@ export class NewsletterController {
       'The address is now unsubscribed. Idempotent, exactly like the GET.',
   })
   @Public()
-  // The `List-Unsubscribe` header every digest carries points HERE, and RFC
+  // The `List-Unsubscribe` header a bulk message carries points HERE, and RFC
   // 8058 requires that URI to accept a bare POST: the mail client (Gmail,
   // Yahoo, Apple Mail) posts it directly from the message, with no browser
   // session, no landing page and no confirmation step. Hence:

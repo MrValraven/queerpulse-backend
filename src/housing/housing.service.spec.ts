@@ -8,7 +8,6 @@ import {
   CoopJoinRequest,
   JoinRequestStatus,
 } from './entities/coop-join-request.entity';
-import { CoopRelocationRequest } from './entities/coop-relocation-request.entity';
 import {
   CoopCtaKind,
   HousingCoop,
@@ -16,7 +15,6 @@ import {
 } from './entities/housing-coop.entity';
 import { HousingService } from './housing.service';
 
-type RepoMock = Record<string, jest.Mock>;
 type QueryBuilderStub = Record<string, jest.Mock>;
 
 /** Fluent `createQueryBuilder` chain: every builder method returns the builder;
@@ -71,8 +69,8 @@ function uniqueViolation(): Error & { code: string } {
 
 describe('HousingService', () => {
   let service: HousingService;
-  // Declared with the exact method shape (rather than the bare `RepoMock`
-  // index-signature alias) so `coops.find.mockResolvedValue(...)`-style
+  // Declared with the exact method shape (rather than a loose
+  // index-signature record) so `coops.find.mockResolvedValue(...)`-style
   // chained access doesn't see `noUncheckedIndexedAccess`'s `| undefined`.
   let coops: {
     find: jest.Mock;
@@ -87,7 +85,6 @@ describe('HousingService', () => {
     save: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
-  let relocationRequests: RepoMock;
   let affirmingPledge: { requireAccepted: jest.Mock };
 
   beforeEach(async () => {
@@ -104,12 +101,6 @@ describe('HousingService', () => {
       save: jest.fn((row: unknown) => Promise.resolve(row)),
       createQueryBuilder: jest.fn(() => makeQueryBuilderStub()),
     };
-    relocationRequests = {
-      findOne: jest.fn().mockResolvedValue(null),
-      create: jest.fn((row: unknown) => row),
-      save: jest.fn((row: unknown) => Promise.resolve(row)),
-      createQueryBuilder: jest.fn(() => makeQueryBuilderStub()),
-    };
     affirmingPledge = {
       requireAccepted: jest.fn().mockResolvedValue(undefined),
     };
@@ -121,10 +112,6 @@ describe('HousingService', () => {
         {
           provide: getRepositoryToken(CoopJoinRequest),
           useValue: joinRequests,
-        },
-        {
-          provide: getRepositoryToken(CoopRelocationRequest),
-          useValue: relocationRequests,
         },
         { provide: AffirmingPledgeService, useValue: affirmingPledge },
       ],

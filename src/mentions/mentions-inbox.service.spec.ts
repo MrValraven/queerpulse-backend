@@ -18,6 +18,8 @@ function mentionRow(
     read: false,
     createdAt: now,
     payload,
+    bundleKey: null,
+    otherActorCount: 0,
   };
 }
 

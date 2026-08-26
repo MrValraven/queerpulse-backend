@@ -69,9 +69,16 @@ export class Company {
   @Column({ type: 'jsonb', default: () => "'[]'" })
   work!: CompanyWorkItem[];
 
+  // Nullable since `SetNullContentAuthorFksOnUserErasure1794610000000`: the FK
+  // to `users` was `ON DELETE CASCADE`, so erasing one member's account
+  // deleted the company profile, its team roster, its jobs and its reviews. It is now `ON DELETE SET NULL`, so
+  // NULL here means "the company profile is unclaimed" rather than "no such row".
+  // Read paths must render a removed-member placeholder instead of assuming
+  // a non-null id. See `ContentOwnerErasureService` for what happens to the
+  // row itself when the account goes.
   @Index('IDX_companies_owner_id')
-  @Column({ type: 'uuid' })
-  ownerId!: string;
+  @Column({ type: 'uuid', nullable: true })
+  ownerId!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

@@ -1,13 +1,19 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
+  HttpCode,
+  HttpStatus,
+  Logger,
   Param,
   ParseUUIDPipe,
   Post,
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { In, Repository } from 'typeorm';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import {
@@ -16,14 +22,18 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { RolesGuard } from '../auth/guards/roles.guard';
-import { UserRole } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { Feature } from '../common/feature.decorator';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { GetGovernanceFinancesQuery } from './dto/get-governance-finances.query';
+import { CreateGovernanceMotionDto } from './dto/create-governance-motion.dto';
 import { CreateGovernanceProposalDto } from './dto/create-governance-proposal.dto';
 import { CastGovernanceVoteDto } from './dto/cast-governance-vote.dto';
 import { GovernanceFinanceService } from './governance-finance.service';
 import { GovernanceOverviewService } from './governance-overview.service';
 import { GovernanceProposalService } from './governance-proposal.service';
+import { GovernanceProposalDTO } from './governance-proposal-response';
 import {
   ApiCookieAuth,
   ApiCreatedResponse,
@@ -32,8 +42,14 @@ import {
   ApiOkResponse,
   ApiOperation,
   ApiTags,
+  ApiTooManyRequestsResponse,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
+
+/** The platform roles that receive a "this motion is ready for screening"
+ *  alert. Mirrors `CommunityOwnerReviewService`'s `PLATFORM_STAFF_ROLES`
+ *  (moderators and admins). */
+const PLATFORM_STAFF_ROLES = [UserRole.Moderator, UserRole.Admin];
 
 // Read-only controller serving the structured data behind `/about/governance`.
 // Both endpoints follow the "structure in the DB, words in i18n" model: they
@@ -54,10 +70,15 @@ import {
 @Controller('governance')
 @UseGuards(ActiveMemberGuard)
 export class GovernanceController {
+  private readonly logger = new Logger(GovernanceController.name);
+
   constructor(
     private readonly governanceFinanceService: GovernanceFinanceService,
     private readonly governanceOverviewService: GovernanceOverviewService,
     private readonly governanceProposalService: GovernanceProposalService,
+    private readonly notifications: NotificationsService,
+    @InjectRepository(User)
+    private readonly users: Repository<User>,
   ) {}
 
   @Get('overview')
@@ -149,5 +170,150 @@ export class GovernanceController {
     @CurrentUser() user: CurrentUserData,
   ) {
     return this.governanceProposalService.castVote(user.userId, id, dto);
+  }
+
+  // ── Member motions (GOV-01) ──────────────────────────────────────────────
+  // Until these routes existed, only an admin could put anything to the
+  // community: `POST /governance/proposals` above is admin-gated, so the
+  // public Governance page promised members a vote on decisions members had
+  // no way to raise. A motion closes that loop from the other end.
+  //
+  // A member files the QUESTION and nothing more. The motion then has to earn
+  // its way onto a ballot: ten members must put their names to it (the
+  // proposer counts as the first), which moves it to `screening`, and only
+  // then does an admin decide whether it goes to a vote and in what window.
+  // The threshold is the point — it keeps the ballot from filling with motions
+  // one person cared about, without letting staff quietly bin a motion the
+  // community clearly wanted (a refusal is a recorded, reasoned act that the
+  // proposer is told about).
+  //
+  // A co-signature is NOT a vote: it says "put this to the community", and a
+  // co-signer is free to vote it down once it is on the ballot. That is why
+  // withdrawing one is a plain DELETE with no ceremony around it.
+  //
+  // All three writes carry `NotRestrictedGuard` for the same reason `castVote`
+  // does: a member under an active moderation restriction stays `active`, so
+  // the class-level `ActiveMemberGuard` alone would let them file and sign.
+
+  @Post('motions')
+  @UseGuards(NotRestrictedGuard)
+  @ApiOperation({
+    summary: 'File a member motion and start its co-signature drive',
+  })
+  @ApiCreatedResponse({
+    description:
+      'The filed motion at `gathering`, already carrying the proposer’s ' +
+      'own founding co-signature.',
+  })
+  @ApiForbiddenResponse({
+    description: 'A moderation restriction is in effect for the caller.',
+  })
+  @ApiTooManyRequestsResponse({
+    description:
+      'The caller has already filed a motion inside the per-member filing ' +
+      'window.',
+  })
+  createMotion(
+    @Body() dto: CreateGovernanceMotionDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.governanceProposalService.createMotion(dto, user.userId);
+  }
+
+  @Post('proposals/:id/cosign')
+  @UseGuards(NotRestrictedGuard)
+  @ApiOperation({
+    summary: 'Co-sign a member motion so it reaches staff screening',
+  })
+  @ApiCreatedResponse({
+    description: 'The motion with its updated co-signature count.',
+  })
+  @ApiForbiddenResponse({
+    description:
+      'A moderation restriction is in effect for the caller, or the ' +
+      'co-signature drive is no longer open.',
+  })
+  @ApiNotFoundResponse({ description: 'No motion with that id.' })
+  async cosignMotion(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+  ): Promise<GovernanceProposalDTO> {
+    const result = await this.governanceProposalService.cosign(id, user.userId);
+    // The signature that tips a motion over its threshold is the ONLY moment
+    // anything moves it to `screening`, so the staff alert fires here, after
+    // that write has committed, and never on the signatures before it.
+    if (result.hasReachedThreshold) {
+      await this.notifyPlatformStaffOfMotion(result.proposal);
+    }
+    return result.proposal;
+  }
+
+  @Delete('proposals/:id/cosign')
+  @UseGuards(NotRestrictedGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Withdraw the caller’s co-signature from a motion' })
+  @ApiOkResponse({
+    description: 'The motion with its updated co-signature count.',
+  })
+  @ApiForbiddenResponse({
+    description:
+      'A moderation restriction is in effect for the caller, the caller is ' +
+      'the proposer (whose founding signature cannot be withdrawn), or the ' +
+      'drive has already closed.',
+  })
+  @ApiNotFoundResponse({ description: 'No motion with that id.' })
+  withdrawCosignature(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.governanceProposalService.withdrawCosignature(id, user.userId);
+  }
+
+  /**
+   * Tells platform staff a motion has cleared its co-signature threshold and
+   * is waiting on a screening decision.
+   *
+   * Best-effort by construction, following `CommunityOwnerReviewService`'s
+   * `notifyPlatformStaff` contract: it runs AFTER the co-signature write has
+   * committed and its own try/catch swallows every failure into a log line. A
+   * bell that could not be written must never turn a member's successful
+   * co-signature into a 500.
+   *
+   * `createForRecipients` is deliberately called WITHOUT an `actorId`. That
+   * argument applies each recipient's block/mute list, which is right for
+   * member-driven notifications and wrong here: this is a duty alert, and a
+   * motion ten members are behind must not go unscreened because the
+   * moderator on shift once muted whoever happened to cast the tenth
+   * signature.
+   */
+  private async notifyPlatformStaffOfMotion(
+    proposal: GovernanceProposalDTO,
+  ): Promise<void> {
+    try {
+      const staff = await this.users.find({
+        where: {
+          role: In(PLATFORM_STAFF_ROLES),
+          status: UserStatus.Active,
+        },
+        select: { id: true },
+      });
+      const recipientIds = staff.map((staffUser) => staffUser.id);
+      if (!recipientIds.length) return;
+
+      await this.notifications.createForRecipients(
+        recipientIds,
+        NotificationType.GovernanceMotionReadyForReview,
+        {
+          source: 'governance',
+          proposalId: proposal.id,
+          title: proposal.title,
+          cosignatureCount: proposal.cosignatureCount,
+        },
+      );
+    } catch (error) {
+      this.logger.error(
+        `Motion ${proposal.id} reached its co-signature threshold, but notifying platform staff failed: ${String(error)}`,
+      );
+    }
   }
 }

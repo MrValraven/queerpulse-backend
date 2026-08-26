@@ -10,6 +10,7 @@ import { Shaping, ShapingKind } from './entities/shaping.entity';
 import { Skill } from './entities/skill.entity';
 import { SocialLink } from './entities/social-link.entity';
 import { WorkItem, WorkLink } from './entities/work-item.entity';
+import { ActivityBand } from './last-active';
 import { OpenToEntry } from './open-to';
 import { facetsForLabels } from './identities';
 import { matchNeighbourhood } from './neighbourhoods';
@@ -104,9 +105,41 @@ export interface ProfileRelations {
   featuredCommunities: FeaturedCommunityRefView[];
 }
 
+/**
+ * How many of the VIEWER's own accepted connections have vouched for the
+ * member whose profile this is: the "three members you know vouched for them"
+ * trust cue, computed per read because it is viewer-relative and therefore
+ * never a column.
+ *
+ * `null` means "no answer", and there are exactly two reasons for it, both
+ * deliberate:
+ *  - the viewer IS the member (mutual vouchers with yourself is not a
+ *    question), and
+ *  - the member has turned `vouchersVisible` off. A viewer-relative count over
+ *    a set the viewer already knows by name is a partial roster: with three
+ *    connections and a count of one, the viewer has narrowed "who vouched for
+ *    them" to three people, and often to one. A member who hid their roster
+ *    hid it from this read too. `null` is honest where `0` would be a lie
+ *    ("nobody you know did") about a set the viewer is not allowed to see, and
+ *    it leaks nothing new: `vouchersVisible` is already on the wire for every
+ *    viewer (see ProfileCard).
+ *
+ * `0` therefore always means the real answer is zero.
+ */
+export type MutualVoucherCount = number | null;
+
 export interface FullProfileResponse extends ProfileCard {
   verified: boolean;
   joinedAt: string;
+  // See MutualVoucherCount. Gated in ProfilesService, never here.
+  mutualVoucherCount: MutualVoucherCount;
+  // The coarse "recently active" band, or `null` when the member has opted out
+  // (for any viewer but themselves) and when nothing has been recorded yet.
+  // NEVER a timestamp: the finest value behind this is a month, and the finest
+  // value on the wire is one of three buckets. See ./last-active.ts, and note
+  // that `LimitedProfileResponse` deliberately carries no band at all, same as
+  // it carries no location or openTo.
+  activityBand: ActivityBand | null;
   bio: string | null;
   // Portuguese translation of `bio`. Ungated — same as `bio` above.
   bioPt: string | null;
@@ -154,6 +187,12 @@ export interface FullProfileResponse extends ProfileCard {
 export interface LimitedProfileResponse extends ProfileCard {
   verified: boolean;
   joinedAt: string;
+  // Carried on the limited card on purpose, unlike location/openTo/activity.
+  // The limited card is precisely the "should I send this stranger a
+  // connection request?" surface, which is where a trust cue is worth most,
+  // and it discloses no more than the ungated `vouchCount` already beside it.
+  // Same gate as the full profile: see MutualVoucherCount.
+  mutualVoucherCount: MutualVoucherCount;
   openTo: [];
   socials: [];
   work: [];
@@ -186,6 +225,11 @@ export interface MemberCard extends ProfileCard {
   // `MostVouched` sort's vouchCount in being a plain derived number, not
   // profile content.
   years: number;
+  // The coarse "recently active" band. `null` covers three distinct cases the
+  // card renders identically (as nothing at all): the member opted out, the
+  // member has held no session since the signal existed, and this build simply
+  // did not ask for it. See ./last-active.ts.
+  activityBand: ActivityBand | null;
 }
 
 export const SHAPING_KIND_ORDER: ShapingKind[] = [
@@ -268,6 +312,10 @@ export function toMemberCard(
   // profile from their own results (see `ProfilesService.searchMembers`), so
   // this can legitimately be true, not just a theoretical parameter.
   isOwner = false,
+  // Resolved by the caller through `visibleBand`, which is where the member's
+  // opt-out is applied. Defaults to `null` so a caller that has no signal in
+  // scope renders no band rather than an invented one.
+  activityBand: ActivityBand | null = null,
 ): MemberCard {
   // The directory lists every member (§8), but only `open` profiles expose
   // location/openTo on the card — `network`/`private` keep them blank here,
@@ -290,6 +338,7 @@ export function toMemberCard(
     hood: locationVisible ? matchNeighbourhood(p.location) : null,
     identityFacets: facetsForLabels(p.discoverableIdentities ?? []),
     years: tenureYears(p.joinedAt),
+    activityBand,
   };
 }
 
@@ -317,11 +366,21 @@ export function toFullProfile(
   // `MediaCropService.getMany` for the whole profile read and passes the
   // resulting Map straight through; this mapper stays synchronous.
   crops: Map<string, CropRect> = new Map(),
+  // Already gated by `visibleBand` in the caller: this mapper never decides
+  // whether the band may be shown, exactly like `crops` above is never fetched
+  // here.
+  activityBand: ActivityBand | null = null,
+  // Already gated by the caller, exactly like `activityBand` above: this
+  // mapper never decides whether the count may be shown. See
+  // MutualVoucherCount and ProfilesService.loadMutualVoucherCount.
+  mutualVoucherCount: MutualVoucherCount = null,
 ): FullProfileResponse {
   return {
     ...toProfileCard(p, vouchCount),
     verified: p.verified,
     joinedAt: p.joinedAt.toISOString(),
+    mutualVoucherCount,
+    activityBand,
     bio: p.bio,
     bioPt: p.bioPt,
     // Overrides the ungated `avatarUrl` the spread above copied from
@@ -386,6 +445,8 @@ export function toLimitedProfile(
   // `toMemberCard`'s signature rather than assuming `isOwner` is always
   // false, in case an owner-preview code path exists somewhere.
   isOwner = false,
+  // Already gated by the caller. See MutualVoucherCount.
+  mutualVoucherCount: MutualVoucherCount = null,
 ): LimitedProfileResponse {
   return {
     ...toProfileCard(p, vouchCount),
@@ -396,6 +457,7 @@ export function toLimitedProfile(
     avatarUrl: gateAvatarUrl(p, isOwner),
     verified: p.verified,
     joinedAt: p.joinedAt.toISOString(),
+    mutualVoucherCount,
     openTo: [],
     socials: [],
     work: [],

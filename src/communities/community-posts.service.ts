@@ -34,8 +34,11 @@ import {
   ReportStatus,
   ReportSubjectType,
 } from '../reports/entities/report.entity';
-import { ReportDTO, toReportDTO } from '../reports/report-response';
 import { Profile } from '../users/entities/profile.entity';
+import {
+  CommunityReportDTO,
+  toCommunityReportDTO,
+} from './community-report-response';
 import {
   CommunityPostDTO,
   CommunityPostHistoryResponse,
@@ -241,6 +244,53 @@ export class CommunityPostsService {
     return paginate(qb, normalizedPage, (rows) =>
       this.toPostDTOs(rows, viewerId, viewerRole),
     );
+  }
+
+  /**
+   * `GET /communities/:slug/posts/:id` — one post, for its permalink page
+   * (SOC-02). Before this the only way to read a post was to page through
+   * `listPosts` until it appeared, so a "someone replied to your post"
+   * notification could only ever land on the top of a timeline.
+   *
+   * Every gate `listPosts` applies to the same row is applied here, so a
+   * permalink can never show what the timeline withholds:
+   *
+   * - a PRIVATE community is a 404 to a non-member (`assertViewable`), the
+   *   same not-found the timeline gives, so holding a post id proves nothing;
+   * - a blocked-either-way or muted author's post is a 404, matching the
+   *   in-query `blockFilter.excludeHidden` the timeline runs;
+   * - a moderator-hidden post is a 404 for a non-staff viewer, because
+   *   `toPostDTOs` drops it and leaves the array empty. Owner/co-owner/mod
+   *   still read it, exactly as they still see it in the timeline.
+   *
+   * A non-member of a PUBLIC/request/invite community reads the post the same
+   * way they read the timeline: the DTO's own `canEdit`/`canDelete` flags stay
+   * false, so the page renders it without write affordances.
+   */
+  async getPost(
+    slug: string,
+    postId: string,
+    viewerId: string,
+  ): Promise<CommunityPostDTO> {
+    const community = await this.loadCommunityOr404(slug);
+    await this.assertViewable(community, viewerId);
+    const post = await this.loadPostOr404(community.id, postId);
+    if (post.authorId) {
+      const hiddenAuthorIds = await this.blockFilter.hiddenUserIds(viewerId, [
+        post.authorId,
+      ]);
+      if (hiddenAuthorIds.has(post.authorId)) {
+        throw new NotFoundException('Post not found');
+      }
+    }
+    const viewerRole = await this.viewerRoleIn(community.id, viewerId);
+    const [dto] = await this.toPostDTOs([post], viewerId, viewerRole);
+    if (!dto) {
+      // `toPostDTOs` withheld it: moderator-hidden, and this viewer is not
+      // staff. Same answer as a post that never existed.
+      throw new NotFoundException('Post not found');
+    }
+    return dto;
   }
 
   async createPost(
@@ -604,22 +654,19 @@ export class CommunityPostsService {
   // shape, narrowed from admin-wide to one community and from totals to the
   // actual rows a moderator queue needs.
   //
-  // NOTE for whoever wires the controller route: this has to live on
-  // `CommunitiesController` (`GET /communities/:slug/reports` — a route's
-  // path is always controller-prefix + method path, and this service's own
-  // `CommunityPostsController` is mounted at `/community-posts`, not
-  // `/communities`). `CommunitiesController` belongs to a parallel task in
-  // this effort, so only this service method is added here; wiring it up is
-  // a one-line addition mirroring every other community-scoped GET already on
-  // that controller:
-  //   @Get(':slug/reports')
-  //   listReports(@CurrentUser() user: CurrentUserData, @Param('slug') slug: string) {
-  //     return this.communityPostsService.listCommunityReports(slug, user.userId);
-  //   }
+  // Each row carries the content it is about (excerpt, author, thread id,
+  // moderation state) so a moderator reads the statement before acting on it.
+  // Resolving that stays batched: whatever the page size, this runs a fixed
+  // five queries (reports, posts, replies, authors, moderation states) rather
+  // than one lookup per report.
+  //
+  // The route lives on `CommunitiesController` (`GET /communities/:slug/reports`),
+  // because a route's path is controller-prefix + method path and this
+  // service's own `CommunityPostsController` is mounted at `/community-posts`.
   async listCommunityReports(
     slug: string,
     actorId: string,
-  ): Promise<ReportDTO[]> {
+  ): Promise<CommunityReportDTO[]> {
     const community = await this.loadCommunityOr404(slug);
     const membership = await this.assertMember(community.id, actorId);
     if (!CommunityPostsService.isStaffRole(membership.role)) {
@@ -663,7 +710,88 @@ export class CommunityPostsService {
       .take(DEFAULT_LIST_LIMIT)
       .getMany();
 
-    return rows.map(toReportDTO);
+    return this.attachReportedContent(rows);
+  }
+
+  /**
+   * Resolves a page of community reports to their content in a fixed number
+   * of queries and maps the DTOs.
+   *
+   * The subject ids arriving here already passed the scoping predicate above,
+   * so every one of them is a real uuid of a post or reply inside this
+   * community. The posts/replies loads are still unconditional `find`s on
+   * those ids: a row can be tombstoned or moderation-hidden and must still
+   * reach the moderator, which is the whole point of the queue.
+   */
+  private async attachReportedContent(
+    rows: Report[],
+  ): Promise<CommunityReportDTO[]> {
+    if (!rows.length) return [];
+
+    const postIds = [
+      ...new Set(
+        rows
+          .filter((report) => report.subjectType === ReportSubjectType.Post)
+          .map((report) => report.subjectId),
+      ),
+    ];
+    const replyIds = [
+      ...new Set(
+        rows
+          .filter((report) => report.subjectType === ReportSubjectType.Reply)
+          .map((report) => report.subjectId),
+      ),
+    ];
+
+    const [postRows, replyRows] = await Promise.all([
+      postIds.length
+        ? this.posts.find({ where: { id: In(postIds) } })
+        : Promise.resolve([]),
+      replyIds.length
+        ? this.replies.find({ where: { id: In(replyIds) } })
+        : Promise.resolve([]),
+    ]);
+
+    const postsById = new Map(postRows.map((post) => [post.id, post]));
+    const repliesById = new Map(replyRows.map((reply) => [reply.id, reply]));
+
+    const [authors, states] = await Promise.all([
+      new MemberLookup(this.profiles).byUserIds([
+        ...new Set(
+          nonNullIds([
+            ...postRows.map((post) => post.authorId),
+            ...replyRows.map((reply) => reply.authorId),
+          ]),
+        ),
+      ]),
+      this.moderationStatesFor(postIds, replyIds),
+    ]);
+
+    const now = new Date();
+    return rows.map((report) => {
+      // Keyed by the report's OWN subject type: a post and a reply are both
+      // addressed by uuid, so looking a subject id up in both maps would let
+      // one table answer for the other.
+      const isReply = report.subjectType === ReportSubjectType.Reply;
+      const post = isReply ? null : (postsById.get(report.subjectId) ?? null);
+      const reply = isReply
+        ? (repliesById.get(report.subjectId) ?? null)
+        : null;
+      const authorId = isReply
+        ? (reply?.authorId ?? null)
+        : (post?.authorId ?? null);
+      return toCommunityReportDTO(
+        report,
+        {
+          post,
+          reply,
+          author: authorRefOf(authors, authorId),
+          moderation:
+            states.get(report.subjectId) ?? CommunityPostsService.VISIBLE,
+        },
+        now,
+      );
+    });
   }
 
   // Resolve a single reply's author and map it (with the actor's role) so the

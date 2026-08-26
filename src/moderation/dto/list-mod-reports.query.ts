@@ -8,7 +8,18 @@ import {
 const TABS = ['open', 'appeals', 'resolved'] as const;
 export type ModReportsTab = (typeof TABS)[number];
 
-const FILTERS = ['all', 'emergencies', 'mine'] as const;
+/**
+ * `overdue` and `surge` are the two TS-06 triage filters.
+ *
+ * `overdue` is "the response window has already closed": `sla_due_at` is in
+ * the past and the report is still unresolved. `surge` is "several different
+ * people are reporting the same thing", which is the shape of both a genuine
+ * emergency and a brigade, and the queue could not tell either of them from
+ * thirty independent complaints. See `ModerationService.applySurgeFilter` for
+ * the thresholds, which are the ones `CommunityAutoFreezeService` already
+ * uses one layer down.
+ */
+const FILTERS = ['all', 'emergencies', 'mine', 'overdue', 'surge'] as const;
 export type ModReportsFilter = (typeof FILTERS)[number];
 
 const SORTS = ['priority', 'age'] as const;
@@ -48,6 +59,22 @@ export class ListModReportsQuery {
   @IsOptional()
   @IsString()
   subjectId?: string;
+
+  /**
+   * Narrows the queue to reports that came from ONE community, by its slug
+   * (TS-14) — the same value `ModReportDTO.community` reports back, so a
+   * moderator can click a row's community chip and see everything else from
+   * that room.
+   *
+   * Attribution follows `admin-communities/community-report-scope.ts` exactly:
+   * a `community` report (the slug itself), a `post` or `reply` whose content
+   * belongs to that community, and a `gathering` hosted inside it. A member,
+   * message or venue report is NOT attributed to a community by either
+   * surface, so this filter never invents one for them.
+   */
+  @IsOptional()
+  @IsString()
+  community?: string;
 
   @IsOptional()
   @IsIn(SORTS)

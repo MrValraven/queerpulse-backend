@@ -73,6 +73,10 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     // exposed on public browse.
     riskScore: 0,
     riskReasons: [],
+    // LOC-01 decision trail — null until a moderator has decided on the row.
+    decisionReason: null,
+    decidedById: null,
+    decidedAt: null,
     // Null = lister added no virtual-tour link.
     virtualTourUrl: null,
     // Null = still looking / still live to the public (owner hasn't marked it

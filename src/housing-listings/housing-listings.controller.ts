@@ -16,6 +16,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateHousingEnquiryDto } from './dto/create-housing-enquiry.dto';
 import { CreateHousingListingDto } from './dto/create-housing-listing.dto';
@@ -51,6 +52,7 @@ export class HousingListingsController {
   constructor(private readonly service: HousingListingsService) {}
 
   @Post()
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Create a housing listing for the current member' })
   @ApiCreatedResponse({ description: 'The newly created housing listing.' })
   @ApiConflictResponse({
@@ -100,6 +102,7 @@ export class HousingListingsController {
   }
 
   @Patch(':ref')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: "Update one of the member's own housing listings" })
   @ApiOkResponse({ description: 'The updated housing listing.' })
   @ApiNotFoundResponse({
@@ -194,6 +197,7 @@ export class HousingListingsController {
   }
 
   @Post(':ref/enquiries')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: "Send an enquiry to a live listing's lister" })
   @ApiCreatedResponse({
     description: 'The conversation id for the delivered enquiry.',

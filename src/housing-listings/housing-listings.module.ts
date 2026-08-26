@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConnectionsModule } from '../connections/connections.module';
+import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { HousingViewingsModule } from '../housing-viewings/housing-viewings.module';
 import { MessagingModule } from '../messaging/messaging.module';
@@ -12,6 +14,7 @@ import { AdminHousingListingsController } from './admin-housing-listings.control
 import { HousingDirectoryController } from './housing-directory.controller';
 import { HousingDirectoryService } from './housing-directory.service';
 import { HousingListingsController } from './housing-listings.controller';
+import { HousingListingModerationService } from './housing-listing-moderation.service';
 import { HousingListingsService } from './housing-listings.service';
 import { HousingListingExpirySweeperService } from './housing-listing-expiry-sweeper.service';
 import { HousingListing } from './entities/housing-listing.entity';
@@ -21,7 +24,12 @@ import { HousingListing } from './entities/housing-listing.entity';
     // UserStaffRole is registered here too — `HousingModerationGuard` (on
     // `AdminHousingListingsController`) needs it to check the additive
     // `housing_moderator` staff role.
-    TypeOrmModule.forFeature([HousingListing, UserStaffRole]),
+    // `ModAuditLog` gets its own registration here (TypeORM permits overlapping
+    // ones): `ModerationModule` exports nothing at all, so importing it would
+    // not make `Repository<ModAuditLog>` reachable. Same precedent
+    // `AdminMembersModule` follows. `HousingListingModerationService` writes one
+    // immutable row per decision into the shared moderation trail.
+    TypeOrmModule.forFeature([HousingListing, UserStaffRole, ModAuditLog]),
     // UsersModule exports the Profile repository (member-ref hydration).
     UsersModule,
     // MessagingModule exports MessagingService (enquiry delivery).
@@ -37,6 +45,10 @@ import { HousingListing } from './entities/housing-listing.entity';
     // read discloses the exact point/address only to the owner or a connected
     // member (`areConnected`).
     ConnectionsModule,
+    // Exports NotificationsService — every moderation decision tells the lister
+    // in-app (and, via `PushNotificationListener`, on their phone). No cycle:
+    // `NotificationsModule` imports nothing that reaches back into housing.
+    NotificationsModule,
     // Exports HousingViewingsService — the address-privacy gate ALSO unlocks the
     // exact point/address to an enquirer with a lister-accepted viewing.
     HousingViewingsModule,
@@ -48,6 +60,9 @@ import { HousingListing } from './entities/housing-listing.entity';
   ],
   providers: [
     HousingListingsService,
+    // The moderator surface (review queue + decisions). Kept apart from
+    // `HousingListingsService`, which is owner-scoped by construction.
+    HousingListingModerationService,
     HousingDirectoryService,
     // HSG-3 daily expiry sweep (see the service's own doc comment). Registered
     // here, not exported — it's a background job, not a dependency of another

@@ -77,6 +77,7 @@ import { ListingReview } from '../listings/entities/listing-review.entity';
 import {
   Event,
   EventStatus,
+  EventVenueConfirmation,
   EventVisibility,
 } from '../events/entities/event.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
@@ -3819,6 +3820,12 @@ async function seedListings(
           venue: listing.name,
           status: EventStatus.Published,
           visibility: EventVisibility.Public,
+          // Venue consent (LOC-16). An attachment now starts `pending`, and a
+          // pending one is withheld from the anonymous venue page, so without
+          // this a fresh seed would show an empty "what's on here" block. These
+          // are hosted by the listing's own owner, so `confirmed` is truthful.
+          venueConfirmation: EventVenueConfirmation.Confirmed,
+          venueConfirmedAt: new Date(),
         }),
       );
     }

@@ -85,6 +85,24 @@ export class ForumThread {
   @Column({ type: 'text', array: true, default: () => "'{}'" })
   tags!: string[];
 
+  // The reply this thread's author (or a platform moderator) marked as the
+  // answer — a pointer into `forum_post`, null while the question is open.
+  //
+  // This is what makes the long-standing `unanswered` sort mean what its label
+  // says: `ForumThreadsService.list` filters on `accepted_post_id IS NULL`,
+  // where it used to filter on `reply_count = 0` (so a question with forty
+  // replies and no resolution counted as answered). Backed by the partial
+  // keyset index `IDX_forum_thread_unanswered_created_at_id`, which covers
+  // exactly the rows that sort can return — migration-owned, since a partial
+  // DESC composite is not expressible as an `@Index` decorator.
+  //
+  // `ON DELETE SET NULL` on the FK: a hard-deleted post clears the mark and
+  // leaves the thread standing. A soft tombstone never reaches the FK, so
+  // `setAcceptedPost` refuses to mark a tombstoned post and the read path drops
+  // the mark from a post tombstoned after the fact.
+  @Column({ type: 'uuid', nullable: true })
+  acceptedPostId!: string | null;
+
   // Denormalized copy of the OP post's `voteCount`, kept in sync by
   // `ForumPostsService.vote` when the voted post `is_op`. Lets the thread-list
   // card render upvotes and the `top` sort order threads without joining

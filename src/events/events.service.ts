@@ -9,6 +9,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
 import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
+import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import { normalizePage, paginate } from '../common/pagination';
 import { randomBytes } from 'node:crypto';
 import {
@@ -22,7 +23,14 @@ import {
 } from 'typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
-import { ListingLookupService } from '../listings/listing-lookup.service';
+import {
+  AttachableListingRef,
+  ListingLookupService,
+} from '../listings/listing-lookup.service';
+import {
+  ListingAccessibilityAnswer,
+  normalizeAccessibilityAnswers,
+} from '../listings/listing-accessibility';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -31,6 +39,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { AttendeeStatusFilter } from './dto/list-attendees.query';
+import type { EventCostFilter } from './dto/list-events.query';
 import type {
   RecurrenceCadence,
   RecurrenceEndType,
@@ -42,13 +51,16 @@ import {
   EventOrganizerView,
   EventSummary,
   toAttendeeView,
+  toEventAnnouncementView,
   toEventSummary,
+  toEventVenueAttachmentView,
   toLineupEntryView,
   toOrganizerView,
   toRsvpDetailsView,
 } from './event-response';
 import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBookmarksService } from './event-bookmarks.service';
+import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
 import { EventLineupEntry } from './entities/event-lineup-entry.entity';
@@ -58,7 +70,12 @@ import {
   EventSeriesCadence,
   EventSeriesEndType,
 } from './entities/event-series.entity';
-import { Event, EventStatus, EventVisibility } from './entities/event.entity';
+import {
+  Event,
+  EventStatus,
+  EventVenueConfirmation,
+  EventVisibility,
+} from './entities/event.entity';
 import { RsvpService } from './rsvp.service';
 
 /** Edit/cancel scope for a recurring occurrence — see `SeriesScopeQuery`'s doc. */
@@ -80,6 +97,12 @@ interface AppliedEventUpdate {
   shouldReconcileWaitlist: boolean;
   /** `startAt` / location fields that moved, empty when nothing notifiable did. */
   materialChanges: string[];
+  /** LOC-16: this patch left the gathering attached to a directory listing
+   *  that has never been asked about it, and the gathering can now reach that
+   *  venue's public page. Raised AFTER the transaction commits, like every
+   *  other notification here: an ask that cannot be un-sent must not describe
+   *  a write that rolled back. `null` when there is nothing to ask. */
+  venueOwnerToNotify: AttachableListingRef | null;
 }
 
 export interface LineupEntryInput {
@@ -106,6 +129,20 @@ export interface CreateEventInput {
   visibility?: EventVisibility;
   status?: EventStatus.Draft | EventStatus.Published;
   coverImageUrl?: string;
+  // ── Where it actually is (LOC-04) — see `Event.address`'s doc. Same
+  // absent/null/value three-way as `communitySlug` below on update; `create()`
+  // treats null/''/absent alike.
+  address?: string | null;
+  arrivalNotes?: string | null;
+  neighbourhood?: string | null;
+  language?: string | null;
+  eventType?: string | null;
+  accessibility?: {
+    answers?: Partial<Record<string, ListingAccessibilityAnswer>>;
+    note?: string;
+  };
+  // Free-text door price (LOC-18). Display only; no payment code anywhere.
+  cost?: string | null;
   // `null`/`''` (update only — `create()` treats them the same as absent,
   // since there's no existing community to detach from) explicitly clears
   // `communityId`; a non-empty slug resolves/authorizes it; absent (the
@@ -167,6 +204,12 @@ export class EventsService {
     private readonly lineupEntries: Repository<EventLineupEntry>,
     @InjectRepository(EventSeries)
     private readonly eventSeries: Repository<EventSeries>,
+    // Host announcements (LOC-06) — read here so an event's detail can carry
+    // "we moved to the back room" on the page itself, not only in a
+    // notification that has since scrolled away. Writing them belongs to
+    // `EventAnnouncementsService`.
+    @InjectRepository(EventAnnouncement)
+    private readonly announcements: Repository<EventAnnouncement>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly usersService: UsersService,
     private readonly rsvpService: RsvpService,
@@ -230,9 +273,27 @@ export class EventsService {
       );
     }
 
-    const listingId = dto.listingId
-      ? await this.assertLiveListing(dto.listingId)
+    // LOC-16. The venue is resolved to a full ref (id, slug, name, owner) so
+    // the attachment can ask its owner for consent below. The attachment
+    // itself starts PENDING: until the owner confirms, the gathering is
+    // withheld from the anonymous, CDN-cached version of that venue's page.
+    const venueListing = dto.listingId
+      ? await this.assertAttachableListing(dto.listingId)
       : null;
+    const listingId = venueListing?.id ?? null;
+    const visibilityReachesVenuePage =
+      visibility === EventVisibility.Public ||
+      visibility === EventVisibility.Members;
+    const status = dto.status ?? EventStatus.Published;
+    // The ask is raised once, for the whole create call. A weekly series
+    // creates twelve rows, and twelve bells for one decision is not an ask,
+    // it is a flood, so every occurrence is stamped as already-asked and one
+    // notification names the first of them.
+    const shouldAskVenueOwner =
+      venueListing !== null &&
+      venueListing.ownerId !== null &&
+      status === EventStatus.Published &&
+      visibilityReachesVenuePage;
 
     // MSG-10 — a `recurrence` rule expands this one create() call into a
     // whole series: `resolveOccurrences` computes every occurrence's own
@@ -281,12 +342,33 @@ export class EventsService {
         timezone: dto.timezone,
         venue: dto.venue ?? null,
         listingId,
+        // LOC-16, see `EventVenueConfirmation`. Set explicitly rather than
+        // left to the column default so the in-memory row and the stored row
+        // agree from the first line of code that reads either.
+        venueConfirmation: EventVenueConfirmation.Pending,
+        venueOwnerNotifiedAt: shouldAskVenueOwner ? new Date() : null,
         isOnline: dto.isOnline ?? false,
         onlineUrl: dto.onlineUrl ?? null,
         capacity: dto.capacity ?? null,
         visibility,
-        status: dto.status ?? EventStatus.Published,
+        status,
         coverImageUrl: dto.coverImageUrl ?? null,
+        // LOC-04/LOC-18. `?? null` for every one of them, including the empty
+        // string a wizard sends for a field the host skipped: an empty
+        // address is "no address given", never a zero-length street.
+        address: EventsService.blankToNull(dto.address),
+        arrivalNotes: EventsService.blankToNull(dto.arrivalNotes),
+        neighbourhood: EventsService.blankToNull(dto.neighbourhood),
+        language: EventsService.blankToNull(dto.language),
+        eventType: EventsService.blankToNull(dto.eventType),
+        // Always a COMPLETE six-question map on write, so a reader never has
+        // to tell an absent key from an unanswered question — the whole point
+        // of the three-valued model this borrows from `listings`.
+        accessibilityAnswers: normalizeAccessibilityAnswers(
+          dto.accessibility?.answers,
+        ),
+        accessibilityNote: dto.accessibility?.note?.trim() ?? '',
+        cost: EventsService.blankToNull(dto.cost),
         communityId,
         allowWaitlist: dto.allowWaitlist ?? true,
         showAttendeeCount: dto.showAttendeeCount ?? true,
@@ -299,6 +381,9 @@ export class EventsService {
     // `firstSaved` is always set: `occurrences` always has at least one entry
     // (the gathering's own start), so the loop runs at least once with
     // `index === 0`.
+    if (shouldAskVenueOwner && venueListing) {
+      await this.notifyVenueOwnerBestEffort(firstSaved!, venueListing);
+    }
     return this.buildDetail(firstSaved!, hostId);
   }
 
@@ -451,6 +536,26 @@ export class EventsService {
         );
       }
     }
+    // LOC-16: ask the venue's owner, after the write is durable. A series
+    // edit under `scope: 'future'` can leave several occurrences newly
+    // attached, so the owner is asked about the FIRST of them and the rest are
+    // stamped as asked, matching `create()`'s one-ask-per-series rule.
+    const venueAsks = applied.filter(
+      (outcome) => outcome.venueOwnerToNotify !== null,
+    );
+    const [firstAsk] = venueAsks;
+    if (firstAsk?.venueOwnerToNotify) {
+      await this.notifyVenueOwnerBestEffort(
+        firstAsk.event,
+        firstAsk.venueOwnerToNotify,
+      );
+      for (const outcome of venueAsks.slice(1)) {
+        await this.events.update(
+          { id: outcome.event.id },
+          { venueOwnerNotifiedAt: new Date() },
+        );
+      }
+    }
 
     const saved = applied[0]?.event ?? event;
     return this.buildDetail(saved, userId);
@@ -527,11 +632,18 @@ export class EventsService {
     // detaches it (falling back to plain-text `venue`), a uuid
     // resolves+validates the new link.
     let listingId = event.listingId;
+    let venueListing: AttachableListingRef | null = null;
     if (dto.listingId !== undefined) {
-      listingId = dto.listingId
-        ? await this.assertLiveListing(dto.listingId)
+      venueListing = dto.listingId
+        ? await this.assertAttachableListing(dto.listingId, event)
         : null;
+      listingId = venueListing?.id ?? null;
     }
+    // LOC-16. A NEW venue is a new ask: the consent state, its stamp and the
+    // "already asked" marker all reset together, so an owner never inherits
+    // another venue's confirmation and the next ask is never suppressed by a
+    // marker left over from a venue this gathering has since left.
+    const isNewVenue = listingId !== event.listingId;
 
     const oldStartAt = event.startAt;
     const oldCapacity = event.capacity;
@@ -540,6 +652,12 @@ export class EventsService {
     const oldVenue = event.venue;
     const oldIsOnline = event.isOnline;
     const oldOnlineUrl = event.onlineUrl;
+    // The street address and the arrival note are "where", exactly as much as
+    // the venue name is — a host who moves the door and tells nobody is the
+    // failure this notification exists to prevent (LOC-04).
+    const oldAddress = event.address;
+    const oldArrivalNotes = event.arrivalNotes;
+    const oldNeighbourhood = event.neighbourhood;
 
     // Validate the resulting schedule (effective start/end after the patch).
     const nextStartAt =
@@ -564,6 +682,13 @@ export class EventsService {
       ...(dto.timezone !== undefined ? { timezone: dto.timezone } : {}),
       ...(dto.venue !== undefined ? { venue: dto.venue ?? null } : {}),
       ...(dto.listingId !== undefined ? { listingId } : {}),
+      ...(isNewVenue
+        ? {
+            venueConfirmation: EventVenueConfirmation.Pending,
+            venueConfirmedAt: null,
+            venueOwnerNotifiedAt: null,
+          }
+        : {}),
       ...(dto.isOnline !== undefined ? { isOnline: dto.isOnline } : {}),
       ...(dto.onlineUrl !== undefined
         ? { onlineUrl: dto.onlineUrl ?? null }
@@ -580,6 +705,41 @@ export class EventsService {
         : {}),
       ...(dto.showAttendeeCount !== undefined
         ? { showAttendeeCount: dto.showAttendeeCount }
+        : {}),
+      // LOC-04/LOC-18. Absent leaves the stored value alone; `null` or `''`
+      // clears it; a value replaces it.
+      ...(dto.address !== undefined
+        ? { address: EventsService.blankToNull(dto.address) }
+        : {}),
+      ...(dto.arrivalNotes !== undefined
+        ? { arrivalNotes: EventsService.blankToNull(dto.arrivalNotes) }
+        : {}),
+      ...(dto.neighbourhood !== undefined
+        ? { neighbourhood: EventsService.blankToNull(dto.neighbourhood) }
+        : {}),
+      ...(dto.language !== undefined
+        ? { language: EventsService.blankToNull(dto.language) }
+        : {}),
+      ...(dto.eventType !== undefined
+        ? { eventType: EventsService.blankToNull(dto.eventType) }
+        : {}),
+      ...(dto.cost !== undefined
+        ? { cost: EventsService.blankToNull(dto.cost) }
+        : {}),
+      // Accessibility answers MERGE per question rather than replacing the
+      // map: a host correcting "accessible toilet" must not silently blank
+      // the other five answers back to unknown. The note replaces wholesale,
+      // being one value.
+      ...(dto.accessibility?.answers !== undefined
+        ? {
+            accessibilityAnswers: normalizeAccessibilityAnswers({
+              ...normalizeAccessibilityAnswers(event.accessibilityAnswers),
+              ...dto.accessibility.answers,
+            }),
+          }
+        : {}),
+      ...(dto.accessibility?.note !== undefined
+        ? { accessibilityNote: dto.accessibility.note.trim() }
         : {}),
     });
 
@@ -616,16 +776,120 @@ export class EventsService {
     if (
       saved.venue !== oldVenue ||
       saved.isOnline !== oldIsOnline ||
-      saved.onlineUrl !== oldOnlineUrl
+      saved.onlineUrl !== oldOnlineUrl ||
+      saved.address !== oldAddress ||
+      saved.arrivalNotes !== oldArrivalNotes ||
+      saved.neighbourhood !== oldNeighbourhood
     ) {
       materialChanges.push('location');
     }
+    // LOC-16: is there a venue owner who still has to be asked?
+    //
+    // Four separate edits arrive here and all four have to raise the ask
+    // exactly once: attaching a venue for the first time, swapping one venue
+    // for another, PUBLISHING a draft that already named a venue, and WIDENING
+    // a `network`-scoped gathering to `public`/`members`. The last two are why
+    // this is computed from the SAVED row rather than from `dto.listingId`:
+    // neither of them touches the venue field at all, and both are the moment
+    // the gathering first becomes something that can appear on a business's
+    // public page.
+    //
+    // `venueOwnerNotifiedAt` is the idempotency key. It is stamped by
+    // `notifyVenueOwnerBestEffort` after the send and cleared only when the
+    // venue itself changes, so no sequence of edits can ask the same owner
+    // about the same attachment twice.
+    const venueOwnerToNotify = await this.resolveVenueOwnerToNotify(
+      saved,
+      venueListing,
+    );
     return {
       event: saved,
       shouldReconcileWaitlist,
       materialChanges:
         saved.status === EventStatus.Published ? materialChanges : [],
+      venueOwnerToNotify,
     };
+  }
+
+  /**
+   * The listing whose owner should be asked about `event`, or null when
+   * nobody should be (LOC-16).
+   *
+   * Null in every one of these cases, each for its own reason:
+   *  - no venue attached, or the owner has already been asked;
+   *  - the attachment is already `confirmed` (including the grandfathered
+   *    pre-LOC-16 ones, which must not generate a retro-active ask for a link
+   *    that has been on the page for months);
+   *  - the gathering is a DRAFT, or scoped tighter than `members`. Neither can
+   *    reach the venue's public page, so there is nothing to consent to, and
+   *    naming an `invite_only` or `network` gathering to somebody outside its
+   *    audience would be a disclosure this feature has no right to make;
+   *  - the listing has nobody to ask (unclaimed, or its owner's account was
+   *    erased). The attachment simply stays pending, which is the safe state.
+   */
+  private async resolveVenueOwnerToNotify(
+    event: Event,
+    alreadyResolved: AttachableListingRef | null,
+  ): Promise<AttachableListingRef | null> {
+    if (!event.listingId) return null;
+    if (event.venueConfirmation !== EventVenueConfirmation.Pending) return null;
+    if (event.venueOwnerNotifiedAt !== null) return null;
+    if (event.status !== EventStatus.Published) return null;
+    if (
+      event.visibility !== EventVisibility.Public &&
+      event.visibility !== EventVisibility.Members
+    ) {
+      return null;
+    }
+    const listing =
+      alreadyResolved && alreadyResolved.id === event.listingId
+        ? alreadyResolved
+        : await this.listingLookup.findAttachable(event.listingId);
+    return listing && listing.ownerId ? listing : null;
+  }
+
+  /**
+   * Tells a business's owner that a gathering has attached itself to their
+   * venue, and stamps the attachment as asked (LOC-16).
+   *
+   * NO ACTOR ARGUMENT, deliberately. `NotificationsService.create`'s fourth
+   * parameter runs the block/mute filter, and passing the host there would
+   * mean a host the owner has blocked could attach a gathering to that owner's
+   * business page and silently suppress the one warning they would ever get.
+   * The bell names the venue and the gathering; who organised it is on the
+   * gathering's own page.
+   *
+   * The stamp is written even if the notification write fails. A missing bell
+   * is a missed message; a missing stamp is the same owner asked again on
+   * every subsequent edit of the gathering.
+   */
+  private async notifyVenueOwnerBestEffort(
+    event: Event,
+    listing: AttachableListingRef,
+  ): Promise<void> {
+    const notifiedAt = new Date();
+    try {
+      await this.events.update(
+        { id: event.id },
+        { venueOwnerNotifiedAt: notifiedAt },
+      );
+      event.venueOwnerNotifiedAt = notifiedAt;
+      if (!listing.ownerId) return;
+      await this.notifications.create(
+        listing.ownerId,
+        NotificationType.VenueEventAttachment,
+        {
+          source: 'listing',
+          listingSlug: listing.slug,
+          listingName: listing.name,
+          eventSlug: event.slug,
+          eventTitle: event.title,
+        },
+      );
+    } catch {
+      // Intentionally ignored: the gathering itself is already saved, and a
+      // failed bell must not fail the host's create or edit.
+    }
   }
 
   /**
@@ -750,13 +1014,33 @@ export class EventsService {
     );
   }
 
+  /**
+   * `options.hostSlug`/`excludeSlug` are honoured on the 'upcoming' branch
+   * only — see `ListEventsQuery`'s doc.
+   *
+   * `options.from`/`to`/`hood`/`type`/`q`/`cost` are the discovery filters
+   * (LOC-17). They are applied IN SQL, never post-query, so a filtered browse
+   * survives pagination: the old shape shipped whole pages to the client and
+   * filtered them there, which under-reported every answer until the member
+   * had scrolled the entire feed. `from`/`to`/`q` also apply to the 'past'
+   * branch (a member narrowing their own history); the rest are browse-only,
+   * and every one is ignored by `going`/`hosting`/`waitlisted`/`saved`, which
+   * are already scoped by the viewer's own relationship to the event.
+   */
   async list(
     userId: string,
     filter: EventListFilter,
     page: number,
-    // Only honoured on the 'upcoming' branch — see `ListEventsQuery`'s doc.
-    // `GatheringRecapPage`'s "more from this host" CTA is the sole caller.
-    options?: { hostSlug?: string; excludeSlug?: string },
+    options?: {
+      hostSlug?: string;
+      excludeSlug?: string;
+      from?: string;
+      to?: string;
+      hood?: string;
+      type?: string;
+      q?: string;
+      cost?: EventCostFilter;
+    },
   ): Promise<EventSummary[]> {
     const now = new Date();
     const skip = (page - 1) * PAGE_SIZE;
@@ -789,14 +1073,20 @@ export class EventsService {
         .getMany();
     } else if (filter === 'past') {
       // Single join: my non-cancelled RSVPs to events that have already started.
-      events = await this.events
+      const pastQb = this.events
         .createQueryBuilder('e')
         .innerJoin(EventRsvp, 'r', 'r.event_id = e.id')
         .where('r.user_id = :userId', { userId })
         .andWhere('r.status IN (:...statuses)', {
           statuses: [RsvpStatus.Going, RsvpStatus.Maybe, RsvpStatus.Waitlisted],
         })
-        .andWhere('e.start_at < :now', { now })
+        .andWhere('e.start_at < :now', { now });
+      this.applyDiscoveryFilters(pastQb, {
+        from: options?.from,
+        to: options?.to,
+        q: options?.q,
+      });
+      events = await pastQb
         // Property path (`startAt`) — see the join+pagination note above.
         .orderBy('e.startAt', 'DESC')
         .skip(skip)
@@ -838,6 +1128,7 @@ export class EventsService {
           excludeSlug: options.excludeSlug,
         });
       }
+      this.applyDiscoveryFilters(upcomingQb, options ?? {});
       events = await upcomingQb
         .orderBy('e.start_at', 'ASC')
         .skip(skip)
@@ -846,6 +1137,105 @@ export class EventsService {
     }
 
     return this.summarize(events, userId);
+  }
+
+  /**
+   * The LOC-17 discovery predicates, all in SQL.
+   *
+   * `hood` and `type` compare `lower(...)` on both sides rather than using
+   * ILIKE, so "arroios" finds "Arroios" while "roio" finds nothing: these are
+   * picked from a fixed list, and a substring match on a chosen value would
+   * quietly widen the filter the member set.
+   *
+   * `q` reuses `searchByText`'s ILIKE shape (and therefore the trigram
+   * indexes `AddSearchTrgmAndTagsIndexes1785700100000` already built on
+   * `title`/`venue`/`description`), plus `neighbourhood` so typing a
+   * neighbourhood name into the search box works the way a member expects.
+   *
+   * `cost` reads the free-text column the way `isFreeCost` does. The two must
+   * agree, or a card would carry a "free" chip that the free filter excludes.
+   * `NULL`/empty counts as free: every gathering created before the column
+   * existed was free as far as this platform ever knew.
+   */
+  private applyDiscoveryFilters(
+    qb: SelectQueryBuilder<Event>,
+    options: {
+      from?: string;
+      to?: string;
+      hood?: string;
+      type?: string;
+      q?: string;
+      cost?: EventCostFilter;
+    },
+  ): void {
+    if (options.from) {
+      const from = new Date(options.from);
+      if (!Number.isNaN(from.getTime())) {
+        qb.andWhere('e.start_at >= :discoveryFrom', { discoveryFrom: from });
+      }
+    }
+    if (options.to) {
+      const to = new Date(options.to);
+      if (!Number.isNaN(to.getTime())) {
+        qb.andWhere('e.start_at <= :discoveryTo', { discoveryTo: to });
+      }
+    }
+    if (options.hood) {
+      qb.andWhere('lower(e.neighbourhood) = lower(:discoveryHood)', {
+        discoveryHood: options.hood.trim(),
+      });
+    }
+    if (options.type) {
+      qb.andWhere('lower(e.event_type) = lower(:discoveryType)', {
+        discoveryType: options.type.trim(),
+      });
+    }
+    const term = options.q?.trim();
+    if (term) {
+      qb.andWhere(
+        '(e.title ILIKE :discoveryPattern OR e.venue ILIKE :discoveryPattern ' +
+          'OR e.neighbourhood ILIKE :discoveryPattern ' +
+          'OR e.description ILIKE :discoveryPattern)',
+        { discoveryPattern: `%${escapeLikeTerm(term)}%` },
+      );
+    }
+    if (options.cost === 'free') {
+      qb.andWhere(
+        `(e.cost IS NULL OR btrim(e.cost) = '' OR lower(btrim(e.cost)) = ANY(:freeCostLabels))`,
+        { freeCostLabels: EventsService.FREE_COST_LABELS },
+      );
+    } else if (options.cost === 'paid') {
+      qb.andWhere(
+        `(e.cost IS NOT NULL AND btrim(e.cost) <> '' AND NOT (lower(btrim(e.cost)) = ANY(:freeCostLabels)))`,
+        { freeCostLabels: EventsService.FREE_COST_LABELS },
+      );
+    }
+  }
+
+  // The SQL half of `isFreeCost` (event-response.ts). Kept beside the query
+  // that uses it and asserted equal to the TypeScript half by
+  // `events-discovery.spec.ts`, so the chip on a card and the filter that
+  // produced the card cannot drift apart.
+  private static readonly FREE_COST_LABELS = [
+    'free',
+    'gratis',
+    'gratuito',
+    'grátis',
+    'free entry',
+    'entrada livre',
+    'entrada gratuita',
+    '0',
+    '0 eur',
+    '0eur',
+    'no cost',
+  ];
+
+  // '' and '   ' are "the host skipped this field", never a zero-length
+  // street name. One place, so create() and update() cannot disagree.
+  private static blankToNull(value: string | null | undefined): string | null {
+    if (value === null || value === undefined) return null;
+    const trimmed = value.trim();
+    return trimmed === '' ? null : trimmed;
   }
 
   // Cross-entity global search (SearchService) — mirrors the 'upcoming'
@@ -1094,7 +1484,11 @@ export class EventsService {
       return rows
         .filter((r) => profiles.has(r.userId)) // drop profile-less ghost rows
         .map((r) => {
-          const view = toAttendeeView(r, profiles.get(r.userId));
+          // ORGANISERS ONLY for the check-in stamp and the attendee's own
+          // declared needs (LOC-07/LOC-03) — `toAttendeeView` omits all four
+          // fields entirely for anybody else, and this route is never
+          // `@Public()`.
+          const view = toAttendeeView(r, profiles.get(r.userId), isOrganizer);
           // Waitlist ordering is organizer-only; hide positions from regular viewers.
           if (!isOrganizer) {
             view.waitlistPosition = null;
@@ -1103,12 +1497,69 @@ export class EventsService {
         });
     });
 
+    const counts = await this.rosterCounts(event.id);
     return {
       items,
       total,
       page: resolvedPage,
       pageSize,
       capacity: event.capacity,
+      goingCount: counts.goingCount,
+      seatsTaken: counts.seatsTaken,
+      waitlistCount: counts.waitlistCount,
+      // Who has physically arrived is the host's own operational picture;
+      // a member reading a guest list never learns it.
+      checkedInCount: isOrganizer ? counts.checkedInCount : 0,
+    };
+  }
+
+  /**
+   * The four numbers the door needs, in one query: how many members are
+   * going, how many SEATS that is once declared guests are counted, how many
+   * are waiting, and how many have been checked in (LOC-03/LOC-07).
+   *
+   * Public because `EventCheckInService` returns the same block after every
+   * check-in, and two places computing "expected vs arrived" from two
+   * different definitions is exactly how a door desk ends up arguing with a
+   * dashboard.
+   */
+  async rosterCounts(eventId: string): Promise<{
+    goingCount: number;
+    seatsTaken: number;
+    waitlistCount: number;
+    checkedInCount: number;
+  }> {
+    const row = await this.rsvps
+      .createQueryBuilder('r')
+      .select(`COUNT(*) FILTER (WHERE r.status = :going)`, 'goingCount')
+      .addSelect(
+        `COUNT(*) FILTER (WHERE r.status = :going) + COALESCE(SUM(r.guest_count) FILTER (WHERE r.status = :going), 0)`,
+        'seatsTaken',
+      )
+      .addSelect(
+        `COUNT(*) FILTER (WHERE r.status = :waitlisted)`,
+        'waitlistCount',
+      )
+      .addSelect(
+        `COUNT(*) FILTER (WHERE r.status = :going AND r.checked_in_at IS NOT NULL)`,
+        'checkedInCount',
+      )
+      .where('r.event_id = :eventId', { eventId })
+      .setParameters({
+        going: RsvpStatus.Going,
+        waitlisted: RsvpStatus.Waitlisted,
+      })
+      .getRawOne<{
+        goingCount: string;
+        seatsTaken: string;
+        waitlistCount: string;
+        checkedInCount: string;
+      }>();
+    return {
+      goingCount: Number(row?.goingCount ?? 0),
+      seatsTaken: Number(row?.seatsTaken ?? 0),
+      waitlistCount: Number(row?.waitlistCount ?? 0),
+      checkedInCount: Number(row?.checkedInCount ?? 0),
     };
   }
 
@@ -1145,18 +1596,25 @@ export class EventsService {
       .createQueryBuilder('r')
       .select('r.event_id', 'eventId')
       .addSelect('COUNT(*)', 'count')
+      .addSelect('COUNT(*) + COALESCE(SUM(r.guest_count), 0)', 'seats')
       .where('r.event_id IN (:...ids)', { ids: eventIds })
       .andWhere('r.status = :status', { status: RsvpStatus.Going })
       .groupBy('r.event_id')
-      .getRawMany<{ eventId: string; count: string }>();
+      .getRawMany<{ eventId: string; count: string; seats: string }>();
     const goingByEvent = new Map(
       goingRows.map((row) => [row.eventId, Number(row.count)]),
+    );
+    const seatsByEvent = new Map(
+      goingRows.map((row) => [row.eventId, Number(row.seats)]),
     );
     const crops = await this.mediaCropService.getMany(
       events.flatMap((e) => (e.coverImageUrl ? [e.coverImageUrl] : [])),
     );
     const hostProfiles = await this.profilesByUserIds(
-      events.map((e) => e.hostId),
+      // NULL for a gathering whose host erased their account
+      // (`SetNullContentAuthorFksOnUserErasure1794610000000`); the row stays,
+      // and `toOrganizerView(undefined)` renders `host: null`.
+      presentActorIds(events.map((e) => e.hostId)),
     );
 
     return events.map((e) =>
@@ -1166,7 +1624,9 @@ export class EventsService {
         null,
         false,
         crops,
-        toOrganizerView(hostProfiles.get(e.hostId)),
+        toOrganizerView(actorFromLookup(hostProfiles, e.hostId)),
+        undefined,
+        seatsByEvent.get(e.id) ?? 0,
       ),
     );
   }
@@ -1236,16 +1696,35 @@ export class EventsService {
     }
   }
 
-  // Resolves a `listingId` payload value to a validated FK — 400s (not 404;
-  // this is a create/update input, not a route lookup) when it isn't a real,
-  // live listing. Returns the same id back, mirroring `assertMemberBySlug`'s
-  // "resolve + authorize, or throw" shape for `communitySlug`.
-  private async assertLiveListing(listingId: string): Promise<string> {
-    const listing = await this.listingLookup.findLinkable(listingId);
+  /**
+   * Resolves a `listingId` payload value to a validated attach target. 400s
+   * (not 404; this is a create/update input, not a route lookup) when it isn't
+   * a real, live, linkable listing. Mirrors `assertMemberBySlug`'s "resolve +
+   * authorize, or throw" shape for `communitySlug`, and returns the full ref
+   * so the caller can ask the venue's owner for consent (LOC-16).
+   *
+   * THE SECOND CHECK IS THE POINT (LOC-16). A venue owner who detaches a
+   * gathering from their business has said no, and without this the host could
+   * simply re-attach it, making "the owner can detach" mean "the owner can
+   * detach for five seconds". Refused for that listing and that gathering
+   * only: the host stays free to name any other venue, or to write the same
+   * venue's name into the free-text `venue` field, which is their own
+   * statement about where to go and never appears on the business's page.
+   */
+  private async assertAttachableListing(
+    listingId: string,
+    event?: Event,
+  ): Promise<AttachableListingRef> {
+    if (event && event.venueDetachedListingId === listingId) {
+      throw new BadRequestException(
+        'This venue removed this gathering from its page',
+      );
+    }
+    const listing = await this.listingLookup.findAttachable(listingId);
     if (!listing) {
       throw new BadRequestException('Venue listing not found');
     }
-    return listingId;
+    return listing;
   }
 
   private async loadEventOr404(slug: string): Promise<Event> {
@@ -1263,17 +1742,24 @@ export class EventsService {
     if (!events.length) return [];
     const eventIds = events.map((e) => e.id);
 
-    // One grouped count for every event's going tally...
+    // One grouped count for every event's going tally, carrying BOTH numbers
+    // in a single pass: the headcount of members who pressed the button, and
+    // the seats they actually occupy once their declared guests are added.
+    // Capacity is measured against the second (LOC-07).
     const goingRows = await this.rsvps
       .createQueryBuilder('r')
       .select('r.event_id', 'eventId')
       .addSelect('COUNT(*)', 'count')
+      .addSelect('COUNT(*) + COALESCE(SUM(r.guest_count), 0)', 'seats')
       .where('r.event_id IN (:...ids)', { ids: eventIds })
       .andWhere('r.status = :status', { status: RsvpStatus.Going })
       .groupBy('r.event_id')
-      .getRawMany<{ eventId: string; count: string }>();
+      .getRawMany<{ eventId: string; count: string; seats: string }>();
     const goingByEvent = new Map(
       goingRows.map((row) => [row.eventId, Number(row.count)]),
+    );
+    const seatsByEvent = new Map(
+      goingRows.map((row) => [row.eventId, Number(row.seats)]),
     );
 
     // ...and one IN-query for the viewer's own RSVP across the whole page.
@@ -1296,7 +1782,10 @@ export class EventsService {
     // for why the list surface carries a real host ref now, not just an org
     // label (MyEvents' "Block host" flow needs the host's own member slug).
     const hostProfiles = await this.profilesByUserIds(
-      events.map((e) => e.hostId),
+      // NULL for a gathering whose host erased their account
+      // (`SetNullContentAuthorFksOnUserErasure1794610000000`); the row stays,
+      // and `toOrganizerView(undefined)` renders `host: null`.
+      presentActorIds(events.map((e) => e.hostId)),
     );
     // ...and ONE batched series lookup for every recurring event on the page
     // (see `EventSummary.series`'s doc) — never a per-event query.
@@ -1311,8 +1800,9 @@ export class EventsService {
         myRsvpByEvent.get(e.id) ?? null,
         bookmarkedIds.has(e.id),
         crops,
-        toOrganizerView(hostProfiles.get(e.hostId)),
+        toOrganizerView(actorFromLookup(hostProfiles, e.hostId)),
         e.seriesId ? seriesById.get(e.seriesId) : undefined,
+        seatsByEvent.get(e.id) ?? 0,
       ),
     );
   }
@@ -1347,6 +1837,8 @@ export class EventsService {
       crops,
       venueListing,
       series,
+      seatCounts,
+      announcementRows,
     ] = await Promise.all([
       this.rsvps.count({
         where: { eventId: event.id, status: RsvpStatus.Going },
@@ -1373,8 +1865,19 @@ export class EventsService {
       event.seriesId
         ? this.eventSeries.findOne({ where: { id: event.seriesId } })
         : Promise.resolve(undefined),
+      this.rosterCounts(event.id),
+      // Newest first, bounded — a host's announcements are a short list of
+      // "we moved to the back room" notes, never a feed.
+      this.announcements.find({
+        where: { eventId: event.id },
+        order: { createdAt: 'DESC' },
+        take: EventsService.ANNOUNCEMENT_DETAIL_LIMIT,
+      }),
     ]);
-    const organizerIds = [event.hostId, ...cohostRows.map((c) => c.userId)];
+    const organizerIds = presentActorIds([
+      event.hostId,
+      ...cohostRows.map((c) => c.userId),
+    ]);
     const profiles = await this.profilesByUserIds(organizerIds);
     const isOrganizer =
       event.hostId === viewerId ||
@@ -1393,14 +1896,63 @@ export class EventsService {
       crops,
       null,
       series ?? undefined,
+      seatCounts.seatsTaken,
     );
+
+    // ADDRESS PRIVACY (LOC-04). The exact door goes to an organiser or to
+    // somebody holding a CONFIRMED 'going' RSVP, and to nobody else: a
+    // 'maybe' has not committed, a waitlisted member has no seat yet, and a
+    // stranger browsing gets the venue name and the neighbourhood. This is
+    // the same shape `toHousingListingDTO` applies to a home's precise point,
+    // for the same reason: a house party has to be listable without its
+    // address being public.
+    const hasConfirmedRsvp = myRsvp?.status === RsvpStatus.Going;
+    const seesExactLocation = isOrganizer || hasConfirmedRsvp;
+
+    // Announcements reach the people they were addressed to: organisers, and
+    // anyone holding a live RSVP of any kind (going, maybe or waitlisted —
+    // "we moved to the back room" matters to all three). A passer-by reading
+    // the public page gets none.
+    const seesAnnouncements =
+      isOrganizer ||
+      (myRsvp !== null &&
+        myRsvp !== undefined &&
+        myRsvp.status !== RsvpStatus.Cancelled);
+    const announcementAuthors = seesAnnouncements
+      ? await this.profilesByUserIds(
+          presentActorIds(announcementRows.map((row) => row.authorId)),
+        )
+      : new Map<string, Profile>();
+
     return {
       ...summary,
       description: event.description,
       onlineUrl: event.onlineUrl,
+      address: seesExactLocation ? event.address : null,
+      arrivalNotes: seesExactLocation ? event.arrivalNotes : null,
+      locationPrecision:
+        seesExactLocation && event.address !== null ? 'exact' : 'venue',
+      language: event.language,
+      accessibilityAnswers: normalizeAccessibilityAnswers(
+        event.accessibilityAnswers,
+      ),
+      accessibilityNote: event.accessibilityNote ?? '',
+      announcements: seesAnnouncements
+        ? announcementRows.map((row) =>
+            toEventAnnouncementView(
+              row,
+              row.authorId ? announcementAuthors.get(row.authorId) : undefined,
+            ),
+          )
+        : [],
       communitySlug,
       venueListing,
-      host: toOrganizerView(profiles.get(event.hostId)),
+      // LOC-16. Organisers only, and only when there is (or was) a listed
+      // venue to describe. See `EventDetail.venueAttachment`.
+      ...(isOrganizer
+        ? { venueAttachment: toEventVenueAttachmentView(event) }
+        : {}),
+      host: toOrganizerView(actorFromLookup(profiles, event.hostId)),
       cohosts: cohostRows
         .map((c) => toOrganizerView(profiles.get(c.userId)))
         .filter((v): v is NonNullable<typeof v> => v !== null),
@@ -1417,6 +1969,10 @@ export class EventsService {
       goingAttendeesPreviewTotal: attendeesPreview.total,
     };
   }
+
+  /** At most this many announcements ride on `EventDetail.announcements`.
+   *  The full list is `GET /events/:slug/announcements`. */
+  private static readonly ANNOUNCEMENT_DETAIL_LIMIT = 10;
 
   // At most this many profiles ride on `EventDetail.goingAttendeesPreview` —
   // a small pre-RSVP "safety in numbers" glance, not the full guest list

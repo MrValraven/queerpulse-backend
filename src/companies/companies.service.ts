@@ -9,6 +9,7 @@ import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { CompanyOpenRolesService } from '../jobs/company-open-roles.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
@@ -306,9 +307,11 @@ export class CompaniesService {
     return paginate(qb, page, async (rows) => {
       if (!rows.length) return [];
       const refs = await new MemberLookup(this.profiles).byUserIds(
-        rows.map((r) => r.authorId),
+        presentActorIds(rows.map((r) => r.authorId)),
       );
-      return rows.map((r) => toCompanyReview(r, refs.get(r.authorId) ?? null));
+      return rows.map((r) =>
+        toCompanyReview(r, actorFromLookup(refs, r.authorId) ?? null),
+      );
     });
   }
 
@@ -451,7 +454,13 @@ export class CompaniesService {
     const [aggregates, teamRows, ownerProfile, openRoles] = await Promise.all([
       this.reviewAggregatesFor(company.id),
       this.team.find({ where: { companyId: company.id } }),
-      this.profiles.findOne({ where: { userId: company.ownerId } }),
+      // `company.ownerId` is NULL once the owner's account is erased
+      // (`SetNullContentAuthorFksOnUserErasure1794610000000`), which is an
+      // unclaimed company profile rather than a missing one. Skip the lookup
+      // and let the mapper serialize `owner: null`.
+      company.ownerId === null
+        ? null
+        : this.profiles.findOne({ where: { userId: company.ownerId } }),
       this.getOpenRoles(company),
     ]);
 

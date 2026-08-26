@@ -13,10 +13,11 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { CompaniesService } from './companies.service';
 import { CreateCompanyDto } from './dto/create-company.dto';
-import { CreateReviewDto } from './dto/create-review.dto';
+import { CreateCompanyReviewDto } from './dto/create-review.dto';
 import { ListCompaniesQuery } from './dto/list-companies.query';
 import { UpdateCompanyDto } from './dto/update-company.dto';
 import {
@@ -58,6 +59,7 @@ export class CompaniesController {
   }
 
   @Post()
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Create a company.' })
   @ApiCreatedResponse({ description: 'The created company detail.' })
   @ApiConflictResponse({ description: 'Could not allocate a unique slug.' })
@@ -66,6 +68,7 @@ export class CompaniesController {
   }
 
   @Patch(':slug')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Update a company you own.' })
   @ApiOkResponse({ description: 'The updated company detail.' })
   @ApiForbiddenResponse({
@@ -89,6 +92,7 @@ export class CompaniesController {
   }
 
   @Post(':slug/reviews')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Post a review for a company.' })
   @ApiCreatedResponse({ description: 'The created review.' })
   @ApiNotFoundResponse({ description: 'No company with that slug.' })
@@ -98,7 +102,7 @@ export class CompaniesController {
   createReview(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
-    @Body() dto: CreateReviewDto,
+    @Body() dto: CreateCompanyReviewDto,
   ) {
     return this.companiesService.createReview(slug, user.userId, dto);
   }

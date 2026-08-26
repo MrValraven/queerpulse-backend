@@ -75,6 +75,10 @@ function makeListing(overrides: Partial<HousingListing> = {}): HousingListing {
     // exposed on public browse.
     riskScore: 0,
     riskReasons: [],
+    // LOC-01 decision trail — null until a moderator has decided on the row.
+    decisionReason: null,
+    decidedById: null,
+    decidedAt: null,
     // Null = lister added no virtual-tour link.
     virtualTourUrl: null,
     // Null = still looking / still live to the public (owner hasn't marked it
@@ -239,6 +243,81 @@ describe('HousingListingsService', () => {
 
       expect(listings.create).toHaveBeenCalledWith(
         expect.objectContaining({ lgbtqFriendly: true }),
+      );
+    });
+
+    // LOC-09: the backend owns the city. QueerPulse housing is Lisbon-only, so
+    // an omitted or empty city is not a validation error, it is a value the
+    // server fills in. Before this the column held whatever the form sent, and
+    // the form sent `city: area.trim()`.
+    it('stores "Lisbon" when the submission sends an empty city', async () => {
+      listings.save.mockImplementation((row: unknown) =>
+        Promise.resolve(makeListing({ ...(row as object) })),
+      );
+
+      await service.create('owner-1', {
+        ...(CREATE_DTO as object),
+        city: '',
+      } as never);
+
+      expect(listings.create).toHaveBeenCalledWith(
+        expect.objectContaining({ city: 'Lisbon' }),
+      );
+    });
+
+    it('stores "Lisbon" when the submission sends no city at all', async () => {
+      listings.save.mockImplementation((row: unknown) =>
+        Promise.resolve(makeListing({ ...(row as object) })),
+      );
+      const { city: _omitted, ...withoutCity } = CREATE_DTO as {
+        city?: string;
+      };
+
+      await service.create('owner-1', withoutCity as never);
+
+      expect(listings.create).toHaveBeenCalledWith(
+        expect.objectContaining({ city: 'Lisbon' }),
+      );
+    });
+
+    // The shape the old "List a space" form actually produced: the
+    // neighbourhood in the city field, and no area at all. The neighbourhood is
+    // kept (it is real data the lister typed) and moved to the column that
+    // powers the centroid pin, the browse filter and saved-search matching.
+    it('moves a neighbourhood sent as the city into area, and still stores "Lisbon"', async () => {
+      listings.save.mockImplementation((row: unknown) =>
+        Promise.resolve(makeListing({ ...(row as object) })),
+      );
+
+      await service.create('owner-1', {
+        ...(CREATE_DTO as object),
+        city: 'Arroios',
+      } as never);
+
+      expect(listings.create).toHaveBeenCalledWith(
+        expect.objectContaining({ city: 'Lisbon', area: 'Arroios' }),
+      );
+    });
+
+    // Markup is stripped ONCE, here at the write boundary, so no reader has to.
+    it('strips markup from every member-typed field before storing it', async () => {
+      listings.save.mockImplementation((row: unknown) =>
+        Promise.resolve(makeListing({ ...(row as object) })),
+      );
+
+      await service.create('owner-1', {
+        ...(CREATE_DTO as object),
+        title: '<b>Sunny</b> room',
+        description: '<script>alert(1)</script>A bright room.',
+        idealFor: ['<i>students</i>'],
+      } as never);
+
+      expect(listings.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Sunny room',
+          description: 'A bright room.',
+          idealFor: ['students'],
+        }),
       );
     });
 
@@ -550,32 +629,6 @@ describe('HousingListingsService', () => {
         'Is it still available?',
       );
       expect(result).toEqual({ conversationId: 'conv-1' });
-    });
-  });
-
-  describe('setStatus', () => {
-    it('404s an unknown ref', async () => {
-      listings.findOne.mockResolvedValue(null);
-
-      await expect(
-        service.setStatus('QPH-x', HousingListingStatus.Live),
-      ).rejects.toThrow(NotFoundException);
-    });
-
-    it('directly sets any status (moderator path) and saves', async () => {
-      listings.findOne.mockResolvedValue(
-        makeListing({ status: HousingListingStatus.Review }),
-      );
-      listings.save.mockImplementation((row: HousingListing) =>
-        Promise.resolve(row),
-      );
-
-      const result = await service.setStatus(
-        'QPH-2026-0001',
-        HousingListingStatus.Live,
-      );
-
-      expect(result.status).toBe(HousingListingStatus.Live);
     });
   });
 

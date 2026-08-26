@@ -278,6 +278,8 @@ export class ConversationsService {
         muted: part.muted,
         pinnedAt: part.pinnedAt?.toISOString() ?? null,
         favorite: part.favoritedAt != null,
+        archivedAt: part.archivedAt?.toISOString() ?? null,
+        draft: part.draft,
         hasLeft: isGroup ? part.leftAt != null : false,
         ...(isGroup
           ? this.core.groupCapabilities(part.role, part.leftAt != null)
@@ -498,6 +500,46 @@ export class ConversationsService {
   ): Promise<{ ok: true }> {
     const part = await this.core.requireParticipant(conversationId, userId);
     part.favoritedAt = favorite ? new Date() : null;
+    await this.participants.save(part);
+    return { ok: true };
+  }
+
+  /**
+   * Archive/unarchive a conversation for THIS caller only (mirrors `setMuted`),
+   * stamping `archivedAt` with the app clock (NULL = not archived). No cap,
+   * and always allowed either direction — unlike a group leave/removal this
+   * never touches send/read access, purely an inbox-declutter preference.
+   * `MessagingCoreService.buildPostResult` independently clears `archivedAt`
+   * for every participant the moment a fresh message lands, so archiving is
+   * never the reason a reply goes unseen.
+   */
+  async setArchived(
+    conversationId: string,
+    userId: string,
+    archived: boolean,
+  ): Promise<{ ok: true }> {
+    const part = await this.core.requireParticipant(conversationId, userId);
+    part.archivedAt = archived ? new Date() : null;
+    await this.participants.save(part);
+    return { ok: true };
+  }
+
+  /**
+   * Sync THIS caller's own unsent composer text for a conversation to the
+   * server — the cross-device layer on top of the client's always-on
+   * localStorage copy (see the entity's own doc). An empty string clears the
+   * stored draft, mirroring `features/messages/drafts.ts`'s own "empty text
+   * drops the key" convention. The client debounces calls to this (never one
+   * per keystroke) — nothing here rate-limits it further, matching `setMuted`/
+   * `setPinned`/`setFavorite`, which lean on the endpoint's own `Throttle`.
+   */
+  async setDraft(
+    conversationId: string,
+    userId: string,
+    draft: string,
+  ): Promise<{ ok: true }> {
+    const part = await this.core.requireParticipant(conversationId, userId);
+    part.draft = draft.length > 0 ? draft : null;
     await this.participants.save(part);
     return { ok: true };
   }

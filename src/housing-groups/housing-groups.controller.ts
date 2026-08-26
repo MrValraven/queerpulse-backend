@@ -29,6 +29,7 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateGroupJoinRequestDto } from './dto/create-group-join-request.dto';
 import { CreateGroupListingDto } from './dto/create-group-listing.dto';
@@ -96,6 +97,26 @@ export class HousingGroupsController {
     return this.groups.listVisibleListings(slug);
   }
 
+  // The poster's OWN rooms in this group, in whatever state each is in
+  // (LOC-19). The public read above shows only what a moderator has cleared,
+  // so a member who submitted a room watched it disappear with no surface
+  // anywhere that could say it was waiting, had gone up, had a question
+  // against it, or had been refused. Member-private, so no cache header: this
+  // is one person's moderation state and must never reach a shared cache.
+  @UseGuards(ActiveMemberGuard)
+  @Get(':slug/listings/mine')
+  @ApiOperation({
+    summary: 'Your own rooms in this group, with their review state',
+  })
+  @ApiOkResponse({ description: "The caller's own listings, newest first." })
+  @ApiNotFoundResponse({ description: 'No published group with that slug.' })
+  listMyListings(
+    @Param('slug') slug: string,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.groups.listMyListings(slug, user.userId);
+  }
+
   // Anonymous public write: tightly throttled per IP so the group review queue
   // can't be flooded. `@Public()` + optional guard means an anonymous applicant
   // is allowed, a signed-in one is identified.
@@ -120,7 +141,7 @@ export class HousingGroupsController {
   // always had (BE-HSG-01): the affirming pledge, a phone-verification step-up
   // and the deterministic risk pass. The result lands in `review` — a 201 here
   // means "submitted", never "published".
-  @UseGuards(ActiveMemberGuard)
+  @UseGuards(ActiveMemberGuard, NotRestrictedGuard)
   @Throttle({ default: { limit: 10, ttl: seconds(60) } })
   @Post(':slug/listings')
   @ApiOperation({
@@ -142,7 +163,7 @@ export class HousingGroupsController {
   // create was the ONLY member write on a group listing, so a wrong price could
   // not be fixed. An edit that changes what the group page shows re-opens the
   // review, so a listing cannot be approved clean and then rewritten in place.
-  @UseGuards(ActiveMemberGuard)
+  @UseGuards(ActiveMemberGuard, NotRestrictedGuard)
   @Patch(':slug/listings/:id')
   @ApiOperation({ summary: 'Correct your own group listing (poster only)' })
   @ApiOkResponse({ description: 'The updated listing.' })

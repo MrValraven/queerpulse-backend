@@ -7,7 +7,7 @@ import { GovernanceLogAction } from '../../communities/entities/community-govern
  * newest first, optionally narrowed to one action. Mirrors
  * `ListAdminCommunityTagRequestsQuery`.
  */
-export class ListCommunityGovernanceLogQuery {
+export class ListAdminCommunityGovernanceLogQuery {
   @IsOptional()
   @Type(() => Number)
   @IsInt()

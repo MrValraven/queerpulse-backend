@@ -8,6 +8,7 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
+import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 
 // `POST /forum/threads` body — matches `CreateThreadDto` in the frontend's
 // `forum.api.ts` (`title`, `body`, `category`, optional `tags`).
@@ -41,6 +42,14 @@ export class CreateThreadDto {
   @IsString({ each: true })
   @MaxLength(24, { each: true })
   tags?: string[];
+
+  // One optional photo on the opening post, as a storage key from the
+  // presigned upload pipeline (SOC-13). Same validator + global ownership
+  // interceptor as `CreatePostDto.image`; persisted on the OP `forum_post`
+  // row, not on the thread.
+  @IsOptional()
+  @IsImageReference()
+  image?: string;
 
   // Optional community to attach this thread to. When present, the service
   // resolves it via `CommunityMembershipService.assertMemberBySlug` — 404 if

@@ -25,7 +25,12 @@ import {
   Community,
   CommunityType,
 } from './entities/community.entity';
-import { Report } from '../reports/entities/report.entity';
+import {
+  Report,
+  ReportSeverity,
+  ReportStatus,
+  ReportSubjectType,
+} from '../reports/entities/report.entity';
 
 // A chainable query-builder stub whose terminal methods resolve to empty
 // results by default (mirrors `communities.service.spec.ts`'s `qbStub`).
@@ -185,6 +190,7 @@ describe('CommunityPostsService', () => {
   let members: { findOne: jest.Mock };
   let posts: {
     findOne: jest.Mock;
+    find: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
     createQueryBuilder: jest.Mock;
@@ -234,6 +240,9 @@ describe('CommunityPostsService', () => {
       // (body/pinned/editedAt/deletedAt), so returning the shared `POST`
       // reference would leak those mutations across tests.
       findOne: jest.fn(() => Promise.resolve({ ...POST })),
+      // Only `listCommunityReports` reads posts by a batch of ids; every
+      // other path here goes through `findOne` or the query builder.
+      find: jest.fn().mockResolvedValue([]),
       create: jest.fn((v: object) => v),
       save: jest.fn((v: unknown) =>
         Promise.resolve({
@@ -1482,6 +1491,134 @@ describe('CommunityPostsService', () => {
       await expect(
         service.likeFlatPost('p1', 'u1', true),
       ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+  });
+  // TS-01: the community queue used to hand a moderator a reason code and a
+  // timestamp. These cover what it now resolves alongside each report, and
+  // that resolving it stays batched.
+  describe('listCommunityReports', () => {
+    const OPEN_POST_REPORT = {
+      id: 'rep-1',
+      subjectType: ReportSubjectType.Post,
+      subjectId: 'p1',
+      reasonCode: 'harassment',
+      severity: ReportSeverity.High,
+      status: ReportStatus.Open,
+      createdAt: new Date('2026-02-01T00:00:00.000Z'),
+      slaDueAt: new Date('2026-02-01T04:00:00.000Z'),
+    } as Report;
+    const OPEN_REPLY_REPORT = {
+      ...OPEN_POST_REPORT,
+      id: 'rep-2',
+      subjectType: ReportSubjectType.Reply,
+      subjectId: 'r1',
+      slaDueAt: new Date('2999-01-01T00:00:00.000Z'),
+    } as Report;
+
+    const queueOf = (rows: Report[]) => {
+      const qb = reportsQbStub();
+      qb.getMany!.mockResolvedValue(rows);
+      reports.createQueryBuilder.mockReturnValue(qb);
+    };
+
+    beforeEach(() => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Mod });
+      profiles.find.mockResolvedValue([
+        {
+          userId: 'author-1',
+          slug: 'ana',
+          firstName: 'Ana',
+          lastName: 'Reis',
+          pronouns: 'she/her',
+          avatarUrl: null,
+          photoVisible: true,
+        },
+      ]);
+    });
+
+    it('refuses a plain member', async () => {
+      members.findOne.mockResolvedValue({ role: RosterRole.Member });
+      await expect(
+        service.listCommunityReports('slug', 'u1'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('carries the reported post excerpt, author, thread id and overdue flag', async () => {
+      queueOf([OPEN_POST_REPORT]);
+      posts.find.mockResolvedValue([{ ...POST, body: '<b>hello</b> there' }]);
+
+      const row = (await service.listCommunityReports('slug', 'u1'))[0]!;
+
+      expect(row.severity).toBe(ReportSeverity.High);
+      // The SLA closed in Feb 2026 and the report is still open.
+      expect(row.isOverdue).toBe(true);
+      expect(row.content).toMatchObject({
+        kind: 'post',
+        id: 'p1',
+        postId: 'p1',
+        excerpt: 'hello there',
+        isExcerptTruncated: false,
+        isDeleted: false,
+        isHidden: false,
+        isRemoved: false,
+      });
+      expect(row.content?.author?.slug).toBe('ana');
+    });
+
+    it("points a reply report at its parent post and reports the reply's own body", async () => {
+      queueOf([OPEN_REPLY_REPORT]);
+      replies.find.mockResolvedValue([REPLY]);
+
+      const row = (await service.listCommunityReports('slug', 'u1'))[0]!;
+
+      expect(row.isOverdue).toBe(false);
+      expect(row.content).toMatchObject({
+        kind: 'reply',
+        id: 'r1',
+        postId: 'p1',
+        excerpt: 'a reply',
+      });
+    });
+
+    it('surfaces content a moderator has already hidden', async () => {
+      queueOf([OPEN_POST_REPORT]);
+      posts.find.mockResolvedValue([{ ...POST }]);
+      contentModeration.statesForAnyType.mockResolvedValue(
+        new Map([['p1', { hidden: true, removed: false }]]),
+      );
+
+      const row = (await service.listCommunityReports('slug', 'u1'))[0]!;
+
+      expect(row.content?.isHidden).toBe(true);
+      expect(row.content?.excerpt).toBe('hello');
+    });
+
+    it('resolves a whole page in one query per table, never one per report', async () => {
+      queueOf([
+        OPEN_POST_REPORT,
+        { ...OPEN_POST_REPORT, id: 'rep-3' },
+        OPEN_REPLY_REPORT,
+      ]);
+      posts.find.mockResolvedValue([{ ...POST }]);
+      replies.find.mockResolvedValue([REPLY]);
+
+      const rows = await service.listCommunityReports('slug', 'u1');
+
+      expect(rows).toHaveLength(3);
+      expect(posts.find).toHaveBeenCalledTimes(1);
+      expect(replies.find).toHaveBeenCalledTimes(1);
+      expect(profiles.find).toHaveBeenCalledTimes(1);
+      expect(contentModeration.statesForAnyType).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the report when the content row is gone', async () => {
+      queueOf([OPEN_POST_REPORT]);
+      posts.find.mockResolvedValue([]);
+
+      const row = (await service.listCommunityReports('slug', 'u1'))[0]!;
+
+      expect(row.id).toBe('rep-1');
+      expect(row.content).toBeNull();
     });
   });
 });

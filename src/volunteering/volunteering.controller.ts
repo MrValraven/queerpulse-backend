@@ -16,6 +16,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateOpportunityDto } from './dto/create-opportunity.dto';
 import { CreateSignupDto } from './dto/create-signup.dto';
@@ -82,6 +83,7 @@ export class VolunteeringController {
   }
 
   @Post()
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Post a volunteering opportunity' })
   @ApiCreatedResponse({ description: 'The created opportunity detail.' })
   @ApiConflictResponse({ description: 'Could not allocate a unique slug.' })
@@ -96,6 +98,7 @@ export class VolunteeringController {
   }
 
   @Patch(':slug')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Update an opportunity you posted' })
   @ApiOkResponse({ description: 'The updated opportunity detail.' })
   @ApiForbiddenResponse({
@@ -128,6 +131,7 @@ export class VolunteeringController {
   }
 
   @Post(':slug/signups')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Sign up for an opportunity' })
   @ApiCreatedResponse({ description: 'The created signup.' })
   @ApiConflictResponse({

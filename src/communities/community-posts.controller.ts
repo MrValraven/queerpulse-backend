@@ -15,6 +15,7 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { Throttle, seconds } from '@nestjs/throttler';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { CommunityPostsService } from './community-posts.service';
 import { CreateFlatPostDto } from './dto/create-flat-post.dto';
@@ -63,6 +64,7 @@ export class CommunityPostsController {
 
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Post()
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: 'Create a post, optionally scoped to a community by slug.',
   })
@@ -78,6 +80,7 @@ export class CommunityPostsController {
   }
 
   @Patch(':id')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary:
       'Update a post by id (author-only; body/kind/image — no pinning without a community).',
@@ -172,6 +175,7 @@ export class CommunityPostsController {
 
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Post(':id/replies')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Reply to a post by id.' })
   @ApiCreatedResponse({ description: 'The created reply id (`{ id }`).' })
   @ApiBadRequestResponse({
@@ -191,6 +195,7 @@ export class CommunityPostsController {
   }
 
   @Patch(':id/replies/:replyId')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Edit a reply to a post by id (author-only).' })
   @ApiOkResponse({ description: 'The updated reply.' })
   @ApiBadRequestResponse({ description: 'Malformed id or invalid payload.' })

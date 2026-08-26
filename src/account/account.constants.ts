@@ -5,6 +5,13 @@
 export const DAY_MS = 24 * 60 * 60 * 1000;
 export const REAUTH_TTL_MS = 5 * 60 * 1000;
 export const DELETION_GRACE_DAYS = 30;
+
+// How many days before the scheduled erasure the member is warned that it is
+// coming, by `AccountDeletionProcessorService.warnUpcomingDeletions`. Three
+// days is short enough that the warning is about something imminent and long
+// enough to still act on: cancelling is one click on the delete-account page
+// the notification links to, and it stays possible right up to the erasure.
+export const DELETION_FINAL_WARNING_LEAD_DAYS = 3;
 export const DSAR_DUE_DAYS = 30;
 
 // Signed download links on a ready export job are single-use and expire 7

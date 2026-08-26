@@ -45,7 +45,47 @@ export function toAuthorSummary(
   };
 }
 
-export interface FeedItem {
+/**
+ * Why this item is in the member's feed (SOC-04). Mirrors `FeedReason` in
+ * `feed-affinity.ts`, which is where the precedence is defined. Present on
+ * the "All" tab, where ranking runs; omitted elsewhere, where the tab itself
+ * is already the explanation.
+ */
+export type FeedItemReason = 'membership' | 'connection' | 'topic' | 'recent';
+
+/**
+ * The interaction state that lets a feed card act instead of only link out
+ * (SOC-04). `reactionCount` and `myReaction` are the flat `like` counter
+ * `POST /community-posts/:id/like` maintains, so the optimistic update on the
+ * card and the number the server returns are counting the same thing. Carried
+ * for `community_post`; `replyCount` is also carried for `forum_thread`,
+ * which already stores it on the row.
+ */
+/** A source a member can turn down in their own feed (SOC-18). `name` is
+ *  carried so the card's menu and the managed list can say what is being
+ *  quieted without a second lookup. Null for an item with no room behind it
+ *  (a flat post, a global new-member row). */
+export interface FeedItemSource {
+  kind: 'community' | 'forum_thread';
+  id: string;
+  name: string;
+}
+
+export interface FeedItemSignals {
+  /** Present on every tab: muting is a reader's preference, not a ranking
+   *  concept, so it is offered wherever the card is. */
+  source?: FeedItemSource | null;
+  reason?: FeedItemReason;
+  /** The community, person or topic named by `reason`, ready to render.
+   *  Null for `recent`, and for a reason whose subject didn't resolve. */
+  reasonSubject?: string | null;
+  reactionCount?: number;
+  replyCount?: number;
+  /** The viewer's OWN reaction key, or null. See `FeedInteractionsService`. */
+  myReaction?: string | null;
+}
+
+export interface FeedItem extends FeedItemSignals {
   id: string;
   type: FeedItemType;
   createdAt: string;
@@ -74,12 +114,17 @@ function truncate(text: string, max = SUMMARY_MAX): string {
 }
 
 /**
- * `title`/`link` for a community post: if it's scoped to a community, both
- * name it (the community is the meaningful "context" a feed card shows,
- * mirroring the old feed mock's `context` field); a flat/global post (see
- * `CommunityPost.communityId`, nullable since Task 3.2) has no community to
- * link into, so it falls back to a generic label and `/feed` (there is no
- * dedicated single-post detail page in the frontend yet).
+ * `title`/`link` for a community post: if it's scoped to a community, the
+ * title names it (the community is the meaningful "context" a feed card
+ * shows, mirroring the old feed mock's `context` field) and the link is the
+ * post's own PERMALINK, `/community/:slug/post/:id` (SOC-02). It used to be
+ * the community page, which dropped the reader at the top of a timeline with
+ * the post they clicked somewhere below.
+ *
+ * A flat/global post (see `CommunityPost.communityId`, nullable since Task
+ * 3.2) has no community to link into, so it falls back to a generic label and
+ * `/feed`: the permalink route is community-scoped, and a community-less post
+ * has no other surface in the frontend to open.
  */
 export function communityPostToFeedItem(
   post: CommunityPost,
@@ -92,7 +137,7 @@ export function communityPostToFeedItem(
     createdAt: post.createdAt.toISOString(),
     title: community ? community.name : 'Community feed',
     summary: truncate(post.body),
-    link: community ? `/community/${community.slug}` : '/feed',
+    link: community ? `/community/${community.slug}/post/${post.id}` : '/feed',
     actor: toAuthorSummary(author),
   };
 }
@@ -117,6 +162,10 @@ export function forumThreadToFeedItem(
     summary: `${thread.category} · ${thread.replyCount} ${replyWord}`,
     link: `/thread/${thread.slug}`,
     actor: toAuthorSummary(author),
+    // Free: the thread row already maintains this counter. The feed card
+    // shows it as context; replying still happens in the thread itself,
+    // since a forum reply is a threaded post rather than a one-line note.
+    replyCount: thread.replyCount,
   };
 }
 

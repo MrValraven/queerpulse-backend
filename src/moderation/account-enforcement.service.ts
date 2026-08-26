@@ -10,10 +10,27 @@ import { AccountDeactivation } from '../account/entities/account-deactivation.en
 import { Report, ReportSubjectType } from '../reports/entities/report.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+import { LiftRestrictionDto } from './dto/lift-restriction.dto';
 import { LiftSuspensionDto } from './dto/lift-suspension.dto';
 import { ModActionCode } from './dto/mod-action.dto';
 import { ModAuditService } from './mod-audit.service';
 import { parseDuration } from './parse-duration';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import {
+  ACCOUNT_REMOVED,
+  AccountRemovedEvent,
+} from '../ban-evasion/ban-evasion.events';
+import { RemovalKind } from '../ban-evasion/entities/removed-account-signal.entity';
+import { ReportSubjectResolverService } from './report-subject-resolver.service';
+import {
+  BAN_INTERIM_SUSPENSION,
+  BanRatification,
+  BanRatificationStatus,
+} from './entities/ban-ratification.entity';
+import {
+  BAN_PENDING_AUDIT_ACTION,
+  banHoldExpiryFrom,
+} from './ban-ratification-window';
 
 // Loose enough to guard `Repository.findOne({ where: { userId: subjectId } })`
 // from a Postgres "invalid input syntax for type uuid" error when a
@@ -28,9 +45,10 @@ const UUID_RE =
  * today (`ban` is always sent duration-less too, and is permanent as a
  * result) — a `restrict` needs a duration, so an unspecified one falls back to
  * this rather than 400ing on every real click. A week is long enough to change
- * a member's next actions, short enough that a mis-click self-corrects without
- * needing a "lift restriction" endpoint (there isn't one — see `restricted`'s
- * doc comment on `User`).
+ * a member's next actions, short enough that a mis-click self-corrects on its
+ * own. A mis-click can also be undone directly now:
+ * `PATCH /admin/members/:id/restriction` lifts a restriction (see
+ * `AdminMemberModerationService.liftRestriction`).
  */
 const DEFAULT_RESTRICTION_DURATION = '7d';
 
@@ -52,8 +70,26 @@ export class AccountEnforcementService {
   constructor(
     @InjectRepository(User) private readonly users: Repository<User>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    // TS-12. The hold row and the interim suspension are one decision, so they
+    // are written by the same service inside one transaction. Injected as a
+    // repository rather than through `BanRatificationService` on purpose: that
+    // service already injects THIS one (to apply or undo the ban when a second
+    // moderator decides), and a service-level cycle between the two would need
+    // a `forwardRef` to paper over a design that does not need one.
+    @InjectRepository(BanRatification)
+    private readonly banRatifications: Repository<BanRatification>,
     private readonly dataSource: DataSource,
     private readonly audit: ModAuditService,
+    // Resolves a report's subject to the member behind it for EVERY subject
+    // type, which is what lets a moderator sanction the author of reported
+    // content (TS-03) instead of only the subject of a `member` report.
+    // Read-only and dependency-light (it holds the `DataSource` and nothing
+    // else), so injecting it adds no edge to the module graph.
+    private readonly subjectResolver: ReportSubjectResolverService,
+    // Emits `ACCOUNT_REMOVED` after a permanent ban commits, so the
+    // ban-evasion module can keep correlation material for the invite
+    // review queue.
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   // PATCH /mod/users/:userId/suspension — lift a suspension or ban.
@@ -80,6 +116,21 @@ export class AccountEnforcementService {
 
     await this.dataSource.transaction(async (manager) => {
       await this.restoreUser(manager, user.id);
+      // TS-12. Lifting the suspension has to close the hold behind it too.
+      // Otherwise a moderator could lift a member's interim suspension on
+      // Tuesday and a second moderator could ratify the same, still-open hold
+      // on Wednesday, permanently banning someone a colleague had just let back
+      // in. A member with no hold is unaffected: the conditional update simply
+      // matches nothing.
+      await manager.update(
+        BanRatification,
+        { targetUserId: user.id, status: BanRatificationStatus.Pending },
+        {
+          status: BanRatificationStatus.Withdrawn,
+          decidedBy: actorId,
+          decidedAt: new Date(),
+        },
+      );
       await this.audit.writeAuditLog(
         dto.reportId ?? null,
         actorId,
@@ -95,11 +146,94 @@ export class AccountEnforcementService {
   }
 
   /**
+   * The member's live scoped-restriction state, for the admin member drawer's
+   * "lift restriction" control. Read-only: `restricted` is not exposed on any
+   * other admin DTO, and the drawer has to know whether there is anything to
+   * lift before it offers the button.
+   *
+   * NOTE the expiry semantics: `restricted_until` in the PAST means the
+   * restriction has already lapsed and `JwtStrategy` will clear the flags on
+   * the member's next request (see its `restrictedUntil` branch). This reports
+   * `restricted: false` for that case rather than offering a lift of something
+   * already gone.
+   */
+  async restrictionState(userId: string): Promise<{
+    userId: string;
+    restricted: boolean;
+    restrictedUntil: Date | null;
+  }> {
+    const user = await this.users.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException('Member not found.');
+    }
+    const hasLapsed =
+      user.restrictedUntil !== null && user.restrictedUntil <= new Date();
+    return {
+      userId: user.id,
+      restricted: user.restricted && !hasLapsed,
+      restrictedUntil: user.restrictedUntil,
+    };
+  }
+
+  /**
+   * PATCH /admin/members/:id/restriction — lift a scoped restriction.
+   *
+   * The counterpart `liftSuspension` has always had, and `restrict` never did:
+   * before this, the only way out of a restriction was winning an appeal
+   * (`ModerationService.revertOriginalAction`) or waiting for
+   * `restricted_until` to lapse. A moderator who restricted the wrong member,
+   * or one whose situation changed, had no way back.
+   *
+   * Idempotent, matching `liftSuspension` and this codebase's
+   * promotion/RSVP/vouch convention: lifting a restriction that is not there is
+   * a no-op returning the current state, not a 409. Deliberately does NOT touch
+   * `status`/`suspendedUntil` — a restriction never changed them (see
+   * `enforceAgainstUser`) — and does NOT revoke sessions, for the same reason
+   * applying one does not.
+   */
+  async liftRestriction(
+    userId: string,
+    actorId: string,
+    dto: LiftRestrictionDto,
+  ): Promise<{
+    userId: string;
+    restricted: boolean;
+    restrictedUntil: Date | null;
+  }> {
+    const state = await this.restrictionState(userId);
+    if (!state.restricted) {
+      return state;
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      await manager.update(
+        User,
+        { id: userId },
+        { restricted: false, restrictedUntil: null },
+      );
+      // Same action code the appeal-overturn path writes
+      // (`ModerationService.revertOriginalAction`), so both routes out of a
+      // restriction read as one thing in the audit feed.
+      await this.audit.writeAuditLog(
+        dto.reportId ?? null,
+        actorId,
+        'restriction_lifted',
+        dto.reasonCode,
+        dto.note,
+        undefined,
+        manager,
+      );
+    });
+
+    return { userId, restricted: false, restrictedUntil: null };
+  }
+
+  /**
    * Restores the member behind an overturned appeal's report, if there is one
    * and they are actually suspended.
    *
-   * Silent when the appeal has no `reportId`, the report is not about a member,
-   * or the member is not suspended — an overturn must still record its decision
+   * Silent when the appeal has no `reportId`, the report's subject resolves to
+   * no account, or that member is not suspended — an overturn must still record its decision
    * in all of those cases rather than 400 on a bookkeeping detail.
    */
   async restoreSuspensionForAppeal(
@@ -111,26 +245,42 @@ export class AccountEnforcementService {
     const report = await manager.findOne(Report, { where: { id: reportId } });
     if (!report) return;
 
-    const profile = await this.resolveReportedProfile(report);
-    if (!profile) return;
+    // Resolves the author on a content report too, not just the subject of a
+    // `member` one: now that `suspend`/`ban` can land on the author of reported
+    // content (TS-03), an overturned appeal has to be able to reach the same
+    // account the sanction did.
+    const userId = await this.resolveEnforcementTargetUserId(report);
+    if (!userId) return;
 
-    const user = await manager.findOne(User, {
-      where: { id: profile.userId },
-    });
+    const user = await manager.findOne(User, { where: { id: userId } });
     if (!user || user.status !== UserStatus.Suspended) return;
 
     await this.restoreUser(manager, user.id);
   }
 
   /**
-   * Applies a moderator action to the reported *member*, if the action is one
-   * that has an effect on an account.
+   * Applies a moderator action to the member a report resolves to, if the
+   * action is one that has an effect on an account.
+   *
+   * That member is the reported member on a `member` report and the AUTHOR of
+   * the reported content on every other subject type (TS-03) — see
+   * `resolveEnforcementTargetUserId`. The house account, staff accounts, the
+   * deactivation `previousStatus` sync and the restriction-versus-lockout split
+   * below all apply identically whichever way the member was reached.
    *
    * Returns the affected user's id (so the caller can revoke their sessions
-   * outside the transaction) alongside the sanction's expiry — `null` for a
-   * permanent ban, a `Date` for a time-boxed suspension or a restriction — so
+   * outside the transaction) alongside the sanction's expiry — a `Date` for a
+   * time-boxed suspension, a restriction, or a ban waiting on ratification — so
    * the caller can put "until X" in the outcome notification. Returns `null`
    * when the action was not an enforcement action.
+   *
+   * `ban` NO LONGER REMOVES THE ACCOUNT HERE (TS-12). It opens a ratification
+   * hold and suspends the member for the length of that hold, returning
+   * `kind: 'ban_pending'`. The permanent ban lands in `applyRatifiedBan`, called
+   * by `BanRatificationService.decide` once a second, different moderator
+   * confirms it. Nothing about this delays a content takedown:
+   * `hide_content`/`remove_content` are separate actions and never pass through
+   * here at all.
    *
    * `restrict` writes the scoped restriction (`User.restricted` +
    * `restrictedUntil`), enforced by `NotRestrictedGuard` on the specific write
@@ -142,7 +292,17 @@ export class AccountEnforcementService {
   async enforceAgainstUser(
     manager: EntityManager,
     report: Report,
-    dto: { action: ModActionCode; duration?: string },
+    dto: {
+      action: ModActionCode;
+      duration?: string;
+      reasonCode?: string;
+      note?: string;
+    },
+    // The moderator asking. Recorded on the ratification hold a `ban` opens, so
+    // the second moderator can see whose ban they are being asked to confirm,
+    // and so `BanRatificationService.decide` can refuse to let them confirm
+    // their own.
+    actorId?: string,
   ): Promise<{
     userId: string;
     suspendedUntil: Date | null;
@@ -151,8 +311,17 @@ export class AccountEnforcementService {
      * revoke the member's sessions for a restriction (see this method's doc
      * comment — it is deliberately not a lockout), only for the two actions
      * that actually change `status`.
+     *
+     * `ban_pending` (TS-12) is a `ban` that has NOT removed anyone yet: the
+     * member is suspended for the length of the ratification hold and the
+     * account action waits on a second moderator. Callers must revoke sessions
+     * for it (it IS a suspension) and must NOT emit `ACCOUNT_REMOVED` for it,
+     * because nothing has been removed. That emit belongs to
+     * `BanRatificationService.decide`, at the moment the ban takes effect.
      */
-    kind: 'suspend' | 'ban' | 'restrict';
+    kind: 'suspend' | 'ban' | 'restrict' | 'ban_pending';
+    /** Only on `ban_pending`: the hold a second moderator has to act on. */
+    ratificationId?: string;
   } | null> {
     if (
       dto.action !== 'suspend' &&
@@ -162,23 +331,20 @@ export class AccountEnforcementService {
       return null;
     }
 
-    // Suspending the author of reported *content* is not possible here: the
-    // author of a post/reply/message is not resolvable within this module (see
-    // the note in `buildDetail`). Failing loudly beats the silent no-op this
-    // whole change exists to remove.
-    if (report.subjectType !== ReportSubjectType.Member) {
+    // TS-03: these three actions used to 400 on every non-`member` report, so
+    // a post that outs someone could only be hidden and the person behind it
+    // had to be found by hand, through a path that recorded no link to the
+    // report. The subject now resolves to its author for every subject type
+    // that has one, and the audit row `actOnReport` writes carries the
+    // `reportId`, so the sanction is linked to the evidence and appealable as
+    // that decision.
+    const userId = await this.resolveEnforcementTargetUserId(report);
+    if (!userId) {
       throw new BadRequestException(
-        `Cannot ${dto.action} for a "${report.subjectType}" report — that action applies to members only.`,
+        `Could not resolve the "${report.subjectType}" this report names to an account. ` +
+          'Act on the content instead, or find the member and act from their drawer.',
       );
     }
-
-    const profile = await this.resolveReportedProfile(report);
-    if (!profile) {
-      throw new BadRequestException(
-        'Could not resolve the reported member to an account.',
-      );
-    }
-    const userId = profile.userId;
 
     const now = new Date();
 
@@ -271,6 +437,45 @@ export class AccountEnforcementService {
     // is not a way to dodge it either.
     const preserveDeactivation = user.status === UserStatus.Deactivated;
 
+    // TS-12. A ban does not remove the account here any more. It opens a hold
+    // for a second moderator and suspends the member for the length of that
+    // hold. Everything above this line still runs first, so the house-account
+    // and staff carve-outs and the duration validation refuse a bad ban before
+    // any hold is opened.
+    if (dto.action === 'ban') {
+      const hold = await this.openBanHold(manager, {
+        targetUserId: userId,
+        reportId: report.id,
+        requestedBy: actorId ?? null,
+        note: dto.note ?? null,
+        reasonCode: dto.reasonCode ?? null,
+        now,
+      });
+      await manager.update(
+        User,
+        { id: userId },
+        {
+          ...(preserveDeactivation ? {} : { status: UserStatus.Suspended }),
+          // The interim suspension expires WITH the hold, which is what makes
+          // "nobody ratified it" self-correcting: `JwtStrategy` clears a lapsed
+          // suspension on the member's next request, so an unconfirmed ban
+          // costs them the hold window and nothing more.
+          suspendedUntil: hold.expiresAt,
+        },
+      );
+      await this.syncDeactivationPreviousStatus(
+        manager,
+        userId,
+        UserStatus.Suspended,
+      );
+      return {
+        userId,
+        suspendedUntil: hold.expiresAt,
+        kind: 'ban_pending',
+        ratificationId: hold.id,
+      };
+    }
+
     await manager.update(
       User,
       { id: userId },
@@ -289,8 +494,118 @@ export class AccountEnforcementService {
     return {
       userId,
       suspendedUntil,
-      kind: dto.action === 'ban' ? 'ban' : 'suspend',
+      kind: 'suspend',
     };
+  }
+
+  /**
+   * Opens (or joins) the ratification hold for a permanent ban, inside the
+   * caller's transaction (TS-12).
+   *
+   * IDEMPOTENT PER MEMBER, which is what makes a bulk ban correct rather than
+   * merely tolerable: a `PATCH /mod/reports/bulk` naming one member across
+   * thirty reports must open ONE hold, not thirty, and must not push the
+   * member's interim suspension out by another 72 hours on each row. When a
+   * hold already stands, the existing one comes back with its ORIGINAL expiry,
+   * so a second report cannot silently extend how long someone is suspended
+   * before anyone has confirmed anything.
+   *
+   * `UQ_ban_ratifications_pending_target` (partial unique on `target_user_id
+   * WHERE status = 'pending'`) is what actually closes the race between two
+   * moderators; the read below fast-paths the ordinary case.
+   *
+   * A hold whose window has already closed is not an open hold: it is settled
+   * as expired and a fresh one is opened, rather than a lapsed row being
+   * silently reused with a deadline in the past.
+   */
+  private async openBanHold(
+    manager: EntityManager,
+    input: {
+      targetUserId: string;
+      reportId: string | null;
+      requestedBy: string | null;
+      note: string | null;
+      reasonCode: string | null;
+      now: Date;
+    },
+  ): Promise<BanRatification> {
+    const repo = manager.getRepository(BanRatification);
+    const existing = await repo.findOne({
+      where: {
+        targetUserId: input.targetUserId,
+        status: BanRatificationStatus.Pending,
+      },
+    });
+    if (existing && existing.expiresAt.getTime() > input.now.getTime()) {
+      return existing;
+    }
+    if (existing) {
+      await repo.update(
+        { id: existing.id, status: BanRatificationStatus.Pending },
+        { status: BanRatificationStatus.Expired, decidedAt: input.now },
+      );
+    }
+
+    // The display-name snapshot, taken now, is what lets the ratification queue
+    // still say who a hold is about after the member is erased — the same
+    // reason `mod_audit_logs.target_name` exists.
+    const profile = await manager.findOne(Profile, {
+      where: { userId: input.targetUserId },
+    });
+    const targetName = profile
+      ? `${profile.firstName} ${profile.lastName}`.trim()
+      : null;
+
+    return repo.save(
+      repo.create({
+        targetUserId: input.targetUserId,
+        targetName,
+        reportId: input.reportId,
+        requestedBy: input.requestedBy,
+        note: input.note,
+        reasonCode: input.reasonCode,
+        interimAction: BAN_INTERIM_SUSPENSION,
+        expiresAt: banHoldExpiryFrom(input.now),
+        status: BanRatificationStatus.Pending,
+      }),
+    );
+  }
+
+  /**
+   * Applies a permanent ban that a second moderator has just ratified (TS-12).
+   *
+   * The same write `enforceAgainstUser` used to do inline for a `ban`:
+   * `status = Suspended` with `suspended_until = NULL`, which is the shape this
+   * codebase has always used for "never expires" (see `JwtStrategy`'s
+   * lapsed-suspension branch, which treats a NULL as permanent). The
+   * `Deactivated` carve-out is preserved for the same reason it is everywhere
+   * else here: a member who had already hidden themselves stays hidden, and
+   * `previousStatus` is synced so signing back in cannot launder the ban away.
+   *
+   * The guards (house account, staff accounts, duration validation) are NOT
+   * re-run: they were all applied when the hold was opened, and re-running them
+   * here would mean a member promoted to moderator between the request and the
+   * ratification could not be banned for what they did as a member.
+   */
+  async applyRatifiedBan(
+    manager: EntityManager,
+    userId: string,
+  ): Promise<void> {
+    const user = await manager.findOne(User, { where: { id: userId } });
+    const preserveDeactivation = user?.status === UserStatus.Deactivated;
+    await manager.update(
+      User,
+      { id: userId },
+      {
+        ...(preserveDeactivation ? {} : { status: UserStatus.Suspended }),
+        suspendedUntil: null,
+      },
+    );
+    await this.syncDeactivationPreviousStatus(
+      manager,
+      userId,
+      UserStatus.Suspended,
+    );
   }
 
   /**
@@ -362,40 +677,87 @@ export class AccountEnforcementService {
 
     const preserveDeactivation = user.status === UserStatus.Deactivated;
 
-    await this.dataSource.transaction(async (manager) => {
-      await manager.update(
-        User,
-        { id: userId },
-        {
-          ...(preserveDeactivation ? {} : { status: UserStatus.Suspended }),
-          suspendedUntil,
-        },
-      );
-      await this.syncDeactivationPreviousStatus(
-        manager,
+    // TS-12 applies here too, and deliberately so. This route is the admin
+    // member drawer's "restrict permanently", and it reaches the same
+    // permanent ban the report queue does, without a report and without a
+    // second signature. Leaving it outside the ratification requirement would
+    // have made the whole control theatre: a compromised staff account would
+    // simply use this door instead. So a `ban` here opens the same hold, and
+    // the member is suspended for its length rather than removed.
+    const holdExpiresAt = await this.dataSource.transaction(
+      async (manager): Promise<Date | null> => {
+        const hold =
+          dto.action === 'ban'
+            ? await this.openBanHold(manager, {
+                targetUserId: userId,
+                reportId: null,
+                requestedBy: actorId,
+                note: dto.note,
+                reasonCode: dto.reasonCode,
+                now,
+              })
+            : null;
+        const persistedUntil = hold ? hold.expiresAt : suspendedUntil;
+
+        await manager.update(
+          User,
+          { id: userId },
+          {
+            ...(preserveDeactivation ? {} : { status: UserStatus.Suspended }),
+            suspendedUntil: persistedUntil,
+          },
+        );
+        await this.syncDeactivationPreviousStatus(
+          manager,
+          userId,
+          UserStatus.Suspended,
+        );
+        // Report-less audit row (reportId = null): this action answers to no
+        // particular report. It surfaces in the global `GET /mod/audit` feed but
+        // not `GET /mod/reports/audit`, which filters by report. A pending ban
+        // is recorded as pending, carrying the hold's expiry, for the same
+        // reason the report path records it that way: the trail must not say
+        // someone was removed while a second moderator has yet to agree.
+        await this.audit.writeAuditLog(
+          null,
+          actorId,
+          hold ? BAN_PENDING_AUDIT_ACTION : dto.action,
+          dto.reasonCode,
+          dto.note,
+          hold ? hold.expiresAt.toISOString() : dto.duration,
+          manager,
+        );
+        return hold ? hold.expiresAt : null;
+      },
+    );
+
+    // Ban evasion (TS-05), same contract as the report-driven path in
+    // `ModerationService.actOnReport`: post-commit, best effort, and never able
+    // to roll the ban back.
+    //
+    // SINCE TS-12 THIS CANNOT FIRE FROM HERE either: a `ban` opens a hold
+    // rather than removing an account, so the emit belongs to
+    // `BanRatificationService.decide`, at the instant a second moderator
+    // confirms. The branch is kept so the move stays visible in this file
+    // rather than reading as a deletion.
+    if (dto.action === 'ban' && !holdExpiresAt) {
+      const removed: AccountRemovedEvent = {
         userId,
-        UserStatus.Suspended,
-      );
-      // Report-less audit row (reportId = null): this action answers to no
-      // particular report. It surfaces in the global `GET /mod/audit` feed but
-      // not `GET /mod/reports/audit`, which filters by report.
-      await this.audit.writeAuditLog(
-        null,
-        actorId,
-        dto.action,
-        dto.reasonCode,
-        dto.note,
-        dto.duration,
-        manager,
-      );
-    });
+        removalKind: RemovalKind.PlatformBan,
+        communityId: null,
+        removedAt: new Date(),
+      };
+      this.eventEmitter.emit(ACCOUNT_REMOVED, removed);
+    }
 
     // A member who was already `Deactivated` keeps that status (only
     // `suspendedUntil` changes); everyone else becomes `Suspended`. Report the
-    // status actually persisted, not a fixed literal.
+    // status actually persisted, not a fixed literal — including the hold's
+    // expiry for a ban awaiting ratification, which is genuinely when this
+    // member's suspension currently ends.
     return {
       userId,
-      suspendedUntil,
+      suspendedUntil: holdExpiresAt ?? suspendedUntil,
       status: preserveDeactivation
         ? UserStatus.Deactivated
         : UserStatus.Suspended,
@@ -410,10 +772,10 @@ export class AccountEnforcementService {
    * it, and that is `Deactivated` for someone who had paused their own account
    * — un-hiding them here would be a privilege grant nobody asked for.
    */
-  private async restoreUser(
-    manager: EntityManager,
-    userId: string,
-  ): Promise<void> {
+  // Public since TS-12: `BanRatificationService.decide` calls it to undo the
+  // interim suspension when a second moderator DECLINES a ban. Same
+  // transaction-bearing contract as every other helper here.
+  async restoreUser(manager: EntityManager, userId: string): Promise<void> {
     const user = await manager.findOne(User, { where: { id: userId } });
     const preserveDeactivation = user?.status === UserStatus.Deactivated;
 
@@ -472,5 +834,29 @@ export class AccountEnforcementService {
       ? [{ slug: report.subjectId }, { userId: report.subjectId }]
       : [{ slug: report.subjectId }];
     return this.profiles.findOne({ where });
+  }
+
+  /**
+   * The account a sanction should land on for THIS report: the reported member
+   * on a `member` report, the author of the reported content on every other
+   * subject type that has one.
+   *
+   * A `member` subject keeps going through `resolveReportedProfile` so the
+   * enforcement path and the drawer's read path can never disagree about who a
+   * report is about. Everything else goes through
+   * {@link ReportSubjectResolverService}, which returns `null` rather than a
+   * guess when the subject has no author (a `venue` report describing a place
+   * in prose, an unclaimed directory listing, content whose author has erased
+   * their account).
+   */
+  private async resolveEnforcementTargetUserId(
+    report: Report,
+  ): Promise<string | null> {
+    if (report.subjectType === ReportSubjectType.Member) {
+      const profile = await this.resolveReportedProfile(report);
+      return profile?.userId ?? null;
+    }
+    const resolution = await this.subjectResolver.resolve(report);
+    return resolution.authorUserId;
   }
 }

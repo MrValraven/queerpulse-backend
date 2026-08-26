@@ -16,6 +16,7 @@ import {
 import { Listing } from '../listings/entities/listing.entity';
 import { Event } from '../events/entities/event.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
+import { ConversationParticipant } from '../messaging/entities/conversation-participant.entity';
 import { Profile } from '../users/entities/profile.entity';
 
 type EntityKind = 'member' | 'community' | 'business' | 'event' | 'thread';
@@ -32,6 +33,8 @@ export class MentionNotificationService {
     @InjectRepository(Event) private readonly events: Repository<Event>,
     @InjectRepository(ForumThread)
     private readonly threads: Repository<ForumThread>,
+    @InjectRepository(ConversationParticipant)
+    private readonly conversationParticipants: Repository<ConversationParticipant>,
     private readonly notifications: NotificationsService,
   ) {}
 
@@ -128,8 +131,11 @@ export class MentionNotificationService {
           listingRows.map((listing) => [listing.slug, listing.ownerId]),
         );
         for (const slug of mentions.businesses) {
+          // `undefined` = no such listing; `null` = its owner erased their
+          // account (`SetNullContentAuthorFksOnUserErasure1794610000000`).
+          // Either way there is nobody to notify about the mention.
           const ownerId = ownerBySlug.get(slug);
-          if (ownerId === undefined) continue;
+          if (ownerId === undefined || ownerId === null) continue;
           groups.push({ kind: 'business', ref: slug, recipients: [ownerId] });
         }
       }
@@ -142,7 +148,7 @@ export class MentionNotificationService {
         );
         for (const slug of mentions.events) {
           const hostId = hostBySlug.get(slug);
-          if (hostId === undefined) continue;
+          if (hostId === undefined || hostId === null) continue;
           groups.push({ kind: 'event', ref: slug, recipients: [hostId] });
         }
       }
@@ -283,6 +289,15 @@ export class MentionNotificationService {
    * see (finding H3). For a public community, a forum thread, or a global post
    * with no community, every candidate passes through unchanged.
    *
+   * A `message` source (a mention written inside a DM or group thread) is
+   * restricted to that conversation's own participants. A DM is the most
+   * private space on the platform, so mentioning a handle that is not in the
+   * room must notify nobody: the notification alone would disclose that a
+   * private conversation exists and names them, and the row persists a 140-char
+   * `excerpt` of someone else's private message. This one FAILS CLOSED, unlike
+   * the community branch below: an unresolvable conversation drops the
+   * mention rather than broadcasting it.
+   *
    * Fails open on an unresolvable community slug: the fan-out runs synchronously
    * right after the post/reply is saved, so the source community is present in
    * practice; a miss means a data race we can't classify, and dropping a
@@ -297,6 +312,17 @@ export class MentionNotificationService {
       return new Set();
     }
     const source = payloadBase.source;
+    if (source === 'message') {
+      const conversationId = payloadBase.conversationId;
+      if (typeof conversationId !== 'string' || !conversationId) {
+        return new Set();
+      }
+      const participants = await this.conversationParticipants.find({
+        where: { conversationId, userId: In(candidateUserIds) },
+        select: { userId: true },
+      });
+      return new Set(participants.map((participant) => participant.userId));
+    }
     const communitySlug = payloadBase.communitySlug;
     if (
       source !== 'community' ||

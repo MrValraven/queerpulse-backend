@@ -28,6 +28,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminReadingGroupProposalsService } from './admin-reading-group-proposals.service';
 import { DecideReadingGroupProposalDto } from './dto/decide-reading-group-proposal.dto';
+import { DeclineReadingGroupProposalDto } from './dto/decline-reading-group-proposal.dto';
 import { ListAdminReadingGroupProposalsQuery } from './dto/list-admin-reading-group-proposals.query';
 
 /**
@@ -67,9 +68,18 @@ export class AdminReadingGroupProposalsController {
     return this.adminReadingGroupProposals.list(query);
   }
 
+  // Approving CREATES the community the member proposed, owned by them, and
+  // notifies them (LOC-19). Idempotent: a second approve on a proposal that
+  // already built its community returns that proposal unchanged rather than
+  // creating a second one, so this stays safe to retry.
   @Post(':id/approve')
-  @ApiOperation({ summary: 'Approve a reading-group proposal.' })
-  @ApiOkResponse({ description: 'The proposal, now approved.' })
+  @ApiOperation({
+    summary:
+      "Approve a reading-group proposal — creates the proposer's community.",
+  })
+  @ApiOkResponse({
+    description: 'The proposal, now approved, carrying its community slug.',
+  })
   @ApiBadRequestResponse({ description: 'Malformed id or note.' })
   @ApiNotFoundResponse({ description: 'No proposal with that id.' })
   approve(
@@ -80,17 +90,22 @@ export class AdminReadingGroupProposalsController {
     return this.adminReadingGroupProposals.approve(id, user.userId, dto.note);
   }
 
+  // A decline needs a reason, and the proposer is told it. `reason` is
+  // required by `DeclineReadingGroupProposalDto`, which is why this handler
+  // does not share the optional-note body the other two use.
   @Post(':id/decline')
-  @ApiOperation({ summary: 'Decline a reading-group proposal.' })
+  @ApiOperation({
+    summary: 'Decline a reading-group proposal (reason required).',
+  })
   @ApiOkResponse({ description: 'The proposal, now declined.' })
-  @ApiBadRequestResponse({ description: 'Malformed id or note.' })
+  @ApiBadRequestResponse({ description: 'Malformed id, or a missing reason.' })
   @ApiNotFoundResponse({ description: 'No proposal with that id.' })
   decline(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,
-    @Body() dto: DecideReadingGroupProposalDto,
+    @Body() dto: DeclineReadingGroupProposalDto,
   ) {
-    return this.adminReadingGroupProposals.decline(id, user.userId, dto.note);
+    return this.adminReadingGroupProposals.decline(id, user.userId, dto.reason);
   }
 
   @Post(':id/archive')

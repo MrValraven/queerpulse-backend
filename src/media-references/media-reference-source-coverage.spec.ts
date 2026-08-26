@@ -28,6 +28,13 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   // A flat/global post is a `CommunityPost` row with a null `communityId`, so
   // its image lives in the same column the nested route writes.
   'UpdateFlatPostDto.image': 'CommunityPost.image',
+  // Forum image upload (SOC-13). The forum's own update DTO is
+  // `UpdateForumPostDto`, deliberately NOT `UpdatePostDto`: this map is keyed
+  // by class name alone, so two DTOs sharing a name would collapse into one
+  // entry and silently mis-map one of them.
+  'CreateThreadDto.image': 'ForumPost.image',
+  'ReplyThreadDto.image': 'ForumPost.image',
+  'UpdateForumPostDto.image': 'ForumPost.image',
   'CreateCommunityDto.coverImageUrl': 'Community.coverImageUrl',
   'CreateCommunityDto.avatarImageUrl': 'Community.avatarImageUrl',
   'UpsertCardProgramDto.crestMediaKey': 'CommunityCard.crestMediaKey',
@@ -36,7 +43,7 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   'UpdateLandlordDto.photo': 'Landlord.photo',
   // A member's own photo on a review, written by both the create and the edit
   // body. Same underlying column, so both map to the one source.
-  'CreateReviewDto.photo': 'ListingReview.photo',
+  'CreateListingReviewDto.photo': 'ListingReview.photo',
   // The ordered gallery: one `@IsImageReference` field per photo.
   'ListingGalleryPhotoDto.image': 'Listing.photoGallery',
   // LEGACY four-slot pair, still accepted on the wire. Whatever a client sends
@@ -52,12 +59,15 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   'WorkItemDto.imageUrl': 'WorkItem.imageUrl',
   'UpdateProfileDto.avatarUrl': 'Profile.avatarUrl',
   'CreateEventDto.coverImageUrl': 'Event.coverImageUrl',
-  'CreateGroupDto.avatarUrl': 'Conversation.avatarUrl',
+  'CreateGroupConversationDto.avatarUrl': 'Conversation.avatarUrl',
   'UpdateConversationDto.avatarUrl': 'Conversation.avatarUrl',
   'CompanyWorkItemDto.imageUrl': 'Company.work[].imageUrl',
   'CreateChangemakerDto.imageUrl': 'Changemaker.imageUrl',
+  'UpdateArticleDto.heroImageKey': 'MagazineArticle.heroImageKey',
   'UpdateArticleDto.socialImage': 'MagazineArticle.socialImage',
   'UpdateCoverDto.coverUrl': 'MagazineIssue.coverUrl',
+  'CreateStorySubmissionDto.coverImageKey':
+    'MagazineStorySubmission.coverImageKey',
   'CreateDeckDto.cover': 'MagazineDeck.cover',
 };
 

@@ -37,6 +37,10 @@ import {
   SubprofileInvitedEvent,
   SubprofileMemberRemovedEvent,
 } from '../subprofiles/subprofile.events';
+import {
+  SECURITY_NEW_SIGN_IN,
+  SecurityNewSignInEvent,
+} from '../auth/security.events';
 import { USER_PROMOTED, UserPromotedEvent } from '../users/user.events';
 import { VOUCH_CREATED, VouchCreatedEvent } from '../vouch/vouch.events';
 import { NotificationType } from './entities/notification.entity';
@@ -269,6 +273,36 @@ export class NotificationsListener {
       NotificationType.SubprofileMemberRemoved,
       { subprofileName: e.displayName },
       e.removedByUserId,
+    );
+  }
+
+  /**
+   * A device this member has not signed in from before just signed in
+   * (`AuthService.issueTokens`).
+   *
+   * NO ACTOR ARGUMENT, unlike almost everything above: there is no other member
+   * involved, so there is nobody for the block/mute gate to filter on. The
+   * member's own switch (`member_preferences.login_alerts_enabled`) is checked
+   * at the emit site instead, which is why this handler applies no gate of its
+   * own — if the event reached here, the member asked to hear about it.
+   *
+   * The payload is the whole alert: a coarse device name, when it happened, and
+   * the session's family id. `source: 'security'` is what deep-links the row to
+   * `/account/sessions`, the one place the member can end the session. Nothing
+   * here is precise enough to identify a machine or to out anyone from a push
+   * preview.
+   */
+  @OnEvent(SECURITY_NEW_SIGN_IN)
+  async onSecurityNewSignIn(e: SecurityNewSignInEvent): Promise<void> {
+    await this.notifications.create(
+      e.userId,
+      NotificationType.SecurityNewSignIn,
+      {
+        source: 'security',
+        deviceLabel: e.deviceLabel,
+        signedInAt: e.signedInAt.toISOString(),
+        familyId: e.familyId,
+      },
     );
   }
 }

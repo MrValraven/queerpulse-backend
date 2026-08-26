@@ -16,6 +16,7 @@ import {
   In,
   Not,
   Repository,
+  SelectQueryBuilder,
 } from 'typeorm';
 import {
   CONNECTION_ACCEPTED,
@@ -37,10 +38,38 @@ import {
   toConnectionListItem,
 } from './connection-response';
 import { Connection, ConnectionStatus } from './entities/connection.entity';
+import { ConnectionNote } from './entities/connection-note.entity';
 import { Paginated, PAGE_SIZE, normalizePage } from '../common/pagination';
+import { escapeLikeTerm } from '../common/like-escape';
+import { toStoredPlainTextOrNull } from '../communities/community-plain-text';
+import {
+  CONNECTION_SEARCH_HAYSTACK,
+  foldedTextExpression,
+} from './connection-search';
 
 export type ConnectionAction = 'accept' | 'decline' | 'block' | 'unblock';
 export type ConnectionTab = 'all' | 'incoming' | 'outgoing' | 'vouched';
+/** How a page of connections is ordered. `recent` is the default. */
+export type ConnectionSort = 'recent' | 'alphabetical' | 'mutuals';
+
+/** The filters and ordering `list` accepts beyond the tab itself. */
+export interface ConnectionListOptions {
+  page?: number;
+  q?: string;
+  sort?: ConnectionSort;
+}
+
+/**
+ * How deep the "most mutuals" ordering ranks.
+ *
+ * Mutual counts are viewer-relative and cannot be expressed as a column, so
+ * ranking by them means computing them for the whole matching set rather than
+ * for one page. That is bounded here instead of left to grow with a member's
+ * degree: the most-connected members in the set are ranked, and anything past
+ * the cap keeps the recency order it already had. Well above the "fifty
+ * people" this ordering exists to make navigable.
+ */
+const MUTUAL_SORT_MAX = 300;
 
 /** The relationship for a member the viewer shares nothing with (yet). */
 const NO_RELATIONSHIP: ConnectionRelationship = {
@@ -53,6 +82,8 @@ export class ConnectionsService {
   constructor(
     @InjectRepository(Connection)
     private readonly connections: Repository<Connection>,
+    @InjectRepository(ConnectionNote)
+    private readonly connectionNotes: Repository<ConnectionNote>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly vouchService: VouchService,
     private readonly eventEmitter: EventEmitter2,
@@ -461,18 +492,45 @@ export class ConnectionsService {
     return { ok: true };
   }
 
+  /**
+   * One page of the member's own address book.
+   *
+   * Two shapes, deliberately:
+   *
+   *  - With no search term and the default recency ordering, the original
+   *    `findAndCount` per tab runs untouched. That is the common case and it
+   *    needs no join.
+   *  - With `q` or a non-default `sort`, the page is resolved by
+   *    {@link listBySearchOrSort}, which joins the other member's profile so
+   *    the filter and the ordering happen in SQL and the `total` stays honest
+   *    across pages.
+   *
+   * Either way the mapping tail is shared, so every row carries the same
+   * relationship signals, the same introducer, and the viewer's own private
+   * note.
+   */
   async list(
     userId: string,
     tab: ConnectionTab,
-    query?: { page?: number },
+    query?: ConnectionListOptions,
   ): Promise<Paginated<ConnectionListItem>> {
     const page = normalizePage(query?.page);
     const take = PAGE_SIZE;
     const skip = (page - 1) * PAGE_SIZE;
+    const searchTerm = query?.q?.trim() ?? '';
+    const sort: ConnectionSort = query?.sort ?? 'recent';
 
     let rows: Connection[];
     let total: number;
-    if (tab === 'incoming') {
+    if (searchTerm || sort !== 'recent') {
+      [rows, total] = await this.listBySearchOrSort(
+        userId,
+        tab,
+        searchTerm,
+        sort,
+        page,
+      );
+    } else if (tab === 'incoming') {
       [rows, total] = await this.connections.findAndCount({
         where: { addresseeId: userId, status: ConnectionStatus.Pending },
         order: { createdAt: 'DESC' },
@@ -532,10 +590,15 @@ export class ConnectionsService {
     const introducerIds = rows
       .map((c) => c.introducedBy)
       .filter((id): id is string => id !== null && id !== undefined);
-    const [profilesById, relationshipsByUserId] = await Promise.all([
-      this.profilesByUserIds([...otherIds, ...introducerIds]),
-      this.relationshipsByUserIds(userId, otherIds),
-    ]);
+    const [profilesById, relationshipsByUserId, notesByConnectionId] =
+      await Promise.all([
+        this.profilesByUserIds([...otherIds, ...introducerIds]),
+        this.relationshipsByUserIds(userId, otherIds),
+        this.viewerNotesByConnectionId(
+          userId,
+          rows.map((c) => c.id),
+        ),
+      ]);
     const items = rows.map((c) => {
       const otherUserId = this.otherId(c, userId);
       return toConnectionListItem(
@@ -544,9 +607,239 @@ export class ConnectionsService {
         profilesById.get(otherUserId),
         relationshipsByUserId.get(otherUserId) ?? NO_RELATIONSHIP,
         c.introducedBy ? profilesById.get(c.introducedBy) : undefined,
+        notesByConnectionId.get(c.id) ?? null,
       );
     });
     return { items, total, page, pageSize: PAGE_SIZE };
+  }
+
+  /**
+   * The searched and/or re-ordered variant of {@link list}'s row fetch.
+   *
+   * Returns `[rows, total]` in the same shape the plain `findAndCount`
+   * branches do, so the caller's mapping tail is identical either way.
+   */
+  private async listBySearchOrSort(
+    userId: string,
+    tab: ConnectionTab,
+    searchTerm: string,
+    sort: ConnectionSort,
+    page: number,
+  ): Promise<[Connection[], number]> {
+    let vouchedIds: string[] | null = null;
+    if (tab === 'vouched') {
+      vouchedIds = await this.vouchService.getActiveVoucheeIds(userId);
+      if (!vouchedIds.length) {
+        return [[], 0];
+      }
+    }
+    const query = this.buildSearchableListQuery(
+      userId,
+      tab,
+      vouchedIds,
+      searchTerm,
+    );
+
+    if (sort === 'mutuals') {
+      return this.pageRankedByMutuals(userId, tab, query, page);
+    }
+
+    if (sort === 'alphabetical') {
+      // Folded so "Ávila" sorts with the A's rather than after Z, which is
+      // what the database's own collation does under a C-like locale.
+      query
+        .orderBy(foldedTextExpression('other.first_name'), 'ASC')
+        .addOrderBy(foldedTextExpression('other.last_name'), 'ASC');
+    } else {
+      this.applyRecencyOrder(query, tab);
+    }
+    // A stable tiebreak, so two rows with the same timestamp (or the same
+    // name) cannot swap places between page 1 and page 2 and hide a row.
+    query.addOrderBy('connection.id', 'ASC');
+
+    // `.offset()`/`.limit()` rather than `.skip()`/`.take()`: this query joins
+    // and can order by a joined column, which is exactly the combination
+    // `.skip()`/`.take()` gets wrong.
+    return query
+      .offset((page - 1) * PAGE_SIZE)
+      .limit(PAGE_SIZE)
+      .getManyAndCount();
+  }
+
+  /**
+   * "Most mutuals first". The count is viewer-relative, so it is not a column
+   * anything can `ORDER BY`: the matching set is taken in recency order up to
+   * {@link MUTUAL_SORT_MAX}, scored with the existing batched mutual-count
+   * read, re-ordered, and then sliced into a page.
+   *
+   * `total` stays the true total, so the tab badge and the list still agree.
+   * Sorting is stable, so members who share the same number of mutuals keep
+   * the recency order they arrived in.
+   */
+  private async pageRankedByMutuals(
+    userId: string,
+    tab: ConnectionTab,
+    query: SelectQueryBuilder<Connection>,
+    page: number,
+  ): Promise<[Connection[], number]> {
+    const total = await query.clone().getCount();
+    if (!total) {
+      return [[], 0];
+    }
+    const ranking = this.applyRecencyOrder(query.clone(), tab)
+      .addOrderBy('connection.id', 'ASC')
+      .limit(MUTUAL_SORT_MAX);
+    const candidates = await ranking.getMany();
+    const mutualCounts = await this.mutualCountsByUserIds(
+      userId,
+      candidates.map((c) => this.otherId(c, userId)),
+    );
+    const ordered = [...candidates].sort(
+      (left, right) =>
+        (mutualCounts.get(this.otherId(right, userId)) ?? 0) -
+        (mutualCounts.get(this.otherId(left, userId)) ?? 0),
+    );
+    const skip = (page - 1) * PAGE_SIZE;
+    return [ordered.slice(skip, skip + PAGE_SIZE), total];
+  }
+
+  /**
+   * The joined query behind search and non-default sorts: the viewer's edges
+   * for this tab, with the OTHER member's profile joined on so their name,
+   * handle, and headline are filterable and sortable in SQL.
+   *
+   * The join condition derives the far end of each edge from the viewer, which
+   * is the same "who is the other person here" rule {@link otherId} applies in
+   * memory. Every predicate is still anchored on `connections`, so the profile
+   * comparison only ever runs over the viewer's own connection degree.
+   */
+  private buildSearchableListQuery(
+    userId: string,
+    tab: ConnectionTab,
+    vouchedIds: string[] | null,
+    searchTerm: string,
+  ): SelectQueryBuilder<Connection> {
+    const otherUserIdExpression =
+      'CASE WHEN connection.requester_id = :viewerUserId ' +
+      'THEN connection.addressee_id ELSE connection.requester_id END';
+    const query = this.connections
+      .createQueryBuilder('connection')
+      .setParameter('viewerUserId', userId)
+      .innerJoin(Profile, 'other', `other.user_id = ${otherUserIdExpression}`);
+
+    if (tab === 'incoming') {
+      query
+        .where('connection.addressee_id = :viewerUserId')
+        .andWhere('connection.status = :status', {
+          status: ConnectionStatus.Pending,
+        });
+    } else if (tab === 'outgoing') {
+      query
+        .where('connection.requester_id = :viewerUserId')
+        .andWhere('connection.status = :status', {
+          status: ConnectionStatus.Pending,
+        });
+    } else {
+      query
+        .where(
+          '(connection.requester_id = :viewerUserId ' +
+            'OR connection.addressee_id = :viewerUserId)',
+        )
+        .andWhere('connection.status = :status', {
+          status: ConnectionStatus.Accepted,
+        });
+      if (vouchedIds) {
+        // The vouched tab is the accepted set narrowed to members the viewer
+        // vouched for. Expressed on the joined profile, so it composes with
+        // the search predicate instead of needing a second `where` shape.
+        query.andWhere('other.user_id IN (:...vouchedIds)', { vouchedIds });
+      }
+    }
+
+    if (searchTerm) {
+      // One folded `LIKE` over name + handle + headline. Both sides go through
+      // the same folding, so "Sao" matches "São" and "SÃO" alike. The term is
+      // LIKE-escaped so a member typing `%` searches for a percent sign rather
+      // than matching everyone.
+      query.andWhere(
+        `${foldedTextExpression(`(${CONNECTION_SEARCH_HAYSTACK})`)} ` +
+          `LIKE ${foldedTextExpression(':searchPattern')} ESCAPE '\\'`,
+        { searchPattern: `%${escapeLikeTerm(searchTerm)}%` },
+      );
+    }
+    return query;
+  }
+
+  /**
+   * Newest first, reading the timestamp that actually means something for the
+   * tab: when the request was sent for the pending tabs, when it was accepted
+   * for the connected ones. Mirrors the plain `findAndCount` branches exactly.
+   */
+  private applyRecencyOrder(
+    query: SelectQueryBuilder<Connection>,
+    tab: ConnectionTab,
+  ): SelectQueryBuilder<Connection> {
+    return tab === 'incoming' || tab === 'outgoing'
+      ? query.orderBy('connection.created_at', 'DESC')
+      : query.orderBy('connection.responded_at', 'DESC');
+  }
+
+  /**
+   * The viewer's OWN notes for a page of connections, keyed by connection id.
+   *
+   * `authorId: viewerUserId` is the whole privacy guarantee for the private
+   * note, and it lives here rather than in the mapper on purpose: a note
+   * written by the other party is never loaded, so no later change to a
+   * response DTO can leak one. Both parties may hold a note on the same
+   * connection; each read sees only their own.
+   */
+  private async viewerNotesByConnectionId(
+    viewerUserId: string,
+    connectionIds: string[],
+  ): Promise<Map<string, string>> {
+    if (!connectionIds.length) {
+      return new Map();
+    }
+    const rows = await this.connectionNotes.find({
+      where: { authorId: viewerUserId, connectionId: In(connectionIds) },
+    });
+    return new Map(rows.map((note) => [note.connectionId, note.body]));
+  }
+
+  /**
+   * Write (or clear) the viewer's private note on one of their connections.
+   *
+   * Only a party to the connection may annotate it. An empty body, or one that
+   * strips down to nothing, deletes the note rather than storing a blank every
+   * read site would then have to treat as absent. Markup is stripped once here,
+   * at the write boundary, never at render.
+   */
+  async setNote(
+    connectionId: string,
+    authorId: string,
+    body: string,
+  ): Promise<{ note: string | null }> {
+    const conn = await this.connections.findOne({
+      where: { id: connectionId },
+    });
+    if (!conn) {
+      throw new NotFoundException('Connection not found');
+    }
+    if (authorId !== conn.requesterId && authorId !== conn.addresseeId) {
+      throw new ForbiddenException('Not your connection');
+    }
+    const stored = toStoredPlainTextOrNull(body);
+    if (!stored) {
+      await this.connectionNotes.delete({ connectionId, authorId });
+      return { note: null };
+    }
+    // `(connection_id, author_id)` is UNIQUE, so a re-save is one atomic
+    // upsert instead of a read-then-write that two tabs could race.
+    await this.connectionNotes.upsert(
+      { connectionId, authorId, body: stored, updatedAt: new Date() },
+      { conflictPaths: ['connectionId', 'authorId'] },
+    );
+    return { note: stored };
   }
 
   /**

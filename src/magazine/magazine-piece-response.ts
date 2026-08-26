@@ -23,6 +23,7 @@ import {
   MagazineArticle,
 } from './entities/magazine-article.entity';
 import { MagazineDeck } from './entities/magazine-deck.entity';
+import { toReadableBlocks } from './magazine-response';
 import { Profile } from '../users/entities/profile.entity';
 import { toImageUrl } from '../common/image-url';
 
@@ -329,9 +330,22 @@ export function computePublishGate(care: PieceCare | null): PublishGateItem[] {
   return items;
 }
 
+/**
+ * The money side of a piece (CON-18). `fee` and `expenses` are DECIMAL
+ * STRINGS off Postgres `numeric` ("420.00"), or `null` when that field has
+ * never been priced. Never parse one into a JS `number` on the way to a
+ * total: sum them server-side, where they stay exact.
+ */
 export interface PaymentResponse {
-  fee: string;
+  /** ISO 4217 code both amounts on this row are in. */
+  currency: string;
+  fee: string | null;
+  /** The fee as the desk originally wrote it, when it says more than the amount. */
+  feeText: string | null;
   expenses: string | null;
+  /** The expenses as the desk originally wrote them ("18 travel"). */
+  expensesText: string | null;
+  /** An invoice REFERENCE, never an amount. */
   invoice: string | null;
   filedOn: string | null;
   terms: string;
@@ -364,8 +378,11 @@ export type PieceRecordFull = PieceRecord & {
 
 export function toPaymentResponse(payment: MagazinePayment): PaymentResponse {
   return {
-    fee: payment.fee,
-    expenses: payment.expenses,
+    currency: payment.currency,
+    fee: payment.feeAmount,
+    feeText: payment.feeText,
+    expenses: payment.expensesAmount,
+    expensesText: payment.expensesText,
     invoice: payment.invoice,
     filedOn: payment.filedOn,
     terms: payment.terms,
@@ -486,6 +503,20 @@ export interface ArticleDraftResponse {
   metaDescription: string;
   socialImage: string;
   canonicalUrl: string;
+  /**
+   * CON-04 — the piece's lead art, served as the RESOLVED `/files/<key>` URL
+   * rather than the bare key, because the editor's upload field renders it
+   * directly and a private storage key is not fetchable. `null` when the desk
+   * has not commissioned art yet.
+   *
+   * The editor re-sends this exact value as `UpdateArticleDto.heroImageKey`
+   * when it saves anything else on the piece; the global
+   * `StorageKeyOwnershipInterceptor` collapses it back to the bare key before
+   * the service persists it, so the column stays canonical. Same round-trip
+   * every other upload-backed edit form in the app uses (see
+   * `Community.coverImageUrl`).
+   */
+  heroImageUrl: string | null;
   tags: string[];
   contentNotes: string[];
   blocks: ArticleBlock[];
@@ -625,9 +656,13 @@ export function toArticleDraftResponse(
     metaDescription: article.metaDescription,
     socialImage: article.socialImage,
     canonicalUrl: article.canonicalUrl,
+    heroImageUrl: toImageUrl(article.heroImageKey),
     tags: article.tags,
     contentNotes: article.contentNotes,
-    blocks: article.blocks,
+    // CON-04 — an uploaded image block holds a storage key, which the editor
+    // cannot render. Resolved on the way out and collapsed back to a key by
+    // the ownership interceptor on the way in (see `toReadableBlocks`).
+    blocks: toReadableBlocks(article.blocks),
     readMinutes: Math.max(
       1,
       Math.ceil(countArticleWords(article.blocks) / WORDS_PER_MINUTE),
@@ -787,7 +822,7 @@ export function toIssueProduction(
     { label: 'Cover art set', done: Boolean(issue.coverUrl) },
     { label: 'Coverlines written', done: issue.coverlines.length > 0 },
     {
-      label: 'Digest has at least one piece',
+      label: '"In this issue" panel lists at least one piece',
       done: issue.digest.some((entry) => entry.on),
     },
   ];

@@ -31,9 +31,10 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
-// Read-only resource directory (guides — housing/health/legal/finance/trans
-// life). Any active member can browse it; there's no ownership/authorship
-// concept and no write endpoint on the guide side (seed + read only). Also
+// Public resource directory (guides — health/legal/trans life/safety/
+// community/culture/finance). Any active member can browse it. The write
+// side lives on `AdminResourcesController` (CON-08), so this controller
+// stays read-only by design rather than for want of an authoring path. Also
 // hosts CNT-14's two additions: the real Legal Aid / Sexual Health Testing
 // listings directory (`GET /listings`) and the "suggest a resource"
 // submission pathway (`POST /suggestions`) that feeds the admin review queue
@@ -65,6 +66,21 @@ export class ResourcesController {
   @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
   listListings(@Query() query: ListResourceListingsQuery) {
     return this.resourceListingsService.list(query.category);
+  }
+
+  // Same declaration-order rule as `listListings` above: this MUST stay
+  // before `getBySlug(':slug')` or a slug wildcard swallows "/resources/index".
+  @Get('index')
+  @ApiOperation({
+    summary: 'Every published guide, for the category-grouped guide index',
+  })
+  @ApiOkResponse({
+    description: 'Every published guide: slug, title, category, route.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
+  listIndex() {
+    return this.resourcesService.listIndex();
   }
 
   @Post('suggestions')

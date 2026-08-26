@@ -143,7 +143,7 @@ describe('buildBadges', () => {
       eventsAttended: 2,
       communityPosts: 0,
       endorsementCount: 0,
-      workshopsTaught: 0,
+      eventsHosted: 0,
       tenureDays: 0,
       verified: false,
       gettingStartedStepsDone: 0,

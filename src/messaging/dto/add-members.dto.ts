@@ -8,7 +8,7 @@ import {
 
 /**
  * `POST /conversations/:id/members` body. Members are addressed by their profile
- * HANDLE (slug) — the same identifier `CreateGroupDto` uses — resolved + gated
+ * HANDLE (slug) — the same identifier `CreateGroupConversationDto` uses — resolved + gated
  * (connected to the adder + not blocked) server-side. Owner/admin only (the
  * service re-checks the caller's role).
  */

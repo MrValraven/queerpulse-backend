@@ -12,9 +12,11 @@ import { GlossaryTerm } from './entities/glossary-term.entity';
 import { Resource } from './entities/resource.entity';
 import {
   GlossaryTermResponseDTO,
+  ResourceIndexEntryDTO,
   ResourceResponseDTO,
   ResourceSearchRow,
   toGlossaryTermResponse,
+  toResourceIndexEntry,
   toResourceResponse,
   toResourceSearchRow,
 } from './resource-response';
@@ -51,6 +53,27 @@ export class ResourcesService {
     }
 
     return paginate(qb, page, (rows) => rows.map(toResourceResponse));
+  }
+
+  /**
+   * Every published guide in one unpaginated, compact response — what the
+   * public guide index (CON-10) renders as a category-grouped list.
+   *
+   * Seventeen guides had no `routes.*` reference anywhere and were reachable
+   * only by typing the URL; the ones worst affected served the least-served
+   * audiences. A reader cannot browse to a page nobody links to, so the index
+   * links every one of them, and it needs the whole set at once rather than
+   * page one of the library.
+   */
+  async listIndex(): Promise<ResourceIndexEntryDTO[]> {
+    const rows = await this.resources
+      .createQueryBuilder('r')
+      .where('r.publishedAt IS NOT NULL')
+      .andWhere('r.publishedAt <= :now', { now: new Date() })
+      .orderBy('r.category', 'ASC')
+      .addOrderBy('r.title', 'ASC')
+      .getMany();
+    return rows.map(toResourceIndexEntry);
   }
 
   // 404s anything unpublished/future-dated — hides its existence from the

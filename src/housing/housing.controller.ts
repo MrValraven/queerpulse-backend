@@ -1,22 +1,9 @@
-import {
-  Body,
-  Controller,
-  Get,
-  Header,
-  Param,
-  Post,
-  UseGuards,
-} from '@nestjs/common';
+import { Body, Controller, Get, Header, Param, Post } from '@nestjs/common';
 import { Throttle, seconds } from '@nestjs/throttler';
 import { Public } from '../auth/decorators/public.decorator';
-import {
-  CurrentUser,
-  CurrentUserData,
-} from '../auth/decorators/current-user.decorator';
-import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import {} from '../auth/decorators/current-user.decorator';
 import { Feature } from '../common/feature.decorator';
-import { CreateJoinRequestDto } from './dto/create-join-request.dto';
-import { CreateRelocationRequestDto } from './dto/create-relocation-request.dto';
+import { CreateHousingJoinRequestDto } from './dto/create-join-request.dto';
 import { HousingService } from './housing.service';
 import {
   ApiCreatedResponse,
@@ -80,22 +67,8 @@ export class HousingController {
   @ApiNotFoundResponse({ description: 'No co-op with that slug.' })
   submitJoinRequest(
     @Param('slug') slug: string,
-    @Body() dto: CreateJoinRequestDto,
+    @Body() dto: CreateHousingJoinRequestDto,
   ) {
     return this.housing.createJoinRequest(slug, dto, null);
-  }
-
-  // Flagging a serious household conflict is a member action (unlike the
-  // anonymous join request): an operator needs an accountable person to reach.
-  // Not `@Public()`, so the global JwtAuthGuard + ActiveMemberGuard apply.
-  @UseGuards(ActiveMemberGuard)
-  @Throttle({ default: { limit: 5, ttl: seconds(60) } })
-  @Post('coops/:slug/relocation-requests')
-  submitRelocationRequest(
-    @Param('slug') slug: string,
-    @Body() dto: CreateRelocationRequestDto,
-    @CurrentUser() user: CurrentUserData,
-  ) {
-    return this.housing.createRelocationRequest(slug, dto, user.userId);
   }
 }

@@ -20,6 +20,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { RequestHousingViewingDto } from './dto/request-housing-viewing.dto';
 import {
@@ -51,6 +52,7 @@ export class HousingViewingsController {
   constructor(private readonly service: HousingViewingsService) {}
 
   @Post()
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Request a viewing on a live listing' })
   @ApiCreatedResponse({ description: 'The created viewing request.' })
   request(

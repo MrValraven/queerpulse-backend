@@ -1,7 +1,7 @@
 import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { seconds, Throttle } from '@nestjs/throttler';
 import { Public } from '../auth/decorators/public.decorator';
-import { CreateJoinRequestDto } from './dto/create-join-request.dto';
+import { CreateMembershipJoinRequestDto } from './dto/create-join-request.dto';
 import { SubmittedJoinRequestView } from './join-request-response';
 import { JoinRequestsService } from './join-requests.service';
 import {
@@ -56,7 +56,7 @@ export class JoinRequestsController {
   @ApiConflictResponse({
     description: 'An invite request for this email is already awaiting review.',
   })
-  submit(@Body() dto: CreateJoinRequestDto): Promise<SubmittedJoinRequestView> {
+  submit(@Body() dto: CreateMembershipJoinRequestDto): Promise<SubmittedJoinRequestView> {
     return this.joinRequestsService.submit(dto);
   }
 }

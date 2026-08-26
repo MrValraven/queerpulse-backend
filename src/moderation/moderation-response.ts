@@ -6,6 +6,10 @@ import {
 } from '../reports/entities/report.entity';
 import { CursorPage } from '../common/cursor-pagination';
 import { Appeal, AppealStatus } from './entities/appeal.entity';
+import {
+  BanRatification,
+  BanRatificationStatus,
+} from './entities/ban-ratification.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
 
 // Everything here mirrors
@@ -78,7 +82,18 @@ const OUTCOME_LABEL: Record<string, string> = {
   restrict: 'Restricted',
   suspend: 'Suspended',
   ban: 'Banned',
-  shield: 'Shielded member',
+  // TS-12. A ban asked for by one moderator and not yet ratified by a second
+  // has not removed anyone, and the badge must not claim it has. The three
+  // codes below are the audit trail's own words for the three ways a hold
+  // ends. `community_ban_applied`/`community_ban_lifted` are wave 2's
+  // community-level rows (written by `community-governance-log.service.ts`),
+  // labelled here so an appeal against one reads as something other than a raw
+  // snake_case string in the queue.
+  ban_pending_ratification: 'Ban pending a second moderator',
+  ban_declined: 'Ban refused by a second moderator',
+  ban_hold_expired: 'Ban lapsed unratified',
+  community_ban_applied: 'Barred from a community',
+  community_ban_lifted: 'Community bar lifted',
 };
 
 export function outcomeLabelFor(
@@ -153,6 +168,53 @@ export interface ModCounts {
   resolved: number;
 }
 
+/**
+ * TS-06: one `(subjectType, subjectId)` pile, summarized.
+ *
+ * The queue is a flat list, so thirty people reporting one member inside ten
+ * minutes arrived as thirty independent rows with nothing saying the other
+ * twenty-nine existed, and thirty separate SLA clocks made it read as thirty
+ * times the urgency. A cluster answers the question the flat list could not:
+ * how many open reports there really are about this subject, and how many
+ * DIFFERENT people are behind them. The second number is the one that
+ * separates a genuine emergency from a pile-on, where the right action is
+ * usually against the reporters.
+ *
+ * Only pairs with more than one open report get a cluster: a single report is
+ * already fully described by its own row.
+ */
+export interface ModReportClusterDTO {
+  subjectType: ReportSubjectType;
+  subjectId: string;
+  /** Open + escalated reports about this subject, platform-wide. */
+  openCount: number;
+  /**
+   * How many different members are behind them. An account-less reporter
+   * counts as their own distinct person rather than being collapsed into one
+   * "anonymous" bucket, mirroring
+   * `CommunityAutoFreezeService.distinctOpenReporterCount`.
+   */
+  distinctReporterCount: number;
+  /** How many of those reports are already past their SLA window. */
+  overdueCount: number;
+  /** The most severe report in the pile, which is how the cluster reads. */
+  highestSeverity: ReportSeverity;
+  firstReportedAt: string;
+  lastReportedAt: string;
+  /**
+   * True when this pile meets the same volume + distinct-reporter thresholds
+   * `CommunityAutoFreezeService` freezes a community on. It is a signal to
+   * read the pile as one event, never a verdict about who is in the wrong.
+   */
+  isSurge: boolean;
+  /**
+   * The open report ids in this cluster, oldest first, capped at 100 (the
+   * `ModBulkActionDto` batch limit) so a moderator can act on the whole pile
+   * in one `PATCH /mod/reports/bulk`.
+   */
+  reportIds: string[];
+}
+
 // The moderation queue now answers with the repo's canonical cursor-page
 // envelope — `CursorPage<T>` = `{ data, pageInfo: { nextCursor, hasMore } }`,
 // the same shape the feed/forum/blocks/mutes/saved lists use — instead of its
@@ -162,6 +224,13 @@ export interface ModCounts {
 // dropped. Mirrors `ModReportsResponse` in `moderation.api.ts`.
 export interface ModReportsResponse extends CursorPage<ModReportDTO> {
   counts: ModCounts;
+  /**
+   * TS-06: the piles behind the rows on THIS page, one entry per
+   * `(subjectType, subjectId)` pair that carries more than one open report.
+   * Counted over every open report about that subject, so a cluster stays
+   * honest about the twenty-nine reports that did not fit on the page.
+   */
+  clusters: ModReportClusterDTO[];
 }
 
 export function toModReportDTO(
@@ -172,7 +241,7 @@ export function toModReportDTO(
   assignedModeratorName?: string,
   resolution?: ModReportResolutionDTO,
   // `false` only for `PATCH /mod/reports/:id`'s community-owner/mod
-  // `dismiss` carve-out (`ModerationService.assertCanActOnReport`) — every
+  // community-mod carve-out (`ModerationService.assertCanActOnReport`) — every
   // other caller sits behind the platform `@Roles(Moderator, Admin)` guard
   // and always passes (or defaults to) `true`. When `false`, `reporter`/
   // `reported` already arrive pre-redacted from `toRow`; this additionally
@@ -180,6 +249,13 @@ export function toModReportDTO(
   // moderator (if any) is working the report is still report visibility, and
   // this carve-out was never meant to grant any.
   hasFullReportVisibility = true,
+  // TS-14: the community this report came from, pre-resolved to a slug by the
+  // caller (`ModerationService.toRow`/`toRows`, batched for a whole page).
+  // `null` means "no community owns this subject", which is the honest answer
+  // for a member, a message, a DM-adjacent subject, or an unresolvable id —
+  // the same subjects `admin-communities/community-report-scope.ts` drops
+  // rather than guesses at.
+  communitySlug: string | null = null,
 ): ModReportDTO {
   return {
     id: report.id,
@@ -189,15 +265,14 @@ export function toModReportDTO(
     subjectId: report.subjectId,
     reporter,
     reported,
-    // Best-effort: only `community`-subject reports have a directly known
-    // community (the subjectId itself); reports against a member/post/reply/
-    // venue/message inside a community aren't traceable to one here without
-    // pulling in the communities module, which is out of this fix's scope
-    // (touches only `src/reports` + `src/moderation`).
+    // A `community`-subject report needs no lookup at all: its `subjectId` IS
+    // the community slug. Every other subject that HAS a community (a post, a
+    // reply, a gathering hosted inside one) arrives pre-resolved as
+    // `communitySlug`.
     community:
       report.subjectType === ReportSubjectType.Community
         ? report.subjectId
-        : null,
+        : communitySlug,
     createdAt: report.createdAt.toISOString(),
     slaDueAt: report.slaDueAt.toISOString(),
     status: report.status,
@@ -356,6 +431,27 @@ export interface AppealDTO {
   original: AppealOriginal;
   createdAt: string;
   status: AppealStatus;
+  /** When §05's 7-day decision window closes on this appeal (TS-11). */
+  slaDueAt: string;
+  /** When it was actually decided. Null while awaiting, and also on an appeal
+   *  decided before the column existed (see the entity's doc comment). */
+  decidedAt: string | null;
+  /** Awaiting, and past its window. Computed server-side against `now()` so the
+   *  queue and the SLA agree about what "late" means. */
+  isOverdue: boolean;
+  /** The moderator's decision text, once there is one. The queue shows it on
+   *  the decided tab; the member reads the same string through
+   *  `GET /appeals/me`. */
+  decision: string | null;
+}
+
+/**
+ * `GET /mod/appeals` response. The canonical cursor-page envelope every other
+ * list endpoint uses, with the two tab totals plus the overdue count carried
+ * alongside (the same way `ModReportsResponse` carries the queue's `counts`).
+ */
+export interface ModAppealsResponse extends CursorPage<AppealDTO> {
+  counts: { awaiting: number; decided: number; overdue: number };
 }
 
 // `POST /appeals` response — the member-facing acknowledgement. Deliberately
@@ -393,6 +489,15 @@ export interface MemberAppealDTO {
   severity: ReportSeverity;
   community: string | null;
   createdAt: string;
+  /**
+   * When the platform has undertaken to decide this appeal by (TS-11). Sent to
+   * the member on purpose: the Code of Conduct publishes the 7-day window to
+   * them, so the deadline is theirs to hold the platform to, and a member
+   * locked out of their account has no other way to see it.
+   */
+  slaDueAt: string;
+  /** When it was decided. Null while it is still awaiting. */
+  decidedAt: string | null;
 }
 
 export function toMemberAppealDTO(appeal: Appeal): MemberAppealDTO {
@@ -404,6 +509,8 @@ export function toMemberAppealDTO(appeal: Appeal): MemberAppealDTO {
     severity: appeal.severity,
     community: appeal.community,
     createdAt: appeal.createdAt.toISOString(),
+    slaDueAt: appeal.slaDueAt.toISOString(),
+    decidedAt: appeal.decidedAt ? appeal.decidedAt.toISOString() : null,
   };
 }
 
@@ -411,6 +518,7 @@ export function toAppealDTO(
   appeal: Appeal,
   appellant: AppealAppellant,
   original: AppealOriginal,
+  now: Date = new Date(),
 ): AppealDTO {
   return {
     id: appeal.id,
@@ -427,5 +535,82 @@ export function toAppealDTO(
     original,
     createdAt: appeal.createdAt.toISOString(),
     status: appeal.status,
+    slaDueAt: appeal.slaDueAt.toISOString(),
+    decidedAt: appeal.decidedAt ? appeal.decidedAt.toISOString() : null,
+    // Only an UNDECIDED appeal can be overdue. A decided one either met its
+    // window or missed it, and that is a fact its own two timestamps carry.
+    isOverdue:
+      appeal.status === AppealStatus.Awaiting &&
+      appeal.slaDueAt.getTime() < now.getTime(),
+    decision: appeal.decision,
+  };
+}
+
+/**
+ * One permanent ban waiting on a second moderator (TS-12) — mirrors
+ * `BanRatificationDTO` in
+ * `queerpulse/src/features/admin/api/moderation.api.ts`.
+ *
+ * `requestedByName` and `note` are the two fields that make this queue usable
+ * rather than decorative: the ratifying moderator has to see WHO asked and in
+ * WHOSE WORDS before putting their own name to removing an account. `expiresAt`
+ * is when the hold lapses if nobody does.
+ */
+export interface BanRatificationDTO {
+  id: string;
+  reportId: string | null;
+  targetUserId: string;
+  targetName: string;
+  requestedById: string | null;
+  requestedByName: string;
+  /** The first moderator's exact member-facing reason. */
+  note: string | null;
+  reasonCode: string | null;
+  /** What is happening to the member while the hold stands. Always
+   *  `suspended_pending_ratification` today; carried explicitly so the queue
+   *  states it rather than the reader inferring it. */
+  interimAction: string;
+  requestedAt: string;
+  expiresAt: string;
+  /** True once `expiresAt` has passed and the lazy sweep has not run yet. The
+   *  queue greys such a row rather than offering a ratify button that would
+   *  refuse. */
+  isExpired: boolean;
+  status: BanRatificationStatus;
+  decidedById: string | null;
+  decidedByName: string | null;
+  decidedAt: string | null;
+  decisionNote: string | null;
+}
+
+export function toBanRatificationDTO(
+  hold: BanRatification,
+  requestedByName: string,
+  decidedByName: string | null,
+  now: Date = new Date(),
+): BanRatificationDTO {
+  return {
+    id: hold.id,
+    reportId: hold.reportId,
+    targetUserId: hold.targetUserId,
+    // The snapshot taken at request time is the authoritative label here: it
+    // still reads correctly after the member is erased, which is exactly the
+    // case a removal record has to survive.
+    targetName: hold.targetName ?? 'Member',
+    requestedById: hold.requestedBy,
+    requestedByName,
+    note: hold.note,
+    reasonCode: hold.reasonCode,
+    interimAction: hold.interimAction,
+    requestedAt: hold.createdAt.toISOString(),
+    expiresAt: hold.expiresAt.toISOString(),
+    isExpired:
+      hold.status === BanRatificationStatus.Pending &&
+      hold.expiresAt.getTime() <= now.getTime(),
+    status: hold.status,
+    decidedById: hold.decidedBy,
+    decidedByName,
+    decidedAt: hold.decidedAt ? hold.decidedAt.toISOString() : null,
+    decisionNote: hold.decisionNote,
   };
 }

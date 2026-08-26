@@ -3,12 +3,17 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { MemberLookup, MemberRef } from '../common/member-ref';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
+import { Profile } from '../users/entities/profile.entity';
 import {
   Connection,
   ConnectionStatus,
@@ -27,23 +32,30 @@ import {
   GroupListing,
   GroupListingStatus,
 } from './entities/group-listing.entity';
-import { CreateGroupDto } from './dto/create-group.dto';
+import { CreateHousingGroupDto } from './dto/create-group.dto';
 import { UpdateGroupDto } from './dto/update-group.dto';
 import { CreateGroupJoinRequestDto } from './dto/create-group-join-request.dto';
 import { CreateGroupListingDto } from './dto/create-group-listing.dto';
 import { UpdateGroupListingDto } from './dto/update-group-listing.dto';
 import { HideGroupListingDto } from './dto/hide-group-listing.dto';
 import { SetGroupListingStatusDto } from './dto/set-group-listing-status.dto';
+import { ListGroupListingQueueQuery } from './dto/list-group-listing-queue.query';
 import {
   AdminGroupJoinRequestDTO,
   AdminGroupListingDTO,
+  AdminGroupListingsPageDTO,
   GroupListingDTO,
   HousingGroupDTO,
+  MyGroupListingDTO,
   toAdminGroupJoinRequestDTO,
   toAdminGroupListingDTO,
   toGroupListingDTO,
   toHousingGroupDTO,
+  toMyGroupListingDTO,
 } from './housing-groups-response';
+
+/** One page of the moderator's group-listing review queue (LOC-19). */
+export const GROUP_LISTING_QUEUE_PAGE_SIZE = 20;
 
 /** The subset of a group listing the risk scorer reads. Structurally satisfied
  * by both `CreateGroupListingDto` (submission) and the `GroupListing` entity
@@ -56,6 +68,8 @@ type GroupListingRiskFields = Pick<
 
 @Injectable()
 export class HousingGroupsService {
+  private readonly logger = new Logger(HousingGroupsService.name);
+
   constructor(
     @InjectRepository(HousingGroup)
     private readonly groups: Repository<HousingGroup>,
@@ -65,10 +79,18 @@ export class HousingGroupsService {
     private readonly listings: Repository<GroupListing>,
     @InjectRepository(Connection)
     private readonly connections: Repository<Connection>,
+    // Read-only, for resolving a listing's poster into a `MemberRef` on the
+    // moderator queue (LOC-19). Same `forFeature` overlap pattern as
+    // `AdminReadingGroupProposalsService`, so no dependency on ProfilesModule.
+    @InjectRepository(Profile)
+    private readonly profiles: Repository<Profile>,
     private readonly affirmingPledge: AffirmingPledgeService,
     // Step-up gate + honest risk signal for a group listing (BE-HSG-01), the
     // same two things `HousingListingsService.create` reads it for.
     private readonly verification: VerificationService,
+    // The poster is told what happened to their own submission, in-app plus
+    // push (LOC-19). QueerPulse sends no email.
+    private readonly notifications: NotificationsService,
   ) {}
 
   async listPublished(): Promise<HousingGroupDTO[]> {
@@ -117,7 +139,7 @@ export class HousingGroupsService {
     return groups.map(toHousingGroupDTO);
   }
 
-  async createGroup(dto: CreateGroupDto): Promise<HousingGroupDTO> {
+  async createGroup(dto: CreateHousingGroupDto): Promise<HousingGroupDTO> {
     const existing = await this.groups.findOne({ where: { slug: dto.slug } });
     if (existing) throw new ConflictException('Slug already in use');
     try {
@@ -366,7 +388,7 @@ export class HousingGroupsService {
     slug: string,
     dto: CreateGroupListingDto,
     userId: string | null,
-  ): Promise<GroupListingDTO> {
+  ): Promise<MyGroupListingDTO> {
     const group = await this.groups.findOne({
       where: { slug, published: true },
     });
@@ -400,7 +422,10 @@ export class HousingGroupsService {
         postedByUserId: userId,
       }),
     );
-    return toGroupListingDTO(saved);
+    // The poster's own view, so the 201 already carries `status: 'review'`.
+    // Answering a submission with the public DTO left the client with nothing
+    // to show but a title, and no honest way to say what happens next.
+    return toMyGroupListingDTO(saved, group);
   }
 
   /**
@@ -445,14 +470,21 @@ export class HousingGroupsService {
    * An edit that changes what the group page shows re-opens the review, exactly
    * as an owner edit does on the sibling member-listing surface (BE-HSG-02):
    * the alternative is a listing approved clean and then rewritten in place.
+   * LOC-19 widened that from `live` to every decided state, so answering a
+   * moderator's question or fixing what a refusal named actually puts the room
+   * back in the queue.
    */
   async updateListing(
     slug: string,
     id: string,
     dto: UpdateGroupListingDto,
     userId: string,
-  ): Promise<GroupListingDTO> {
-    const listing = await this.loadPostedListingOr404(slug, id, userId);
+  ): Promise<MyGroupListingDTO> {
+    const { group, listing } = await this.loadPostedListingOr404(
+      slug,
+      id,
+      userId,
+    );
     const before = this.listingContentFingerprint(listing);
     Object.assign(listing, {
       ...(dto.title !== undefined ? { title: dto.title } : {}),
@@ -474,13 +506,24 @@ export class HousingGroupsService {
     const assessment = this.assessGroupListingRisk(listing, level);
     listing.riskScore = assessment.score;
     listing.riskReasons = assessment.reasons;
+    // A content change re-opens the review from ANY decided state, not just
+    // `live`. Restricting it to `live` left the two states an edit is the
+    // ANSWER to permanently stuck: a poster asked a question, or told what to
+    // fix, could rewrite their room and it stayed `question`/`declined`
+    // forever, because nothing put it back in front of a moderator. A listing
+    // already sitting in `review` is left where it is, since it is queued.
     if (
-      listing.status === GroupListingStatus.Live &&
+      listing.status !== GroupListingStatus.Review &&
       this.listingContentFingerprint(listing) !== before
     ) {
       listing.status = GroupListingStatus.Review;
+      // A re-opened review is a fresh one: the previous verdict and its reason
+      // are cleared rather than left standing against text nobody has read yet.
+      listing.decidedAt = null;
+      listing.decidedBy = null;
+      listing.decisionReason = null;
     }
-    return toGroupListingDTO(await this.listings.save(listing));
+    return toMyGroupListingDTO(await this.listings.save(listing), group);
   }
 
   /**
@@ -491,18 +534,45 @@ export class HousingGroupsService {
    * moderation queue lie about why a listing is down.
    */
   async removeListing(slug: string, id: string, userId: string): Promise<void> {
-    const listing = await this.loadPostedListingOr404(slug, id, userId);
+    const { listing } = await this.loadPostedListingOr404(slug, id, userId);
     await this.listings.remove(listing);
   }
 
-  /** Loads a listing in the given group that the caller actually posted.
-   * 404 for a listing that is not in this group, 403 for someone else's (and
-   * for a listing with no recorded poster, which nobody can edit). */
+  /**
+   * Every room the caller has submitted to this group, in whatever state it is
+   * in (LOC-19). The public group read shows only what a moderator has cleared,
+   * so before this existed a member who posted a room saw it vanish and had no
+   * surface anywhere that could tell them it was waiting, had gone up, had a
+   * question against it, or had been refused.
+   *
+   * Their own rows, resolved by `postedByUserId`, so ownership is the query
+   * rather than something the client asserts and a 403 corrects afterwards.
+   */
+  async listMyListings(
+    slug: string,
+    userId: string,
+  ): Promise<MyGroupListingDTO[]> {
+    const group = await this.groups.findOne({
+      where: { slug, published: true },
+    });
+    if (!group) throw new NotFoundException('Group not found');
+    const listings = await this.listings.find({
+      where: { groupId: group.id, postedByUserId: userId },
+      order: { createdAt: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
+    });
+    return listings.map((listing) => toMyGroupListingDTO(listing, group));
+  }
+
+  /** Loads a listing in the given group that the caller actually posted, with
+   * the group it belongs to. 404 for a listing that is not in this group, 403
+   * for someone else's (and for a listing with no recorded poster, which
+   * nobody can edit). */
   private async loadPostedListingOr404(
     slug: string,
     id: string,
     userId: string,
-  ): Promise<GroupListing> {
+  ): Promise<{ group: HousingGroup; listing: GroupListing }> {
     const group = await this.groups.findOne({
       where: { slug, published: true },
     });
@@ -514,7 +584,9 @@ export class HousingGroupsService {
     if (!listing.postedByUserId || listing.postedByUserId !== userId) {
       throw new ForbiddenException('Only the poster can do that');
     }
-    return listing;
+    // The group rides back with the listing because the poster-facing DTO
+    // names the group it belongs to, and the relation is never loaded here.
+    return { group, listing };
   }
 
   /** The fields the group page actually shows, fingerprinted so `updateListing`
@@ -544,27 +616,205 @@ export class HousingGroupsService {
       .take(DEFAULT_LIST_LIMIT);
     if (groupSlug) query.where('group.slug = :groupSlug', { groupSlug });
     const listings = await query.getMany();
-    return listings.map(toAdminGroupListingDTO);
+    // Explicit arrow: `toAdminGroupListingDTO`'s second parameter is the
+    // poster ref, and a bare point-free `.map` would hand it the array index.
+    return listings.map((listing) => toAdminGroupListingDTO(listing));
+  }
+
+  /**
+   * The paginated review queue a moderator actually works from (LOC-19).
+   *
+   * Sibling of `listAllListingsForAdmin`, which stays exactly as it is: that
+   * one returns a single uncapped slab of every listing ever posted for the
+   * existing admin-housing console, and this one answers "what is still
+   * waiting on me", filtered and paged, with the poster resolved so a decision
+   * can be addressed to a person.
+   *
+   * Ordering is riskiest-first then newest, the same order the slab uses, so
+   * the listings most likely to carry discriminatory text, a scam price or
+   * off-platform payment language surface at the top with their machine
+   * reasons attached.
+   *
+   * `.offset()`/`.limit()` rather than `.skip()`/`.take()`: this query joins
+   * the group and pages it, which is exactly the combination where TypeORM's
+   * DISTINCT-subquery pagination misbehaves. The two profile lookups are ONE
+   * batched query for the whole page, never one per row.
+   */
+  async listListingQueue(
+    query: ListGroupListingQueueQuery,
+  ): Promise<AdminGroupListingsPageDTO> {
+    const page = query.page && query.page > 0 ? query.page : 1;
+    const pageSize = GROUP_LISTING_QUEUE_PAGE_SIZE;
+
+    const listingQueryBuilder = this.listings
+      .createQueryBuilder('listing')
+      .leftJoinAndSelect('listing.group', 'group')
+      .orderBy('listing.riskScore', 'DESC')
+      .addOrderBy('listing.createdAt', 'DESC')
+      .offset((page - 1) * pageSize)
+      .limit(pageSize);
+
+    if (query.status) {
+      listingQueryBuilder.andWhere('listing.status = :status', {
+        status: query.status,
+      });
+    }
+    if (query.group) {
+      listingQueryBuilder.andWhere('group.slug = :groupSlug', {
+        groupSlug: query.group,
+      });
+    }
+    if (query.hidden !== undefined) {
+      listingQueryBuilder.andWhere('listing.hidden = :hidden', {
+        hidden: query.hidden,
+      });
+    }
+
+    const [rows, total] = await listingQueryBuilder.getManyAndCount();
+    if (!rows.length) {
+      return { items: [], total, page, pageSize };
+    }
+
+    const posterIds = [
+      ...new Set(
+        rows
+          .map((listing) => listing.postedByUserId)
+          .filter((userId): userId is string => Boolean(userId)),
+      ),
+    ];
+    const refsByUserId = posterIds.length
+      ? await new MemberLookup(this.profiles).byUserIds(posterIds)
+      : new Map<string, MemberRef>();
+
+    const items = rows.map((listing) =>
+      toAdminGroupListingDTO(
+        listing,
+        listing.postedByUserId
+          ? (refsByUserId.get(listing.postedByUserId) ?? null)
+          : null,
+      ),
+    );
+
+    return { items, total, page, pageSize };
   }
 
   /**
    * Moderator/admin: move a group listing through its pre-publication review
    * (BE-HSG-01). This is the ONLY way a listing becomes public — members never
    * self-transition, mirroring `HousingListingsService.setStatus`.
+   *
+   * LOC-19 turned this from a status write into a decision (the whole point of
+   * the item: a member submitted a room and the platform acknowledged receipt
+   * and did nothing):
+   *  - `declined` and `question` REQUIRE a reason. A refusal with no sentence
+   *    attached, and a question with no question in it, are the two failures
+   *    this endpoint exists to stop.
+   *  - Who decided, when, and why are recorded on the row.
+   *  - The poster is told, in-app plus push, for every outcome except a return
+   *    to `review`. That one is the queue's own bookkeeping ("nobody has
+   *    decided yet"), so there is nothing to report.
+   *
+   * IDEMPOTENT on a repeat of the same decision: a listing already carrying
+   * that exact `status` with a decision stamped is returned unchanged, so a
+   * double-clicked approve or a second moderator working the same queue cannot
+   * send the poster the same verdict twice.
    */
   async setListingStatus(
     id: string,
     dto: SetGroupListingStatusDto,
+    adminUserId: string,
   ): Promise<AdminGroupListingDTO> {
-    const listing = await this.listings.findOne({ where: { id } });
-    if (!listing) throw new NotFoundException('Listing not found');
-    listing.status = dto.status;
-    await this.listings.save(listing);
-    const updated = await this.listings.findOne({
+    const reason = HousingGroupsService.trimToNull(dto.reason);
+    const isRefusal = dto.status === GroupListingStatus.Declined;
+    const isQuestion = dto.status === GroupListingStatus.Question;
+    if (!reason && (isRefusal || isQuestion)) {
+      throw new BadRequestException(
+        isRefusal
+          ? 'A declined listing needs a reason the poster can read.'
+          : 'Send the poster the question you need answered.',
+      );
+    }
+
+    const listing = await this.listings.findOne({
       where: { id },
       relations: { group: true },
     });
-    return toAdminGroupListingDTO(updated!);
+    if (!listing) throw new NotFoundException('Listing not found');
+
+    if (listing.status === dto.status && listing.decidedAt) {
+      return this.toAdminListingDTO(listing);
+    }
+
+    listing.status = dto.status;
+    listing.decidedAt = new Date();
+    listing.decidedBy = adminUserId;
+    listing.decisionReason = reason;
+    await this.listings.save(listing);
+
+    if (dto.status !== GroupListingStatus.Review) {
+      await this.notifyListingDecided(listing, dto.status, reason);
+    }
+
+    return this.toAdminListingDTO(listing);
+  }
+
+  /** Hand-map a listing to the admin DTO with its poster resolved. */
+  private async toAdminListingDTO(
+    listing: GroupListing,
+  ): Promise<AdminGroupListingDTO> {
+    if (!listing.postedByUserId) return toAdminGroupListingDTO(listing, null);
+    const refsByUserId = await new MemberLookup(this.profiles).byUserIds([
+      listing.postedByUserId,
+    ]);
+    return toAdminGroupListingDTO(
+      listing,
+      refsByUserId.get(listing.postedByUserId) ?? null,
+    );
+  }
+
+  /**
+   * Best-effort "here is what happened to the room you posted" to the poster,
+   * in-app plus push. Never throws: the decision has already committed by the
+   * time this runs, and a notification failure must not turn a completed
+   * review into a 500 the moderator retries into a second decision.
+   *
+   * Only the listing's title, the group it was posted into and the moderator's
+   * own words travel. The description, price and accessibility text stay on
+   * the page the deep link opens.
+   */
+  private async notifyListingDecided(
+    listing: GroupListing,
+    status: GroupListingStatus,
+    reason: string | null,
+  ): Promise<void> {
+    if (!listing.postedByUserId) return;
+    try {
+      await this.notifications.create(
+        listing.postedByUserId,
+        NotificationType.GroupListingDecided,
+        {
+          source: 'housing_group',
+          decision: status,
+          listingTitle: listing.title,
+          ...(listing.group
+            ? { groupSlug: listing.group.slug, groupName: listing.group.name }
+            : {}),
+          ...(reason ? { reason } : {}),
+        },
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Failed to notify poster of group listing ${listing.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /** Empty or whitespace-only free text stores as NULL, never as a blank. */
+  private static trimToNull(value: string | undefined | null): string | null {
+    const trimmed = value?.trim();
+    return trimmed ? trimmed : null;
   }
 
   async setListingHidden(
@@ -580,6 +830,6 @@ export class HousingGroupsService {
       where: { id },
       relations: { group: true },
     });
-    return toAdminGroupListingDTO(updated!);
+    return this.toAdminListingDTO(updated!);
   }
 }

@@ -22,7 +22,8 @@ import { LockThreadDto } from './dto/lock-thread.dto';
 import { ListPostsQuery } from './dto/list-posts.query';
 import { ListThreadsQuery } from './dto/list-threads.query';
 import { ReplyThreadDto } from './dto/reply-thread.dto';
-import { UpdatePostDto } from './dto/update-post.dto';
+import { SetAcceptedPostDto } from './dto/set-accepted-post.dto';
+import { UpdateForumPostDto } from './dto/update-post.dto';
 import { UpdateThreadDto } from './dto/update-thread.dto';
 import { VotePostDto } from './dto/vote-post.dto';
 import { ForumPostsService } from './forum-posts.service';
@@ -189,7 +190,13 @@ export class ForumController {
     @Param('slug') slug: string,
     @Body() dto: ReplyThreadDto,
   ) {
-    return this.postsService.reply(slug, user, dto.body, dto.parentPostId);
+    return this.postsService.reply(
+      slug,
+      user,
+      dto.body,
+      dto.parentPostId,
+      dto.image,
+    );
   }
 
   @Post('posts/:id/vote')
@@ -209,6 +216,7 @@ export class ForumController {
   }
 
   @Patch('posts/:id')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Edit a post body (author only)' })
   @ApiOkResponse({ description: 'The updated post.' })
   @ApiForbiddenResponse({ description: 'Only the author can edit this post.' })
@@ -217,9 +225,9 @@ export class ForumController {
   updatePost(
     @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: UpdatePostDto,
+    @Body() dto: UpdateForumPostDto,
   ) {
-    return this.postsService.updatePostBody(id, user, dto.body);
+    return this.postsService.updatePostBody(id, user, dto.body, dto.image);
   }
 
   @Delete('posts/:id')
@@ -273,23 +281,69 @@ export class ForumController {
   }
 
   @Patch('threads/:slug')
-  @ApiOperation({ summary: 'Edit a thread title (author only)' })
+  @UseGuards(NotRestrictedGuard)
+  @ApiOperation({
+    summary:
+      'Edit a thread title (author only) and/or its tags (author or moderator)',
+  })
   @ApiOkResponse({ description: 'The updated thread.' })
   @ApiForbiddenResponse({
-    description: 'Only the author can edit this thread.',
+    description:
+      'Only the author can edit the title; only the author or a moderator can edit the tags.',
   })
+  @ApiBadRequestResponse({ description: 'Neither a title nor tags were sent.' })
   @ApiNotFoundResponse({ description: 'Thread not found.' })
   updateThread(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
     @Body() dto: UpdateThreadDto,
   ) {
-    return this.threadsService.updateThreadTitle(
-      slug,
-      user,
-      dto.title,
-      dto.tags,
-    );
+    return this.threadsService.updateThread(slug, user, dto.title, dto.tags);
+  }
+
+  @Post('threads/:slug/accepted-answer')
+  @ApiOperation({
+    summary:
+      "Mark a reply as this thread's accepted answer, or clear the mark (thread author or moderator)",
+  })
+  @ApiCreatedResponse({ description: 'The updated thread.' })
+  @ApiForbiddenResponse({
+    description:
+      'Only the thread author or a moderator can accept an answer here.',
+  })
+  @ApiBadRequestResponse({
+    description:
+      'The post is the opening post, or is deleted, so it cannot be the answer.',
+  })
+  @ApiNotFoundResponse({ description: 'Thread or post not found.' })
+  setAcceptedAnswer(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Body() dto: SetAcceptedPostDto,
+  ) {
+    return this.threadsService.setAcceptedPost(slug, user, dto.postId);
+  }
+
+  @Post('threads/:slug/follow')
+  @ApiOperation({ summary: 'Follow this thread (notify me about new replies)' })
+  @ApiCreatedResponse({ description: 'The updated thread.' })
+  @ApiNotFoundResponse({ description: 'Thread not found.' })
+  followThread(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.threadsService.setSubscribed(slug, user, true);
+  }
+
+  @Post('threads/:slug/unfollow')
+  @ApiOperation({ summary: 'Stop following this thread' })
+  @ApiCreatedResponse({ description: 'The updated thread.' })
+  @ApiNotFoundResponse({ description: 'Thread not found.' })
+  unfollowThread(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+  ) {
+    return this.threadsService.setSubscribed(slug, user, false);
   }
 
   @Post('threads/:slug/lock')

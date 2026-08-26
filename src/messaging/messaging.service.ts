@@ -110,6 +110,26 @@ export class MessagingService {
     );
   }
 
+  setArchived(
+    conversationId: string,
+    userId: string,
+    archived: boolean,
+  ): Promise<{ ok: true }> {
+    return this.conversationsService.setArchived(
+      conversationId,
+      userId,
+      archived,
+    );
+  }
+
+  setDraft(
+    conversationId: string,
+    userId: string,
+    draft: string,
+  ): Promise<{ ok: true }> {
+    return this.conversationsService.setDraft(conversationId, userId, draft);
+  }
+
   isParticipant(conversationId: string, userId: string): Promise<boolean> {
     return this.conversationsService.isParticipant(conversationId, userId);
   }

@@ -23,6 +23,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { CreateSafeSpaceVouchDto } from './dto/create-safe-space-vouch.dto';
 import { SafeSpaceVouchesService } from './safe-space-vouches.service';
 
@@ -41,6 +42,7 @@ export class SafeSpaceVouchesController {
 
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Post(':slug/vouch')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Vouch for a verified safe space' })
   @ApiCreatedResponse({ description: 'The updated live vouch count.' })
   @ApiBadRequestResponse({

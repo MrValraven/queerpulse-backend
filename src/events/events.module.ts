@@ -1,10 +1,14 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { Community } from '../communities/entities/community.entity';
 import { CommunityMembershipModule } from '../communities/community-membership.module';
 import { ConnectionsModule } from '../connections/connections.module';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { ListingLookupModule } from '../listings/listing-lookup.module';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
+import { CardTokenService } from '../membership-cards/card-token.service';
+import { CommunityCard } from '../membership-cards/entities/community-card.entity';
+import { MembershipCard } from '../membership-cards/entities/membership-card.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PushModule } from '../push/push.module';
 import { SocialModule } from '../social/social.module';
@@ -17,6 +21,8 @@ import {
 } from './events.controller';
 import { EventPhotosController } from './event-photos.controller';
 import { EventReminderPreferencesController } from './event-reminder-preferences.controller';
+import { EventAnnouncement } from './entities/event-announcement.entity';
+import { EventBan } from './entities/event-ban.entity';
 import { EventBookmark } from './entities/event-bookmark.entity';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventCohostInvite } from './entities/event-cohost-invite.entity';
@@ -27,8 +33,11 @@ import { EventRsvp } from './entities/event-rsvp.entity';
 import { EventSeries } from './entities/event-series.entity';
 import { Event } from './entities/event.entity';
 import { MemberEventReminderPreferences } from './entities/member-event-reminder-preferences.entity';
+import { EventAnnouncementsService } from './event-announcements.service';
 import { EventAudienceGateService } from './event-audience-gate.service';
+import { EventBansService } from './event-bans.service';
 import { EventBookmarksService } from './event-bookmarks.service';
+import { EventCheckInService } from './event-check-in.service';
 import { EventCohostInvitesService } from './event-cohost-invites.service';
 import { EventInvitesService } from './event-invites.service';
 import { EventPhotosService } from './event-photos.service';
@@ -50,6 +59,21 @@ import { RsvpService } from './rsvp.service';
       EventBookmark,
       MemberEventReminderPreferences,
       EventSeries,
+      // Host announcements (LOC-06) and the host's own door (LOC-08).
+      EventAnnouncement,
+      EventBan,
+      // ── Day-of check-in by scanned membership card (LOC-03) ─────────────
+      // These three belong to `MembershipCardsModule`, and they are
+      // registered here rather than imported through it because
+      // `MembershipCardsModule` imports `CommunitiesModule`, which imports
+      // THIS module: importing it back would close a dependency cycle.
+      // `TypeOrmModule.forFeature` on another module's entity is the
+      // established way out (`AdminCommunitiesModule` reads `Community` the
+      // same way), and `EventCheckInService` reuses the SHARED pure
+      // `effectiveCardStatus` rather than restating the status rules.
+      MembershipCard,
+      CommunityCard,
+      Community,
     ]),
     UsersModule,
     NotificationsModule,
@@ -105,6 +129,15 @@ import { RsvpService } from './rsvp.service';
     EventRemindersService,
     EventReminderPreferencesService,
     EventPhotosService,
+    EventAnnouncementsService,
+    EventBansService,
+    EventCheckInService,
+    // Verifies a scanned membership-card QR at an event door (LOC-03).
+    // Provided here, not imported, for the cycle reason spelled out on the
+    // `forFeature` list above. It is a stateless verifier over an Ed25519 key
+    // pair read from config, so a second instance holds no state of its own
+    // and cannot drift from the one `MembershipCardsModule` provides.
+    CardTokenService,
     // Shared audience-scope tier check `EventsService.assertCanView` (reads)
     // and `RsvpService` (writes) both call — a leaf provider (depends only on
     // `ConnectionsService`/`CommunityMembershipService` and its own

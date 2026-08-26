@@ -86,6 +86,7 @@ function makePitch(overrides: Partial<MagazinePitch> = {}): MagazinePitch {
     passTemplate: null,
     passNote: null,
     submitterId: 'writer-1',
+    storySubmissionId: null,
     createdAt: new Date('2026-07-12T09:00:00Z'),
     ...overrides,
   };
@@ -97,8 +98,11 @@ function makePayment(
   return {
     id: 'payment-1',
     pieceId: 'piece-1',
-    fee: '€420',
-    expenses: null,
+    currency: 'EUR',
+    feeAmount: '420.00',
+    feeText: null,
+    expensesAmount: null,
+    expensesText: null,
     invoice: null,
     filedOn: null,
     terms: '21 days',
@@ -201,7 +205,7 @@ describe('toWriterAssignment', () => {
   it('maps fee/pay from the payment when present', () => {
     const result = toWriterAssignment(makePiece(), makePayment());
 
-    expect(result.fee).toBe('€420');
+    expect(result.fee).toBe('€420.00');
     expect(result.pay).toBe('approved_unpaid');
   });
 
@@ -289,7 +293,7 @@ describe('toWriterPayment', () => {
 
     expect(result.title).toBe(piece.title);
     expect(result.issue).toBe(piece.issueId);
-    expect(result.fee).toBe('€420');
+    expect(result.fee).toBe('€420.00');
   });
 
   it('reports "Not yet agreed" when there is no payment row', () => {

@@ -20,7 +20,7 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminCommunitiesService } from './admin-communities.service';
-import { ListCommunityGovernanceLogQuery } from './dto/list-community-governance-log.query';
+import { ListAdminCommunityGovernanceLogQuery } from './dto/list-community-governance-log.query';
 import { ReassignOwnerDto } from './dto/reassign-owner.dto';
 import { UpdateAdminCommunitySettingsDto } from './dto/update-admin-community-settings.dto';
 import {
@@ -88,7 +88,7 @@ export class AdminCommunitiesController {
   @Get(':slug/governance-log')
   getGovernanceLog(
     @Param('slug') slug: string,
-    @Query() query: ListCommunityGovernanceLogQuery,
+    @Query() query: ListAdminCommunityGovernanceLogQuery,
   ) {
     return this.adminCommunities.getGovernanceLog(slug, query);
   }

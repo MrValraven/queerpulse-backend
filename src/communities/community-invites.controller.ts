@@ -15,6 +15,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { CommunityInvitesService } from './community-invites.service';
 import { CreateCommunityInvitesDto } from './dto/create-community-invites.dto';
@@ -41,6 +42,7 @@ export class CommunityInvitesController {
   ) {}
 
   @Post()
+  @UseGuards(NotRestrictedGuard)
   @Throttle({ default: { limit: 10, ttl: seconds(60) } })
   @ApiOperation({
     summary:

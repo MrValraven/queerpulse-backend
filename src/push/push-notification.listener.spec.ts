@@ -18,6 +18,8 @@ function makeNotification(
     type,
     payload,
     read: false,
+    bundleKey: null,
+    otherActorCount: 0,
     createdAt: NOTIFICATION_CREATED_AT,
   };
 }
@@ -25,6 +27,8 @@ function makeNotification(
 function build(opts: {
   // Which categories are DISABLED for the recipients (empty = everything on).
   pushDisabledCategories?: string[];
+  // Recipients currently inside their quiet-hours window (empty = nobody).
+  quietUserIds?: string[];
   // The actor profile `resolveActor` finds (undefined = no matching profile).
   actorProfile?: {
     userId: string;
@@ -37,7 +41,23 @@ function build(opts: {
   const profilesRepo = {
     findOne: jest.fn().mockResolvedValue(opts.actorProfile ?? null),
   };
-  const push = { sendToUsers: jest.fn().mockResolvedValue(undefined) };
+  // Doubles as both collaborators the listener now takes: `PushService` (which
+  // only `pushSecurityNewSignIn` calls directly) and
+  // `PushPreviewPrivacyService` (which every other handler sends through since
+  // ID-13). `sendSplitByPreviewPreference` delegates to `sendToUsers`, which is
+  // the real service's behaviour for a recipient who has previews SHOWN, the
+  // case every assertion below is about. The split is covered in
+  // `push-preview-privacy.service.spec.ts`.
+  const push = {
+    sendToUsers: jest.fn().mockResolvedValue(undefined),
+    sendSplitByPreviewPreference: jest.fn(),
+  };
+  push.sendSplitByPreviewPreference.mockImplementation(
+    (userIds: string[], payload: unknown): Promise<void> => {
+      push.sendToUsers(userIds, payload);
+      return Promise.resolve();
+    },
+  );
   // Echoes back whichever of the input userIds are still enabled — in the
   // real service this is one batched `IN (...)` query for the whole list, not
   // one call per recipient (that's exactly the N+1 this listener now avoids).
@@ -50,12 +70,33 @@ function build(opts: {
         ),
       ),
   };
+  // Quiet hours: by default nobody is inside a window, so every recipient
+  // stays audible and these tests measure only what they mean to measure.
+  const notificationDelivery = {
+    recipientsOutsideQuietHours: jest
+      .fn()
+      .mockImplementation((userIds: string[]) =>
+        Promise.resolve(
+          userIds.filter(
+            (userId) => !(opts.quietUserIds ?? []).includes(userId),
+          ),
+        ),
+      ),
+  };
   const listener = new PushNotificationListener(
     profilesRepo as never,
     push as never,
+    push as never,
     notificationPreferences as never,
+    notificationDelivery as never,
   );
-  return { listener, push, notificationPreferences, profilesRepo };
+  return {
+    listener,
+    push,
+    notificationPreferences,
+    notificationDelivery,
+    profilesRepo,
+  };
 }
 
 function emit(

@@ -76,6 +76,7 @@ function build(accessibleForwardCount: number) {
     .mockResolvedValue({
       view: {} as never,
       response: {} as never,
+      isNew: true,
     });
   return { service, messages, getCount, buildPostResult };
 }

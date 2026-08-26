@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   NotFoundException,
@@ -11,6 +12,7 @@ import {
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import { POSTGRES_UNIQUE_VIOLATION } from '../common/db-errors';
+import { PAGE_SIZE } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
@@ -20,6 +22,8 @@ import {
 } from './entities/landlord-intro-request.entity';
 import { LandlordRecommendation } from './entities/landlord-recommendation.entity';
 import { Landlord, LandlordStatus } from './entities/landlord.entity';
+import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { LandlordsService } from './landlords.service';
 
 type RepoMock = Record<string, jest.Mock>;
@@ -30,7 +34,15 @@ function makePaginatedBuilder(
   total: number,
 ): QueryBuilderStub {
   const builder: QueryBuilderStub = {};
-  for (const method of ['where', 'andWhere', 'orderBy', 'skip', 'take']) {
+  for (const method of [
+    'where',
+    'andWhere',
+    'orderBy',
+    'skip',
+    'take',
+    'offset',
+    'limit',
+  ]) {
     builder[method] = jest.fn().mockReturnValue(builder);
   }
   builder.getManyAndCount = jest.fn().mockResolvedValue([rows, total]);
@@ -52,6 +64,9 @@ function makeLandlord(overrides: Partial<Landlord> = {}): Landlord {
     areas: [],
     rentingNote: '',
     stats: [],
+    decidedAt: null,
+    decidedBy: null,
+    decisionReason: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
@@ -68,6 +83,26 @@ function makeRec(
     stars: 5,
     text: 'Great!',
     createdAt: new Date('2026-01-02T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+function makeIntroRequest(
+  overrides: Partial<LandlordIntroRequest> = {},
+): LandlordIntroRequest {
+  return {
+    id: 'intro-1',
+    landlordId: 'landlord-1',
+    userId: null,
+    user: null,
+    name: 'Sam',
+    note: null,
+    contactEmail: null,
+    status: LandlordIntroRequestStatus.Pending,
+    decidedAt: null,
+    decidedBy: null,
+    decisionReason: null,
+    createdAt: new Date('2026-01-03T00:00:00.000Z'),
     ...overrides,
   };
 }
@@ -132,6 +167,7 @@ describe('LandlordsService', () => {
     findOne: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
+    createQueryBuilder: jest.Mock;
   };
   let profiles: RepoMock;
   let verification: {
@@ -140,6 +176,8 @@ describe('LandlordsService', () => {
     levelsForUsers: jest.Mock;
   };
   let affirmingPledge: { requireAccepted: jest.Mock };
+  // LOC-19: every staff decision now reaches the member it is about.
+  let notifications: { create: jest.Mock };
 
   beforeEach(async () => {
     landlords = {
@@ -168,6 +206,7 @@ describe('LandlordsService', () => {
       findOne: jest.fn().mockResolvedValue(null),
       create: jest.fn((row: unknown) => row),
       save: jest.fn((row: unknown) => Promise.resolve(row)),
+      createQueryBuilder: jest.fn(() => makePaginatedBuilder([], 0)),
     };
     profiles = { find: jest.fn().mockResolvedValue([]) };
     verification = {
@@ -178,6 +217,7 @@ describe('LandlordsService', () => {
     affirmingPledge = {
       requireAccepted: jest.fn().mockResolvedValue(undefined),
     };
+    notifications = { create: jest.fn().mockResolvedValue(null) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -194,6 +234,7 @@ describe('LandlordsService', () => {
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: VerificationService, useValue: verification },
         { provide: AffirmingPledgeService, useValue: affirmingPledge },
+        { provide: NotificationsService, useValue: notifications },
       ],
     }).compile();
     service = module.get(LandlordsService);
@@ -480,18 +521,91 @@ describe('LandlordsService', () => {
       ).resolves.toBeDefined();
     });
 
-    it('setStatus flips the moderation status', async () => {
+    it('setStatus flips the moderation status and stamps the decision', async () => {
       landlords.findOne.mockResolvedValue(
         makeLandlord({ status: LandlordStatus.Review }),
       );
       landlords.save.mockImplementation((row: unknown) => Promise.resolve(row));
 
-      const result = await service.setStatus('landlord-1', LandlordStatus.Live);
+      const result = await service.setStatus(
+        'landlord-1',
+        { status: LandlordStatus.Live },
+        'moderator-1',
+      );
 
       expect(result.slug).toBe('friendly-landlord');
       expect(landlords.save).toHaveBeenCalledWith(
-        expect.objectContaining({ status: LandlordStatus.Live }),
+        expect.objectContaining({
+          status: LandlordStatus.Live,
+          decidedBy: 'moderator-1',
+          decidedAt: expect.any(Date) as unknown,
+        }),
       );
+    });
+
+    // LOC-19. The whole point of the queue: the member who suggested the entry
+    // is told it went live, and told where.
+    it('setStatus tells the member who suggested the entry', async () => {
+      landlords.findOne.mockResolvedValue(
+        makeLandlord({
+          status: LandlordStatus.Review,
+          submittedByUserId: 'member-9',
+        }),
+      );
+      landlords.save.mockImplementation((row: unknown) => Promise.resolve(row));
+
+      await service.setStatus(
+        'landlord-1',
+        { status: LandlordStatus.Live },
+        'moderator-1',
+      );
+
+      expect(notifications.create).toHaveBeenCalledWith(
+        'member-9',
+        NotificationType.LandlordSuggestionDecided,
+        expect.objectContaining({
+          decision: LandlordStatus.Live,
+          landlordSlug: 'friendly-landlord',
+          landlordName: 'Friendly Landlord',
+        }),
+      );
+    });
+
+    it('setStatus refuses to hold a suggested entry back with no reason', async () => {
+      landlords.findOne.mockResolvedValue(
+        makeLandlord({
+          status: LandlordStatus.Live,
+          submittedByUserId: 'member-9',
+        }),
+      );
+
+      await expect(
+        service.setStatus(
+          'landlord-1',
+          { status: LandlordStatus.Review },
+          'moderator-1',
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(landlords.save).not.toHaveBeenCalled();
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('setStatus is idempotent: re-deciding the same state notifies nobody', async () => {
+      landlords.findOne.mockResolvedValue(
+        makeLandlord({
+          status: LandlordStatus.Live,
+          submittedByUserId: 'member-9',
+        }),
+      );
+
+      await service.setStatus(
+        'landlord-1',
+        { status: LandlordStatus.Live },
+        'moderator-1',
+      );
+
+      expect(landlords.save).not.toHaveBeenCalled();
+      expect(notifications.create).not.toHaveBeenCalled();
     });
 
     it('remove 404s an unknown id', async () => {
@@ -507,6 +621,39 @@ describe('LandlordsService', () => {
       await service.remove('landlord-1');
 
       expect(landlords.remove).toHaveBeenCalledWith(landlord);
+    });
+
+    it('remove refuses to delete a member-suggested entry with no reason', async () => {
+      landlords.findOne.mockResolvedValue(
+        makeLandlord({ submittedByUserId: 'member-9' }),
+      );
+
+      await expect(service.remove('landlord-1')).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(landlords.remove).not.toHaveBeenCalled();
+    });
+
+    it('remove tells the member who suggested the entry, with the reason', async () => {
+      landlords.findOne.mockResolvedValue(
+        makeLandlord({ submittedByUserId: 'member-9' }),
+      );
+
+      await service.remove(
+        'landlord-1',
+        'This is a letting agency, not a landlord.',
+      );
+
+      expect(landlords.remove).toHaveBeenCalled();
+      expect(notifications.create).toHaveBeenCalledWith(
+        'member-9',
+        NotificationType.LandlordSuggestionDecided,
+        expect.objectContaining({
+          decision: 'removed',
+          landlordSlug: 'friendly-landlord',
+          reason: 'This is a letting agency, not a landlord.',
+        }),
+      );
     });
   });
 
@@ -530,29 +677,26 @@ describe('LandlordsService', () => {
   });
 
   describe('listIntroRequests', () => {
-    it('returns an empty list when the filter slug matches no landlord', async () => {
+    it('returns an empty page when the filter slug matches no landlord', async () => {
       landlords.findOne.mockResolvedValue(null);
 
-      await expect(service.listIntroRequests('ghost')).resolves.toEqual([]);
-      expect(introRequests.find).not.toHaveBeenCalled();
+      await expect(
+        service.listIntroRequests({ landlord: 'ghost' }),
+      ).resolves.toEqual({ items: [], total: 0, page: 1, pageSize: PAGE_SIZE });
+      expect(introRequests.createQueryBuilder).not.toHaveBeenCalled();
     });
 
     it('maps intro requests and embeds their target landlord', async () => {
-      const request = {
-        id: 'intro-1',
-        landlordId: 'landlord-1',
-        name: 'Sam',
-        note: null,
-        contactEmail: null,
-        status: LandlordIntroRequestStatus.Pending,
-        createdAt: new Date('2026-01-03T00:00:00.000Z'),
-      } as LandlordIntroRequest;
-      introRequests.find.mockResolvedValue([request]);
+      const request = makeIntroRequest();
+      introRequests.createQueryBuilder.mockReturnValue(
+        makePaginatedBuilder([request], 1),
+      );
       landlords.find.mockResolvedValue([makeLandlord()]);
 
-      const result = await service.listIntroRequests();
+      const result = await service.listIntroRequests({});
 
-      expect(result[0]).toMatchObject({
+      expect(result.total).toBe(1);
+      expect(result.items[0]).toMatchObject({
         id: 'intro-1',
         landlordSlug: 'friendly-landlord',
         landlordName: 'Friendly Landlord',
@@ -564,58 +708,128 @@ describe('LandlordsService', () => {
     it('404s an unknown request', async () => {
       introRequests.findOne.mockResolvedValue(null);
 
-      await expect(service.triageIntroRequest('x', 'accepted')).rejects.toThrow(
-        NotFoundException,
-      );
+      await expect(
+        service.triageIntroRequest('x', { action: 'accepted' }, 'moderator-1'),
+      ).rejects.toThrow(NotFoundException);
     });
 
-    it('accepts a request and re-embeds the landlord in the DTO', async () => {
-      introRequests.findOne.mockResolvedValue({
-        id: 'intro-1',
-        landlordId: 'landlord-1',
-        name: 'Sam',
-        note: null,
-        contactEmail: null,
-        status: LandlordIntroRequestStatus.Pending,
-        createdAt: new Date(),
-      });
+    it('accepts a request, stamps the decision, and re-embeds the landlord', async () => {
+      introRequests.findOne.mockResolvedValue(makeIntroRequest());
       introRequests.save.mockImplementation((row: unknown) =>
         Promise.resolve(row),
       );
       landlords.find.mockResolvedValue([makeLandlord()]);
 
-      const result = await service.triageIntroRequest('intro-1', 'accepted');
+      const result = await service.triageIntroRequest(
+        'intro-1',
+        { action: 'accepted' },
+        'moderator-1',
+      );
 
       expect(introRequests.save).toHaveBeenCalledWith(
         expect.objectContaining({
           status: LandlordIntroRequestStatus.Accepted,
+          decidedBy: 'moderator-1',
+          decidedAt: expect.any(Date) as unknown,
         }),
       );
       expect(result.landlordSlug).toBe('friendly-landlord');
     });
 
-    it('maps the "declined" action onto the Declined status', async () => {
-      introRequests.findOne.mockResolvedValue({
-        id: 'intro-2',
-        landlordId: 'landlord-1',
-        name: 'Sam',
-        note: null,
-        contactEmail: null,
-        status: LandlordIntroRequestStatus.Pending,
-        createdAt: new Date(),
-      });
+    // LOC-19. A member handed over a name, a note and a contact detail to ask
+    // for this. The answer reaches them.
+    it('tells the member who asked, naming the landlord', async () => {
+      introRequests.findOne.mockResolvedValue(
+        makeIntroRequest({ userId: 'member-9' }),
+      );
       introRequests.save.mockImplementation((row: unknown) =>
         Promise.resolve(row),
       );
       landlords.find.mockResolvedValue([makeLandlord()]);
 
-      await service.triageIntroRequest('intro-2', 'declined');
+      await service.triageIntroRequest(
+        'intro-1',
+        { action: 'accepted' },
+        'moderator-1',
+      );
+
+      expect(notifications.create).toHaveBeenCalledWith(
+        'member-9',
+        NotificationType.LandlordIntroRequestDecided,
+        expect.objectContaining({
+          decision: 'accepted',
+          landlordSlug: 'friendly-landlord',
+          landlordName: 'Friendly Landlord',
+        }),
+      );
+    });
+
+    it('maps the "declined" action onto the Declined status and forwards the reason', async () => {
+      introRequests.findOne.mockResolvedValue(
+        makeIntroRequest({ id: 'intro-2', userId: 'member-9' }),
+      );
+      introRequests.save.mockImplementation((row: unknown) =>
+        Promise.resolve(row),
+      );
+      landlords.find.mockResolvedValue([makeLandlord()]);
+
+      await service.triageIntroRequest(
+        'intro-2',
+        { action: 'declined', reason: 'They have nothing free until spring.' },
+        'moderator-1',
+      );
 
       expect(introRequests.save).toHaveBeenCalledWith(
         expect.objectContaining({
           status: LandlordIntroRequestStatus.Declined,
+          decisionReason: 'They have nothing free until spring.',
         }),
       );
+      expect(notifications.create).toHaveBeenCalledWith(
+        'member-9',
+        NotificationType.LandlordIntroRequestDecided,
+        expect.objectContaining({
+          decision: 'declined',
+          reason: 'They have nothing free until spring.',
+        }),
+      );
+    });
+
+    it('refuses a decline with no reason', async () => {
+      introRequests.findOne.mockResolvedValue(
+        makeIntroRequest({ userId: 'member-9' }),
+      );
+
+      await expect(
+        service.triageIntroRequest(
+          'intro-1',
+          { action: 'declined', reason: '   ' },
+          'moderator-1',
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(introRequests.save).not.toHaveBeenCalled();
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    it('is idempotent: re-answering the same way notifies nobody twice', async () => {
+      introRequests.findOne.mockResolvedValue(
+        makeIntroRequest({
+          userId: 'member-9',
+          status: LandlordIntroRequestStatus.Accepted,
+          decidedAt: new Date('2026-01-04T00:00:00.000Z'),
+          decidedBy: 'moderator-1',
+        }),
+      );
+      landlords.find.mockResolvedValue([makeLandlord()]);
+
+      await service.triageIntroRequest(
+        'intro-1',
+        { action: 'accepted' },
+        'moderator-2',
+      );
+
+      expect(introRequests.save).not.toHaveBeenCalled();
+      expect(notifications.create).not.toHaveBeenCalled();
     });
   });
 });

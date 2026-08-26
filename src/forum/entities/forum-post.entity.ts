@@ -40,6 +40,16 @@ export class ForumPost {
   @Column({ type: 'text' })
   body!: string;
 
+  // One optional photo attached to this post, as a bare storage key (never a
+  // URL). Written through the same presigned upload pipeline every other image
+  // slot uses: `@IsImageReference` on the write DTOs,
+  // `StorageKeyOwnershipInterceptor` normalising `/files/<key>` back to the
+  // bare key and refusing a key the caller does not own, and `toImageUrl`
+  // resolving it to a fetchable `GET /files/*` URL on the way out. Mirrors
+  // `CommunityPost.image` field for field. Null for an ordinary text post.
+  @Column({ type: 'varchar', nullable: true })
+  image!: string | null;
+
   // Denormalized count of `forum_post_vote` rows with `value = 1` for this
   // post, kept in sync by `ForumPostsService.vote` — avoids a `COUNT(*)`
   // join on every post render.

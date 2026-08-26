@@ -17,6 +17,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateListingEnquiryDto } from './dto/create-listing-enquiry.dto';
 import { ListingEnquiriesService } from './listing-enquiries.service';
@@ -77,6 +78,7 @@ export class ListingEnquiriesController {
   // per-listing and per-day caps in the service are the layer this one cannot
   // express (see `ListingEnquiriesService`).
   @Post(':slug/enquiries')
+  @UseGuards(NotRestrictedGuard)
   @Throttle({ default: { limit: 5, ttl: seconds(300) } })
   @ApiOperation({
     summary: 'Send a private enquiry to a listing’s business through messaging',

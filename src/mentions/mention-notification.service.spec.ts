@@ -20,6 +20,10 @@ function build() {
   const listings = { findOne: jest.fn() };
   const events = { findOne: jest.fn() };
   const threads = { findOne: jest.fn() };
+  // A `message`-source mention is restricted to the conversation's own
+  // participants, so the fan-out reads this repo. Default: nobody is a
+  // participant, which is the fail-closed shape the service relies on.
+  const conversationParticipants = { find: jest.fn().mockResolvedValue([]) };
   const notifications = {
     // Resolves to the ids it actually notified (the real signature returns
     // `Promise<string[]>`; `notify` reads that array). A stub resolving to
@@ -42,11 +46,13 @@ function build() {
     listings as never,
     events as never,
     threads as never,
+    conversationParticipants as never,
     notifications as never,
   );
 
   return {
     service,
+    conversationParticipants,
     communities,
     members,
     listings,
@@ -194,6 +200,54 @@ describe('MentionNotificationService.notify', () => {
       notifications.createForRecipients.mock.calls.flatMap((call) => call[0]);
     expect(notifiedRecipients).toEqual(['user-insider']);
     expect(notifiedRecipients).not.toContain('user-outsider');
+  });
+
+  it("restricts an @-member mention inside a DM to that conversation's participants", async () => {
+    const {
+      service,
+      conversationParticipants,
+      notifications,
+      userIdsForSlugs,
+    } = build();
+    userIdsForSlugs.mockResolvedValue(
+      new Map([
+        ['insider', 'user-insider'],
+        ['outsider', 'user-outsider'],
+      ]),
+    );
+    // Only the insider is in the room. A DM is the most private space on the
+    // platform: notifying the outsider would disclose that a private
+    // conversation exists and names them, and would persist a 140-char
+    // excerpt of someone else's private message.
+    conversationParticipants.find.mockResolvedValue([
+      { userId: 'user-insider' },
+    ]);
+
+    await service.notify('@insider @outsider look here', 'author-1', {
+      source: 'message',
+      conversationId: 'conversation-1',
+      messageId: 'message-1',
+      excerpt: 'something said inside a private thread',
+    });
+
+    const notifiedRecipients =
+      notifications.createForRecipients.mock.calls.flatMap((call) => call[0]);
+    expect(notifiedRecipients).toEqual(['user-insider']);
+    expect(notifiedRecipients).not.toContain('user-outsider');
+  });
+
+  it('fails CLOSED on a message mention carrying no conversationId', async () => {
+    const { service, notifications, userIdsForSlugs } = build();
+    userIdsForSlugs.mockResolvedValue(new Map([['someone', 'user-someone']]));
+
+    // Unlike the community branch, which fails open, an unclassifiable
+    // conversation must notify nobody rather than broadcast a DM excerpt.
+    await service.notify('@someone', 'author-1', {
+      source: 'message',
+      excerpt: 'a private thing',
+    });
+
+    expect(notifications.createForRecipients).not.toHaveBeenCalled();
   });
 
   it('does NOT restrict an @-member mention in a PUBLIC community', async () => {

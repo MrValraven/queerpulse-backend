@@ -12,7 +12,7 @@ import { IsImageReference } from '../../common/validators/is-image-reference.dec
 /**
  * Body of `POST /magazine/admin/decks`. Metadata fields mirror
  * `MagazineDeck` (see `entities/magazine-deck.entity.ts`) — class-validator,
- * workshops-DTO style (`workshops/dto/create-workshop.dto.ts`). `slides` is
+ * jobs-DTO style (`jobs/dto/create-job.dto.ts`). `slides` is
  * typed loosely as `unknown[]` here: the discriminated `DeckSlide` union
  * isn't expressible as class-validator decorators, so it's validated by hand
  * via `validateDeckSlides()` in `deck-slides.validation.ts`, called by the

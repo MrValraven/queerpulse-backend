@@ -12,7 +12,9 @@ import {
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { NotificationPreferencesService } from './notification-preferences.service';
+import { NotificationDeliveryService } from './notification-delivery.service';
 import { UpdateNotificationPreferenceDto } from './dto/update-notification-preference.dto';
+import { UpdateNotificationDeliveryDto } from './dto/update-notification-delivery.dto';
 
 /**
  * Per-member, per-category notification preferences.
@@ -34,6 +36,7 @@ import { UpdateNotificationPreferenceDto } from './dto/update-notification-prefe
 export class NotificationPreferencesController {
   constructor(
     private readonly notificationPreferences: NotificationPreferencesService,
+    private readonly notificationDelivery: NotificationDeliveryService,
   ) {}
 
   // Returns every category's effective state (defaults ON) — never 404s and
@@ -55,5 +58,28 @@ export class NotificationPreferencesController {
     @Body() body: UpdateNotificationPreferenceDto,
   ) {
     return this.notificationPreferences.update(user.userId, body);
+  }
+
+  // Quiet hours. A separate pair of routes from the category map above because
+  // it answers a different question: the category map is WHICH notifications,
+  // this is WHEN a phone may buzz for the ones that survived it.
+  @Get('notification-delivery')
+  @ApiOperation({ summary: 'Get your quiet-hours window.' })
+  @ApiOkResponse({
+    description:
+      'The window and the time zone it is measured in. Never 404s: a member with no stored window gets the defaults, which have quiet hours off.',
+  })
+  getDelivery(@CurrentUser() user: CurrentUserData) {
+    return this.notificationDelivery.get(user.userId);
+  }
+
+  @Put('notification-delivery')
+  @ApiOperation({ summary: 'Set your quiet-hours window.' })
+  @ApiOkResponse({ description: 'The updated window.' })
+  updateDelivery(
+    @CurrentUser() user: CurrentUserData,
+    @Body() body: UpdateNotificationDeliveryDto,
+  ) {
+    return this.notificationDelivery.update(user.userId, body);
   }
 }

@@ -4,17 +4,12 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, Repository } from 'typeorm';
-import { MemberLookup } from '../common/member-ref';
-import {
-  DEFAULT_LIST_LIMIT,
-  normalizePage,
-  paginate,
-  Paginated,
-} from '../common/pagination';
+import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
+import { normalizePage, paginate, Paginated } from '../common/pagination';
+import { toStoredPlainText } from '../communities/community-plain-text';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { MessagingService } from '../messaging/messaging.service';
 import { Profile } from '../users/entities/profile.entity';
@@ -30,40 +25,72 @@ import {
   HousingListing,
   HousingListingStatus,
 } from './entities/housing-listing.entity';
+import { resolveHousingLocation } from './housing-city';
 import {
-  AdminHousingListingDTO,
   HousingListingDTO,
-  toAdminHousingListingDTO,
   toHousingListingDTO,
 } from './housing-listing-response';
+import { HousingListerLookup } from './housing-lister-lookup';
 import { assessHousingRisk, HousingRiskAssessment } from './housing-risk';
-import { deriveListingVerified } from './housing-verified';
-import {
-  HOUSING_LISTING_WENT_LIVE,
-  HousingListingWentLiveEvent,
-} from './housing-listing.events';
 
 // Postgres unique-violation SQLSTATE. Mirrors the file-local helper each
 // service (`ListingsService`, `CompaniesService`) keeps by convention.
+
+/**
+ * Every member-typed free-text field on a housing listing is stripped of markup
+ * ONCE, here at the write boundary, and stored as plain text.
+ *
+ * This repo strips markup where the value is persisted rather than at each
+ * render site (`toStoredPlainText`, `communities/community-plain-text.ts`, and
+ * `sanitizeArticleHtml` before it), because a crafted API call bypasses
+ * whatever the client does on the way in and because a value stripped at read
+ * time is only as safe as the last renderer somebody added. None of these
+ * fields is rich text: a room description, a feature chip and an "ideal for"
+ * chip are prose, so the allowlist is empty and only the text survives.
+ *
+ * `title` and `blurb` matter twice over: they are the two fields that also feed
+ * `slugify` and the deterministic risk scorer, and both should see the same
+ * characters a reader will.
+ */
+function toStoredArray(values: string[]): string[] {
+  return values
+    .map((value) => toStoredPlainText(value))
+    .filter((value) => value.length > 0);
+}
+
 /** Applies only the fields present on a PATCH body (mirrors
- * `ListingsService.applyUpdate`'s conditional-spread idiom). */
+ * `ListingsService.applyUpdate`'s conditional-spread idiom).
+ *
+ * `city`/`area` are the one pair that is NOT applied verbatim: they go through
+ * `resolveHousingLocation` together, so a PATCH can never put a neighbourhood
+ * in the city column (see `housing-city.ts`). Passing the listing's stored
+ * `area` as the fallback keeps a city-only PATCH from wiping the area. */
 function applyUpdate(
   listing: HousingListing,
   dto: UpdateHousingListingDto,
 ): void {
+  const isLocationTouched = dto.city !== undefined || dto.area !== undefined;
+  const location = isLocationTouched
+    ? resolveHousingLocation({
+        city: dto.city,
+        area: dto.area !== undefined ? dto.area : listing.area,
+      })
+    : null;
+
   Object.assign(listing, {
     ...(dto.type !== undefined ? { type: dto.type } : {}),
-    ...(dto.title !== undefined ? { title: dto.title } : {}),
-    ...(dto.blurb !== undefined ? { blurb: dto.blurb } : {}),
-    ...(dto.city !== undefined ? { city: dto.city } : {}),
-    ...(dto.area !== undefined ? { area: dto.area } : {}),
+    ...(dto.title !== undefined ? { title: toStoredPlainText(dto.title) } : {}),
+    ...(dto.blurb !== undefined ? { blurb: toStoredPlainText(dto.blurb) } : {}),
+    ...(location !== null
+      ? { city: location.city, area: location.area ?? '' }
+      : {}),
     ...(dto.rentEuros !== undefined ? { rentEuros: dto.rentEuros } : {}),
     ...(dto.bedrooms !== undefined ? { bedrooms: dto.bedrooms } : {}),
     ...(dto.billsIncluded !== undefined
       ? { billsIncluded: dto.billsIncluded }
       : {}),
     ...(dto.accessibilityInfo !== undefined
-      ? { accessibilityInfo: dto.accessibilityInfo }
+      ? { accessibilityInfo: toStoredPlainText(dto.accessibilityInfo) }
       : {}),
     ...(dto.listerKind !== undefined ? { listerKind: dto.listerKind } : {}),
     ...(dto.availableFrom !== undefined
@@ -72,9 +99,15 @@ function applyUpdate(
     ...(dto.minStayMonths !== undefined
       ? { minStayMonths: dto.minStayMonths }
       : {}),
-    ...(dto.description !== undefined ? { description: dto.description } : {}),
-    ...(dto.features !== undefined ? { features: dto.features } : {}),
-    ...(dto.idealFor !== undefined ? { idealFor: dto.idealFor } : {}),
+    ...(dto.description !== undefined
+      ? { description: toStoredPlainText(dto.description) }
+      : {}),
+    ...(dto.features !== undefined
+      ? { features: toStoredArray(dto.features) }
+      : {}),
+    ...(dto.idealFor !== undefined
+      ? { idealFor: toStoredArray(dto.idealFor) }
+      : {}),
     ...(dto.gallery !== undefined ? { gallery: dto.gallery } : {}),
     ...(dto.virtualTourUrl !== undefined
       ? { virtualTourUrl: dto.virtualTourUrl }
@@ -141,7 +174,10 @@ export interface ListMyHousingQueryInput {
 // is neither).
 const DEFAULT_LISTING_LIFETIME_DAYS = 60;
 
-function computeExpiry(from: Date = new Date()): Date {
+/** Exported for `HousingListingModerationService`: a listing that sat in the
+ * review queue past its own expiry would otherwise be approved into a state
+ * where browse already withholds it, so approval refreshes the window. */
+export function computeExpiry(from: Date = new Date()): Date {
   return new Date(
     from.getTime() + DEFAULT_LISTING_LIFETIME_DAYS * 24 * 60 * 60 * 1000,
   );
@@ -163,9 +199,6 @@ export class HousingListingsService {
     private readonly messaging: MessagingService,
     private readonly verification: VerificationService,
     private readonly affirmingPledge: AffirmingPledgeService,
-    // Fire-and-forget domain events (global EventEmitter2). Used to announce a
-    // listing going live so the saved-search alerts listener can match + notify.
-    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   async create(
@@ -210,11 +243,10 @@ export class HousingListingsService {
     dto: UpdateHousingListingDto,
   ): Promise<HousingListingDTO> {
     const listing = await this.loadOwnedOr404(ref, userId);
-    const wasLive = listing.status === HousingListingStatus.Live;
     // Snapshot BEFORE the merge so a real content change is distinguishable
-    // from a PATCH that re-sends the same values (which must not bounce a live
-    // listing out of browse for nothing).
-    const before = wasLive ? moderatedHousingFingerprint(listing) : null;
+    // from a PATCH that re-sends the same values (which must not bounce a
+    // listing back into the queue for nothing).
+    const before = moderatedHousingFingerprint(listing);
     // Runs BEFORE any mutation (`HousingListingsController.update` is on
     // `SHARED_UPLOAD_HANDLERS`, so the interceptor's foreign-upload check is
     // exempted for this handler): a co-lister may re-save the gallery whoever
@@ -235,22 +267,27 @@ export class HousingListingsService {
     // Re-score on every edit — a listing that was clean can be edited to add
     // off-platform payment language or an implausible rent, and the queue must
     // reflect its current content, not what it looked like at create time.
-    const level = await this.verification.levelForUser(listing.ownerId);
+    const level = await this.listerVerificationLevel(listing.ownerId);
     const assessment = this.riskForListing(listing, level);
     listing.riskScore = assessment.score;
     listing.riskReasons = assessment.reasons;
-    // BE-HSG-02: moderation used to happen exactly once, at approval. An owner
-    // editing any field a moderator actually looked at now re-opens that
-    // review — the listing leaves public browse until a human clears it again
-    // through `setStatus`, which also re-fires the saved-search go-live alert
-    // on re-approval (by then `wasLive` is false there). The re-scored
-    // `riskScore` above only ever sorted the queue; nothing consulted it as a
-    // gate, so the score alone could never have caught this.
-    if (
-      wasLive &&
-      before !== null &&
-      moderatedHousingFingerprint(listing) !== before
-    ) {
+    // BE-HSG-02 + LOC-01: moderation used to happen exactly once, at approval.
+    // An owner editing any field a moderator actually looked at now returns the
+    // listing to `review`, whatever it was before:
+    //  - from `live`, it leaves public browse until a human clears it again, so
+    //    a clean approval cannot be edited into a discriminatory description, a
+    //    scam rent, an IBAN or an unrelated gallery while it stays browsable;
+    //  - from `question`, this is the LISTER ANSWERING the requested changes,
+    //    and without it a listing a moderator sent back would sit in
+    //    "changes requested" forever, never re-entering any queue;
+    //  - from `rejected`/`taken_down`, a refusal stops being a grave: a lister
+    //    who fixes the actual problem gets re-reviewed rather than having to
+    //    post a second listing to work around the first.
+    // Approval (`setStatus` on the moderation service) re-fires the
+    // saved-search go-live alert, because by then the listing is not live.
+    // The re-scored `riskScore` above only ever sorted the queue; nothing
+    // consulted it as a gate, so the score alone could never have caught this.
+    if (moderatedHousingFingerprint(listing) !== before) {
       listing.status = HousingListingStatus.Review;
     }
     const saved = await this.listings.save(listing);
@@ -307,7 +344,16 @@ export class HousingListingsService {
     dto: CreateHousingEnquiryDto,
   ): Promise<{ conversationId: string }> {
     const listing = await this.loadLiveOr404(ref);
-    if (listing.ownerId === fromUserId) {
+    // NULL once the lister erased their account
+    // (`SetNullContentAuthorFksOnUserErasure1794610000000`). There is no inbox
+    // left to deliver to, so the enquiry is refused rather than sent nowhere.
+    const listerId = listing.ownerId;
+    if (listerId === null) {
+      throw new BadRequestException(
+        'This listing no longer has a lister to contact',
+      );
+    }
+    if (listerId === fromUserId) {
       throw new BadRequestException(
         'You cannot send an enquiry on your own listing',
       );
@@ -316,43 +362,7 @@ export class HousingListingsService {
     await this.affirmingPledge.requireAccepted(fromUserId);
     // Step-up gate: reaching out about a home needs a phone-verified account.
     await this.verification.requireLevel(fromUserId, VerificationLevel.Phone);
-    return this.messaging.deliverEnquiry(fromUserId, listing.ownerId, dto.body);
-  }
-
-  /** Moderator/admin: every listing incl. non-live, RISKIEST first (P0.6), then
-   * newest — so the human review queue leads with the listings most likely to
-   * be a scam/discrimination/off-platform problem, reasons attached. */
-  async listAllForAdmin(): Promise<AdminHousingListingDTO[]> {
-    const rows = await this.listings.find({
-      order: { riskScore: 'DESC', createdAt: 'DESC' },
-      take: DEFAULT_LIST_LIMIT,
-    });
-    return this.mapRowsForAdmin(rows);
-  }
-
-  /** Moderator/admin only — any status is directly settable. */
-  async setStatus(
-    ref: string,
-    status: HousingListingStatus,
-  ): Promise<HousingListingDTO> {
-    const listing = await this.loadOr404(ref);
-    const wasLive = listing.status === HousingListingStatus.Live;
-    listing.status = status;
-    const saved = await this.listings.save(listing);
-    // A listing transitioning INTO live (a new listing clearing review, or a
-    // re-approval) is the moment saved-search alerts fire. Compute the verified
-    // state once here — it needs the lister's assurance level — and hand it to
-    // the alerts listener so it never re-derives per saved search.
-    if (!wasLive && saved.status === HousingListingStatus.Live) {
-      const level = await this.verification.levelForUser(saved.ownerId);
-      const listingVerified = deriveListingVerified(saved, level).verified;
-      const event: HousingListingWentLiveEvent = {
-        listing: saved,
-        listingVerified,
-      };
-      this.eventEmitter.emit(HOUSING_LISTING_WENT_LIVE, event);
-    }
-    return this.buildDTO(saved);
+    return this.messaging.deliverEnquiry(fromUserId, listerId, dto.body);
   }
 
   /** Loads a listing that must be publicly live (used by the enquiry flow). */
@@ -368,14 +378,6 @@ export class HousingListingsService {
 
   // --- internals ---
 
-  private async loadOr404(ref: string): Promise<HousingListing> {
-    const listing = await this.listings.findOne({ where: { ref } });
-    if (!listing) {
-      throw new NotFoundException('Housing listing not found');
-    }
-    return listing;
-  }
-
   /**
    * Owner-scoped load: folds ownership into the query so a valid `ref` owned by
    * someone else 404s exactly like a non-existent one, instead of loading it and
@@ -383,7 +385,8 @@ export class HousingListingsService {
    * an existence oracle (a member could enumerate `QPH-<year>-NNNN` and learn
    * which listings, including in-review/rejected ones, exist). Use this for every
    * owner-management read/update/remove path; keep `loadOr404` only where a
-   * non-owner is legitimately allowed to load (the moderator `setStatus` path).
+   * non-owner is legitimately allowed to load (`HousingListingModerationService`
+   * keeps its own moderator-gated load).
    */
   private async loadOwnedOr404(
     ref: string,
@@ -400,35 +403,22 @@ export class HousingListingsService {
 
   private async mapRows(rows: HousingListing[]): Promise<HousingListingDTO[]> {
     if (!rows.length) return [];
-    const ownerIds = rows.map((r) => r.ownerId);
-    const refs = await new MemberLookup(this.profiles).byUserIds(ownerIds);
+    const ownerIds = presentActorIds(rows.map((r) => r.ownerId));
+    const refs = await new HousingListerLookup(this.profiles).byUserIds(
+      ownerIds,
+    );
     const levels = await this.verification.levelsForUsers(ownerIds);
-    // Owner-facing (`listMine`) + moderator (`listAllForAdmin`) reads: the exact
-    // point + address are theirs to see, so map with `precise: true`.
+    // Owner-facing read (`listMine`): the exact point + address are theirs to
+    // see (`precise`), and so is the moderator's last decision on their own
+    // listing (`includeDecision`) — a lister sent back for changes has to be
+    // able to read WHY without asking anybody.
     return rows.map((r) =>
       toHousingListingDTO(
         r,
-        refs.get(r.ownerId) ?? null,
-        levels.get(r.ownerId) ?? VerificationLevel.Email,
+        actorFromLookup(refs, r.ownerId) ?? null,
+        actorFromLookup(levels, r.ownerId) ?? VerificationLevel.Email,
         true,
-      ),
-    );
-  }
-
-  /** Admin rows: same hydration as `mapRows`, but through the admin mapper so
-   * `riskScore`/`riskReasons` ride along for the risk-sorted queue. */
-  private async mapRowsForAdmin(
-    rows: HousingListing[],
-  ): Promise<AdminHousingListingDTO[]> {
-    if (!rows.length) return [];
-    const ownerIds = rows.map((row) => row.ownerId);
-    const refs = await new MemberLookup(this.profiles).byUserIds(ownerIds);
-    const levels = await this.verification.levelsForUsers(ownerIds);
-    return rows.map((row) =>
-      toAdminHousingListingDTO(
-        row,
-        refs.get(row.ownerId) ?? null,
-        levels.get(row.ownerId) ?? VerificationLevel.Email,
+        true,
       ),
     );
   }
@@ -454,17 +444,34 @@ export class HousingListingsService {
     });
   }
 
+  /**
+   * The lister's assurance level, tolerating an erased lister. `ownerId` is
+   * NULL once their account is erased
+   * (`SetNullContentAuthorFksOnUserErasure1794610000000`); there is no
+   * standing left to read, so the risk model and the DTO both see the lowest
+   * level rather than a level belonging to nobody.
+   */
+  private async listerVerificationLevel(
+    ownerId: string | null,
+  ): Promise<VerificationLevel> {
+    return ownerId === null
+      ? VerificationLevel.Email
+      : this.verification.levelForUser(ownerId);
+  }
+
   private async buildDTO(listing: HousingListing): Promise<HousingListingDTO> {
-    const refs = await new MemberLookup(this.profiles).byUserIds([
-      listing.ownerId,
-    ]);
-    const level = await this.verification.levelForUser(listing.ownerId);
-    // Every caller of `buildDTO` is owner- or moderator-gated (create / getByRef
-    // / setStatus), so the precise location is always disclosable here.
+    const refs = await new HousingListerLookup(this.profiles).byUserIds(
+      presentActorIds([listing.ownerId]),
+    );
+    const level = await this.listerVerificationLevel(listing.ownerId);
+    // Every caller of `buildDTO` is owner-gated (create / getByRef / the owner
+    // lifecycle mutations), so both the precise location and the moderator's
+    // decision on the caller's OWN listing are disclosable here.
     return toHousingListingDTO(
       listing,
-      refs.get(listing.ownerId) ?? null,
+      actorFromLookup(refs, listing.ownerId) ?? null,
       level,
+      true,
       true,
     );
   }
@@ -490,26 +497,43 @@ export class HousingListingsService {
     dto: CreateHousingListingDto,
     level: VerificationLevel,
   ): Promise<HousingListing> {
+    // Markup is stripped ONCE here, at the write boundary (see `toStoredArray`
+    // above), so the risk scorer, `slugify` and every reader all see the same
+    // characters, and no renderer downstream has to strip anything.
+    const stored = {
+      title: toStoredPlainText(dto.title),
+      blurb: toStoredPlainText(dto.blurb ?? ''),
+      description: toStoredPlainText(dto.description ?? ''),
+      accessibilityInfo: toStoredPlainText(dto.accessibilityInfo),
+      features: toStoredArray(dto.features ?? []),
+      idealFor: toStoredArray(dto.idealFor ?? []),
+    };
+    // The backend owns the city (LOC-09). See `housing-city.ts`: an omitted,
+    // empty or unrecognised city stores "Lisbon", and a neighbourhood sent in
+    // the city field moves into `area` rather than corrupting the column that
+    // the browse filter, the centroid pin and the saved-search matcher read.
+    const location = resolveHousingLocation({ city: dto.city, area: dto.area });
     // Score deterministically from the submission + who's posting. High-risk
     // listings still land in `review` (as every listing does) — the score sorts
     // the human queue and keeps a risky listing from ever auto-publishing.
     const assessment = assessHousingRisk({
       type: dto.type,
-      title: dto.title,
-      blurb: dto.blurb ?? '',
-      description: dto.description ?? '',
+      title: stored.title,
+      blurb: stored.blurb,
+      description: stored.description,
       rentEuros: dto.rentEuros,
-      accessibilityInfo: dto.accessibilityInfo,
+      accessibilityInfo: stored.accessibilityInfo,
       gallery: dto.gallery ?? [],
-      features: dto.features ?? [],
+      features: stored.features,
       // BE-HSG-08: the "ideal for" chips are scanned as text too.
-      idealFor: dto.idealFor ?? [],
+      idealFor: stored.idealFor,
       listerVerificationLevel: level,
     });
     const MAX_ATTEMPTS = 5;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const slug = await allocateUniqueSlug(slugify(dto.title, 'home'), (s) =>
-        this.listings.exists({ where: { slug: s } }),
+      const slug = await allocateUniqueSlug(
+        slugify(stored.title, 'home'),
+        (s) => this.listings.exists({ where: { slug: s } }),
       );
       try {
         return await this.listings.save(
@@ -519,10 +543,10 @@ export class HousingListingsService {
             ownerId,
             status: HousingListingStatus.Review,
             type: dto.type,
-            title: dto.title,
-            blurb: dto.blurb ?? '',
-            city: dto.city,
-            area: dto.area ?? '',
+            title: stored.title,
+            blurb: stored.blurb,
+            city: location.city,
+            area: location.area ?? '',
             rentEuros: dto.rentEuros,
             bedrooms: dto.bedrooms ?? null,
             billsIncluded: dto.billsIncluded ?? false,
@@ -537,13 +561,13 @@ export class HousingListingsService {
             // the global ValidationPipe runs `forbidNonWhitelisted` and would
             // 400 a client still sending it.
             lgbtqFriendly: true,
-            accessibilityInfo: dto.accessibilityInfo,
+            accessibilityInfo: stored.accessibilityInfo,
             listerKind: dto.listerKind ?? HousingListerKind.Member,
             availableFrom: dto.availableFrom ?? null,
             minStayMonths: dto.minStayMonths ?? null,
-            description: dto.description ?? '',
-            features: dto.features ?? [],
-            idealFor: dto.idealFor ?? [],
+            description: stored.description,
+            features: stored.features,
+            idealFor: stored.idealFor,
             gallery: dto.gallery ?? [],
             virtualTourUrl: dto.virtualTourUrl ?? null,
             riskScore: assessment.score,

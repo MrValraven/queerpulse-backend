@@ -24,7 +24,7 @@ export class SearchController {
   @Get()
   @ApiOperation({
     summary:
-      'Global search across members, communities, events, forum, businesses, magazine, jobs, housing, resources, workshops, subprofiles and topics',
+      'Global search across members, communities, events, forum threads, forum replies, businesses, magazine, jobs, housing, resources, subprofiles and topics. Ranked and accent-insensitive; `type` + `offset` page one category.',
   })
   @ApiOkResponse({
     description: 'Grouped, per-type-capped search results for the query.',
@@ -38,6 +38,7 @@ export class SearchController {
       query.q,
       query.type,
       query.limit,
+      query.offset,
     );
   }
 }

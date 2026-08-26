@@ -5,7 +5,7 @@ import { MediaReferencesModule } from '../media-references/media-references.modu
 import { Message } from '../messaging/entities/message.entity';
 import { User } from '../users/entities/user.entity';
 import { FilesController } from './files.controller';
-import { OptionalJwtAuthGuard } from './optional-jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { StorageMaintenanceService } from './storage-maintenance.service';
 import { StorageService } from './storage.service';
 import { UploadsController } from './uploads.controller';

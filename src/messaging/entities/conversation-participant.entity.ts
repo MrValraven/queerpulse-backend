@@ -82,4 +82,36 @@ export class ConversationParticipant {
    */
   @Column({ type: 'timestamptz', nullable: true })
   favoritedAt!: Date | null;
+
+  /**
+   * When this participant ARCHIVED the conversation out of their main inbox.
+   * A per-participant preference (like `muted`/`pinnedAt`), stored as a
+   * timestamp so it could sort ("most recently archived first") if the
+   * Archived tab ever wants that. NULL = not archived.
+   *
+   * Auto-cleared (unarchived) the instant a genuinely NEW message lands in
+   * the conversation — see `MessagingCoreService.buildPostResult` — so an
+   * archived thread can never silently swallow a reply the way a
+   * `deletedAt`-style hard clear could. This is the intended replacement for
+   * "clear for me" (`clearedAt`) as the everyday way to declutter the inbox:
+   * reversible, and it resurfaces itself the moment the conversation is
+   * live again. `clearedAt` itself is untouched — it keeps its own,
+   * separate, still-destructive "delete for me" meaning.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  archivedAt!: Date | null;
+
+  /**
+   * This participant's unsent composer text for the conversation, synced from
+   * the client so it survives a device switch (phone -> laptop) — the
+   * cross-device layer on top of the instant, always-on localStorage copy the
+   * composer itself writes on every keystroke (`features/messages/drafts.ts`).
+   * Debounced on the client (`PATCH /conversations/:id { draft }`); NULL/empty
+   * once the draft is sent or explicitly cleared. Never broadcast over the
+   * realtime socket — it is this participant's own unsent text, nobody else's
+   * concern, and reading it back only ever happens on this participant's own
+   * `GET /conversations`.
+   */
+  @Column({ type: 'text', nullable: true })
+  draft!: string | null;
 }

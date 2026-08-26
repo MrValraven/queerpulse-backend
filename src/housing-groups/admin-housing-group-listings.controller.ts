@@ -1,12 +1,15 @@
 import {
   Body,
   Controller,
+  Get,
   Param,
   ParseUUIDPipe,
   Patch,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
+  ApiBadRequestResponse,
   ApiCookieAuth,
   ApiForbiddenResponse,
   ApiNotFoundResponse,
@@ -15,8 +18,13 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
+import {
+  CurrentUser,
+  CurrentUserData,
+} from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { HousingModerationGuard } from '../auth/guards/housing-moderation.guard';
+import { ListGroupListingQueueQuery } from './dto/list-group-listing-queue.query';
 import { SetGroupListingStatusDto } from './dto/set-group-listing-status.dto';
 import { HousingGroupsService } from './housing-groups.service';
 
@@ -47,17 +55,34 @@ import { HousingGroupsService } from './housing-groups.service';
 export class AdminHousingGroupListingsController {
   constructor(private readonly groups: HousingGroupsService) {}
 
+  // The queue itself (LOC-19). Declared BEFORE `listings/:id/status` for
+  // readability only: the two paths cannot collide, since `queue` is a static
+  // segment on a two-segment path and the other is three segments long.
+  @ApiOperation({
+    summary:
+      'The paginated group-listing review queue, riskiest first (moderator only).',
+  })
+  @ApiOkResponse({ description: 'One page of listings awaiting a decision.' })
+  @Get('listings/queue')
+  listListingQueue(@Query() query: ListGroupListingQueueQuery) {
+    return this.groups.listListingQueue(query);
+  }
+
   @ApiOperation({
     summary:
       "Set a group listing's pre-publication review status (moderator only).",
   })
   @ApiOkResponse({ description: 'The updated listing.' })
+  @ApiBadRequestResponse({
+    description: 'A declined listing, or a question, needs a reason.',
+  })
   @ApiNotFoundResponse({ description: 'Listing not found.' })
   @Patch('listings/:id/status')
   setListingStatus(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: SetGroupListingStatusDto,
+    @CurrentUser() user: CurrentUserData,
   ) {
-    return this.groups.setListingStatus(id, dto);
+    return this.groups.setListingStatus(id, dto, user.userId);
   }
 }

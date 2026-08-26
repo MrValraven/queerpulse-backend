@@ -54,9 +54,16 @@ export class HousingReview {
   listingId!: string;
 
   // Who wrote it.
+  // Nullable since `SetNullContentAuthorFksOnUserErasure1794610000000`: the FK
+  // to `users` was `ON DELETE CASCADE`, so erasing one member's account
+  // deleted reviews the next tenant relies on. It is now `ON DELETE SET NULL`, so
+  // NULL here means "the review was written by a member who has since left" rather than "no such row".
+  // Read paths must render a removed-member placeholder instead of assuming
+  // a non-null id. See `ContentOwnerErasureService` for what happens to the
+  // row itself when the account goes.
   @Index('IDX_housing_reviews_author_id')
-  @Column({ type: 'uuid' })
-  authorId!: string;
+  @Column({ type: 'uuid', nullable: true })
+  authorId!: string | null;
 
   // Who it is about (the other participant).
   @Index('IDX_housing_reviews_subject_id')

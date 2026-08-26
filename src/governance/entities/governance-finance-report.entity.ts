@@ -93,9 +93,8 @@ export interface FinancePartner {
  * Postgres `numeric` columns round-trip as strings through `pg` by default
  * (arbitrary precision, so the driver never silently narrows them) — this
  * transformer keeps the metric columns below as `number | null` on the
- * entity, matching the same pattern used by `Job`'s and `Workshop`'s
- * `numericTransformer` (kept file-local rather than shared, per those
- * entities' own precedent).
+ * entity, matching the same pattern used by `Job`'s `numericTransformer`
+ * (kept file-local rather than shared, per that entity's own precedent).
  */
 const numericTransformer = {
   to: (value: number | null | undefined): number | null => value ?? null,

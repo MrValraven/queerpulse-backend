@@ -42,6 +42,12 @@ export interface AdminReadingGroupProposalDTO {
   status: ReadingGroupProposalStatus;
   decidedAt: string | null;
   decisionNote: string | null;
+  // The community an approval actually created, or null for a proposal that is
+  // still pending, was declined/archived, or was approved before LOC-19 made
+  // approval create anything at all. The console renders it as a link to
+  // `/communities/{slug}` so a reviewer can see the outcome of their own
+  // decision, and its presence is what makes a repeat approve a no-op.
+  createdCommunitySlug: string | null;
 }
 
 export interface AdminReadingGroupProposalsPageDTO {
@@ -66,5 +72,6 @@ export function toAdminReadingGroupProposalDTO(
     status: proposal.status,
     decidedAt: proposal.decidedAt ? proposal.decidedAt.toISOString() : null,
     decisionNote: proposal.decisionNote ?? null,
+    createdCommunitySlug: proposal.createdCommunitySlug ?? null,
   };
 }

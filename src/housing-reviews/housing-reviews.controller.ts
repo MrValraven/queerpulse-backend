@@ -20,6 +20,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { SubmitHousingReviewDto } from './dto/submit-housing-review.dto';
 import { HousingReviewsService } from './housing-reviews.service';
@@ -39,6 +40,7 @@ export class HousingReviewsController {
   constructor(private readonly service: HousingReviewsService) {}
 
   @Post()
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Submit a review after a completed viewing' })
   @ApiCreatedResponse({ description: "The caller's own submitted review." })
   submit(

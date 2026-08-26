@@ -15,6 +15,15 @@ import { ConnectionsService } from '../connections/connections.service';
 import { ConnectionStatus } from '../connections/entities/connection.entity';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { escapeLikeTerm } from '../common/like-escape';
+import {
+  PROFILE_SEARCH_COLUMNS,
+  PROFILE_SEARCH_FIELDS,
+  foldedHaystack,
+  foldedSearchQuery,
+  foldedSearchTerm,
+  searchRankExpression,
+  weightedSearchVector,
+} from '../search/search-text';
 import { HandlesService } from '../handles/handles.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
@@ -69,6 +78,7 @@ import {
   GroupView,
   LimitedProfileResponse,
   MemberCard,
+  MutualVoucherCount,
   ProfileCard,
   ProfileRelations,
   SocialLinkView,
@@ -81,10 +91,23 @@ import {
   toMemberCard,
   toProfileCard,
 } from './profile-response';
+import { ActivityVisibilityService } from './activity-visibility.service';
+import { visibleBand } from './last-active';
+import { LastActiveService } from './last-active.service';
 
 const PAGE_SIZE = 20;
 const RELATED_LIMIT = 4;
-const ACTIVITY_LIMIT = 6;
+// How many activity rows a profile shows. Raised from 6 with the second and
+// third kinds (a public community join, a persona publish): six rows was a
+// half-screen of a section whose whole job is answering "what has this person
+// been up to?".
+const ACTIVITY_LIMIT = 12;
+// How many rows are READ to fill those. The read-time visibility gate
+// (`ActivityVisibilityService`) drops rows whose subject stopped being public,
+// so reading exactly `ACTIVITY_LIMIT` would show a short page whenever
+// anything went private. Over-fetching absorbs that; a member whose newest
+// `ACTIVITY_READ_LIMIT` rows are ALL stale correctly shows nothing.
+const ACTIVITY_READ_LIMIT = ACTIVITY_LIMIT * 2;
 const DAY_MS = 24 * 60 * 60 * 1000;
 // "looking" items expire sooner than "offering" items — a member actively
 // searching for something needs a shorter shelf life than one advertising
@@ -149,6 +172,13 @@ export class ProfilesService {
     // Batched crop lookup (`MediaCropService.getMany`) for a work item's
     // `imageUrl` sibling `crop`.
     private readonly mediaCropService: MediaCropService,
+    // The read half of the activity privacy gate: re-checks that each stored
+    // row's subject is still public before it is served. See
+    // `ActivityVisibilityService`.
+    private readonly activityVisibility: ActivityVisibilityService,
+    // The coarse "recently active" band. Read-only from here: the only writer
+    // is `LastActiveListener` off a session refresh.
+    private readonly lastActive: LastActiveService,
   ) {}
 
   /**
@@ -189,6 +219,9 @@ export class ProfilesService {
         profile,
         vouchCount,
         profile.userId === viewerUserId,
+        // The limited card carries the same gated trust cue as the full
+        // profile: this is the "should I ask to connect?" surface.
+        await this.loadMutualVoucherCount(profile, viewerUserId),
       );
     }
     return this.buildFullProfile(profile, vouchCount, viewerUserId);
@@ -287,11 +320,7 @@ export class ProfilesService {
       this.boardPosts.find({ where: { userId }, order: { position: 'ASC' } }),
       this.skills.find({ where: { userId }, order: { position: 'ASC' } }),
       this.shapings.find({ where: { userId } }),
-      this.activities.find({
-        where: { userId },
-        order: { occurredAt: 'DESC' },
-        take: ACTIVITY_LIMIT,
-      }),
+      this.loadVisibleActivity(userId),
       this.loadGroups(userId),
       this.loadRelated(profile, viewerUserId),
       this.loadFeaturedCommunities(userId),
@@ -314,7 +343,100 @@ export class ProfilesService {
         workItem.imageUrl ? [workItem.imageUrl] : [],
       ),
     );
-    return toFullProfile(profile, rels, vouchCount, isOwner, crops);
+    // The two viewer-relative reads, run together and after the parallel block
+    // above rather than inside it, so that block's tuple stays as it is.
+    // `activityBand` is one primary-key lookup on a two-column table;
+    // `mutualVoucherCount` is two bounded trust-graph reads.
+    const [activityBand, mutualVoucherCount] = await Promise.all([
+      // The band the VIEWER may see: `visibleBand` applies the member's
+      // opt-out, with the owner exempted so their own switch has a visible
+      // effect.
+      this.lastActive
+        .getSignal(userId)
+        .then((signal) => visibleBand(signal, isOwner)),
+      this.loadMutualVoucherCount(profile, viewerUserId),
+    ]);
+    return toFullProfile(
+      profile,
+      rels,
+      vouchCount,
+      isOwner,
+      crops,
+      activityBand,
+      mutualVoucherCount,
+    );
+  }
+
+  /**
+   * The member's newest activity rows, narrowed to those whose subject is
+   * STILL public, capped at `ACTIVITY_LIMIT`.
+   *
+   * The write-time gate in `ActivityListener` is not enough on its own: a
+   * public event can be switched to members-only, a public community to
+   * request-to-join, a published persona unpublished, all AFTER the row was
+   * written. `ActivityVisibilityService` re-checks each row's stored subject
+   * and drops the ones that stopped being public (and purges them, so the
+   * anonymous public-profile endpoint reading the same table cannot serve them
+   * either). Reading `ACTIVITY_READ_LIMIT` rows and slicing after the filter
+   * keeps the page full when a few drop.
+   */
+  private async loadVisibleActivity(userId: string): Promise<Activity[]> {
+    const rows = await this.activities.find({
+      where: { userId },
+      order: { occurredAt: 'DESC' },
+      take: ACTIVITY_READ_LIMIT,
+    });
+    const visible = await this.activityVisibility.filterVisible(rows);
+    return visible.slice(0, ACTIVITY_LIMIT);
+  }
+
+  /**
+   * "How many members you know vouched for them" for ONE profile read.
+   *
+   * Reuses the two existing batched primitives rather than adding a third
+   * trust-graph query shape: `VouchService.getNamedVoucherIds` (active,
+   * non-anonymous vouchers, capped) intersected with
+   * `ConnectionsService.acceptedConnectionsAmong` (which candidate ids are the
+   * viewer's accepted connections, one bounded query). Both are the same
+   * methods the connection-card `{mutuals, vouchBadge}` batch is built from,
+   * so there is one definition of "vouched for them" and one of "you know
+   * them" in the codebase.
+   *
+   * Returns `null` rather than a number in the two cases documented on
+   * {@link MutualVoucherCount}: the viewer is the member, or the member has
+   * hidden their voucher roster. The roster gate is the important one. A
+   * viewer-relative count is a partial roster to anyone who knows their own
+   * connection list, which every viewer does, so `vouchersVisible: false` has
+   * to suppress it. The plain `vouchCount` beside it is unaffected, matching
+   * `VouchService.listVouchers`, which still returns the true total with an
+   * empty roster.
+   *
+   * The viewer can never be counted in their own answer: nobody is an accepted
+   * connection of themselves, so a vouch the viewer made drops out for free
+   * (it surfaces as the connections `you-vouched` badge instead).
+   */
+  private async loadMutualVoucherCount(
+    profile: Profile,
+    viewerUserId: string,
+  ): Promise<MutualVoucherCount> {
+    if (profile.userId === viewerUserId) {
+      return null;
+    }
+    if (!profile.vouchersVisible) {
+      return null;
+    }
+    const voucherIds = await this.vouchService.getNamedVoucherIds(
+      profile.userId,
+    );
+    if (!voucherIds.length) {
+      return 0;
+    }
+    const connectedVouchers =
+      await this.connectionsService.acceptedConnectionsAmong(
+        viewerUserId,
+        voucherIds,
+      );
+    return connectedVouchers.size;
   }
 
   private async loadGroups(userId: string): Promise<GroupView[]> {
@@ -980,6 +1102,11 @@ export class ProfilesService {
   async searchMembers(
     q: ListMembersQuery,
     viewerUserId: string,
+    // Global search paginates by a flat offset, not by the directory's fixed
+    // 20-per-page window (SOC-08): the search page's "load more" on the Members
+    // tab asks for rows 50..99 of one type, which `q.page` cannot express. When
+    // absent, paging is exactly what it was.
+    pagination?: { offset: number; limit: number },
   ): Promise<{
     items: MemberCard[];
     total: number;
@@ -1009,14 +1136,30 @@ export class ProfilesService {
     // `findBySlugOrThrow`).
     qb.andWhere('("p"."hidden_until" IS NULL OR "p"."hidden_until" <= now())');
 
+    // Free-text search (SOC-08). Two branches, OR'd:
+    //
+    //  - an accent-folded full-text match, so "Sao" finds "São" and a hit in a
+    //    name outranks one in a bio (the weights live in `PROFILE_SEARCH_FIELDS`);
+    //  - the original substring match, folded the same way. Kept because full
+    //    text matches whole tokens: dropping it would stop "trans" finding
+    //    "transfeminine", a regression on what members already rely on.
+    //
+    // The haystack now includes `bio` and `bio_pt`, which member search skipped
+    // entirely. `bio_pt` matters most: a Portuguese-speaking member writes their
+    // real self-description there.
+    const memberSearchVector = weightedSearchVector('p', PROFILE_SEARCH_FIELDS);
+    const memberSearchHaystack = foldedHaystack('p', PROFILE_SEARCH_COLUMNS);
+    const memberSearchTsQuery = foldedSearchQuery('memberSearchTerm');
+    const hasSearchTerm = Boolean(q.query);
     if (q.query) {
       // Escape LIKE metacharacters (\ % _) so a user-supplied term is matched
       // literally and can't inject wildcards. Postgres treats backslash as the
       // default LIKE escape character.
       const term = `%${escapeLikeTerm(q.query)}%`;
       qb.andWhere(
-        '(p.firstName ILIKE :term OR p.lastName ILIKE :term OR p.slug ILIKE :term OR p.tagline ILIKE :term)',
-        { term },
+        `(${memberSearchVector} @@ ${memberSearchTsQuery} ` +
+          `OR ${memberSearchHaystack} LIKE ${foldedSearchTerm('memberSearchPattern')})`,
+        { memberSearchTerm: q.query, memberSearchPattern: term },
       );
     }
 
@@ -1192,20 +1335,74 @@ export class ProfilesService {
         }
         break;
       }
+      case MemberSort.RecentlyActive:
+        // Ordered through an ALIASED SCALAR SUBQUERY, not a join, for the same
+        // reason `ClosestMutuals` above uses one: this query paginates over a
+        // join, so TypeORM rewrites it into a DISTINCT-id subquery and re-parses
+        // every ORDER BY term as `alias.column`. Ordering by a genuinely joined
+        // column here would be the broken `.skip()`/`.take()` + join + joined
+        // ORDER BY combination, and would have forced this whole method onto
+        // `.offset()`/`.limit()`, silently changing how the other three sorts
+        // paginate. A dot-free alias sidesteps the parser entirely and leaves
+        // them untouched.
+        //
+        // The subquery reads `is_hidden = false`, so a member who opted out
+        // carries NO ordering value at all rather than a demoted one. They keep
+        // their place in the directory, they simply stop being ranked by this
+        // signal, which is the whole point of the opt-out.
+        //
+        // NULLS LAST covers the two honest unknowns together: opted out, and
+        // nothing recorded yet. Neither is "dormant", and neither may be sorted
+        // as though it were. The stored value is a month, so most of a month's
+        // members tie here and fall through to the `p.slug` tiebreaker below:
+        // this ordering cannot be read backwards as a precise last-seen rank.
+        qb.addSelect(
+          `(SELECT la.last_active_month FROM profile_last_active la
+              WHERE la.user_id = p.user_id AND la.is_hidden = false)`,
+          'last_active_month_sort',
+        )
+          .orderBy('last_active_month_sort', 'DESC', 'NULLS LAST')
+          .addOrderBy('p.joinedAt', 'DESC');
+        break;
       case MemberSort.RecentlyJoined:
       default:
-        qb.orderBy('p.joinedAt', 'DESC');
+        // With a search term and no sort chosen, order by relevance (SOC-08).
+        // Every explicit sort above is left exactly as it was: a member who
+        // picked "A to Z" asked for A to Z, term or no term. Selected under a
+        // DOT-FREE alias for the same reason `ClosestMutuals` and
+        // `RecentlyActive` are: this query paginates over a join, so TypeORM
+        // rewrites it into a DISTINCT-id subquery and re-parses each ORDER BY
+        // term as `alias.column`.
+        if (hasSearchTerm) {
+          qb.addSelect(
+            searchRankExpression(
+              memberSearchVector,
+              memberSearchTsQuery,
+              memberSearchHaystack,
+              foldedSearchTerm('memberSearchTerm'),
+            ),
+            'member_search_rank',
+          )
+            .orderBy('member_search_rank', 'DESC')
+            .addOrderBy('p.joinedAt', 'DESC');
+        } else {
+          qb.orderBy('p.joinedAt', 'DESC');
+        }
         break;
     }
 
     qb.addOrderBy('p.slug', 'ASC')
-      .skip((page - 1) * PAGE_SIZE)
-      .take(PAGE_SIZE);
+      .skip(pagination ? pagination.offset : (page - 1) * PAGE_SIZE)
+      .take(pagination ? pagination.limit : PAGE_SIZE);
 
     const [rows, total] = await qb.getManyAndCount();
-    const counts = await this.vouchService.getVouchCounts(
-      rows.map((r) => r.userId),
-    );
+    const memberIds = rows.map((r) => r.userId);
+    const counts = await this.vouchService.getVouchCounts(memberIds);
+    // ONE batched lookup for the whole page's activity bands, never one per
+    // card. A member with no row is simply absent from the map, and
+    // `visibleBand` renders that as no band rather than as "not active
+    // recently". See last-active.ts on why the two must not be confused.
+    const activitySignals = await this.lastActive.getSignals(memberIds);
     return {
       // Directory search never excludes the viewer's own profile from their
       // own results (unlike `excludeBlocked` above) — the viewer's own name/
@@ -1213,12 +1410,18 @@ export class ProfilesService {
       // appear on a page in the unfiltered listing. When that happens, they
       // must still see their own real photo/hood, hence `isOwner` here rather
       // than a hardcoded `false`. See `toMemberCard`/`gateAvatarUrl`.
-      items: rows.map((r) =>
-        toMemberCard(r, counts.get(r.userId) ?? 0, r.userId === viewerUserId),
-      ),
+      items: rows.map((r) => {
+        const isOwner = r.userId === viewerUserId;
+        return toMemberCard(
+          r,
+          counts.get(r.userId) ?? 0,
+          isOwner,
+          visibleBand(activitySignals.get(r.userId), isOwner),
+        );
+      }),
       total,
       page,
-      pageSize: PAGE_SIZE,
+      pageSize: pagination ? pagination.limit : PAGE_SIZE,
     };
   }
 }

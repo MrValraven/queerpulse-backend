@@ -17,6 +17,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { AnswerListingPublicQuestionDto } from './dto/answer-listing-public-question.dto';
 import { AnswerListingQuestionDto } from './dto/answer-listing-question.dto';
@@ -33,6 +34,7 @@ import { UpdateOperatingStateDto } from './dto/update-operating-state.dto';
 import { toListingClaimPolicyDTO } from './listing-claim-policy';
 import { ListingClaimsService } from './listing-claims.service';
 import { ListingOwnerPendingService } from './listing-owner-pending.service';
+import { ListingVenueEventsService } from './listing-venue-events.service';
 import { ListingsService } from './listings.service';
 import {
   ApiBadRequestResponse,
@@ -88,9 +90,13 @@ export class ListingsController {
     private readonly listingClaimsService: ListingClaimsService,
     // C8: what is currently waiting on a listing, for the person who owns it.
     private readonly listingOwnerPendingService: ListingOwnerPendingService,
+    // LOC-16: the gatherings other members have attached to this venue, and
+    // the owner's confirm/detach over them.
+    private readonly listingVenueEventsService: ListingVenueEventsService,
   ) {}
 
   @Post()
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Create a business listing for the current member' })
   @ApiCreatedResponse({ description: 'The newly created listing.' })
   @ApiConflictResponse({
@@ -268,6 +274,80 @@ export class ListingsController {
     return this.listingOwnerPendingService.getPendingForOwner(ref, user.userId);
   }
 
+  // ── LOC-16: the gatherings other members have attached to this venue ─────
+  //
+  // OWNER ONLY (`ListingVenueEventsService.loadOwnedOr404`), unlike the
+  // co-manager-allowed routes around it. Consenting to have the business's
+  // name attached to a stranger's event sits with the acts `loadOwnedOr404`
+  // already fences off, not with running the page day to day. See the
+  // service's class doc.
+  //
+  // Three segments, so no collision with the two-segment `@Get(':ref')`
+  // declared above; the declaration order here is not load-bearing.
+  @Get(':ref/venue-events')
+  @ApiOperation({
+    summary: 'List the gatherings attached to a venue the caller owns',
+  })
+  @ApiOkResponse({
+    description:
+      'Upcoming gatherings at this venue, split pending vs confirmed, soonest first.',
+  })
+  @ApiNotFoundResponse({
+    description: 'No listing with that reference owned by the caller.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  listVenueEvents(
+    @CurrentUser() user: CurrentUserData,
+    @Param('ref') ref: string,
+  ) {
+    return this.listingVenueEventsService.listForOwner(ref, user.userId);
+  }
+
+  // OWNER ONLY: yes, this gathering may say it is happening here. Idempotent,
+  // so a double press is not an error.
+  @Post(':ref/venue-events/:eventId/confirm')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Confirm a gathering attached to a venue you own' })
+  @ApiOkResponse({ description: 'The confirmed attachment.' })
+  @ApiNotFoundResponse({
+    description: 'No such listing owned by the caller, or no such gathering.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  confirmVenueEvent(
+    @CurrentUser() user: CurrentUserData,
+    @Param('ref') ref: string,
+    @Param('eventId') eventId: string,
+  ) {
+    return this.listingVenueEventsService.confirm(ref, eventId, user.userId);
+  }
+
+  // OWNER ONLY: take my business's name off this. Unlinks the venue; never
+  // deletes the gathering, which keeps its free-text venue string (the
+  // business's name is copied into it when the host left it empty).
+  @Delete(':ref/venue-events/:eventId')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Detach a gathering from a venue you own' })
+  @ApiOkResponse({
+    description: 'The detached gathering and the venue string it kept.',
+  })
+  @ApiNotFoundResponse({
+    description: 'No such listing owned by the caller, or no such gathering.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  detachVenueEvent(
+    @CurrentUser() user: CurrentUserData,
+    @Param('ref') ref: string,
+    @Param('eventId') eventId: string,
+  ) {
+    return this.listingVenueEventsService.detach(ref, eventId, user.userId);
+  }
+
   // OWNER OR CO-MANAGER (`loadOwnedOrCoManagedOr404`): the listing's content,
   // which is the largest thing a co-manager exists to do — hours, hours
   // exceptions, photos and the gallery, services, accessibility answers and
@@ -279,6 +359,7 @@ export class ListingsController {
   // `listing-owner-personal-fields.ts` for the eight fields and the argument
   // for refusing rather than dropping them.
   @Patch(':ref')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Update a listing the caller owns or co-manages' })
   @ApiOkResponse({ description: 'The updated listing.' })
   @ApiNotFoundResponse({ description: 'No listing with that reference.' })
@@ -418,6 +499,7 @@ export class ListingsController {
   // venue either way, so nothing about which of the two typed it reaches the
   // public page.
   @Patch(':ref/reviews/:reviewId/reply')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: "Post or overwrite the owner's public reply to a review",
   })
@@ -501,6 +583,7 @@ export class ListingsController {
   // NOT the public Q&A. That is `public-questions` below, which IS
   // co-manager-allowed.
   @Post(':ref/questions/:id/answer')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: "Owner answers a moderator's question about their listing",
   })
@@ -538,6 +621,7 @@ export class ListingsController {
   // (`POST /directory/:slug/questions`), because the asker is not the owner and
   // has no `ref`; answering happens here, because the answerer is.
   @Post(':ref/public-questions/:id/answer')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({
     summary: "Owner answers a member's public question on their listing",
   })

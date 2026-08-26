@@ -71,7 +71,7 @@ export class HousingGroup {
    * DERIVED, never client-supplied: the number of `group_join_requests` rows
    * for this group with status `approved`. Maintained by
    * `HousingGroupsService.refreshMemberCount` on every triage decision and
-   * deliberately absent from `CreateGroupDto`/`UpdateGroupDto` — it used to be
+   * deliberately absent from `CreateHousingGroupDto`/`UpdateGroupDto` — it used to be
    * an admin-typed integer, which made the public "N members" figure disagree
    * with the roster the admin queue reads.
    */

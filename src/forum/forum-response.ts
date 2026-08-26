@@ -110,6 +110,21 @@ export interface ForumThreadResponse {
   // Normalized (lowercase, deduped) tags for the thread — mirror of
   // `thread.tags`.
   tags: string[];
+  // Whether the viewer may replace this thread's tag set. The author always
+  // may; a platform moderator may too, so an untagged or mis-tagged thread can
+  // be filed correctly without going through the author. Deliberately WIDER
+  // than `canEdit` (the title), which stays author-only — a moderator
+  // rewriting someone's title is a different act from filing their thread.
+  canEditTags: boolean;
+  // The reply the author (or a moderator) marked as the answer, or null while
+  // the question is open. Mirror of `thread.acceptedPostId`.
+  acceptedPostId: string | null;
+  // Whether the viewer may set or clear the accepted answer — the thread's
+  // author, or a platform moderator.
+  canAcceptAnswer: boolean;
+  // Whether the viewer is following this thread (SOC-13). Defaults to false on
+  // the echoes that don't resolve it.
+  isSubscribed: boolean;
 }
 
 // The viewer of a thread card — their id plus whether they hold a moderator
@@ -137,8 +152,10 @@ export function toForumThreadResponse(
   viewer: ForumThreadViewer,
   opPost: ForumPost | null = null,
   myVote = 0,
+  isSubscribed = false,
 ): ForumThreadResponse {
   const opTombstoned = opPost?.deletedAt != null;
+  const isThreadAuthor = thread.authorId === viewer.userId;
   const opIsAuthor = opPost != null && opPost.authorId === viewer.userId;
   const canModerateOp = opIsAuthor || viewer.isModerator;
   return {
@@ -153,7 +170,7 @@ export function toForumThreadResponse(
     replyCount: thread.replyCount,
     lastActivityAt: thread.lastActivityAt.toISOString(),
     createdAt: thread.createdAt.toISOString(),
-    canEdit: thread.authorId === viewer.userId,
+    canEdit: isThreadAuthor,
     canDelete: opPost != null && canModerateOp && !opTombstoned,
     // Only an author's own tombstone is restorable through the forum route.
     canRestore: opPost != null && canModerateOp && opTombstoned,
@@ -164,6 +181,10 @@ export function toForumThreadResponse(
     opVoteCount: thread.opVoteCount,
     myVote,
     tags: thread.tags,
+    canEditTags: isThreadAuthor || viewer.isModerator,
+    acceptedPostId: thread.acceptedPostId,
+    canAcceptAnswer: isThreadAuthor || viewer.isModerator,
+    isSubscribed,
   };
 }
 
@@ -202,6 +223,15 @@ export interface ForumPostResponse {
   // A moderator `hide_content` takedown. Only ever `true` in a moderator's own
   // view — members never receive a hidden post (it is filtered out upstream).
   moderationHidden: boolean;
+  // Resolved (`toImageUrl`) URL of the photo attached to this post, or null.
+  // Blanked alongside the body on a tombstoned/removed/hidden post — the image
+  // is content, and a takedown that left the photo standing would be no
+  // takedown at all.
+  image: string | null;
+  // Whether this post is its thread's accepted answer. Drives both the badge
+  // and the server-side ordering that hoists the accepted reply to the top of
+  // the replies (see `ForumPostsService.listPosts`).
+  isAccepted: boolean;
 }
 
 export function toForumPostResponse(
@@ -210,6 +240,7 @@ export function toForumPostResponse(
   myVote: number,
   viewer: ForumPostViewer,
   moderation?: ForumPostModeration,
+  acceptedPostId: string | null = null,
 ): ForumPostResponse {
   const authorTombstoned = post.deletedAt != null;
   const moderationRemoved = moderation?.removed ?? false;
@@ -249,6 +280,12 @@ export function toForumPostResponse(
     canViewHistory: canModerate && post.editedAt != null,
     moderationRemoved,
     moderationHidden,
+    image: blanked ? null : toImageUrl(post.image),
+    // A tombstoned/removed post can still hold the mark (the FK only clears on
+    // a HARD delete), so drop it here rather than badging an empty tombstone as
+    // the answer.
+    isAccepted:
+      !blanked && acceptedPostId != null && acceptedPostId === post.id,
   };
 }
 

@@ -4,7 +4,7 @@ import { Repository, SelectQueryBuilder } from 'typeorm';
 import { ConnectionsService } from '../connections/connections.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { escapeLikeTerm } from '../common/like-escape';
-import { MemberLookup } from '../common/member-ref';
+import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
@@ -15,6 +15,7 @@ import {
   HousingListing,
   HousingListingStatus,
 } from './entities/housing-listing.entity';
+import { HousingListerLookup } from './housing-lister-lookup';
 import { VERIFIED_LISTING_MAX_RISK } from './housing-verified';
 import {
   HousingListingDTO,
@@ -156,14 +157,24 @@ export class HousingDirectoryService {
 
     return paginate(qb, page, async (rows) => {
       if (!rows.length) return [];
-      const ownerIds = rows.map((r) => r.ownerId);
-      const refs = await new MemberLookup(this.profiles).byUserIds(ownerIds);
+      // NULL for a listing whose lister erased their account
+      // (`SetNullContentAuthorFksOnUserErasure1794610000000`). The row keeps
+      // its reviews and viewings; it just has no lister to name, and
+      // `ContentOwnerErasureService` has already marked it filled so it is
+      // off the market.
+      const ownerIds = presentActorIds(rows.map((r) => r.ownerId));
+      // `HousingListerLookup` is the same single `profiles.find` MemberLookup
+      // issues, mapped to the richer lister block (member-since + bio) the
+      // housing card and detail actually render.
+      const refs = await new HousingListerLookup(this.profiles).byUserIds(
+        ownerIds,
+      );
       const levels = await this.verification.levelsForUsers(ownerIds);
       return rows.map((r) =>
         toHousingListingDTO(
           r,
-          refs.get(r.ownerId) ?? null,
-          levels.get(r.ownerId) ?? VerificationLevel.Email,
+          actorFromLookup(refs, r.ownerId) ?? null,
+          actorFromLookup(levels, r.ownerId) ?? VerificationLevel.Email,
         ),
       );
     });
@@ -220,16 +231,22 @@ export class HousingDirectoryService {
     // from their "My Listings" management view to see/un-mark it, while a
     // stranger following an old link or search hit gets the same honest 404 a
     // moderation takedown would give.
-    const isOwner = listing.ownerId === viewerId;
+    const isOwner = listing.ownerId !== null && listing.ownerId === viewerId;
     const isWithheld =
       listing.filledAt !== null || listing.expiresAt.getTime() < Date.now();
     if (!isOwner && isWithheld) {
       throw new NotFoundException('Housing listing not found');
     }
-    const refs = await new MemberLookup(this.profiles).byUserIds([
-      listing.ownerId,
-    ]);
-    const level = await this.verification.levelForUser(listing.ownerId);
+    const listerId = listing.ownerId;
+    const refs = await new HousingListerLookup(this.profiles).byUserIds(
+      presentActorIds([listerId]),
+    );
+    // An erased lister has no verification standing left to show: fall back to
+    // the lowest level rather than inventing one.
+    const level =
+      listerId === null
+        ? VerificationLevel.Email
+        : await this.verification.levelForUser(listerId);
 
     // Precise-vs-area gate. The exact point + address are disclosed to (a) the
     // owner, (b) a mutually-connected member (the platform's canonical
@@ -238,14 +255,17 @@ export class HousingDirectoryService {
     // slice flagged as the production refinement, now realised via
     // housing_viewings. A cold enquiry still deliberately creates no connection,
     // so an unanswered enquiry never unlocks the address.
+    // With an erased lister there is nobody to be connected to, so the
+    // precise-location unlock falls back to the accepted-viewing signal alone.
     const precise =
-      listing.ownerId === viewerId ||
-      (await this.connections.areConnected(viewerId, listing.ownerId)) ||
+      (listerId !== null &&
+        (listerId === viewerId ||
+          (await this.connections.areConnected(viewerId, listerId)))) ||
       (await this.viewings.hasUnlockedViewing(listing.id, viewerId));
 
     return toHousingListingDTO(
       listing,
-      refs.get(listing.ownerId) ?? null,
+      actorFromLookup(refs, listerId) ?? null,
       level,
       precise,
     );

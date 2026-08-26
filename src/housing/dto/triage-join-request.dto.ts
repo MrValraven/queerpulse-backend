@@ -1,6 +1,6 @@
 import { IsIn } from 'class-validator';
 
-export class TriageJoinRequestDto {
+export class TriageHousingJoinRequestDto {
   @IsIn(['accepted', 'declined'])
   action!: 'accepted' | 'declined';
 }

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { presentActorIds } from '../common/nullable-actor';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import {
@@ -69,7 +70,10 @@ export class HousingSavedSearchAlertsListener {
 
       // Order-preserving de-dup across ALL batches. The lister is seeded in so
       // they are never alerted about their own listing.
-      const seen = new Set<string>([listing.ownerId]);
+      // `ownerId` is NULL for a listing whose lister erased their account
+      // (`SetNullContentAuthorFksOnUserErasure1794610000000`): nobody to seed
+      // out, so the set simply starts empty.
+      const seen = new Set<string>(presentActorIds([listing.ownerId]));
       // Keyset cursor over the primary key: stable under concurrent inserts and
       // never re-reads a page, unlike OFFSET.
       let cursor: string | null = null;

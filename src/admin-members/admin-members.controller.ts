@@ -24,7 +24,7 @@ import { AdminMembersService } from './admin-members.service';
 import { GrantStaffRoleDto } from './dto/grant-staff-role.dto';
 import { ListAdminMembersQuery } from './dto/list-admin-members.query';
 import { UpdateInviteQuotaDto } from './dto/update-invite-quota.dto';
-import { UpdateMemberRoleDto } from './dto/update-member-role.dto';
+import { UpdatePlatformMemberRoleDto } from './dto/update-member-role.dto';
 import {
   ApiBadRequestResponse,
   ApiConflictResponse,
@@ -97,7 +97,7 @@ export class AdminMembersController {
   updateRole(
     @CurrentUser() currentUser: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: UpdateMemberRoleDto,
+    @Body() body: UpdatePlatformMemberRoleDto,
   ) {
     return this.adminMembers.updateRole(currentUser.userId, id, body.role);
   }

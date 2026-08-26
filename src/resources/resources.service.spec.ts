@@ -39,6 +39,15 @@ describe('ResourcesService', () => {
     externalUrl: null,
     publishedAt: new Date('2026-01-01T00:00:00.000Z'),
     lastVerifiedAt: null,
+    titlePt: null,
+    descriptionPt: null,
+    sections: [],
+    sectionsPt: null,
+    routePath: '/safety/legal',
+    reviewDueOn: null,
+    lastReviewedOn: null,
+    reviewedBy: null,
+    updatedBy: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
   };
@@ -50,6 +59,11 @@ describe('ResourcesService', () => {
     definition:
       'The set of intentional, ongoing relationships of care that queer people build.',
     category: 'Essential',
+    definitionPt: null,
+    reviewDueOn: null,
+    lastReviewedOn: null,
+    reviewedBy: null,
+    updatedBy: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
   };
@@ -133,6 +147,18 @@ describe('ResourcesService', () => {
             // an unverified resource has to map to an explicit null rather
             // than be absent from the response.
             lastVerifiedAt: null,
+            // CON-08/CON-09 additions: the Portuguese copy, the structured
+            // prose (empty here — this guide is metadata-only and the
+            // frontend keeps its hardcoded page), the route the guide is
+            // addressable at, and the review trail.
+            titlePt: null,
+            descriptionPt: null,
+            sections: [],
+            sectionsPt: null,
+            routePath: '/safety/legal',
+            lastReviewedOn: null,
+            reviewedBy: null,
+            reviewDueOn: null,
           },
         ],
         total: 1,
@@ -185,6 +211,14 @@ describe('ResourcesService', () => {
         meta: 'Guide · 12 min · PT / EN',
         externalUrl: null,
         lastVerifiedAt: null,
+        titlePt: null,
+        descriptionPt: null,
+        sections: [],
+        sectionsPt: null,
+        routePath: '/safety/legal',
+        lastReviewedOn: null,
+        reviewedBy: null,
+        reviewDueOn: null,
       });
     });
 
@@ -228,6 +262,7 @@ describe('ResourcesService', () => {
           term: 'Chosen family',
           definition:
             'The set of intentional, ongoing relationships of care that queer people build.',
+          definitionPt: null,
           category: 'Essential',
         },
       ]);
@@ -255,6 +290,7 @@ describe('ResourcesService', () => {
         term: 'Chosen family',
         definition:
           'The set of intentional, ongoing relationships of care that queer people build.',
+        definitionPt: null,
         category: 'Essential',
       });
     });

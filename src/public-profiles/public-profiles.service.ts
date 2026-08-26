@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { Activity } from '../profiles/entities/activity.entity';
+import { ActivityVisibilityService } from '../profiles/activity-visibility.service';
 import { SocialLink } from '../profiles/entities/social-link.entity';
 import { WorkItem } from '../profiles/entities/work-item.entity';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
@@ -37,6 +38,7 @@ export class PublicProfilesService {
     private readonly workItems: Repository<WorkItem>,
     @InjectRepository(Activity)
     private readonly activities: Repository<Activity>,
+    private readonly activityVisibility: ActivityVisibilityService,
     private readonly contentModeration: ContentModerationService,
   ) {}
 
@@ -156,6 +158,14 @@ export class PublicProfilesService {
       }),
     ]);
 
-    return toPublicProfile(profile, socials, work, activity);
+    // Re-check every row against its subject's CURRENT visibility before it
+    // reaches the open web. The write-time gate only knew what was public at
+    // the instant of the action, and this is the one surface that serves a
+    // logged-out visitor. `filterVisible` also purges what it rejects, so the
+    // row stops being served to every audience, not just this one.
+    const visibleActivity =
+      await this.activityVisibility.filterVisible(activity);
+
+    return toPublicProfile(profile, socials, work, visibleActivity);
   }
 }

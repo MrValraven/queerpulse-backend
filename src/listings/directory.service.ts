@@ -32,7 +32,12 @@ import {
   paginate,
   Paginated,
 } from '../common/pagination';
-import { Event, EventStatus } from '../events/entities/event.entity';
+import {
+  Event,
+  EventStatus,
+  EventVenueConfirmation,
+  EventVisibility,
+} from '../events/entities/event.entity';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { SavedItem, SavedKind } from '../saved/entities/saved-item.entity';
 import { Profile } from '../users/entities/profile.entity';
@@ -42,9 +47,11 @@ import {
 } from '../safe-space-vouches/entities/safe-space-vouch.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { SafeSpaceBadgeService } from '../safe-space-nominations/safe-space-badge.service';
 import { AskListingPublicQuestionDto } from './dto/ask-listing-public-question.dto';
-import { CreateReviewDto } from './dto/create-review.dto';
-import { ListDirectoryQuery } from './dto/list-directory.query';
+import { CreateListingReviewDto } from './dto/create-review.dto';
+import { ListListingDirectoryQuery } from './dto/list-directory.query';
+import { ListingAccessibilityAnswer } from './listing-accessibility';
 import {
   ListingPublicQuestionDTO,
   ListingQuestionAsker,
@@ -86,6 +93,24 @@ import {
 } from './listing-response';
 
 /**
+ * The owner photo one card should render, out of the page's ONE batched
+ * lookup (`DirectoryService.resolveOwnerAvatars`). A listing whose owner
+ * erased their account has no `ownerId` and therefore no face to show; a
+ * missing key means the lookup deliberately skipped that listing (unlinked or
+ * anonymous) or the owner's profile is gone.
+ *
+ * Whether the photo is actually allowed onto the card is decided downstream by
+ * `toDirectoryCard`, against the owner's chosen visibility.
+ */
+function ownerAvatarFor(
+  listing: Listing,
+  ownerAvatars: Map<string, string | null>,
+): string | null {
+  const ownerId = listing.ownerId;
+  return ownerId === null ? null : (ownerAvatars.get(ownerId) ?? null);
+}
+
+/**
  * Public, read-only views over the `listings` (businesses) table for the
  * marketing surfaces — the host page's partner spaces here, and the
  * `/local/directory` grid + detail in later sub-projects. Kept separate from
@@ -122,6 +147,12 @@ export class DirectoryService {
     // two statements that must not be observable apart, so they run in one
     // transaction.
     private readonly dataSource: DataSource,
+    // The ONE reader of open badge suspensions on this side. Every public read
+    // that serialises a safe-space badge asks it for the whole page's answer in
+    // a single query (`openSuspensionsByListing`), so the suspension rule lives
+    // in one place and no card path re-derives "open means lifted_at IS NULL"
+    // for itself.
+    private readonly safeSpaceBadges: SafeSpaceBadgeService,
   ) {}
 
   private readonly logger = new Logger(DirectoryService.name);
@@ -314,6 +345,47 @@ export class DirectoryService {
     });
   }
 
+  // TRUE for a listing with an OPEN safe-space badge suspension against it.
+  //
+  // Spliced verbatim into raw SQL (no parameter, no user input) so the same
+  // predicate can be used in a WHERE and inside an ORDER BY CASE. It is an
+  // EXISTS anti-join rather than a real JOIN on purpose: `paginate()` uses
+  // `.skip()/.take()`, and adding a joined table under those turns the row
+  // limit into a row-of-the-joined-set limit.
+  //
+  // NO NEW INDEX IS NEEDED. `UQ_safe_space_badge_suspensions_open` is a partial
+  // UNIQUE index over `(listing_id) WHERE lifted_at IS NULL` — the exact shape
+  // of this lookup, and already created by
+  // `1794730000000-AddSafeSpaceReviewWorkflow`. The suspensions table holds one
+  // row per badge under review, which is a handful, so each probe is an index
+  // hit on a table that fits in cache.
+  private static readonly OPEN_BADGE_SUSPENSION_EXISTS = `EXISTS (
+        SELECT 1 FROM "safe_space_badge_suspensions" "ssbs"
+        WHERE "ssbs"."listing_id" = listing.id
+          AND "ssbs"."lifted_at" IS NULL
+      )`;
+
+  /**
+   * Which of these listings currently have their safe-space badge suspended,
+   * as ONE query for the whole page.
+   *
+   * Only listings actually carrying a badge are asked about: a page with no
+   * verified spaces on it costs zero queries, and a page full of them costs
+   * exactly one. Fetching per card would be an N+1 on the hottest public read
+   * in the product.
+   */
+  private async suspendedBadgeListingIds(
+    rows: Pick<Listing, 'id' | 'safeSpaceStatus'>[],
+  ): Promise<Set<string>> {
+    const badgedListingIds = rows
+      .filter((row) => row.safeSpaceStatus === SafeSpaceStatus.Verified)
+      .map((row) => row.id);
+    if (!badgedListingIds.length) return new Set<string>();
+    const openSuspensions =
+      await this.safeSpaceBadges.openSuspensionsByListing(badgedListingIds);
+    return new Set(openSuspensions.keys());
+  }
+
   /**
    * Every live listing flagged as a QueerPulse partner venue, for the public
    * host page. Only `status = live` rows surface — a listing still in review
@@ -344,7 +416,7 @@ export class DirectoryService {
    * bounded (`take` vs `paginate`'s `skip`/`take`).
    */
   private buildDirectoryQuery(
-    query: Pick<ListDirectoryQuery, 'cat' | 'q' | 'safe'>,
+    query: Pick<ListListingDirectoryQuery, 'cat' | 'q' | 'safe' | 'access'>,
   ): SelectQueryBuilder<Listing> {
     const qb = this.listings
       .createQueryBuilder('listing')
@@ -368,9 +440,39 @@ export class DirectoryService {
     }
 
     if (query.safe === 'verified') {
+      // "Show me only verified safe spaces" is a request for the badge as it
+      // reads TODAY, so a badge under suspension does not answer it. Filtered
+      // in-query rather than after the fetch, which is what keeps
+      // `listDirectoryPage`'s `total` honest: a suspended space is neither
+      // returned nor counted.
       qb.andWhere('listing.safeSpaceStatus = :safeSpaceStatus', {
         safeSpaceStatus: SafeSpaceStatus.Verified,
       });
+      qb.andWhere(`NOT ${DirectoryService.OPEN_BADGE_SUSPENSION_EXISTS}`);
+    }
+
+    if (query.access?.length) {
+      // Every requested question, set to `yes`, as ONE jsonb object. A single
+      // containment test (`@>`) means "holds all of these", so multiple
+      // requirements are an AND in one indexable predicate rather than N
+      // separate ones — and `@>` is the operator
+      // `IDX_listings_accessibility_answers` (jsonb_path_ops GIN) exists to
+      // serve, so this stays an index scan as the directory grows.
+      //
+      // Only `yes` is written into the requirement, which is what makes
+      // `unknown` a non-match. `unknown` is a real stored value, so a row that
+      // has never been asked about step-free access holds
+      // `{"step-free-entrance":"unknown"}` and simply fails containment. It is
+      // never presented as a match, never boosted, and never backfilled with an
+      // optimistic guess. A member filtering on an access need is planning
+      // around it, and "nobody has told us" cannot be allowed to read as "yes".
+      const accessRequirement = Object.fromEntries(
+        query.access.map((slug) => [slug, ListingAccessibilityAnswer.Yes]),
+      );
+      qb.andWhere(
+        'listing.accessibilityAnswers @> CAST(:accessRequirement AS jsonb)',
+        { accessRequirement: JSON.stringify(accessRequirement) },
+      );
     }
 
     this.excludeModeratedListings(qb);
@@ -387,9 +489,17 @@ export class DirectoryService {
     // existing name order, which remains the tiebreaker). Boost happens in
     // the SQL `ORDER BY` — not a JS re-sort — so it stays correct across
     // `take`/pagination.
+    //
+    // A SUSPENDED badge does not earn the boost. Promoting a space the platform
+    // has just stopped vouching for to the top of the grid is the loudest
+    // possible version of the claim this whole mechanism exists to withdraw.
+    // The suspension probe sits after the cheap column test in the same `AND`,
+    // so the planner only runs it for rows that actually carry a badge.
     return qb
       .orderBy(
-        `CASE WHEN listing.safeSpaceStatus = '${SafeSpaceStatus.Verified}' THEN 0 ELSE 1 END`,
+        `CASE WHEN listing.safeSpaceStatus = '${SafeSpaceStatus.Verified}'
+                AND NOT ${DirectoryService.OPEN_BADGE_SUSPENSION_EXISTS}
+              THEN 0 ELSE 1 END`,
         'ASC',
       )
       .addOrderBy('listing.name', 'ASC');
@@ -403,10 +513,12 @@ export class DirectoryService {
    * "related places", and `SearchService`'s cross-domain search) that need
    * the working set client-side rather than a browsable page. The
    * `/local/directory` grid itself instead calls `listDirectoryPage` (below)
-   * when it wants real pagination — see `ListDirectoryQuery.page`'s doc
+   * when it wants real pagination — see `ListListingDirectoryQuery.page`'s doc
    * comment for why the two coexist.
    */
-  async listDirectory(query: ListDirectoryQuery): Promise<DirectoryCardDTO[]> {
+  async listDirectory(
+    query: ListListingDirectoryQuery,
+  ): Promise<DirectoryCardDTO[]> {
     const rows = await this.buildDirectoryQuery(query)
       .take(DEFAULT_LIST_LIMIT)
       .getMany();
@@ -416,7 +528,18 @@ export class DirectoryService {
     const crops = await this.mediaCropService.getMany(
       rows.flatMap((row) => listingPhotoKeys(row)),
     );
-    return rows.map((row) => toDirectoryCard(row, crops));
+    const ownerAvatars = await this.resolveOwnerAvatars(rows);
+    // ONE query for the page's suspensions, never one per card.
+    const suspendedBadges = await this.suspendedBadgeListingIds(rows);
+    return rows.map((row) =>
+      toDirectoryCard(
+        row,
+        crops,
+        undefined,
+        ownerAvatarFor(row, ownerAvatars),
+        suspendedBadges.has(row.id),
+      ),
+    );
   }
 
   /**
@@ -427,7 +550,7 @@ export class DirectoryService {
    * Same filters/ordering as `listDirectory` (shared `buildDirectoryQuery`).
    */
   async listDirectoryPage(
-    query: ListDirectoryQuery,
+    query: ListListingDirectoryQuery,
   ): Promise<Paginated<DirectoryCardDTO>> {
     const qb = this.buildDirectoryQuery(query);
     return paginate(qb, normalizePage(query.page), async (rows) => {
@@ -436,7 +559,18 @@ export class DirectoryService {
       const crops = await this.mediaCropService.getMany(
         rows.flatMap((row) => listingPhotoKeys(row)),
       );
-      return rows.map((row) => toDirectoryCard(row, crops));
+      const ownerAvatars = await this.resolveOwnerAvatars(rows);
+      // ONE query for this page's suspensions, never one per card.
+      const suspendedBadges = await this.suspendedBadgeListingIds(rows);
+      return rows.map((row) =>
+        toDirectoryCard(
+          row,
+          crops,
+          undefined,
+          ownerAvatarFor(row, ownerAvatars),
+          suspendedBadges.has(row.id),
+        ),
+      );
     });
   }
 
@@ -472,7 +606,18 @@ export class DirectoryService {
     const crops = await this.mediaCropService.getMany(
       visibleRows.flatMap((row) => listingPhotoKeys(row)),
     );
-    return visibleRows.map((row) => toDirectoryCard(row, crops));
+    const ownerAvatars = await this.resolveOwnerAvatars(visibleRows);
+    // ONE query for the strip's suspensions, never one per card.
+    const suspendedBadges = await this.suspendedBadgeListingIds(visibleRows);
+    return visibleRows.map((row) =>
+      toDirectoryCard(
+        row,
+        crops,
+        undefined,
+        ownerAvatarFor(row, ownerAvatars),
+        suspendedBadges.has(row.id),
+      ),
+    );
   }
 
   /**
@@ -487,7 +632,17 @@ export class DirectoryService {
    * record instead of correcting it. The page renders the closure notice from
    * `operatingState` and stops being somewhere the directory sends people.
    */
-  async getDirectoryBySlug(slug: string): Promise<DirectoryDetailDTO> {
+  async getDirectoryBySlug(
+    slug: string,
+    /**
+     * True only when the caller is a signed-in ACTIVE member (the controller
+     * reads `CurrentUserData.status`, matching `ActiveMemberGuard`). It widens
+     * the `upcoming` block from public-only to public + members. Defaults to
+     * false so any future caller that forgets to pass it gets the anonymous,
+     * safe answer rather than the wider one.
+     */
+    isActiveMemberViewer = false,
+  ): Promise<DirectoryDetailDTO> {
     const listing = await this.loadLiveOr404(slug);
     // Bounded: the detail card embeds the review list AND derives its rating
     // aggregate from this same array, so `take` must sit well above any real
@@ -502,14 +657,61 @@ export class DirectoryService {
     // Drop moderator-taken-down reviews before they reach the DTO or the derived
     // rating aggregate.
     const reviews = await this.dropModeratedReviews(allReviews);
-    // Upcoming, published events at this venue — soonest first, capped so the
-    // sidebar card stays short. `new Date()` here is server "now" at request
-    // time (not a cached value), which is exactly the cutoff we want.
+    // Upcoming events at this venue — soonest first, capped so the sidebar card
+    // stays short. `new Date()` here is server "now" at request time (not a
+    // cached value), which is exactly the cutoff we want.
+    //
+    // The `visibility` predicate is the point of this query, not a detail.
+    // Without it a gathering scoped `invite_only`, `network`,
+    // `extended_network` or `community` was published, with its title, slug and
+    // start time, on a `@Public()`, CDN-cached endpoint: "Trans peer support,
+    // Tuesday 19:00" leaking to the open web from a venue page. The audience
+    // rules those tiers encode are per-viewer computations
+    // (`EventAudienceGateService`), and a cached venue page cannot do a
+    // per-viewer computation, so this read simply never carries them.
+    //
+    // `members` is the one tier that widens, and only for a signed-in active
+    // member. That makes the response caller-dependent, which is why the route
+    // serves the authenticated variant `private, no-store` — see the comment on
+    // `DirectoryController.getDirectoryListing`.
+    //
+    // VENUE CONSENT (LOC-16) is the SECOND axis this query narrows on, and it
+    // narrows the anonymous variant only. An attachment starts `pending`: the
+    // host picked this business out of the directory and its owner has not
+    // answered yet.
+    //
+    // The two obvious answers are both wrong. Showing a pending attachment
+    // everywhere is the harm itself: a bar owner wakes up to a party
+    // advertised on their business's page, to the open web, with no say in it.
+    // Hiding every pending attachment until an owner acts is worse in the
+    // other direction: most listings are unclaimed or belong to somebody who
+    // may never sign in, so gatherings that really are happening at that venue
+    // would be undiscoverable indefinitely, and event discovery is what this
+    // block exists for.
+    //
+    // So the split is by AUDIENCE, matching where the harm actually lands. The
+    // anonymous, CDN-cached, search-indexable page carries only what the
+    // business has confirmed, because that page reads to a stranger as the
+    // business speaking about itself. A signed-in member gets the pending ones
+    // too, flagged `venueConfirmed: false` so the card can say a member listed
+    // this and the venue has not confirmed it: inside the community, an
+    // unconfirmed listing is legible as one member's claim, which is exactly
+    // what it is.
+    //
+    // This keeps the anonymous variant STRICTLY the narrowest one on both
+    // axes (public-only visibility AND confirmed-only attachments), which is
+    // what makes it safe for it to be the shared-cacheable variant.
     const upcoming = await this.events.find({
       where: {
         listingId: listing.id,
         status: EventStatus.Published,
         startAt: MoreThanOrEqual(new Date()),
+        visibility: isActiveMemberViewer
+          ? In([EventVisibility.Public, EventVisibility.Members])
+          : EventVisibility.Public,
+        ...(isActiveMemberViewer
+          ? {}
+          : { venueConfirmation: EventVenueConfirmation.Confirmed }),
       },
       order: { startAt: 'ASC' },
       take: 4,
@@ -536,6 +738,10 @@ export class DirectoryService {
     // truncating, and the full list is one request away at
     // `GET /directory/:slug/questions`.
     const questions = await this.loadDetailQuestions(listing.id);
+    // The detail inherits the card's badge fields, so it has to resolve the
+    // same suspension the grid does. One row, one query, and only when the
+    // listing actually carries a badge.
+    const suspendedBadges = await this.suspendedBadgeListingIds([listing]);
     return toDirectoryDetail(
       listing,
       reviews,
@@ -548,6 +754,7 @@ export class DirectoryService {
       crops,
       movedToListing,
       questions,
+      suspendedBadges.has(listing.id),
     );
   }
 
@@ -694,14 +901,62 @@ export class DirectoryService {
     ) {
       return { slug: null, avatarUrl: null };
     }
-    const profile = await this.profiles.findOne({
-      where: { userId: listing.ownerId },
-      select: { slug: true, avatarUrl: true, photoVisible: true },
-    });
+    // NULL once the owner erased their account
+    // (`SetNullContentAuthorFksOnUserErasure1794610000000`). The venue entry
+    // stays live and unclaimed, with no member to link out to.
+    const ownerId = listing.ownerId;
+    const profile =
+      ownerId === null
+        ? null
+        : await this.profiles.findOne({
+            where: { userId: ownerId },
+            select: { slug: true, avatarUrl: true, photoVisible: true },
+          });
     return {
       slug: profile?.slug ?? null,
       avatarUrl: profile ? DirectoryService.publicAvatarUrl(profile) : null,
     };
+  }
+
+  /**
+   * Batch-resolve the profile photo of every card's owner, keyed by `ownerId`,
+   * so the "run by <first>" line on a grid of listings shows the member's face
+   * instead of initials over a tint. One `IN (...)` query for the whole page,
+   * never one per card — the same shape as `resolveReviewAuthors`.
+   *
+   * Listings whose owner reveals nothing (unlinked, `anon`, `role`) are left
+   * out of the query entirely rather than fetched and discarded: the photo is
+   * as identifying as the name, and the cheapest way not to leak it is not to
+   * read it. `toDirectoryCard` re-applies that same redaction on the value it
+   * is handed, so the guarantee does not depend on this filter alone.
+   */
+  private async resolveOwnerAvatars(
+    listings: Listing[],
+  ): Promise<Map<string, string | null>> {
+    const ownerIds = [
+      ...new Set(
+        listings
+          .filter(
+            (listing) =>
+              listing.linkToProfile &&
+              listing.visibility !== 'anon' &&
+              listing.visibility !== 'role',
+          )
+          .map((listing) => listing.ownerId)
+          .filter((ownerId): ownerId is string => ownerId !== null),
+      ),
+    ];
+    if (ownerIds.length === 0) return new Map();
+    const profiles = await this.profiles.find({
+      where: { userId: In(ownerIds) },
+      select: { userId: true, avatarUrl: true, photoVisible: true },
+    });
+    return new Map(
+      profiles.map((profile) => [
+        profile.userId,
+        DirectoryService.publicAvatarUrl(profile),
+      ]),
+    );
   }
 
   /**
@@ -821,7 +1076,7 @@ export class DirectoryService {
   async addReview(
     slug: string,
     userId: string,
-    dto: CreateReviewDto,
+    dto: CreateListingReviewDto,
   ): Promise<ReviewDTO> {
     const listing = await this.loadLiveOr404(slug);
     // BE-HSG-14: the owner cannot review their own listing. A five-star
@@ -1325,6 +1580,15 @@ export class DirectoryService {
    * Verified + removed safe spaces for the public Safe Spaces page. Only
    * `status = live` listings whose `safeSpaceStatus <> none` surface. Ratings
    * come from real reviews; `stats` feeds the page's hero numbers.
+   *
+   * A space whose badge is SUSPENDED appears in neither list and in no count.
+   * It is not verified: three members flagged it (or a moderator paused it) and
+   * a review is open, so listing it under "verified" would republish the exact
+   * claim the suspension withdrew. It is not removed either: nothing was taken
+   * away, and putting it in the removed column would say the review had already
+   * concluded against the venue. So it steps out of the hub for the duration
+   * and steps back in, unchanged, when the review closes. Its own page still
+   * resolves and says a review is open (`getSafeSpaceBySlug`).
    */
   async listSafeSpaces(): Promise<SafeSpaceListDTO> {
     const allRows = await this.listings.find({
@@ -1342,7 +1606,17 @@ export class DirectoryService {
       order: { name: 'ASC' },
       take: DEFAULT_LIST_LIMIT,
     });
-    const rows = await this.dropModeratedListings(allRows);
+    const listedRows = await this.dropModeratedListings(allRows);
+    // ONE query for every badge on the page, then a set difference. Dropping
+    // the suspended spaces HERE, before anything is derived from `rows`, is
+    // what makes the rest of this method honest for free: the rating aggregate
+    // below never asks about them, the loop never builds a card for them, and
+    // `stats.verified` / `stats.reviews` cannot count a space the platform has
+    // stopped vouching for.
+    const suspendedBadges = await this.suspendedBadgeListingIds(listedRows);
+    const rows = listedRows.filter(
+      (listing) => !suspendedBadges.has(listing.id),
+    );
     // The card's rating only needs a per-listing COUNT + AVG of stars (never the
     // review bodies), so aggregate in ONE grouped query — O(verified listings),
     // not O(reviews). This stays bounded no matter how large the review corpus
@@ -1448,7 +1722,18 @@ export class DirectoryService {
     });
     const reviews = await this.dropModeratedReviews(allReviews);
     const memberVouches = await this.loadSafeSpaceMemberVouches(listing.id);
-    return toSafeSpaceDetail(listing, reviews, memberVouches);
+    // The page a suspended space's own link still lands on. It keeps
+    // resolving (the vouches and the verification narrative are a record of
+    // what happened, and the review has not concluded), and it says so:
+    // `isBadgeSuspended` is the field the page has to read before it renders
+    // a badge.
+    const suspendedBadges = await this.suspendedBadgeListingIds([listing]);
+    return toSafeSpaceDetail(
+      listing,
+      reviews,
+      memberVouches,
+      suspendedBadges.has(listing.id),
+    );
   }
 
   // Shared detail-page load for `getDirectoryBySlug`, `listReviews` and

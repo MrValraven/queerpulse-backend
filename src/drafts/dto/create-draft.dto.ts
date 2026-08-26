@@ -27,7 +27,11 @@ export class CreateDraftDto {
 
   @IsString() @MinLength(1) @MaxLength(500) title!: string;
 
-  @IsString() @MaxLength(4000) desc!: string;
+  // 10000, matching the longest body any composer that autosaves through this
+  // module can produce (`CreateThreadDto.body`/`ReplyThreadDto.body`). A
+  // forum draft that silently failed validation at 4000 characters would lose
+  // exactly the long, considered post autosave exists to protect.
+  @IsString() @MaxLength(10000) desc!: string;
 
   @IsNumber() @Min(0) @Max(100) progress!: number;
 

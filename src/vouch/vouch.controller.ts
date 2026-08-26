@@ -13,9 +13,10 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Throttle, seconds } from '@nestjs/throttler';
 import { CreateVouchDto } from './dto/create-vouch.dto';
-import { PaginationQuery } from './dto/pagination.query';
+import { PaginationQuery } from '../common/pagination.query';
 import { VouchService } from './vouch.service';
 import {
   ApiBadRequestResponse,
@@ -39,6 +40,7 @@ export class VouchController {
 
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Post(':slug/vouch')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Vouch for a member' })
   @ApiCreatedResponse({ description: 'The created vouch.' })
   @ApiBadRequestResponse({ description: 'You cannot vouch for yourself.' })

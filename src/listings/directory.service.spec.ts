@@ -17,6 +17,7 @@ import { SafeSpaceMemberVouch } from '../safe-space-vouches/entities/safe-space-
 import { SavedItem } from '../saved/entities/saved-item.entity';
 import { StorageService } from '../storage/storage.service';
 import { Profile } from '../users/entities/profile.entity';
+import { SafeSpaceBadgeService } from '../safe-space-nominations/safe-space-badge.service';
 import { DirectoryService } from './directory.service';
 import { ListingPublicQuestion } from './entities/listing-public-question.entity';
 import { ListingReviewHelpfulVote } from './entities/listing-review-helpful-vote.entity';
@@ -175,6 +176,14 @@ describe('DirectoryService', () => {
         },
         { provide: StorageService, useValue: storage },
         { provide: DataSource, useValue: dataSource },
+        // The batched open-suspension lookup every public card read now makes.
+        // No suspensions in these fixtures, so it answers with an empty Map.
+        {
+          provide: SafeSpaceBadgeService,
+          useValue: {
+            openSuspensionsByListing: jest.fn().mockResolvedValue(new Map()),
+          },
+        },
       ],
     }).compile();
     service = module.get(DirectoryService);

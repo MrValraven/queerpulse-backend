@@ -29,6 +29,16 @@ import { Collection } from './entities/collection.entity';
  */
 const MAX_ITEMS_PER_COLLECTION = 500;
 
+/**
+ * DEPRECATED (SOC-12). Superseded by `SavedListsService`.
+ *
+ * Kept live only so clients that have not reloaded since the collections UI
+ * moved to `/me/saved/lists` keep working. See `CollectionsController`'s
+ * docstring for the retirement path. The data is already copied across by
+ * `1794740000000-BackfillCollectionsIntoSavedLists`.
+ *
+ * @deprecated Use `SavedListsService` instead.
+ */
 @Injectable()
 export class CollectionsService {
   constructor(

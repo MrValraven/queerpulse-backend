@@ -27,6 +27,7 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { CommunityResourcesService } from './community-resources.service';
 import { CreateCommunityResourceDto } from './dto/create-community-resource.dto';
@@ -73,6 +74,7 @@ export class CommunityResourcesController {
   }
 
   @Post()
+  @UseGuards(NotRestrictedGuard)
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @ApiOperation({
     summary:
@@ -127,6 +129,7 @@ export class CommunityResourcesController {
   }
 
   @Patch(':id')
+  @UseGuards(NotRestrictedGuard)
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @ApiOperation({
     summary: 'Edit one resource (owner, co-owner or moderator).',

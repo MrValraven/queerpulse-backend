@@ -3,13 +3,16 @@ import {
   CurrentUser,
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
+import { UpdateLoginAlertsDto } from './dto/update-login-alerts.dto';
 import { UpdatePublicProfileDto } from './dto/update-public-profile.dto';
+import { UpdatePushPreviewsDto } from './dto/update-push-previews.dto';
 import { UpdateWorkPreferencesDto } from './dto/update-work-preferences.dto';
 import { PreferencesService } from './preferences.service';
 import {
   ApiBadRequestResponse,
   ApiCookieAuth,
   ApiOkResponse,
+  ApiForbiddenResponse,
   ApiOperation,
   ApiTags,
   ApiUnauthorizedResponse,
@@ -17,7 +20,8 @@ import {
 
 /**
  * Member safety + visibility switches. Mirrors the frontend contract exactly:
- * `GET|PUT /me/work-preferences`, `GET|PUT /me/public-profile`.
+ * `GET|PUT /me/work-preferences`, `GET|PUT /me/public-profile`,
+ * `GET|PUT /me/login-alerts`, `GET|PUT /me/push-previews`.
  *
  * ---------------------------------------------------------------------------
  * GUARDS: JWT only — deliberately NO ActiveMemberGuard
@@ -90,17 +94,93 @@ export class PreferencesController {
     return this.preferencesService.getPublicProfile(user.userId);
   }
 
+  // Takes the whole `CurrentUserData`, and the extra field earns its place:
+  // `status` is what the eligibility gate reads to keep a suspended or
+  // deactivated member from publishing to the open web. Passing `userId` alone
+  // would leave the service unable to see it.
+  //
+  // `{ enabled: false }` is never gated. See the service's doc comment.
   @ApiOperation({
     summary: "Replace the member's public-profile visibility setting.",
   })
   @ApiOkResponse({ description: 'The persisted public-profile setting.' })
   @ApiBadRequestResponse({ description: 'Validation failed.' })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({
+    description:
+      'The member is not eligible to publish a public profile. Carries a coarse `reasonCode`. Only ever returned for `{ enabled: true }`.',
+  })
   @Put('public-profile')
   updatePublicProfile(
     @CurrentUser() user: CurrentUserData,
     @Body() body: UpdatePublicProfileDto,
   ) {
-    return this.preferencesService.updatePublicProfile(user.userId, body);
+    return this.preferencesService.updatePublicProfile(user, body);
+  }
+
+  // Defaults to `{ enabled: true }` when no row exists — a member who has never
+  // opened settings is still told when a device they have not used before signs
+  // in to their account. See `DEFAULT_LOGIN_ALERTS_ENABLED`.
+  //
+  // The controller-level note above applies with particular force here: this is
+  // the security switch of a member who may have deactivated BECAUSE something
+  // was wrong, so the JWT-only guard stance is what keeps it reachable.
+  @ApiOperation({
+    summary: "Get the member's new-device sign-in alert setting.",
+  })
+  @ApiOkResponse({ description: 'The sign-in alert setting (defaults to on).' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @Get('login-alerts')
+  getLoginAlerts(@CurrentUser() user: CurrentUserData) {
+    return this.preferencesService.getLoginAlerts(user.userId);
+  }
+
+  @ApiOperation({
+    summary: "Replace the member's new-device sign-in alert setting.",
+  })
+  @ApiOkResponse({ description: 'The persisted sign-in alert setting.' })
+  @ApiBadRequestResponse({ description: 'Validation failed.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @Put('login-alerts')
+  updateLoginAlerts(
+    @CurrentUser() user: CurrentUserData,
+    @Body() body: UpdateLoginAlertsDto,
+  ) {
+    return this.preferencesService.updateLoginAlerts(user.userId, body);
+  }
+
+  // Defaults to `{ hidePreviews: true }` when no row exists, so a member who
+  // has never opened settings gets a lock screen that says a notification
+  // arrived and nothing else. See `DEFAULT_HIDE_PUSH_PREVIEWS` for why hidden
+  // is the safe default rather than the cautious one.
+  //
+  // The app also mirrors this value into IndexedDB so the service worker can
+  // degrade a payload on engines that run it, but THIS is the authority: iOS
+  // never runs the worker's push handler, so the only place a sender's name can
+  // be kept off an iPhone lock screen is the composer, which reads this column.
+  @ApiOperation({
+    summary: "Get the member's lock-screen notification-preview setting.",
+  })
+  @ApiOkResponse({
+    description: 'The preview setting (defaults to hidden).',
+  })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @Get('push-previews')
+  getPushPreviews(@CurrentUser() user: CurrentUserData) {
+    return this.preferencesService.getPushPreviews(user.userId);
+  }
+
+  @ApiOperation({
+    summary: "Replace the member's lock-screen notification-preview setting.",
+  })
+  @ApiOkResponse({ description: 'The persisted preview setting.' })
+  @ApiBadRequestResponse({ description: 'Validation failed.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @Put('push-previews')
+  updatePushPreviews(
+    @CurrentUser() user: CurrentUserData,
+    @Body() body: UpdatePushPreviewsDto,
+  ) {
+    return this.preferencesService.updatePushPreviews(user.userId, body);
   }
 }

@@ -79,6 +79,8 @@ function build(opts: {
   blocked?: string[];
   muters?: string[];
   pushDisabled?: string[];
+  // Recipients currently inside their quiet-hours window (empty = nobody).
+  quietUserIds?: string[];
   // Raw stored avatar for the sender's profile (undefined = no avatar). An
   // absolute https URL is a public avatar; a storage key resolves to our
   // auth-gated `/files/*` route and must NOT become the push icon.
@@ -106,7 +108,23 @@ function build(opts: {
   const presence = {
     isOnline: (userId: string) => opts.online.includes(userId),
   };
-  const push = { sendToUsers: jest.fn().mockResolvedValue(undefined) };
+  // Doubles as the `PushPreviewPrivacyService` the listener now sends through
+  // (ID-13). `sendSplitByPreviewPreference` delegates straight to
+  // `sendToUsers`, which is the real service's behaviour for a recipient who
+  // has previews SHOWN, the case every assertion below is about, since they
+  // all check the rich sender-name payload. The split itself, and what the
+  // hidden-preview half receives, is covered in
+  // `push-preview-privacy.service.spec.ts`.
+  const push = {
+    sendToUsers: jest.fn().mockResolvedValue(undefined),
+    sendSplitByPreviewPreference: jest.fn(),
+  };
+  push.sendSplitByPreviewPreference.mockImplementation(
+    (userIds: string[], payload: unknown): Promise<void> => {
+      push.sendToUsers(userIds, payload);
+      return Promise.resolve();
+    },
+  );
   const blockFilter = {
     blockedUserIds: jest
       .fn()
@@ -126,6 +144,19 @@ function build(opts: {
         ),
       ),
   };
+  // Quiet hours: by default nobody is inside a window, so every recipient
+  // stays audible and these tests measure only what they mean to measure.
+  const notificationDelivery = {
+    recipientsOutsideQuietHours: jest
+      .fn()
+      .mockImplementation((userIds: string[]) =>
+        Promise.resolve(
+          userIds.filter(
+            (userId) => !(opts.quietUserIds ?? []).includes(userId),
+          ),
+        ),
+      ),
+  };
   const listener = new PushMessageListener(
     conversationsRepo as never,
     participantsRepo as never,
@@ -134,6 +165,7 @@ function build(opts: {
     push as never,
     blockFilter as never,
     notificationPreferences as never,
+    notificationDelivery as never,
   );
   return {
     listener,

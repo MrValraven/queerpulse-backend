@@ -23,6 +23,7 @@ import { ListingReview } from './entities/listing-review.entity';
 import { Listing } from './entities/listing.entity';
 import { SafeSpaceMemberVouch } from '../safe-space-vouches/entities/safe-space-vouch.entity';
 import { ReportsModule } from '../reports/reports.module';
+import { SafeSpaceNominationsModule } from '../safe-space-nominations/safe-space-nominations.module';
 import { ListingClaimsService } from './listing-claims.service';
 import { ListingCoManagersController } from './listing-co-managers.controller';
 import { ListingCoManagersService } from './listing-co-managers.service';
@@ -30,6 +31,7 @@ import { ListingEnquiriesController } from './listing-enquiries.controller';
 import { ListingEnquiriesService } from './listing-enquiries.service';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
 import { ListingOwnerPendingService } from './listing-owner-pending.service';
+import { ListingVenueEventsService } from './listing-venue-events.service';
 import { ListingsController } from './listings.controller';
 import { ListingsService } from './listings.service';
 
@@ -99,6 +101,18 @@ import { ListingsService } from './listings.service';
     // per-slot `photoCrops` sibling, shared by `ListingsService` and
     // `DirectoryService`.
     MediaCropsModule,
+    // `SafeSpaceBadgeService` — every public read that serialises a safe-space
+    // badge asks it whether that badge is currently SUSPENDED, so a space three
+    // members flagged can never render as verified on a card, in the
+    // safe-spaces list, or in its hero counts.
+    //
+    // The dependency runs THIS way only. `SafeSpaceNominationsModule`
+    // deliberately does not import this module (it registers the `Listing`
+    // entity alone, for the reason its own docstring gives), and its own
+    // imports are `NotificationsModule` + `SafeSpaceVouchesModule`, neither of
+    // which reaches back here. So this is a plain import with no cycle and no
+    // `forwardRef`.
+    SafeSpaceNominationsModule,
   ],
   controllers: [
     // FIRST, and that is load-bearing rather than stylistic. Nest resolves
@@ -131,6 +145,11 @@ import { ListingsService } from './listings.service';
     // `Repository<Report>` comes from `ReportsModule`'s re-exported
     // `TypeOrmModule`, already imported above.
     ListingOwnerPendingService,
+    // LOC-16: the venue owner's side of an event-to-listing attachment
+    // (confirm / detach). Reads and writes `events` through the `Event`
+    // repository already registered above for `DirectoryService`, and reads
+    // `Profile` through `UsersModule`'s re-exported `TypeOrmModule`.
+    ListingVenueEventsService,
     DirectoryService,
   ],
   exports: [DirectoryService],

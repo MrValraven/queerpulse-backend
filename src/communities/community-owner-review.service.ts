@@ -1,12 +1,14 @@
 import {
   ConflictException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, MoreThanOrEqual, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -20,7 +22,7 @@ import { toStoredPlainText } from './community-plain-text';
 import {
   loadActiveCommunityOr404,
   loadMembershipOr403,
-  resolveStaffCommunity,
+  resolveMemberCommunity,
 } from './community-staff-access';
 import { CreateCommunityOwnerReviewDto } from './dto/create-community-owner-review.dto';
 import {
@@ -44,23 +46,74 @@ const UNIQUE_VIOLATION = '23505';
  *  `PlatformStaffService`'s `STAFF_ROLES` (moderators and admins). */
 const PLATFORM_STAFF_ROLES = [UserRole.Moderator, UserRole.Admin];
 
+/**
+ * The rolling window one member's filings are counted over. See the service
+ * doc comment's rate-limiting section: at most ONE owner review per member per
+ * 24 hours, counted across every community they belong to.
+ */
+const MEMBER_FILING_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 function isUniqueViolation(error: unknown): boolean {
   const candidate = error as { code?: string; driverError?: { code?: string } };
   return (candidate?.code ?? candidate?.driverError?.code) === UNIQUE_VIOLATION;
 }
 
 /**
- * Backs `/communities/:slug/owner-review` — a community's moderators flagging
+ * Backs `/communities/:slug/owner-review`, a community's own members flagging
  * that their owner has gone unreachable.
  *
- * An owner who simply stops logging in leaves their moderators stuck: they
- * hold no owner-only powers (settings, ownership transfer, the danger zone),
- * and the only remedy was a platform-staff reassignment nobody had a way to
- * ASK for. `communities.needs_owner_review_at` already existed and was stamped
- * by exactly one automatic path (`CommunityOwnerOrphanService
+ * An owner who simply stops logging in leaves the whole room stuck: nobody
+ * else holds owner-only powers (settings, ownership transfer, the danger
+ * zone), and the only remedy was a platform-staff reassignment nobody had a
+ * way to ASK for. `communities.needs_owner_review_at` already existed and was
+ * stamped by exactly one automatic path (`CommunityOwnerOrphanService
  * .handleOwnerErasure`, an owner who erased their account with no moderator to
  * promote), and the admin surface already queries it. This is the human route
  * onto that same surface.
+ *
+ * ## Who may file (GOV-02)
+ *
+ * ANY roster member, at any role, with ONE exception: the owner themselves.
+ *
+ * Filing used to be restricted to `mod` and `co_owner`, which locked out
+ * exactly the community this feature exists for. A small room whose owner
+ * vanished and who never appointed a moderator has nobody holding either of
+ * those roles, so the report route was dead for every single person in it and
+ * the abandonment had no way to be reported at all. Widening it to the roster
+ * is the fix.
+ *
+ * The owner stays refused, with the same message as before: a community's
+ * owner flagging themselves as absent is not a signal anyone can act on, and
+ * `withdraw` below is their side of this conversation.
+ *
+ * READING the state (`getState`) is open to the whole roster for the same
+ * reason. The client decides whether to show the report control purely from
+ * the server-computed `canOpen` flag, so a plain member who cannot read the
+ * state can never file either, however permissive `open` becomes.
+ *
+ * ## Rate limiting a filing
+ *
+ * Two layers, because they answer two different questions.
+ *
+ * The controller keeps this repo's established `@Throttle` decorator
+ * (`@nestjs/throttler`, bound app-wide as `HttpThrottlerGuard` in
+ * `AppModule`), which is the pattern every throttled write route here
+ * follows. It bounds a BURST. It cannot express the rule this endpoint
+ * actually needs: it keys on client IP, lumping a shared network into one
+ * bucket, and it stores its counters in process memory, so they reset on every
+ * deploy.
+ *
+ * The durable rule therefore lives in this service, read straight off
+ * `community_owner_review_requests`: one member may file at most ONE owner
+ * review across ALL communities in a rolling 24 hours, counted by
+ * `requestedByUserId` + `createdAt`, answered as a 429. Opening filing to
+ * every roster member is what makes it necessary. Staff are few; members are
+ * not, and one motivated person could otherwise flag every room they belong to
+ * in a single sitting and bury the platform-staff queue.
+ *
+ * The count deliberately ignores STATUS, so withdrawing a request does not
+ * hand back the allowance. A file-and-withdraw loop would otherwise defeat the
+ * whole limit.
  *
  * ## Writing to the community row from here
  *
@@ -91,16 +144,22 @@ export class CommunityOwnerReviewService {
   ) {}
 
   /**
-   * The current state for a community's own staff (owner, co-owner or
-   * moderator). The owner is included as a READER on purpose: a request filed
-   * about them is not a secret, and seeing it is what prompts the "I am still
-   * here" withdrawal below.
+   * The current state for anyone on the community's roster.
+   *
+   * Member-tier rather than staff-tier since GOV-02: `canOpen` is what the
+   * client renders its report control from, so gating the READ at moderator
+   * level would keep the widened filing rule invisible to every member it was
+   * widened for.
+   *
+   * The owner is included as a reader on purpose: a request filed about them
+   * is not a secret, and seeing it is what prompts the "I am still here"
+   * withdrawal below.
    */
   async getState(
     slug: string,
     userId: string,
   ): Promise<CommunityOwnerReviewStateDTO> {
-    const { community, membership } = await resolveStaffCommunity(
+    const { community, membership } = await resolveMemberCommunity(
       this.communities,
       this.members,
       slug,
@@ -110,11 +169,16 @@ export class CommunityOwnerReviewService {
   }
 
   /**
-   * File an owner-review request (moderators and co-owners).
+   * File an owner-review request. Open to ANY roster member since GOV-02, at
+   * any role, except the owner.
    *
    * The owner is refused: a community's owner flagging themselves as absent
    * is not a signal anyone can act on, and the withdrawal route below is their
    * side of this conversation.
+   *
+   * Rate limited per member over a rolling 24 hours across every community, in
+   * addition to the controller's `@Throttle` burst limit. See this service's
+   * doc comment for why both layers exist.
    */
   async open(
     slug: string,
@@ -127,16 +191,19 @@ export class CommunityOwnerReviewService {
       community.id,
       userId,
     );
-    if (
-      membership.role !== RosterRole.Mod &&
-      membership.role !== RosterRole.CoOwner
-    ) {
+    // Read the owner from BOTH sources, the same pairing `withdraw` and
+    // `buildState` use: `communities.owner_id` is the owner of record, and the
+    // roster row is what a community's own surfaces render from. Either one
+    // saying "owner" is enough to refuse.
+    const isViewerTheOwner =
+      community.ownerId === userId || membership.role === RosterRole.Owner;
+    if (isViewerTheOwner) {
       throw new ForbiddenException(
-        membership.role === RosterRole.Owner
-          ? 'A community owner cannot file an owner review for their own community'
-          : 'Only a moderator or co-owner can file an owner review',
+        'A community owner cannot file an owner review for their own community',
       );
     }
+
+    await this.assertMemberFilingWindowIsClear(userId);
 
     const alreadyOpen = await this.openRequestFor(community.id);
     if (alreadyOpen) {
@@ -182,15 +249,20 @@ export class CommunityOwnerReviewService {
   }
 
   /**
-   * Withdraw the open request, by the moderator who filed it or by the
+   * Withdraw the open request, by the member who filed it or by the
    * community's owner.
    *
    * The owner withdrawing is the "I am still here" signal, so that route also
    * clears `needsOwnerReviewAt` and takes the community off the admin queue.
    * A requester withdrawing does NOT clear it: that same column is set by the
-   * automatic orphan path for a community with no owner at all, and a
-   * moderator taking their own request back must not be able to erase that
-   * flag. Platform staff clear it from their own surface.
+   * automatic orphan path for a community with no owner at all, and by the
+   * daily owner-inactivity sweep (`CommunityOwnerInactivityService`), and
+   * whoever filed a request must not be able to erase either of those flags by
+   * taking their own request back. Platform staff clear it from their own
+   * surface.
+   *
+   * Withdrawing does NOT restore the filer's 24-hour filing allowance, which
+   * is counted on `createdAt` regardless of a request's final status.
    */
   async withdraw(
     slug: string,
@@ -213,7 +285,7 @@ export class CommunityOwnerReviewService {
       community.ownerId === userId || membership.role === RosterRole.Owner;
     if (!isRequester && !isOwner) {
       throw new ForbiddenException(
-        'Only the moderator who filed this review, or the community owner, can withdraw it',
+        'Only the member who filed this review, or the community owner, can withdraw it',
       );
     }
 
@@ -230,6 +302,38 @@ export class CommunityOwnerReviewService {
     }
 
     return this.buildState(community, membership, userId, saved);
+  }
+
+  /**
+   * The durable per-member filing limit: one owner review across ALL
+   * communities in a rolling 24 hours, or a 429.
+   *
+   * `HttpException` with `HttpStatus.TOO_MANY_REQUESTS` rather than
+   * `@nestjs/throttler`'s own `ThrottlerException`, which is only throwable
+   * from inside a guard and carries a fixed "ThrottlerException: Too Many
+   * Requests" message. This rule is a product rule about a person and a day,
+   * so it gets a message that says so.
+   *
+   * Counted on `createdAt` with no status filter on purpose: see this
+   * service's doc comment. Served by the existing
+   * `community_owner_review_requests` scan, which is a small staff-facing
+   * table; if it ever grows, the index to add is
+   * (`requested_by_user_id`, `created_at`).
+   */
+  private async assertMemberFilingWindowIsClear(userId: string): Promise<void> {
+    const windowStartedAt = new Date(Date.now() - MEMBER_FILING_WINDOW_MS);
+    const recentFilingCount = await this.reviewRequests.count({
+      where: {
+        requestedByUserId: userId,
+        createdAt: MoreThanOrEqual(windowStartedAt),
+      },
+    });
+    if (recentFilingCount > 0) {
+      throw new HttpException(
+        'You can file one owner review a day. Please try again tomorrow.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
   }
 
   private async openRequestFor(
@@ -265,10 +369,7 @@ export class CommunityOwnerReviewService {
       : null;
 
     const isOpen = request?.status === CommunityOwnerReviewRequestStatus.Open;
-    const canFile =
-      membership.role === RosterRole.Mod ||
-      membership.role === RosterRole.CoOwner;
-    const isOwner =
+    const isViewerTheOwner =
       community.ownerId === viewerUserId ||
       membership.role === RosterRole.Owner;
 
@@ -279,9 +380,16 @@ export class CommunityOwnerReviewService {
       needsOwnerReviewAt: community.needsOwnerReviewAt
         ? community.needsOwnerReviewAt.toISOString()
         : null,
-      canOpen: canFile && !isOpen,
+      // Two conditions only, since GOV-02: on the roster and not the owner
+      // (a `membership` in hand already proves the first), and no request
+      // currently open. The 24-hour per-member filing limit is deliberately
+      // NOT folded in here: it would cost an extra count query on every read
+      // of this surface to hide a control the member is usually entitled to,
+      // and a member who does hit it gets a 429 that explains itself.
+      canOpen: !isViewerTheOwner && !isOpen,
       canWithdraw:
-        isOpen && (isOwner || request?.requestedByUserId === viewerUserId),
+        isOpen &&
+        (isViewerTheOwner || request?.requestedByUserId === viewerUserId),
     };
   }
 
@@ -294,7 +402,7 @@ export class CommunityOwnerReviewService {
    * active users holding a staff role. A suspended moderator stops being staff
    * the moment their account changes state, so they stop being paged too.
    *
-   * The requesting moderator is carried in the payload as `actorId` (which is
+   * The requesting member is carried in the payload as `actorId` (which is
    * what the notification type's docstring specifies) but is deliberately NOT
    * passed as `createForRecipients`'s `actorId` ARGUMENT, unlike the
    * community-scoped fan-outs. That argument applies the recipient's block and

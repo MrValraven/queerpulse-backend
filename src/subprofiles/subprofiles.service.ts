@@ -27,7 +27,7 @@ import { MediaCropService } from '../media-crops/media-crops.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { storageKeyOwnerId } from '../storage/storage-key';
 import { CreateSubprofileDTO } from './dto/create-subprofile.dto';
-import { ListDirectoryQuery } from './dto/list-directory.query';
+import { ListSubprofileDirectoryQuery } from './dto/list-directory.query';
 import { SubprofileItemInputDTO } from './dto/replace-items.dto';
 import { UpdateSubprofileDTO } from './dto/update-subprofile.dto';
 import { SubprofileAffiliation } from './entities/subprofile-affiliation.entity';
@@ -87,6 +87,10 @@ import {
   SUBPROFILE_DELETED,
   SubprofileDeletedEvent,
 } from './subprofile.events';
+import {
+  SUBPROFILE_PUBLISHED,
+  SubprofilePublishedEvent,
+} from '../profiles/activity.listener';
 
 // Hard cap on the serialized size of an owner-supplied jsonb payload
 // (`structured` per item, `skinData` on the persona) — Personas redesign
@@ -1140,9 +1144,14 @@ export class SubprofilesService {
     // and as the read side), not one lookup per item.
     const ownerIdsToBlockCheck: string[] = [];
     for (const event of eventRows) {
+      // `hostId` is null once the host's account is erased
+      // (`SetNullContentAuthorFksOnUserErasure1794610000000`): the same shape
+      // an ownerless community already has below: no user left to block-check
+      // against, so it is skipped.
       if (
         event.status === EventStatus.Published &&
-        event.visibility !== EventVisibility.InviteOnly
+        event.visibility !== EventVisibility.InviteOnly &&
+        event.hostId !== null
       ) {
         ownerIdsToBlockCheck.push(event.hostId);
       }
@@ -1173,7 +1182,7 @@ export class SubprofilesService {
           !event ||
           event.status !== EventStatus.Published ||
           event.visibility === EventVisibility.InviteOnly ||
-          blockedOwnerIds.has(event.hostId)
+          (event.hostId !== null && blockedOwnerIds.has(event.hostId))
         ) {
           throw new BadRequestException(
             `Affiliation target not found or not visible: ${label}`,
@@ -1258,6 +1267,15 @@ export class SubprofilesService {
       sp.handle = null;
       sp.status = SubprofileStatus.Published;
       await this.saveSubprofile(sp);
+      // The profiles `ActivityListener` records a "Published a persona" row
+      // from this. It re-reads the persona and applies its own gate (published,
+      // `open` visibility, LINKED, not removed), so that rule lives in exactly
+      // one place and emitting on every publish is correct: an unlinked persona
+      // is dropped there rather than being filtered twice.
+      this.eventEmitter.emit(SUBPROFILE_PUBLISHED, {
+        subprofileId: sp.id,
+        ownerUserId: sp.userId,
+      } satisfies SubprofilePublishedEvent);
       return toSubprofileDTO(
         sp,
         items,
@@ -1306,6 +1324,15 @@ export class SubprofilesService {
       throw err;
     }
     sp.status = SubprofileStatus.Published;
+    // The profiles `ActivityListener` records a "Published a persona" row
+    // from this. It re-reads the persona and applies its own gate (published,
+    // `open` visibility, LINKED, not removed), so that rule lives in exactly
+    // one place and emitting on every publish is correct: an unlinked persona
+    // is dropped there rather than being filtered twice.
+    this.eventEmitter.emit(SUBPROFILE_PUBLISHED, {
+      subprofileId: sp.id,
+      ownerUserId: sp.userId,
+    } satisfies SubprofilePublishedEvent);
     return toSubprofileDTO(
       sp,
       items,
@@ -1429,7 +1456,7 @@ export class SubprofilesService {
   // Directory of standalone (unlinked + published + open) personas. Delegates
   // to the extracted public-read service.
   directory(
-    query: ListDirectoryQuery,
+    query: ListSubprofileDirectoryQuery,
     viewerId: string,
   ): Promise<{
     items: SubprofileCardView[];

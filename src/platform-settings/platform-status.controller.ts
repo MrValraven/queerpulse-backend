@@ -8,7 +8,11 @@ import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { LockdownExempt } from '../common/lockdown-exempt.decorator';
 import { AnnouncementDismissalService } from './announcement-dismissal.service';
 import { PlatformSettingsService } from './platform-settings.service';
-import { CURRENT_GUIDELINES_VERSION } from '../users/users.service';
+import {
+  CURRENT_GUIDELINES_VERSION,
+  CURRENT_PRIVACY_POLICY_VERSION,
+  CURRENT_TERMS_VERSION,
+} from '../consent/policy-versions';
 import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 /** The public projection. Deliberately narrower than the entity. */
@@ -27,6 +31,20 @@ export interface PlatformStatusView {
    * drifting out of sync.
    */
   guidelinesVersion: string;
+  /**
+   * The Terms of Service revision currently in effect, and the Privacy Policy
+   * revision cookie consent pins to. Same reason as `guidelinesVersion` above,
+   * generalised (ID-14): all three now live in ONE backend file
+   * (`consent/policy-versions.ts`) and the frontend reads them here rather than
+   * keeping literals of its own that drift — which is exactly what had already
+   * happened to the privacy version (frontend `3.4`, backend `3.3`).
+   *
+   * Served on this PUBLIC endpoint, not only on `/auth/me`, because the
+   * surfaces that need them run with no session: the cookie banner, the
+   * request-invite form's 18+ attestation, and the sign-in page.
+   */
+  termsVersion: string;
+  privacyPolicyVersion: string;
   /**
    * Sitewide announcement banner (ADM-25). Already accounts for
    * `announcementExpiresAt` having passed — an expired announcement reports
@@ -100,6 +118,8 @@ export class PlatformStatusController {
       lockdownMessage: settings.lockdownMessage,
       registrationClosedMessage: settings.registrationClosedMessage,
       guidelinesVersion: CURRENT_GUIDELINES_VERSION,
+      termsVersion: CURRENT_TERMS_VERSION,
+      privacyPolicyVersion: CURRENT_PRIVACY_POLICY_VERSION,
       announcementEnabled: announcementActive,
       announcementMessage: announcementActive
         ? settings.announcementMessage

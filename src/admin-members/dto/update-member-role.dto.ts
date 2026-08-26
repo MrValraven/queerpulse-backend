@@ -8,7 +8,7 @@ import { UserRole } from '../../users/entities/user.entity';
  * role you want. `@IsEnum` rejects anything outside `member`/`moderator`/`admin`
  * before the service runs, so the guardrails only ever see a valid target.
  */
-export class UpdateMemberRoleDto {
+export class UpdatePlatformMemberRoleDto {
   @IsEnum(UserRole)
   role!: UserRole;
 }

@@ -43,6 +43,24 @@ export interface ConnectionListItem {
   direction: 'incoming' | 'outgoing' | 'connected';
   requestMessage: string | null;
   requestReason: string | null;
+  /**
+   * Whether the VIEWER is the one who sent this request. Once a connection is
+   * accepted, `direction` collapses to "connected" and the request's own words
+   * lose their author, so the card cannot tell "you reached out about
+   * collaborating" from "they did" without this.
+   *
+   * `requestMessage` / `requestReason` stay visible to both parties, which is
+   * what the request flow implies: the requester chose them, the addressee is
+   * who they were written for, and nobody else is ever in a connection.
+   */
+  isRequestedByYou: boolean;
+  /**
+   * The VIEWER'S OWN private note about this connection, or null when they have
+   * not written one. Never the other party's note: the loader that fills this
+   * only ever reads rows whose `authorId` is the viewer, so a note belonging to
+   * anyone else is not in memory to be mapped here.
+   */
+  note: string | null;
   createdAt: Date;
   respondedAt: Date | null;
   member: ConnectionMemberView;
@@ -60,6 +78,10 @@ export function toConnectionListItem(
   otherProfile: Profile | undefined,
   relationship: ConnectionRelationship,
   introducerProfile?: Profile,
+  // The viewer's own note, already filtered to `authorId = viewerUserId` by the
+  // caller. Optional so the single-connection create path (which has no note by
+  // definition) needs no extra argument.
+  viewerNote?: string | null,
 ): ConnectionListItem {
   // From the viewer's perspective: an incoming pending request is one where the
   // viewer is the addressee; outgoing is one they sent; accepted is "connected".
@@ -75,6 +97,8 @@ export function toConnectionListItem(
     direction,
     requestMessage: conn.requestMessage,
     requestReason: conn.requestReason,
+    isRequestedByYou: conn.requesterId === viewerUserId,
+    note: viewerNote ?? null,
     createdAt: conn.createdAt,
     respondedAt: conn.respondedAt,
     member: {

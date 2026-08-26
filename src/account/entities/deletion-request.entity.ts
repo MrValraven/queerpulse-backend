@@ -64,6 +64,30 @@ export class DeletionRequest {
   processedAt!: Date | null;
 
   /**
+   * When the "your account is deleted in N days" final warning was sent, or
+   * NULL if it has not been.
+   *
+   * This column exists to make that warning fire ONCE. It is emitted from
+   * `AccountDeletionProcessorService`, which is a DAILY cron: without a marker,
+   * every member inside the warning window would be told again every morning
+   * for the rest of their grace period, which is the opposite of a kindness.
+   *
+   * Claimed with a conditional UPDATE (`finalWarningSentAt IS NULL` in the
+   * WHERE), the same way `eraseDueAccounts` claims a row by its status, so two
+   * replicas ticking at the same instant cannot both send. Stamped BEFORE the
+   * notification is created: a warning that was claimed and then failed to
+   * deliver is a missing notification, while the other ordering is a member
+   * warned twice, and only one of those is recoverable by the member reading
+   * the delete-account page they are being pointed at anyway.
+   *
+   * Added by `AddIntakeAndDsarNotificationTypes1794660000000`. NULL on every
+   * pre-existing row, deliberately un-backfilled: a member already inside the
+   * window when the column landed is owed the warning they never got.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  finalWarningSentAt!: Date | null;
+
+  /**
    * The `users.status` held when the grace period opened. Opening a deletion
    * request sets `users.status = Deactivated` — that is what makes the
    * "everything is hidden now" line in the delete-account UI true rather than

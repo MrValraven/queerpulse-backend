@@ -22,6 +22,7 @@ import { CreateStorySubmissionDto } from './dto/create-story-submission.dto';
 import { ListArticlesQuery } from './dto/list-articles.query';
 import { ListDecksQuery } from './dto/list-decks.query';
 import { ListReaderCommentsQuery } from './dto/list-reader-comments.query';
+import { UpdateAuthorDto } from './dto/update-author.dto';
 import { UpdateReaderCommentDto } from './dto/update-reader-comment.dto';
 import { MagazineReaderCommentsService } from './magazine-reader-comments.service';
 import { MagazineService } from './magazine.service';
@@ -52,8 +53,13 @@ export class MagazineController {
   ) {}
 
   @Get('issues')
-  @ApiOperation({ summary: 'List magazine issues' })
-  @ApiOkResponse({ description: 'All magazine issues.' })
+  @ApiOperation({ summary: 'List published magazine issues' })
+  @ApiOkResponse({
+    description:
+      'Published issues only, newest number first. An issue with no publish ' +
+      'date, or one dated in the future, stays embargoed until it ships — ' +
+      'the desk sees those through `GET /magazine/admin/issues`.',
+  })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
@@ -62,9 +68,12 @@ export class MagazineController {
   }
 
   @Get('issues/:number')
-  @ApiOperation({ summary: 'Get a magazine issue by number' })
+  @ApiOperation({ summary: 'Get a published magazine issue by number' })
   @ApiOkResponse({ description: 'The issue.' })
-  @ApiNotFoundResponse({ description: 'No issue with that number.' })
+  @ApiNotFoundResponse({
+    description:
+      'No published issue with that number (an embargoed issue 404s).',
+  })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
@@ -83,14 +92,23 @@ export class MagazineController {
   }
 
   @Get('articles/:slug')
-  @ApiOperation({ summary: 'Get a magazine article by slug' })
-  @ApiOkResponse({ description: 'The article.' })
+  @ApiOperation({
+    summary: 'Get a magazine article by slug, in the reader’s language',
+  })
+  @ApiOkResponse({
+    description:
+      'The article. CON-16: with `?lang=`, a published translation in that ' +
+      'language is served in place of the addressed piece, and the response ' +
+      'states its own `slug` so the caller can correct the URL. Asking for a ' +
+      'language the piece is not in returns it as written; `translations` ' +
+      'lists every language it does exist in.',
+  })
   @ApiNotFoundResponse({ description: 'No article with that slug.' })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
-  getArticle(@Param('slug') slug: string) {
-    return this.magazineService.getArticleBySlug(slug);
+  getArticle(@Param('slug') slug: string, @Query('lang') lang?: string) {
+    return this.magazineService.getArticleBySlug(slug, lang);
   }
 
   @Get('sections')
@@ -134,6 +152,55 @@ export class MagazineController {
   })
   listAuthors() {
     return this.magazineService.listAuthors();
+  }
+
+  // Declared BEFORE `authors/:slug`: Nest matches routes in declaration
+  // order, so a literal segment registered after the wildcard would never be
+  // reached ("me" would resolve as an author slug).
+  @Get('authors/me')
+  @ApiOperation({
+    summary: "The caller's own magazine byline, or null if they have none",
+  })
+  @ApiOkResponse({
+    description:
+      'The byline linked to the caller, or null when they have never been credited.',
+  })
+  getMyAuthor(@CurrentUser() user: CurrentUserData) {
+    return this.magazineService.getAuthorForUser(user.userId);
+  }
+
+  @Patch('authors/me')
+  @UseGuards(NotRestrictedGuard)
+  @ApiOperation({
+    summary: 'Edit your own author bio and portrait (CON-11)',
+  })
+  @ApiOkResponse({ description: 'The updated byline.' })
+  @ApiForbiddenResponse({
+    description: 'A moderation restriction is currently in effect.',
+  })
+  @ApiNotFoundResponse({
+    description: 'The caller has no magazine byline yet.',
+  })
+  updateMyAuthor(
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: UpdateAuthorDto,
+  ) {
+    return this.magazineService.updateOwnAuthor(user.userId, dto, user.userId);
+  }
+
+  // The "Writing" surface on a member profile (CON-11). Nullable by design —
+  // most members have never written for the magazine — so consume it with
+  // `apiGetNullable` on the FE.
+  @Get('authors/by-member/:memberSlug')
+  @ApiOperation({
+    summary: "A member's magazine byline, addressed by their profile slug",
+  })
+  @ApiOkResponse({
+    description:
+      'The byline, or null when this member has never been credited.',
+  })
+  getAuthorForMember(@Param('memberSlug') memberSlug: string) {
+    return this.magazineService.getAuthorForMemberSlug(memberSlug);
   }
 
   @Get('authors/:slug')
@@ -218,6 +285,7 @@ export class MagazineController {
   }
 
   @Patch('comments/:id')
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Edit a reader comment (author only)' })
   @ApiOkResponse({ description: 'The updated comment.' })
   @ApiForbiddenResponse({

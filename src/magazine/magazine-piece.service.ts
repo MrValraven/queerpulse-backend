@@ -6,21 +6,15 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Not, Repository } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
 import { normalizePage, Paginated } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
-import { MailerService } from '../mailer/mailer.service';
-import {
-  NEWSLETTER_DIGEST_DUE,
-  NewsletterDigestDueEvent,
-} from '../newsletter/newsletter.events';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
-import { User, UserRole } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { CreateArticleCommentDto } from './dto/create-article-comment.dto';
 import { CreateCorrectionDto } from './dto/create-correction.dto';
@@ -65,6 +59,7 @@ import {
 } from './entities/magazine-issue.entity';
 import { MagazineLetter } from './entities/magazine-letter.entity';
 import { MagazinePayment } from './entities/magazine-payment.entity';
+import { DEFAULT_MAGAZINE_CURRENCY } from './magazine-money';
 import { MagazinePieceEvent } from './entities/magazine-piece-event.entity';
 import { MagazinePieceMessage } from './entities/magazine-piece-message.entity';
 import { MagazinePiece } from './entities/magazine-piece.entity';
@@ -156,6 +151,15 @@ const RECENT_ACTIVITY_LIMIT = 20;
  * (Magazine Desk Phase 7, Task B1) — matches the ArchiveTab's page size.
  */
 const ARCHIVE_SEARCH_LIMIT = 20;
+
+/**
+ * How many members one `createForRecipients` call announces a shipped issue to
+ * (CON-05). Matches the community post fan-out's chunk size: each call is
+ * already batched internally into one multi-row INSERT plus two filter
+ * queries, and chunking keeps a membership-wide announcement off a single
+ * enormous statement.
+ */
+const ISSUE_ANNOUNCE_CHUNK_SIZE = 500;
 
 /**
  * The human actors in an event trail, ready for `resolveActorDisplayNames`.
@@ -254,11 +258,6 @@ export class MagazinePieceService {
     private readonly profiles: Repository<Profile>,
     private readonly dataSource: DataSource,
     private readonly notifications: NotificationsService,
-    private readonly mailer: MailerService,
-    // Publishing announces "this issue's digest is due" and returns; the
-    // newsletter module owns the subscriber list, the ledger and the sending.
-    // See `sendDigestIfScheduled`.
-    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   /**
@@ -446,6 +445,19 @@ export class MagazinePieceService {
       article.socialImage,
       article.blocks,
     );
+    // CON-04 — the lead art is a stored article image too, so an editor
+    // re-saving a draft whose hero a DIFFERENT editor uploaded is allowed,
+    // while pointing it at a new foreign upload is not.
+    if (article.heroImageKey) {
+      storedArticleImageRefs.push(article.heroImageKey);
+    }
+    if (dto.heroImageKey !== undefined) {
+      assertNoForeignUploadIntroduced(
+        actorId,
+        dto.heroImageKey,
+        storedArticleImageRefs,
+      );
+    }
     if (dto.socialImage !== undefined) {
       assertNoForeignUploadIntroduced(
         actorId,
@@ -492,6 +504,14 @@ export class MagazinePieceService {
         : {}),
       ...(dto.socialImage !== undefined
         ? { socialImage: dto.socialImage }
+        : {}),
+      // CON-04. Arrives as a bare storage key, or as the resolved
+      // `/files/<key>` URL the editor's upload field was seeded with — the
+      // global `StorageKeyOwnershipInterceptor` has already collapsed the
+      // latter back to a key by the time this runs, so the column stays
+      // canonical either way.
+      ...(dto.heroImageKey !== undefined
+        ? { heroImageKey: dto.heroImageKey }
         : {}),
       ...(dto.canonicalUrl !== undefined
         ? { canonicalUrl: dto.canonicalUrl }
@@ -619,13 +639,27 @@ export class MagazinePieceService {
     if (!payment) {
       payment = this.payments.create({
         pieceId,
-        fee: dto.fee ?? '',
+        currency: dto.currency ?? DEFAULT_MAGAZINE_CURRENCY,
+        feeAmount: dto.fee ?? null,
       });
     }
 
     Object.assign(payment, {
-      ...(dto.fee !== undefined ? { fee: dto.fee } : {}),
-      ...(dto.expenses !== undefined ? { expenses: dto.expenses } : {}),
+      // CON-18 — `fee`/`expenses` arrive as validated decimal strings and go
+      // straight into `numeric` columns; the desk's own wording keeps its own
+      // fields. An empty string clears the amount rather than storing "" in a
+      // numeric column, which Postgres would reject.
+      ...(dto.fee !== undefined ? { feeAmount: dto.fee || null } : {}),
+      ...(dto.feeText !== undefined ? { feeText: dto.feeText || null } : {}),
+      ...(dto.expenses !== undefined
+        ? { expensesAmount: dto.expenses || null }
+        : {}),
+      ...(dto.expensesText !== undefined
+        ? { expensesText: dto.expensesText || null }
+        : {}),
+      ...(dto.currency !== undefined
+        ? { currency: dto.currency.toUpperCase() }
+        : {}),
       ...(dto.invoice !== undefined ? { invoice: dto.invoice } : {}),
       ...(dto.filedOn !== undefined ? { filedOn: dto.filedOn } : {}),
       ...(dto.terms !== undefined ? { terms: dto.terms } : {}),
@@ -1659,8 +1693,12 @@ export class MagazinePieceService {
   }
 
   /**
-   * Replaces the members' digest/social curation wholesale (spec §7.5
-   * Task 2) — a straight jsonb overwrite, mirroring `updateCover` below.
+   * Replaces the issue-panel/social curation wholesale (spec §7.5 Task 2) — a
+   * straight jsonb overwrite, mirroring `updateCover` below.
+   *
+   * The `digest` column name is historical (CON-05 retired the members' email
+   * digest); the data is now what the issue's public "In this issue" panel
+   * renders, and `sendOnPublish` toggles the in-app announcement on ship.
    */
   async updateDigest(
     issueNumber: string,
@@ -1673,23 +1711,6 @@ export class MagazinePieceService {
     }
     await this.issues.save(issue);
     return this.getIssueProduction(issueNumber);
-  }
-
-  /**
-   * Sends a one-off preview of the issue's current members' digest to the
-   * caller's own inbox (CNT-6 "Send test"). Reuses the `digest_test` mail
-   * template; a real SMTP delivery failure is left to bubble up (not
-   * swallowed) so the desk's toast reports a genuine failure rather than a
-   * false success.
-   */
-  async sendDigestTest(issueNumber: string, toEmail: string): Promise<void> {
-    const issue = await this.loadIssueOr404(issueNumber);
-    const items = await this.resolveDigestMailItems(issue);
-    await this.mailer.send(toEmail, 'digest_test', {
-      issueNumber: issue.number,
-      issueTitle: issue.title,
-      items,
-    });
   }
 
   /**
@@ -1850,85 +1871,85 @@ export class MagazinePieceService {
       shippedPieces = pieces;
     });
 
-    // Outside the transaction, deliberately: this is a best-effort external
-    // send to potentially many subscribers, and it must never hold the
-    // piece-publishing transaction open (or roll it back) if mail delivery is
-    // slow or fails. `sendDigestIfScheduled` re-checks `digestSentAt` itself,
-    // so this is safe to call on every ship — it only ever sends once.
-    await this.sendDigestIfScheduled(shippedIssue, shippedPieces);
+    // Outside the transaction, deliberately: the announcement is best-effort
+    // fan-out across the whole membership and must never hold the
+    // piece-publishing transaction open (or roll it back).
+    // `announceIssueIfScheduled` re-checks `digestSentAt` itself, so this is
+    // safe to call on every ship — it only ever announces once.
+    await this.announceIssueIfScheduled(shippedIssue);
 
     return toIssueProduction(shippedIssue, shippedPieces);
   }
 
   /**
-   * CNT-6 "Schedule with issue": the real dispatch behind the toggle. Fires
-   * from `shipIssue` right after a ship actually publishes pieces — there is
-   * no cron in this module, so shipping IS the scheduled moment.
+   * CON-05. The real dispatch behind the issue panel's "announce with the
+   * issue" toggle. Fires from `shipIssue` right after a ship actually
+   * publishes pieces — there is no cron in this module, so shipping IS the
+   * scheduled moment.
    *
-   * Two independent guards keep a re-ship (the issue's publish gate can be hit
-   * more than once as later pieces clear it) from mailing anyone twice:
-   * `digestSentAt === null` here, and the ledger's own UNIQUE keys in
-   * `NewsletterDigestService.queueDigest`. Delivery itself belongs to the
-   * newsletter module's drain cron, not to this request.
+   * THIS USED TO SEND EMAIL. Shipping emitted `newsletter.digest_due`, which
+   * wrote one ledger row per confirmed newsletter subscriber, and a
+   * once-a-minute cron in the newsletter module drained that queue through
+   * `mailer.send(..., 'digest', ...)`. QueerPulse delivers no email and never
+   * will, so shipping an issue with SMTP configured would have started mailing
+   * members. The queue, the cron and the `digest`/`digest_test` templates are
+   * deleted; this is the replacement, and it is in-app only.
+   *
+   * The desk's curation work survives untouched: the `digest` jsonb (the
+   * curated order and the per-piece blurbs) is what
+   * `MagazineIssueContentsService` renders on the issue's public page, which
+   * is where this notification deep-links.
+   *
+   * ONE announcement per issue, ever. `digestSentAt === null` is the guard —
+   * the issue's publish gate can be hit more than once as later pieces clear
+   * it, and a re-ship must not re-ring every member's bell. Failures are
+   * swallowed: the issue has already shipped and its pieces are already
+   * published by the time this runs, and a bell that did not ring is never
+   * worth failing a ship over.
    */
-  private async sendDigestIfScheduled(
-    issue: MagazineIssue,
-    pieces: MagazinePiece[],
-  ): Promise<void> {
+  private async announceIssueIfScheduled(issue: MagazineIssue): Promise<void> {
     if (!issue.digestSendOnPublish || issue.digestSentAt !== null) {
       return;
     }
 
-    const items = this.resolveDigestMailItemsFromPieces(issue, pieces);
-    // QUEUE, don't send. This used to loop the whole confirmed subscriber list
-    // and await an SMTP round trip each, right here in the publish request:
-    // `subscribers x up to 16s` of blocked request time, and because
-    // `digestSentAt` was stamped only after the last one, a proxy timeout or a
-    // restart part-way through left the issue looking unsent and re-mailed
-    // everyone who had already received it on the next ship. There was no
-    // per-subscriber record either way.
-    //
-    // `emitAsync` awaits the listener, so `digestSentAt` is stamped only once
-    // the mailing is DURABLY queued (`newsletter_digest_sends`, one row per
-    // subscriber). Queueing is idempotent on the issue, so a re-ship is a
-    // no-op rather than a second mailing.
-    await this.eventEmitter.emitAsync(NEWSLETTER_DIGEST_DUE, {
-      issueId: issue.id,
-      issueNumber: issue.number,
-      issueTitle: issue.title,
-      items,
-    } satisfies NewsletterDigestDueEvent);
-
-    issue.digestSentAt = new Date();
-    await this.issues.save(issue);
-  }
-
-  /** `sendDigestTest` variant: loads the issue's own pieces first. */
-  private async resolveDigestMailItems(
-    issue: MagazineIssue,
-  ): Promise<{ title: string; blurb: string }[]> {
-    const pieces = await this.pieces.find({ where: { issueId: issue.id } });
-    return this.resolveDigestMailItemsFromPieces(issue, pieces);
-  }
-
-  /**
-   * Resolves the issue's curated (`on: true`) digest entries to
-   * `{ title, blurb }` mail rows, dropping any entry whose piece no longer
-   * resolves (deleted, or genuinely missing a title) rather than mailing a
-   * blank line.
-   */
-  private resolveDigestMailItemsFromPieces(
-    issue: MagazineIssue,
-    pieces: MagazinePiece[],
-  ): { title: string; blurb: string }[] {
-    const pieceById = new Map(pieces.map((piece) => [piece.id, piece]));
-    return issue.digest
-      .filter((item) => item.on)
-      .map((item) => ({
-        title: pieceById.get(item.pieceId)?.title ?? '',
-        blurb: item.blurb,
-      }))
-      .filter((item) => item.title.length > 0);
+    try {
+      // Everyone who can read the magazine. `isSystem` accounts (the
+      // QueerPulse house account) are excluded — nobody reads their bell.
+      const recipientRows = await this.users.find({
+        where: { status: UserStatus.Active, isSystem: false },
+        select: { id: true },
+      });
+      const recipientIds = recipientRows.map((row) => row.id);
+      const payload = {
+        source: 'magazine',
+        issueNumber: issue.number,
+        issueTitle: issue.title,
+      };
+      // Chunked, like every other membership-wide fan-out: one multi-row
+      // INSERT per chunk rather than a create per member.
+      for (
+        let offset = 0;
+        offset < recipientIds.length;
+        offset += ISSUE_ANNOUNCE_CHUNK_SIZE
+      ) {
+        await this.notifications.createForRecipients(
+          recipientIds.slice(offset, offset + ISSUE_ANNOUNCE_CHUNK_SIZE),
+          NotificationType.MagazineIssuePublished,
+          payload,
+        );
+      }
+      // Stamped only after the fan-out completed, so a crash mid-announce
+      // leaves the issue re-announceable rather than silently half-announced.
+      issue.digestSentAt = new Date();
+      await this.issues.save(issue);
+      this.logger.log(
+        `Announced issue ${issue.number} to ${recipientIds.length} member(s)`,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Issue ${issue.number} announcement fan-out failed: ${String(error)}`,
+      );
+    }
   }
 
   /**
@@ -1969,7 +1990,7 @@ export class MagazinePieceService {
       deck.slides,
     );
 
-    const authorId = await this.resolveAuthorId(piece.byline);
+    const authorId = await this.resolveAuthorId(piece.byline, piece.writerId);
     const slug = await allocateUniqueSlug(
       slugify(piece.title, 'draft'),
       async (candidate) =>
@@ -2803,7 +2824,7 @@ export class MagazinePieceService {
       return this.loadArticleOr404(piece.articleId);
     }
 
-    const authorId = await this.resolveAuthorId(piece.byline);
+    const authorId = await this.resolveAuthorId(piece.byline, piece.writerId);
     const slug = await allocateUniqueSlug(
       slugify(piece.title, 'draft'),
       async (candidate) => {
@@ -2846,17 +2867,33 @@ export class MagazinePieceService {
    * Finds or creates the `MagazineAuthor` byline row for a piece's free-text
    * `byline` field. `MagazineArticle.authorId` is a NOT NULL foreign key to
    * `magazine_author`, but a commissioned `MagazinePiece` only ever carries a
-   * `byline` string (spec §3.1) — bylines are seeded editorial content, not
-   * member accounts (see `MagazineAuthor`'s doc comment), so there's no
-   * existing id to reuse. Keyed by the slugified byline so the same writer's
-   * name resolves to the same author row across pieces.
+   * `byline` string (spec §3.1), so there's no existing id to reuse. Keyed by
+   * the slugified byline so the same writer's name resolves to the same
+   * author row across pieces.
+   *
+   * CON-11: when the piece's assigned writer is a member whose display name
+   * IS this byline, the row is linked to their account (`userId`), which is
+   * what makes the byline a real person — the author page links to their
+   * profile, their profile credits the piece, and they can edit their own
+   * author bio. A byline that doesn't match stays free text, so a
+   * non-member contributor and a pen name both keep working.
    */
-  private async resolveAuthorId(byline: string): Promise<string> {
+  private async resolveAuthorId(
+    byline: string,
+    writerUserId: string | null,
+  ): Promise<string> {
     const name = byline.trim().length > 0 ? byline.trim() : 'Staff writer';
     const slug = slugify(name, 'staff-writer');
+    const memberUserId = await this.bylineMemberUserId(slug, writerUserId);
 
     const existing = await this.authors.findOne({ where: { slug } });
     if (existing) {
+      // Backfill only: an existing link is left alone, so a staff editor's
+      // deliberate link/unlink is never silently reversed by the next piece.
+      if (memberUserId !== null && existing.userId === null) {
+        existing.userId = memberUserId;
+        await this.authors.save(existing);
+      }
       return existing.id;
     }
 
@@ -2865,8 +2902,40 @@ export class MagazinePieceService {
       name,
       bio: null,
       avatarUrl: null,
+      userId: memberUserId,
     });
     await this.authors.save(author);
     return author.id;
+  }
+
+  /**
+   * The member account to link a byline to, or `null` to leave it free text.
+   *
+   * Deliberately strict. `piece.writerId` alone is not enough: a desk editor
+   * files under "Staff writer" or a photographer's name all the time, and
+   * linking those to whoever happened to be assigned would credit the wrong
+   * person on their own profile. So the byline must slugify to the same value
+   * as the writer's own display name, and the member must not already hold a
+   * different byline (`magazine_author.user_id` is uniquely indexed).
+   */
+  private async bylineMemberUserId(
+    bylineSlug: string,
+    writerUserId: string | null,
+  ): Promise<string | null> {
+    if (!writerUserId) return null;
+    const profile = await this.profiles.findOne({
+      where: { userId: writerUserId },
+    });
+    if (!profile) return null;
+    if (slugify(toActorDisplayName(profile), 'member') !== bylineSlug) {
+      return null;
+    }
+    const alreadyLinked = await this.authors.findOne({
+      where: { userId: writerUserId },
+    });
+    if (alreadyLinked && alreadyLinked.slug !== bylineSlug) {
+      return null;
+    }
+    return writerUserId;
   }
 }

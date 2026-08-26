@@ -1,12 +1,15 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { LessThanOrEqual } from 'typeorm';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { MagazineArticle } from './entities/magazine-article.entity';
 import { MagazineAuthor } from './entities/magazine-author.entity';
+import { MagazineCorrection } from './entities/magazine-correction.entity';
 import { MagazineDeck } from './entities/magazine-deck.entity';
 import { MagazineIssue } from './entities/magazine-issue.entity';
 import { MagazineSection } from './entities/magazine-section.entity';
 import { MediaCropService } from '../media-crops/media-crops.service';
+import { Profile } from '../users/entities/profile.entity';
 import { MagazineService } from './magazine.service';
 
 type QueryBuilderMock = {
@@ -38,6 +41,31 @@ function makeQueryBuilder(
   return qb;
 }
 
+/**
+ * CON-11: `listAuthors`/`getAuthorBySlug` run ONE grouped published-piece
+ * count through `articles.createQueryBuilder`. Default it to an empty result
+ * so the author tests exercise the mapping, not the counting.
+ */
+type CountQueryBuilderMock = {
+  select: jest.Mock;
+  addSelect: jest.Mock;
+  where: jest.Mock;
+  andWhere: jest.Mock;
+  groupBy: jest.Mock;
+  getRawMany: jest.Mock;
+};
+
+function makeCountQueryBuilder(): CountQueryBuilderMock {
+  const qb = {} as CountQueryBuilderMock;
+  qb.select = jest.fn().mockReturnValue(qb);
+  qb.addSelect = jest.fn().mockReturnValue(qb);
+  qb.where = jest.fn().mockReturnValue(qb);
+  qb.andWhere = jest.fn().mockReturnValue(qb);
+  qb.groupBy = jest.fn().mockReturnValue(qb);
+  qb.getRawMany = jest.fn().mockResolvedValue([]);
+  return qb;
+}
+
 const AUTHOR: MagazineAuthor = {
   id: 'author-1',
   slug: 'sofia',
@@ -54,6 +82,29 @@ const ISSUE: MagazineIssue = {
   publishedOn: '2026-06-06',
   coverUrl: null,
 } as MagazineIssue;
+
+/**
+ * Chainable stub for the CON-02 corrections query builder. Every call returns
+ * itself so the service's `.innerJoin().where().andWhere().orderBy()` chain
+ * runs; `getMany` is what the test controls.
+ */
+interface CorrectionsQueryBuilderStub {
+  innerJoin: jest.Mock;
+  where: jest.Mock;
+  andWhere: jest.Mock;
+  orderBy: jest.Mock;
+  addOrderBy: jest.Mock;
+  getMany: jest.Mock;
+}
+
+const correctionsQueryBuilder: CorrectionsQueryBuilderStub = {
+  innerJoin: jest.fn(() => correctionsQueryBuilder),
+  where: jest.fn(() => correctionsQueryBuilder),
+  andWhere: jest.fn(() => correctionsQueryBuilder),
+  orderBy: jest.fn(() => correctionsQueryBuilder),
+  addOrderBy: jest.fn(() => correctionsQueryBuilder),
+  getMany: jest.fn().mockResolvedValue([]),
+};
 
 const ARTICLE: MagazineArticle = {
   id: 'article-1',
@@ -77,6 +128,10 @@ describe('MagazineService', () => {
   let authors: { find: jest.Mock; findOne: jest.Mock };
   let issues: { find: jest.Mock; findOne: jest.Mock };
   let sections: { find: jest.Mock };
+  // CON-02 published corrections on the public article read.
+  let corrections: { createQueryBuilder: jest.Mock };
+  // CON-11 byline -> member link.
+  let profiles: { find: jest.Mock; findOne: jest.Mock };
   let decks: {
     find: jest.Mock;
     findOne: jest.Mock;
@@ -86,12 +141,21 @@ describe('MagazineService', () => {
 
   beforeEach(async () => {
     articles = {
-      createQueryBuilder: jest.fn(),
+      createQueryBuilder: jest.fn(() => makeCountQueryBuilder()),
       findOne: jest.fn(),
     };
     authors = { find: jest.fn().mockResolvedValue([]), findOne: jest.fn() };
     issues = { find: jest.fn().mockResolvedValue([]), findOne: jest.fn() };
     sections = { find: jest.fn().mockResolvedValue([]) };
+    // CON-02 — the article read joins published corrections through the staff
+    // piece record. Default: this article has never been corrected.
+    corrections = {
+      createQueryBuilder: jest.fn(() => correctionsQueryBuilder),
+    };
+    profiles = {
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(null),
+    };
     decks = {
       find: jest.fn(),
       findOne: jest.fn(),
@@ -112,6 +176,11 @@ describe('MagazineService', () => {
           useValue: decks,
         },
         { provide: getRepositoryToken(MagazineSection), useValue: sections },
+        {
+          provide: getRepositoryToken(MagazineCorrection),
+          useValue: corrections,
+        },
+        { provide: getRepositoryToken(Profile), useValue: profiles },
         {
           provide: MediaCropService,
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
@@ -135,8 +204,13 @@ describe('MagazineService', () => {
       ]);
       // The perf change projects only the columns `toIssueResponse` reads
       // (never the issue-production `runOrder`/`digest`/`coverlines` jsonb),
-      // still ordered newest-issue-first.
+      // still ordered newest-issue-first. CON-18 added the embargo gate:
+      // `published_on <= today`, so an unshipped or scheduled issue never
+      // reaches the public archive.
       expect(issues.find).toHaveBeenCalledWith({
+        where: {
+          publishedOn: LessThanOrEqual(new Date().toISOString().slice(0, 10)),
+        },
         select: {
           number: true,
           title: true,
@@ -155,6 +229,19 @@ describe('MagazineService', () => {
       await expect(service.getIssueByNumber('99')).rejects.toBeInstanceOf(
         NotFoundException,
       );
+    });
+
+    // CON-18: an embargoed issue is unreachable by number, not merely absent
+    // from the archive list.
+    it('gates the lookup on published_on <= today', async () => {
+      issues.findOne.mockResolvedValue(ISSUE);
+      await service.getIssueByNumber('09');
+      expect(issues.findOne).toHaveBeenCalledWith({
+        where: {
+          number: '09',
+          publishedOn: LessThanOrEqual(new Date().toISOString().slice(0, 10)),
+        },
+      });
     });
 
     it('returns the mapped issue when found', async () => {
@@ -185,6 +272,7 @@ describe('MagazineService', () => {
               handle: 'sofia',
               displayName: 'Sofia Andrade',
               avatarUrl: 'https://example.com/sofia.jpg',
+              memberSlug: null,
             },
             issueNumber: '09',
             tags: ['Lisbon', 'Community'],
@@ -297,12 +385,17 @@ describe('MagazineService', () => {
           handle: 'sofia',
           displayName: 'Sofia Andrade',
           avatarUrl: 'https://example.com/sofia.jpg',
+          memberSlug: null,
         },
         issueNumber: '09',
         tags: ['Lisbon', 'Community'],
         readMinutes: 12,
         publishedAt: '2026-06-06T00:00:00.000Z',
         body: 'Full article body text.',
+        contentNotes: [],
+        corrections: [],
+        socialImage: null,
+        heroImageUrl: null,
       });
     });
 
@@ -325,6 +418,9 @@ describe('MagazineService', () => {
           name: 'Sofia Andrade',
           bio: 'Writes about queer life in Lisbon.',
           avatarUrl: 'https://example.com/sofia.jpg',
+          // CON-11: unlinked byline (`userId` null) and no published pieces.
+          memberSlug: null,
+          pieceCount: 0,
         },
       ]);
     });
@@ -345,6 +441,8 @@ describe('MagazineService', () => {
         name: 'Sofia Andrade',
         bio: 'Writes about queer life in Lisbon.',
         avatarUrl: 'https://example.com/sofia.jpg',
+        memberSlug: null,
+        pieceCount: 0,
       });
     });
   });

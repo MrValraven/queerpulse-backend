@@ -17,7 +17,7 @@ import { SubprofileKind } from '../entities/subprofile.entity';
 export const DIRECTORY_DEFAULT_LIMIT = 40;
 export const DIRECTORY_MAX_LIMIT = 100;
 
-export class ListDirectoryQuery {
+export class ListSubprofileDirectoryQuery {
   @IsOptional() @IsEnum(SubprofileKind) kind?: SubprofileKind;
 
   @IsOptional() @IsString() @MaxLength(100) query?: string;

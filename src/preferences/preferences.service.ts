@@ -1,18 +1,28 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { CurrentUserData } from '../auth/decorators/current-user.decorator';
+import { PublicEligibilityService } from '../public-eligibility/public-eligibility.service';
 import { UpdatePublicProfileDto } from './dto/update-public-profile.dto';
 import { UpdateWorkPreferencesDto } from './dto/update-work-preferences.dto';
+import { UpdateLoginAlertsDto } from './dto/update-login-alerts.dto';
+import { UpdatePushPreviewsDto } from './dto/update-push-previews.dto';
 import {
+  DEFAULT_HIDE_PUSH_PREVIEWS,
+  DEFAULT_LOGIN_ALERTS_ENABLED,
   DEFAULT_OUT_AT_WORK,
   DEFAULT_PUBLIC_PROFILE_ENABLED,
   DEFAULT_SAFE_ONLY,
   MemberPreferences,
 } from './entities/member-preferences.entity';
 import {
+  LoginAlertsDTO,
   PublicProfileDTO,
+  PushPreviewsDTO,
   WorkPreferencesDTO,
+  toLoginAlertsDTO,
   toPublicProfileDTO,
+  toPushPreviewsDTO,
   toWorkPreferencesDTO,
 } from './preferences-response';
 import { normalizeTransSupport } from './trans-support';
@@ -24,6 +34,7 @@ export class PreferencesService {
   constructor(
     @InjectRepository(MemberPreferences)
     private readonly preferences: Repository<MemberPreferences>,
+    private readonly publicEligibility: PublicEligibilityService,
   ) {}
 
   // The unsaved shape a member who has never opened either settings page gets.
@@ -40,6 +51,8 @@ export class PreferencesService {
     row.skills = [];
     row.focusAreas = [];
     row.publicProfileEnabled = DEFAULT_PUBLIC_PROFILE_ENABLED;
+    row.loginAlertsEnabled = DEFAULT_LOGIN_ALERTS_ENABLED;
+    row.hidePushPreviews = DEFAULT_HIDE_PUSH_PREVIEWS;
     return row;
   }
 
@@ -77,7 +90,7 @@ export class PreferencesService {
     return toPublicProfileDTO(await this.loadOrDefault(userId));
   }
 
-  // ⚠️ THIS NOW PUBLISHES TO THE OPEN WEB. `publicProfileEnabled` stopped being
+  // ⚠️ THIS PUBLISHES TO THE OPEN WEB. `publicProfileEnabled` stopped being
   // inert when `GET /public/profiles/:slug` landed: it is the gate on that
   // unauthenticated route (`PublicProfilesService.getBySlug`). Setting it true
   // makes the member's name, pronouns, tagline, avatar, bio, links and work
@@ -87,13 +100,92 @@ export class PreferencesService {
   //
   // Setting it false un-publishes immediately: the public route holds no cache
   // and sends `Cache-Control: no-store`, so the next request 404s.
+  //
+  // THE GATE IS ASYMMETRIC, DELIBERATELY.
+  //
+  // Turning it ON runs `PublicEligibilityService.assertMayGoPublic`, which is
+  // the single source of truth for the rule (verified, 90 days of tenure, 100
+  // points, standing). It throws 403 with a coarse reason code. Until this
+  // landed the switch was assigned straight from the DTO, so a member of one
+  // day, or a stolen session, could publish to the open internet with one API
+  // call while the whole rule sat in frontend JavaScript.
+  //
+  // Turning it OFF is ALWAYS allowed, and runs no check at all. A member who
+  // has become ineligible, been suspended, or deactivated their account still
+  // has to be able to un-publish. Making the safety direction conditional on
+  // standing would take the control away at the exact moment it matters most.
   async updatePublicProfile(
-    userId: string,
+    user: CurrentUserData,
     dto: UpdatePublicProfileDto,
   ): Promise<PublicProfileDTO> {
-    const row = await this.loadOrDefault(userId);
+    if (dto.enabled) {
+      await this.publicEligibility.assertMayGoPublic(user);
+    }
+
+    const row = await this.loadOrDefault(user.userId);
     row.publicProfileEnabled = dto.enabled;
 
     return toPublicProfileDTO(await this.preferences.save(row));
+  }
+
+  // --- Account security -----------------------------------------------------
+
+  async getLoginAlerts(userId: string): Promise<LoginAlertsDTO> {
+    return toLoginAlertsDTO(await this.loadOrDefault(userId));
+  }
+
+  /**
+   * Turn the new-device sign-in alert on or off.
+   *
+   * Merged onto `loadOrDefault` like every other writer here, so flipping this
+   * never clobbers `publicProfileEnabled` or the work settings sharing the row.
+   *
+   * This switch governs DELIVERY only. `AuthService.issueTokens` reads it
+   * before emitting `SECURITY_NEW_SIGN_IN`, so switching it off writes no bell
+   * row and sends no push — but the device label and the session itself are
+   * still recorded, and `/account/sessions` still lists every device. A member
+   * who wants quiet does not thereby lose the record.
+   */
+  async updateLoginAlerts(
+    userId: string,
+    dto: UpdateLoginAlertsDto,
+  ): Promise<LoginAlertsDTO> {
+    const row = await this.loadOrDefault(userId);
+    row.loginAlertsEnabled = dto.enabled;
+
+    return toLoginAlertsDTO(await this.preferences.save(row));
+  }
+
+  // --- Lock-screen privacy --------------------------------------------------
+
+  async getPushPreviews(userId: string): Promise<PushPreviewsDTO> {
+    return toPushPreviewsDTO(await this.loadOrDefault(userId));
+  }
+
+  /**
+   * Hide or show what a push notification says on a lock screen.
+   *
+   * Merged onto `loadOrDefault` like every other writer here, so flipping this
+   * never clobbers `publicProfileEnabled`, `loginAlertsEnabled` or the work
+   * settings sharing the row.
+   *
+   * Unlike `updateLoginAlerts` this suppresses NOTHING. Every notification is
+   * still written and still delivered; `PushPreviewPrivacyService` reads this
+   * column on the send path and decides whether the payload may name a sender.
+   * The app shows everything once it is open and unlocked.
+   *
+   * It applies to every device the member is signed in on, which is the whole
+   * reason it lives here rather than in the browser: the version of this that
+   * shipped first was an IndexedDB flag the service worker read, and iOS never
+   * runs that code. See `DEFAULT_HIDE_PUSH_PREVIEWS`.
+   */
+  async updatePushPreviews(
+    userId: string,
+    dto: UpdatePushPreviewsDto,
+  ): Promise<PushPreviewsDTO> {
+    const row = await this.loadOrDefault(userId);
+    row.hidePushPreviews = dto.hidePreviews;
+
+    return toPushPreviewsDTO(await this.preferences.save(row));
   }
 }

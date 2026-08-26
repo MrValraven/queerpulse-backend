@@ -18,13 +18,19 @@ import {
 import {
   Event,
   EventStatus,
+  EventVenueConfirmation,
   EventVisibility,
 } from '../events/entities/event.entity';
+import { emptyAccessibilityAnswers } from '../listings/listing-accessibility';
 import { ConnectionsService } from '../connections/connections.service';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { BlockFilterService } from '../social/block-filter.service';
+import { TopicFollow } from '../topics/entities/topic-follow.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
+import { FeedInteractionsService } from './feed-interactions.service';
+import { FeedMuteService } from './feed-mute.service';
+import { decodeRankedCursor } from './feed-ranked-cursor';
 import { FeedItem } from './feed-response';
 import { FeedService } from './feed.service';
 
@@ -114,6 +120,7 @@ const baseThread = (overrides: Partial<ForumThread> = {}): ForumThread => ({
   isLocked: false,
   lockReason: null,
   isOfficial: false,
+  acceptedPostId: null,
   replyCount: 3,
   lastActivityAt: t('2026-07-10T00:00:00.000Z'),
   createdAt: t('2026-07-09T00:00:00.000Z'),
@@ -132,7 +139,20 @@ const baseEvent = (overrides: Partial<Event> = {}): Event => ({
   endAt: null,
   timezone: 'Europe/Lisbon',
   venue: 'Livraria Trama',
+  address: null,
+  arrivalNotes: null,
+  neighbourhood: null,
+  language: null,
+  eventType: null,
+  accessibilityAnswers: emptyAccessibilityAnswers(),
+  accessibilityNote: '',
+  cost: null,
   listingId: null,
+  venueConfirmation: EventVenueConfirmation.Pending,
+  venueConfirmedAt: null,
+  venueOwnerNotifiedAt: null,
+  venueDetachedListingId: null,
+  venueDetachedAt: null,
   communityId: null,
   isOnline: false,
   onlineUrl: null,
@@ -280,9 +300,12 @@ describe('FeedService', () => {
   let forumThreads: { createQueryBuilder: jest.Mock };
   let events: { createQueryBuilder: jest.Mock };
   let profiles: { find: jest.Mock; createQueryBuilder: jest.Mock };
-  let communityMembers: { createQueryBuilder: jest.Mock };
+  let communityMembers: { createQueryBuilder: jest.Mock; find: jest.Mock };
+  let topicFollows: { find: jest.Mock };
   let blockFilter: { hiddenUserIds: jest.Mock };
   let connectionsService: { allAcceptedConnectionUserIds: jest.Mock };
+  let feedInteractions: { forPosts: jest.Mock };
+  let feedMutes: { mutedSources: jest.Mock };
 
   beforeEach(async () => {
     communityPosts = { createQueryBuilder: jest.fn(() => qbStub()) };
@@ -293,7 +316,14 @@ describe('FeedService', () => {
       find: jest.fn().mockResolvedValue([]),
       createQueryBuilder: jest.fn(() => qbStub()),
     };
-    communityMembers = { createQueryBuilder: jest.fn(() => qbStub()) };
+    // `find` backs the viewer's own memberships, one of the three explicit
+    // graph facts the ranked "All" tab scores on (SOC-04). Empty by default,
+    // so every pre-existing test sees the unchanged chronological order.
+    communityMembers = {
+      createQueryBuilder: jest.fn(() => qbStub()),
+      find: jest.fn().mockResolvedValue([]),
+    };
+    topicFollows = { find: jest.fn().mockResolvedValue([]) };
     // `dropBlocked` now resolves the whole page's hidden authors in one batched
     // `hiddenUserIds(viewerId, authorIds)` call (union of blocked + muted),
     // returning a Set, rather than one `isBlockedEitherWay`/`isMutedBy` call
@@ -307,6 +337,15 @@ describe('FeedService', () => {
     // `getFeed` only invokes it when `resolvedTab === 'connections'`.
     connectionsService = {
       allAcceptedConnectionUserIds: jest.fn().mockResolvedValue([]),
+    };
+    // SOC-04: reaction/reply state for the page's community posts. Empty map
+    // = "nobody has touched these posts", which every card falls back to.
+    feedInteractions = { forPosts: jest.fn().mockResolvedValue(new Map()) };
+    // SOC-18: nothing muted by default.
+    feedMutes = {
+      mutedSources: jest
+        .fn()
+        .mockResolvedValue({ communityIds: [], forumThreadIds: [] }),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -324,8 +363,11 @@ describe('FeedService', () => {
           provide: getRepositoryToken(CommunityMember),
           useValue: communityMembers,
         },
+        { provide: getRepositoryToken(TopicFollow), useValue: topicFollows },
         { provide: BlockFilterService, useValue: blockFilter },
         { provide: ConnectionsService, useValue: connectionsService },
+        { provide: FeedInteractionsService, useValue: feedInteractions },
+        { provide: FeedMuteService, useValue: feedMutes },
       ],
     }).compile();
     service = module.get(FeedService);
@@ -999,7 +1041,9 @@ describe('FeedService', () => {
     expect(page.data[0]).toMatchObject({
       type: 'community_post',
       title: 'Trans & Non-Binary Network',
-      link: '/community/trans-nb-network',
+      // SOC-02: the card links to the post's own permalink, not the top of
+      // the community timeline it happens to sit in.
+      link: '/community/trans-nb-network/post/post-1',
       actor: { handle: 'ava', displayName: 'Ava Lee', avatarUrl: null },
     });
   });
@@ -1021,5 +1065,331 @@ describe('FeedService', () => {
       link: '/feed',
     });
     expect(communities.find).not.toHaveBeenCalled();
+  });
+
+  describe('"all" tab affinity ranking (SOC-04)', () => {
+    // Only three inputs are allowed here, all of them explicit facts the
+    // member created: they joined a community, they accepted a connection,
+    // they followed a topic. There is no behavioural signal anywhere in this
+    // path and there must never be one.
+    const oldPostFromMyCommunity = basePost({
+      id: 'post-mine',
+      communityId: 'community-1',
+      authorId: 'stranger',
+      createdAt: t('2026-07-01T00:00:00.000Z'),
+    });
+    const newestStrangerThread = baseThread({
+      id: 'thread-stranger',
+      authorId: 'stranger',
+      communityId: null,
+      createdAt: t('2026-07-20T00:00:00.000Z'),
+    });
+
+    it('lifts an item from a community the viewer joined above a newer unrelated one', async () => {
+      communityMembers.find.mockResolvedValue([
+        baseCommunityMember({ userId: 'viewer-1', communityId: 'community-1' }),
+      ]);
+      communityPosts.createQueryBuilder.mockReturnValue(
+        qbStub([oldPostFromMyCommunity]),
+      );
+      forumThreads.createQueryBuilder.mockReturnValue(
+        qbStub([newestStrangerThread]),
+      );
+      communities.find.mockResolvedValue([baseCommunity()]);
+
+      const page = await service.getFeed('viewer-1', 'all', undefined);
+
+      expect(page.data.map((item) => item.id)).toEqual([
+        'post-mine',
+        'thread-stranger',
+      ]);
+    });
+
+    it('says WHY an item is there, naming the community the viewer is in', async () => {
+      communityMembers.find.mockResolvedValue([
+        baseCommunityMember({ userId: 'viewer-1', communityId: 'community-1' }),
+      ]);
+      communityPosts.createQueryBuilder.mockReturnValue(
+        qbStub([oldPostFromMyCommunity]),
+      );
+      communities.find.mockResolvedValue([baseCommunity()]);
+
+      const page = await service.getFeed('viewer-1', 'all', undefined);
+
+      expect(page.data[0]).toMatchObject({
+        reason: 'membership',
+        reasonSubject: 'Trans & Non-Binary Network',
+      });
+    });
+
+    it("scores an accepted connection's post, and names them as the reason", async () => {
+      connectionsService.allAcceptedConnectionUserIds.mockResolvedValue([
+        'author-1',
+      ]);
+      communityPosts.createQueryBuilder.mockReturnValue(
+        qbStub([
+          basePost({
+            id: 'post-from-friend',
+            communityId: null,
+            authorId: 'author-1',
+            createdAt: t('2026-07-01T00:00:00.000Z'),
+          }),
+        ]),
+      );
+      forumThreads.createQueryBuilder.mockReturnValue(
+        qbStub([newestStrangerThread]),
+      );
+      profiles.find.mockResolvedValue([baseProfile()]);
+
+      const page = await service.getFeed('viewer-1', 'all', undefined);
+
+      expect(page.data[0]).toMatchObject({
+        id: 'post-from-friend',
+        reason: 'connection',
+        reasonSubject: 'Ava Lee',
+      });
+    });
+
+    it("scores a followed topic off the thread's own tags", async () => {
+      topicFollows.find.mockResolvedValue([
+        { id: 'follow-1', userId: 'viewer-1', topicSlug: 'housing' },
+      ]);
+      forumThreads.createQueryBuilder.mockReturnValue(
+        qbStub([
+          baseThread({
+            id: 'thread-housing',
+            tags: ['housing'],
+            createdAt: t('2026-07-01T00:00:00.000Z'),
+          }),
+          baseThread({
+            id: 'thread-other',
+            tags: ['gardening'],
+            createdAt: t('2026-07-20T00:00:00.000Z'),
+          }),
+        ]),
+      );
+
+      const page = await service.getFeed('viewer-1', 'all', undefined);
+
+      expect(page.data[0]).toMatchObject({
+        id: 'thread-housing',
+        reason: 'topic',
+        reasonSubject: 'housing',
+      });
+    });
+
+    it('keeps a chronological lane, so unscored items still reach the page', async () => {
+      // Four items the viewer has an explicit tie to, one they do not. With a
+      // 3:1 weave the unrelated item must still appear on the first page
+      // rather than being buried behind every scored item.
+      communityMembers.find.mockResolvedValue([
+        baseCommunityMember({ userId: 'viewer-1', communityId: 'community-1' }),
+      ]);
+      const mine = [1, 2, 3, 4].map((index) =>
+        basePost({
+          id: `post-mine-${index}`,
+          communityId: 'community-1',
+          createdAt: t(`2026-07-0${index}T00:00:00.000Z`),
+        }),
+      );
+      communityPosts.createQueryBuilder.mockReturnValue(qbStub(mine));
+      forumThreads.createQueryBuilder.mockReturnValue(
+        qbStub([
+          baseThread({
+            id: 'thread-unrelated',
+            communityId: null,
+            createdAt: t('2026-06-01T00:00:00.000Z'),
+          }),
+        ]),
+      );
+      communities.find.mockResolvedValue([baseCommunity()]);
+
+      const page = await service.getFeed('viewer-1', 'all', undefined, 5);
+      const ids = page.data.map((item) => item.id);
+
+      // Three scored items, then the oldest unscored one, then the rest.
+      expect(ids.indexOf('thread-unrelated')).toBe(3);
+      expect(ids).toHaveLength(5);
+    });
+
+    it('leaves a member with no memberships, connections or follows in pure reverse-chronological order', async () => {
+      communityPosts.createQueryBuilder.mockReturnValue(
+        qbStub([
+          basePost({
+            id: 'post-old',
+            createdAt: t('2026-07-01T00:00:00.000Z'),
+          }),
+        ]),
+      );
+      forumThreads.createQueryBuilder.mockReturnValue(
+        qbStub([
+          baseThread({
+            id: 'thread-new',
+            createdAt: t('2026-07-20T00:00:00.000Z'),
+          }),
+        ]),
+      );
+      communities.find.mockResolvedValue([baseCommunity()]);
+
+      const page = await service.getFeed('viewer-1', 'all', undefined);
+
+      expect(page.data.map((item) => item.id)).toEqual([
+        'thread-new',
+        'post-old',
+      ]);
+      expect(page.data[0]).toMatchObject({ reason: 'recent' });
+    });
+
+    it('pages through a ranked window by offset before advancing the window', async () => {
+      const rows = [1, 2, 3, 4].map((index) =>
+        basePost({
+          id: `p${index}`,
+          createdAt: t(`2026-07-2${index}T00:00:00.000Z`),
+        }),
+      );
+      communityPosts.createQueryBuilder.mockReturnValue(qbStub(rows));
+      communities.find.mockResolvedValue([baseCommunity()]);
+
+      const page = await service.getFeed('viewer-1', 'all', undefined, 2);
+
+      expect(page.pageInfo.hasMore).toBe(true);
+      // The window holds all four rows (limit 2 x 3 pages), so the next
+      // request stays on the same window and just moves the offset.
+      const decoded = decodeRankedCursor(page.pageInfo.nextCursor as string);
+      expect(decoded).toEqual({ windowCursor: undefined, offset: 2 });
+    });
+
+    it('treats a plain pre-ranking cursor as the start of a window rather than rejecting it', async () => {
+      const legacyCursor = encodeCursor({
+        createdAt: t('2026-07-10T00:00:00.000Z'),
+        id: 'post-9',
+      });
+      const qb = qbStub([]);
+      communityPosts.createQueryBuilder.mockReturnValue(qb);
+
+      await service.getFeed('viewer-1', 'all', legacyCursor, 5);
+
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('< (:cursorCreatedAt, :cursorId)'),
+        { cursorCreatedAt: t('2026-07-10T00:00:00.000Z'), cursorId: 'post-9' },
+      );
+    });
+  });
+
+  describe('inline card actions (SOC-04)', () => {
+    it("carries reaction/reply counts and the viewer's own reaction on a community post", async () => {
+      communityPosts.createQueryBuilder.mockReturnValue(
+        qbStub([basePost({ id: 'post-1' })]),
+      );
+      communities.find.mockResolvedValue([baseCommunity()]);
+      feedInteractions.forPosts.mockResolvedValue(
+        new Map([
+          ['post-1', { reactionCount: 4, replyCount: 2, myReaction: 'like' }],
+        ]),
+      );
+
+      const page = await service.getFeed('viewer-1', 'posts', undefined);
+
+      expect(feedInteractions.forPosts).toHaveBeenCalledWith(
+        ['post-1'],
+        'viewer-1',
+      );
+      expect(page.data[0]).toMatchObject({
+        reactionCount: 4,
+        replyCount: 2,
+        myReaction: 'like',
+      });
+    });
+
+    it('falls back to an empty interaction seed for a post nobody has touched', async () => {
+      communityPosts.createQueryBuilder.mockReturnValue(
+        qbStub([basePost({ id: 'post-1' })]),
+      );
+      communities.find.mockResolvedValue([baseCommunity()]);
+
+      const page = await service.getFeed('viewer-1', 'posts', undefined);
+
+      expect(page.data[0]).toMatchObject({
+        reactionCount: 0,
+        replyCount: 0,
+        myReaction: null,
+      });
+    });
+
+    it("carries a forum thread's stored reply count", async () => {
+      forumThreads.createQueryBuilder.mockReturnValue(
+        qbStub([baseThread({ replyCount: 7 })]),
+      );
+
+      const page = await service.getFeed('viewer-1', 'posts', undefined);
+
+      const thread = page.data.find((item) => item.type === 'forum_thread');
+      expect(thread).toMatchObject({ replyCount: 7 });
+    });
+  });
+
+  describe('feed source mutes (SOC-18)', () => {
+    const predicateOf = (qb: QbStub, needle: string) =>
+      qb.andWhere.mock.calls.find(
+        (call) => typeof call[0] === 'string' && call[0].includes(needle),
+      );
+
+    it('excludes a muted community from posts, threads and gatherings, in-query', async () => {
+      feedMutes.mutedSources.mockResolvedValue({
+        communityIds: ['community-9'],
+        forumThreadIds: [],
+      });
+      const postQb = qbStub([]);
+      const threadQb = qbStub([]);
+      const eventQb = qbStub([]);
+      communityPosts.createQueryBuilder.mockReturnValue(postQb);
+      forumThreads.createQueryBuilder.mockReturnValue(threadQb);
+      events.createQueryBuilder.mockReturnValue(eventQb);
+
+      await service.getFeed('viewer-1', 'all', undefined);
+
+      expect(predicateOf(postQb, 'mutedCommunityIds')?.[1]).toEqual({
+        mutedCommunityIds: ['community-9'],
+      });
+      expect(predicateOf(threadQb, 't.community_id NOT IN')).toBeDefined();
+      expect(predicateOf(eventQb, 'e.community_id NOT IN')).toBeDefined();
+    });
+
+    it('excludes a muted thread by id', async () => {
+      feedMutes.mutedSources.mockResolvedValue({
+        communityIds: [],
+        forumThreadIds: ['thread-9'],
+      });
+      const threadQb = qbStub([]);
+      forumThreads.createQueryBuilder.mockReturnValue(threadQb);
+
+      await service.getFeed('viewer-1', 'posts', undefined);
+
+      expect(predicateOf(threadQb, 't.id NOT IN')?.[1]).toEqual({
+        mutedThreadIds: ['thread-9'],
+      });
+    });
+
+    it('applies mutes on the scoped tabs too, so a muted room stays quiet everywhere', async () => {
+      feedMutes.mutedSources.mockResolvedValue({
+        communityIds: ['community-9'],
+        forumThreadIds: [],
+      });
+      const postQb = qbStub([]);
+      communityPosts.createQueryBuilder.mockReturnValue(postQb);
+
+      await service.getFeed('viewer-1', 'communities', undefined);
+
+      expect(predicateOf(postQb, 'mutedCommunityIds')).toBeDefined();
+    });
+
+    it('emits no mute predicate at all when nothing is muted', async () => {
+      const postQb = qbStub([]);
+      communityPosts.createQueryBuilder.mockReturnValue(postQb);
+
+      await service.getFeed('viewer-1', 'posts', undefined);
+
+      expect(predicateOf(postQb, 'mutedCommunityIds')).toBeUndefined();
+    });
   });
 });

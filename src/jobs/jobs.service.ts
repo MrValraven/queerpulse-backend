@@ -488,7 +488,11 @@ export class JobsService {
       // Tell the poster they have an applicant (skip self — a poster applying
       // to their own posting notifies no one). Best-effort: an application must
       // never fail because its notification did.
-      if (job.posterId !== applicantId) {
+      // A NULL `posterId` is a role whose poster erased their account
+      // (`SetNullContentAuthorFksOnUserErasure1794610000000`); there is nobody
+      // left to notify. `ContentOwnerErasureService` closes such roles on
+      // erasure, so this is only reachable for a role reopened by a moderator.
+      if (job.posterId !== null && job.posterId !== applicantId) {
         try {
           await this.notifications.create(
             job.posterId,
@@ -718,7 +722,9 @@ export class JobsService {
   private async buildDetail(job: Job, viewerId: string): Promise<JobDetailDTO> {
     const [companyRefs, posterProfile, myApplication] = await Promise.all([
       this.companiesService.companyRefsByIds([job.companyId]),
-      this.profiles.findOne({ where: { userId: job.posterId } }),
+      job.posterId === null
+        ? null
+        : this.profiles.findOne({ where: { userId: job.posterId } }),
       this.applications.findOne({
         where: { jobId: job.id, applicantId: viewerId },
       }),

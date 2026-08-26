@@ -7,6 +7,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Put,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -15,10 +16,12 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
+import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateConnectionDto } from './dto/create-connection.dto';
 import { ListConnectionsQuery } from './dto/list-connections.query';
 import { RespondConnectionDto } from './dto/respond-connection.dto';
+import { UpsertConnectionNoteDto } from './dto/upsert-connection-note.dto';
 import { ConnectionsService } from './connections.service';
 import { Throttle, seconds } from '@nestjs/throttler';
 import {
@@ -47,7 +50,8 @@ export class ConnectionsController {
 
   @Get()
   @ApiOperation({
-    summary: 'List your connections (paginated, filtered by tab).',
+    summary:
+      'List your connections (paginated, filtered by tab, searchable, sortable).',
   })
   @ApiOkResponse({ description: 'A page of connection list items.' })
   list(
@@ -73,6 +77,7 @@ export class ConnectionsController {
 
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Post()
+  @UseGuards(NotRestrictedGuard)
   @ApiOperation({ summary: 'Send a connection request.' })
   @ApiCreatedResponse({ description: 'The created request as a list item.' })
   @ApiBadRequestResponse({ description: 'You cannot connect to yourself.' })
@@ -115,6 +120,25 @@ export class ConnectionsController {
     @Body() dto: RespondConnectionDto,
   ) {
     return this.connectionsService.respondView(id, user.userId, dto.action);
+  }
+
+  @Put(':id/note')
+  @ApiOperation({
+    summary: 'Write or clear your private note about this connection.',
+  })
+  @ApiOkResponse({
+    description: 'The stored note, or null when it was cleared.',
+  })
+  @ApiForbiddenResponse({ description: 'Not your connection.' })
+  @ApiNotFoundResponse({ description: 'Connection not found.' })
+  setNote(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: CurrentUserData,
+    @Body() dto: UpsertConnectionNoteDto,
+  ) {
+    // The note is the author's alone. It is written under their own user id and
+    // only ever read back under it, so the other party never sees it.
+    return this.connectionsService.setNote(id, user.userId, dto.body);
   }
 
   @Delete(':id')

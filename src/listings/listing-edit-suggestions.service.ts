@@ -377,6 +377,10 @@ export class ListingEditSuggestionsService {
         }
       }
 
+      // A NULL `ownerId` is an entry whose owner erased their account
+      // (`SetNullContentAuthorFksOnUserErasure1794610000000`); the suggestion
+      // still applies to the venue, there is just nobody to tell about it.
+      if (listing.ownerId === null) return;
       await this.notifications.create(
         listing.ownerId,
         NotificationType.ListingEditSuggestionAccepted,
