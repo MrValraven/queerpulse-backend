@@ -54,8 +54,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * inserted. Both statements run inside this migration's transaction, and the
  * second one re-derives the same deterministic name mapping.
  */
-export class BackfillCollectionsIntoSavedLists1794740000000 implements MigrationInterface {
-  name = 'BackfillCollectionsIntoSavedLists1794740000000';
+export class BackfillCollectionsIntoSavedLists1794740100000 implements MigrationInterface {
+  name = 'BackfillCollectionsIntoSavedLists1794740100000';
 
   /**
    * Shared by both statements below. Produces one row per `collection` with the
@@ -124,7 +124,7 @@ export class BackfillCollectionsIntoSavedLists1794740000000 implements Migration
     // right answer: the default list already holds every item the collection
     // could have referenced.
     await queryRunner.query(`
-      ${BackfillCollectionsIntoSavedLists1794740000000.MAPPING_CTE}
+      ${BackfillCollectionsIntoSavedLists1794740100000.MAPPING_CTE}
       INSERT INTO "saved_lists"
         ("user_id", "name", "is_default", "share_token", "shared_at", "created_at", "updated_at")
       SELECT
@@ -149,7 +149,7 @@ export class BackfillCollectionsIntoSavedLists1794740000000 implements Migration
     // `created_at` carries the filing's own timestamp across, so a migrated
     // list reads in the order the member filed things rather than all at once.
     await queryRunner.query(`
-      ${BackfillCollectionsIntoSavedLists1794740000000.MAPPING_CTE}
+      ${BackfillCollectionsIntoSavedLists1794740100000.MAPPING_CTE}
       INSERT INTO "saved_list_entries" ("list_id", "saved_item_id", "created_at")
       SELECT
         "list"."id",

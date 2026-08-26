@@ -25,7 +25,7 @@ export enum HousingListingStatus {
    * Refused by a moderator, with a required reason. Never publicly browsable.
    * Not a grave: an owner edit that changes moderated content returns the
    * listing to `Review`, so a lister who fixes the problem can be re-reviewed.
-   * Added by `AddHousingModerationDecisionEnums1794720000000`.
+   * Added by `AddHousingModerationDecisionEnums1794720100000`.
    */
   Rejected = 'rejected',
   /**
@@ -33,7 +33,7 @@ export enum HousingListingStatus {
    * `Rejected` so the lister's notification and the console can tell "we never
    * published this" from "we removed something that was published" — different
    * facts, and only one of them was ever visible to the community.
-   * Added by `AddHousingModerationDecisionEnums1794720000000`.
+   * Added by `AddHousingModerationDecisionEnums1794720100000`.
    */
   TakenDown = 'taken_down',
 }

@@ -26,7 +26,7 @@ import {
  * in live mode too, a documented gap rather than a fake success).
  *
  * WHERE THE ROWS COME FROM (SOC-01). The curated starter directory is
- * inserted by `SeedTopics1794701000000` from `src/topics/topics.seed.ts`, in
+ * inserted by `SeedTopics1794701100000` from `src/topics/topics.seed.ts`, in
  * every environment including production. Everything after that is written by
  * the operating team through `admin-topics` (`AdminTopicsController`). There
  * is no `content.seed.ts` on disk and there never was one for this table;

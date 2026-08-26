@@ -14,7 +14,7 @@ import { CreateDateColumn, Entity, Index, PrimaryColumn } from 'typeorm';
  *  - the member themselves, via the Follow toggle on the thread page.
  *
  * The composite primary key is `(threadId, userId)` — see
- * `CreateForumThreadSubscription1794710000000` for why the identity IS the key
+ * `CreateForumThreadSubscription1794710100000` for why the identity IS the key
  * rather than a surrogate uuid. `SnakeNamingStrategy` maps both properties to
  * `thread_id`/`user_id`, so neither carries a `name:`.
  */

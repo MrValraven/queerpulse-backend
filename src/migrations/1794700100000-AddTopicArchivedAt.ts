@@ -23,8 +23,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
-export class AddTopicArchivedAt1794700000000 implements MigrationInterface {
-  name = 'AddTopicArchivedAt1794700000000';
+export class AddTopicArchivedAt1794700100000 implements MigrationInterface {
+  name = 'AddTopicArchivedAt1794700100000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(

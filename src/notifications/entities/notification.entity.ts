@@ -523,7 +523,7 @@ export enum NotificationType {
    * IN-APP PLUS PUSH. QueerPulse sends no email and never will, so nothing
    * about this type may be described as one.
    *
-   * See migration `AddHousingModerationDecisionEnums1794720000000`.
+   * See migration `AddHousingModerationDecisionEnums1794720100000`.
    */
   HousingListingDecision = 'housing_listing_decision',
 

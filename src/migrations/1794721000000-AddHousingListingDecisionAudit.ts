@@ -32,7 +32,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * is small and the queue is staff-only, so a brief write lock is not worth
  * splitting the migration into two phases.
  *
- * Runs AFTER `AddHousingModerationDecisionEnums1794720000000`, which adds the
+ * Runs AFTER `AddHousingModerationDecisionEnums1794720100000`, which adds the
  * `rejected`/`taken_down` labels. Nothing here references them, so the
  * committed-before-use rule for `ALTER TYPE ... ADD VALUE` is not in play.
  */

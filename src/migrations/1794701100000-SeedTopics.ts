@@ -29,8 +29,8 @@ import { topicsSeed } from '../topics/topics.seed';
  *
  * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
-export class SeedTopics1794701000000 implements MigrationInterface {
-  name = 'SeedTopics1794701000000';
+export class SeedTopics1794701100000 implements MigrationInterface {
+  name = 'SeedTopics1794701100000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     for (const topic of topicsSeed) {

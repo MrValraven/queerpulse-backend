@@ -30,8 +30,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * No `CREATE INDEX CONCURRENTLY`: the table is created empty in this same
  * migration, so every index builds on nothing and the file stays transactional.
  */
-export class CreateForumThreadSubscription1794710000000 implements MigrationInterface {
-  name = 'CreateForumThreadSubscription1794710000000';
+export class CreateForumThreadSubscription1794710100000 implements MigrationInterface {
+  name = 'CreateForumThreadSubscription1794710100000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`

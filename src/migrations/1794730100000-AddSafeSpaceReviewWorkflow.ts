@@ -50,8 +50,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * TRANSACTIONAL. Every object is created inside this migration's own
  * transaction, so no `CONCURRENTLY` two-phase split is needed.
  */
-export class AddSafeSpaceReviewWorkflow1794730000000 implements MigrationInterface {
-  name = 'AddSafeSpaceReviewWorkflow1794730000000';
+export class AddSafeSpaceReviewWorkflow1794730100000 implements MigrationInterface {
+  name = 'AddSafeSpaceReviewWorkflow1794730100000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     // --- 1. The nomination review process --------------------------------

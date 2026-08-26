@@ -3,7 +3,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
  * LOC-05 — makes the nominations already in the table readable by the review
- * workflow `AddSafeSpaceReviewWorkflow1794730000000` just added.
+ * workflow `AddSafeSpaceReviewWorkflow1794730100000` just added.
  *
  * Runs as its own migration rather than inside that one because it is DATA, not
  * schema: it has to be reviewable and revertible on its own terms, and it reads
@@ -30,8 +30,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *    exactly what it says it is, breach and all. Silently marking the backlog
  *    acknowledged would be the platform marking its own homework.
  */
-export class BackfillSafeSpaceNominationWorkflow1794731000000 implements MigrationInterface {
-  name = 'BackfillSafeSpaceNominationWorkflow1794731000000';
+export class BackfillSafeSpaceNominationWorkflow1794731100000 implements MigrationInterface {
+  name = 'BackfillSafeSpaceNominationWorkflow1794731100000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`

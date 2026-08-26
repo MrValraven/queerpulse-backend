@@ -34,8 +34,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `AddHousingListingDecisionAudit1794721000000` adds the columns and runs
  * after, and deliberately references none of these labels.
  */
-export class AddHousingModerationDecisionEnums1794720000000 implements MigrationInterface {
-  name = 'AddHousingModerationDecisionEnums1794720000000';
+export class AddHousingModerationDecisionEnums1794720100000 implements MigrationInterface {
+  name = 'AddHousingModerationDecisionEnums1794720100000';
 
   transaction = false as const;
 

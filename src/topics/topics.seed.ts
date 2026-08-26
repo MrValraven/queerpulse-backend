@@ -30,7 +30,7 @@ export interface TopicSeed {
  * refuses to run under `NODE_ENV=production`, so seeding there would leave
  * production with the table created and empty: the directory renders its
  * "no topics" empty state and every topic page 404s, while the meganav and
- * global search keep linking to both. `SeedTopics1794701000000` inserts
+ * global search keep linking to both. `SeedTopics1794701100000` inserts
  * these rows in every environment, and this file stays the single source of
  * the copy so the words cannot drift between the two.
  *
