@@ -1,6 +1,7 @@
 import type { LoggerService } from '@nestjs/common';
 import { DataSource, MigrationExecutor, type QueryRunner } from 'typeorm';
 import type { PostgresConnectionOptions } from 'typeorm/driver/postgres/PostgresConnectionOptions';
+import { reconcileRenamedMigrations } from './renamed-migrations';
 
 const CONTEXT = 'MigrationRunner';
 
@@ -32,7 +33,7 @@ type LockOutcome = 'acquired' | 'applied-elsewhere' | 'timed-out';
  * not run, did not finish, or does not exist in this environment. The app
  * catches the database up itself instead of refusing to start.
  *
- * Three things make that safe to do at boot:
+ * Four things make that safe to do at boot:
  *
  *  1. A Postgres ADVISORY LOCK. Two instances rolling out at once would
  *     otherwise both start the same batch; the second would hit "relation
@@ -46,7 +47,13 @@ type LockOutcome = 'acquired' | 'applied-elsewhere' | 'timed-out';
  *     without being recorded in the ledger, so the retry fails with "already
  *     exists" forever. Dropping the stub first makes the retry rebuild it.
  *
- *  3. A SEPARATE DATA SOURCE for the run. The app's pool sets
+ *  3. A LEDGER RENAME PASS. A migration renumbered after it shipped is recorded
+ *     under a class name no build carries any more, so it reads as pending and
+ *     re-runs its `up()` against a schema that already has the change. Renaming
+ *     the ledger row is the fix; `IF NOT EXISTS` guards on the DDL are not (see
+ *     CLAUDE.md). See renamed-migrations.ts.
+ *
+ *  4. A SEPARATE DATA SOURCE for the run. The app's pool sets
  *     `statement_timeout` (30s by default) on every connection it opens, which
  *     is correct for serving traffic and wrong for a backfill or an index
  *     build, where a migration would be killed mid-way. This one clears the
@@ -91,14 +98,23 @@ export async function applyPendingMigrations(
     }
     isLockHeld = true;
 
-    // Re-read the ledger now that the lock is held: the instance that just
-    // released it may have applied everything.
+    // Before anything is judged pending: bring ledger rows recorded under a
+    // superseded class name up to the name this build carries. A migration that
+    // was renumbered after it shipped is otherwise indistinguishable from one
+    // that never ran, and re-running it fails on the change it already made.
+    const renamedCount = await reconcileRenamedMigrations(lockRunner, logger);
+
+    // Re-read the ledger now that the lock is held and the renames are settled:
+    // the instance that just released it may have applied everything.
     const pending = await new MigrationExecutor(
       dataSource,
     ).getPendingMigrations();
     if (pending.length === 0) {
       logger.log(
-        'Pending migrations were applied by another instance; nothing to do.',
+        renamedCount > 0
+          ? 'Nothing left to apply: the drift was renamed ledger rows, now ' +
+              'reconciled.'
+          : 'Pending migrations were applied by another instance; nothing to do.',
         CONTEXT,
       );
       return;

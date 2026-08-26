@@ -48,6 +48,10 @@ const migrationsDirectory = join(scriptDirectory, '..', 'src', 'migrations');
 //   1794730000000  notification_delivery_prefs | safe_space_nominations/flags
 //   1794731000000  notifications               | safe_space_nominations rows
 //   1794740000000  group_listings/notif enums  | saved_lists rows (backfill)
+// The interim fix (moving the second column of that table into a `...100000`
+// band) reached PRODUCTION before it was reverted, so production recorded those
+// seven under the `...100000` names. `src/database/renamed-migrations.ts` renames
+// those ledger rows at boot. Do not resurrect the `...100000` numbering.
 const allowedDuplicateTimestamps = new Set([
   '1782800650000',
   '1785003000000',
