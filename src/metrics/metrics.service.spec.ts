@@ -38,6 +38,24 @@ describe('MetricsService', () => {
     expect(scrape).toContain('websocket_connections 1');
   });
 
+  // TS-05: a flood-cap refusal writes no report row, so this counter is the
+  // only way a moderation surface sees one.
+  it('counts report flood refusals separately per cap', async () => {
+    const service = new MetricsService(dataSourceWithPool(null));
+
+    service.incrementReportFloodRefusal('daily');
+    service.incrementReportFloodRefusal('daily');
+    service.incrementReportFloodRefusal('subject');
+
+    const scrape = await service.scrape();
+    expect(scrape).toContain(
+      'moderation_report_flood_refusals_total{cap="daily"} 2',
+    );
+    expect(scrape).toContain(
+      'moderation_report_flood_refusals_total{cap="subject"} 1',
+    );
+  });
+
   it('derives pool occupancy from the live pg pool at scrape time', async () => {
     const service = new MetricsService(
       dataSourceWithPool({ totalCount: 10, idleCount: 4, waitingCount: 2 }),

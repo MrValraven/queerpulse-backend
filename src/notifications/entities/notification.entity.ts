@@ -738,6 +738,46 @@ export enum NotificationType {
    * `AddCardSelfRenewAndExpiryWarning1795620000000`.
    */
   CardExpiring = 'card_expiring',
+
+  /**
+   * Sent to PLATFORM STAFF (`users.role` of `moderator` or `admin`) when a
+   * moderation queue crosses its warning or critical threshold, and once more
+   * when that queue comes back to `ok` (TS-04). Raised by
+   * `ModerationQueueAlertService`, an hourly cron in
+   * `admin-moderation-health`.
+   *
+   * The gap it closes: `join-request-sla.ts` computed a due date and the admin
+   * dashboard carried `medianResponseHours`, and nothing anywhere raised its
+   * voice when a queue got deep or a published window passed. On a
+   * volunteer-run platform that means the first sign of moderator burnout is a
+   * queue nobody has opened in a fortnight.
+   *
+   * ONE VALUE COVERS ALL THREE LEVELS. `severity` in the payload is
+   * `ok | warning | critical`, and the copy branches on it, the same choice
+   * `ReportFiled` makes for its four urgency levels rather than minting an
+   * enum value per level. A queue added tomorrow needs no migration either:
+   * `queue` is a code-defined `ModerationQueueKey`.
+   *
+   * STAFF ONLY, AND UNMUTABLE. The recipient list is a role query, so a member
+   * can never receive one. No `NotificationPreferenceCategory`, matching
+   * `ReportFiled`/`ModerationOutcome`: this is duty mail about the platform's
+   * own promises, and a volume control that could swallow it would defeat the
+   * point of having it. Carries NO actor id: there is no person involved, and
+   * an operational alert must never be droppable by a block or mute between
+   * two staff members.
+   *
+   * IN-APP ONLY. Deliberately absent from `PushNotificationListener`'s push
+   * whitelist: queue depth is not worth waking somebody for, and the person it
+   * is for opens the console anyway. QueerPulse sends no email, so nothing
+   * about this type may be described as one.
+   *
+   * Payload carries `{ source: 'moderation', queue, severity, depth,
+   * overdueCount, oldestItemHours }`. `source: 'moderation'` deep-links to the
+   * moderation console, the same value `ReportResolved` and `ModerationOutcome`
+   * already use. `oldestItemHours` is a NUMBER (or null on an empty queue). See
+   * migration `AddModerationQueueAlertNotificationType1795720200000`.
+   */
+  ModerationQueueAlert = 'moderation_queue_alert',
 }
 
 @Entity('notifications')

@@ -27,9 +27,9 @@ import { AccountExportService } from './account-export.service';
 import {
   DeletionRequestResponse,
   DsarResponse,
-  EmailPreferenceResponse,
   ExportJobResponse,
   SessionResponse,
+  exportLinkExpiresAt,
   toDeletionRequestResponse,
   toDsarResponse,
   toExportJobResponse,
@@ -37,17 +37,14 @@ import {
 } from './account-response';
 import {
   DAY_MS,
-  DEFAULT_EMAIL_PREFERENCES,
   DELETION_GRACE_DAYS,
   DSAR_DUE_DAYS,
   EXPORT_REUSE_WINDOW_MS,
-  LOCKED_EMAIL_CATEGORIES,
 } from './account.constants';
 import { DeactivateDto } from './dto/deactivate.dto';
 import { RequestDeletionDto } from './dto/request-deletion.dto';
 import { RequestExportDto } from './dto/request-export.dto';
 import { SubmitDsarDto } from './dto/submit-dsar.dto';
-import { UpdateEmailPreferenceDto } from './dto/update-email-preferences.dto';
 import { AccountDeactivation } from './entities/account-deactivation.entity';
 import { AccountReauthToken } from './entities/account-reauth-token.entity';
 import {
@@ -60,12 +57,7 @@ import {
   DeletionRequestStatus,
 } from './entities/deletion-request.entity';
 import { DsarRequest, DsarStatus } from './entities/dsar-request.entity';
-import { EmailPreference } from './entities/email-preference.entity';
 import { ExportDownload, describeExportDownload } from './export-archive';
-
-// Re-exported for tests/consumers that historically imported the default
-// matrix from this module.
-export { DEFAULT_EMAIL_PREFERENCES };
 
 /** Order-insensitive comparison of two already-de-duplicated category lists. */
 function sameCategorySet(left: string[], right: string[]): boolean {
@@ -85,8 +77,6 @@ export class AccountService {
     private readonly dsarRequests: Repository<DsarRequest>,
     @InjectRepository(DataExportJob)
     private readonly exportJobs: Repository<DataExportJob>,
-    @InjectRepository(EmailPreference)
-    private readonly emailPreferences: Repository<EmailPreference>,
     @InjectRepository(AccountReauthToken)
     private readonly reauthTokens: Repository<AccountReauthToken>,
     @InjectRepository(AccountDeactivation)
@@ -472,8 +462,8 @@ export class AccountService {
    * Every failure mode lives in here, BEFORE the controller writes a single
    * response byte. That ordering is load-bearing for the zip path: once headers
    * are on the wire an exception filter has no status code left to change, so
-   * "not yours" and "not ready" have to be decided while a 404 is still
-   * possible.
+   * "not yours", "not ready" and "expired" have to be decided while a 404 is
+   * still possible.
    */
   async getExportDownload(
     userId: string,
@@ -485,6 +475,39 @@ export class AccountService {
     }
     if (job.status !== DataExportStatus.Ready || !job.data) {
       throw new NotFoundException('Export archive is not ready');
+    }
+    // ENFORCE the expiry this API has been advertising all along. `expiresAt`
+    // on `toExportJobResponse` told the member the link stops working after
+    // EXPORT_LINK_EXPIRY_DAYS, and nothing here checked it, so the link kept
+    // serving until `AccountRetentionService` nulled the payload at
+    // `retention.dataExportArchiveDays`. A member acted on a seven-day promise
+    // while the richest single object in the system stayed fetchable for
+    // thirty.
+    //
+    // THE TWO WINDOWS ARE COMPLEMENTARY, NOT A CONTRADICTION. Do not "fix"
+    // the apparent inconsistency by widening this to match the sweeper:
+    //   - HERE (7 days, EXPORT_LINK_EXPIRY_DAYS): how long the link is honoured.
+    //     Short on purpose. It bounds how long a leaked download URL, a shared
+    //     screen, or a stale browser tab is worth anything.
+    //   - THE SWEEP (30 days, retention.dataExportArchiveDays, see
+    //     AccountRetentionService.expireOldDataExportArchives): when the bytes
+    //     are actually destroyed and the row flips to `expired`.
+    // The gap between them is deliberate slack for the sweeper: it is a cron,
+    // it batches, and it can miss a tick. Access must stop on the promised day
+    // regardless of whether the job that deletes the payload has run yet.
+    //
+    // Refused as a 404 rather than a 410, matching the two refusals above: this
+    // route's whole contract is that every failure resolves to "no file here"
+    // before a single response byte is written (see the note on the zip path
+    // above). The message differs from theirs deliberately: the `{ id, userId }`
+    // lookup already proved ownership, so an expired-versus-absent distinction
+    // is only ever disclosed to the member whose export it is, and telling them
+    // to request a fresh one is more useful than a blank "not found".
+    const expiresAt = exportLinkExpiresAt(job);
+    if (expiresAt !== null && expiresAt.getTime() <= Date.now()) {
+      throw new NotFoundException(
+        'This export download link has expired. Request a new export to download your data again.',
+      );
     }
     return describeExportDownload(job);
   }
@@ -691,48 +714,5 @@ export class AccountService {
     this.eventEmitter.emit(USER_SESSION_REVOKED, {
       userId,
     } satisfies UserSessionRevokedEvent);
-  }
-
-  // --- Email preferences ------------------------------------------------------
-
-  async getEmailPreferences(
-    userId: string,
-  ): Promise<EmailPreferenceResponse[]> {
-    const rows = await this.emailPreferences.find({ where: { userId } });
-    const overrides = new Map(rows.map((r) => [r.category, r.enabled]));
-    return Object.entries(DEFAULT_EMAIL_PREFERENCES).map(
-      ([category, defaultEnabled]) => {
-        const locked = LOCKED_EMAIL_CATEGORIES.has(category);
-        return {
-          category,
-          // Locked (ALWAYS_ON) categories are never off, regardless of stored
-          // rows.
-          email: locked ? true : (overrides.get(category) ?? defaultEnabled),
-          ...(locked ? { locked: true } : {}),
-          // No sender consults these categories yet, so the stored toggle is
-          // never acted on. See EmailPreferenceResponse.comingSoon.
-          comingSoon: true,
-        };
-      },
-    );
-  }
-
-  async updateEmailPreference(
-    userId: string,
-    dto: UpdateEmailPreferenceDto,
-  ): Promise<EmailPreferenceResponse[]> {
-    // ALWAYS_ON transactional categories cannot be toggled off.
-    if (!LOCKED_EMAIL_CATEGORIES.has(dto.category)) {
-      const existing = await this.emailPreferences.findOne({
-        where: { userId, category: dto.category },
-      });
-      await this.emailPreferences.save({
-        ...(existing ?? {}),
-        userId,
-        category: dto.category,
-        enabled: dto.email,
-      });
-    }
-    return this.getEmailPreferences(userId);
   }
 }

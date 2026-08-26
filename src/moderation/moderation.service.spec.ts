@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
   NotFoundException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -227,6 +228,7 @@ describe('ModerationService', () => {
         authorUserId: null,
         excerpt: null,
         communityId: null,
+        isAuthorAmbiguous: false,
       }),
       resolveMany: jest.fn().mockResolvedValue(new Map()),
     };
@@ -1881,6 +1883,7 @@ describe('ModerationService', () => {
         authorUserId: 'user-1',
         excerpt: null,
         communityId: null,
+        isAuthorAmbiguous: false,
       });
     });
 
@@ -2362,6 +2365,7 @@ describe('ModerationService', () => {
         authorUserId: 'author-9',
         excerpt: 'the reported body',
         communityId: 'community-1',
+        isAuthorAmbiguous: false,
       });
       users.findOne.mockResolvedValue({
         id: 'author-9',
@@ -2385,20 +2389,37 @@ describe('ModerationService', () => {
       expect(memberCall()?.[0]).toBe('author-9');
     });
 
-    it('warn notifies nobody when the subject has no resolvable author', async () => {
+    /**
+     * A `warn` with nobody to warn used to close the report and log "warned"
+     * while notifying no one, which reads to the moderator exactly like a
+     * warning that landed. It refuses now, the same way the three
+     * account-changing actions already did.
+     */
+    it('warn refuses rather than resolving the report and telling nobody', async () => {
       subjectResolver.resolve.mockResolvedValue({
         authorUserId: null,
         excerpt: null,
         communityId: null,
+        isAuthorAmbiguous: false,
       });
 
-      await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
-        action: 'warn',
-        reasonCode: 'harassment',
-        note: 'n',
+      await expect(
+        service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
+          action: 'warn',
+          reasonCode: 'harassment',
+          note: 'n',
+        }),
+      ).rejects.toMatchObject({
+        response: {
+          code: 'ENFORCEMENT_TARGET_UNRESOLVED',
+          target: 'no_account',
+        },
       });
 
       expect(memberCall()).toBeUndefined();
+      // The refusal is raised inside the action's transaction, so the report
+      // is not closed on the way out.
+      expect(auditLogs.save).not.toHaveBeenCalled();
     });
 
     it('suspend lands on the post author instead of 400ing (TS-03)', async () => {
@@ -2475,6 +2496,7 @@ describe('ModerationService', () => {
         authorUserId: null,
         excerpt: null,
         communityId: null,
+        isAuthorAmbiguous: false,
       });
 
       await expect(
@@ -2484,6 +2506,84 @@ describe('ModerationService', () => {
           note: 'Out.',
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    /**
+     * The drawer used to show "Couldn't reach the safety service. Restored."
+     * for all four of these, which is false in every one of them: the service
+     * answered, and it answered for a reason. The code is the contract; the
+     * `target` field says which case.
+     */
+    describe('every refusal carries a typed code', () => {
+      const refusalBody = async (
+        setUp: () => void,
+      ): Promise<Record<string, unknown>> => {
+        setUp();
+        try {
+          await service.actOnReport('report-1', 'actor-1', UserRole.Admin, {
+            action: 'ban',
+            reasonCode: 'harassment',
+            note: 'Out.',
+          });
+        } catch (error) {
+          return (error as HttpException).getResponse() as Record<
+            string,
+            unknown
+          >;
+        }
+        throw new Error('expected the action to be refused');
+      };
+
+      it('names an unresolvable subject as no_account', async () => {
+        const body = await refusalBody(() =>
+          subjectResolver.resolve.mockResolvedValue({
+            authorUserId: null,
+            excerpt: null,
+            communityId: null,
+            isAuthorAmbiguous: false,
+          }),
+        );
+
+        expect(body).toMatchObject({
+          statusCode: 400,
+          code: 'ENFORCEMENT_TARGET_UNRESOLVED',
+          target: 'no_account',
+        });
+        expect(typeof body.message).toBe('string');
+      });
+
+      it('names the house account', async () => {
+        const body = await refusalBody(() =>
+          users.findOne.mockResolvedValue({
+            id: 'author-9',
+            role: UserRole.Member,
+            status: UserStatus.Active,
+            isSystem: true,
+          }),
+        );
+
+        expect(body).toMatchObject({
+          statusCode: 403,
+          code: 'ENFORCEMENT_TARGET_PROTECTED',
+          target: 'house_account',
+        });
+      });
+
+      it('names a staff account', async () => {
+        const body = await refusalBody(() =>
+          users.findOne.mockResolvedValue({
+            id: 'author-9',
+            role: UserRole.Moderator,
+            status: UserStatus.Active,
+          }),
+        );
+
+        expect(body).toMatchObject({
+          statusCode: 403,
+          code: 'ENFORCEMENT_TARGET_PROTECTED',
+          target: 'staff_account',
+        });
+      });
     });
 
     it('shows the reported content, not only the complaint about it', async () => {
@@ -2522,6 +2622,111 @@ describe('ModerationService', () => {
 
       expect(row.community).toBeNull();
       expect(communityMembership.slugById).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * A `listing_public_question` report covers the member's question AND the
+   * listing owner's answer under it, and nothing on the wire says which half
+   * was reported. The resolver names the ASKER as the author, so before this
+   * fix a moderator reading an offending ANSWER and clicking Ban banned the
+   * person who asked the question. Nothing 400d, nothing looked unusual, and
+   * the audit row, the notification and the appeal would all have named the
+   * wrong member, so the mistake was unlearnable.
+   *
+   * Account-level actions refuse now. Content-level actions are untouched:
+   * hiding the exchange, removing it, dismissing or escalating the report all
+   * still work, and none of them needs to know who wrote which half.
+   */
+  describe('an ambiguous subject refuses account-level enforcement', () => {
+    beforeEach(() => {
+      reports.findOne.mockResolvedValue(
+        baseReport({
+          subjectType: ReportSubjectType.ListingPublicQuestion,
+          subjectId: '33333333-3333-3333-3333-333333333333',
+        }),
+      );
+      subjectResolver.resolve.mockResolvedValue({
+        // The asker IS resolved. Taking that as the target is the defect.
+        authorUserId: 'asker-1',
+        excerpt: 'is the entrance step-free? / read the sign',
+        communityId: null,
+        isAuthorAmbiguous: true,
+      });
+      users.findOne.mockResolvedValue({
+        id: 'asker-1',
+        role: UserRole.Member,
+        status: UserStatus.Active,
+      });
+    });
+
+    const refuses = (action: 'ban' | 'suspend' | 'restrict' | 'warn') =>
+      it(`${action} refuses instead of guessing between the two authors`, async () => {
+        await expect(
+          service.actOnReport('report-1', 'actor-1', UserRole.Admin, {
+            action,
+            reasonCode: 'harassment',
+            note: 'Out.',
+            ...(action === 'suspend' || action === 'restrict'
+              ? { duration: '7d' }
+              : {}),
+          }),
+        ).rejects.toMatchObject({
+          response: {
+            statusCode: 400,
+            code: 'ENFORCEMENT_TARGET_UNRESOLVED',
+            target: 'ambiguous_authors',
+          },
+        });
+
+        // Nobody was sanctioned and nothing was written.
+        expect(userUpdates()).toHaveLength(0);
+        expect(auditLogs.save).not.toHaveBeenCalled();
+      });
+
+    refuses('ban');
+    refuses('suspend');
+    refuses('restrict');
+    refuses('warn');
+
+    it('never notifies the asker about an answer they did not write', async () => {
+      await expect(
+        service.actOnReport('report-1', 'actor-1', UserRole.Admin, {
+          action: 'warn',
+          reasonCode: 'harassment',
+          note: 'Out.',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(notificationsCreate).not.toHaveBeenCalled();
+    });
+
+    it('still lets the moderator take the content down', async () => {
+      await service.actOnReport('report-1', 'actor-1', UserRole.Admin, {
+        action: 'remove_content',
+        reasonCode: 'harassment',
+        note: 'Taken down.',
+      });
+
+      expect(applyContentAction).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          subjectType: ReportSubjectType.ListingPublicQuestion,
+          action: 'remove_content',
+        }),
+      );
+    });
+
+    it('still lets the moderator dismiss the report', async () => {
+      await service.actOnReport('report-1', 'actor-1', UserRole.Admin, {
+        action: 'dismiss',
+        reasonCode: 'other',
+        note: 'Nothing wrong here.',
+      });
+
+      expect(auditLogs.save).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'dismiss' }),
+      );
     });
   });
 

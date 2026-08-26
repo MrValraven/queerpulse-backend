@@ -11,7 +11,6 @@ import appConfig from './config/app.config';
 import authConfig from './config/auth.config';
 import databaseConfig from './config/database.config';
 import loggingConfig from './config/logging.config';
-import mailConfig from './config/mail.config';
 import muxConfig from './config/mux.config';
 import pushConfig from './config/push.config';
 import retentionConfig from './config/retention.config';
@@ -33,7 +32,6 @@ import { VouchModule } from './vouch/vouch.module';
 import { ConnectionsModule } from './connections/connections.module';
 import { MessagingModule } from './messaging/messaging.module';
 import { LinkPreviewModule } from './link-preview/link-preview.module';
-import { MailerModule } from './mailer/mailer.module';
 import { ChatModule } from './chat/chat.module';
 import { CinemaModule } from './cinema/cinema.module';
 import { CommunitiesModule } from './communities/communities.module';
@@ -57,6 +55,7 @@ import { TransparencyModule } from './transparency/transparency.module';
 import { AdminTopicsModule } from './admin-topics/admin-topics.module';
 import { AdminTrustNetworkModule } from './admin-trust-network/admin-trust-network.module';
 import { AdminOverviewModule } from './admin-overview/admin-overview.module';
+import { AdminModerationHealthModule } from './admin-moderation-health/admin-moderation-health.module';
 import { AdminReportsModule } from './admin-reports/admin-reports.module';
 import { AdminMediaModule } from './admin-media/admin-media.module';
 import { MyMediaModule } from './my-media/my-media.module';
@@ -140,7 +139,6 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
         muxConfig,
         pushConfig,
         retentionConfig,
-        mailConfig,
       ],
       validate,
     }),
@@ -218,7 +216,6 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     }),
     DatabaseModule,
     CommonModule,
-    MailerModule,
     PlatformSettingsModule,
     UsersModule,
     AuthModule,
@@ -322,6 +319,11 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     AdminTopicsModule,
     AdminTrustNetworkModule,
     AdminOverviewModule,
+    // Moderator workload and SLA alerting (TS-04). Registering it starts the
+    // hourly queue-health cron as well as opening
+    // /admin/moderation/queue-health, which is why it is named here in its own
+    // right rather than folded into AdminOverviewModule.
+    AdminModerationHealthModule,
     AdminReportsModule,
     AdminMediaModule,
     MyMediaModule,

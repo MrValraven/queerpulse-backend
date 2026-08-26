@@ -183,7 +183,10 @@ export class ListingsController {
   @Get('claims/mine')
   @ApiOperation({ summary: "List the caller's own listing ownership claims" })
   @ApiOkResponse({
-    description: 'The caller’s claims, newest first, with their age.',
+    description:
+      'The caller’s claims, newest first, with their age, the date a ' +
+      'decision was promised by, and the target listing’s public slug so ' +
+      'each one links straight to its directory page.',
   })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',

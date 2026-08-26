@@ -208,6 +208,14 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     NotificationType.CommunityBanned,
     NotificationType.ConcernUpdate,
     NotificationType.SecurityNewSignIn,
+    // A moderation queue crossing its warning or critical threshold, and its
+    // recovery notice (TS-04). Reaches platform `moderator`/`admin` accounts
+    // only (a member can never receive one), and it is duty mail about the
+    // platform's own published review windows. A volume control that could
+    // silence it would defeat the only thing it exists to do, and the alert is
+    // already deduplicated at source (one per queue per state change, not one
+    // per hourly tick), so there is no volume here for a switch to control.
+    NotificationType.ModerationQueueAlert,
 
     // 2. Account lifecycle.
     NotificationType.PromotedToMember,

@@ -4,9 +4,10 @@ import { ListingDraft } from './entities/listing-draft.entity';
  * Hand-mapped response shapes for listing drafts. There is NO global
  * serializer in this codebase — entities are mapped to DTOs by hand so that a
  * column is never leaked by accident. In particular the `resumeToken` and
- * `userId` columns are NEVER placed on any response DTO: the token is only
- * ever delivered out of band (the resume-link email), never handed back to the
- * browser that could then share it.
+ * `userId` columns are NEVER placed on any response DTO: the token is the
+ * resume link's only secret, so it is never handed back to a browser that
+ * could then share it. Nothing delivers it either, since QueerPulse delivers
+ * no email.
  */
 
 /** A row in `GET /listing-drafts` — enough to render the "resume a draft" list. */

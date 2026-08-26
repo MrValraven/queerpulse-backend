@@ -134,6 +134,11 @@ export class ListingClaimsService {
    * `claimant` is left null on every row: the caller IS the claimant, so
    * echoing their own member ref back at them would be noise. Bounded like
    * `listPending`, and one batched listing lookup rather than N+1.
+   *
+   * That one lookup loads the whole `Listing` row, so `listingSlug` rides out
+   * on every DTO at no extra cost: the claimant's list links straight to
+   * `/local/directory/:slug` instead of guessing at the listing through a name
+   * search, which picks the wrong business whenever two share a name.
    */
   async listMine(claimantId: string): Promise<ListingClaimDTO[]> {
     const rows = await this.claims.find({
@@ -144,6 +149,8 @@ export class ListingClaimsService {
     if (!rows.length) return [];
 
     const listingIds = [...new Set(rows.map((row) => row.listingId))];
+    // No projection: the mapper needs `ref`, `slug` and `name` off each row,
+    // and this is already one batched query per call rather than per claim.
     const listingRows = await this.listings.find({
       where: { id: In(listingIds) },
     });

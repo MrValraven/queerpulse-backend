@@ -40,8 +40,10 @@ export class CsrfController {
    * from, and this removes the cause rather than relying on the retry.
    *
    * The cookie is still re-set so its 31-day expiry slides forward. Rotation
-   * happens where it actually matters: `logout` / `logout-all` clear the cookie
-   * (`clearCsrfCookie`), so the next fetch after a sign-out mints a fresh one.
+   * happens where it actually matters: the routes that clear the cookie
+   * (`clearCsrfCookie`) are `logout` and the under-18 disclosure lockout, so
+   * the next fetch after a sign-out mints a fresh one. This used to name
+   * `logout-all` too; that route was removed on 2026-08-26.
    */
   @Get()
   @ApiOperation({

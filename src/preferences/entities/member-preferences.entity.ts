@@ -53,8 +53,8 @@ export const DEFAULT_HIDE_PUSH_PREVIEWS = true;
  * no other query in the codebase joins it.
  *
  * `user_id` is BOTH the primary key and the FK to users (1:1) — the `Profile`
- * idiom — because this is a singleton settings row, not the sparse per-category
- * override set that `email_preference` models.
+ * idiom, because this is a singleton settings row rather than a sparse
+ * per-category override set of the kind `notification_preferences` models.
  */
 @Entity('member_preferences')
 export class MemberPreferences {

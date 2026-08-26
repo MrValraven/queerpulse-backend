@@ -44,6 +44,20 @@ export interface JoinRequestView {
   createdAt: Date;
   reviewedAt: Date | null;
   reviewedBy: string | null;
+  /**
+   * Display name of the reviewer in `reviewedBy`, resolved through the same
+   * batched `queueAssigneeName` path `assignedStaffName` uses. The id stays
+   * beside it because the id is the stable thing: a display name changes when
+   * someone renames themselves, and the quality-sample surface groups a
+   * reviewer's decisions on the id.
+   *
+   * Absent when `reviewedBy` is null. That covers erasure too, and correctly:
+   * `join_requests.reviewed_by` is `ON DELETE SET NULL`, so an erased
+   * reviewer's id is already gone from the row and there is no name left to
+   * resolve, and nothing here can resurrect one. Also absent on a single row
+   * mapped without a batch to resolve against (`review()`).
+   */
+  reviewedByName?: string;
   declineReason: string | null;
   /**
    * OPS-04. The reviewer currently working this request, or null when nobody
@@ -185,6 +199,13 @@ export function toJoinRequestView(
   // Undefined on an unclaimed request, and on a single just-reviewed row where
   // the caller has no batch to resolve against.
   assignedStaffName?: string,
+  // The DECIDING reviewer's display name, resolved by the caller through
+  // `optionalQueueAssigneeName` against the SAME batched profile lookup the
+  // assignee uses, so naming reviewers costs a page no extra query. Undefined
+  // when nobody decided the row yet, when the deciding reviewer has since been
+  // erased (the id is NULLed by the FK, so there is nothing to resolve), and on
+  // a single just-reviewed row with no batch behind it.
+  reviewedByName?: string,
 ): JoinRequestView {
   return {
     id: request.id,
@@ -200,6 +221,7 @@ export function toJoinRequestView(
     createdAt: request.createdAt,
     reviewedAt: request.reviewedAt,
     reviewedBy: request.reviewedBy,
+    ...(reviewedByName ? { reviewedByName } : {}),
     declineReason: request.declineReason,
     assignedStaffId: request.assignedStaffId,
     ...(assignedStaffName ? { assignedStaffName } : {}),

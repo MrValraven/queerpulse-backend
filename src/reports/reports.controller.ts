@@ -16,6 +16,7 @@ import {
   ApiOkResponse,
   ApiOperation,
   ApiTags,
+  ApiTooManyRequestsResponse,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
@@ -32,6 +33,13 @@ export class ReportsController {
   // Tight per-user cap on report filing (mirrors `VouchController`): a member
   // has no legitimate reason to file more than a handful of reports a minute,
   // and this blunts spam/abuse-report floods.
+  //
+  // This is only the BURST layer. It keys on client IP and keeps its counters
+  // in process memory, so it says nothing about sustained behaviour: ten a
+  // minute is 14,400 a day. The durable rolling caps that close report
+  // flooding as a harassment vector (TS-05) live in `report-flood-limits.ts`
+  // and are enforced in `ReportsService.create`. Both layers answer with 429,
+  // so a client needs no new branch to tell them apart.
   @ApiOperation({ summary: 'File a report against a subject' })
   @ApiCreatedResponse({
     description:
@@ -39,6 +47,15 @@ export class ReportsController {
   })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
   @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
+  @ApiTooManyRequestsResponse({
+    description:
+      'Too many reports. TWO different refusals share this status, and the body is what tells them apart. ' +
+      'A rolling flood cap (see `report-flood-limits.ts`) answers with ' +
+      '`{ statusCode: 429, error: "Too Many Requests", code: "REPORT_FLOOD_CAP", cap: "daily" | "subject", message: string }`, ' +
+      'where `message` is member-facing copy a client should surface verbatim and `cap` is additive detail that is safe to ignore. ' +
+      'The `@nestjs/throttler` burst refusal carries NO `code`, and its `message` is a framework exception string that must never be shown to a member. ' +
+      'Branch on the presence of `code === "REPORT_FLOOD_CAP"`, never on message text.',
+  })
   @Throttle({ default: { limit: 10, ttl: seconds(60) } })
   @Post()
   create(@CurrentUser() user: CurrentUserData, @Body() dto: CreateReportDto) {

@@ -35,6 +35,10 @@ import { ListingDraftsService } from './listing-drafts.service';
  * signed-in member: a draft that is not the caller's own 404s. Tagged with the
  * `listings` feature so it 404s in lockstep if the listings feature is off.
  *
+ * There is NO route that delivers a resume link. QueerPulse delivers no email,
+ * so `GET` on the list is the cross-device path, and `resume/:token` only
+ * resolves a link the member carries themselves.
+ *
  * `resume/:token` is declared before the `:id` routes so Nest resolves the
  * literal `resume` segment as a route rather than treating `resume` as an `:id`
  * (mirrors the "static path before dynamic param" ordering in
@@ -105,26 +109,5 @@ export class ListingDraftsController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.listingDraftsService.remove(user.userId, id);
-  }
-
-  @Post(':id/resume-link')
-  @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({
-    summary:
-      'Email yourself a cross-device resume link for a draft. ' +
-      'Sent via the transactional mailer; when SMTP is unconfigured (dev/test) ' +
-      'the mailer logs the message instead of delivering it.',
-  })
-  @ApiNoContentResponse({ description: 'The resume link was dispatched.' })
-  @ApiNotFoundResponse({ description: 'No draft with that id for the caller.' })
-  sendResumeLink(
-    @CurrentUser() user: CurrentUserData,
-    @Param('id', ParseUUIDPipe) id: string,
-  ) {
-    return this.listingDraftsService.sendResumeLink(
-      user.userId,
-      user.email,
-      id,
-    );
   }
 }

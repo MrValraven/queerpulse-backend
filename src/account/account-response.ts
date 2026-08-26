@@ -47,14 +47,30 @@ export interface ExportJobResponse {
   error?: string;
 }
 
+/**
+ * When a ready export job's download link stops working, or `null` for a job
+ * that has no link to expire (still building, failed, or already expired by the
+ * retention sweep).
+ *
+ * THE ONE place this instant is computed. It is read twice, and the two readers
+ * have to agree exactly: `toExportJobResponse` below ADVERTISES it to the member
+ * as `expiresAt`, and `AccountService.getExportDownload` ENFORCES it. When those
+ * two drifted apart the API promised a seven-day link and served it for thirty,
+ * which is the wrong direction for the richest single object in the system.
+ *
+ * `generatedAt` is the clock, never `requestedAt`: the window is "seven days to
+ * download what we built", and a job that was never built has no window at all.
+ */
+export function exportLinkExpiresAt(job: DataExportJob): Date | null {
+  if (job.status !== DataExportStatus.Ready || !job.generatedAt) {
+    return null;
+  }
+  return new Date(job.generatedAt.getTime() + EXPORT_LINK_EXPIRY_DAYS * DAY_MS);
+}
+
 export function toExportJobResponse(job: DataExportJob): ExportJobResponse {
   const ready = job.status === DataExportStatus.Ready;
-  const expiresAt =
-    ready && job.generatedAt
-      ? new Date(
-          job.generatedAt.getTime() + EXPORT_LINK_EXPIRY_DAYS * DAY_MS,
-        ).toISOString()
-      : undefined;
+  const expiresAt = exportLinkExpiresAt(job)?.toISOString();
   return {
     jobId: job.id,
     status: job.status,
@@ -148,20 +164,7 @@ export interface ReauthResult {
   expiresAt: string;
 }
 
-// Matches the frontend's `EmailPreference` in
-// `features/settings/api/account.api.ts`.
-export interface EmailPreferenceResponse {
-  category: string;
-  email: boolean;
-  locked?: boolean;
-  /**
-   * ⚠️ ALWAYS `true` for now. `MailerService` is wired and does deliver, but
-   * no sender consults these categories: nothing reads `email_preference`
-   * before sending, and no digest/reminder/product-update job exists. Every
-   * toggle here is stored and never acted on. This flag exists so the
-   * endpoint's own payload states the gap rather than implying delivery; the FE
-   * renders it as "this isn't live yet". Drop it (or flip to omitted) once a
-   * sender honours the stored preference.
-   */
-  comingSoon: boolean;
-}
+// RETIRED: `EmailPreferenceResponse`. Its `comingSoon` field was always `true`
+// because QueerPulse delivers no email and never will, so the whole shape
+// described a channel that does not exist. The live preference payloads are in
+// `src/notifications` (in-app and push).

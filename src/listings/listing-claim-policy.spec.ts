@@ -27,7 +27,11 @@ const baseClaim = (overrides: Partial<ListingClaim> = {}): ListingClaim => ({
   ...overrides,
 });
 
-const listing = { ref: 'QPL-2026-0001', name: 'Drama Bar' };
+const listing = {
+  ref: 'QPL-2026-0001',
+  slug: 'drama-bar',
+  name: 'Drama Bar',
+};
 
 describe('listing-claim-policy', () => {
   it('publishes the turnaround and the evidence hints as one defined value', () => {
@@ -69,6 +73,15 @@ describe('listing-claim-policy', () => {
   });
 
   describe('on the claim DTO', () => {
+    it("carries the listing's public slug, so a claim links to its page", () => {
+      // `ref` addresses ownership routes and `slug` addresses the public
+      // detail page. A claimant's list needs the second one, and neither
+      // stands in for the other.
+      const dto = toListingClaimDTO(baseClaim(), listing, null);
+      expect(dto.listingSlug).toBe('drama-bar');
+      expect(dto.listingRef).toBe('QPL-2026-0001');
+    });
+
     it('a pending claim carries the turnaround and a decision date', () => {
       const dto = toListingClaimDTO(baseClaim(), listing, null);
       expect(dto.reviewTurnaroundDays).toBe(

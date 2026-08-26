@@ -8,7 +8,6 @@ import {
   Logger,
   Param,
   ParseUUIDPipe,
-  Patch,
   Post,
   Req,
   Res,
@@ -32,7 +31,6 @@ import { DeactivateDto } from './dto/deactivate.dto';
 import { RequestDeletionDto } from './dto/request-deletion.dto';
 import { RequestExportDto } from './dto/request-export.dto';
 import { SubmitDsarDto } from './dto/submit-dsar.dto';
-import { UpdateEmailPreferenceDto } from './dto/update-email-preferences.dto';
 import { Throttle, seconds } from '@nestjs/throttler';
 import {
   ApiBadRequestResponse,
@@ -49,8 +47,8 @@ import {
 } from '@nestjs/swagger';
 
 // No ActiveMemberGuard: account lifecycle actions (deactivate, deletion,
-// export, DSAR, sessions, email preferences) must remain reachable by a
-// pending member, same as `consent`/`notifications`.
+// export, DSAR, sessions) must remain reachable by a pending member, same as
+// `consent`/`notifications`.
 //
 // Step-up re-authentication (`reauthToken`, required below by deactivate/
 // deletion/export/DSAR) is no longer minted by a plain POST here — that had
@@ -182,7 +180,8 @@ export class AccountController {
   @ApiBadRequestResponse({ description: 'Malformed job id.' })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @ApiNotFoundResponse({
-    description: 'Export job not found, or its archive is not ready.',
+    description:
+      'Export job not found, its archive is not ready, or its download link has expired (see `expiresAt`).',
   })
   @Get('export/:jobId/download')
   async downloadExport(
@@ -544,41 +543,17 @@ export class AccountController {
     );
   }
 
-  // NOT-YET-ACTIVE. A transactional mailer DOES exist now (`MailerService`,
-  // used by the join-request approve/decline flow), but nothing consults these
-  // categories: no digest, reminder or product-update sender reads
-  // `email_preference`. The toggles are persisted and never acted on, so every
-  // item still comes back with `comingSoon: true`.
-  @ApiOperation({
-    summary:
-      "Get the caller's email-notification preferences. NOTE: no sender consults these categories yet, so toggles are stored but not acted on (every item carries comingSoon: true).",
-  })
-  @ApiOkResponse({
-    description: 'The email preferences (delivery not yet active).',
-  })
-  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-  @Get('email-preferences')
-  getEmailPreferences(@CurrentUser() user: CurrentUserData) {
-    return this.accountService.getEmailPreferences(user.userId);
-  }
-
-  // PATCH (not POST): this partially updates an existing settings resource and
-  // is idempotent. API CONTRACT CHANGE — the frontend must call PATCH
-  // /account/email-preferences (was POST).
-  @ApiOperation({
-    summary:
-      'Update one email-notification preference. NOTE: no sender consults these categories yet, so the toggle is persisted but nothing changes about what is sent.',
-  })
-  @ApiOkResponse({
-    description: 'The updated email preferences (delivery not yet active).',
-  })
-  @ApiBadRequestResponse({ description: 'Malformed request body.' })
-  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-  @Patch('email-preferences')
-  updateEmailPreference(
-    @CurrentUser() user: CurrentUserData,
-    @Body() body: UpdateEmailPreferenceDto,
-  ) {
-    return this.accountService.updateEmailPreference(user.userId, body);
-  }
+  // RETIRED: `GET|PATCH /account/email-preferences`.
+  //
+  // QueerPulse delivers no email and never will. The routes served a matrix of
+  // email-notification categories that no sender ever consulted, every item
+  // marked `comingSoon: true`, for a channel that does not exist. That was the
+  // last surface still implying an email channel next to a privacy policy that
+  // says there is none, so it is gone: routes, DTO, category constants,
+  // response shape, service methods and the `email_preference` table
+  // (`DropEmailPreference1795740000000`).
+  //
+  // The member-facing preferences that DO run are in-app and push, under
+  // `GET|PUT /me/notification-preferences` (`src/notifications`). Route
+  // anything new about "what reaches me" there.
 }

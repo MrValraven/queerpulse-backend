@@ -17,20 +17,50 @@ export interface ReportSubjectResolution {
   excerpt: string | null;
   /** The community the reported thing belongs to, or `null`. */
   communityId: string | null;
+  /**
+   * True when this subject covers content written by MORE THAN ONE member and
+   * the report does not record which of them was reported, so
+   * {@link authorUserId} is one of the candidates rather than the answer.
+   *
+   * Exactly one subject type can be true today: `listing_public_question`,
+   * where one row holds a member's question AND the listing owner's answer
+   * posted under it, and the single "Report this" control on the card sits
+   * below both halves (`DirectoryQuestionCard.tsx`). A member reporting the
+   * ANSWER files a report indistinguishable from one about the question.
+   *
+   * Read by the enforcement path, which must refuse rather than sanction a
+   * coin-flip: a wrong ban costs someone their place in a community they are
+   * probably relying on, and the platform never learns it was wrong. The read
+   * path is free to keep showing `authorUserId` (the asker opened the
+   * exchange), because naming who is on screen is not the same act as
+   * choosing who to punish.
+   */
+  isAuthorAmbiguous: boolean;
 }
 
-/** The shape every lookup query in this file selects. */
+/**
+ * The shape every lookup query in this file selects.
+ *
+ * `is_author_ambiguous` is the one OPTIONAL alias: only a statement whose
+ * subject can genuinely cover two authors selects it, and node-postgres yields
+ * `undefined` for a column a statement never named, which {@link
+ * ReportSubjectResolverService.runLookup} reads as `false`. Adding a constant
+ * `FALSE AS is_author_ambiguous` to the other nineteen statements would say
+ * nothing they do not already say by omission.
+ */
 interface RawSubjectRow {
   key: string;
   author_user_id: string | null;
   excerpt: string | null;
   community_id: string | null;
+  is_author_ambiguous?: boolean | null;
 }
 
 const UNRESOLVED: ReportSubjectResolution = {
   authorUserId: null,
   excerpt: null,
   communityId: null,
+  isAuthorAmbiguous: false,
 };
 
 // Loose enough to guard a `uuid`-typed column from a Postgres "invalid input
@@ -302,6 +332,9 @@ export class ReportSubjectResolverService {
         authorUserId: row.author_user_id ?? null,
         excerpt: toExcerpt(row.excerpt),
         communityId: row.community_id ?? null,
+        // Absent on every statement whose subject has exactly one author.
+        // See `RawSubjectRow`.
+        isAuthorAmbiguous: row.is_author_ambiguous === true,
       });
     }
     return byKey;
@@ -311,9 +344,11 @@ export class ReportSubjectResolverService {
 /*
  * Every statement below selects the same four aliases (`key`,
  * `author_user_id`, `excerpt`, `community_id`) so {@link
- * ReportSubjectResolverService.runLookup} can stay one generic reader. `$1` is
- * always the array of subject ids; `= ANY(...)` keeps it a single indexed
- * lookup regardless of page size.
+ * ReportSubjectResolverService.runLookup} can stay one generic reader, plus an
+ * optional fifth (`is_author_ambiguous`) that only the one statement whose
+ * subject can cover two authors bothers to name. `$1` is always the array of
+ * subject ids; `= ANY(...)` keeps it a single indexed lookup regardless of page
+ * size.
  *
  * The `author_user_id` column is nullable on most of these tables because
  * erasing an account sets it NULL rather than deleting the content (see
@@ -399,9 +434,20 @@ const MAGAZINE_COMMENT_SQL = `
 
 // One subject covers the question AND the answer posted under it (see
 // `ReportSubjectType.ListingPublicQuestion`), so the excerpt shows the question
-// with the answer appended when there is one. The asker is the author: the
-// answer is written by the listing's owner, who is not the reported party when
-// a member reports the exchange.
+// with the answer appended when there is one.
+//
+// THE AUTHOR IS THEREFORE NOT ALWAYS KNOWABLE, and this is the only statement
+// in this file where that is true. The asker wrote the question; somebody else
+// (the listing's owner, a later owner after a claim, or a moderator; see
+// `ListingPublicQuestion.isAnsweredByModerator`) wrote the answer. The single
+// "Report this" control on the card sits below both halves and sends only the
+// question's uuid, so nothing on the wire says which half a member meant.
+//
+// `author_user_id` stays the asker, which is right for the READ path: they
+// opened the exchange and the drawer has to name somebody. `is_author_ambiguous`
+// is how the ENFORCEMENT path learns not to trust it. Answered by the asker
+// themselves is not ambiguous at all (both halves are then the same member),
+// and neither is an answer that is absent or blank.
 const LISTING_PUBLIC_QUESTION_SQL = `
   SELECT lpq.id::text AS key,
          lpq.asker_id AS author_user_id,
@@ -409,7 +455,12 @@ const LISTING_PUBLIC_QUESTION_SQL = `
            WHEN lpq.answer IS NULL OR lpq.answer = '' THEN lpq.body
            ELSE lpq.body || ' / ' || lpq.answer
          END        AS excerpt,
-         NULL::uuid AS community_id
+         NULL::uuid AS community_id,
+         (
+           lpq.answer IS NOT NULL
+           AND btrim(lpq.answer) <> ''
+           AND lpq.answered_by_id IS DISTINCT FROM lpq.asker_id
+         )          AS is_author_ambiguous
   FROM listing_public_questions lpq
   WHERE lpq.id = ANY($1::uuid[])
 `;

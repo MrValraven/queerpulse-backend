@@ -56,7 +56,6 @@ import { AccountReauthToken } from './entities/account-reauth-token.entity';
 import { DataExportJob } from './entities/data-export-job.entity';
 import { DeletionRequest } from './entities/deletion-request.entity';
 import { DsarRequest } from './entities/dsar-request.entity';
-import { EmailPreference } from './entities/email-preference.entity';
 
 @Module({
   imports: [
@@ -91,7 +90,6 @@ import { EmailPreference } from './entities/email-preference.entity';
       DeletionRequest,
       DsarRequest,
       DataExportJob,
-      EmailPreference,
       AccountReauthToken,
       AccountDeactivation,
       // Reuses the existing refresh-token store (owned by `src/auth`) for

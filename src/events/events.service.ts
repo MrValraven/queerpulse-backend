@@ -5,6 +5,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { escapeLikeTerm } from '../common/like-escape';
@@ -65,6 +66,7 @@ import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
 import { EventLineupEntry } from './entities/event-lineup-entry.entity';
 import { EventRsvp, RsvpStatus } from './entities/event-rsvp.entity';
+import { isAttendanceCleared } from './event-attendance-window';
 import {
   EventSeries,
   EventSeriesCadence,
@@ -194,6 +196,9 @@ function capacityIncreased(
 @Injectable()
 export class EventsService {
   constructor(
+    // Reads `retention.eventAttendanceDays` so `rosterCounts` stops reporting a
+    // check-in count on exactly the gatherings the retention sweep has cleared.
+    private readonly config: ConfigService,
     @InjectRepository(Event) private readonly events: Repository<Event>,
     @InjectRepository(EventCohost)
     private readonly cohosts: Repository<EventCohost>,
@@ -1497,7 +1502,7 @@ export class EventsService {
         });
     });
 
-    const counts = await this.rosterCounts(event.id);
+    const counts = await this.rosterCounts(event);
     return {
       items,
       total,
@@ -1508,7 +1513,11 @@ export class EventsService {
       seatsTaken: counts.seatsTaken,
       waitlistCount: counts.waitlistCount,
       // Who has physically arrived is the host's own operational picture;
-      // a member reading a guest list never learns it.
+      // a member reading a guest list never learns it. Withheld as 0 rather
+      // than null on purpose: null means "no longer recorded" and the client
+      // renders it as such, which would be the wrong message for somebody who
+      // was never entitled to the number in the first place. No non-organiser
+      // surface renders this field.
       checkedInCount: isOrganizer ? counts.checkedInCount : 0,
     };
   }
@@ -1522,12 +1531,28 @@ export class EventsService {
    * check-in, and two places computing "expected vs arrived" from two
    * different definitions is exactly how a door desk ends up arguing with a
    * dashboard.
+   *
+   * `checkedInCount` IS NULLABLE, and the null is load-bearing.
+   * `EventAttendanceRetentionService` erases `checked_in_at` once a gathering
+   * is past the retention window, so the `FILTER (WHERE checked_in_at IS NOT
+   * NULL)` below would count the cleared rows as zero arrivals and report "0
+   * arrived of 40 going" for a gathering that was full. Past the window the
+   * count is no longer knowable, so it is `null` ("no longer recorded") and the
+   * caller renders that rather than a number.
+   *
+   * ZERO STILL MEANS ZERO. Inside the window a gathering nobody turned up to
+   * genuinely reports 0, which is the distinction this whole change exists to
+   * preserve.
+   *
+   * Takes the EVENT rather than an id because the retention decision needs its
+   * date, and both callers already hold the loaded row. Fetching it here would
+   * add a query to the door's hot path, which runs this on every check-in.
    */
-  async rosterCounts(eventId: string): Promise<{
+  async rosterCounts(event: Pick<Event, 'id' | 'startAt' | 'endAt'>): Promise<{
     goingCount: number;
     seatsTaken: number;
     waitlistCount: number;
-    checkedInCount: number;
+    checkedInCount: number | null;
   }> {
     const row = await this.rsvps
       .createQueryBuilder('r')
@@ -1544,7 +1569,7 @@ export class EventsService {
         `COUNT(*) FILTER (WHERE r.status = :going AND r.checked_in_at IS NOT NULL)`,
         'checkedInCount',
       )
-      .where('r.event_id = :eventId', { eventId })
+      .where('r.event_id = :eventId', { eventId: event.id })
       .setParameters({
         going: RsvpStatus.Going,
         waitlisted: RsvpStatus.Waitlisted,
@@ -1555,11 +1580,20 @@ export class EventsService {
         waitlistCount: string;
         checkedInCount: string;
       }>();
+    // Read from the same config key the sweeper reads, through the same shared
+    // helper, so the window that ERASES the records and the window that stops
+    // REPORTING them are one number and cannot drift apart.
+    const attendanceCleared = isAttendanceCleared(
+      event,
+      this.config.get<number>('retention.eventAttendanceDays', 30),
+    );
     return {
       goingCount: Number(row?.goingCount ?? 0),
       seatsTaken: Number(row?.seatsTaken ?? 0),
       waitlistCount: Number(row?.waitlistCount ?? 0),
-      checkedInCount: Number(row?.checkedInCount ?? 0),
+      checkedInCount: attendanceCleared
+        ? null
+        : Number(row?.checkedInCount ?? 0),
     };
   }
 
@@ -1865,7 +1899,7 @@ export class EventsService {
       event.seriesId
         ? this.eventSeries.findOne({ where: { id: event.seriesId } })
         : Promise.resolve(undefined),
-      this.rosterCounts(event.id),
+      this.rosterCounts(event),
       // Newest first, bounded — a host's announcements are a short list of
       // "we moved to the back room" notes, never a feed.
       this.announcements.find({

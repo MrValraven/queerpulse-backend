@@ -1,11 +1,30 @@
-# No Transactional Email at Launch
+# No Mailer, Ever: the flow-by-flow record
 
-**Status:** conscious launch decision (audit P1-13 / §L "The Mailer Question").
-QueerPulse ships **without any mailer**. There is no mail provider, no
-dependency, no sender — no nodemailer/Postmark/SendGrid/SES anywhere in the
-backend. This is a **decision, not an oversight**: it is recorded here so that
-every flow that would normally reach a member out-of-band is a known, accepted
-gap rather than a silent one.
+**Status:** accepted and in force (audit P1-13 / §L "The Mailer Question").
+**Reaffirmed:** 2026-08-26, after a mailer was built and removed again.
+**Companion record:** `docs/ops/no-email-at-launch.md` states the same decision
+and carries the "if you are about to add email" bar. This file is the
+operational half: what each affected flow does instead, and the risk it carries.
+
+QueerPulse delivers **no email**. There is no mail provider, no dependency, no
+sender anywhere in the backend. This is a **decision, not an oversight**: it is
+recorded here so that every flow that would normally reach a member out of band
+is a known, accepted gap rather than a silent one.
+
+## What happened in August 2026
+
+A **nodemailer-backed `MailerService`** was introduced in `src/mailer/` in
+violation of this decision, wired into `AppModule` with SMTP env vars and four
+call sites (intake concern update, ops inquiry ping, listing-draft resume link,
+newsletter confirmation). It ran log-only until SMTP env was set, so one
+production env change would have started delivering mail on paths that had
+never been reviewed for deliverability, consent, or unsubscribe.
+
+**It was removed in full on 2026-08-26** (LB-07): the module, the config
+factory, the SMTP env validation and `.env.example` block, the `nodemailer` and
+`@types/nodemailer` dependencies, and every call site. **Nothing in `src/` may
+reintroduce an outbound mail transport.** The bar that would have to be cleared
+first is in the companion record, and repeated at the end of this file.
 
 **Why this is tenable at all:** auth is **Google-OAuth-only + invite redemption**.
 There is no password on a QueerPulse account, so the one flow email is usually
@@ -16,10 +35,9 @@ none of which block sign-in. Those are enumerated below with how each behaves
 without email, and the risk each carries.
 
 **Scope:** the production NestJS backend and the React frontend copy that
-describes these flows. The FE used to literally catalogue the unbuilt templates
-in `queerpulse/src/features/settings/api/account.api.ts` (the "Email template
-catalogue" block) — that block stays as the design-of-record for when email
-lands, and it already warns "Do not write UI copy that promises any of these
+describes these flows. The FE email-template catalogue in
+`queerpulse/src/features/settings/api/account.api.ts` is a design note, not a
+plan, and it already warns "Do not write UI copy that promises any of these
 arrive." This document is the operational half of that warning.
 
 ---
@@ -52,17 +70,20 @@ Verify each is still honest before go-live (another edit could regress them):
 
 **Still open (owned by other work-streams — do not regress, do not ship a promise):**
 
-- [ ] **Newsletter double-opt-in confirmation** (`homepage:*` newsletter subscribe
-      copy + `system:*` "we'll email a one-time confirmation link"). The newsletter
-      cannot send a confirmation link with no mailer. Either gate the newsletter
-      form behind demo mode or soften the copy. Tracked with the homepage owner.
+- [ ] **Newsletter confirmation** (`homepage:*` newsletter subscribe copy +
+      `system:*` "we'll email a one-time confirmation link"). `POST
+      /newsletter/subscribe` records a `pending` row and mints a confirm token,
+      and **nothing delivers it**: the confirm and unsubscribe routes stay
+      reachable only for a token someone is handed out of band. Any copy that
+      says a link is on its way is false. Either gate the newsletter form behind
+      demo mode or soften the copy. Tracked with the homepage owner.
 - [ ] **Event RSVP / host copy** ("you'll receive a confirmation email",
       "you'll get an email notification for each new attendee",
       `gatherings:*`). Owned by the events work-stream. In-app notifications
       exist; the email half is the false promise.
 - [ ] **DSAR intake** (`marketing:dsar.legalStrip` — "we'll respond within 30
       days"). Does **not** over-promise email specifically (legally accurate),
-      but the *response channel* is the gap in §3 below.
+      but the *response channel* is the gap named in §2d.
 
 > Demo-mode narrative copy (supper-club Multibanco tickets, magazine print-run
 > ship notices, mentorship/economy intros, studio receipts) promises email
@@ -79,8 +100,7 @@ honest in-app — nothing tells a member to expect an email — and (b) keeping 
 irreversible/most-dangerous ones visible in-app so a signed-in member can always
 see where they stand. The residual risk is that a member who is **locked out**
 (banned/suspended) or **has no account yet** (invite applicant) cannot be reached
-at all. That risk is named per-flow below and is the reason a mailer is the first
-post-launch infrastructure item.
+at all. That risk is named per-flow below, and it is accepted.
 
 ---
 
@@ -98,7 +118,7 @@ post-launch infrastructure item.
   that signing back in cancels it. Copy no longer implies an email will remind them.
 - **Risk:** **irreversible data loss with no second touch.** This is the single
   flow where "no email" can cause real, unrecoverable harm to a member who *wanted*
-  to be reachable. First to wire when a mailer lands.
+  to be reachable, and it is the accepted cost of the decision in §1.
 
 ### 2b. Join-request approval / decline
 
@@ -150,8 +170,13 @@ post-launch infrastructure item.
 ### 2f. Newsletter / digests / the whole `email_preference` matrix — **dead weight**
 
 - The `email_preference` matrix, the settings "Email notifications" delivery
-  cadence control, weekly-digest toggles, and the newsletter double-opt-in all
-  presuppose a mailer. **None can function.**
+  cadence control, weekly-digest toggles, and the newsletter confirmation all
+  presuppose a mailer. **None can function.** The magazine digest queue and its
+  drain cron were deleted outright; shipping an issue writes in-app
+  notifications only.
+- **Superseded 2026-08-26 for the matrix specifically:** the two
+  `/account/email-preferences` routes, the DTO, the category constants, the
+  response shape and the `email_preference` table are all removed. See §4.
 - **In-app handling:** the settings email-delivery and login-alert controls are
   already `comingSoon`-gated (rendered `inert` with a "Coming soon" badge), so
   they don't lie. The **newsletter confirmation copy** is the exception still to
@@ -161,28 +186,39 @@ post-launch infrastructure item.
 
 ---
 
-## 3. When we add a mailer — wire order
+## 3. If you are about to add email
 
-Postmark is already in the governance budget; it is the intended provider (see
-the template catalogue in `account.api.ts`). All sends are **transactional** (no
-unsubscribe) unless noted, each carries a deterministic `messageKey` for
-idempotent resends. Wire in this order (harm-reduction first):
+There is no wire order waiting to be picked up. Building a transport is a
+product decision that has to be retaken, and it does not start in `src/`.
+All four of these must be decided and written down first, by the owners of this
+record:
 
-1. **Erasure grace-window warning (D-7 / D-1)** — §2a. The only flow where the
-   absence of email causes *irreversible* harm to a member who wanted reaching.
-2. **Moderation / appeal outcome** — §2c. Closes the due-process gap for
-   locked-out members; the one flow the app *structurally cannot* deliver in-app.
-3. **Join-request approve/decline** — §2b. Removes the manual-copy step and the
-   silent-decline gap.
-4. **DSAR received + resolved** — §2d. Puts the statutory clock on rails instead
-   of a human's memory.
-5. **Data-export ready** (if/when export goes async) — §2f. Today it's synchronous
-   and downloads on the page, so this is only needed if the worker model changes.
-6. **Terms-change notice**, then **newsletter/digests** — §2e/§2f. Lowest harm;
-   newsletter is the only non-transactional (needs unsubscribe + double-opt-in).
+1. **Deliverability.** A sending domain, SPF, DKIM and DMARC records, a
+   monitored bounce and complaint path, and a named owner for sender
+   reputation. Mail that silently lands in spam is worse than no mail: the
+   product believes it delivered.
+2. **Consent.** Which categories are transactional (the member asked for this
+   specific thing) and which are marketing (they did not). Marketing mail needs
+   a working unsubscribe on every message, honoured before the next send, and a
+   recorded lawful basis per address.
+3. **An outbox.** A persisted queue with a deterministic idempotency key per
+   message, so a retry cannot double-send and a failure is visible rather than
+   swallowed in a log line. The removed `MailerService` sent inline from the
+   request handler, which is exactly how a flaky provider becomes a timing
+   oracle or a duplicated notice.
+4. **A sub-processor entry.** An email provider processes members' addresses
+   and message bodies. It belongs in the privacy policy's sub-processor list and
+   in the DPA record before the first send, not after.
 
-When any of these lands, **re-audit the corresponding copy** — the softened
-strings in §0 should be restored to promise the email that now actually arrives.
+Only with those settled does an order make sense, and it should be harm-first:
+§2a erasure warning, then §2c moderation and appeal outcomes, then §2b
+join-request approve/decline, then §2d DSAR, and bulk mail (§2f) last because
+it needs item 2 fully in place.
+
+If any of that ever lands, **re-audit the corresponding copy**: the softened
+strings in §0 would be restored to promise the email that then actually
+arrives. Until then, a code review that introduces a mail transport is a
+blocking finding; point at this file.
 
 ---
 
@@ -191,8 +227,15 @@ strings in §0 should be restored to promise the email that now actually arrives
 - **In-app notifications** exist and are unaffected — this doc is only about the
   out-of-band (email) channel. ~14 notification *types* are still missing (audit
   §K); that's a separate gap.
-- **The `email_preference` schema** stays in place as dead weight rather than
-  being dropped — cheaper to leave than to migrate out and back in when Postmark
-  lands. Recorded here so it isn't mistaken for a live feature.
+- **The `email_preference` schema** is **gone** as of 2026-08-26, reversing the
+  earlier "keep it inert" call recorded in §2f. Once the routes came out there
+  was no writer and no reader, and the rows were never in the Art. 20 export
+  either, so what remained was personal data with no purpose. Dropping it also
+  fails safe in every case: a stored row says either "send me this" (impossible)
+  or "do not send me this" (which is satisfied by sending nothing, forever).
+  `src/migrations/1795740000000-DropEmailPreference.ts` carries the full
+  reasoning and a `down()` that restores the table's exact shape, both indexes
+  and its cascading FK. The rows themselves come back only from a database
+  backup.
 - **Bucket object deletion on erasure** (no `DeleteObjectCommand`) — a separate
   erasure/GDPR gap noted in `backup-restore.md` §5.

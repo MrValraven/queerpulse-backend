@@ -1889,10 +1889,10 @@ export class MagazinePieceService {
    *
    * THIS USED TO SEND EMAIL. Shipping emitted `newsletter.digest_due`, which
    * wrote one ledger row per confirmed newsletter subscriber, and a
-   * once-a-minute cron in the newsletter module drained that queue through
-   * `mailer.send(..., 'digest', ...)`. QueerPulse delivers no email and never
-   * will, so shipping an issue with SMTP configured would have started mailing
-   * members. The queue, the cron and the `digest`/`digest_test` templates are
+   * once-a-minute cron in the newsletter module drained that queue out through
+   * an outbound mail transport. QueerPulse delivers no email and never will, so
+   * shipping an issue would have started mailing members. The queue, the cron,
+   * the `digest`/`digest_test` templates and the transport itself are all
    * deleted; this is the replacement, and it is in-app only.
    *
    * The desk's curation work survives untouched: the `digest` jsonb (the

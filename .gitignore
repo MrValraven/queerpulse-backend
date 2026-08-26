@@ -47,6 +47,13 @@ lerna-debug.log*
 .temp
 .tmp
 
+# Scratch tsc output. Compiling a throwaway `*.tmp.ts` probe at the repo root
+# (an ad-hoc "does this decorator emit that header?" check) leaves its emitted
+# .js/.d.ts/.js.map behind. Never source, always disposable.
+*.tmp.js
+*.tmp.d.ts
+*.tmp.js.map
+
 # Runtime data
 pids
 *.pid

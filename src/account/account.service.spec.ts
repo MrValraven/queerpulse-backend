@@ -13,7 +13,8 @@ import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
 import { AccountExportService } from './account-export.service';
-import { AccountService, DEFAULT_EMAIL_PREFERENCES } from './account.service';
+import { AccountService } from './account.service';
+import { DAY_MS, EXPORT_LINK_EXPIRY_DAYS } from './account.constants';
 import { AccountDeactivation } from './entities/account-deactivation.entity';
 import { AccountReauthToken } from './entities/account-reauth-token.entity';
 import {
@@ -25,7 +26,6 @@ import {
   DeletionRequestStatus,
 } from './entities/deletion-request.entity';
 import { DsarRequest } from './entities/dsar-request.entity';
-import { EmailPreference } from './entities/email-preference.entity';
 
 const sha256 = (value: string) =>
   createHash('sha256').update(value).digest('hex');
@@ -40,11 +40,6 @@ describe('AccountService', () => {
   };
   let dsarRequests: { find: jest.Mock; save: jest.Mock };
   let exportJobs: { findOne: jest.Mock; save: jest.Mock };
-  let emailPreferences: {
-    find: jest.Mock;
-    findOne: jest.Mock;
-    save: jest.Mock;
-  };
   let reauthTokens: {
     save: jest.Mock;
     findOne: jest.Mock;
@@ -103,13 +98,6 @@ describe('AccountService', () => {
       findOne: jest.fn().mockResolvedValue(null),
       save: jest.fn((v: Partial<DataExportJob>) =>
         Promise.resolve({ id: 'job-1', ...v }),
-      ),
-    };
-    emailPreferences = {
-      find: jest.fn().mockResolvedValue([]),
-      findOne: jest.fn().mockResolvedValue(null),
-      save: jest.fn((v: Partial<EmailPreference>) =>
-        Promise.resolve({ id: 'pref-1', ...v }),
       ),
     };
     reauthTokens = {
@@ -240,10 +228,6 @@ describe('AccountService', () => {
         },
         { provide: getRepositoryToken(DsarRequest), useValue: dsarRequests },
         { provide: getRepositoryToken(DataExportJob), useValue: exportJobs },
-        {
-          provide: getRepositoryToken(EmailPreference),
-          useValue: emailPreferences,
-        },
         {
           provide: getRepositoryToken(AccountReauthToken),
           useValue: reauthTokens,
@@ -748,16 +732,31 @@ describe('AccountService', () => {
     });
 
     describe('getExportDownload', () => {
+      // `generatedAt` is CLOCK-RELATIVE, and has to be: the download route now
+      // enforces the advertised `EXPORT_LINK_EXPIRY_DAYS` window against the
+      // real `Date.now()` (this suite does not fake timers, see the
+      // `Date.now() + 60_000` reauth fixtures throughout). The old fixture
+      // pinned `generatedAt` to the fixed `now` constant, which drifts further
+      // into the past on every real-world day and would eventually have every
+      // one of these tests failing on expiry rather than on what it asserts.
+      const generatedAt = () => new Date(Date.now() - 60_000);
+
       const readyJob = (format: DataExportFormat) => ({
         id: 'job-1',
         userId: 'u1',
         status: 'ready',
         format,
         categories: ['profile'],
-        generatedAt: now,
-        requestedAt: now,
+        generatedAt: generatedAt(),
+        requestedAt: generatedAt(),
         data: { manifest: { schemaVersion: '1.0' }, profile: { email: 'a@b' } },
         error: null,
+      });
+
+      /** A ready job whose archive was generated `ageMs` ago. */
+      const jobGeneratedAgo = (ageMs: number) => ({
+        ...readyJob(DataExportFormat.Json),
+        generatedAt: new Date(Date.now() - ageMs),
       });
 
       it('scopes the lookup to the owning user', async () => {
@@ -818,6 +817,87 @@ describe('AccountService', () => {
         exportJobs.findOne.mockResolvedValue(readyJob(DataExportFormat.Both));
         await service.getExportDownload('u1', 'job-1');
         expect(exportJobs.save).not.toHaveBeenCalled();
+      });
+
+      describe('download-link expiry (EXPORT_LINK_EXPIRY_DAYS)', () => {
+        // The API advertised `expiresAt` and enforced nothing, so a link the
+        // member was told lasts 7 days kept serving until the 30-day retention
+        // sweep nulled the payload. These pin the promise to the behaviour.
+
+        it('serves an archive inside the window', async () => {
+          exportJobs.findOne.mockResolvedValue(
+            jobGeneratedAgo(EXPORT_LINK_EXPIRY_DAYS * DAY_MS - 60_000),
+          );
+          const result = await service.getExportDownload('u1', 'job-1');
+          expect(result.kind).toBe('json');
+        });
+
+        it('refuses an archive past the window', async () => {
+          exportJobs.findOne.mockResolvedValue(
+            jobGeneratedAgo(EXPORT_LINK_EXPIRY_DAYS * DAY_MS + 60_000),
+          );
+          await expect(
+            service.getExportDownload('u1', 'job-1'),
+          ).rejects.toBeInstanceOf(NotFoundException);
+        });
+
+        it('refuses exactly AT the boundary, and serves one millisecond before it', async () => {
+          // The check is `expiresAt <= now`, so the expiry instant itself is
+          // already too late. Both sides are pinned so a later refactor cannot
+          // quietly move the comparison by a day.
+          exportJobs.findOne.mockResolvedValue(
+            jobGeneratedAgo(EXPORT_LINK_EXPIRY_DAYS * DAY_MS),
+          );
+          await expect(
+            service.getExportDownload('u1', 'job-1'),
+          ).rejects.toBeInstanceOf(NotFoundException);
+
+          exportJobs.findOne.mockResolvedValue(
+            jobGeneratedAgo(EXPORT_LINK_EXPIRY_DAYS * DAY_MS - 1),
+          );
+          await expect(
+            service.getExportDownload('u1', 'job-1'),
+          ).resolves.toMatchObject({ kind: 'json' });
+        });
+
+        it('does NOT wait for the 30-day retention sweep to destroy the payload', async () => {
+          // The two windows are complementary. An archive between the link
+          // expiry and the sweep still has its bytes in `data`, and must still
+          // be refused: the sweeper is a cron that batches and can miss a tick,
+          // so access cannot depend on it having run.
+          const betweenTheTwoWindows = (EXPORT_LINK_EXPIRY_DAYS + 1) * DAY_MS;
+          const job = jobGeneratedAgo(betweenTheTwoWindows);
+          expect(job.data).not.toBeNull();
+          exportJobs.findOne.mockResolvedValue(job);
+          await expect(
+            service.getExportDownload('u1', 'job-1'),
+          ).rejects.toBeInstanceOf(NotFoundException);
+        });
+
+        it('tells the owner the link expired rather than pretending it never existed', async () => {
+          // Safe to differentiate: the `{ id, userId }` lookup already proved
+          // ownership, so this only ever reaches the member whose export it is.
+          exportJobs.findOne.mockResolvedValue(
+            jobGeneratedAgo(EXPORT_LINK_EXPIRY_DAYS * DAY_MS + 60_000),
+          );
+          await expect(
+            service.getExportDownload('u1', 'job-1'),
+          ).rejects.toThrow(/expired/i);
+        });
+
+        it('leaves a job with no generatedAt to the not-ready guard', async () => {
+          // No `generatedAt` means nothing was ever built, so there is no
+          // window to be inside or outside of. It must still be refused, by the
+          // guard above rather than by the expiry check.
+          exportJobs.findOne.mockResolvedValue({
+            ...readyJob(DataExportFormat.Json),
+            generatedAt: null,
+            data: null,
+          });
+          await expect(
+            service.getExportDownload('u1', 'job-1'),
+          ).rejects.toBeInstanceOf(NotFoundException);
+        });
       });
     });
   });
@@ -1174,120 +1254,6 @@ describe('AccountService', () => {
       expect(refreshTokens.update).toHaveBeenCalledWith(
         expect.objectContaining({ userId: 'u1' }),
         expect.objectContaining({ revokedAt: expect.any(Date) as unknown }),
-      );
-    });
-  });
-
-  describe('email preferences', () => {
-    it('getEmailPreferences returns an EmailPreference[] of the default matrix', async () => {
-      emailPreferences.find.mockResolvedValue([]);
-      const result = await service.getEmailPreferences('u1');
-      // One entry per default category, each { category, email }.
-      expect(result).toHaveLength(
-        Object.keys(DEFAULT_EMAIL_PREFERENCES).length,
-      );
-      const productUpdates = result.find(
-        (p) => p.category === 'productUpdates',
-      );
-      expect(productUpdates).toEqual({
-        category: 'productUpdates',
-        email: true,
-        // No mailer at launch — every item is flagged not-yet-delivered.
-        comingSoon: true,
-      });
-    });
-
-    it('getEmailPreferences layers stored overrides on top of the defaults', async () => {
-      emailPreferences.find.mockResolvedValue([
-        { category: 'productUpdates', enabled: false },
-      ]);
-      const result = await service.getEmailPreferences('u1');
-      expect(result.find((p) => p.category === 'productUpdates')?.email).toBe(
-        false,
-      );
-      expect(result.find((p) => p.category === 'communityDigest')?.email).toBe(
-        true,
-      );
-    });
-
-    it('getEmailPreferences marks ALWAYS_ON categories locked and always on', async () => {
-      emailPreferences.find.mockResolvedValue([
-        // Even a stored "off" override cannot turn a locked category off.
-        { category: 'securityAlerts', enabled: false },
-      ]);
-      const result = await service.getEmailPreferences('u1');
-      const security = result.find((p) => p.category === 'securityAlerts');
-      expect(security).toEqual({
-        category: 'securityAlerts',
-        email: true,
-        locked: true,
-        comingSoon: true,
-      });
-    });
-
-    it('updateEmailPreference upserts a single {category,email} toggle and returns the array', async () => {
-      emailPreferences.findOne.mockResolvedValueOnce(null);
-      emailPreferences.find.mockResolvedValue([
-        { category: 'productUpdates', enabled: false },
-      ]);
-
-      const result = await service.updateEmailPreference('u1', {
-        category: 'productUpdates',
-        email: false,
-      });
-
-      expect(emailPreferences.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userId: 'u1',
-          category: 'productUpdates',
-          enabled: false,
-        }),
-      );
-      expect(result.find((p) => p.category === 'productUpdates')?.email).toBe(
-        false,
-      );
-      // Untouched default survives.
-      expect(result.find((p) => p.category === 'communityDigest')?.email).toBe(
-        true,
-      );
-    });
-
-    it('updateEmailPreference refuses to persist an ALWAYS_ON category toggle', async () => {
-      const result = await service.updateEmailPreference('u1', {
-        category: 'securityAlerts',
-        email: false,
-      });
-      expect(emailPreferences.save).not.toHaveBeenCalled();
-      expect(result.find((p) => p.category === 'securityAlerts')?.email).toBe(
-        true,
-      );
-    });
-
-    it('round-trips: an update is reflected on the next get', async () => {
-      let stored: Array<{ category: string; enabled: boolean }> = [];
-      emailPreferences.findOne.mockImplementation(
-        ({ where }: { where: { category: string } }) =>
-          Promise.resolve(
-            stored.find((r) => r.category === where.category) ?? null,
-          ),
-      );
-      emailPreferences.save.mockImplementation(
-        (v: { category: string; enabled: boolean }) => {
-          stored = stored.filter((r) => r.category !== v.category);
-          stored.push(v);
-          return Promise.resolve(v);
-        },
-      );
-      emailPreferences.find.mockImplementation(() => Promise.resolve(stored));
-
-      await service.updateEmailPreference('u1', {
-        category: 'eventReminders',
-        email: false,
-      });
-      const after = await service.getEmailPreferences('u1');
-
-      expect(after.find((p) => p.category === 'eventReminders')?.email).toBe(
-        false,
       );
     });
   });

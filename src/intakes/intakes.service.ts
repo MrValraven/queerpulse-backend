@@ -16,7 +16,6 @@ import {
   setQueueAssignment,
 } from '../common/queue-assignment';
 import { Paginated, normalizePage, paginate } from '../common/pagination';
-import { MailerService } from '../mailer/mailer.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { ListIntakesQuery } from './dto/list-intakes.query';
@@ -44,7 +43,6 @@ export class IntakesService {
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
     private readonly notifications: NotificationsService,
-    private readonly mailer: MailerService,
   ) {}
 
   /** Batch-resolve a set of user-ids — submitters AND triaging admins — to
@@ -243,13 +241,14 @@ export class IntakesService {
   }
 
   /**
-   * Tell the submitter their concern reached an outcome: an in-app notification
-   * for a signed-in member (identified by their account), or an email for a
-   * logged-out submitter who left one. Best-effort — the status change is
-   * already committed, so a flaky mailer/notifier is logged, never fatal
-   * (mirrors `InquiriesService.notifyOps` and `RoadmapAdminService`). No
-   * `actorId`: an admin decision is the platform's word, so block/mute must not
-   * suppress it.
+   * Tell the submitter their concern reached an outcome, in-app, when the
+   * submission is tied to an account. QueerPulse delivers no email, so a
+   * concern submitted anonymously with only an email address gets NO outbound
+   * update at all: the outcome is recorded on the submission and nothing
+   * reaches the address. Best-effort: the status change is already committed,
+   * so a flaky notifier is logged, never fatal (mirrors `RoadmapAdminService`).
+   * No `actorId`: an admin decision is the platform's word, so block/mute must
+   * not suppress it.
    *
    * The notification type branches on the KIND. `governance_concern` is the one
    * kind this table holds that actually is a concern, and it keeps
@@ -277,12 +276,6 @@ export class IntakesService {
             ? { source: 'concern', status, ...(category ? { category } : {}) }
             : { source: 'intake', kind: submission.kind, status },
         );
-        return;
-      }
-      const rawEmail = submission.payload.email;
-      const email = typeof rawEmail === 'string' ? rawEmail.trim() : '';
-      if (email) {
-        await this.mailer.send(email, 'concern_update', { status });
       }
     } catch (error) {
       this.logger.error(

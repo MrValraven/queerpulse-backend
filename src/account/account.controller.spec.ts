@@ -21,8 +21,6 @@ describe('AccountController', () => {
     listSessions: jest.Mock;
     revokeSession: jest.Mock;
     revokeOtherSessions: jest.Mock;
-    getEmailPreferences: jest.Mock;
-    updateEmailPreference: jest.Mock;
   };
 
   const user: CurrentUserData = {
@@ -51,8 +49,6 @@ describe('AccountController', () => {
       listSessions: jest.fn(),
       revokeSession: jest.fn(),
       revokeOtherSessions: jest.fn(),
-      getEmailPreferences: jest.fn(),
-      updateEmailPreference: jest.fn(),
     };
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AccountController],
@@ -334,36 +330,10 @@ describe('AccountController', () => {
     );
   });
 
-  it('GET /email-preferences returns the array from the service', async () => {
-    service.getEmailPreferences.mockResolvedValue([
-      { category: 'productUpdates', email: true },
-    ]);
-    const result = await controller.getEmailPreferences(user);
-    expect(service.getEmailPreferences).toHaveBeenCalledWith('u1');
-    expect(result).toEqual([{ category: 'productUpdates', email: true }]);
-  });
-
-  it('POST /email-preferences upserts a single {category,email} toggle and returns the array', async () => {
-    service.updateEmailPreference.mockResolvedValue([
-      { category: 'productUpdates', email: false },
-    ]);
-    const result = await controller.updateEmailPreference(user, {
-      category: 'productUpdates',
-      email: false,
-    });
-    expect(service.updateEmailPreference).toHaveBeenCalledWith('u1', {
-      category: 'productUpdates',
-      email: false,
-    });
-    expect(result).toEqual([{ category: 'productUpdates', email: false }]);
-  });
-
   it('a pending user can call every account endpoint (no ActiveMemberGuard applied)', async () => {
     const pendingUser: CurrentUserData = { ...user, status: 'pending' };
-    service.getEmailPreferences.mockResolvedValue([]);
-    await expect(
-      controller.getEmailPreferences(pendingUser),
-    ).resolves.toBeDefined();
+    service.listDsar.mockResolvedValue([]);
+    await expect(controller.listDsar(pendingUser)).resolves.toBeDefined();
     // Documents intent: AccountController has no @UseGuards(ActiveMemberGuard).
   });
 });

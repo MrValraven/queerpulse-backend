@@ -401,10 +401,12 @@ export class JoinRequestsService {
 
     // OPS-04: one batched profile lookup for every reviewer holding a row on
     // this page, so the queue can print "Claimed by Ana Reis" without a query
-    // per row.
-    const assigneeRefs = await this.assigneeRefs(
-      requests.map((r) => r.assignedStaffId),
-    );
+    // per row. The DECIDING reviewers ride along in the SAME lookup, so naming
+    // who made each past call costs this page nothing extra.
+    const staffRefs = await this.staffRefs([
+      ...requests.map((r) => r.assignedStaffId),
+      ...requests.map((r) => r.reviewedBy),
+    ]);
 
     return requests.map((r) => {
       const reference = r.referenceUserId
@@ -417,7 +419,8 @@ export class JoinRequestsService {
         priorDeclineCounts.get(r.email.toLowerCase()) ?? 0,
         reference?.name ?? null,
         reference?.slug ?? null,
-        optionalQueueAssigneeName(r.assignedStaffId, assigneeRefs),
+        optionalQueueAssigneeName(r.assignedStaffId, staffRefs),
+        optionalQueueAssigneeName(r.reviewedBy, staffRefs),
       );
     });
   }
@@ -474,7 +477,10 @@ export class JoinRequestsService {
     const saved = await this.joinRequests.findOne({ where: { id } });
     if (!saved) throw new NotFoundException('Join request not found');
     const inviteRefById = await this.loadInviteRefs([saved]);
-    const assigneeRefs = await this.assigneeRefs([saved.assignedStaffId]);
+    const staffRefs = await this.staffRefs([
+      saved.assignedStaffId,
+      saved.reviewedBy,
+    ]);
     return toJoinRequestView(
       saved,
       saved.inviteId ? (inviteRefById.get(saved.inviteId) ?? null) : null,
@@ -482,17 +488,24 @@ export class JoinRequestsService {
       0,
       null,
       null,
-      optionalQueueAssigneeName(saved.assignedStaffId, assigneeRefs),
+      optionalQueueAssigneeName(saved.assignedStaffId, staffRefs),
+      optionalQueueAssigneeName(saved.reviewedBy, staffRefs),
     );
   }
 
-  /** Batched userId -> profile ref for the reviewers holding a set of rows.
-   *  Skips the query entirely when nothing on the page is claimed. */
-  private async assigneeRefs(
-    assignedStaffIds: (string | null)[],
+  /**
+   * Batched userId -> profile ref for the staff attached to a set of rows:
+   * whoever is HOLDING each row and whoever DECIDED it, resolved together in
+   * ONE query because they are the same population and a page needs both.
+   * Skips the query entirely when the set is empty (a page of unclaimed,
+   * undecided requests), and de-duplicates, so one reviewer across fifty rows
+   * is looked up once.
+   */
+  private async staffRefs(
+    staffUserIds: (string | null)[],
   ): Promise<Map<string, MemberRef>> {
     const ids = [
-      ...new Set(assignedStaffIds.filter((id): id is string => id !== null)),
+      ...new Set(staffUserIds.filter((id): id is string => id !== null)),
     ];
     if (!ids.length) return new Map<string, MemberRef>();
     return new MemberLookup(this.dataSource.getRepository(Profile)).byUserIds(
@@ -663,8 +676,14 @@ export class JoinRequestsService {
    *
    * No flags/prior-decline-count on sampled rows: those signals exist to
    * triage *pending* requests, not to re-triage a decision that has already
-   * been made. `toJoinRequestView` is called with just the invite code, same
-   * as `review()`'s single-row call, so those fields default to `[]`/`0`.
+   * been made, so those fields default to `[]`/`0`.
+   *
+   * The DECIDING reviewer IS resolved to a name here, and it is the one thing
+   * this surface cannot work without: reading a run of decisions for a
+   * consistent bar means knowing which of them were read by the same person.
+   * It costs ONE batched profile lookup for the whole draw (up to 50 rows),
+   * never one per row, so the endpoint issues at most three queries: the
+   * sampled rows, their invites, and this.
    */
   async sample(n: number): Promise<JoinRequestView[]> {
     const requests = await this.joinRequests
@@ -680,10 +699,23 @@ export class JoinRequestsService {
       .getMany();
 
     const inviteRefById = await this.loadInviteRefs(requests);
+    // A decided row can still carry the claim it was worked under, so both
+    // staff ids go into the one lookup rather than resolving the reviewer and
+    // leaving the holder as a bare uuid.
+    const staffRefs = await this.staffRefs([
+      ...requests.map((r) => r.reviewedBy),
+      ...requests.map((r) => r.assignedStaffId),
+    ]);
     return requests.map((r) =>
       toJoinRequestView(
         r,
         r.inviteId ? (inviteRefById.get(r.inviteId) ?? null) : null,
+        [],
+        0,
+        null,
+        null,
+        optionalQueueAssigneeName(r.assignedStaffId, staffRefs),
+        optionalQueueAssigneeName(r.reviewedBy, staffRefs),
       ),
     );
   }
@@ -766,10 +798,26 @@ export class JoinRequestsService {
     this.logger.log(
       `Reviewer ${reviewerId} reissued the approval invite on join request ${id}`,
     );
-    return toJoinRequestView(request, {
-      code: invite.code,
-      status: resolveInviteStatus(invite, new Date()),
-      expiresAt: invite.expiresAt,
-    });
+    // The caller patches a decided row in place with this, so the reviewer's
+    // name has to survive the patch or reissuing an invite would blank out who
+    // decided the request. One batched lookup for the single row.
+    const staffRefs = await this.staffRefs([
+      request.reviewedBy,
+      request.assignedStaffId,
+    ]);
+    return toJoinRequestView(
+      request,
+      {
+        code: invite.code,
+        status: resolveInviteStatus(invite, new Date()),
+        expiresAt: invite.expiresAt,
+      },
+      [],
+      0,
+      null,
+      null,
+      optionalQueueAssigneeName(request.assignedStaffId, staffRefs),
+      optionalQueueAssigneeName(request.reviewedBy, staffRefs),
+    );
   }
 }

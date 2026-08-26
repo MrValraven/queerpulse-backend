@@ -26,25 +26,10 @@ export const EXPORT_LINK_EXPIRY_DAYS = 7;
 // `POST /account/export`.
 export const EXPORT_REUSE_WINDOW_MS = 60 * 60 * 1000;
 
-// Categories always present in `GET /account/email-preferences`, even before
-// the member has ever touched a toggle. `email_preference` rows are overrides
-// layered on top of this default matrix.
+// RETIRED: `DEFAULT_EMAIL_PREFERENCES` / `LOCKED_EMAIL_CATEGORIES`.
 //
-// ⚠️ NOT-YET-ACTIVE. `MailerService` exists and delivers (the join-request
-// approve/decline emails go through it), but NO sender consults these
-// categories: nothing reads `email_preference` before sending, and there is no
-// digest/reminder/product-update job at all. The toggles are PERSISTED and
-// never acted on; every response item carries `comingSoon: true`. This matrix
-// stays here ready for the day a sender honours it. Do not read it as evidence
-// that these emails are delivered.
-export const DEFAULT_EMAIL_PREFERENCES: Record<string, boolean> = {
-  productUpdates: true,
-  communityDigest: true,
-  eventReminders: true,
-  directMessages: true,
-  securityAlerts: true,
-};
-
-// ALWAYS_ON transactional categories the frontend marks `locked: true` and
-// which `POST /account/email-preferences` refuses to toggle off.
-export const LOCKED_EMAIL_CATEGORIES = new Set<string>(['securityAlerts']);
+// They described a matrix of email-notification categories that no sender ever
+// read, for a channel QueerPulse does not have and never will. Do not add an
+// email category here. The preferences that genuinely gate delivery are the
+// in-app and push categories in
+// `src/notifications/notification-preferences.ts`.

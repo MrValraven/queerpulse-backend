@@ -27,12 +27,13 @@ export class NewsletterController {
   constructor(private readonly newsletter: NewsletterService) {}
 
   @ApiOperation({
-    summary: 'Subscribe an email to the newsletter (double opt-in).',
+    summary: 'Record an email address for the newsletter (nothing is sent).',
   })
   @ApiOkResponse({
     description:
-      'Acknowledged. A confirmation email is sent when the address is not yet ' +
-      'confirmed; the response never reveals whether the address already existed.',
+      'Acknowledged. QueerPulse delivers no email, so no confirmation link is ' +
+      'sent and the row stays pending; the response never reveals whether the ' +
+      'address already existed.',
   })
   @Public()
   // Public form on the marketing homepage; keep it modest to blunt abuse. CSRF
@@ -45,22 +46,20 @@ export class NewsletterController {
   }
 
   @ApiOperation({
-    summary: 'Confirm a newsletter subscription via emailed token.',
+    summary: 'Confirm a newsletter subscription by token.',
   })
   @ApiOkResponse({ description: 'The address is now confirmed.' })
   @Public()
-  // Version-neutral so the link baked into the confirmation email
-  // (`<API_URL>/newsletter/confirm?token=...`) answers at its unprefixed path.
+  // Version-neutral so a bare `<API_URL>/newsletter/confirm?token=...` answers
+  // at its unprefixed path.
   //
-  // STATE-CHANGING GET, knowingly: this route is what an already-delivered
-  // confirmation email points at, and those links live in inboxes for as long
-  // as the mail does, so it has to keep working. It is the weak half of double
-  // opt-in — Outlook SafeLinks and corporate mail scanners follow GET links
-  // before a human ever sees them, which confirms the address on its own — and
-  // the POST below is the replacement. Moving the emailed link over to the
-  // frontend confirmation page (which calls that POST, exactly as the
-  // unsubscribe flow already does) is what retires this route; until that page
-  // exists, `NewsletterService.sendConfirmation` still has to link here.
+  // STATE-CHANGING GET, knowingly: this is the shape of link that was handed
+  // out historically, so it keeps working for anyone still holding one. It is
+  // the weak half of a confirmation step (a link scanner that follows GET
+  // links confirms the address on its own), and the POST below is the
+  // replacement. Nothing in this repository delivers either link: QueerPulse
+  // delivers no email, so both routes only ever serve a token someone was
+  // handed out of band.
   @Version(VERSION_NEUTRAL)
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @Get('confirm')
@@ -87,16 +86,16 @@ export class NewsletterController {
   }
 
   @ApiOperation({
-    summary: 'Unsubscribe from the newsletter via the emailed/link token.',
+    summary: 'Unsubscribe from the newsletter with the subscription token.',
   })
   @ApiOkResponse({
     description:
       'The address is now unsubscribed. Idempotent: calling this twice is not an error.',
   })
   @Public()
-  // Unlike `confirm`, this is NOT version-neutral: the confirm link is opened
-  // by hitting this API directly from the raw email link, but the unsubscribe
-  // link points at the frontend's confirmation page (CNT-19 asked for real
+  // Unlike `confirm`, this is NOT version-neutral: a confirm link is opened by
+  // hitting this API directly, but the unsubscribe link points at the
+  // frontend's confirmation page (CNT-19 asked for real
   // success/already-unsubscribed/invalid states instead of bare JSON), which
   // calls this endpoint through the normal versioned API client.
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
@@ -114,14 +113,14 @@ export class NewsletterController {
       'The address is now unsubscribed. Idempotent, exactly like the GET.',
   })
   @Public()
-  // The `List-Unsubscribe` header a bulk message carries points HERE, and RFC
-  // 8058 requires that URI to accept a bare POST: the mail client (Gmail,
-  // Yahoo, Apple Mail) posts it directly from the message, with no browser
-  // session, no landing page and no confirmation step. Hence:
+  // RFC 8058 shape, kept for any `List-Unsubscribe` URI that was ever handed
+  // out: the URI has to accept a bare POST, with no browser session, no
+  // landing page and no confirmation step. QueerPulse sends no bulk mail, so
+  // nothing generates such a header today; the route stays because a token
+  // holder must always be able to opt out. Hence:
   //
-  // - `@Version(VERSION_NEUTRAL)`: the URL is baked into already-delivered
-  //   mail and must keep answering across API versions, same reasoning as
-  //   `confirm` above.
+  // - `@Version(VERSION_NEUTRAL)`: such a URL is unversioned and must keep
+  //   answering across API versions, same reasoning as `confirm` above.
   // - `@SkipCsrf()`: there is no SPA and no CSRF token in a mail client's
   //   POST. The route carries its OWN request authentication — the unguessable
   //   32-byte `confirmToken` — which is exactly the "routes with their own

@@ -918,21 +918,47 @@ export class AuthService {
     } satisfies UserSessionRevokedEvent);
   }
 
-  /** Revoke every live refresh token for a user (logout-all / global sign-out). */
+  /**
+   * Revoke every live refresh token for a user (global sign-out).
+   *
+   * NO MEMBER-FACING HTTP ROUTE REACHES THIS. `POST /auth/logout-all`, the
+   * "sign out everywhere including this device" route, was removed on
+   * 2026-08-26 for having no caller. The session control that did ship is
+   * `DELETE /account/sessions`, and it is a different act: it revokes every
+   * session EXCEPT the presenting one, so the caller stays signed in here, and
+   * it clears no cookies. It runs through `AccountService.revokeOtherSessions`
+   * and never comes through this method.
+   *
+   * So every caller today is the platform acting ON a member rather than a
+   * member acting on themselves: refresh-token reuse detection, the under-18
+   * disclosure lockout, and the moderation suspend/ban paths.
+   *
+   * KEEP THIS METHOD. If a genuine "sign out everywhere" control is ever built,
+   * this is the thing to wire it to. The route would need to clear this
+   * device's auth and CSRF cookies on the way out too, which is the part
+   * `DELETE /account/sessions` deliberately does not do.
+   */
   async revokeAllForUser(userId: string): Promise<void> {
-    await this.revokeAllUserSessions(userId, 'logout-all');
+    await this.revokeAllUserSessions(userId, 'sign-out-everywhere');
   }
 
   // --- internals ---
 
   /**
    * Revoke all of a user's currently-live refresh tokens in one statement and
-   * emit a security log line. Used for both explicit logout-all and reuse
-   * detection. Logs never include token values/secrets.
+   * emit a security log line. Used for both a deliberate global sign-out and
+   * reuse detection. Logs never include token values/secrets.
+   *
+   * `reason` is a LOG LABEL only. It is never persisted: `RefreshToken` has no
+   * reason column, and the value reaches nothing but the `logger.warn` below.
+   * It was `'logout-all'` until 2026-08-26, named after the `POST
+   * /auth/logout-all` route that has since been removed. Renamed to
+   * `'sign-out-everywhere'` because the surviving callers are reuse detection,
+   * the under-18 lockout, and moderation, and none of them is a logout.
    */
   private async revokeAllUserSessions(
     userId: string,
-    reason: 'reuse-detected' | 'logout-all',
+    reason: 'reuse-detected' | 'sign-out-everywhere',
     context: { rowId?: string; userAgent?: string } = {},
   ): Promise<void> {
     const result = await this.refreshTokens.update(
@@ -944,8 +970,9 @@ export class AuthService {
         `rowId=${context.rowId ?? 'n/a'} userAgent=${context.userAgent ?? 'n/a'} ` +
         `count=${result.affected ?? 0}`,
     );
-    // Drop the member's live sockets too. Covers both logout-all and reuse
-    // detection (a compromise signal) — the chat gateway consumes this event.
+    // Drop the member's live sockets too. Covers both a global sign-out and
+    // reuse detection (a compromise signal). The chat gateway consumes this
+    // event.
     this.eventEmitter.emit(USER_SESSION_REVOKED, {
       userId,
     } satisfies UserSessionRevokedEvent);

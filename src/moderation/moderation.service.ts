@@ -52,6 +52,7 @@ import { Appeal, AppealStatus } from './entities/appeal.entity';
 import { ModAuditLog } from './entities/mod-audit-log.entity';
 import { ModAuditService } from './mod-audit.service';
 import { statusForAction } from './mod-action-status';
+import { enforcementTargetUnresolved } from './enforcement-refusals';
 import { COMMUNITY_BAN_AUDIT_ACTION } from '../communities/community-governance-log.service';
 import { BAN_PENDING_AUDIT_ACTION } from './ban-ratification-window';
 import { BanRatificationService } from './ban-ratification.service';
@@ -914,9 +915,25 @@ export class ModerationService {
    * nobody at all, so the team believed it was running a graduated ladder while
    * the member heard nothing. `suspend`/`ban`/`restrict` reuse the account the
    * enforcement already landed on, carrying its expiry (`null` = permanent
-   * ban). Any non-outcome action yields null, as does a subject with no
-   * resolvable author (a `venue` report describing a place in prose, an erased
-   * author) — the honest answer, rather than warning the wrong person.
+   * ban). Any non-outcome action yields null.
+   *
+   * A `warn` WITH NO ONE TO WARN NOW REFUSES rather than resolving the report
+   * quietly. Half of TS-02 was fixed and half was left: a `warn` on a subject
+   * with no resolvable author still returned `null` here, so the report closed,
+   * the audit row said "warned", `resolutionNotified` correctly omitted
+   * `member`, and absolutely nobody was told anything. From the moderator's
+   * side that is indistinguishable from a warning that landed. It is the same
+   * failure `enforceAgainstUser` refuses for `restrict`/`suspend`/`ban`, minus
+   * the 400, so it gets the 400 too, including the ambiguous case, where a
+   * `warn` on an answered public question would otherwise tell the member who
+   * asked a question that their conduct was a problem.
+   *
+   * ORDERING NOTE: `warn` always resolves a report (`statusForAction`), so
+   * `applyResolution` is the FIRST caller and it runs inside the action's
+   * transaction. The refusal therefore rolls the whole action back before the
+   * post-commit callers here are ever reached. Anything added to
+   * {@link OUTCOME_ACTIONS} that does NOT resolve its report must be checked
+   * against that.
    */
   private async resolveOutcomeTarget(
     report: Report,
@@ -926,9 +943,18 @@ export class ModerationService {
     if (!ModerationService.OUTCOME_ACTIONS.has(dto.action)) return null;
     if (dto.action === 'warn') {
       const resolution = await this.subjectResolver.resolve(report);
-      return resolution.authorUserId
-        ? { userId: resolution.authorUserId, expiresAt: null }
-        : null;
+      // Two people could have written what was reported and the report does
+      // not say which. See `ReportSubjectResolution.isAuthorAmbiguous`.
+      if (resolution.isAuthorAmbiguous) {
+        throw enforcementTargetUnresolved(
+          'ambiguous_authors',
+          report.subjectType,
+        );
+      }
+      if (!resolution.authorUserId) {
+        throw enforcementTargetUnresolved('no_account', report.subjectType);
+      }
+      return { userId: resolution.authorUserId, expiresAt: null };
     }
     return enforceResult
       ? {

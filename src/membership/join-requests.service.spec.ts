@@ -876,5 +876,92 @@ describe('JoinRequestsService', () => {
       expect(qb.orderBy).toHaveBeenCalledWith('RANDOM()');
       expect(qb.limit).toHaveBeenCalledWith(5);
     });
+
+    it('names the deciding reviewer in ONE batched lookup for the whole draw', async () => {
+      const decided = (id: string, reviewedBy: string | null) =>
+        ({
+          id,
+          name: id,
+          email: `${id}@example.com`,
+          status: PlatformJoinRequestStatus.Approved,
+          reviewedBy,
+          assignedStaffId: null,
+          inviteId: null,
+        }) as unknown as PlatformJoinRequest;
+      qb.getMany.mockResolvedValue([
+        decided('one', 'reviewer-ana'),
+        decided('two', 'reviewer-ana'),
+        decided('three', 'reviewer-luis'),
+      ]);
+      profileRepo.find.mockResolvedValue([
+        { userId: 'reviewer-ana', firstName: 'Ana', lastName: 'Reis' },
+        { userId: 'reviewer-luis', firstName: 'Luís', lastName: 'Matos' },
+      ]);
+
+      const rows = await service.sample(3);
+
+      expect(rows.map((row) => row.reviewedByName)).toEqual([
+        'Ana Reis',
+        'Ana Reis',
+        'Luís Matos',
+      ]);
+      // The id stays beside the name: the sample groups on it, and a name is
+      // not stable enough to group on.
+      expect(rows.map((row) => row.reviewedBy)).toEqual([
+        'reviewer-ana',
+        'reviewer-ana',
+        'reviewer-luis',
+      ]);
+      // Three rows, two distinct reviewers, ONE profile query. This is the N+1 that
+      // batching exists to prevent.
+      expect(profileRepo.find).toHaveBeenCalledTimes(1);
+      expect(profileRepo.find).toHaveBeenCalledWith({
+        where: { userId: In(['reviewer-ana', 'reviewer-luis']) },
+      });
+    });
+
+    it('leaves the reviewer name off a row whose reviewer was erased, rather than inventing one', async () => {
+      // `join_requests.reviewed_by` is ON DELETE SET NULL, so erasure takes the
+      // id with it. There is nothing left to resolve, and nothing here may put
+      // a name back.
+      qb.getMany.mockResolvedValue([
+        {
+          id: 'erased',
+          name: 'Sam',
+          email: 'sam@example.com',
+          status: PlatformJoinRequestStatus.Declined,
+          reviewedBy: null,
+          assignedStaffId: null,
+          inviteId: null,
+        },
+      ]);
+
+      const rows = await service.sample(1);
+
+      expect(rows[0]!.reviewedBy).toBeNull();
+      expect(rows[0]).not.toHaveProperty('reviewedByName');
+      // Nothing to look up, so no query is issued at all.
+      expect(profileRepo.find).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the neutral member label when a reviewer has no profile row', async () => {
+      qb.getMany.mockResolvedValue([
+        {
+          id: 'no-profile',
+          name: 'Sam',
+          email: 'sam@example.com',
+          status: PlatformJoinRequestStatus.Approved,
+          reviewedBy: 'reviewer-without-profile',
+          assignedStaffId: null,
+          inviteId: null,
+        },
+      ]);
+      profileRepo.find.mockResolvedValue([]);
+
+      const rows = await service.sample(1);
+
+      // Never their email: this label is shown to OTHER reviewers.
+      expect(rows[0]!.reviewedByName).toBe('Member');
+    });
   });
 });

@@ -42,6 +42,7 @@ import { EventCohostInvitesService } from './event-cohost-invites.service';
 import { EventInvitesService } from './event-invites.service';
 import { EventPhotosService } from './event-photos.service';
 import { EventReminderPreferencesService } from './event-reminder-preferences.service';
+import { EventAttendanceRetentionService } from './event-attendance-retention.service';
 import { EventRemindersService } from './event-reminders.service';
 import { EventsService } from './events.service';
 import { RsvpService } from './rsvp.service';
@@ -127,6 +128,10 @@ import { RsvpService } from './rsvp.service';
     EventInvitesService,
     EventCohostInvitesService,
     EventRemindersService,
+    // Daily cron clearing attendance detail on gatherings that ended over the
+    // retention window ago. Needs no controller and is exported to nobody: it
+    // only ever runs on its own schedule.
+    EventAttendanceRetentionService,
     EventReminderPreferencesService,
     EventPhotosService,
     EventAnnouncementsService,

@@ -66,7 +66,11 @@ import { MediaCropService } from '../media-crops/media-crops.service';
 
 // This controller inherits the app-wide `defaultVersion: '1'`, so its routes
 // answer at `/v1/auth/...` — which is where the SPA's versioned API client
-// (src/shared/api/client.ts) sends `me` and `logout-all`.
+// (src/shared/api/client.ts) sends `me`.
+//
+// This comment used to name `logout-all` here as well. That was wrong on both
+// counts: the SPA never called it, and the route itself was removed on
+// 2026-08-26.
 //
 // The exceptions carry `@Version(VERSION_NEUTRAL)` per-method and keep their
 // fixed, unversioned paths:
@@ -337,25 +341,12 @@ export class AuthController {
     return { ok: true };
   }
 
-  // Global sign-out: revoke every live refresh token for the current user, then
-  // clear this device's cookies. Authenticated (NOT @Public) so we know who to
-  // revoke; POST keeps it CSRF-protected.
-  @ApiOperation({ summary: 'Log out every device for the current user.' })
-  @ApiCookieAuth('access_token')
-  @ApiCreatedResponse({
-    description: 'All sessions revoked; this device signed out.',
-  })
-  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-  @Post('logout-all')
-  async logoutAll(
-    @CurrentUser() current: CurrentUserData,
-    @Res({ passthrough: true }) res: Response,
-  ): Promise<{ ok: true }> {
-    await this.authService.revokeAllForUser(current.userId);
-    clearAuthCookies(res, this.cookieOpts());
-    clearCsrfCookie(res);
-    return { ok: true };
-  }
+  // REMOVED 2026-08-26: `POST /auth/logout-all` ("sign out everywhere,
+  // including this device"). It had no caller: nothing in the SPA ever hit it.
+  // `DELETE /account/sessions` is the member-facing session control that does
+  // ship, and it means something different (sign out my OTHER devices, keep
+  // this one). See the note on `AuthService.revokeAllForUser`, which survives
+  // and is what a real sign-out-everywhere control should call.
 
   @ApiOperation({ summary: 'Get the currently authenticated user.' })
   @ApiCookieAuth('access_token')
@@ -492,9 +483,12 @@ export class AuthController {
    * be accepted rather than 403, so the client can be honest about failures
    * instead of silently giving up. Idempotent for the same reason.
    *
-   * This device's cookies are cleared on the way out, like `logout-all`, so the
-   * browser is not left holding a session the server has already killed. The
-   * frontend signs out immediately afterwards regardless of what this answers.
+   * This device's cookies are cleared on the way out, so the browser is not
+   * left holding a session the server has already killed. The frontend signs
+   * out immediately afterwards regardless of what this answers. (This used to
+   * point at `logout-all` as the reference implementation of that clearing;
+   * that route was removed on 2026-08-26, and this is now the only route that
+   * clears cookies alongside a full session revoke.)
    *
    * Throttled: it is a self-declared, one-time act, so a burst is never
    * legitimate traffic.

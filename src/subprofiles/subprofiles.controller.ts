@@ -135,6 +135,24 @@ export class SubprofilesController {
   // response for every anonymous caller, so it also carries a positive
   // `Cache-Control` — see AUDIT-2026-07-30.md §I "No CDN cache headers on
   // public GETs" / `caching-and-cost.md`.
+  //
+  // CONSUMER (this route is IN USE, do not delete it as orphaned):
+  //   queerpulse/scripts/publicPaths.mjs  -> fetchSubprofilePublicPaths()
+  //   called by queerpulse/scripts/generate-sitemap.mjs
+  //   which runs from `pnpm build` alongside scripts/prerender.mjs.
+  //
+  // The caller is a BUILD-TIME script, never a runtime call from the SPA, so
+  // this route has no call site anywhere in the frontend's `src/`. Any audit
+  // that diffs backend routes against frontend `src/` call sites will report it
+  // as unused. It is not. Checked and confirmed in use on 2026-08-26.
+  //
+  // What breaks if it is removed: every `/p/:handle` entry silently disappears
+  // from the sitemap and the prerender set. `fetchSubprofilePublicPaths` never
+  // fails the build (a demo or offline build has to succeed with no API), so a
+  // 404 here degrades to zero persona URLs while the build still goes green and
+  // persona pages quietly stop being crawlable. That script now logs a loud
+  // `console.error` on failure to make the regression visible, though the build
+  // still passes by design. Removing this route is a silent SEO regression.
   @Public()
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })
   @Get('public-handles')

@@ -3,11 +3,9 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomBytes } from 'node:crypto';
 import { Repository } from 'typeorm';
-import { MailerService } from '../mailer/mailer.service';
 import { SaveListingDraftDto } from './dto/save-listing-draft.dto';
 import { ListingDraft } from './entities/listing-draft.entity';
 import {
@@ -27,8 +25,6 @@ export class ListingDraftsService {
   constructor(
     @InjectRepository(ListingDraft)
     private readonly listingDrafts: Repository<ListingDraft>,
-    private readonly config: ConfigService,
-    private readonly mailer: MailerService,
   ) {}
 
   /** `GET /listing-drafts` — the caller's own drafts, newest-edited first. */
@@ -50,8 +46,8 @@ export class ListingDraftsService {
    *   a draft deleted on another device simply becomes a new one instead of a
    *   404 that would break autosave).
    * - `id` resolves to the caller's own draft: its payload is replaced in
-   *   place (the resume token is deliberately kept stable so a link already
-   *   emailed for this draft keeps working).
+   *   place (the resume token is deliberately kept stable so a resume link the
+   *   member already carries for this draft keeps working).
    */
   async save(
     userId: string,
@@ -94,38 +90,15 @@ export class ListingDraftsService {
   }
 
   /**
-   * `POST /listing-drafts/:id/resume-link` — deliver the cross-device resume
-   * link for one of the caller's own drafts to their own email address.
-   *
-   * The link is `<frontendUrl>/local/list-business?draft=<resumeToken>`, where
-   * `frontendUrl` is the canonical origin (first `FRONTEND_URL` allowlist
-   * entry) exactly as OAuth redirects and Mux URLs use it.
-   *
-   * DELIVERY: sent through the transactional {@link MailerService} with the
-   * keyed `listing_draft_resume_link` template. When SMTP is configured
-   * (SMTP_URL / SMTP_HOST) the link is really delivered; with no SMTP the mailer
-   * falls back to a log-only transport (dev/test) that logs the message instead
-   * of dropping it. The recipient is always the signed-in member's OWN address,
-   * never a caller-supplied one.
-   */
-  async sendResumeLink(
-    userId: string,
-    userEmail: string,
-    id: string,
-  ): Promise<void> {
-    const draft = await this.loadOwnedOr404(userId, id);
-    const resumeUrl = this.buildResumeUrl(draft.resumeToken);
-
-    await this.mailer.send(userEmail, 'listing_draft_resume_link', {
-      resumeUrl,
-    });
-  }
-
-  /**
    * `GET /listing-drafts/resume/:token` — resolve a resume token to its draft
    * so the frontend's `?draft=<token>` route can load it. Owner-scoped: a
    * token that belongs to a different user 404s exactly like an unknown token,
    * so nothing leaks whether a foreign token exists.
+   *
+   * NOTHING DELIVERS THIS TOKEN. QueerPulse delivers no email, so the platform
+   * never hands the resume link to anyone: it works only for a member who
+   * carries the `?draft=<token>` URL across devices themselves. The drafts LIST
+   * (`GET /listing-drafts`) is the cross-device path that needs no link at all.
    */
   async resolveByToken(
     userId: string,
@@ -138,13 +111,6 @@ export class ListingDraftsService {
       throw new NotFoundException('Draft not found');
     }
     return toListingDraftDetailDTO(draft);
-  }
-
-  private buildResumeUrl(resumeToken: string): string {
-    const frontendUrl = this.config.getOrThrow<string>('app.frontendUrl');
-    const resumeUrl = new URL('/local/list-business', frontendUrl);
-    resumeUrl.searchParams.set('draft', resumeToken);
-    return resumeUrl.toString();
   }
 
   private mintResumeToken(): string {

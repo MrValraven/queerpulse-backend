@@ -32,12 +32,15 @@ const baseReport = (overrides: Partial<Report> = {}): Report => ({
   ...overrides,
 });
 
-/** The raw row shape every statement in the resolver selects. */
+/** The raw row shape every statement in the resolver selects.
+ *  `is_author_ambiguous` is optional exactly as it is in the resolver: only the
+ *  one statement whose subject can cover two authors names that column. */
 interface Row {
   key: string;
   author_user_id: string | null;
   excerpt: string | null;
   community_id: string | null;
+  is_author_ambiguous?: boolean;
 }
 
 function build(rowsFor: (sql: string, keys: string[]) => Row[] = () => []) {
@@ -79,6 +82,9 @@ describe('ReportSubjectResolverService', () => {
         // Whitespace is collapsed so the excerpt sits on one queue row.
         excerpt: 'the reported body',
         communityId: 'community-1',
+        // A community post has exactly one author, so its statement never
+        // names the column and the reader reads the absence as `false`.
+        isAuthorAmbiguous: false,
       });
     });
 
@@ -120,6 +126,70 @@ describe('ReportSubjectResolverService', () => {
     });
   });
 
+  /**
+   * The `listing_public_question` subject is the ONE subject that can cover
+   * content by two different members: the asker's question and the listing
+   * owner's answer under it. The card carries a single "Report this" control
+   * below both halves, so a report about the ANSWER arrives indistinguishable
+   * from one about the question, and `author_user_id` is always the asker.
+   * Enforcement therefore has to be told not to trust it.
+   */
+  describe('a public question with an answer under it', () => {
+    const questionReport = () =>
+      baseReport({
+        subjectType: ReportSubjectType.ListingPublicQuestion,
+        subjectId: '33333333-3333-3333-3333-333333333333',
+      });
+
+    const answered = (isAuthorAmbiguous: boolean) =>
+      build((sql, keys) =>
+        sql.includes('listing_public_questions lpq')
+          ? [
+              {
+                key: keys[0]!,
+                author_user_id: 'asker-1',
+                excerpt: 'is the entrance step-free? / read the sign',
+                community_id: null,
+                is_author_ambiguous: isAuthorAmbiguous,
+              },
+            ]
+          : [],
+      );
+
+    it('flags the author as ambiguous, while still naming the asker', async () => {
+      const { service } = answered(true);
+
+      const resolution = await service.resolve(questionReport());
+
+      // The asker is still returned: the drawer has to name somebody, and they
+      // opened the exchange. `isAuthorAmbiguous` is what stops a sanction
+      // being aimed at them on the strength of it.
+      expect(resolution.authorUserId).toBe('asker-1');
+      expect(resolution.isAuthorAmbiguous).toBe(true);
+    });
+
+    it('is not ambiguous when the row says only one member wrote it', async () => {
+      const { service } = answered(false);
+
+      expect((await service.resolve(questionReport())).isAuthorAmbiguous).toBe(
+        false,
+      );
+    });
+
+    it('asks Postgres for the ambiguity rather than deciding it here', async () => {
+      const { service, query } = answered(true);
+
+      await service.resolve(questionReport());
+
+      const [sql] = (query.mock.calls as [string, unknown[]][])[0]!;
+      expect(sql).toContain('is_author_ambiguous');
+      // Blank and absent answers are not two authors, and neither is an owner
+      // answering their own question.
+      expect(sql).toContain("btrim(lpq.answer) <> ''");
+      expect(sql).toContain('lpq.answered_by_id IS DISTINCT FROM lpq.asker_id');
+    });
+  });
+
   describe('a subject with nothing to resolve', () => {
     it('answers three nulls rather than guessing', async () => {
       const { service } = build();
@@ -128,6 +198,8 @@ describe('ReportSubjectResolverService', () => {
         authorUserId: null,
         excerpt: null,
         communityId: null,
+        // Nothing resolved is not the same as two candidates.
+        isAuthorAmbiguous: false,
       });
     });
 

@@ -390,6 +390,29 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'subjectType',
       'communityName',
     ],
+    // Staff duty mail on a moderation queue crossing a threshold (TS-04). The
+    // write site is a cron whose recipient list is a `moderator`/`admin` role
+    // query, so these keys never reach an ordinary member.
+    //
+    // All five are the copy's interpolation tokens: `queue` is the stable
+    // `ModerationQueueKey` the client keys its own label off, `severity`
+    // (`ok | warning | critical`) is what the copy and the bell's urgent
+    // presentation branch on, and `depth`/`overdueCount`/`oldestItemHours` are
+    // the three numbers that say what kind of trouble the queue is in.
+    // `oldestItemHours` and `overdueCount` are NUMBERS, so the client can
+    // CLDR-pluralise on them.
+    //
+    // What is absent: nothing about any individual moderator, and nothing
+    // about any individual item in the queue. This alert is about a QUEUE, and
+    // the row that made it deep is read behind the moderation console's own
+    // authentication.
+    [NotificationType.ModerationQueueAlert]: [
+      'queue',
+      'severity',
+      'depth',
+      'overdueCount',
+      'oldestItemHours',
+    ],
 
     // --- The four approval queues (LOC-19) ---------------------------------
     // Each carries the `decision` its copy branches on, the member's own

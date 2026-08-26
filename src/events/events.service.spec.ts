@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -634,6 +635,12 @@ describe('EventsService.addCohostByUserId', () => {
     cohosts = { createQueryBuilder: jest.fn(() => insertBuilder) };
 
     service = new EventsService(
+      // `rosterCounts` reads `retention.eventAttendanceDays` through this to
+      // decide whether a gathering's check-in count is still knowable. These
+      // tests never reach it, so the default is enough.
+      {
+        get: (_key: string, fallback?: number) => fallback,
+      } as unknown as ConfigService,
       events as unknown as Repository<Event>,
       cohosts as unknown as Repository<EventCohost>,
       {} as unknown as Repository<EventRsvp>,

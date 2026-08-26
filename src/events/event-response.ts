@@ -419,9 +419,19 @@ export interface AttendeesPageDTO extends Paginated<AttendeeView> {
   seatsTaken: number;
   /** Members on the waitlist, whichever status page was requested. */
   waitlistCount: number;
-  /** How many 'going' members have been checked in at the door (LOC-03).
-   *  Always 0 for a non-organiser viewer, who never sees check-in state. */
-  checkedInCount: number;
+  /**
+   * How many 'going' members have been checked in at the door (LOC-03).
+   *
+   * `null` means NO LONGER RECORDED, never zero. The attendance retention
+   * sweep erases `checked_in_at` once a gathering is past its window
+   * (`EventAttendanceRetentionService`), at which point the count cannot be
+   * stated at all and a client must render "no longer recorded" rather than a
+   * figure. `0` keeps its literal meaning: nobody arrived.
+   *
+   * Always `0` for a non-organiser viewer, who never sees check-in state and
+   * for whom "no longer recorded" would be the wrong explanation.
+   */
+  checkedInCount: number | null;
 }
 
 // `GET/PUT /events/:slug/lineup` — the "who performed" credit list (Personas

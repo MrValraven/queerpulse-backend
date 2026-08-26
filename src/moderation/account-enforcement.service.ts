@@ -23,6 +23,11 @@ import {
 import { RemovalKind } from '../ban-evasion/entities/removed-account-signal.entity';
 import { ReportSubjectResolverService } from './report-subject-resolver.service';
 import {
+  enforcementTargetProtected,
+  enforcementTargetUnresolved,
+  type EnforcementTargetProblem,
+} from './enforcement-refusals';
+import {
   BAN_INTERIM_SUSPENSION,
   BanRatification,
   BanRatificationStatus,
@@ -51,6 +56,22 @@ const UUID_RE =
  * `AdminMemberModerationService.liftRestriction`).
  */
 const DEFAULT_RESTRICTION_DURATION = '7d';
+
+/**
+ * Who an account-level action on a report should land on, or why nobody can.
+ *
+ * A bare `string | null` used to be enough, back when the only way to fail was
+ * "there is nobody behind this subject". There is now a second, more dangerous
+ * way: a subject with two possible authors and no record of which one was
+ * reported. Both must refuse, and the moderator has to be told which is which,
+ * so the answer carries the reason rather than dropping it.
+ */
+interface EnforcementTargetResolution {
+  /** The single account to act on, or `null` when there is not exactly one. */
+  userId: string | null;
+  /** Why there is not exactly one. Always `null` when `userId` is set. */
+  problem: EnforcementTargetProblem | null;
+}
 
 /**
  * The account-enforcement cluster, extracted from `ModerationService` as a
@@ -249,7 +270,7 @@ export class AccountEnforcementService {
     // `member` one: now that `suspend`/`ban` can land on the author of reported
     // content (TS-03), an overturned appeal has to be able to reach the same
     // account the sanction did.
-    const userId = await this.resolveEnforcementTargetUserId(report);
+    const { userId } = await this.resolveEnforcementTarget(report);
     if (!userId) return;
 
     const user = await manager.findOne(User, { where: { id: userId } });
@@ -264,9 +285,12 @@ export class AccountEnforcementService {
    *
    * That member is the reported member on a `member` report and the AUTHOR of
    * the reported content on every other subject type (TS-03) — see
-   * `resolveEnforcementTargetUserId`. The house account, staff accounts, the
-   * deactivation `previousStatus` sync and the restriction-versus-lockout split
-   * below all apply identically whichever way the member was reached.
+   * `resolveEnforcementTarget`, which REFUSES with a 400 rather than picking
+   * one when a subject could name two members (see
+   * `ReportSubjectResolution.isAuthorAmbiguous`). The house account, staff
+   * accounts, the deactivation `previousStatus` sync and the
+   * restriction-versus-lockout split below all apply identically whichever way
+   * the member was reached.
    *
    * Returns the affected user's id (so the caller can revoke their sessions
    * outside the transaction) alongside the sanction's expiry — a `Date` for a
@@ -338,11 +362,17 @@ export class AccountEnforcementService {
     // that has one, and the audit row `actOnReport` writes carries the
     // `reportId`, so the sanction is linked to the evidence and appealable as
     // that decision.
-    const userId = await this.resolveEnforcementTargetUserId(report);
+    const { userId, problem } = await this.resolveEnforcementTarget(report);
     if (!userId) {
-      throw new BadRequestException(
-        `Could not resolve the "${report.subjectType}" this report names to an account. ` +
-          'Act on the content instead, or find the member and act from their drawer.',
+      // FAILS CLOSED, AND THAT IS THE POINT. Under-enforcing on one report
+      // costs a follow-up. Sanctioning the wrong member costs them their place
+      // in a community they are probably relying on, and nothing in the system
+      // would ever surface the mistake: the audit row, the notification and the
+      // appeal would all name the person who was never reported. See
+      // `enforcement-refusals.ts` for the typed body and why it is typed.
+      throw enforcementTargetUnresolved(
+        problem ?? 'no_account',
+        report.subjectType,
       );
     }
 
@@ -360,10 +390,11 @@ export class AccountEnforcementService {
       const restrictedUser = await manager.findOne(User, {
         where: { id: userId },
       });
+      // The subject resolved to an id no `users` row answers to any more:
+      // the same "nobody to act on" the resolver reports, found one step
+      // later, so it carries the same typed refusal.
       if (!restrictedUser) {
-        throw new BadRequestException(
-          'Could not restrict the reported member.',
-        );
+        throw enforcementTargetUnresolved('no_account', report.subjectType);
       }
       // Same house-account and staff carve-outs as suspend/ban below. The
       // house account has `role = member` and `is_system = true`, so the role
@@ -371,12 +402,10 @@ export class AccountEnforcementService {
       // it (BE-COM-33) — the direct admin path (`restrictMember`) has always
       // refused this.
       if (restrictedUser.isSystem) {
-        throw new ForbiddenException('The house account cannot be restricted.');
+        throw enforcementTargetProtected('house_account');
       }
       if (restrictedUser.role !== UserRole.Member) {
-        throw new ForbiddenException(
-          'Moderation actions cannot target staff accounts.',
-        );
+        throw enforcementTargetProtected('staff_account');
       }
 
       // Deliberately does NOT touch `status`/`suspendedUntil` or run
@@ -407,8 +436,9 @@ export class AccountEnforcementService {
       dto.action === 'ban' ? null : parseDuration(dto.duration as string, now);
 
     const user = await manager.findOne(User, { where: { id: userId } });
+    // Same "nobody to act on" as above, found one step later.
     if (!user) {
-      throw new BadRequestException('Could not suspend the reported member.');
+      throw enforcementTargetUnresolved('no_account', report.subjectType);
     }
 
     // The house/system account is never a legitimate enforcement target: it
@@ -417,16 +447,14 @@ export class AccountEnforcementService {
     // would suspend it and run `revokeAllForUser` on it (BE-COM-33). Mirrors
     // the same guard on the direct admin path (`restrictMember`).
     if (user.isSystem) {
-      throw new ForbiddenException('The house account cannot be restricted.');
+      throw enforcementTargetProtected('house_account');
     }
 
     // A moderator may only enforce against ordinary members — never against
     // another moderator or an admin. Staff accounts are out of scope for this
     // surface entirely (403, not a silent success).
     if (user.role !== UserRole.Member) {
-      throw new ForbiddenException(
-        'Moderation actions cannot target staff accounts.',
-      );
+      throw enforcementTargetProtected('staff_account');
     }
 
     // A member who had already deactivated keeps `Deactivated` as their live
@@ -848,15 +876,31 @@ export class AccountEnforcementService {
    * guess when the subject has no author (a `venue` report describing a place
    * in prose, an unclaimed directory listing, content whose author has erased
    * their account).
+   *
+   * Answers `problem` instead of a bare `null` so the caller can tell the two
+   * failures apart on the wire: nobody to act on, versus two people and no
+   * record of which one was reported. See {@link EnforcementTargetProblem}.
    */
-  private async resolveEnforcementTargetUserId(
+  private async resolveEnforcementTarget(
     report: Report,
-  ): Promise<string | null> {
+  ): Promise<EnforcementTargetResolution> {
     if (report.subjectType === ReportSubjectType.Member) {
       const profile = await this.resolveReportedProfile(report);
-      return profile?.userId ?? null;
+      return profile
+        ? { userId: profile.userId, problem: null }
+        : { userId: null, problem: 'no_account' };
     }
     const resolution = await this.subjectResolver.resolve(report);
-    return resolution.authorUserId;
+    // Ambiguity outranks a resolved author on purpose. The resolver DOES
+    // return an author for an answered public question (the asker), and taking
+    // it would be the whole defect: a member reporting the owner's ANSWER
+    // files a report that names the asker, so `restrict`/`suspend`/`ban` would
+    // land on the person who asked "is the entrance step-free".
+    if (resolution.isAuthorAmbiguous) {
+      return { userId: null, problem: 'ambiguous_authors' };
+    }
+    return resolution.authorUserId
+      ? { userId: resolution.authorUserId, problem: null }
+      : { userId: null, problem: 'no_account' };
   }
 }

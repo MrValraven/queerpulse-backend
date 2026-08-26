@@ -1,9 +1,7 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomBytes } from 'node:crypto';
 import { Repository } from 'typeorm';
-import { MailerService } from '../mailer/mailer.service';
 import type {
   ConfirmResultDto,
   SubscribeResultDto,
@@ -13,24 +11,26 @@ import { NewsletterSubscription } from './entities/newsletter-subscription.entit
 
 @Injectable()
 export class NewsletterService {
-  private readonly logger = new Logger(NewsletterService.name);
-
   constructor(
     @InjectRepository(NewsletterSubscription)
     private readonly subscriptions: Repository<NewsletterSubscription>,
-    private readonly mailer: MailerService,
-    private readonly config: ConfigService,
   ) {}
 
   /**
-   * Register (or re-register) an address for the newsletter under double opt-in.
+   * Register (or re-register) an address for the newsletter.
    *
-   * Upserts a `pending` row keyed by the (lowercased) email and mails a fresh
-   * confirmation link. The response is IDENTICAL regardless of whether the
-   * address was new, already pending, previously unsubscribed, or already
-   * confirmed — so a caller can never probe the list for membership. A row that
-   * is already `confirmed` is left untouched and no email is re-sent, but the
-   * caller still sees the same `pending`-shaped acknowledgement.
+   * Upserts a `pending` row keyed by the (lowercased) email and mints a fresh
+   * confirm token. NOTHING IS DELIVERED: QueerPulse delivers no email, so no
+   * confirmation link ever reaches the address and the row simply stays
+   * `pending` until someone is handed its token out of band.
+   * `POST /newsletter/confirm` and the unsubscribe routes stay reachable by
+   * token for whoever holds one.
+   *
+   * The response is IDENTICAL regardless of whether the address was new,
+   * already pending, previously unsubscribed, or already confirmed, so a
+   * caller can never probe the list for membership. A row that is already
+   * `confirmed` is left untouched, and the caller still sees the same
+   * `pending`-shaped acknowledgement.
    */
   async subscribe(rawEmail: string): Promise<SubscribeResultDto> {
     const email = rawEmail.trim().toLowerCase();
@@ -38,7 +38,7 @@ export class NewsletterService {
 
     if (existing && existing.status === 'confirmed') {
       // Already on the list — do nothing, but return the uniform response so
-      // membership never leaks through a different shape or a resent email.
+      // membership never leaks through a different shape.
       return { status: 'pending' };
     }
 
@@ -58,20 +58,8 @@ export class NewsletterService {
       );
     }
 
-    // Fire-and-forget, deliberately NOT awaited.
-    //
-    // The response body is uniform so membership can't be read off it, but
-    // awaiting the send leaked the same fact through TIMING: an
-    // already-confirmed address returned in tens of milliseconds (it exits
-    // above without sending), while every other address paid a synchronous SMTP
-    // round trip — up to the mailer's 8s connect + 8s socket timeouts against a
-    // degraded host. `POST /newsletter/subscribe` was a reliable membership
-    // oracle for anyone with a stopwatch, and the 5/min throttle is plenty for
-    // a targeted check. Both branches now return as soon as the row is written.
-    //
-    // `void` (not a floating promise): `sendConfirmation` already swallows its
-    // own delivery errors and logs them, so this can never reject unhandled.
-    void this.sendConfirmation(email, confirmToken);
+    // The uniform `pending` response is still deliberate: every branch returns
+    // the same shape so nobody can probe the list for membership.
     return { status: 'pending' };
   }
 
@@ -96,7 +84,9 @@ export class NewsletterService {
    * Mark the address behind `token` unsubscribed (CNT-19). Reuses the same
    * `confirmToken` a fresh subscribe mints — it doubles as this row's stable
    * unsubscribe key rather than a second secret being generated for it — so
-   * an invalid/unknown token is rejected exactly like `confirm`'s. Idempotent:
+   * an invalid/unknown token is rejected exactly like `confirm`'s. The
+   * platform never delivers this token anywhere; the route stays reachable for
+   * anyone handed one out of band. Idempotent:
    * calling this on an already-unsubscribed row is not an error, it just
    * reports `alreadyUnsubscribed: true` instead of stamping a new timestamp.
    */
@@ -115,32 +105,5 @@ export class NewsletterService {
       await this.subscriptions.save(subscription);
     }
     return { status: 'unsubscribed', alreadyUnsubscribed };
-  }
-
-  /**
-   * Build the confirm link and dispatch it through the shared mailer (log-only
-   * until SMTP env is set). A delivery failure is logged but swallowed so the
-   * subscribe response stays uniform and never depends on the mail transport.
-   *
-   * Called OFF the request path (`void`-ed by `subscribe`), so it must never
-   * throw — see the timing-oracle note there. Anything added here has to keep
-   * that guarantee.
-   */
-  private async sendConfirmation(
-    email: string,
-    confirmToken: string,
-  ): Promise<void> {
-    const apiUrl = this.config.getOrThrow<string>('app.apiUrl');
-    const confirmUrl = new URL('/newsletter/confirm', apiUrl);
-    confirmUrl.searchParams.set('token', confirmToken);
-    try {
-      await this.mailer.send(email, 'newsletter_confirm', {
-        confirmUrl: confirmUrl.toString(),
-      });
-    } catch (error) {
-      this.logger.error(
-        `Failed to send newsletter confirmation to ${email}: ${String(error)}`,
-      );
-    }
   }
 }
