@@ -32,6 +32,7 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { QueueAssignmentDto } from '../common/queue-assignment.dto';
 import { UserRole } from '../users/entities/user.entity';
 import { CreateIntakeDto } from './dto/create-intake.dto';
 import { ListIntakesQuery } from './dto/list-intakes.query';
@@ -90,6 +91,40 @@ export class IntakesController {
     return this.intakes.list(query);
   }
 
+  /**
+   * Claim or release one submission (OPS-04).
+   *
+   * The same route shape, body and semantics as
+   * `PATCH /mod/reports/:id/assignment`: self-assign only, 409 when someone
+   * else holds it, release only what you hold (admins override both, so the
+   * console cannot deadlock on an account that is gone). Declared BEFORE
+   * `PATCH :id` so Nest matches the two-segment path first, and carrying the
+   * SAME per-method gate the other two admin routes on this controller
+   * carry — this class has no class-level guard because `POST :kind` is
+   * deliberately public.
+   */
+  @UseGuards(ActiveMemberGuard, RolesGuard)
+  @Roles(UserRole.Admin)
+  @ApiCookieAuth('access_token')
+  @Patch(':id/assignment')
+  @ApiOperation({ summary: 'Claim or release an intake submission (admin).' })
+  @ApiOkResponse({ description: 'The updated submission.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Requires the admin role.' })
+  @ApiNotFoundResponse({ description: 'No submission with that id.' })
+  setAssignment(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() body: QueueAssignmentDto,
+    @CurrentUser() admin: CurrentUserData,
+  ) {
+    return this.intakes.setAssignment(
+      id,
+      admin.userId,
+      admin.role,
+      body.assign,
+    );
+  }
+
   @UseGuards(ActiveMemberGuard, RolesGuard)
   @Roles(UserRole.Admin)
   @ApiCookieAuth('access_token')
@@ -97,8 +132,10 @@ export class IntakesController {
   @ApiOperation({
     summary: 'Move a submission through triage (admin).',
     description:
-      'Used by the governance-concern dashboard to mark a concern as ' +
-      'reviewing / resolved / dismissed.',
+      'The governance-concern dashboard marks a concern reviewing / resolved ' +
+      '/ dismissed; the other eleven kinds flip to the plain `reviewed`. ' +
+      'Every move stamps the acting admin and the time. `new` is not an ' +
+      'accepted target.',
   })
   @ApiOkResponse({ description: 'The updated submission.' })
   @ApiBadRequestResponse({ description: 'An invalid target status.' })
@@ -108,7 +145,8 @@ export class IntakesController {
   updateStatus(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() body: UpdateIntakeStatusDto,
+    @CurrentUser() admin: CurrentUserData,
   ) {
-    return this.intakes.updateStatus(id, body.status);
+    return this.intakes.updateStatus(id, body.status, admin.userId);
   }
 }

@@ -16,8 +16,10 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
+import { isPlatformStaffTier } from '../auth/platform-staff-tier';
 import { Feature } from '../common/feature.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { AnswerListingPublicQuestionDto } from './dto/answer-listing-public-question.dto';
@@ -33,6 +35,7 @@ import { UpdateQueerOwnedVerifiedDto } from './dto/update-queer-owned-verified.d
 import { UpdateSafeSpaceDto } from './dto/update-safe-space.dto';
 import { ListingClaimsService } from './listing-claims.service';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
+import { toDirectoryModerationListingDTO } from './listing-owner-personal-fields';
 import { ListingsService } from './listings.service';
 import {
   ApiBadRequestResponse,
@@ -70,15 +73,30 @@ import {
  * are declared before the `:ref` routes so Nest matches the literal rather
  * than binding it as a `ref` value — the same ordering rule
  * `ListingsController` follows for `mine`/`similar`.
+ *
+ * WHO CAN BE HERE, AND WHAT THEY READ. `RolesOrStaffGuard` means a caller may
+ * be a platform Moderator/Admin OR a plain member holding the
+ * `directory_moderator` grant. Widening the gate did not narrow the bodies,
+ * and every handler below that echoes a `ListingDTO` was handing a grant
+ * holder the owner's own contact email and their consent decisions on top of
+ * the business. Those handlers now pass the response through
+ * `toDirectoryModerationListingDTO`, which omits three owner-personal fields
+ * for a caller who is not platform staff by ACCOUNT TIER. See
+ * `listing-owner-personal-fields.ts` for which three and why the other five
+ * stay.
  */
 @Feature('listings')
 @ApiTags('Admin — Listings')
 @ApiCookieAuth()
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
+@ApiForbiddenResponse({
+  description:
+    'Requires a moderator or admin role, or the `directory_moderator` staff role.',
+})
 @Controller('admin/listings')
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)
+@StaffRoles('directory_moderator')
 export class AdminListingsController {
   constructor(
     private readonly listingsService: ListingsService,
@@ -97,8 +115,18 @@ export class AdminListingsController {
   @Get('queue')
   @ApiOperation({ summary: 'List the listings moderation queue' })
   @ApiOkResponse({ description: 'Paginated page of queued listings.' })
-  listQueue(@Query() query: ListListingQueueQuery) {
-    return this.listingsService.listQueue(query);
+  async listQueue(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: ListListingQueueQuery,
+  ) {
+    const isReaderPlatformStaff = isPlatformStaffTier(user.role);
+    const page = await this.listingsService.listQueue(query);
+    return {
+      ...page,
+      items: page.items.map((listing) =>
+        toDirectoryModerationListingDTO(listing, isReaderPlatformStaff),
+      ),
+    };
   }
 
   // The "suggest an edit" review queue. Submission itself is NOT a route here
@@ -189,16 +217,19 @@ export class AdminListingsController {
   @ApiOperation({ summary: "Set a listing's moderation status" })
   @ApiOkResponse({ description: 'The updated listing.' })
   @ApiNotFoundResponse({ description: 'No listing with that reference.' })
-  setStatus(
+  async setStatus(
     @CurrentUser() user: CurrentUserData,
     @Param('ref') ref: string,
     @Body() dto: UpdateListingStatusDto,
   ) {
-    return this.listingsService.setStatus(
-      ref,
-      dto.status,
-      user.userId,
-      dto.reason,
+    return toDirectoryModerationListingDTO(
+      await this.listingsService.setStatus(
+        ref,
+        dto.status,
+        user.userId,
+        dto.reason,
+      ),
+      isPlatformStaffTier(user.role),
     );
   }
 
@@ -212,12 +243,15 @@ export class AdminListingsController {
   @ApiBadRequestResponse({
     description: 'This listing has no submitter to contact.',
   })
-  askQuestion(
+  async askQuestion(
     @CurrentUser() user: CurrentUserData,
     @Param('ref') ref: string,
     @Body() dto: AskListingQuestionDto,
   ) {
-    return this.listingsService.askQuestion(ref, user.userId, dto.body);
+    return toDirectoryModerationListingDTO(
+      await this.listingsService.askQuestion(ref, user.userId, dto.body),
+      isPlatformStaffTier(user.role),
+    );
   }
 
   // Moderator answers a member's PUBLIC question on a listing.
@@ -266,8 +300,15 @@ export class AdminListingsController {
   @ApiOperation({ summary: "Toggle a listing's safe-space badge" })
   @ApiOkResponse({ description: 'The updated listing.' })
   @ApiNotFoundResponse({ description: 'No listing with that reference.' })
-  setSafeSpace(@Param('ref') ref: string, @Body() dto: UpdateSafeSpaceDto) {
-    return this.listingsService.setSafeSpace(ref, dto);
+  async setSafeSpace(
+    @CurrentUser() user: CurrentUserData,
+    @Param('ref') ref: string,
+    @Body() dto: UpdateSafeSpaceDto,
+  ) {
+    return toDirectoryModerationListingDTO(
+      await this.listingsService.setSafeSpace(ref, dto),
+      isPlatformStaffTier(user.role),
+    );
   }
 
   // Only the moderation surface confirms the "queer-owned" badge. Distinct
@@ -284,12 +325,15 @@ export class AdminListingsController {
   })
   @ApiOkResponse({ description: 'The updated listing.' })
   @ApiNotFoundResponse({ description: 'No listing with that reference.' })
-  setQueerOwnedVerified(
+  async setQueerOwnedVerified(
     @CurrentUser() user: CurrentUserData,
     @Param('ref') ref: string,
     @Body() dto: UpdateQueerOwnedVerifiedDto,
   ) {
-    return this.listingsService.setQueerOwnedVerified(ref, user.userId, dto);
+    return toDirectoryModerationListingDTO(
+      await this.listingsService.setQueerOwnedVerified(ref, user.userId, dto),
+      isPlatformStaffTier(user.role),
+    );
   }
 
   // Permanently delete any listing regardless of owner. The owner-only

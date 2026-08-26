@@ -25,8 +25,10 @@ export interface CommunityGovernanceSettingChangeDTO {
  * `community_governance_log.metadata` is an unbounded `jsonb` written by a
  * dozen call sites across four modules (communities, admin-communities,
  * membership-cards, and whatever is added next). The admin reader
- * (`AdminGovernanceLogEntryDTO`) passes that column straight through, which is
- * right for platform staff and wrong here: a passthrough means the DEFAULT for
+ * (`AdminGovernanceLogEntryDTO`) passes that column straight through to a
+ * platform Moderator/Admin, which is right for them and wrong here (and wrong
+ * for a `communities` grant holder, who is served this allowlist on the admin
+ * route too). A passthrough means the DEFAULT for
  * any key a future `log()` call site invents is "community staff can read it",
  * so a report id, a triage note, or an internal moderation signal would ship to
  * every community owner the day someone wrote it, with no code change on this
@@ -105,8 +107,9 @@ export interface CommunityGovernanceLogDetailsDTO {
  * to the platform-side settings that patch can carry (`isFeatured`,
  * `requiresSecondVouch`, `autoFreezeOnReports` appear nowhere in this
  * community's own surfaces). Those stay with platform staff on
- * `GET /admin/communities/:slug/governance-log`, which still exposes the whole
- * payload.
+ * `GET /admin/communities/:slug/governance-log`, which exposes the whole
+ * payload to a Moderator/Admin tier and this same narrowed `details` to a
+ * `communities` grant holder.
  */
 export interface CommunityGovernanceLogEntryDTO {
   id: string;
@@ -183,8 +186,16 @@ function readChangedSettings(
  * because they are the same thing written under two names by two call sites
  * (`CommunitiesService.removeMember` and `CommunityBansService.liftBan`), and a
  * client should not have to know which.
+ *
+ * Exported because `GET /admin/communities/:slug/governance-log` now serves
+ * this same allowlist to a caller who reached it on the `communities` staff
+ * grant rather than on the Moderator/Admin tier. Before that, a grant holder
+ * read the raw `metadata` — including `bannedByUserId` and `banReason` against
+ * a named `target` — and so saw MORE about a member's ban than the moderators
+ * who issued it. One allowlist, read by both routes, is what keeps that from
+ * drifting apart again.
  */
-function toDetails(
+export function toCommunityGovernanceLogDetails(
   metadata: Record<string, unknown> | null,
 ): CommunityGovernanceLogDetailsDTO {
   if (!metadata || isAdminOverride(metadata)) return {};
@@ -235,7 +246,7 @@ export function toCommunityGovernanceLogEntry(
       ? (memberRefs.get(entry.targetUserId) ?? null)
       : null,
     isPlatformAction,
-    details: toDetails(entry.metadata),
+    details: toCommunityGovernanceLogDetails(entry.metadata),
     createdAt: entry.createdAt.toISOString(),
   };
 }

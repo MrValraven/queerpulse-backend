@@ -16,6 +16,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { randomUUID } from 'node:crypto';
+import { Readable } from 'node:stream';
 import { IMAGE_UPLOAD_TYPES } from './upload-content-types';
 import { UPLOAD_KIND_SPECS, UploadKind } from './upload-kinds';
 import { isStorageKey } from './storage-key';
@@ -160,6 +161,45 @@ export class StorageService {
     return getSignedUrl(this.storageClient(), command, {
       expiresIn: PRESIGN_EXPIRY_SECONDS,
     });
+  }
+
+  /**
+   * Open ONE stored object as a readable byte stream.
+   *
+   * The Art. 20 data export (`AccountController.downloadExport`) puts the
+   * member's own uploaded files into the zip under `media/`, and it must do so
+   * WITHOUT ever holding the set in memory: `archiver.append` accepts a
+   * `Readable`, and piping the archive into the response applies backpressure
+   * all the way back to this stream. That is why this returns the S3 body
+   * as-is rather than `transformToByteArray()`-ing it the way the small ranged
+   * magic-byte read above does.
+   *
+   * Deliberately NOT `createPresignedDownload`: that mints a URL for a browser
+   * to follow, which would mean the server fetching its own presigned URL over
+   * HTTP just to get bytes it can already ask the bucket for directly.
+   *
+   * THROWS on a missing/unreadable object (`NoSuchKey`, credentials, network).
+   * The export treats a single failure as skippable — see
+   * `AccountController.appendMediaEntries`, which records the skip in
+   * `media/manifest.json` instead of destroying the whole download.
+   */
+  async openObjectStream(key: string): Promise<Readable> {
+    const response = await this.storageClient().send(
+      new GetObjectCommand({
+        Bucket: this.requireConfig('storage.bucket'),
+        Key: key,
+      }),
+    );
+    const body = response.Body;
+    // The SDK types `Body` as a union covering browser `ReadableStream`/`Blob`
+    // too; on Node it is always a `Readable`, and anything else here means we
+    // cannot stream it and the caller must treat the object as unreadable.
+    if (!(body instanceof Readable)) {
+      throw new InternalServerErrorException(
+        `Stored object ${key} did not return a readable stream`,
+      );
+    }
+    return body;
   }
 
   /**

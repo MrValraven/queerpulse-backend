@@ -35,10 +35,16 @@ import { GovernanceLogAction } from './entities/community-governance-log.entity'
  * consulting.
  *
  * The platform-staff reader (`GET /admin/communities/:slug/governance-log`)
- * stays exactly as it was: it reads every community and exposes the full
- * `metadata` payload. This route is scoped to one community, for that
+ * reads every community and exposes the full `metadata` payload to a platform
+ * Moderator or Admin. This route is scoped to one community, for that
  * community's own staff, and returns a narrowed shape. See
  * `CommunityGovernanceLogDetailsDTO` for what is withheld and why.
+ *
+ * That narrowed shape is now also what the admin route serves a caller who
+ * reached it on the additive `communities` staff grant rather than on the
+ * Moderator/Admin tier. A grant holder must never read more about a member's
+ * ban than the moderators who issued it, which is exactly what raw `metadata`
+ * (`bannedByUserId`, `banReason`) against a named `target` handed them.
  */
 @Feature('communities')
 @ApiTags('Communities')

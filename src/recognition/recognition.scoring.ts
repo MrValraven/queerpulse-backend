@@ -9,8 +9,34 @@ export interface RecognitionSignals {
   eventsAttended: number;
   communityPosts: number;
   endorsementCount: number;
-  /** Open, published gatherings this member hosts or co-hosts. */
+  /** Open, published gatherings this member hosts or co-hosts, whether or not
+   *  they have happened yet. A visibility signal, never an XP one. */
   eventsHosted: number;
+  /** Gatherings this member hosted or co-hosted that ALREADY HAPPENED and
+   *  drew at least one other person (`PublicEligibilityService
+   *  .countHeldGatherings`). The XP and badge unit for hosting: see the
+   *  `hosting` rule in XP_RULES for why `eventsHosted` cannot be. */
+  eventsHeld: number;
+  // ── the contribution side (SUS-05) ────────────────────────────────────────
+  // Everything above this line is consumption: showing up, saving, joining,
+  // connecting. Everything below is the work the platform depends on. See
+  // XP_RULES for why these carry a high per-unit value and a low cap.
+  /**
+   * Volunteer sessions a POSTER confirmed the member attended
+   * (`volunteer_signups.attended = true`) AND recorded hours against
+   * (`hours_contributed > 0`). The XP unit is the session and never the hour
+   * (see the `volunteering` rule in XP_RULES), which is exactly why the hours
+   * floor is here: a confirmation with no hours recorded describes no work,
+   * and would otherwise pay the same 120 points as a full Saturday.
+   */
+  volunteerSessions: number;
+  /** Magazine pieces of theirs that reached a published article or deck.
+   *  Same definition `public-eligibility.service.ts` already computes. */
+  piecesPublished: number;
+  /** Public questions on a directory listing that this member answered. */
+  directoryAnswers: number;
+  /** Resource suggestions of theirs an admin APPROVED. */
+  resourcesApproved: number;
   tenureDays: number;
   verified: boolean;
   gettingStartedStepsDone: number; // 0..6
@@ -34,7 +60,12 @@ export type XpSourceKey =
   | 'endorsements'
   | 'tenure'
   | 'verified'
-  | 'gettingStarted';
+  | 'gettingStarted'
+  | 'volunteering'
+  | 'hosting'
+  | 'magazine'
+  | 'answers'
+  | 'resources';
 
 interface SignalRule {
   key: XpSourceKey;
@@ -43,8 +74,34 @@ interface SignalRule {
   units: (signals: RecognitionSignals) => number;
 }
 
-// Capped per family so no single activity runs away. Tops out near the
-// LEVEL_LADDER_DEF span (~3700 XP = Pillar). Tune values here only.
+/**
+ * Capped per family so no single activity runs away. Tune values here only.
+ *
+ * TWO HALVES, deliberately shaped differently (SUS-05).
+ *
+ * The consumption half (profile .. gettingStarted) is unchanged and tops out
+ * at 3055 XP: many small units, low per-unit value, high caps. It rewards
+ * turning up and being present, which is right, and it was the ONLY half that
+ * existed. Volunteering on a Saturday, hosting the gathering, writing the
+ * piece and answering the question earned nothing at all.
+ *
+ * The contribution half (volunteering .. resources) is the inverse: high
+ * per-unit value, low cap, topping out at 3740 XP. One confirmed volunteer
+ * session is worth 120 XP, which is 2.4 RSVPs or two vouches; one published
+ * magazine piece is 150. That ratio is the whole point of the item: the work
+ * the platform depends on has to outweigh consuming it. The low caps are what
+ * stop the ladder going trivial. `LEVEL_LADDER_DEF` needs 3700 XP to reach
+ * Pillar, so neither half alone hands it to you, and the two together still
+ * take real, sustained effort rather than one busy month.
+ *
+ * SESSIONS, NOT HOURS, are the volunteering unit. Hours are recorded, summed
+ * and reportable (`VolunteeringService.volunteerHoursTotals`), and they are
+ * deliberately NOT what XP is paid on. Paying per hour would put an incentive
+ * on inflating the exact number the platform intends to show a funder, and it
+ * would reward the volunteer whose confirmer is generous over the one whose
+ * confirmer is precise. A session is countable and someone other than the
+ * volunteer attested it happened.
+ */
 export const XP_RULES: SignalRule[] = [
   {
     key: 'profile',
@@ -111,6 +168,53 @@ export const XP_RULES: SignalRule[] = [
     perUnit: 25,
     cap: 6,
     units: (signals) => signals.gettingStartedStepsDone,
+  },
+
+  // ── contribution ──────────────────────────────────────────────────────────
+  // A confirmed Saturday: the single heaviest repeatable act on the platform,
+  // and the only one a third party has to attest to before it counts.
+  {
+    key: 'volunteering',
+    perUnit: 120,
+    cap: 12,
+    units: (signals) => signals.volunteerSessions,
+  },
+  // Hosting pays on `eventsHeld`, never on `eventsHosted`. Creating a
+  // published, public gathering is one unguarded API call, and a single
+  // recurrence rule expands to 52 independent rows, so `eventsHosted` would
+  // have let one request take the whole 800-point cap. XP buys monthly
+  // invitations at levels 4 and 5 (`INVITE_QUOTA_BONUS_BY_LEVEL`), so on an
+  // invite-gated platform that is an invitation farm. `eventsHeld` requires
+  // the date to have passed and someone other than the host to have said they
+  // were going: calendar time and another person's cooperation, per gathering.
+  {
+    key: 'hosting',
+    perUnit: 100,
+    cap: 8,
+    units: (signals) => signals.eventsHeld,
+  },
+  // The highest per-unit value on the board: a published piece is weeks of
+  // work by one person that everyone else reads.
+  {
+    key: 'magazine',
+    perUnit: 150,
+    cap: 6,
+    units: (signals) => signals.piecesPublished,
+  },
+  // Answering "is the entrance step-free" once saves the next twenty people
+  // asking. Light work, so it sits at the connection rate.
+  {
+    key: 'answers',
+    perUnit: 25,
+    cap: 12,
+    units: (signals) => signals.directoryAnswers,
+  },
+  // Only APPROVED suggestions count, so submitting volume earns nothing.
+  {
+    key: 'resources',
+    perUnit: 60,
+    cap: 5,
+    units: (signals) => signals.resourcesApproved,
   },
 ];
 
@@ -193,8 +297,17 @@ export const BADGE_REQUIREMENTS: Record<string, BadgeRequirement> = {
   'two-homes': { units: (s) => s.communitiesJoined, target: 2 },
   decade: { units: (s) => s.tenureDays, target: 365 },
   sustainer: { units: (s) => s.tenureDays, target: 180 },
-  'event-host': { units: (s) => s.eventsHosted, target: 1 },
-  'serial-host': { units: (s) => s.eventsHosted, target: 5 },
+  // The contribution side's only badges. Both are 'legendary', so each one
+  // carries a 150-point badge bonus; leaving them on the free-to-create
+  // `eventsHosted` would have kept 300 farmable XP on the board even after
+  // the `hosting` rule moved to `eventsHeld`. They read the same held-and-
+  // attended unit the XP rule does. NO badge is wired for volunteering,
+  // magazine writing, directory answers or resource suggestions, because
+  // BADGE_CATALOG holds none for them and this task deliberately did not
+  // invent any. Add the catalog entry first and the requirement follows here
+  // in one line.
+  'event-host': { units: (s) => s.eventsHeld, target: 1 },
+  'serial-host': { units: (s) => s.eventsHeld, target: 5 },
   'first-steps': {
     units: (s) => (s.gettingStartedComplete ? 1 : 0),
     target: 1,

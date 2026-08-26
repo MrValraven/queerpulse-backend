@@ -9,8 +9,9 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminCommissionInterestsService } from './admin-commission-interests.service';
 import { ListAdminCommissionInterestsQuery } from './dto/list-admin-commission-interests.query';
@@ -22,12 +23,15 @@ import { ListAdminCommissionInterestsQuery } from './dto/list-admin-commission-i
  * with `@Roles(Admin)` — and read-only (this module's writes stay on the
  * member-facing `CommissionInterestsController`).
  */
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Admin)
+@StaffRoles('editorial')
 @ApiTags('Admin — Commission interests')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires the admin role.' })
+@ApiForbiddenResponse({
+  description: 'Requires the admin role, or the `editorial` staff role.',
+})
 @Controller('admin/commission-interests')
 export class AdminCommissionInterestsController {
   constructor(

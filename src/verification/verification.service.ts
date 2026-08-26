@@ -13,10 +13,14 @@ import { EntityManager, In, Repository } from 'typeorm';
 import { cursorPaginate, CursorKeyset } from '../common/cursor-pagination';
 import { escapeLikeTerm } from '../common/like-escape';
 import { MemberLookup, MemberRef } from '../common/member-ref';
+import {
+  optionalQueueAssigneeName,
+  setQueueAssignment,
+} from '../common/queue-assignment';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Profile } from '../users/entities/profile.entity';
-import { User } from '../users/entities/user.entity';
+import { User, UserRole } from '../users/entities/user.entity';
 import { BulkDecideVerificationRequestsResultDTO } from './dto/bulk-decide-verification-requests.dto';
 import { MemberVerification } from './entities/member-verification.entity';
 import { VerificationEvent } from './entities/verification-event.entity';
@@ -29,6 +33,7 @@ import {
 import {
   AdminVerificationListDTO,
   AdminVerificationRequestDetailDTO,
+  AdminVerificationRequestDTO,
   AdminVerificationRequestListDTO,
   AdminVerificationSort,
   toAdminVerificationDTO,
@@ -54,6 +59,7 @@ import {
   VerificationLevel,
   VerificationType,
 } from './verification-level';
+import { verificationRequestDueAt } from './verification-sla';
 
 /**
  * Machine-readable code the frontend keys the step-up prompt off. Emitted in
@@ -82,6 +88,13 @@ export interface AdminVerificationRequestListFilter {
   query?: string;
   sort?: VerificationRequestSort;
   cursor?: string;
+  /**
+   * OPS-04. A user id narrows the page to that reviewer's claimed requests;
+   * `'unassigned'` narrows to what nobody has picked up. The controller
+   * resolves the caller's own id from the session, so the wire only ever
+   * carries `me`/`unassigned`.
+   */
+  assignedTo?: string;
 }
 
 /** Rows-per-page for the admin request queue's list + "Load more". */
@@ -569,6 +582,17 @@ export class VerificationService {
         type: filter.type,
       });
     }
+    // OPS-04's "Assigned to me" filter. Applied in SQL, not over the fetched
+    // page: this queue is keyset-paginated, so a client-side filter would hide
+    // every claimed row that had not loaded yet.
+    if (filter.assignedTo === 'unassigned') {
+      queryBuilder.andWhere('verification_request.assignedStaffId IS NULL');
+    } else if (filter.assignedTo) {
+      queryBuilder.andWhere(
+        'verification_request.assignedStaffId = :assignedTo',
+        { assignedTo: filter.assignedTo },
+      );
+    }
     if (trimmedQuery) {
       queryBuilder.andWhere(
         `(
@@ -605,18 +629,90 @@ export class VerificationService {
     // page's distinct userIds, not a lookup per row.
     const [counts, members] = await Promise.all([
       this.countsByRequestStatus(filter.type, trimmedQuery),
+      // OPS-04 folds the claiming reviewers into the SAME batched lookup the
+      // subjects already used, so showing who holds each row costs no extra
+      // query at all.
       new MemberLookup(this.profiles).byUserIds([
-        ...new Set(rows.map((row) => row.userId)),
+        ...new Set([
+          ...rows.map((row) => row.userId),
+          ...rows
+            .map((row) => row.assignedStaffId)
+            .filter((id): id is string => id !== null),
+        ]),
       ]),
     ]);
 
     return {
       rows: rows.map((row) =>
-        toAdminVerificationRequestDTO(row, members.get(row.userId) ?? null),
+        toAdminVerificationRequestDTO(
+          row,
+          members.get(row.userId) ?? null,
+          optionalQueueAssigneeName(row.assignedStaffId, members),
+        ),
       ),
       counts,
       nextCursor,
     };
+  }
+
+  /**
+   * Claim or release one verification request (OPS-04) — the write behind the
+   * queue's "Assigned to me" filter.
+   *
+   * Mirrors `ModerationService.setAssignment` including the property that
+   * makes it safe when two reviewers claim at once: a conditional UPDATE
+   * guarded on the assignment this caller read, so the loser gets a 409 rather
+   * than quietly taking the row. Additionally guarded on the request still
+   * being OPEN, so an already-decided request cannot be claimed from a stale
+   * queue.
+   *
+   * Claiming decides nothing and moves no status. `in_review` is a DECISION a
+   * reviewer publishes to the member; a claim is bookkeeping between staff,
+   * and conflating the two would tell a member their request had progressed
+   * because someone opened it.
+   */
+  async setRequestAssignment(
+    id: string,
+    actorId: string,
+    actorRole: string,
+    assign: boolean,
+  ): Promise<AdminVerificationRequestDTO> {
+    const request = await this.requestRepo.findOne({ where: { id } });
+    if (!request) {
+      throw new NotFoundException('Verification request not found');
+    }
+
+    await setQueueAssignment({
+      repository: this.requestRepo,
+      id,
+      currentAssigneeId: request.assignedStaffId,
+      actorId,
+      // `actorRole` is a JWT claim, typed `string` on `CurrentUserData`.
+      isAdmin: actorRole === (UserRole.Admin as string),
+      assign,
+      rowLabel: 'verification request',
+      claimableStatuses: {
+        column: 'status',
+        values: [...OPEN_REQUEST_STATUSES],
+      },
+    });
+
+    const saved = await this.requestRepo.findOne({ where: { id } });
+    if (!saved) {
+      throw new NotFoundException('Verification request not found');
+    }
+    const members = await new MemberLookup(this.profiles).byUserIds([
+      ...new Set(
+        [saved.userId, saved.assignedStaffId].filter(
+          (id): id is string => id !== null,
+        ),
+      ),
+    ]);
+    return toAdminVerificationRequestDTO(
+      saved,
+      members.get(saved.userId) ?? null,
+      optionalQueueAssigneeName(saved.assignedStaffId, members),
+    );
   }
 
   /** The `CursorKeyset` `listRequestsForAdmin` seeks on. Unlike
@@ -704,6 +800,9 @@ export class VerificationService {
 
     const refUserIds = [request.userId];
     if (request.reviewedByUserId) refUserIds.push(request.reviewedByUserId);
+    // OPS-04: the reviewer currently HOLDING the request, alongside the one
+    // who decided it. Same batched lookup, so still one query.
+    if (request.assignedStaffId) refUserIds.push(request.assignedStaffId);
 
     const [members, history] = await Promise.all([
       new MemberLookup(this.profiles).byUserIds([...new Set(refUserIds)]),
@@ -717,6 +816,7 @@ export class VerificationService {
         ? (members.get(request.reviewedByUserId) ?? null)
         : null,
       history,
+      optionalQueueAssigneeName(request.assignedStaffId, members),
     );
   }
 
@@ -832,6 +932,10 @@ export class VerificationService {
         status: VerificationRequestStatus.Pending,
         context: input.context ?? null,
         evidenceRef: input.evidenceRef ?? null,
+        // OPS-04. Stamped once, from the single window in
+        // `verification-sla.ts`, the way `ReportsService.create` stamps
+        // `slaDueAt`. A first request, so never the appeal window.
+        dueAt: verificationRequestDueAt(false, new Date()),
         // Entity column is the generic jsonb shape (`Record<string,
         // unknown> | null`) — no entity -> DTO coupling; this is the
         // writer that shapes it as `VerificationSignalsDTO`.
@@ -901,6 +1005,11 @@ export class VerificationService {
 
     request.isAppeal = true;
     request.status = VerificationRequestStatus.Appealing;
+    // OPS-04. An appeal re-opens a request that had already been decided, so
+    // its old due date is spent. The clock restarts NOW on the shorter appeal
+    // window: the member is waiting a second time on the same question, and
+    // the second look is owed faster than the first.
+    request.dueAt = verificationRequestDueAt(true, new Date());
     const saved = await this.requestRepo.save(request);
 
     await this.writeEvent({

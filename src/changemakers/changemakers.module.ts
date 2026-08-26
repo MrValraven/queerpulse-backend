@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { Profile } from '../users/entities/profile.entity';
 import { AdminChangemakerNominationsController } from './admin-changemaker-nominations.controller';
@@ -18,6 +19,12 @@ import { ChangemakerNomination } from './entities/changemaker-nomination.entity'
     // `Profile` is registered here (overlapping `forFeature` is permitted) so
     // the nomination admin read model can resolve nominator refs.
     TypeOrmModule.forFeature([
+      // Read-only, and only for `RolesOrStaffGuard` on this module's admin
+      // controllers: it resolves the caller's additive staff grants when their
+      // account tier alone does not satisfy `@Roles(...)`. Same registration
+      // precedent as `HousingListingsModule` for `HousingModerationGuard`.
+      UserStaffRole,
+
       Changemaker,
       ChangemakerDirectorySettings,
       ChangemakerNomination,

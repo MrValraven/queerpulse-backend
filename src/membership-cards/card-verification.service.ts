@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { Community } from '../communities/entities/community.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { CardScanLogService } from './card-scan-log.service';
 import { effectiveCardStatus } from './card-status';
 import { CardTokenService } from './card-token.service';
 import { CommunityCard } from './entities/community-card.entity';
@@ -33,6 +34,7 @@ export class CardVerificationService {
   constructor(
     private readonly tokens: CardTokenService,
     private readonly cards: MembershipCardsService,
+    private readonly scanLog: CardScanLogService,
     @InjectRepository(CommunityCard)
     private readonly programs: Repository<CommunityCard>,
     @InjectRepository(Community)
@@ -72,6 +74,17 @@ export class CardVerificationService {
       communityFrozenAt: community.frozenAt,
       communityArchivedAt: community.archivedAt,
     });
+
+    // The one place a verification becomes a record. It sits AFTER the token
+    // has resolved to a real card of the right generation, so a forged,
+    // unsigned or stale code writes nothing and an unauthenticated caller has
+    // no way to put rows in this table. It records the outcome, so an expired
+    // or revoked presentation is distinguishable in the issuer's log while the
+    // HTTP response stays the same single 404 for every failure.
+    //
+    // Not awaited, and it cannot reject: a logging failure must never break
+    // the verification or make a stranger at a door wait for a second write.
+    this.scanLog.record(card.id, status);
 
     const membership = await this.members.findOne({
       where: { communityId: community.id, userId: card.userId },

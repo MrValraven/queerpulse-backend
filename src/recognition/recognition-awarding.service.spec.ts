@@ -117,8 +117,20 @@ function makeService(opts: {
           : { skills: [], focusAreas: [] },
       ),
   };
+  // The three contribution-side repositories `gatherSignals` counts directly
+  // (SUS-05). Each is a plain `count` stub returning the fixture's own value.
+  const volunteerSignupsRepo = {
+    count: () => Promise.resolve(opts.signals.volunteerSessions),
+  };
+  const listingQuestionsRepo = {
+    count: () => Promise.resolve(opts.signals.directoryAnswers),
+  };
+  const resourceSuggestionsRepo = {
+    count: () => Promise.resolve(opts.signals.resourcesApproved),
+  };
   const eligibility = {
     getSignals: () => Promise.resolve(signalsToDto(opts.signals)),
+    countHeldGatherings: () => Promise.resolve(opts.signals.eventsHeld),
   };
   const notifications = {
     create: (
@@ -137,6 +149,9 @@ function makeService(opts: {
     communityMembersRepo as never,
     savedItemsRepo as never,
     memberPreferencesRepo as never,
+    volunteerSignupsRepo as never,
+    listingQuestionsRepo as never,
+    resourceSuggestionsRepo as never,
     eligibility as never,
     notifications as never,
   );
@@ -162,6 +177,10 @@ function signalsToDto(signals: RecognitionSignals) {
       () => '2026-06-01T00:00:00.000Z',
     ),
     publishedSubprofiles: signals.personasPublished,
+    publishedPieces: Array.from(
+      { length: signals.piecesPublished },
+      () => '2026-06-01T00:00:00.000Z',
+    ),
   };
 }
 
@@ -175,6 +194,7 @@ const BASE: RecognitionSignals = {
   communityPosts: 0,
   endorsementCount: 0,
   eventsHosted: 0,
+  eventsHeld: 0,
   tenureDays: 0,
   verified: false,
   gettingStartedStepsDone: 1,
@@ -182,6 +202,10 @@ const BASE: RecognitionSignals = {
   listingsSaved: 0,
   articlesSaved: 0,
   workProfileComplete: false,
+  volunteerSessions: 0,
+  piecesPublished: 0,
+  directoryAnswers: 0,
+  resourcesApproved: 0,
 };
 
 const USER = { userId: 'u1', status: 'active' } as never;

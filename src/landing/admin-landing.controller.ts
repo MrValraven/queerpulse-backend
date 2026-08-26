@@ -27,8 +27,9 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { CreateLandingFeatureDto } from './dto/create-landing-feature.dto';
 import { ReorderLandingFeaturesDto } from './dto/reorder-landing-features.dto';
@@ -45,12 +46,15 @@ import { LandingService } from './landing.service';
  * / `AdminMembersController`: nothing here can lift a lockdown, so this
  * surface should go dark with everything else.
  */
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Admin)
+@StaffRoles('editorial')
 @ApiTags('Admin — Landing')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires the admin role.' })
+@ApiForbiddenResponse({
+  description: 'Requires the admin role, or the `editorial` staff role.',
+})
 @Controller('admin/landing')
 export class AdminLandingController {
   constructor(private readonly landing: LandingService) {}

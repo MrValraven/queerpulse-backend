@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, Repository } from 'typeorm';
+import { EntityManager, IsNull, MoreThan, Not, Repository } from 'typeorm';
 import { RecognitionStat } from './entities/recognition-stat.entity';
 import { RecognitionAward } from './entities/recognition-award.entity';
 import { RecognitionLedgerEntry } from './entities/recognition-ledger-entry.entity';
@@ -8,6 +8,12 @@ import { Profile } from '../users/entities/profile.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { SavedItem, SavedKind } from '../saved/entities/saved-item.entity';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
+import { ListingPublicQuestion } from '../listings/entities/listing-public-question.entity';
+import {
+  ResourceSuggestion,
+  ResourceSuggestionStatus,
+} from '../resources/entities/resource-suggestion.entity';
+import { VolunteerSignup } from '../volunteering/entities/volunteer-signup.entity';
 import { PublicEligibilityService } from '../public-eligibility/public-eligibility.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -79,6 +85,18 @@ export class RecognitionAwardingService {
     private readonly savedItems: Repository<SavedItem>,
     @InjectRepository(MemberPreferences)
     private readonly memberPreferences: Repository<MemberPreferences>,
+    // ── the contribution side (SUS-05) ──────────────────────────────────────
+    // Three counts that have no home in `PublicEligibilityService` (they are
+    // not eligibility signals) and so are read here directly. The other two
+    // contribution signals, `piecesPublished` and `eventsHosted`, come off
+    // the eligibility DTO, which already computed both and simply never
+    // handed them to recognition.
+    @InjectRepository(VolunteerSignup)
+    private readonly volunteerSignups: Repository<VolunteerSignup>,
+    @InjectRepository(ListingPublicQuestion)
+    private readonly listingQuestions: Repository<ListingPublicQuestion>,
+    @InjectRepository(ResourceSuggestion)
+    private readonly resourceSuggestions: Repository<ResourceSuggestion>,
     private readonly eligibility: PublicEligibilityService,
     private readonly notifications: NotificationsService,
   ) {}
@@ -326,6 +344,10 @@ export class RecognitionAwardingService {
       listingsSaved,
       articlesSaved,
       preferences,
+      volunteerSessions,
+      directoryAnswers,
+      resourcesApproved,
+      eventsHeld,
     ] = await Promise.all([
       this.eligibility.getSignals(user),
       this.profiles.findOne({ where: { userId: user.userId } }),
@@ -337,6 +359,45 @@ export class RecognitionAwardingService {
         where: { userId: user.userId, subjectType: SavedKind.Article },
       }),
       this.memberPreferences.findOne({ where: { userId: user.userId } }),
+      // Sessions a POSTER confirmed they attended. Never self-declared, and
+      // `attended: false` (a recorded no-show) is excluded by the predicate
+      // rather than by subtraction.
+      //
+      // `hoursContributed > 0` as well, because XP pays per SESSION (120 a
+      // time) and never per hour. Without it, a confirmer who ticks "they
+      // turned up" and leaves the hours box at 0 mints exactly as much
+      // recognition as a full Saturday. The hours field is the only place any
+      // work is described at all, so a session with none recorded is not yet
+      // evidence of a session. This tightens the XP count ONLY: `myContribution`
+      // and `volunteerHoursTotals` still count the confirmed session, because
+      // "it happened, the hours were never written down" is a true thing to
+      // show a member and a funder. The frontend copy agrees already:
+      // "Confirmed HOURS count ... towards this member's recognition".
+      this.volunteerSignups.count({
+        where: {
+          userId: user.userId,
+          attended: true,
+          completedAt: Not(IsNull()),
+          hoursContributed: MoreThan(0),
+        },
+      }),
+      // A public question on a directory listing that this member answered.
+      // `isAnsweredByModerator` is not filtered on: a moderator answering a
+      // question is doing the same work for the same reader.
+      this.listingQuestions.count({
+        where: { answeredById: user.userId, answeredAt: Not(IsNull()) },
+      }),
+      // APPROVED only, so submitting volume earns nothing.
+      this.resourceSuggestions.count({
+        where: {
+          memberId: user.userId,
+          status: ResourceSuggestionStatus.Approved,
+        },
+      }),
+      // Gatherings that ACTUALLY HAPPENED and drew somebody, which is a
+      // different question from the `hostedOpenEvents` on the eligibility DTO
+      // below. See `PublicEligibilityService.countHeldGatherings`.
+      this.eligibility.countHeldGatherings(user.userId),
     ]);
 
     const workProfileComplete =
@@ -371,7 +432,23 @@ export class RecognitionAwardingService {
       eventsAttended: signalsDto.eventsAttended,
       communityPosts: signalsDto.communityPosts,
       endorsementCount: signalsDto.endorsementCount,
+      // `hostedOpenEvents` and `publishedPieces` are reused exactly as
+      // `PublicEligibilityService` computes them (published + public
+      // gatherings the member hosts or co-hosts; pieces of theirs behind a
+      // published article or deck). Recomputing either here would be a second
+      // definition of the same thing, free to drift. Both are capped at
+      // `RESULT_CAP` (50) there, which is well above every XP_RULES cap on
+      // this side, so the cap never truncates a score.
+      //
+      // `eventsHosted` is carried for readouts only: NOTHING in XP_RULES or
+      // BADGE_REQUIREMENTS reads it any more, because a published, public
+      // event costs one API call to create. Hosting pays on `eventsHeld`.
       eventsHosted: signalsDto.hostedOpenEvents.length,
+      eventsHeld,
+      piecesPublished: signalsDto.publishedPieces.length,
+      volunteerSessions,
+      directoryAnswers,
+      resourcesApproved,
       tenureDays: signalsDto.tenureDays,
       verified: signalsDto.verified,
       gettingStartedStepsDone,

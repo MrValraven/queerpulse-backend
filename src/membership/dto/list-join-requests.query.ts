@@ -39,4 +39,16 @@ export class ListJoinRequestsQuery {
   @IsOptional()
   @IsIn(['oldest', 'newest'])
   sort?: 'oldest' | 'newest';
+
+  /**
+   * OPS-04's "Assigned to me" filter, as a closed set rather than a user id.
+   *
+   * `me` resolves to the CALLER server-side and `unassigned` to a NULL
+   * assignee. Deliberately not "any user id you like": the queue only ever
+   * needs to answer "mine" and "nobody's", and accepting an arbitrary id would
+   * turn a filter into a way to enumerate what a named colleague is working on.
+   */
+  @IsOptional()
+  @IsIn(['me', 'unassigned'])
+  assignedTo?: 'me' | 'unassigned';
 }

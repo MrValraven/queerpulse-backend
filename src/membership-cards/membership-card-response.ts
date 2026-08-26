@@ -30,7 +30,41 @@ export interface CardProgramDTO {
   allowsPronouns: boolean;
   /** Which legibility treatment a flag or photo ground carries. */
   textBackdrop: CardTextBackdrop;
+  /**
+   * Whether a holder may put their own card back in date near expiry, without
+   * waiting for an owner to run the roster bulk issue. The client draws its
+   * Renew control from this AND the card's own status, and the server checks
+   * both again on the write: this field decides what to SHOW, never what is
+   * allowed.
+   */
+  allowsSelfRenew: boolean;
   serialPrefix: string;
+}
+
+/**
+ * What a member-initiated renewal did to one card.
+ *
+ * Deliberately thin. The client already holds the whole card and refetches
+ * after a successful renew, so the only things worth sending back are the two
+ * values that moved. Hand-mapped like every other payload in this file: there
+ * is no global serializer, and returning the entity here would put
+ * `revokedReason` on a member-facing route.
+ */
+export interface RenewedCardDTO {
+  id: string;
+  status: EffectiveCardStatus;
+  expiresAt: string | null;
+}
+
+export function toRenewedCard(
+  card: MembershipCard,
+  status: EffectiveCardStatus,
+): RenewedCardDTO {
+  return {
+    id: card.id,
+    status,
+    expiresAt: card.expiresAt?.toISOString() ?? null,
+  };
 }
 
 export interface MyCardDTO {
@@ -123,6 +157,38 @@ export interface IssuerCardDTO {
    * truth about it. The client decides whether to draw it.
    */
   token: string | null;
+  /**
+   * How many times THIS card has been verified inside the 90 day retention
+   * window. Per-CARD, never per-member: a card checked far more often than
+   * every other card on the roster is how an issuer notices that a copy of it
+   * is circulating. There is no history behind it, and no way to ask this
+   * question about a person.
+   *
+   * A COUNT, AND DELIBERATELY NOT A TIMESTAMP. This row already carries the
+   * holder's name, photo and pronouns; adding "and they last showed it at
+   * 19:42 on Tuesday" would turn a fraud signal into an attendance log that
+   * an owner or moderator could read off the API. The programme aggregate
+   * below keeps its `lastVerifiedAt`, where it belongs to no one person.
+   */
+  verificationCount: number;
+}
+
+/**
+ * How often a community's cards have actually been checked. Aggregate only:
+ * two counts and one timestamp, with nothing in it that could say who showed
+ * a card, when they showed it, or where. There is deliberately no per-member
+ * shape anywhere in this file.
+ */
+export interface CardVerificationCountsDTO {
+  /** Every verification still inside the 90 day retention window. */
+  total: number;
+  /** Verifications inside the recent window below. */
+  recent: number;
+  /** How many days `recent` covers, so the client states the real window
+   *  instead of hard-coding a number the server could change. */
+  recentDays: number;
+  /** The most recent verification of any card in this programme, or null. */
+  lastVerifiedAt: string | null;
 }
 
 export interface CardVerificationDTO {
@@ -181,6 +247,7 @@ export function toCardProgram(program: CommunityCard): CardProgramDTO {
     photoStyle: program.photoStyle,
     allowsPronouns: program.allowsPronouns,
     textBackdrop: program.textBackdrop,
+    allowsSelfRenew: program.allowsSelfRenew,
     serialPrefix: program.serialPrefix,
   };
 }
@@ -255,6 +322,11 @@ export function toIssuerCard(
     /** The same permanent code the holder sees. There is nothing
      *  holder-specific to withhold: it is the card's own value. */
     token: string | null;
+    /** This card's verification COUNT, already read by the caller from the
+     *  scan log. Optional so a caller with no tally in hand reports an honest
+     *  zero rather than being forced to invent one. No timestamp travels with
+     *  it: see `IssuerCardDTO.verificationCount`. */
+    verificationCount?: number;
   },
 ): IssuerCardDTO {
   // The same one boundary `toMyCard` gates on, applied to the same pair of
@@ -276,6 +348,7 @@ export function toIssuerCard(
     cardPhotoUrl: canShowPhoto ? holder.avatarUrl : null,
     cardPronouns: canShowPronouns ? holder.pronouns?.trim() || null : null,
     token: holder.token,
+    verificationCount: holder.verificationCount ?? 0,
   };
 }
 
@@ -319,5 +392,30 @@ export function toCardVerification(
         ? toImageUrl(context.holderAvatarUrl)
         : null,
     photoStyle: context.photoStyle,
+  };
+}
+
+/**
+ * The issuer's aggregate. Counts arrive from a raw aggregate query as strings
+ * or nulls, so they are normalised to numbers here rather than at each call
+ * site, and the timestamp is normalised to ISO the way every other DTO in
+ * this file does it.
+ */
+export function toCardVerificationCounts(counts: {
+  total: number;
+  recent: number;
+  recentDays: number;
+  lastVerifiedAt: Date | string | null;
+}): CardVerificationCountsDTO {
+  const parsed = counts.lastVerifiedAt ? new Date(counts.lastVerifiedAt) : null;
+  // A driver that hands back something unparseable must cost the panel its
+  // timestamp, never throw a RangeError out of a response mapper.
+  const lastVerifiedAt =
+    parsed && !Number.isNaN(parsed.getTime()) ? parsed.toISOString() : null;
+  return {
+    total: Number.isFinite(counts.total) ? counts.total : 0,
+    recent: Number.isFinite(counts.recent) ? counts.recent : 0,
+    recentDays: counts.recentDays,
+    lastVerifiedAt,
   };
 }

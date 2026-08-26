@@ -44,6 +44,15 @@ export enum GovernanceLogAction {
   // previously barred member back in. Lifting a ban clears the bar and never
   // restores the roster row: they still have to rejoin.
   BanLifted = 'ban_lifted',
+  // Written by `AdminCommunitySupportService.create` when platform staff offer
+  // a struggling community help (OPS-05), and by
+  // `CommunitySupportOffersService.respond` when the community answers. Kept
+  // in this log rather than only in `community_support_offers` for the same
+  // reason every other staff act against a community is: "who from the
+  // platform turned up, and what did we say back" is a question the
+  // community's own history has to be able to answer later.
+  SupportOffered = 'support_offered',
+  SupportOfferAnswered = 'support_offer_answered',
 }
 
 /**

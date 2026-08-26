@@ -24,8 +24,9 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminStorySubmissionsService } from './admin-story-submissions.service';
 import { DecideStorySubmissionDto } from './dto/decide-story-submission.dto';
@@ -39,12 +40,15 @@ import { ListAdminStorySubmissionsQuery } from './dto/list-admin-story-submissio
  * writer-application triage. There is no Editor role in this product.
  * The member-facing write (submitting a story) stays on `MagazineController`.
  */
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Admin)
+@StaffRoles('editorial')
 @ApiTags('Admin — Magazine submissions')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires the admin role.' })
+@ApiForbiddenResponse({
+  description: 'Requires the admin role, or the `editorial` staff role.',
+})
 @Controller('admin/magazine-submissions')
 export class AdminStorySubmissionsController {
   constructor(

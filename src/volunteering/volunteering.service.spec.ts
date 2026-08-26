@@ -1,4 +1,5 @@
 import { ConflictException, ForbiddenException } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, In } from 'typeorm';
@@ -209,6 +210,10 @@ describe('VolunteeringService', () => {
           useValue: communityMembership,
         },
         { provide: NotificationsService, useValue: notificationsService },
+        // `confirmCompletion` emits `VOLUNTEER_SESSION_COMPLETED` on the
+        // global bus; `EventEmitterModule.forRoot()` is not in this testing
+        // module, so the token has to be provided explicitly.
+        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
       ],
     }).compile();
     service = module.get(VolunteeringService);

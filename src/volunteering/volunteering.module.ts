@@ -8,6 +8,7 @@ import { UsersModule } from '../users/users.module';
 import { VolunteerOpportunityTeam } from './entities/volunteer-opportunity-team.entity';
 import { VolunteerOpportunity } from './entities/volunteer-opportunity.entity';
 import { VolunteerSignup } from './entities/volunteer-signup.entity';
+import { AdminVolunteeringController } from './admin-volunteering.controller';
 import { VolunteeringController } from './volunteering.controller';
 import { VolunteeringService } from './volunteering.service';
 
@@ -34,7 +35,11 @@ import { VolunteeringService } from './volunteering.service';
     // dependency back on `VolunteeringModule` (mirrors `communities.module.ts`).
     NotificationsModule,
   ],
-  controllers: [VolunteeringController],
+  // `AdminVolunteeringController` is the staff-side read of the same data
+  // (SUS-05's funder report). It needs no extra imports: `VolunteeringService`
+  // is already a provider here and `CommunityMembershipModule` (imported above
+  // for slug resolution) exports the service it uses to name communities.
+  controllers: [VolunteeringController, AdminVolunteeringController],
   providers: [VolunteeringService],
   exports: [VolunteeringService],
 })

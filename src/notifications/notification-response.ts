@@ -177,6 +177,19 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // NUMBER and the copy is CLDR-pluralised on it, so without this entry the
     // row would forward no count and fall back to the vague flat string.
     [NotificationType.AccountDeletionFinalWarning]: ['daysRemaining'],
+    // The countdown on a membership card about to expire (SUS-07).
+    // `daysRemaining` is a NUMBER the copy is CLDR-pluralised on, `communityName`
+    // names the issuer, and `canSelfRenew` decides between "renew it here" and
+    // "your community issues the new one" — without it the bell would offer an
+    // action the member's programme does not allow. The card's serial and its
+    // scannable token stay off this wire: a notification payload is the wrong
+    // place for a credential, and the member reads both on /account/cards under
+    // their own authentication. `communitySlug` rides in COMMON_PAYLOAD_KEYS.
+    [NotificationType.CardExpiring]: [
+      'communityName',
+      'daysRemaining',
+      'canSelfRenew',
+    ],
     [NotificationType.VerificationUpdate]: [
       'fromLevel',
       'toLevel',
@@ -314,6 +327,18 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
     // The resource's own title, which is owner-authored and already public on
     // the community's shelf to anyone who can see this notification.
     [NotificationType.CommunityResourceAdded]: ['communityName', 'title'],
+    // Platform staff offering a community support (OPS-05). The community's
+    // own name, for copy like "Someone from QueerPulse has offered Trans
+    // Friends some support"; `communitySlug` already rides along in
+    // `COMMON_PAYLOAD_KEYS` and is what the mod-tools deep link is built from.
+    //
+    // The staff member's NOTE is deliberately absent, unlike
+    // `CommunityOwnerReviewRequested`'s `reason` above. That one is listed
+    // because a staff alert has no other surface to be read from; this one
+    // does — the offer sits in the community's own mod-tools console, fetched
+    // under the moderator's own authentication, which is also where they
+    // answer it. Nothing is lost by keeping the prose off the bell.
+    [NotificationType.CommunitySupportOffered]: ['communityName'],
     // Platform-staff operational mail only (the write site restricts
     // recipients to Moderator/Admin). `reason` is listed on purpose, unlike
     // `BarterProposalReceived`'s `message` above: the reason IS the actionable

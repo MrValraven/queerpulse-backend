@@ -302,26 +302,91 @@ export interface PerkCatalogEntry {
   key: string;
   cat: string;
   title: string;
+  /**
+   * Shown on the perk card. `{base}` and `{total}` are interpolated by
+   * `buildPerks` for an invite-quota perk (see `isInviteQuotaPerk`) so the
+   * advertised numbers are the enforced ones, read from the same constants.
+   */
   desc: string;
   /** Member level (1-indexed, matches `LEVEL_LADDER_DEF`) required to claim. */
   unlockLevel: number;
   availableFooter: PerkAvailableFooter;
+  /**
+   * Marks a perk whose grant is "more monthly invites". The size of the grant
+   * is NOT stored here: it is read from `INVITE_QUOTA_BONUS_BY_LEVEL` using
+   * this entry's own `unlockLevel`, so the number on the card and the number
+   * `InvitesService.resolveMonthlyLimit` enforces are the same number.
+   */
+  isInviteQuotaPerk?: boolean;
 }
 
+/**
+ * The fallback monthly invite allowance, mirroring
+ * `app.config.ts`'s `INVITE_MONTHLY_QUOTA` default. Used as the default when
+ * a caller has no `ConfigService` handy, so the perk copy never advertises a
+ * number the enforcement path would not produce.
+ */
+export const DEFAULT_INVITE_MONTHLY_QUOTA = 5;
+
+/**
+ * Extra monthly invites a member's recognition level grants on top of the
+ * configured base quota (`app.inviteMonthlyQuota`).
+ *
+ * THE SINGLE SOURCE OF TRUTH for the level -> invite-quota relationship.
+ * Two things read it and nothing else may hardcode a number:
+ *   - `RecognitionEntitlementsService.getInviteQuotaBonus`, which
+ *     `InvitesService.resolveMonthlyLimit` adds to the base quota;
+ *   - `buildPerks`, which renders the perk copy from it.
+ * Before this existed, the catalogue advertised "1 to 2" while the backend
+ * enforced a flat 5, so the copy was fiction in both directions (SUS-04).
+ */
+export const INVITE_QUOTA_BONUS_BY_LEVEL: Readonly<Record<number, number>> = {
+  4: 2,
+  5: 5,
+};
+
+/** The bonus a member at `level` has unlocked: the largest bonus whose level
+ *  they have reached, or 0 below the first rung. */
+export function inviteQuotaBonusForLevel(level: number): number {
+  let bonus = 0;
+  for (const [unlockLevel, amount] of Object.entries(
+    INVITE_QUOTA_BONUS_BY_LEVEL,
+  )) {
+    if (level >= Number(unlockLevel)) bonus = Math.max(bonus, amount);
+  }
+  return bonus;
+}
+
+/**
+ * PERKS ARE ENFORCED, OR THEY ARE NOT IN THIS LIST (SUS-04).
+ *
+ * The catalogue used to advertise six perks and enforce none of them: there
+ * was no claim endpoint at all (the controller was GET-only), no service read
+ * a member's level, and the invite-quota copy named numbers the backend never
+ * used. Three entries were deleted rather than faked:
+ *
+ *   - `early-rsvp` promised a 48-hour head start on RSVPs and an email when a
+ *     gathering is approved. There is no RSVP opening window anywhere in
+ *     `rsvp.service.ts`, and QueerPulse sends no email at all.
+ *   - `trusted-lounge` promised access to a members-only community that does
+ *     not exist and that no code path can grant.
+ *   - `host-without-approval` promised skipping a host application review.
+ *     `POST /events` is guarded by `NotRestrictedGuard` alone and
+ *     `EventsService.create` publishes immediately, so there is no review to
+ *     skip for anyone, at any level.
+ *
+ * Every entry below names the file that enforces it.
+ */
 export const PERK_CATALOG: readonly PerkCatalogEntry[] = [
   {
+    // ENFORCED BY: `src/vouch/vouch.controller.ts` — `ActiveMemberGuard` is
+    // the only gate on vouching, so every active member really does hold this
+    // from day one. Kept at `unlockLevel: 1` so it renders as a capability the
+    // member already has rather than a fake locked tier (COM-15).
     key: 'vouch-access',
     cat: 'Community',
     title: 'Vouch access',
-    desc: 'The ability to vouch for other members — a trust signal that helps them stand out.',
-    // `vouch.controller.ts` has no level check: any active member can vouch
-    // from day one (`ActiveMemberGuard` is the only gate). This used to read
-    // `unlockLevel: 3` with "Applied automatically at Level 3 · Regular"
-    // copy — a gate that never existed in the backend (COM-15). Rather than
-    // adding a real Level 3 gate nobody asked for, this entry is honest about
-    // being available from Level 1 (every active member already has it), so
-    // it always renders in "Available to claim" instead of a fake locked
-    // tier.
+    desc: 'The ability to vouch for other members, a trust signal that helps them stand out. Every active member has it from day one.',
     unlockLevel: 1,
     availableFooter: {
       type: 'active-auto',
@@ -329,64 +394,51 @@ export const PERK_CATALOG: readonly PerkCatalogEntry[] = [
     },
   },
   {
-    key: 'early-rsvp',
-    cat: 'Early Access',
-    title: 'Early RSVP Access',
-    desc: "Get 48-hour early access to all new gathering RSVPs before they open to the community. You'll receive an email the moment a new gathering is approved.",
+    // ENFORCED BY: `src/membership/invites.service.ts`
+    // (`resolveMonthlyLimit`), via
+    // `RecognitionEntitlementsService.getInviteQuotaBonus`. The bonus applies
+    // once the perk is CLAIMED, which is what the button below writes.
+    key: 'invite-quota-level-4',
+    cat: 'Membership',
+    title: 'More invites each month',
+    desc: 'Claim it and your monthly invite allowance goes from {base} to {total}. Invites reset on the first of each month.',
     unlockLevel: 4,
-    availableFooter: {
-      type: 'active-auto',
-      autoLabel: 'Applied automatically at Level 4',
-    },
-  },
-  {
-    key: 'trusted-lounge',
-    cat: 'Community',
-    title: 'Trusted Lounge',
-    desc: 'Access to the Trusted members-only community — a smaller, quieter space to connect. Not indexed or visible to the general directory.',
-    unlockLevel: 4,
+    isInviteQuotaPerk: true,
     availableFooter: {
       type: 'button',
-      label: 'Join the lounge',
-      toast: 'Welcome to the Trusted Lounge',
+      label: 'Claim the higher allowance',
+      toast: 'Claimed. Your monthly invite allowance is higher from now on',
     },
   },
   {
-    key: 'invite-quota-2',
+    // ENFORCED BY: `src/membership/invites.service.ts`
+    // (`resolveMonthlyLimit`), same path as the Level 4 rung above. Claiming
+    // this one replaces the smaller bonus with the larger one.
+    key: 'invite-quota-level-5',
     cat: 'Membership',
-    title: 'Increased Invite Quota',
-    desc: 'Your monthly invite allowance increases from 1 to 2.',
-    unlockLevel: 4,
-    availableFooter: {
-      type: 'link-auto',
-      label: 'Send an invite',
-      to: '/auth/invite',
-      autoLabel: 'Requires action',
-    },
-  },
-  {
-    key: 'host-without-approval',
-    cat: 'Hosting',
-    title: 'Host without approval',
-    desc: "Skip the host application review — your gatherings go live immediately. You've earned the trust.",
+    title: 'The highest invite allowance',
+    desc: 'Claim it and your monthly invite allowance goes from {base} to {total}. The community grows because of people like you.',
     unlockLevel: 5,
+    isInviteQuotaPerk: true,
     availableFooter: {
-      type: 'active-auto',
-      autoLabel: 'Applied automatically at Level 5 · Trusted',
-    },
-  },
-  {
-    key: 'invite-quota-3',
-    cat: 'Membership',
-    title: 'Invite quota increases to 3',
-    desc: 'Bring even more people in. Your monthly quota goes to 3 invites.',
-    unlockLevel: 5,
-    availableFooter: {
-      type: 'active-auto',
-      autoLabel: 'Applied automatically at Level 5 · Trusted',
+      type: 'button',
+      label: 'Claim the higher allowance',
+      toast: 'Claimed. Your monthly invite allowance is higher from now on',
     },
   },
 ];
+
+/** Look up a catalogue entry by its stable key. `undefined` for a key that
+ *  is not in the catalogue (a claim request for one is a 404). */
+export function perkByKey(key: string): PerkCatalogEntry | undefined {
+  return PERK_CATALOG.find((entry) => entry.key === key);
+}
+
+/** The invite-quota perks, in catalogue order. The enforcement path
+ *  (`RecognitionEntitlementsService`) walks them and keeps the largest bonus
+ *  the member has both reached and claimed. */
+export const INVITE_QUOTA_PERKS: readonly PerkCatalogEntry[] =
+  PERK_CATALOG.filter((entry) => entry.isInviteQuotaPerk === true);
 
 export interface LevelDef {
   /** 1-indexed level number. */
@@ -407,22 +459,28 @@ export const LEVEL_LADDER_DEF: readonly LevelDef[] = [
   { level: 7, name: 'Pillar', xpSpan: null },
 ];
 
-/** Baseline perks every member already has at a given level, folded into
- *  the perks-ladder row alongside any `PERK_CATALOG` entries unlocking at
- *  that level. Purely descriptive — not individually claimable. */
+/**
+ * Baseline capabilities folded into the perks-ladder row for a level,
+ * alongside any `PERK_CATALOG` entries unlocking there. Purely descriptive,
+ * never individually claimable.
+ *
+ * Only Level 1 carries entries, and that is the honest shape: nothing in the
+ * backend gates messaging, saving, joining a community or hosting a gathering
+ * on a recognition level. This map used to place those behind Levels 2 and 3
+ * ("Apply to host a gathering" at Level 3), which described a gate no code
+ * ever applied (SUS-04). Higher rungs list what the perk catalogue actually
+ * grants there, and nothing else.
+ */
 export const BASE_PERKS_BY_LEVEL: Readonly<Record<number, readonly string[]>> =
   {
     1: [
       'Browse the member directory',
       'Join gatherings & RSVP',
-      'Access the resource library',
-    ],
-    2: [
       'Message other members directly',
       'Save articles & resources',
       'Join communities',
+      'Host a gathering',
     ],
-    3: ['Apply to host a gathering'],
   };
 
 export function levelDefByNumber(level: number): LevelDef | undefined {

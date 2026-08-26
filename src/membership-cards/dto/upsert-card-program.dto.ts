@@ -125,4 +125,11 @@ export class UpsertCardProgramDto {
   @IsOptional()
   @IsIn(CARD_TEXT_BACKDROPS)
   textBackdrop?: CardTextBackdrop;
+
+  // Whether a holder may put their own card back in date near expiry, without
+  // an owner running the roster bulk issue. Same absent-leaves-it-alone
+  // contract as the switches above.
+  @IsOptional()
+  @IsBoolean()
+  allowsSelfRenew?: boolean;
 }

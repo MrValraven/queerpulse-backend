@@ -1,4 +1,5 @@
 import { NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
@@ -41,6 +42,7 @@ describe('RecognitionService', () => {
         communityPosts: 0,
         endorsementCount: 0,
         eventsHosted: 0,
+        eventsHeld: 0,
         tenureDays: 0,
         verified: false,
         gettingStartedStepsDone: 0,
@@ -67,6 +69,14 @@ describe('RecognitionService', () => {
         { provide: getRepositoryToken(Profile), useValue: profilesRepo },
         { provide: RecognitionAwardingService, useValue: awardingService },
         { provide: ProfilesService, useValue: profilesService },
+        // SUS-04: the perk copy names the deployment's real invite quota, so
+        // the service reads `app.inviteMonthlyQuota`.
+        {
+          provide: ConfigService,
+          useValue: {
+            get: jest.fn((_key: string, fallback: number) => fallback),
+          },
+        },
       ],
     }).compile();
     service = module.get(RecognitionService);

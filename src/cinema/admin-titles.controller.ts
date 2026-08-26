@@ -15,8 +15,9 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { Feature } from '../common/feature.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { CinemaReconciliationService } from './cinema-reconciliation.service';
@@ -44,10 +45,14 @@ import {
 @ApiTags('Admin — Cinema')
 @ApiCookieAuth()
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Moderator or admin role required.' })
+@ApiForbiddenResponse({
+  description:
+    'Requires a moderator or admin role, or the `editorial` staff role.',
+})
 @Controller('cinema/titles')
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)
+@StaffRoles('editorial')
 export class AdminTitlesController {
   constructor(
     private readonly cinema: CinemaService,
@@ -78,7 +83,10 @@ export class AdminTitlesController {
     return this.cinema.updateTitle(user.userId, id, dto);
   }
 
+  // Narrowed back to the account tier: the empty @StaffRoles() overrides the
+  // class-level grant, so RolesOrStaffGuard falls back to @Roles alone here.
   @Delete(':id')
+  @StaffRoles()
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({
     summary: 'Delete a cinema title and its Mux assets (best-effort).',

@@ -11,10 +11,14 @@ import { RecognitionPerkClaim } from './entities/recognition-perk-claim.entity';
 import { RecognitionStat } from './entities/recognition-stat.entity';
 import { SavedItem } from '../saved/entities/saved-item.entity';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
+import { ListingPublicQuestion } from '../listings/entities/listing-public-question.entity';
+import { ResourceSuggestion } from '../resources/entities/resource-suggestion.entity';
+import { VolunteerSignup } from '../volunteering/entities/volunteer-signup.entity';
 import {
   MemberRecognitionController,
   MyRecognitionController,
 } from './recognition.controller';
+import { RecognitionEntitlementsModule } from './recognition-entitlements.module';
 import { RecognitionService } from './recognition.service';
 import { RecognitionAwardingService } from './recognition-awarding.service';
 import { RecognitionListener } from './recognition.listener';
@@ -39,11 +43,21 @@ import { RecognitionListener } from './recognition.listener';
       CommunityMember,
       SavedItem,
       MemberPreferences,
+      // The contribution-side counts (SUS-05). Repositories only, no module
+      // import: `RecognitionAwardingService` reads these three tables and
+      // never calls into the volunteering / listings / resources services, so
+      // there is no dependency (and no cycle) on those modules.
+      VolunteerSignup,
+      ListingPublicQuestion,
+      ResourceSuggestion,
     ]),
     UsersModule,
     ProfilesModule,
     PublicEligibilityModule,
     NotificationsModule,
+    // Re-exported so a consumer that already imports RecognitionModule gets
+    // the entitlement reads too, without a second import.
+    RecognitionEntitlementsModule,
   ],
   controllers: [MyRecognitionController, MemberRecognitionController],
   providers: [
@@ -51,5 +65,6 @@ import { RecognitionListener } from './recognition.listener';
     RecognitionAwardingService,
     RecognitionListener,
   ],
+  exports: [RecognitionEntitlementsModule],
 })
 export class RecognitionModule {}

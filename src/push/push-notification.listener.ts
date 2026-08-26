@@ -136,6 +136,14 @@ export class PushNotificationListener {
         case NotificationType.TopicNewPost:
           await this.pushTopicNewPost(userIds, notification);
           return;
+        // Platform staff offering a struggling community help (OPS-05).
+        // Always-on, no category gate, for the same reason as the types
+        // above: it is the platform reaching the people running a room that
+        // is having a hard time, it arrives at most once until they answer
+        // it, and the in-app bell is the only other place it lands.
+        case NotificationType.CommunitySupportOffered:
+          await this.pushCommunitySupportOffered(userIds, notification);
+          return;
         // The four approval queues (LOC-19). Each is the platform's answer to
         // a member's own submission, so all four push unconditionally: no
         // category gates them (they map to no `NotificationPreferenceCategory`
@@ -457,6 +465,40 @@ export class PushNotificationListener {
         titleKey: 'push:venue.attachment.title',
         bodyKey: 'push:venue.attachment.body',
         params: { listingName, eventTitle },
+      },
+      timestamp: notification.createdAt.getTime(),
+    });
+  }
+
+  /**
+   * "Someone from QueerPulse has offered your community support."
+   *
+   * Deep-links straight to the support pane of that community's mod tools,
+   * which is where the offer is read in full and answered — the same
+   * `?tab=modtools&mod=…` destination `community_report_filed` uses. The
+   * staff member's note never rides on the push: it is not in the payload
+   * allowlist at all, and it belongs behind the moderator's own
+   * authentication.
+   */
+  private async pushCommunitySupportOffered(
+    userIds: string[],
+    notification: Notification,
+  ): Promise<void> {
+    const communityName =
+      this.payloadString(notification, 'communityName') ?? 'Your community';
+    const communitySlug = this.payloadString(notification, 'communitySlug');
+    const url = communitySlug
+      ? `/community/${communitySlug}?tab=modtools&mod=support`
+      : '/communities';
+    await this.previewPrivacy.sendSplitByPreviewPreference(userIds, {
+      title: 'An offer of support',
+      body: `Someone from QueerPulse has offered ${communityName} a hand. Tap to read it.`,
+      tag: `notification:${notification.id}`,
+      data: { url },
+      l10n: {
+        titleKey: 'push:community.supportOffered.title',
+        bodyKey: 'push:community.supportOffered.body',
+        params: { communityName },
       },
       timestamp: notification.createdAt.getTime(),
     });

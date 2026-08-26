@@ -72,6 +72,16 @@ export class AdminMembersController {
     return this.adminMembers.listFlagged();
   }
 
+  // Declared before ':id' for the same reason as 'flagged' above.
+  @ApiOperation({
+    summary: 'List every member holding an additive staff-role grant.',
+  })
+  @ApiOkResponse({ description: 'The grant holders and what each one holds.' })
+  @Get('staff-roles')
+  listStaffRoleHolders() {
+    return this.adminMembers.listStaffRoleHolders();
+  }
+
   @ApiOperation({ summary: "One member's full admin detail view." })
   @ApiOkResponse({ description: 'The member detail.' })
   @ApiNotFoundResponse({ description: 'Member not found.' })

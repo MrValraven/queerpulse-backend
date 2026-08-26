@@ -8,8 +8,15 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { createHash, randomBytes } from 'node:crypto';
 import { isUniqueViolation } from '../common/db-errors';
 import { DEFAULT_LIST_LIMIT } from '../common/pagination';
+import { MemberLookup, MemberRef } from '../common/member-ref';
+import {
+  optionalQueueAssigneeName,
+  setQueueAssignment,
+} from '../common/queue-assignment';
+import { joinRequestDueAt } from './join-request-sla';
 import { DataSource, In, Repository } from 'typeorm';
 import { CreateMembershipJoinRequestDto } from './dto/create-join-request.dto';
 import { Invite } from './entities/invite.entity';
@@ -17,19 +24,41 @@ import {
   PlatformJoinRequest,
   PlatformJoinRequestStatus,
 } from './entities/join-request.entity';
+import { resolveInviteStatus } from './invite-response';
 import { InvitesService } from './invites.service';
 import { computeBatchFlags } from './join-request-flags';
 import {
+  JoinRequestInviteRef,
   JoinRequestView,
+  PublicJoinRequestStatusView,
   SubmittedJoinRequestView,
   toJoinRequestView,
+  toPublicJoinRequestStatusView,
   toSubmittedJoinRequestView,
 } from './join-request-response';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { Profile } from '../users/entities/profile.entity';
-import { User, UserStatus } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 
 const MIN_AGE_YEARS = 18;
+
+/**
+ * Entropy behind the applicant's status token. 32 bytes is 256 bits, the same
+ * budget the CSRF secret and the listing-draft claim token use, and it is
+ * rendered base64url so the token can sit in a query string, a bookmark or a
+ * pasted message without escaping.
+ */
+const STATUS_TOKEN_BYTES = 32;
+
+/**
+ * The stored form of a status token. Sha256 hex, matching
+ * `AuthService.hashToken` and `AccountService`'s deletion tokens: the column
+ * holds this, the applicant holds the plaintext, and the two only ever meet
+ * inside a lookup.
+ */
+function hashStatusToken(statusToken: string): string {
+  return createHash('sha256').update(statusToken).digest('hex');
+}
 
 /**
  * Whole years elapsed between `dob` and `now`, calendar-correct (this year's
@@ -71,7 +100,9 @@ export class JoinRequestsService {
    * address. An address the applicant does not control yields an invite they
    * cannot redeem.
    */
-  async submit(dto: CreateMembershipJoinRequestDto): Promise<SubmittedJoinRequestView> {
+  async submit(
+    dto: CreateMembershipJoinRequestDto,
+  ): Promise<SubmittedJoinRequestView> {
     // Join-request kill switch. First statement in the method, before any
     // query: this endpoint is the unauthenticated one, so it is where a spam
     // flood lands, and a rejected submission should not still cost a
@@ -176,6 +207,12 @@ export class JoinRequestsService {
       referenceUserId = referenced?.id ?? null;
     }
 
+    // The applicant's own status credential (ACQ-01). Minted here because this
+    // response is the only delivery channel that will ever exist for it: the
+    // platform sends no email, so a token generated any later than the 201
+    // could never reach the person who needs it. Only the hash is persisted.
+    const statusToken = randomBytes(STATUS_TOKEN_BYTES).toString('base64url');
+
     const request = this.joinRequests.create({
       name: dto.name.trim(),
       email,
@@ -186,12 +223,22 @@ export class JoinRequestsService {
       status: PlatformJoinRequestStatus.Pending,
       ageAttestedAt: new Date(),
       termsVersion: dto.termsVersion,
+      // OPS-04. Stamped once, here, from the single window constant in
+      // `join-request-sla.ts` — the same shape `ReportsService.create`
+      // computes `slaDueAt` in. Computed from `new Date()` rather than the
+      // row's own `created_at` (which the database writes a moment later);
+      // the two differ by less than the time it takes to insert.
+      dueAt: joinRequestDueAt(new Date()),
       // Trimmed to null so a stray `''` from the frontend reads as "no source"
       // rather than an empty attribution the queue would have to special-case.
       source: dto.source?.trim() || null,
+      statusTokenHash: hashStatusToken(statusToken),
     });
     try {
-      return toSubmittedJoinRequestView(await this.joinRequests.save(request));
+      return toSubmittedJoinRequestView(
+        await this.joinRequests.save(request),
+        statusToken,
+      );
     } catch (err) {
       // The pre-check above races with a concurrent submit; the partial unique
       // index UQ_join_requests_pending_email is the real backstop. Map 23505 to
@@ -205,6 +252,52 @@ export class JoinRequestsService {
     }
   }
 
+  /**
+   * PUBLIC status lookup for the applicant's own request (ACQ-01). The token
+   * the caller holds is the whole credential — there is no session behind this
+   * — so the answer is deliberately the narrowest thing that closes the loop:
+   * the outcome, when it was made, why it was declined, and the invite code an
+   * approval minted. Never the submitted message, never the reviewer, never
+   * another row.
+   *
+   * Returns `null` for EVERY failure mode (a token that matches nothing, a
+   * token that is well-formed but was never issued), so the controller can
+   * answer with one indistinguishable 404. The card-verification route makes
+   * the same call for the same reason: confirming that a token merely exists
+   * would turn this into an oracle for guessing them.
+   */
+  async getPublicStatus(
+    statusToken: string,
+  ): Promise<PublicJoinRequestStatusView | null> {
+    // Looked up BY HASH: the plaintext is never stored, so this is the only
+    // way the token can resolve, and the unique index makes it at most one row.
+    const request = await this.joinRequests.findOne({
+      where: { statusTokenHash: hashStatusToken(statusToken) },
+    });
+    if (!request) {
+      return null;
+    }
+
+    // The invite code is fetched only for an approval that actually minted
+    // one, and only while it is still redeemable — `resolveInviteStatus` is
+    // the same expiry/revocation/used check the invite landing page runs, so
+    // an applicant is never handed a code that would fail at signup.
+    let redeemableInviteCode: string | null = null;
+    if (
+      request.status === PlatformJoinRequestStatus.Approved &&
+      request.inviteId
+    ) {
+      const invite = await this.dataSource
+        .getRepository(Invite)
+        .findOne({ where: { id: request.inviteId } });
+      if (invite && resolveInviteStatus(invite, new Date()) === 'valid') {
+        redeemableInviteCode = invite.code;
+      }
+    }
+
+    return toPublicJoinRequestStatusView(request, redeemableInviteCode);
+  }
+
   async list(
     status?: PlatformJoinRequestStatus,
     options: {
@@ -212,6 +305,14 @@ export class JoinRequestsService {
       cursor?: string;
       limit?: number;
       sort?: 'oldest' | 'newest';
+      /**
+       * OPS-04's "Assigned to me" filter. A user id narrows the page to that
+       * reviewer's claimed requests; `'unassigned'` narrows to the rows nobody
+       * has picked up. Server-side, not a client-side filter over one page:
+       * the queue is keyset-paginated, so filtering after the fetch would hide
+       * claimed rows that simply had not loaded yet.
+       */
+      assignedTo?: string;
     } = {},
   ): Promise<JoinRequestView[]> {
     const sort = options.sort ?? 'oldest';
@@ -222,6 +323,13 @@ export class JoinRequestsService {
     if (options.source) {
       qb.andWhere('jr.source = :source', { source: options.source });
     }
+    if (options.assignedTo === 'unassigned') {
+      qb.andWhere('jr.assignedStaffId IS NULL');
+    } else if (options.assignedTo) {
+      qb.andWhere('jr.assignedStaffId = :assignedTo', {
+        assignedTo: options.assignedTo,
+      });
+    }
     if (options.cursor) {
       const op = sort === 'oldest' ? '>' : '<';
       qb.andWhere(`jr.createdAt ${op} :cursor`, { cursor: options.cursor });
@@ -230,20 +338,10 @@ export class JoinRequestsService {
 
     const requests = await qb.getMany();
     // One extra query for the whole page rather than N+1 (or a join that would
-    // drag the full Invite entity into the view mapper).
-    const inviteIds = requests
-      .map((r) => r.inviteId)
-      .filter((id): id is string => id !== null);
-    const codeById = new Map<string, string>();
-    if (inviteIds.length > 0) {
-      const invites = await this.dataSource.getRepository(Invite).find({
-        where: { id: In(inviteIds) },
-        select: { id: true, code: true },
-      });
-      for (const invite of invites) {
-        codeById.set(invite.id, invite.code);
-      }
-    }
+    // drag the full Invite entity into the view mapper). Status and expiry ride
+    // along with the code: the decided tab has to say whether the link it is
+    // offering still works, and an approval invite lapses after 7 days.
+    const inviteRefById = await this.loadInviteRefs(requests);
 
     // Batch-resolve any reference member (P9) to a display name/slug via
     // `Profile` — not `User`, where the name and slug don't live. Same ad
@@ -301,19 +399,105 @@ export class JoinRequestsService {
       }
     }
 
+    // OPS-04: one batched profile lookup for every reviewer holding a row on
+    // this page, so the queue can print "Claimed by Ana Reis" without a query
+    // per row.
+    const assigneeRefs = await this.assigneeRefs(
+      requests.map((r) => r.assignedStaffId),
+    );
+
     return requests.map((r) => {
       const reference = r.referenceUserId
         ? referenceById.get(r.referenceUserId)
         : undefined;
       return toJoinRequestView(
         r,
-        r.inviteId ? (codeById.get(r.inviteId) ?? null) : null,
+        r.inviteId ? (inviteRefById.get(r.inviteId) ?? null) : null,
         flagsById.get(r.id) ?? [],
         priorDeclineCounts.get(r.email.toLowerCase()) ?? 0,
         reference?.name ?? null,
         reference?.slug ?? null,
+        optionalQueueAssigneeName(r.assignedStaffId, assigneeRefs),
       );
     });
+  }
+
+  /**
+   * Claim or release one invite request (OPS-04) — the write behind the
+   * queue's "Assigned to me" filter.
+   *
+   * Mirrors `ModerationService.setAssignment` exactly, including the property
+   * that makes it safe under two reviewers pressing Claim at once: the write
+   * is a conditional UPDATE guarded on the assignment this caller read, so the
+   * loser gets a 409 rather than silently taking the row. Additionally guarded
+   * on the request still being OPEN, so a decided applicant cannot be claimed
+   * by a stale queue.
+   *
+   * Claiming is not deciding: it takes no side, records no review, and can be
+   * undone by releasing.
+   */
+  async setAssignment(
+    id: string,
+    actorId: string,
+    actorRole: string,
+    assign: boolean,
+  ): Promise<JoinRequestView> {
+    const request = await this.joinRequests.findOne({ where: { id } });
+    if (!request) throw new NotFoundException('Join request not found');
+
+    await setQueueAssignment({
+      repository: this.joinRequests,
+      id,
+      currentAssigneeId: request.assignedStaffId,
+      actorId,
+      // `actorRole` is a JWT claim, typed `string` on `CurrentUserData` — the
+      // widening says so rather than implying the two are the same enum.
+      isAdmin: actorRole === (UserRole.Admin as string),
+      assign,
+      rowLabel: 'invite request',
+      claimableStatuses: {
+        column: 'status',
+        values: [
+          PlatformJoinRequestStatus.Pending,
+          PlatformJoinRequestStatus.Waitlisted,
+        ],
+      },
+    });
+
+    return this.viewOfOne(id);
+  }
+
+  /** Re-reads one request and maps it with its assignee resolved. Used by
+   *  `setAssignment`, which changes only the assignee fields, so none of
+   *  `list`'s batch-derived context (flags, prior declines) applies. */
+  private async viewOfOne(id: string): Promise<JoinRequestView> {
+    const saved = await this.joinRequests.findOne({ where: { id } });
+    if (!saved) throw new NotFoundException('Join request not found');
+    const inviteRefById = await this.loadInviteRefs([saved]);
+    const assigneeRefs = await this.assigneeRefs([saved.assignedStaffId]);
+    return toJoinRequestView(
+      saved,
+      saved.inviteId ? (inviteRefById.get(saved.inviteId) ?? null) : null,
+      [],
+      0,
+      null,
+      null,
+      optionalQueueAssigneeName(saved.assignedStaffId, assigneeRefs),
+    );
+  }
+
+  /** Batched userId -> profile ref for the reviewers holding a set of rows.
+   *  Skips the query entirely when nothing on the page is claimed. */
+  private async assigneeRefs(
+    assignedStaffIds: (string | null)[],
+  ): Promise<Map<string, MemberRef>> {
+    const ids = [
+      ...new Set(assignedStaffIds.filter((id): id is string => id !== null)),
+    ];
+    if (!ids.length) return new Map<string, MemberRef>();
+    return new MemberLookup(this.dataSource.getRepository(Profile)).byUserIds(
+      ids,
+    );
   }
 
   async review(
@@ -358,7 +542,7 @@ export class JoinRequestsService {
 
       // Approving mints the invite BEFORE the claim, so `invite_id` lands in
       // the same UPDATE as the status flip.
-      let inviteCode: string | null = null;
+      let inviteRef: JoinRequestInviteRef | null = null;
       let inviteId: string | null = null;
       if (status === PlatformJoinRequestStatus.Approved) {
         // The approving admin is recorded as the inviter: `invites.inviter_id`
@@ -372,7 +556,13 @@ export class JoinRequestsService {
           reviewerId,
           current.email,
         );
-        inviteCode = invite.code;
+        // Freshly minted inside this transaction, so it is 'valid' by
+        // construction — no `resolveInviteStatus` round trip needed.
+        inviteRef = {
+          code: invite.code,
+          status: 'valid',
+          expiresAt: invite.expiresAt,
+        };
         inviteId = invite.id;
       }
 
@@ -403,7 +593,7 @@ export class JoinRequestsService {
       current.reviewedAt = reviewedAt;
       current.inviteId = inviteId;
       current.declineReason = resolvedDeclineReason;
-      return toJoinRequestView(current, inviteCode);
+      return toJoinRequestView(current, inviteRef);
     });
   }
 
@@ -489,24 +679,97 @@ export class JoinRequestsService {
       .limit(n)
       .getMany();
 
-    const inviteIds = requests
-      .map((r) => r.inviteId)
-      .filter((id): id is string => id !== null);
-    const codeById = new Map<string, string>();
-    if (inviteIds.length > 0) {
-      const invites = await this.dataSource.getRepository(Invite).find({
-        where: { id: In(inviteIds) },
-        select: { id: true, code: true },
-      });
-      for (const invite of invites) {
-        codeById.set(invite.id, invite.code);
-      }
-    }
+    const inviteRefById = await this.loadInviteRefs(requests);
     return requests.map((r) =>
       toJoinRequestView(
         r,
-        r.inviteId ? (codeById.get(r.inviteId) ?? null) : null,
+        r.inviteId ? (inviteRefById.get(r.inviteId) ?? null) : null,
       ),
     );
+  }
+
+  /**
+   * Resolve every approval-minted invite referenced by a batch of requests, in
+   * ONE query for the whole page — never one per row, and never a join that
+   * would drag the full `Invite` entity into the view mapper.
+   *
+   * The status is computed here with `resolveInviteStatus`, the same lazily
+   * evaluated check the invite landing page and the member's own invite list
+   * use, so a row still stored `pending` but past its `expires_at` reports
+   * itself expired to the review queue exactly as it would to the applicant.
+   */
+  private async loadInviteRefs(
+    requests: PlatformJoinRequest[],
+  ): Promise<Map<string, JoinRequestInviteRef>> {
+    const inviteIds = requests
+      .map((request) => request.inviteId)
+      .filter((id): id is string => id !== null);
+    const refById = new Map<string, JoinRequestInviteRef>();
+    if (inviteIds.length === 0) {
+      return refById;
+    }
+    const now = new Date();
+    const invites = await this.dataSource.getRepository(Invite).find({
+      where: { id: In(inviteIds) },
+      select: { id: true, code: true, status: true, expiresAt: true },
+    });
+    for (const invite of invites) {
+      refById.set(invite.id, {
+        code: invite.code,
+        status: resolveInviteStatus(invite, now),
+        expiresAt: invite.expiresAt,
+      });
+    }
+    return refById;
+  }
+
+  /**
+   * Re-mint the lapsed invite an approval already handed out, addressed by the
+   * JOIN REQUEST rather than by the invite code — `POST
+   * /admin/join-requests/:id/invite/reissue`.
+   *
+   * QueerPulse delivers no email, so the reviewer carrying the link over by
+   * hand is the invite's only route to the applicant. When that link lapses
+   * (7 days) the applicant is stranded, and the member-facing
+   * `POST /invites/:code/resend` cannot help: it is scoped to
+   * `{ code, inviterId }`, and the inviter on an approval invite is whichever
+   * reviewer happened to approve it — so anyone else picking the case up gets a
+   * 404. This route is that missing lever, guarded exactly like the rest of the
+   * review queue (moderator or admin) and reachable only through a request the
+   * queue already shows.
+   *
+   * Answers, mirroring the member route so the frontend can share one error map:
+   *  - 404 when the id is unknown, or the request never minted an invite (not
+   *    approved, or approved before invites were recorded) — one answer for
+   *    both, so this cannot be used to probe which requests exist;
+   *  - 409 when the invite was accepted or revoked, or is still valid; only an
+   *    expired invite can be reissued.
+   *
+   * Returns the request's full queue view with the refreshed invite on it, so
+   * the caller can patch the row in place instead of refetching the tab.
+   */
+  async reissueInvite(
+    id: string,
+    reviewerId: string,
+  ): Promise<JoinRequestView> {
+    const request = await this.joinRequests.findOne({ where: { id } });
+    if (
+      !request ||
+      request.status !== PlatformJoinRequestStatus.Approved ||
+      !request.inviteId
+    ) {
+      throw new NotFoundException('No invite to reissue for this request');
+    }
+    const invite = await this.invitesService.reissueApprovalInvite(
+      request.inviteId,
+    );
+    this.logger.log(
+      `Reviewer ${reviewerId} reissued the approval invite on join request ${id}`,
+    );
+    return toJoinRequestView(request, {
+      code: invite.code,
+      status: resolveInviteStatus(invite, new Date()),
+      expiresAt: invite.expiresAt,
+    });
   }
 }

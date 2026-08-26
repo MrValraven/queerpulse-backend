@@ -14,8 +14,9 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { ChangemakersService } from './changemakers.service';
 import { CreateChangemakerDto } from './dto/create-changemaker.dto';
@@ -34,12 +35,15 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Admin)
+@StaffRoles('partnerships')
 @ApiTags('Admin — Changemakers')
 @ApiCookieAuth()
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Admin role required.' })
+@ApiForbiddenResponse({
+  description: 'Requires the admin role, or the `partnerships` staff role.',
+})
 @Controller('admin/changemakers')
 export class AdminChangemakersController {
   constructor(private readonly changemakers: ChangemakersService) {}

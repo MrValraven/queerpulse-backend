@@ -6,6 +6,7 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
@@ -19,12 +20,14 @@ import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateOpportunityDto } from './dto/create-opportunity.dto';
+import { CompleteSignupDto } from './dto/complete-signup.dto';
 import { CreateSignupDto } from './dto/create-signup.dto';
 import { DecideSignupDto } from './dto/decide-signup.dto';
 import { ListOpportunitiesQuery } from './dto/list-opportunities.query';
 import { UpdateOpportunityDto } from './dto/update-opportunity.dto';
 import { VolunteeringService } from './volunteering.service';
 import {
+  ApiBadRequestResponse,
   ApiConflictResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
@@ -69,6 +72,21 @@ export class VolunteeringController {
   })
   listMine(@CurrentUser() user: CurrentUserData) {
     return this.volunteeringService.listMine(user.userId);
+  }
+
+  @Get('me/contribution')
+  @ApiOperation({
+    summary: 'Your own confirmed volunteer sessions and hours',
+  })
+  @ApiOkResponse({
+    description:
+      'Sessions a poster confirmed you attended, the hours they attested, and how many accepted signups are still waiting on a confirmation.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  myContribution(@CurrentUser() user: CurrentUserData) {
+    return this.volunteeringService.myContribution(user.userId);
   }
 
   @Get(':slug')
@@ -196,7 +214,7 @@ export class VolunteeringController {
   decideSignup(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
-    @Param('signupId') signupId: string,
+    @Param('signupId', ParseUUIDPipe) signupId: string,
     @Body() dto: DecideSignupDto,
   ) {
     return this.volunteeringService.decideSignup(
@@ -204,6 +222,44 @@ export class VolunteeringController {
       signupId,
       user.userId,
       dto.status,
+    );
+  }
+
+  @Post(':slug/signups/:signupId/complete')
+  @ApiOperation({
+    summary:
+      'Confirm an accepted volunteer turned up, and for how long (poster or community organiser)',
+  })
+  @ApiCreatedResponse({ description: 'The completed signup.' })
+  @ApiBadRequestResponse({ description: 'Hours outside 0..24.' })
+  @ApiForbiddenResponse({
+    description:
+      'Only the poster or a community organiser can confirm sessions, and never their own.',
+  })
+  @ApiConflictResponse({
+    description:
+      'The application was not accepted, or the session was already confirmed.',
+  })
+  @ApiNotFoundResponse({
+    description: 'No opportunity or signup with that id.',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Not an authenticated active member.',
+  })
+  completeSignup(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('signupId', ParseUUIDPipe) signupId: string,
+    @Body() dto: CompleteSignupDto,
+  ) {
+    return this.volunteeringService.confirmCompletion(
+      slug,
+      signupId,
+      user.userId,
+      {
+        attended: dto.attended,
+        hours: dto.hours,
+      },
     );
   }
 }

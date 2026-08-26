@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -79,6 +80,18 @@ export class AdminWriterApplicationsService {
     }
     if (application.status !== WriterApplicationStatus.Pending) {
       throw new ConflictException('Application already resolved');
+    }
+    // Approving grants `magazine_writer` (below), so triaging your own
+    // application is a self-grant of a staff role. The `editorial` grant that
+    // opens this controller is held by plain members, and every other route to
+    // a staff role is Admin-only (`admin-members.controller.ts`), so without
+    // this an editorial holder could file an application and approve it. Same
+    // rule, and same reason, as `AdminCommunityModeratorsService.addModerator`
+    // refusing a self-appointment: someone else has to decide.
+    if (application.userId === actorUserId) {
+      throw new ForbiddenException(
+        'Someone else has to review your own writer application',
+      );
     }
 
     const newStatus =

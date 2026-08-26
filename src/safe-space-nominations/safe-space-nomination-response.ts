@@ -156,3 +156,42 @@ export function toAdminSafeSpaceNominationResponse(
     listing: context.listing ?? null,
   };
 }
+
+/**
+ * A nomination queue row as a `directory_moderator` GRANT holder reads it:
+ * everything the review needs, minus who nominated the place.
+ */
+export type DelegatedSafeSpaceNominationResponse = Omit<
+  AdminSafeSpaceNominationResponse,
+  'nominatorId'
+>;
+
+/**
+ * Withholds the nominator's identity from a caller who reached the admin
+ * nomination queue on the `directory_moderator` GRANT rather than on the
+ * Moderator/Admin account tier (`isPlatformStaffTier`).
+ *
+ * WHY. `nominatorId` is a raw internal user id, and it is the one field on this
+ * shape that names a member rather than describing a place. Attaching a name to
+ * a member-submitted safe-space claim is the same concern
+ * `SafeSpaceBadgeStateResponse` already refuses on the flag side, and the
+ * `directory_moderator` registry entry already reserves a flagger's identity to
+ * platform staff. The nominator is the other member-submitter on the same
+ * queue, and nothing in the review reads them: the place, the nominator's own
+ * written `reason`, the 48-hour clock and the independent-visit tally are all
+ * still here, and the tally already excludes the nominator's own vouch
+ * server-side (`SafeSpaceVisitsService.tallyForListings` is handed the
+ * nominator id by the service, never by the caller).
+ *
+ * OMITTED, NEVER NULLED, following `redactOwnerPersonalFields` and
+ * `toModReportDTO`: a null would still be a statement about the row.
+ */
+export function toDirectoryModerationNominationResponse(
+  nomination: AdminSafeSpaceNominationResponse,
+  isReaderPlatformStaff: boolean,
+): AdminSafeSpaceNominationResponse | DelegatedSafeSpaceNominationResponse {
+  if (isReaderPlatformStaff) return nomination;
+  const narrowed: Partial<AdminSafeSpaceNominationResponse> = { ...nomination };
+  delete narrowed.nominatorId;
+  return narrowed as DelegatedSafeSpaceNominationResponse;
+}

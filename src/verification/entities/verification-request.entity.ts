@@ -8,6 +8,7 @@ import {
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
+import { QueueAssignmentColumns } from '../../common/queue-assignment.columns';
 import { User } from '../../users/entities/user.entity';
 import { VerificationLevel, VerificationType } from '../verification-level';
 import { VerificationRequestStatus } from '../verification-request-status';
@@ -23,7 +24,13 @@ import { VerificationRequestStatus } from '../verification-request-status';
 @Entity('verification_requests')
 @Index(['status', 'type'])
 @Index(['userId'])
-export class VerificationRequest {
+// OPS-04: backs the queue's "Assigned to me" filter
+// (`listRequestsForAdmin`'s `assignedTo` narrowing), which is a plain equality
+// on this column. Declared here rather than on `QueueAssignmentColumns`
+// because an index name is global in Postgres and a name on the shared base
+// would collide across the tables that extend it.
+@Index('IDX_verification_requests_assigned_staff_id', ['assignedStaffId'])
+export class VerificationRequest extends QueueAssignmentColumns {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 

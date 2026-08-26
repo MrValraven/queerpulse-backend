@@ -1,7 +1,11 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { RefreshToken } from '../auth/entities/refresh-token.entity';
+import { CompanyReview } from '../companies/entities/company-review.entity';
 import { CommunitiesModule } from '../communities/communities.module';
+import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
+import { CommunityPost } from '../communities/entities/community-post.entity';
+import { Community } from '../communities/entities/community.entity';
 import { Connection } from '../connections/entities/connection.entity';
 import { ConsentRecord } from '../consent/entities/consent-record.entity';
 import { EventCohost } from '../events/entities/event-cohost.entity';
@@ -10,9 +14,17 @@ import { EventSeries } from '../events/entities/event-series.entity';
 import { Event } from '../events/entities/event.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
+import { GovernanceProposal } from '../governance/entities/governance-proposal.entity';
+import { GovernanceVote } from '../governance/entities/governance-vote.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
+import { HousingReview } from '../housing-reviews/entities/housing-review.entity';
 import { Job } from '../jobs/entities/job.entity';
+import { ListingReview } from '../listings/entities/listing-review.entity';
 import { Listing } from '../listings/entities/listing.entity';
+import { MagazineArticle } from '../magazine/entities/magazine-article.entity';
+import { MagazineAuthor } from '../magazine/entities/magazine-author.entity';
+import { MagazinePiece } from '../magazine/entities/magazine-piece.entity';
+import { MagazineStorySubmission } from '../magazine/entities/magazine-story-submission.entity';
 import { MembershipCardsModule } from '../membership-cards/membership-cards.module';
 import { Message } from '../messaging/entities/message.entity';
 import { Notification } from '../notifications/entities/notification.entity';
@@ -25,6 +37,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { User } from '../users/entities/user.entity';
 import { UsersModule } from '../users/users.module';
 import { VolunteerOpportunity } from '../volunteering/entities/volunteer-opportunity.entity';
+import { VolunteerSignup } from '../volunteering/entities/volunteer-signup.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import { AccountDeletionProcessorService } from './account-deletion-processor.service';
 import { AccountExportService } from './account-export.service';
@@ -126,6 +139,28 @@ import { EmailPreference } from './entities/email-preference.entity';
       SavedItem,
       Notification,
       ConsentRecord,
+      // Read-only sources for the Art. 20 domains the archive used to miss
+      // entirely (ID-12): the member's magazine writing, the communities they
+      // own and everything they posted in one, their volunteering signups,
+      // their governance votes and proposals, and the reviews they wrote.
+      // Registered the same cross-module way as everything above — the owning
+      // module keeps its own `forFeature`, and TypeORM allows the same entity
+      // in more than one. The `media` category needs no entity at all: it
+      // reads the bucket through `StorageService` (already imported above for
+      // the erasure sweep).
+      MagazineAuthor,
+      MagazineArticle,
+      MagazineStorySubmission,
+      MagazinePiece,
+      Community,
+      CommunityPost,
+      CommunityPostReply,
+      VolunteerSignup,
+      GovernanceVote,
+      GovernanceProposal,
+      ListingReview,
+      CompanyReview,
+      HousingReview,
     ]),
   ],
   controllers: [AccountController],

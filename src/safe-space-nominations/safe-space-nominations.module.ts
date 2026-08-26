@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Listing } from '../listings/entities/listing.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { SafeSpaceVouchesModule } from '../safe-space-vouches/safe-space-vouches.module';
@@ -42,6 +43,12 @@ import { SafeSpaceReviewSweeperService } from './safe-space-review-sweeper.servi
 @Module({
   imports: [
     TypeOrmModule.forFeature([
+      // Read-only, and only for `RolesOrStaffGuard` on this module's admin
+      // controllers: it resolves the caller's additive staff grants when their
+      // account tier alone does not satisfy `@Roles(...)`. Same registration
+      // precedent as `HousingListingsModule` for `HousingModerationGuard`.
+      UserStaffRole,
+
       SafeSpaceNomination,
       SafeSpaceFlag,
       SafeSpaceBadgeSuspension,

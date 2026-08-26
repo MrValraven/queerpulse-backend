@@ -218,6 +218,11 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     // own case reference and there is no other channel it arrives on, so it is
     // not something a volume control may swallow.
     NotificationType.DsarResolved,
+    // A membership card thirty days from expiry (SUS-07). Time-bounded and
+    // irreversible if missed in the plainest sense this list has: miss it and
+    // the card stops working at a door, in front of people. It arrives once per
+    // term, so there is no volume for a switch to control.
+    NotificationType.CardExpiring,
 
     // 3. Governance of a community or persona you belong to.
     NotificationType.CommunityRoleChanged,
@@ -228,6 +233,12 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     NotificationType.CommunityUnfrozen,
     NotificationType.CommunityOwnerReviewRequested,
     NotificationType.CommunityTagRequestResolved,
+    // Platform staff offering a community that is struggling some help
+    // (OPS-05). It reaches only the people running the room, it arrives at
+    // most once until they answer it, and it is the platform reaching out
+    // rather than community chatter, so there is no volume here for a switch
+    // to control.
+    NotificationType.CommunitySupportOffered,
     NotificationType.SubprofileDeleted,
     NotificationType.SubprofileMemberRemoved,
 

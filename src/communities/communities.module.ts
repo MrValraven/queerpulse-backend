@@ -30,6 +30,8 @@ import { CommunityOwnerReviewController } from './community-owner-review.control
 import { CommunityOwnerReviewService } from './community-owner-review.service';
 import { CommunityResourcesController } from './community-resources.controller';
 import { CommunityResourcesService } from './community-resources.service';
+import { CommunitySupportOffersController } from './community-support-offers.controller';
+import { CommunitySupportOffersService } from './community-support-offers.service';
 import { CommunityPreferencesController } from './community-preferences.controller';
 import { CommunityPreferencesService } from './community-preferences.service';
 import { CommunityPublicController } from './community-public.controller';
@@ -48,6 +50,7 @@ import { CommunityBan } from './entities/community-ban.entity';
 import { CommunityGovernanceLog } from './entities/community-governance-log.entity';
 import { CommunityOwnerReviewRequest } from './entities/community-owner-review-request.entity';
 import { CommunityResource } from './entities/community-resource.entity';
+import { CommunitySupportOffer } from './entities/community-support-offer.entity';
 import { CommunityJoinRequest } from './entities/community-join-request.entity';
 import { CommunityMember } from './entities/community-member.entity';
 import { CommunityPostEdit } from './entities/community-post-edit.entity';
@@ -87,6 +90,12 @@ import { MeCommunitiesController } from './me-communities.controller';
       // The owner-editable link shelf on the About tab, which until now could
       // only ever show demo fixtures.
       CommunityResource,
+      // What platform staff have offered this community (OPS-05). Written on
+      // the admin side (`AdminCommunitiesModule` registers its own
+      // `forFeature` for the same entity, the precedent every other shared
+      // community entity here follows); read and answered on this side, by
+      // the community's own owner/co-owners/mods.
+      CommunitySupportOffer,
       // Any roster member flagging an unreachable owner (GOV-02; it was
       // moderators only, which left a room with no moderator no route at
       // all). Stamps the community's existing `needsOwnerReviewAt` for the
@@ -179,6 +188,7 @@ import { MeCommunitiesController } from './me-communities.controller';
     CommunityInvitesController,
     CommunityBansController,
     CommunityOwnerReviewController,
+    CommunitySupportOffersController,
     // A community's own staff reading their own audit trail. Until now the
     // only reader was the platform-admin route, so when two moderators
     // disagreed about who removed whom the answer sat in the database
@@ -217,6 +227,7 @@ import { MeCommunitiesController } from './me-communities.controller';
     CommunityBansService,
     CommunityOwnerReviewService,
     CommunityGovernanceHistoryService,
+    CommunitySupportOffersService,
   ],
   // `CommunityOwnerOrphanService` is exported so `AccountModule` can call
   // `handleOwnerErasure(userId)` from `AccountDeletionProcessorService.eraseAccount`,

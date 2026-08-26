@@ -158,3 +158,72 @@ export function assertNoOwnerPersonalListingFields(
     `Only the listing owner can change ${attemptedFields.join(', ')}`,
   );
 }
+
+/**
+ * The owner-personal fields withheld from an `admin/listings` caller who
+ * reached the route on the `directory_moderator` GRANT rather than on the
+ * Moderator/Admin account tier (`isPlatformStaffTier`).
+ *
+ * WHY A SECOND, SMALLER SET than `OWNER_PERSONAL_LISTING_FIELDS` above. That
+ * one is the CO-MANAGER boundary and it is wider, because a co-manager is
+ * somebody the owner picked to help run the business rather than somebody
+ * judging it. A directory moderator is judging it, so five of the eight stay:
+ * `ownerName`, `ownerBio`, `visibility` and `linkToProfile` decide what the
+ * public listing page actually shows, and that page is the thing under review;
+ * `rel` is a documented input to the queer-owned verification this same
+ * controller grants (see the note on `rel` above).
+ *
+ * The three that leave carry nothing any decision on that controller needs:
+ *
+ *  - `contactEmail` is the owner's own address. The outreach path the
+ *    controller actually offers is `POST /admin/listings/:ref/question`, which
+ *    delivers an in-app DM, and QueerPulse sends no email at all. So the
+ *    address is not a tool a reviewer uses; it is a personal detail sitting in
+ *    a bulk, searchable, paginated queue of every listing on the platform.
+ *  - `consentOuting` and `consentGuide` are that person's answers about being
+ *    named as a queer business owner and about being featured in editorial.
+ *    They are consent decisions about a human being, not facts about a
+ *    business, and no status transition, badge toggle or verification on the
+ *    controller reads either of them.
+ *
+ * A platform Moderator or Admin still receives the full `ListingDTO`. The gate
+ * is exactly where the guard put it; only the size of the answer moves.
+ */
+export const DELEGATED_DIRECTORY_WITHHELD_FIELDS = [
+  'contactEmail',
+  'consentOuting',
+  'consentGuide',
+] as const;
+
+export type DelegatedDirectoryWithheldField =
+  (typeof DELEGATED_DIRECTORY_WITHHELD_FIELDS)[number];
+
+/**
+ * A listing as a `directory_moderator` GRANT holder reads it on the admin
+ * queue. Modelled as an `Omit` for the same reason `CoManagerListingDTO` is:
+ * the response contains no such key at all, so nothing downstream can mistake
+ * a withheld field for a stored empty value.
+ */
+export type DelegatedDirectoryListingDTO = Omit<
+  ListingDTO,
+  DelegatedDirectoryWithheldField
+>;
+
+/**
+ * Narrows one admin listing response to what a grant holder may read, or
+ * returns it untouched for a platform Moderator/Admin.
+ *
+ * Every `admin/listings` handler that echoes a `ListingDTO` funnels through
+ * here, so a new one cannot forget the narrowing by accident.
+ */
+export function toDirectoryModerationListingDTO(
+  listing: ListingDTO,
+  isReaderPlatformStaff: boolean,
+): ListingDTO | DelegatedDirectoryListingDTO {
+  if (isReaderPlatformStaff) return listing;
+  const narrowed: Partial<ListingDTO> = { ...listing };
+  for (const field of DELEGATED_DIRECTORY_WITHHELD_FIELDS) {
+    delete narrowed[field];
+  }
+  return narrowed as DelegatedDirectoryListingDTO;
+}

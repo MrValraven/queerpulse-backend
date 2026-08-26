@@ -12,6 +12,7 @@ import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { normalizePage } from '../common/pagination';
 import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { User, UserRole } from '../users/entities/user.entity';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { CreateTitleDto } from './dto/create-title.dto';
 import {
   TITLE_PAGE_SIZE_DEFAULT,
@@ -55,6 +56,11 @@ function isModerator(user: CurrentUserData): boolean {
   return MODERATOR_ROLES.includes(user.role);
 }
 
+/** Ready AND published: the one combination any active member may see. */
+function isPubliclyVisible(title: CinemaTitle): boolean {
+  return title.status === TitleStatus.Ready && title.publishedAt !== null;
+}
+
 @Injectable()
 export class CinemaService {
   private readonly logger = new Logger(CinemaService.name);
@@ -64,9 +70,36 @@ export class CinemaService {
     private readonly titles: Repository<CinemaTitle>,
     @InjectRepository(WatchProgress)
     private readonly progress: Repository<WatchProgress>,
+    @InjectRepository(UserStaffRole)
+    private readonly staffRoles: Repository<UserStaffRole>,
     private readonly mux: MuxService,
     private readonly dataSource: DataSource,
   ) {}
+
+  /**
+   * May this caller see titles that are not public yet?
+   *
+   * Moderator/Admin by tier, OR a plain member holding the `editorial` staff
+   * grant. OPS-03 widened the WRITE side (`admin/titles`: create, edit, upload,
+   * reconcile) to that grant and left every read here tier-gated, so a grant
+   * holder could edit a title they had no way to find and could not see why an
+   * ingest had failed. The registry promises "maintain the film-club titles";
+   * this is the half that was missing.
+   *
+   * Deleting a title stays Moderator/Admin (an empty `@StaffRoles()` on
+   * `AdminTitlesController`'s delete), because that destroys the Mux assets
+   * irreversibly.
+   *
+   * Every caller checks the cheap public condition FIRST and only reaches this
+   * when the answer can still change the outcome, so an ordinary member
+   * watching a published title never pays for the lookup.
+   */
+  private async canMaintainTitles(user: CurrentUserData): Promise<boolean> {
+    if (isModerator(user)) return true;
+    return this.staffRoles.exists({
+      where: { userId: user.userId, role: 'editorial' },
+    });
+  }
 
   /**
    * One page of the catalog (CNT-17).
@@ -86,8 +119,10 @@ export class CinemaService {
     page?: number,
     pageSize?: number,
   ): Promise<TitleListItem[]> {
-    if (includeAll && !isModerator(user)) {
-      throw new ForbiddenException('Moderator role required');
+    if (includeAll && !(await this.canMaintainTitles(user))) {
+      throw new ForbiddenException(
+        'Moderator role or the editorial staff grant required',
+      );
     }
     const take = Math.min(
       pageSize && pageSize > 0 ? pageSize : TITLE_PAGE_SIZE_DEFAULT,
@@ -125,7 +160,14 @@ export class CinemaService {
     const myProgress = await this.progress.findOne({
       where: { userId: user.userId, titleId: id },
     });
-    return toTitleDetail(title, myProgress, isModerator(user));
+    // Derived, not re-queried: reaching here on a title that is NOT public
+    // means `getVisibleTitle` already proved this caller may maintain titles,
+    // and a public title's admin fields are only ever `ready` and `null`.
+    return toTitleDetail(
+      title,
+      myProgress,
+      isModerator(user) || !isPubliclyVisible(title),
+    );
   }
 
   async createPlaybackSession(
@@ -136,11 +178,13 @@ export class CinemaService {
     // Entitlement (spec §6): active member (guard) + published & ready title.
     // Moderators/admins may preview unpublished ready titles. 404 (not 403)
     // for anything invisible so existence is not leaked.
-    if (
-      !title ||
-      title.status !== TitleStatus.Ready ||
-      (!title.publishedAt && !isModerator(user))
-    ) {
+    if (!title || title.status !== TitleStatus.Ready) {
+      throw new NotFoundException('Title not found');
+    }
+    // Checking a title actually plays is part of maintaining it, so the
+    // `editorial` grant previews an unpublished one exactly as a moderator
+    // does. The lookup only runs for a title that is not public yet.
+    if (!title.publishedAt && !(await this.canMaintainTitles(user))) {
       throw new NotFoundException('Title not found');
     }
     if (!title.muxPlaybackId) {
@@ -527,11 +571,12 @@ export class CinemaService {
     positionSeconds: number,
   ): Promise<{ positionSeconds: number; viewCounted: boolean }> {
     const title = await this.titles.findOne({ where: { id: titleId } });
-    if (
-      !title ||
-      title.status !== TitleStatus.Ready ||
-      (!title.publishedAt && !isModerator(user))
-    ) {
+    if (!title || title.status !== TitleStatus.Ready) {
+      throw new NotFoundException('Title not found');
+    }
+    // Mirrors the playback rule exactly: anyone allowed to preview a title has
+    // to be allowed to save progress on it, or the player 404s mid-watch.
+    if (!title.publishedAt && !(await this.canMaintainTitles(user))) {
       throw new NotFoundException('Title not found');
     }
     // Small grace over duration: player time can overshoot the last segment.
@@ -582,11 +627,16 @@ export class CinemaService {
     id: string,
   ): Promise<CinemaTitle> {
     const title = await this.titles.findOne({ where: { id } });
-    const visible =
-      title &&
-      (isModerator(user) ||
-        (title.status === TitleStatus.Ready && title.publishedAt !== null));
-    if (!title || !visible) {
+    if (!title) {
+      throw new NotFoundException('Title not found');
+    }
+    // The public condition is free, so it is tested first and a member opening
+    // a live title costs no staff-role lookup. 404 rather than 403 for
+    // anything invisible, so existence is never leaked.
+    if (isPubliclyVisible(title)) {
+      return title;
+    }
+    if (!(await this.canMaintainTitles(user))) {
       throw new NotFoundException('Title not found');
     }
     return title;

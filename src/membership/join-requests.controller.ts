@@ -1,20 +1,36 @@
-import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  NotFoundException,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { seconds, Throttle } from '@nestjs/throttler';
 import { Public } from '../auth/decorators/public.decorator';
 import { CreateMembershipJoinRequestDto } from './dto/create-join-request.dto';
-import { SubmittedJoinRequestView } from './join-request-response';
+import { JoinRequestStatusQuery } from './dto/join-request-status.query';
+import {
+  PublicJoinRequestStatusView,
+  SubmittedJoinRequestView,
+} from './join-request-response';
 import { JoinRequestsService } from './join-requests.service';
 import {
   ApiConflictResponse,
   ApiCreatedResponse,
   ApiForbiddenResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
   ApiOperation,
   ApiTags,
 } from '@nestjs/swagger';
 
 /**
- * The PUBLIC side of invite requests: one unauthenticated route where a
- * stranger asks to be let in.
+ * The PUBLIC side of invite requests: two unauthenticated routes — one where a
+ * stranger asks to be let in, and one where they come back to find out what
+ * happened.
  *
  * The moderator/admin review queue that used to share this class now lives in
  * `AdminJoinRequestsController`, guarded at class level. Keeping the two apart
@@ -56,7 +72,48 @@ export class JoinRequestsController {
   @ApiConflictResponse({
     description: 'An invite request for this email is already awaiting review.',
   })
-  submit(@Body() dto: CreateMembershipJoinRequestDto): Promise<SubmittedJoinRequestView> {
+  submit(
+    @Body() dto: CreateMembershipJoinRequestDto,
+  ): Promise<SubmittedJoinRequestView> {
     return this.joinRequestsService.submit(dto);
+  }
+
+  /**
+   * PUBLIC: an applicant checks their own request with the status token they
+   * were handed in the 201 body of `POST /join-requests`. That token is the
+   * entire credential — there is no account to sign in to, and the platform
+   * sends no mail, so this route plus the token the applicant kept is the only
+   * way they ever learn they were approved, declined, or still under review.
+   *
+   * Throttled 20/hour, keyed by IP through the same default tracker `submit`
+   * above relies on. The token carries 256 bits, so throttling is not what
+   * makes guessing infeasible; it is here so an unauthenticated read that
+   * touches the database is not free amplification. It is looser than the
+   * 3/hour on submission because reloading a status page is a normal thing for
+   * one applicant to do repeatedly.
+   *
+   * ONE 404 FOR EVERY FAILURE — unknown token, well-formed token that was
+   * never issued, no such request — exactly as `CardVerificationController`
+   * answers. A response that distinguished "this token does not exist" from
+   * anything else would make the route an oracle for probing tokens. A
+   * malformed token never reaches the service: the DTO's charset and length
+   * bounds turn it into a 400 first.
+   */
+  @Public()
+  @Throttle({ default: { limit: 20, ttl: seconds(3600) } })
+  @Get('status')
+  @ApiOperation({ summary: 'Check the status of your own invite request' })
+  @ApiOkResponse({ description: 'The outcome of the invite request.' })
+  @ApiNotFoundResponse({
+    description: 'The token does not resolve to an invite request.',
+  })
+  async status(
+    @Query() query: JoinRequestStatusQuery,
+  ): Promise<PublicJoinRequestStatusView> {
+    const view = await this.joinRequestsService.getPublicStatus(query.token);
+    if (!view) {
+      throw new NotFoundException('Invite request not found');
+    }
+    return view;
   }
 }

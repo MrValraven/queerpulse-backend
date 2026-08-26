@@ -8,8 +8,9 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminResourceGuideRatingsService } from './admin-resource-guide-ratings.service';
 
@@ -19,12 +20,15 @@ import { AdminResourceGuideRatingsService } from './admin-resource-guide-ratings
  * (unlike `admin-reading-group-proposals.controller.ts`), so the class-level
  * `@Roles(Admin)` needs no method-level `@Roles(Moderator, Admin)` override.
  */
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Admin)
+@StaffRoles('resource_curator')
 @ApiTags('Admin — Guide feedback')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires the admin role.' })
+@ApiForbiddenResponse({
+  description: 'Requires the admin role, or the `resource_curator` staff role.',
+})
 @Controller('admin/resources/guide-ratings')
 export class AdminResourceGuideRatingsController {
   constructor(

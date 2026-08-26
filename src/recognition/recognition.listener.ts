@@ -14,6 +14,10 @@ import {
   ForumThreadCreatedEvent,
 } from '../forum/forum.events';
 import { VOUCH_CREATED, VouchCreatedEvent } from '../vouch/vouch.events';
+import {
+  VOLUNTEER_SESSION_COMPLETED,
+  VolunteerSessionCompletedEvent,
+} from '../volunteering/volunteering.events';
 import { RecognitionAwardingService } from './recognition-awarding.service';
 
 /**
@@ -28,7 +32,7 @@ import { RecognitionAwardingService } from './recognition-awarding.service';
  * Every handler recomputes only the member(s) directly affected by that
  * event, and routes through `safeRecompute` so a recognition failure can
  * never break the emitting domain flow (vouching, connecting, RSVPing,
- * posting, starting a thread).
+ * posting, starting a thread, having a volunteer session confirmed).
  */
 @Injectable()
 export class RecognitionListener {
@@ -69,6 +73,23 @@ export class RecognitionListener {
   @OnEvent(FORUM_THREAD_CREATED)
   async onForumThreadCreated(event: ForumThreadCreatedEvent): Promise<void> {
     await this.safeRecompute(event.authorId);
+  }
+
+  /**
+   * The contribution side (SUS-05). A poster confirmed a volunteer session,
+   * so `volunteerSessions` changed for the VOLUNTEER, never for the person
+   * who confirmed it: attesting to someone else's work is not itself the
+   * work, and paying the confirmer would put an incentive on confirming.
+   *
+   * No `attended` gate here on purpose. `gatherSignals` counts only sessions
+   * recorded as attended, so a recompute after a no-show is already a no-op,
+   * and one exit path is easier to keep correct than two.
+   */
+  @OnEvent(VOLUNTEER_SESSION_COMPLETED)
+  async onVolunteerSessionCompleted(
+    event: VolunteerSessionCompletedEvent,
+  ): Promise<void> {
+    await this.safeRecompute(event.volunteerId);
   }
 
   private async safeRecompute(userId: string): Promise<void> {

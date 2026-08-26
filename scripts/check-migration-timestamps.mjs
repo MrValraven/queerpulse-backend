@@ -34,6 +34,20 @@ const migrationsDirectory = join(scriptDirectory, '..', 'src', 'migrations');
 // AddWriterApplicationNotificationTypes) only appends four DISTINCT values to
 // `notifications_type_enum`, and appending distinct enum values commutes.
 // Re-run that audit before adding anything here (you should not need to).
+//
+// The 1794700000000-1794740000000 block was audited on 2026-08-26 under the
+// same rule. Those seven collisions arose because two parallel work streams
+// picked the same timestamp band; BOTH files in every pair had already been
+// applied by the time the clash was noticed, so neither one could be
+// renumbered — see CLAUDE.md, "an applied migration's name is frozen history".
+// Pairs and the objects they touch, disjoint in every case:
+//   1794700000000  events + event_rsvps        | topics.archived_at
+//   1794701000000  event_announcements/bans    | topics rows (seed)
+//   1794710000000  listings index              | forum_thread_subscription
+//   1794720000000  conversation_participants   | housing/notification enums
+//   1794730000000  notification_delivery_prefs | safe_space_nominations/flags
+//   1794731000000  notifications               | safe_space_nominations rows
+//   1794740000000  group_listings/notif enums  | saved_lists rows (backfill)
 const allowedDuplicateTimestamps = new Set([
   '1782800650000',
   '1785003000000',
@@ -50,6 +64,13 @@ const allowedDuplicateTimestamps = new Set([
   '1792000000000',
   '1792700000000',
   '1793000000000',
+  '1794700000000',
+  '1794701000000',
+  '1794710000000',
+  '1794720000000',
+  '1794730000000',
+  '1794731000000',
+  '1794740000000',
 ]);
 
 let migrationFileNames;

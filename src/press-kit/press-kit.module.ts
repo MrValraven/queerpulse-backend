@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Community } from '../communities/entities/community.entity';
 import { Event } from '../events/entities/event.entity';
 import { MagazineIssue } from '../magazine/entities/magazine-issue.entity';
@@ -20,6 +21,12 @@ import { PressKitService } from './press-kit.service';
     // `UsersService`, so `UsersModule` (which exports it) is imported rather
     // than the `User` repo re-registered here.
     TypeOrmModule.forFeature([
+      // Read-only, and only for `RolesOrStaffGuard` on this module's admin
+      // controllers: it resolves the caller's additive staff grants when their
+      // account tier alone does not satisfy `@Roles(...)`. Same registration
+      // precedent as `HousingListingsModule` for `HousingModerationGuard`.
+      UserStaffRole,
+
       PressCoverage,
       PressContact,
       Event,

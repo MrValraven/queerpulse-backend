@@ -1,5 +1,7 @@
 import {
   BadRequestException,
+  ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -13,6 +15,10 @@ import { CommunityMembershipService } from '../communities/community-membership.
 import { GovernanceLogAction } from '../communities/entities/community-governance-log.entity';
 import { CardProgramsService } from './card-programs.service';
 import { CardSerialService } from './card-serial.service';
+import {
+  CARD_EXPIRY_WARNING_LEAD_DAYS,
+  isWithinRenewalWindow,
+} from './card-expiry';
 import { EffectiveCardStatus, effectiveCardStatus } from './card-status';
 import { MAX_CODE_VERSION } from './card-token.service';
 import { CommunityCard } from './entities/community-card.entity';
@@ -86,6 +92,9 @@ export class MembershipCardsService {
       // action at all, so there would be no way back to a working card short
       // of deleting the row.
       existing.expiresAt = this.expiryFrom(program.validityMonths);
+      // A fresh term earns a fresh warning. Leaving the marker set would mean
+      // this card's next expiry arrived in silence.
+      existing.expiryWarningSentAt = null;
       return this.cards.save(existing);
     }
 
@@ -165,6 +174,8 @@ export class MembershipCardsService {
       }
       if (existing.expiresAt && existing.expiresAt.getTime() <= now) {
         existing.expiresAt = this.expiryFrom(program.validityMonths);
+        // Same reason as `issue()`: the new term gets its own T-30 warning.
+        existing.expiryWarningSentAt = null;
         await this.cards.save(existing);
         result.renewed += 1;
         continue;
@@ -395,6 +406,153 @@ export class MembershipCardsService {
     }
     if (Object.keys(patch).length === 0) return;
     await this.cards.update(card.id, patch);
+  }
+
+  /**
+   * Put the caller's OWN card back in date, without an owner running the
+   * roster bulk issue (SUS-07).
+   *
+   * The distinction `issueForRoster` draws is preserved here exactly, and
+   * tightened. That method renews an ACTIVE card whose term has run out and
+   * deliberately skips a suspended or revoked one, because an issuer withdrew
+   * those on purpose. A member may not undo an issuer's decision at all, so a
+   * withdrawn card is refused here rather than skipped, with a reason code the
+   * UI can turn into a sentence.
+   *
+   * Roster membership is read LIVE, never inferred from the card's existence:
+   * a member who has left keeps their row until an issuer or the leave hook
+   * revokes it, and none of that may become a route back to a working
+   * credential. The programme's own `allowsSelfRenew` switch is checked here
+   * too, so a community that never opted in cannot have its cards renewed by
+   * a client that guessed the URL.
+   *
+   * Idempotent and concurrency-safe. The write is a compare-and-set: the WHERE
+   * still carries the status and the exact `expiresAt` this method read, so two
+   * requests racing produce ONE renewal and the loser returns the card as it
+   * now stands rather than stamping a second term on top of the first.
+   *
+   * Reuses `expiryFrom`, so a renewed card and a freshly issued one get their
+   * term from the same clock.
+   */
+  async renewOwnCard(
+    cardId: string,
+    userId: string,
+  ): Promise<{ card: MembershipCard; effectiveStatus: EffectiveCardStatus }> {
+    // 404, never 403, for a card the caller does not hold: the same
+    // non-disclosure posture `deleteOwnCard` and the token route use, so a
+    // caller can never learn that a card id exists under someone else's
+    // account.
+    const card = await this.cards.findOne({ where: { id: cardId } });
+    if (!card || card.userId !== userId) {
+      throw new NotFoundException('Card not found');
+    }
+    const program = await this.programRepo.findOne({
+      where: { id: card.programId },
+    });
+    if (!program) throw new NotFoundException('Card not found');
+    const community = await this.communities.findOne({
+      where: { id: program.issuerId },
+    });
+    // An archived community 404s everywhere else and must not be able to hand
+    // out a fresh term from behind that takedown.
+    if (!community || community.archivedAt) {
+      throw new NotFoundException('Card not found');
+    }
+
+    if (!program.allowsSelfRenew) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Forbidden',
+        message: 'This community renews its own cards',
+        reasonCode: 'self_renew_not_allowed',
+      });
+    }
+    // An issuer withdrew this one deliberately. Only an issuer can undo it.
+    if (card.status !== MembershipCardStatus.Active) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Forbidden',
+        message: 'This card was withdrawn by its community',
+        reasonCode: 'card_withdrawn',
+      });
+    }
+    // Live roster membership, read now rather than trusted from the card row.
+    const isStillOnRoster = await this.membership.isMember(
+      program.issuerId,
+      userId,
+    );
+    if (!isStillOnRoster) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Forbidden',
+        message: 'You are no longer a member of this community',
+        reasonCode: 'not_a_member',
+      });
+    }
+    // A paused programme or a frozen community resolves every card to
+    // "suspended" (see card-status.ts). Renewing under either would mint a term
+    // on a credential that still cannot prove anything.
+    if (!program.isEnabled || community.frozenAt) {
+      throw new ConflictException({
+        statusCode: 409,
+        error: 'Conflict',
+        message: 'This card programme is paused',
+        reasonCode: 'programme_paused',
+      });
+    }
+    if (card.expiresAt === null || program.validityMonths === null) {
+      throw new BadRequestException({
+        statusCode: 400,
+        error: 'Bad Request',
+        message: 'This card does not expire',
+        reasonCode: 'no_expiry',
+      });
+    }
+    // Open from the same moment the T-30 warning goes out, and no earlier: the
+    // bell that says "renew it" must never arrive before the button works, and
+    // a member must not be able to ratchet their term forward every morning.
+    if (!isWithinRenewalWindow(card.expiresAt)) {
+      throw new BadRequestException({
+        statusCode: 400,
+        error: 'Bad Request',
+        message: `This card can be renewed in its last ${CARD_EXPIRY_WARNING_LEAD_DAYS} days`,
+        reasonCode: 'not_due',
+      });
+    }
+
+    await this.cards.update(
+      {
+        id: card.id,
+        userId,
+        status: MembershipCardStatus.Active,
+        // The compare half of the compare-and-set. A row whose expiry has
+        // already moved is a row somebody else renewed, and this update
+        // matches nothing.
+        expiresAt: card.expiresAt,
+      },
+      {
+        expiresAt: this.expiryFrom(program.validityMonths),
+        // The new term earns its own warning.
+        expiryWarningSentAt: null,
+      },
+    );
+    // Whether this request won the race or lost it, the answer is the same:
+    // the card as it now stands. A loser returning the winner's term is what
+    // makes this idempotent, so `affected` is deliberately not treated as an
+    // error. Retrying a renew that already happened must never stack a second
+    // term on top of the first, and must never read as a failure either.
+    const renewed = await this.cardById(card.id);
+    if (!renewed) throw new NotFoundException('Card not found');
+    return {
+      card: renewed,
+      effectiveStatus: effectiveCardStatus({
+        status: renewed.status,
+        expiresAt: renewed.expiresAt,
+        programEnabled: program.isEnabled,
+        communityFrozenAt: community.frozenAt,
+        communityArchivedAt: community.archivedAt,
+      }),
+    };
   }
 
   async deleteOwnCard(cardId: string, userId: string): Promise<void> {

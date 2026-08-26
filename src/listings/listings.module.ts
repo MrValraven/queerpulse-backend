@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { Event } from '../events/entities/event.entity';
 import { MediaCropsModule } from '../media-crops/media-crops.module';
@@ -43,6 +44,12 @@ import { ListingsService } from './listings.service';
     // aggregate on the directory detail DTO — the saved-items domain itself
     // lives in `SavedModule`.
     TypeOrmModule.forFeature([
+      // Read-only, and only for `RolesOrStaffGuard` on this module's admin
+      // controllers: it resolves the caller's additive staff grants when their
+      // account tier alone does not satisfy `@Roles(...)`. Same registration
+      // precedent as `HousingListingsModule` for `HousingModerationGuard`.
+      UserStaffRole,
+
       Listing,
       ListingReview,
       // Real "was this helpful" votes on a review — the rows

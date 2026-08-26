@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { MailerModule } from '../mailer/mailer.module';
+import { Profile } from '../users/entities/profile.entity';
 import { InquiriesController } from './inquiries.controller';
 import { InquiriesService } from './inquiries.service';
 import { Inquiry } from './entities/inquiry.entity';
@@ -12,7 +13,16 @@ import { Inquiry } from './entities/inquiry.entity';
  * globally available, so no import is needed for it.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([Inquiry]), MailerModule],
+  imports: [
+    TypeOrmModule.forFeature([
+      Inquiry,
+      // Read-only, so the admin triage list can resolve a handler's uuid to a
+      // display name through the shared `MemberLookup` without pulling
+      // `ProfilesService` (and its module graph) into this small module.
+      Profile,
+    ]),
+    MailerModule,
+  ],
   controllers: [InquiriesController],
   providers: [InquiriesService],
 })

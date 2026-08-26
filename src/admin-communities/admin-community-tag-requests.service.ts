@@ -6,6 +6,7 @@ import {
   CommunityTagRequestStatus,
 } from '../communities/entities/community-tag-request.entity';
 import { Community } from '../communities/entities/community.entity';
+import { isPlatformStaffTier } from '../auth/platform-staff-tier';
 import { MemberLookup } from '../common/member-ref';
 import { PAGE_SIZE } from '../common/pagination';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -42,9 +43,17 @@ export class AdminCommunityTagRequestsService {
     private readonly notifications: NotificationsService,
   ) {}
 
+  /**
+   * `actorRole` is the caller's ACCOUNT TIER off the JWT. Since OPS-03 this
+   * queue also opens on the additive `communities` grant, so the handler can no
+   * longer assume its caller is Moderator/Admin: a grant holder reads every row
+   * without the requester being named. See `AdminCommunityTagRequestDTO`.
+   */
   async list(
     query: ListAdminCommunityTagRequestsQuery,
+    actorRole: string,
   ): Promise<AdminCommunityTagRequestsPageDTO> {
+    const isPlatformStaffReader = isPlatformStaffTier(actorRole);
     const page = query.page && query.page > 0 ? query.page : 1;
 
     const qb = this.tagRequests
@@ -64,9 +73,13 @@ export class AdminCommunityTagRequestsService {
 
     const [communitiesById, requestersByUserId] = await Promise.all([
       this.communitiesById([...new Set(rows.map((row) => row.communityId))]),
-      new MemberLookup(this.profiles).byUserIds([
-        ...new Set(rows.map((row) => row.requestedByUserId)),
-      ]),
+      // Skipped entirely for a grant holder: the refs are not built, so they
+      // cannot be serialized by accident later.
+      new MemberLookup(this.profiles).byUserIds(
+        isPlatformStaffReader
+          ? [...new Set(rows.map((row) => row.requestedByUserId))]
+          : [],
+      ),
     ]);
 
     const items = rows.map((row) =>
@@ -74,6 +87,7 @@ export class AdminCommunityTagRequestsService {
         row,
         communitiesById.get(row.communityId) ?? null,
         requestersByUserId.get(row.requestedByUserId) ?? null,
+        isPlatformStaffReader,
       ),
     );
 
@@ -93,7 +107,9 @@ export class AdminCommunityTagRequestsService {
   async resolve(
     id: string,
     adminUserId: string,
+    actorRole: string,
   ): Promise<AdminCommunityTagRequestDTO> {
+    const isPlatformStaffReader = isPlatformStaffTier(actorRole);
     const request = await this.tagRequests.findOne({ where: { id } });
     if (!request) {
       throw new NotFoundException('Tag request not found');
@@ -124,14 +140,17 @@ export class AdminCommunityTagRequestsService {
       // Intentionally ignored — see docstring above.
     }
 
-    const requestersByUserId = await new MemberLookup(this.profiles).byUserIds([
-      saved.requestedByUserId,
-    ]);
+    // Same narrowing as `list`: the requester's profile is not even fetched for
+    // a caller who reached this on the `communities` grant.
+    const requestersByUserId = await new MemberLookup(this.profiles).byUserIds(
+      isPlatformStaffReader ? [saved.requestedByUserId] : [],
+    );
 
     return toAdminCommunityTagRequestDTO(
       saved,
       community ? { slug: community.slug, name: community.name } : null,
       requestersByUserId.get(saved.requestedByUserId) ?? null,
+      isPlatformStaffReader,
     );
   }
 

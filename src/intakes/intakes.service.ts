@@ -8,9 +8,13 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
-import { UserStatus } from '../users/entities/user.entity';
+import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { MemberLookup, MemberRef } from '../common/member-ref';
+import {
+  optionalQueueAssigneeName,
+  setQueueAssignment,
+} from '../common/queue-assignment';
 import { Paginated, normalizePage, paginate } from '../common/pagination';
 import { MailerService } from '../mailer/mailer.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -18,10 +22,11 @@ import { NotificationType } from '../notifications/entities/notification.entity'
 import { ListIntakesQuery } from './dto/list-intakes.query';
 import { IntakeSubmission } from './entities/intake-submission.entity';
 import {
-  ConcernTriageStatus,
+  AdminTriageStatus,
   MEMBER_ONLY_INTAKE_KINDS,
   isIntakeKind,
 } from './intake-kinds';
+import { intakeDueAt } from './intake-sla';
 import {
   IntakeAckDTO,
   IntakeSubmissionDTO,
@@ -42,13 +47,14 @@ export class IntakesService {
     private readonly mailer: MailerService,
   ) {}
 
-  /** Batch-resolve a set of submitter user-ids to member display refs (one
-   *  query for the whole set — never one per row). Skips the lookup entirely
-   *  when the page has no signed-in submitters. */
-  private async resolveSubmitters(
-    submitterIds: (string | null)[],
+  /** Batch-resolve a set of user-ids — submitters AND triaging admins — to
+   *  member display refs (one query for the whole set — never one per row).
+   *  Both id sets go in together so a page costs ONE profile query, not two.
+   *  Skips the lookup entirely when the page has neither. */
+  private async resolveMemberRefs(
+    userIds: (string | null)[],
   ): Promise<Map<string, MemberRef>> {
-    const ids = [...new Set(submitterIds.filter((id): id is string => !!id))];
+    const ids = [...new Set(userIds.filter((id): id is string => !!id))];
     if (ids.length === 0) return new Map<string, MemberRef>();
     return new MemberLookup(this.profiles).byUserIds(ids);
   }
@@ -87,6 +93,10 @@ export class IntakesService {
         submitterId: user?.userId ?? null,
         payload,
         status: 'new',
+        // OPS-04. Stamped once, from the per-kind windows in
+        // `intake-sla.ts` — a governance concern is owed an answer far sooner
+        // than a playlist submission, and the queue should say so.
+        dueAt: intakeDueAt(rawKind, new Date()),
       }),
     );
 
@@ -108,29 +118,99 @@ export class IntakesService {
     }
 
     return paginate(qb, page, async (rows) => {
-      const refs = await this.resolveSubmitters(
-        rows.map((row) => row.submitterId),
-      );
+      const refs = await this.resolveMemberRefs([
+        ...rows.map((row) => row.submitterId),
+        ...rows.map((row) => row.reviewedById),
+        // OPS-04 folds the claiming staff into the SAME lookup, so showing who
+        // holds each row still costs one query for the whole page.
+        ...rows.map((row) => row.assignedStaffId),
+      ]);
       return rows.map((row) =>
         toIntakeSubmissionDTO(
           row,
           row.submitterId ? (refs.get(row.submitterId) ?? null) : null,
+          row.reviewedById ? (refs.get(row.reviewedById) ?? null) : null,
+          optionalQueueAssigneeName(row.assignedStaffId, refs),
         ),
       );
     });
   }
 
   /**
-   * Admin triage action: move one submission into a new state (`reviewing` /
-   * `resolved` / `dismissed`). Backs the governance-concern dashboard. 404s when
-   * no row has the id so a stale dashboard doesn't silently no-op. When the
-   * concern reaches a terminal outcome (resolved/dismissed) its submitter is
-   * notified — closing the "you'll get an update when it's resolved" loop the
-   * form promises.
+   * Claim or release one intake submission (OPS-04).
+   *
+   * Mirrors `ModerationService.setAssignment`, including the property that
+   * makes it safe when two admins claim at once: a conditional UPDATE guarded
+   * on the assignment this caller read, so the loser gets a 409 rather than
+   * quietly taking the row. Additionally guarded on the submission still being
+   * OPEN (`new` or the governance worklist's `reviewing`), so a closed row
+   * cannot be claimed from a stale console.
+   */
+  async setAssignment(
+    id: string,
+    actorId: string,
+    actorRole: string,
+    assign: boolean,
+  ): Promise<IntakeSubmissionDTO> {
+    const submission = await this.submissions.findOne({ where: { id } });
+    if (!submission) {
+      throw new NotFoundException('No submission with that id.');
+    }
+
+    await setQueueAssignment({
+      repository: this.submissions,
+      id,
+      currentAssigneeId: submission.assignedStaffId,
+      actorId,
+      // `actorRole` is a JWT claim, typed `string` on `CurrentUserData`.
+      isAdmin: actorRole === (UserRole.Admin as string),
+      assign,
+      rowLabel: 'submission',
+      claimableStatuses: { column: 'status', values: ['new', 'reviewing'] },
+    });
+
+    const saved = await this.submissions.findOne({ where: { id } });
+    if (!saved) {
+      throw new NotFoundException('No submission with that id.');
+    }
+    const refs = await this.resolveMemberRefs([
+      saved.submitterId,
+      saved.reviewedById,
+      saved.assignedStaffId,
+    ]);
+    return toIntakeSubmissionDTO(
+      saved,
+      saved.submitterId ? (refs.get(saved.submitterId) ?? null) : null,
+      saved.reviewedById ? (refs.get(saved.reviewedById) ?? null) : null,
+      optionalQueueAssigneeName(saved.assignedStaffId, refs),
+    );
+  }
+
+  /**
+   * Admin triage action: move one submission out of `new`.
+   *
+   * Backs BOTH consoles. The governance-concern dashboard walks the
+   * `reviewing` / `resolved` / `dismissed` worklist; the other eleven kinds
+   * flip to the plain `reviewed`, which is all "seen and dealt with" needs to
+   * mean for a grant application or a playlist submission. `new` is never a
+   * target (the DTO rejects it), so a row only ever moves forward out of the
+   * queue.
+   *
+   * Every move stamps `reviewedById` / `reviewedAt` — with two admins working
+   * one pile, a status with no name attached is a guess, not a queue. The stamp
+   * always reflects the LATEST move (unlike an inquiry's handler stamp, which
+   * is set once): the concern worklist has real intermediate states, so "who
+   * moved it to resolved" is the useful fact, not "who first touched it".
+   *
+   * 404s when no row has the id so a stale dashboard doesn't silently no-op.
+   * When a concern reaches a terminal outcome (resolved/dismissed) its
+   * submitter is notified — closing the "you'll get an update when it's
+   * resolved" loop the form promises.
    */
   async updateStatus(
     id: string,
-    status: ConcernTriageStatus,
+    status: AdminTriageStatus,
+    adminUserId: string,
   ): Promise<IntakeSubmissionDTO> {
     const submission = await this.submissions.findOne({ where: { id } });
     if (!submission) {
@@ -138,6 +218,8 @@ export class IntakesService {
     }
     const previousStatus = submission.status;
     submission.status = status;
+    submission.reviewedById = adminUserId;
+    submission.reviewedAt = new Date();
     const saved = await this.submissions.save(submission);
 
     if (
@@ -147,10 +229,16 @@ export class IntakesService {
       await this.notifySubmitter(saved, status);
     }
 
-    const refs = await this.resolveSubmitters([saved.submitterId]);
+    const refs = await this.resolveMemberRefs([
+      saved.submitterId,
+      saved.reviewedById,
+      saved.assignedStaffId,
+    ]);
     return toIntakeSubmissionDTO(
       saved,
       saved.submitterId ? (refs.get(saved.submitterId) ?? null) : null,
+      saved.reviewedById ? (refs.get(saved.reviewedById) ?? null) : null,
+      optionalQueueAssigneeName(saved.assignedStaffId, refs),
     );
   }
 

@@ -6,6 +6,7 @@ import {
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
+import { QueueAssignmentColumns } from '../../common/queue-assignment.columns';
 
 export enum PartnerRegion {
   Pt = 'pt',
@@ -56,8 +57,20 @@ export interface PartnerContact {
   address: string | null;
 }
 
+// Extends `QueueAssignmentColumns` (OPS-04) because a PENDING partner row IS
+// the partner application: there is no separate application table, and
+// `AdminPartnersController`'s `/admin/partners/applications` queue reads
+// exactly `status = 'pending'` rows from here. So the claim/release and the
+// due clock live on this entity, meaning an approved partner also carries
+// three columns that stopped mattering the moment it was approved. That is
+// the honest cost of the one-table shape; splitting the application out is a
+// migration far larger than this one.
+//
+// No `@Index` on `assigned_staff_id` here: the partnerships queue is a single
+// short unpaginated list (`listApplications` takes `DEFAULT_LIST_LIMIT` rows
+// with no assignee filter), so an index on it would never be read.
 @Entity('partners')
-export class Partner {
+export class Partner extends QueueAssignmentColumns {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 

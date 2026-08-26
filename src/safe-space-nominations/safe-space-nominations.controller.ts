@@ -25,8 +25,10 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
+import { isPlatformStaffTier } from '../auth/platform-staff-tier';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminNominationsQuery } from './dto/admin-nominations.query';
 import { CreateSafeSpaceNominationDto } from './dto/create-safe-space-nomination.dto';
@@ -36,6 +38,7 @@ import {
   DecideNominationDto,
   ReopenNominationDto,
 } from './dto/review-nomination.dto';
+import { toDirectoryModerationNominationResponse } from './safe-space-nomination-response';
 import { SafeSpaceNominationsService } from './safe-space-nominations.service';
 
 @ApiTags('Safe-space nominations')
@@ -76,14 +79,26 @@ export class SafeSpaceNominationsController {
  * The review team's console. Every route here can MOVE a nomination, which is
  * what the queue previously could not do at all: rows were written `pending`
  * and no endpoint existed to acknowledge, assign, decide or re-open one.
+ *
+ * Also open to the `directory_moderator` grant, so a caller here may be a plain
+ * member rather than platform staff. Every response carrying a nomination row
+ * therefore goes through `toDirectoryModerationNominationResponse`, which
+ * withholds `nominatorId` from a caller who is not Moderator/Admin by ACCOUNT
+ * TIER. The sibling flag queue reserves a flagger's identity for exactly the
+ * same reason; see that function for why the nominator is the same question.
+ * The gate is unchanged: only the size of the answer moves.
  */
 @ApiTags('Safe-space nominations')
 @ApiCookieAuth('access_token')
 @Controller('admin/safe-space-nominations')
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)
+@StaffRoles('directory_moderator')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
+@ApiForbiddenResponse({
+  description:
+    'Requires a moderator or admin role, or the `directory_moderator` staff role.',
+})
 export class AdminSafeSpaceNominationsController {
   constructor(private readonly nominations: SafeSpaceNominationsService) {}
 
@@ -95,8 +110,21 @@ export class AdminSafeSpaceNominationsController {
     description:
       'A page of nominations. Defaults to the open queue, oldest first, each row carrying its age, whether it breached the 48-hour acknowledgement promise, and the independent visit tally.',
   })
-  list(@Query() query: AdminNominationsQuery) {
-    return this.nominations.listForAdmin(query);
+  async list(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: AdminNominationsQuery,
+  ) {
+    const isReaderPlatformStaff = isPlatformStaffTier(user.role);
+    const page = await this.nominations.listForAdmin(query);
+    return {
+      ...page,
+      items: page.items.map((nomination) =>
+        toDirectoryModerationNominationResponse(
+          nomination,
+          isReaderPlatformStaff,
+        ),
+      ),
+    };
   }
 
   @Get(':id')
@@ -105,8 +133,14 @@ export class AdminSafeSpaceNominationsController {
   })
   @ApiOkResponse({ description: 'The nomination.' })
   @ApiNotFoundResponse({ description: 'No nomination with that id.' })
-  get(@Param('id', new ParseUUIDPipe()) id: string) {
-    return this.nominations.getForAdmin(id);
+  async get(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', new ParseUUIDPipe()) id: string,
+  ) {
+    return toDirectoryModerationNominationResponse(
+      await this.nominations.getForAdmin(id),
+      isPlatformStaffTier(user.role),
+    );
   }
 
   @Get(':id/audit')
@@ -122,12 +156,15 @@ export class AdminSafeSpaceNominationsController {
   })
   @ApiOkResponse({ description: 'The acknowledged nomination.' })
   @ApiBadRequestResponse({ description: 'Already acknowledged.' })
-  acknowledge(
+  async acknowledge(
     @CurrentUser() user: CurrentUserData,
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: AcknowledgeNominationDto,
   ) {
-    return this.nominations.acknowledge(id, user.userId, dto);
+    return toDirectoryModerationNominationResponse(
+      await this.nominations.acknowledge(id, user.userId, dto),
+      isPlatformStaffTier(user.role),
+    );
   }
 
   @Post(':id/assign')
@@ -138,12 +175,15 @@ export class AdminSafeSpaceNominationsController {
   @ApiNotFoundResponse({
     description: 'No nomination or listing with that id.',
   })
-  assign(
+  async assign(
     @CurrentUser() user: CurrentUserData,
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: AssignNominationDto,
   ) {
-    return this.nominations.assign(id, user.userId, dto);
+    return toDirectoryModerationNominationResponse(
+      await this.nominations.assign(id, user.userId, dto),
+      isPlatformStaffTier(user.role),
+    );
   }
 
   @Post(':id/decide')
@@ -153,12 +193,15 @@ export class AdminSafeSpaceNominationsController {
     description:
       'Not in a decidable state, or an award without a listing or a tier.',
   })
-  decide(
+  async decide(
     @CurrentUser() user: CurrentUserData,
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: DecideNominationDto,
   ) {
-    return this.nominations.decide(id, user.userId, dto);
+    return toDirectoryModerationNominationResponse(
+      await this.nominations.decide(id, user.userId, dto),
+      isPlatformStaffTier(user.role),
+    );
   }
 
   @Post(':id/reopen')
@@ -167,11 +210,14 @@ export class AdminSafeSpaceNominationsController {
   @ApiBadRequestResponse({
     description: 'This nomination has not been decided.',
   })
-  reopen(
+  async reopen(
     @CurrentUser() user: CurrentUserData,
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: ReopenNominationDto,
   ) {
-    return this.nominations.reopen(id, user.userId, dto);
+    return toDirectoryModerationNominationResponse(
+      await this.nominations.reopen(id, user.userId, dto),
+      isPlatformStaffTier(user.role),
+    );
   }
 }

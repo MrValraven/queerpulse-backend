@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { createHash } from 'node:crypto';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, In, QueryFailedError } from 'typeorm';
 import { CreateMembershipJoinRequestDto } from './dto/create-join-request.dto';
@@ -58,7 +59,7 @@ describe('JoinRequestsService', () => {
   };
   let txRepo: { findOne: jest.Mock; update: jest.Mock };
   let invites: { createInviteForApproval: jest.Mock };
-  let inviteRepo: { find: jest.Mock };
+  let inviteRepo: { find: jest.Mock; findOne: jest.Mock };
   let userRepo: { findOne: jest.Mock };
   let profileRepo: { find: jest.Mock };
   let dataSource: { transaction: jest.Mock; getRepository: jest.Mock };
@@ -101,7 +102,10 @@ describe('JoinRequestsService', () => {
         .fn()
         .mockResolvedValue({ id: 'inv-1', code: 'QP-ABCD-EFGH' }),
     };
-    inviteRepo = { find: jest.fn().mockResolvedValue([]) };
+    inviteRepo = {
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(null),
+    };
     // No reference member matched by default: `submit()` skips this query
     // entirely unless a test's dto supplies `mutualMemberEmail`.
     userRepo = { findOne: jest.fn().mockResolvedValue(null) };
@@ -147,11 +151,39 @@ describe('JoinRequestsService', () => {
   });
 
   describe('submit', () => {
-    it('persists a pending request and returns only { id, status, createdAt }', async () => {
+    it('persists a pending request and returns only { id, status, createdAt, statusToken }', async () => {
       const res = await service.submit(dto());
       expect(repo.save).toHaveBeenCalled();
       expect(res.status).toBe(PlatformJoinRequestStatus.Pending);
-      expect(Object.keys(res).sort()).toEqual(['createdAt', 'id', 'status']);
+      expect(Object.keys(res).sort()).toEqual([
+        'createdAt',
+        'id',
+        'status',
+        'statusToken',
+      ]);
+    });
+
+    it('mints a url-safe status token and persists only its sha256 hash', async () => {
+      const res = await service.submit(dto());
+      // base64url of 32 random bytes: 43 characters, no padding, no `+` or `/`.
+      expect(res.statusToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      // The row gets the HASH; the plaintext exists only in the response.
+      expect(repo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          statusTokenHash: createHash('sha256')
+            .update(res.statusToken)
+            .digest('hex'),
+        }),
+      );
+      expect(repo.create).not.toHaveBeenCalledWith(
+        expect.objectContaining({ statusTokenHash: res.statusToken }),
+      );
+    });
+
+    it('mints a different status token for every submission', async () => {
+      const first = await service.submit(dto());
+      const second = await service.submit(dto({ email: 'other@example.com' }));
+      expect(first.statusToken).not.toBe(second.statusToken);
     });
 
     it('normalises the email to lowercase and trims name/city', async () => {
@@ -369,6 +401,134 @@ describe('JoinRequestsService', () => {
           },
         });
       });
+    });
+  });
+
+  describe('getPublicStatus', () => {
+    const hashOf = (token: string) =>
+      createHash('sha256').update(token).digest('hex');
+
+    const storedRequest = (overrides: Partial<PlatformJoinRequest> = {}) =>
+      ({
+        id: 'r1',
+        status: PlatformJoinRequestStatus.Pending,
+        createdAt: new Date('2026-07-18T00:00:00.000Z'),
+        reviewedAt: null,
+        declineReason: null,
+        inviteId: null,
+        ...overrides,
+      }) as PlatformJoinRequest;
+
+    it('looks the request up by the HASH of the token, never the plaintext', async () => {
+      repo.findOne.mockResolvedValue(storedRequest());
+      await service.getPublicStatus('a-token');
+      expect(repo.findOne).toHaveBeenCalledWith({
+        where: { statusTokenHash: hashOf('a-token') },
+      });
+    });
+
+    it('returns null for a token that resolves to nothing', async () => {
+      repo.findOne.mockResolvedValue(null);
+      await expect(service.getPublicStatus('nope')).resolves.toBeNull();
+    });
+
+    it('reports a pending request as under_review with no decision fields', async () => {
+      repo.findOne.mockResolvedValue(storedRequest());
+      await expect(service.getPublicStatus('t')).resolves.toEqual({
+        status: 'under_review',
+        submittedAt: '2026-07-18T00:00:00.000Z',
+        decidedAt: null,
+        declineReason: null,
+        inviteCode: null,
+      });
+    });
+
+    it('reports a WAITLISTED request as under_review, hiding even its reviewedAt', async () => {
+      repo.findOne.mockResolvedValue(
+        storedRequest({
+          status: PlatformJoinRequestStatus.Waitlisted,
+          reviewedAt: new Date('2026-07-20T00:00:00.000Z'),
+        }),
+      );
+      await expect(service.getPublicStatus('t')).resolves.toMatchObject({
+        status: 'under_review',
+        decidedAt: null,
+      });
+    });
+
+    it('returns the decline reason and decision time on a decline', async () => {
+      repo.findOne.mockResolvedValue(
+        storedRequest({
+          status: PlatformJoinRequestStatus.Declined,
+          reviewedAt: new Date('2026-07-20T00:00:00.000Z'),
+          declineReason: 'implausible',
+        }),
+      );
+      await expect(service.getPublicStatus('t')).resolves.toEqual({
+        status: 'declined',
+        submittedAt: '2026-07-18T00:00:00.000Z',
+        decidedAt: '2026-07-20T00:00:00.000Z',
+        declineReason: 'implausible',
+        inviteCode: null,
+      });
+    });
+
+    it('returns the invite code on an approval while the invite is still redeemable', async () => {
+      repo.findOne.mockResolvedValue(
+        storedRequest({
+          status: PlatformJoinRequestStatus.Approved,
+          reviewedAt: new Date('2026-07-20T00:00:00.000Z'),
+          inviteId: 'inv-1',
+        }),
+      );
+      inviteRepo.findOne.mockResolvedValue({
+        id: 'inv-1',
+        code: 'QP-ABCD-EFGH',
+        status: 'pending',
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      });
+      await expect(service.getPublicStatus('t')).resolves.toMatchObject({
+        status: 'approved',
+        inviteCode: 'QP-ABCD-EFGH',
+      });
+    });
+
+    it('withholds the invite code once the invite has expired', async () => {
+      repo.findOne.mockResolvedValue(
+        storedRequest({
+          status: PlatformJoinRequestStatus.Approved,
+          reviewedAt: new Date('2026-07-20T00:00:00.000Z'),
+          inviteId: 'inv-1',
+        }),
+      );
+      inviteRepo.findOne.mockResolvedValue({
+        id: 'inv-1',
+        code: 'QP-ABCD-EFGH',
+        status: 'pending',
+        expiresAt: new Date(Date.now() - 60 * 60 * 1000),
+      });
+      await expect(service.getPublicStatus('t')).resolves.toMatchObject({
+        status: 'approved',
+        inviteCode: null,
+      });
+    });
+
+    it('never leaks the applicant message, email, or reviewer', async () => {
+      repo.findOne.mockResolvedValue(
+        storedRequest({
+          email: 'sam@example.com',
+          message: 'let me in',
+          reviewedBy: 'admin-1',
+        }),
+      );
+      const view = await service.getPublicStatus('t');
+      expect(Object.keys(view ?? {}).sort()).toEqual([
+        'decidedAt',
+        'declineReason',
+        'inviteCode',
+        'status',
+        'submittedAt',
+      ]);
     });
   });
 

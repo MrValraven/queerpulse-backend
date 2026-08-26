@@ -29,8 +29,9 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminGlossaryService } from './admin-glossary.service';
 import { CreateGlossaryTermDto } from './dto/create-glossary-term.dto';
@@ -45,12 +46,16 @@ import { UpdateGlossaryTermDto } from './dto/update-glossary-term.dto';
  * feature. Staff-guarded, with deletion narrowed to Admin — a term readers
  * link to should not vanish on one moderator's judgement.
  */
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)
+@StaffRoles('resource_curator')
 @ApiTags('Admin — Glossary')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires a staff role.' })
+@ApiForbiddenResponse({
+  description:
+    'Requires a moderator or admin role, or the `resource_curator` staff role (deletion stays admin-only).',
+})
 @Controller('admin/glossary')
 export class AdminGlossaryController {
   constructor(private readonly adminGlossary: AdminGlossaryService) {}
@@ -98,7 +103,10 @@ export class AdminGlossaryController {
     return this.adminGlossary.review(id, dto, user.userId);
   }
 
+  // Narrowed back to the account tier: the empty @StaffRoles() overrides the
+  // class-level grant, so RolesOrStaffGuard falls back to @Roles alone here.
   @Delete(':id')
+  @StaffRoles()
   @Roles(UserRole.Admin)
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Delete a glossary term' })

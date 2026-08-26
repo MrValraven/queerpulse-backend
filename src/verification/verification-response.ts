@@ -186,11 +186,31 @@ export interface AdminVerificationRequestDTO {
    * jsonb column (`listRequestsForAdmin`'s query carries the whole row, no
    * `.select()` narrowing it), so this never costs a second query. */
   hasDuplicateSignal: boolean;
+  /**
+   * OPS-04. The reviewer currently working this request, or null when nobody
+   * has claimed it. Distinct from `reviewedBy` on the detail DTO, which is who
+   * DECIDED it: a claim says "I have this open" so a second reviewer does not
+   * duplicate the work, and it is given back by releasing.
+   */
+  assignedStaffId: string | null;
+  /** Only present when `assignedStaffId` is set. "Deleted member" after that
+   *  reviewer's erasure (see `queueAssigneeName`). */
+  assignedStaffName?: string;
+  /**
+   * ISO 8601. When this request should have been decided by, stamped from
+   * `verification-sla.ts` at submission and restarted on the shorter appeal
+   * window when the member appeals. NULL means NO CLOCK, never overdue:
+   * requests decided before OPS-04 existed carry none.
+   */
+  dueAt: string | null;
 }
 
 export function toAdminVerificationRequestDTO(
   row: VerificationRequest,
   member: MemberRef | null,
+  // Resolved by the caller through `optionalQueueAssigneeName` against a
+  // batched profile lookup, so a page costs no extra query per row.
+  assignedStaffName?: string,
 ): AdminVerificationRequestDTO {
   return {
     id: row.id,
@@ -208,6 +228,9 @@ export function toAdminVerificationRequestDTO(
     hasDuplicateSignal: Boolean(
       (row.signals as VerificationSignalsDTO | null)?.duplicateProviderRef,
     ),
+    assignedStaffId: row.assignedStaffId,
+    ...(assignedStaffName ? { assignedStaffName } : {}),
+    dueAt: row.dueAt ? row.dueAt.toISOString() : null,
   };
 }
 
@@ -256,9 +279,10 @@ export function toAdminVerificationRequestDetailDTO(
   member: MemberRef | null,
   reviewedBy: MemberRef | null,
   history: VerificationEventDTO[],
+  assignedStaffName?: string,
 ): AdminVerificationRequestDetailDTO {
   return {
-    ...toAdminVerificationRequestDTO(row, member),
+    ...toAdminVerificationRequestDTO(row, member, assignedStaffName),
     context: row.context,
     evidenceRef: row.evidenceRef,
     decisionReason: row.decisionReason,

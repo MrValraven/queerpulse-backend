@@ -1,5 +1,9 @@
 import { MemberRef } from '../common/member-ref';
 import {
+  CommunityGovernanceLogDetailsDTO,
+  toCommunityGovernanceLogDetails,
+} from '../communities/community-governance-history-response';
+import {
   CommunityGovernanceLog,
   GovernanceLogAction,
 } from '../communities/entities/community-governance-log.entity';
@@ -89,11 +93,27 @@ export interface AdminCommunityModeratorDTO {
   joinedAt: string;
 }
 
+/**
+ * One open report about this community, as the admin panel's scoped queue
+ * reads it.
+ *
+ * `detail` is the REPORTER'S OWN FREE TEXT (`Report.detail`) and is therefore
+ * present only for a caller whose account tier is platform Moderator or Admin.
+ * Since OPS-03 this controller is also reachable with the additive
+ * `communities` staff grant, which the registry promises reaches no private
+ * report content: a report narrative names people, places and what happened to
+ * them, and is routinely self-identifying even with the reporter's name
+ * stripped. A grant holder still gets every row, its severity, its reason code
+ * and whether it is overdue, which is what the queue is for. The field is
+ * OMITTED rather than nulled so "withheld from you" stays distinguishable from
+ * "the reporter wrote nothing", matching how `toModReportDTO` withholds
+ * `detail` from the community-mod carve-out in `moderation-response.ts`.
+ */
 export interface AdminCommunityQueueItemDTO {
   id: string;
   severity: ReportSeverity;
   reasonCode: string;
-  detail: string | null;
+  detail?: string | null;
   status: string;
   overdue: boolean;
   createdAt: string;
@@ -383,6 +403,10 @@ export function toAdminModerator(
  * raw user rows, and are `null` for a system-driven action (auto-freeze,
  * owner-erasure auto-promotion) or once the person has erased their account
  * (the FK is `ON DELETE SET NULL` precisely so the entry outlives them).
+ *
+ * `metadata` is the raw jsonb and is present only for a platform Moderator or
+ * Admin. See `toAdminGovernanceLogEntry` for what a `communities` grant holder
+ * gets instead, and why.
  */
 export interface AdminGovernanceLogEntryDTO {
   id: string;
@@ -391,8 +415,14 @@ export interface AdminGovernanceLogEntryDTO {
   target: AdminGovernanceLogMemberDTO | null;
   /** Free-form context for the action (`{ fromRole, toRole }`, a settings
    *  diff, `{ adminOverride: true }`). Written only by
-   *  `CommunityGovernanceLogService.log()` call sites, never by a client. */
-  metadata: Record<string, unknown> | null;
+   *  `CommunityGovernanceLogService.log()` call sites, never by a client.
+   *  Platform Moderator/Admin only. */
+  metadata?: Record<string, unknown> | null;
+  /** The allowlisted read of the same row, served INSTEAD of `metadata` to a
+   *  caller who reached this endpoint on the `communities` staff grant. Exactly
+   *  the shape this community's own owner/co-owners/moderators already read on
+   *  `GET /communities/:slug/governance-log`. */
+  details?: CommunityGovernanceLogDetailsDTO;
   createdAt: string;
 }
 
@@ -416,9 +446,30 @@ export function toAdminGovernanceLogMember(
   };
 }
 
+/**
+ * `isPlatformStaffReader` is the caller's ACCOUNT TIER, not their access to
+ * the endpoint: since OPS-03 this route also opens on the additive
+ * `communities` grant, and `metadata` is an unbounded jsonb. On a
+ * `member_banned` entry it carries `{ bannedAt, bannedByUserId, banReason,
+ * banExpiresAt }` beside a fully named `target` — a member sanction and the
+ * moderator's own note about it, both of which the registry reserves for
+ * Moderator/Admin. Worse, the community's OWN moderators read that entry
+ * through `CommunityGovernanceLogDetailsDTO`, so passing the raw column
+ * through here let a delegated grant holder see more about a ban than the
+ * people who issued it.
+ *
+ * So a non-staff-tier caller gets `details`: the same hand-picked allowlist
+ * that member-facing route serves, reused rather than re-implemented so the
+ * two can never drift. It keeps the ban note and the role diff, drops every
+ * raw uuid, and (like the member-facing route) empties out on a platform
+ * override entry, including the `settings_changed` diff the grant holder's own
+ * PATCH writes — an admin-override row's contents stay with platform staff,
+ * and the entry itself is still listed with its action, actor and timestamp.
+ */
 export function toAdminGovernanceLogEntry(
   entry: CommunityGovernanceLog,
   memberRefs: Map<string, MemberRef>,
+  isPlatformStaffReader: boolean,
 ): AdminGovernanceLogEntryDTO {
   return {
     id: entry.id,
@@ -429,7 +480,9 @@ export function toAdminGovernanceLogEntry(
     target: toAdminGovernanceLogMember(
       entry.targetUserId ? memberRefs.get(entry.targetUserId) : undefined,
     ),
-    metadata: entry.metadata,
+    ...(isPlatformStaffReader
+      ? { metadata: entry.metadata }
+      : { details: toCommunityGovernanceLogDetails(entry.metadata) }),
     createdAt: entry.createdAt.toISOString(),
   };
 }

@@ -55,6 +55,24 @@ export interface PartnerApplicationDTO extends PartnerDetailDTO {
   submittedBy: MemberRef | null;
   reviewNote: string | null;
   createdAt: string;
+  /**
+   * OPS-04. The staff member currently working this application, or null when
+   * nobody has claimed it. Meaningful while `status` is `pending` (that IS the
+   * open application); it simply stops mattering once the application has been
+   * approved or rejected.
+   */
+  assignedStaffId: string | null;
+  /** Only present when `assignedStaffId` is set. "Deleted member" after that
+   *  reviewer's erasure (see `queueAssigneeName`). */
+  assignedStaffName?: string;
+  /**
+   * ISO 8601. When this application should have been answered by, stamped at
+   * submission from `PARTNER_APPLICATION_REVIEW_WINDOW_MS`. NULL means NO
+   * CLOCK, never overdue: applications settled before OPS-04 existed carry
+   * none. This column is the whole point of OPS-04 for this queue, which had
+   * nothing to stop an application sitting for six weeks.
+   */
+  dueAt: string | null;
 }
 
 export function toPartnerCard(p: Partner): PartnerCardDTO {
@@ -96,6 +114,9 @@ export function toPartnerDetail(p: Partner): PartnerDetailDTO {
 export function toPartnerApplication(
   p: Partner,
   submittedBy: MemberRef | null,
+  // OPS-04. Resolved by the caller through `optionalQueueAssigneeName` against
+  // the same batched profile lookup the submitter already uses.
+  assignedStaffName?: string,
 ): PartnerApplicationDTO {
   return {
     ...toPartnerDetail(p),
@@ -104,5 +125,8 @@ export function toPartnerApplication(
     submittedBy,
     reviewNote: p.reviewNote,
     createdAt: p.createdAt.toISOString(),
+    assignedStaffId: p.assignedStaffId,
+    ...(assignedStaffName ? { assignedStaffName } : {}),
+    dueAt: p.dueAt ? p.dueAt.toISOString() : null,
   };
 }

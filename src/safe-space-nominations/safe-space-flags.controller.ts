@@ -27,9 +27,12 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { NotRestrictedGuard } from '../auth/guards/not-restricted.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
+import { isPlatformStaffTier } from '../auth/platform-staff-tier';
 import { UserRole } from '../users/entities/user.entity';
 import {
   AdminFlagsQuery,
@@ -154,14 +157,22 @@ export class AdminSafeSpaceFlagsController {
 }
 
 /** Moderator control of a badge itself: suspend, restore, and the annual
- * re-review queue. */
+ * re-review queue.
+ *
+ * Also open to the `directory_moderator` grant, which is why `audit` below
+ * filters what it returns: the sibling flag queue above stays Moderator/Admin
+ * on purpose, and the badge trail must not route around it. See that method. */
 @ApiTags('Safe-space badge')
 @ApiCookieAuth('access_token')
 @Controller('admin/safe-spaces')
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)
+@StaffRoles('directory_moderator')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
+@ApiForbiddenResponse({
+  description:
+    'Requires a moderator or admin role, or the `directory_moderator` staff role.',
+})
 export class AdminSafeSpaceBadgesController {
   constructor(
     private readonly badges: SafeSpaceBadgeService,
@@ -202,15 +213,46 @@ export class AdminSafeSpaceBadgesController {
     return this.badges.restore(ref, user.userId, dto.reason);
   }
 
+  /**
+   * The badge's own history. `flag` rows are withheld from a caller who
+   * reached this on the `directory_moderator` grant rather than on the
+   * Moderator/Admin tier.
+   *
+   * WHY. A `flag` row is written with `actorId = flaggerId` on flag_raised and
+   * flag_withdrawn, and a flag_resolved row carries the reviewing moderator's
+   * free-text note in `reason`. `toSafeSpaceAuditResponse` returns both
+   * verbatim, so this route was a way around `AdminSafeSpaceFlagsController` —
+   * deliberately left on plain `RolesGuard` because it is the ONLY place a
+   * flagger's identity or free text is served. `directory_moderator`'s registry
+   * entry promises exactly the opposite of what that leak did.
+   *
+   * WHY FILTER RATHER THAN CLOSE THE ROUTE. An empty `@StaffRoles()` here would
+   * work too, and would be the blunter fix: it would take the whole badge
+   * history away from the very people the grant exists for. A directory
+   * moderator suspends and restores badges and works the nomination queue, and
+   * "why is this badge suspended, and what has been done about it?" is the
+   * question this trail answers for that work. The `nomination` and `badge`
+   * rows carry no flagger: their actor is a reviewer, their `reason` is the
+   * reviewer's own note, and the flag-threshold suspension row carries a COUNT
+   * (`{ cause: 'flag_threshold', flagCount }`), never who. So the narrow cut is
+   * by subject type, and it keeps the route useful.
+   */
   @Get(':ref/audit')
   @ApiOperation({
     summary: 'Everything ever done to the safe-space badge on one business',
   })
-  @ApiOkResponse({ description: 'The audit trail, newest first.' })
+  @ApiOkResponse({
+    description:
+      'The audit trail, newest first. Flag rows are included only for a ' +
+      'platform moderator or admin.',
+  })
   @ApiNotFoundResponse({ description: 'No listing with that ref.' })
-  async audit(@Param('ref') ref: string) {
+  async audit(@CurrentUser() user: CurrentUserData, @Param('ref') ref: string) {
     const listing = await this.badges.resolveByRef(ref);
     const rows = await this.audits.listForListing(listing.id);
-    return rows.map(toSafeSpaceAuditResponse);
+    const readableRows = isPlatformStaffTier(user.role)
+      ? rows
+      : rows.filter((row) => row.subjectType !== 'flag');
+    return readableRows.map(toSafeSpaceAuditResponse);
   }
 }

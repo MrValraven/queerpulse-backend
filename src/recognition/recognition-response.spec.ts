@@ -144,6 +144,7 @@ describe('buildBadges', () => {
       communityPosts: 0,
       endorsementCount: 0,
       eventsHosted: 0,
+      eventsHeld: 0,
       tenureDays: 0,
       verified: false,
       gettingStartedStepsDone: 0,
@@ -151,6 +152,10 @@ describe('buildBadges', () => {
       listingsSaved: 0,
       articlesSaved: 0,
       workProfileComplete: false,
+      volunteerSessions: 0,
+      piecesPublished: 0,
+      directoryAnswers: 0,
+      resourcesApproved: 0,
     };
 
     it('is populated when signals are passed (owner view)', () => {

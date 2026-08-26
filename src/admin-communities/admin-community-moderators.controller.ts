@@ -26,8 +26,9 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminCommunityModeratorsService } from './admin-community-moderators.service';
 import { AddModeratorDto } from './dto/add-moderator.dto';
@@ -36,18 +37,31 @@ import { AddModeratorDto } from './dto/add-moderator.dto';
  * Moderator management for the admin communities panel
  * (`AdminCommunitySettings` add/remove controls).
  *
+ * Also opened to the additive `communities` grant (OPS-03), the same grant
+ * that opens the read controller: appointing and standing down a community's
+ * own moderators is the day-to-day work of the domain being delegated, it is
+ * per-community, reversible, and written to the governance log. The overrides
+ * that are NOT reversible in the same way (freeze, archive, reassign
+ * ownership, remove a roster member) stay admin-only on the read controller.
+ * Appointing YOURSELF is refused outright, for every caller including an
+ * admin: see `AdminCommunityModeratorsService.addModerator`.
+ *
  * A distinct controller from the read-only `AdminCommunitiesController`
  * (which is admin-only): these write actions are open to platform moderators
  * as well as admins, so they carry their own class-level `@Roles`, which
- * `RolesGuard` reads via `getAllAndOverride` — the read controller's
- * admin-only gate does not leak onto them.
+ * `RolesOrStaffGuard` reads via `getAllAndOverride` (the read controller's
+ * admin-only gate does not leak onto them).
  */
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)
+@StaffRoles('communities')
 @ApiTags('Admin — Communities')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires the moderator or admin role.' })
+@ApiForbiddenResponse({
+  description:
+    'Requires the moderator or admin role, or the `communities` staff role.',
+})
 @ApiNotFoundResponse({ description: 'Community or member not found.' })
 @Controller('admin/communities/:slug/moderators')
 export class AdminCommunityModeratorsController {
@@ -72,6 +86,11 @@ export class AdminCommunityModeratorsController {
   @ApiOperation({ summary: 'Promote a roster member to moderator.' })
   @ApiOkResponse({ description: 'The promoted moderator.' })
   @ApiBadRequestResponse({ description: 'The target cannot be a moderator.' })
+  @ApiForbiddenResponse({
+    description:
+      'The caller lacks the role or grant, or is trying to appoint ' +
+      'themselves. Nobody appoints themselves, admins included.',
+  })
   @Post()
   addModerator(
     @CurrentUser() currentUser: CurrentUserData,

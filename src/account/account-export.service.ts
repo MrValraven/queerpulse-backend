@@ -5,6 +5,7 @@ import {
   DATA_EXPORT_CONTRIBUTORS,
   DataExportContribution,
 } from './data-export-contributor';
+import { MEDIA_ZIP_ONLY_NOTE } from './export-media';
 import { Connection } from '../connections/entities/connection.entity';
 import { EventRsvp } from '../events/entities/event-rsvp.entity';
 import { Event } from '../events/entities/event.entity';
@@ -140,6 +141,15 @@ export class AccountExportService {
         exportedAt: new Date().toISOString(),
         schemaVersion: '1.0',
         categories,
+        // The one category whose bytes cannot travel in this payload. `media`
+        // contributes a LISTING of the member's uploaded files; the files
+        // themselves are streamed into the zip at download time, so a
+        // `json`-format export carries the list and no bytes. Stated in the
+        // manifest so the archive explains itself without the member having to
+        // remember the wording on the request form. Only present when they
+        // asked for the category — a manifest should not footnote a category
+        // that is not in the archive.
+        ...(want.has('media') ? { mediaNote: MEDIA_ZIP_ONLY_NOTE } : {}),
       },
     };
 

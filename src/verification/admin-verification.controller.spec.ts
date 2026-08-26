@@ -122,6 +122,7 @@ describe('AdminVerificationController', () => {
         query: undefined,
         sort: undefined,
         cursor: undefined,
+        assignedTo: undefined,
       });
     });
   });
@@ -226,7 +227,7 @@ describe('AdminVerificationController', () => {
       };
       service.listRequestsForAdmin.mockResolvedValue(listResult);
 
-      const result = await controller.listRequests(query);
+      const result = await controller.listRequests(currentUser, query);
 
       expect(service.listRequestsForAdmin).toHaveBeenCalledWith({
         status: VerificationRequestStatus.Pending,
@@ -234,6 +235,8 @@ describe('AdminVerificationController', () => {
         query: 'devon',
         sort: 'oldest',
         cursor: 'opaque-cursor',
+        // OPS-04: no `assignedTo` on the query, so no narrowing is forwarded.
+        assignedTo: undefined,
       });
       expect(result).toBe(listResult);
       expect(result.counts).toEqual(
@@ -248,7 +251,7 @@ describe('AdminVerificationController', () => {
       const listResult = { rows: [], counts: {}, nextCursor: null };
       service.listRequestsForAdmin.mockResolvedValue(listResult);
 
-      await controller.listRequests({});
+      await controller.listRequests(currentUser, {});
 
       expect(service.listRequestsForAdmin).toHaveBeenCalledWith({
         status: undefined,

@@ -116,6 +116,9 @@ export class CardProgramsService {
     if (dto.textBackdrop !== undefined) {
       program.textBackdrop = dto.textBackdrop;
     }
+    if (dto.allowsSelfRenew !== undefined) {
+      program.allowsSelfRenew = dto.allowsSelfRenew;
+    }
 
     const saved = await this.programs.save(program);
 

@@ -256,7 +256,24 @@ export class AdminCommunitiesService {
     };
   }
 
-  async getCommunity(slug: string): Promise<AdminCommunityDetailDTO> {
+  /**
+   * `isPlatformStaffReader` is the caller's account TIER (Moderator/Admin),
+   * separate from whether they were let through the gate: since OPS-03 this
+   * controller also opens on the additive `communities` grant, and the
+   * `scopedQueue` this builds carries `Report.detail`, the reporter's own
+   * free-text account of what happened. That is private report content, which
+   * `staff-roles.registry.ts` promises no grant reaches, so it is withheld from
+   * a grant holder. See `AdminCommunityQueueItemDTO`.
+   *
+   * Every internal caller below is an admin-only override (each carries an
+   * empty `@StaffRoles()` on its route) and so passes `true`; only the two
+   * grant-reachable entry points, `GET /admin/communities/:slug` and
+   * `PATCH /admin/communities/:slug`, pass the real tier down from the request.
+   */
+  async getCommunity(
+    slug: string,
+    isPlatformStaffReader: boolean,
+  ): Promise<AdminCommunityDetailDTO> {
     const community = await this.communities.findOne({ where: { slug } });
     if (!community) {
       throw new NotFoundException('Community not found');
@@ -275,7 +292,7 @@ export class AdminCommunitiesService {
       community,
       aggregatesByCommunityId.get(community.id) ?? emptyCommunityAggregates(),
       moderators,
-      this.scopedQueueFor(community, reportScope, now),
+      this.scopedQueueFor(community, reportScope, now, isPlatformStaffReader),
       reportScope.truncated,
     );
   }
@@ -295,10 +312,17 @@ export class AdminCommunitiesService {
    * `MemberRef`-derived shape — no `User`/`Profile` row is returned. A
    * `null` actor/target is a system-driven action or someone who has since
    * erased their account; the entry itself deliberately survives them.
+   *
+   * `isPlatformStaffReader` is the caller's account tier. A caller who reached
+   * this on the `communities` grant gets the same allowlisted `details` the
+   * community's own moderators read instead of the raw `metadata` jsonb, which
+   * on a ban entry carries the sanction itself (`banReason`, `bannedByUserId`).
+   * See `toAdminGovernanceLogEntry`.
    */
   async getGovernanceLog(
     slug: string,
     query: ListAdminCommunityGovernanceLogQuery,
+    isPlatformStaffReader: boolean,
   ): Promise<Paginated<AdminGovernanceLogEntryDTO>> {
     const community = await this.communities.findOne({ where: { slug } });
     if (!community) {
@@ -321,7 +345,9 @@ export class AdminCommunitiesService {
       const memberRefs = await new MemberLookup(this.profiles).byUserIds(
         memberIds,
       );
-      return rows.map((row) => toAdminGovernanceLogEntry(row, memberRefs));
+      return rows.map((row) =>
+        toAdminGovernanceLogEntry(row, memberRefs, isPlatformStaffReader),
+      );
     });
   }
 
@@ -336,6 +362,7 @@ export class AdminCommunitiesService {
     slug: string,
     dto: UpdateAdminCommunitySettingsDto,
     actorUserId: string,
+    isPlatformStaffReader: boolean,
   ): Promise<AdminCommunityDetailDTO> {
     const community = await this.communities.findOne({ where: { slug } });
     if (!community) {
@@ -405,7 +432,7 @@ export class AdminCommunitiesService {
         metadata: { adminOverride: true, changes },
       });
     }
-    return this.getCommunity(slug);
+    return this.getCommunity(slug, isPlatformStaffReader);
   }
 
   /**
@@ -462,7 +489,9 @@ export class AdminCommunitiesService {
       });
     }
 
-    return this.getCommunity(slug);
+    // Admin-only override (empty `@StaffRoles()` on the route), so the caller
+    // is always platform staff and reads the full detail.
+    return this.getCommunity(slug, true);
   }
 
   /**
@@ -513,7 +542,9 @@ export class AdminCommunitiesService {
       });
     }
 
-    return this.getCommunity(slug);
+    // Admin-only override (empty `@StaffRoles()` on the route), so the caller
+    // is always platform staff and reads the full detail.
+    return this.getCommunity(slug, true);
   }
 
   /**
@@ -557,7 +588,9 @@ export class AdminCommunitiesService {
       });
     }
 
-    return this.getCommunity(slug);
+    // Admin-only override (empty `@StaffRoles()` on the route), so the caller
+    // is always platform staff and reads the full detail.
+    return this.getCommunity(slug, true);
   }
 
   /**
@@ -593,7 +626,9 @@ export class AdminCommunitiesService {
       });
     }
 
-    return this.getCommunity(slug);
+    // Admin-only override (empty `@StaffRoles()` on the route), so the caller
+    // is always platform staff and reads the full detail.
+    return this.getCommunity(slug, true);
   }
 
   /**
@@ -643,7 +678,9 @@ export class AdminCommunitiesService {
     const previousOwnerId = community.ownerId;
     if (previousOwnerId === targetUserId) {
       // Already the owner — nothing to change, nothing to log.
-      return this.getCommunity(slug);
+      // Admin-only override (empty `@StaffRoles()` on the route), so the
+      // caller is always platform staff and reads the full detail.
+      return this.getCommunity(slug, true);
     }
 
     const targetUser = await this.users.findOne({
@@ -694,7 +731,9 @@ export class AdminCommunitiesService {
       metadata: { adminOverride: true, previousOwnerId },
     });
 
-    return this.getCommunity(slug);
+    // Admin-only override (empty `@StaffRoles()` on the route), so the caller
+    // is always platform staff and reads the full detail.
+    return this.getCommunity(slug, true);
   }
 
   /**
@@ -1131,11 +1170,14 @@ export class AdminCommunitiesService {
     return moderators;
   }
 
-  /** That community's open reports, newest first. */
+  /** That community's open reports, newest first. `isPlatformStaffReader`
+   *  decides whether the reporter's free text travels with them — see
+   *  `AdminCommunityQueueItemDTO` and `getCommunity`. */
   private scopedQueueFor(
     community: Community,
     reportScope: CommunityReportScope,
     now: Date,
+    isPlatformStaffReader: boolean,
   ): AdminCommunityQueueItemDTO[] {
     return reportScope.reports
       .filter((report) => {
@@ -1154,7 +1196,7 @@ export class AdminCommunitiesService {
         id: report.id,
         severity: report.severity,
         reasonCode: report.reasonCode,
-        detail: report.detail,
+        ...(isPlatformStaffReader ? { detail: report.detail } : {}),
         status: report.status,
         overdue: report.slaDueAt.getTime() < now.getTime(),
         createdAt: report.createdAt.toISOString(),

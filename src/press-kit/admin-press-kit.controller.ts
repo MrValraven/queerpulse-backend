@@ -24,8 +24,9 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { CreatePressContactDto } from './dto/create-press-contact.dto';
 import { CreatePressCoverageDto } from './dto/create-press-coverage.dto';
@@ -43,12 +44,15 @@ import { PressKitService } from './press-kit.service';
  * everything else. The facts on the public payload are DERIVED (not editable),
  * so there is no admin surface for them.
  */
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Admin)
+@StaffRoles('editorial')
 @ApiTags('Admin — Press kit')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires the admin role.' })
+@ApiForbiddenResponse({
+  description: 'Requires the admin role, or the `editorial` staff role.',
+})
 @Controller('admin/press-kit')
 export class AdminPressKitController {
   constructor(private readonly pressKit: PressKitService) {}

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Changemaker } from '../changemakers/entities/changemaker.entity';
 import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Community } from '../communities/entities/community.entity';
@@ -16,6 +17,12 @@ import { LandingService } from './landing.service';
     // target types), and `CommunityMember` (community member counts on the
     // public payload).
     TypeOrmModule.forFeature([
+      // Read-only, and only for `RolesOrStaffGuard` on this module's admin
+      // controllers: it resolves the caller's additive staff grants when their
+      // account tier alone does not satisfy `@Roles(...)`. Same registration
+      // precedent as `HousingListingsModule` for `HousingModerationGuard`.
+      UserStaffRole,
+
       LandingFeature,
       Profile,
       Community,

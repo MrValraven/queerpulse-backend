@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { UsersModule } from '../users/users.module';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
+import { RecognitionEntitlementsModule } from '../recognition/recognition-entitlements.module';
 import { Invite } from './entities/invite.entity';
 import { PlatformJoinRequest } from './entities/join-request.entity';
 import { InvitesController } from './invites.controller';
@@ -16,6 +17,11 @@ import { JoinRequestsService } from './join-requests.service';
     TypeOrmModule.forFeature([Invite, PlatformJoinRequest]),
     UsersModule,
     PlatformSettingsModule,
+    // SUS-04: the level-derived invite-quota bonus. Deliberately the tiny
+    // entitlements module and not `RecognitionModule` — `AuthModule` imports
+    // this module, and `RecognitionModule` reaches `ProfilesModule` /
+    // `NotificationsModule`, so the full module would risk a cycle.
+    RecognitionEntitlementsModule,
   ],
   controllers: [
     InvitesController,

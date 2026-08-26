@@ -4,9 +4,12 @@ import {
   BadgeRarity,
   BadgeTint,
   BadgeVerification,
+  DEFAULT_INVITE_MONTHLY_QUOTA,
   LEVEL_LADDER_DEF,
   PERK_CATALOG,
+  PerkCatalogEntry,
   SEASONAL_BADGE_CATALOG,
+  inviteQuotaBonusForLevel,
   levelName,
   levelStartXp,
 } from './recognition.catalog';
@@ -60,6 +63,10 @@ export interface BadgeDTO {
   progress?: { units: number; target: number };
   /** Present only for time-limited badges (see `SEASONAL_BADGE_CATALOG`). */
   seasonal?: { when: string };
+  /** Owner view only, and only when true: the member has hidden this badge
+   *  from how other people see them. Another member's view never carries the
+   *  field because the badge itself is omitted from that response. */
+  hiddenFromProfile?: boolean;
 }
 export interface BadgesDTO {
   earnedCount: number;
@@ -78,6 +85,9 @@ export type PerkFooterDTO =
   | { type: 'lock'; label: string }
   | { type: 'claimed'; date: string };
 export interface PerkDTO {
+  /** Stable catalogue key, and the path segment
+   *  `POST /me/recognition/perks/:key/claim` takes. */
+  key: string;
   cat: string;
   title: string;
   desc: string;
@@ -139,6 +149,9 @@ export interface RecognitionDTO {
 export interface EarnedAwardRow {
   badgeKey: string;
   context: string | null;
+  /** Optional so a caller that does not care about visibility (and the older
+   *  unit tests) can keep passing two fields. Absent reads as "not hidden". */
+  hiddenFromProfile?: boolean;
 }
 
 /** A single claimed perk row, as read from `RecognitionPerkClaim`. */
@@ -215,6 +228,7 @@ export function buildLevelLadder(currentLevel: number): LevelLadderRowDTO[] {
 export function buildBadges(
   earned: EarnedAwardRow[],
   signals: RecognitionSignals | null = null,
+  isOwnerView = true,
 ): BadgesDTO {
   const earnedByKey = new Map(earned.map((row) => [row.badgeKey, row]));
   const earnedBadges: BadgeDTO[] = [];
@@ -223,6 +237,13 @@ export function buildBadges(
     const row = earnedByKey.get(def.key);
     const xpReward = BADGE_BONUS_BY_RARITY[def.rarity];
     if (row) {
+      const isHiddenFromProfile = row.hiddenFromProfile === true;
+      // A badge the member has hidden is dropped from ANOTHER member's view
+      // entirely — not moved to `locked`, which would tell the viewer the
+      // badge exists and is unearned, and would still be a disclosure the
+      // member asked us not to make. On the owner's own view it stays, marked,
+      // so they can see and undo what they hid.
+      if (isHiddenFromProfile && !isOwnerView) continue;
       earnedBadges.push({
         key: def.key,
         cat: def.cat,
@@ -232,6 +253,7 @@ export function buildBadges(
         tint: def.tint,
         xpReward,
         verifiedBy: def.verifiedBy,
+        hiddenFromProfile: isHiddenFromProfile ? true : undefined,
       });
     } else if (BADGE_REQUIREMENTS[def.key]) {
       lockedBadges.push({
@@ -301,10 +323,35 @@ function xpAwayLabel(unlockLevel: number, totalXp: number): string {
   return `${away} XP away`;
 }
 
+/**
+ * The perk card's copy, with the invite-quota numbers filled in from the ONE
+ * place that decides them (`INVITE_QUOTA_BONUS_BY_LEVEL`) plus the base quota
+ * this deployment actually enforces. A perk with no `{base}`/`{total}` in its
+ * text is returned untouched.
+ */
+export function perkDescription(
+  def: PerkCatalogEntry,
+  baseInviteQuota: number,
+): string {
+  if (def.isInviteQuotaPerk !== true) return def.desc;
+  const total = baseInviteQuota + inviteQuotaBonusForLevel(def.unlockLevel);
+  return def.desc
+    .replace('{base}', String(baseInviteQuota))
+    .replace('{total}', String(total));
+}
+
+/**
+ * `baseInviteQuota` is the deployment's configured `app.inviteMonthlyQuota`,
+ * passed in by `RecognitionService` so the invite-quota perk copy names the
+ * number `InvitesService` will really enforce. It defaults to the same
+ * constant `app.config.ts` defaults to, so a caller without a `ConfigService`
+ * still cannot print a number the backend would not honour.
+ */
 export function buildPerks(
   currentLevel: number,
   totalXp: number,
   claimed: ClaimedPerkRow[],
+  baseInviteQuota: number = DEFAULT_INVITE_MONTHLY_QUOTA,
 ): PerksDTO {
   const claimedByKey = new Map(claimed.map((row) => [row.perkKey, row]));
   const available: PerkDTO[] = [];
@@ -312,29 +359,33 @@ export function buildPerks(
   const lockedByLevel = new Map<number, PerkDTO[]>();
 
   for (const def of PERK_CATALOG) {
+    const desc = perkDescription(def, baseInviteQuota);
     const claim = claimedByKey.get(def.key);
     if (claim) {
       claimedPerks.push({
+        key: def.key,
         cat: def.cat,
         title: def.title,
-        desc: def.desc,
+        desc,
         state: 'claimed',
         footer: { type: 'claimed', date: claim.claimedAt.toISOString() },
       });
     } else if (currentLevel >= def.unlockLevel) {
       available.push({
+        key: def.key,
         cat: def.cat,
         title: def.title,
-        desc: def.desc,
+        desc,
         state: 'available',
         footer: def.availableFooter,
       });
     } else {
       const bucket = lockedByLevel.get(def.unlockLevel) ?? [];
       bucket.push({
+        key: def.key,
         cat: def.cat,
         title: def.title,
-        desc: def.desc,
+        desc,
         state: 'locked',
         footer: {
           type: 'lock',
@@ -411,19 +462,28 @@ export function buildXpBreakdown(
   ];
 }
 
+/**
+ * `options.baseInviteQuota` is the deployment's configured monthly invite
+ * allowance (see `buildPerks`). `options.isOwnerView` decides whether a badge
+ * the member has hidden is returned at all; it defaults to `signals !== null`,
+ * which is exactly how the owner/non-owner split is already expressed
+ * everywhere else in this file (`xpBreakdown`, `xpLedger`, perks).
+ */
 export function buildRecognition(
   totalXp: number,
   earned: EarnedAwardRow[],
   claimed: ClaimedPerkRow[],
   signals: RecognitionSignals | null = null,
   ledgerRows: LedgerEntryRow[] = [],
+  options: { baseInviteQuota?: number; isOwnerView?: boolean } = {},
 ): RecognitionDTO {
   const level = computeLevel(totalXp);
+  const isOwnerView = options.isOwnerView ?? signals !== null;
   return {
     level,
     levelLadder: buildLevelLadder(level.level),
-    badges: buildBadges(earned, signals),
-    perks: buildPerks(level.level, totalXp, claimed),
+    badges: buildBadges(earned, signals, isOwnerView),
+    perks: buildPerks(level.level, totalXp, claimed, options.baseInviteQuota),
     xpBreakdown: buildXpBreakdown(
       signals,
       earned.map((a) => a.badgeKey),

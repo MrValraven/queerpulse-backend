@@ -76,6 +76,16 @@ export interface VolunteerSignupDTO {
   status: SignupStatus;
   decidedAt: string | null;
   createdAt: string;
+  /**
+   * The completion record (SUS-05), all three moving together: null
+   * throughout until the poster confirms the session, then all set. Drives
+   * the "mark attended / enter hours / confirm" control on the poster's
+   * applicant row, which only appears on an accepted, not-yet-completed
+   * signup.
+   */
+  attended: boolean | null;
+  hoursContributed: number | null;
+  completedAt: string | null;
 }
 
 /**
@@ -151,7 +161,70 @@ export function toVolunteerSignup(
     status: signup.status,
     decidedAt: signup.decidedAt ? signup.decidedAt.toISOString() : null,
     createdAt: signup.createdAt.toISOString(),
+    attended: signup.attended,
+    hoursContributed: signup.hoursContributed,
+    completedAt: signup.completedAt ? signup.completedAt.toISOString() : null,
   };
+}
+
+/**
+ * `GET /volunteering/me/contribution`: what the signed-in member has
+ * actually contributed, confirmed by someone else. Deliberately narrow: a
+ * member's own attested sessions and hours, and nothing about anyone else.
+ * `sessionCount` counts sessions recorded as ATTENDED; a recorded no-show is
+ * neither counted nor shown back to them.
+ */
+export interface MyVolunteerContributionDTO {
+  sessionCount: number;
+  hoursContributed: number;
+  /** ISO timestamp of the most recent confirmed session, null if none. */
+  lastCompletedAt: string | null;
+  /** Accepted signups still waiting on the poster to confirm the session. */
+  awaitingConfirmationCount: number;
+}
+
+/** One opportunity's slice of the confirmed-hours aggregate. */
+export interface VolunteerHoursByOpportunityDTO {
+  opportunitySlug: string;
+  role: string;
+  org: string;
+  sessionCount: number;
+  hoursContributed: number;
+}
+
+/** One community's slice of the confirmed-hours aggregate. Opportunities with
+ *  no community attribution are omitted rather than bucketed under a fake
+ *  "none" community; the platform total above always covers them. */
+export interface VolunteerHoursByCommunityDTO {
+  communityId: string;
+  sessionCount: number;
+  hoursContributed: number;
+}
+
+/**
+ * THE FUNDER ANSWER: confirmed volunteer hours over a period, platform-wide
+ * and broken down per opportunity and per community.
+ *
+ * An aggregate operational count and nothing else. `volunteerCount` is a
+ * DISTINCT count of members, not a list, and no row here is attributable to
+ * an individual: this reports what the platform contributed, never what any
+ * one person did. The one per-member number that exists,
+ * `MyVolunteerContributionDTO`, is readable only by that member about
+ * themselves.
+ *
+ * Only ATTENDED sessions count. A recorded no-show exists in the table so the
+ * poster is not asked again, and is excluded from every total here.
+ */
+export interface VolunteerHoursTotalsDTO {
+  /** The window actually applied, echoed back so a caller can label a report
+   *  with the period it covers. Null means unbounded on that side. */
+  from: string | null;
+  to: string | null;
+  sessionCount: number;
+  hoursContributed: number;
+  volunteerCount: number;
+  byOpportunity: VolunteerHoursByOpportunityDTO[];
+  byCommunity: VolunteerHoursByCommunityDTO[];
 }
 
 /** One row of `GET /volunteering/mine`: an opportunity the viewer posted, or

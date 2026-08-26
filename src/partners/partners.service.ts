@@ -5,8 +5,12 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { In, Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
+import {
+  optionalQueueAssigneeName,
+  setQueueAssignment,
+} from '../common/queue-assignment';
 import {
   DEFAULT_LIST_LIMIT,
   normalizePage,
@@ -15,6 +19,8 @@ import {
 } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
 import { Profile } from '../users/entities/profile.entity';
+import { UserRole } from '../users/entities/user.entity';
+import { partnerApplicationDueAt } from './partner-application-sla';
 import {
   PartnerApplicationDTO,
   PartnerCardDTO,
@@ -146,10 +152,34 @@ export class PartnersService {
     return this.buildApplication(saved);
   }
 
-  // Admin queue: pending applications awaiting triage.
-  async listApplications(): Promise<PartnerApplicationDTO[]> {
+  /**
+   * Admin queue: pending applications awaiting triage.
+   *
+   * `assignedTo` is OPS-04's "Assigned to me" narrowing, the same closed set
+   * the join-request and verification queues take: a caller's own id (resolved
+   * from the session by the controller, so the wire never carries a
+   * reviewer's id) or the literal `'unassigned'`. Narrowing here rather than
+   * in the browser keeps the answer honest against `DEFAULT_LIST_LIMIT`: a
+   * client-side filter would silently omit claimed rows that fell off the end
+   * of the page.
+   */
+  async listApplications(
+    options: {
+      /** A user id narrows to that reviewer's claimed applications; the
+       *  literal `'unassigned'` narrows to the rows nobody has picked up.
+       *  Typed as a plain `string` because the literal is a member of it. */
+      assignedTo?: string;
+    } = {},
+  ): Promise<PartnerApplicationDTO[]> {
     const rows = await this.partners.find({
-      where: { status: PartnerStatus.Pending },
+      where: {
+        status: PartnerStatus.Pending,
+        ...(options.assignedTo === 'unassigned'
+          ? { assignedStaffId: IsNull() }
+          : options.assignedTo
+            ? { assignedStaffId: options.assignedTo }
+            : {}),
+      },
       order: { createdAt: 'DESC' },
       take: DEFAULT_LIST_LIMIT,
     });
@@ -193,6 +223,54 @@ export class PartnersService {
     }
 
     const saved = await this.partners.save(partner);
+    return this.buildApplication(saved);
+  }
+
+  /**
+   * Claim or release one partner application (OPS-04).
+   *
+   * Mirrors `ModerationService.setAssignment`, including the property that
+   * makes it safe when two people claim at once: a conditional UPDATE guarded
+   * on the assignment this caller read, so the loser gets a 409 rather than
+   * quietly taking the row. Additionally guarded on the row still being
+   * `pending`, because a pending row IS the open application here — an
+   * approved partner is a directory entry, not a queue item.
+   *
+   * `isAdmin` is the account TIER, not the `partnerships` staff grant: a
+   * delegated partnerships reviewer claims and releases their own rows like
+   * anyone else, while a platform admin can break a hold left by someone who
+   * has gone, exactly as in the moderation queue.
+   */
+  async setApplicationAssignment(
+    id: string,
+    actorId: string,
+    actorRole: string,
+    assign: boolean,
+  ): Promise<PartnerApplicationDTO> {
+    const partner = await this.partners.findOne({ where: { id } });
+    if (!partner) {
+      throw new NotFoundException('Partner application not found');
+    }
+
+    await setQueueAssignment({
+      repository: this.partners,
+      id,
+      currentAssigneeId: partner.assignedStaffId,
+      actorId,
+      // `actorRole` is a JWT claim, typed `string` on `CurrentUserData`.
+      isAdmin: actorRole === (UserRole.Admin as string),
+      assign,
+      rowLabel: 'partner application',
+      claimableStatuses: {
+        column: 'status',
+        values: [PartnerStatus.Pending],
+      },
+    });
+
+    const saved = await this.partners.findOne({ where: { id } });
+    if (!saved) {
+      throw new NotFoundException('Partner application not found');
+    }
     return this.buildApplication(saved);
   }
 
@@ -317,6 +395,10 @@ export class PartnersService {
             status: PartnerStatus.Pending,
             submittedById: memberId,
             reviewNote: null,
+            // OPS-04. Stamped once, from the single window in
+            // `partner-application-sla.ts`. Fourteen days is slow and honest;
+            // the point is that six weeks now goes red.
+            dueAt: partnerApplicationDueAt(new Date()),
           }),
         );
       } catch (err) {
@@ -339,12 +421,13 @@ export class PartnersService {
   private async buildApplication(
     partner: Partner,
   ): Promise<PartnerApplicationDTO> {
-    const refs = await new MemberLookup(this.profiles).byUserIds([
-      partner.submittedById,
-    ]);
+    const refs = await new MemberLookup(this.profiles).byUserIds(
+      partnerRefUserIds([partner]),
+    );
     return toPartnerApplication(
       partner,
       refs.get(partner.submittedById) ?? null,
+      optionalQueueAssigneeName(partner.assignedStaffId, refs),
     );
   }
 
@@ -352,10 +435,28 @@ export class PartnersService {
     partners: Partner[],
   ): Promise<PartnerApplicationDTO[]> {
     const refs = await new MemberLookup(this.profiles).byUserIds(
-      partners.map((p) => p.submittedById),
+      partnerRefUserIds(partners),
     );
-    return partners.map((p) =>
-      toPartnerApplication(p, refs.get(p.submittedById) ?? null),
+    return partners.map((partner) =>
+      toPartnerApplication(
+        partner,
+        refs.get(partner.submittedById) ?? null,
+        optionalQueueAssigneeName(partner.assignedStaffId, refs),
+      ),
     );
   }
+}
+
+/** Every user id a page of applications needs a display name for: the member
+ *  who applied, plus whoever is holding the row (OPS-04). One list, so the
+ *  page stays ONE profile query. */
+function partnerRefUserIds(partners: Partner[]): string[] {
+  return [
+    ...new Set([
+      ...partners.map((partner) => partner.submittedById),
+      ...partners
+        .map((partner) => partner.assignedStaffId)
+        .filter((id): id is string => id !== null),
+    ]),
+  ];
 }

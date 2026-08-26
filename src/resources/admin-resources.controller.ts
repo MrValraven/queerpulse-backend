@@ -29,8 +29,9 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminResourcesService } from './admin-resources.service';
 import { CreateResourceDto } from './dto/create-resource.dto';
@@ -50,12 +51,16 @@ import { UpdateResourceDto } from './dto/update-resource.dto';
  * crisis guide off the site, or putting an unreviewed one on it, is a
  * higher bar than editing a paragraph.
  */
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)
+@StaffRoles('resource_curator')
 @ApiTags('Admin — Resource guides')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires a staff role.' })
+@ApiForbiddenResponse({
+  description:
+    'Requires a moderator or admin role, or the `resource_curator` staff role (publish, unpublish and delete stay admin-only).',
+})
 @Controller('admin/resources')
 export class AdminResourcesController {
   constructor(private readonly adminResources: AdminResourcesService) {}
@@ -115,7 +120,10 @@ export class AdminResourcesController {
     return this.adminResources.review(id, dto, user.userId);
   }
 
+  // Narrowed back to the account tier: the empty @StaffRoles() overrides the
+  // class-level grant, so RolesOrStaffGuard falls back to @Roles alone here.
   @Post(':id/publish')
+  @StaffRoles()
   @Roles(UserRole.Admin)
   @ApiOperation({ summary: 'Publish a guide to the public library' })
   @ApiOkResponse({ description: 'The published guide.' })
@@ -127,7 +135,10 @@ export class AdminResourcesController {
     return this.adminResources.setPublished(id, true, user.userId);
   }
 
+  // Narrowed back to the account tier: the empty @StaffRoles() overrides the
+  // class-level grant, so RolesOrStaffGuard falls back to @Roles alone here.
   @Post(':id/unpublish')
+  @StaffRoles()
   @Roles(UserRole.Admin)
   @ApiOperation({ summary: 'Take a guide off the public library' })
   @ApiOkResponse({ description: 'The unpublished guide.' })
@@ -139,7 +150,10 @@ export class AdminResourcesController {
     return this.adminResources.setPublished(id, false, user.userId);
   }
 
+  // Narrowed back to the account tier: the empty @StaffRoles() overrides the
+  // class-level grant, so RolesOrStaffGuard falls back to @Roles alone here.
   @Delete(':id')
+  @StaffRoles()
   @Roles(UserRole.Admin)
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Delete a guide' })

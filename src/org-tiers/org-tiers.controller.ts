@@ -14,8 +14,9 @@ import {
 } from '@nestjs/common';
 import { Public } from '../auth/decorators/public.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { CreateOrgTierDto } from './dto/create-org-tier.dto';
 import { UpdateOrgTierDto } from './dto/update-org-tier.dto';
@@ -62,8 +63,9 @@ export class OrgTiersController {
 @ApiTags('Admin — Org Tiers')
 @ApiCookieAuth()
 @Controller('admin/org-tiers')
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Admin)
+@StaffRoles('partnerships')
 export class AdminOrgTiersController {
   constructor(private readonly orgTiersService: OrgTiersService) {}
 
@@ -71,7 +73,9 @@ export class AdminOrgTiersController {
   @ApiOperation({ summary: 'List all organisation tiers (published or not)' })
   @ApiOkResponse({ description: 'Every tier in display order.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiForbiddenResponse({
+    description: 'Requires the admin role, or the `partnerships` staff role.',
+  })
   list() {
     return this.orgTiersService.listAll();
   }
@@ -80,7 +84,9 @@ export class AdminOrgTiersController {
   @ApiOperation({ summary: 'Create an organisation tier' })
   @ApiCreatedResponse({ description: 'The created tier.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiForbiddenResponse({
+    description: 'Requires the admin role, or the `partnerships` staff role.',
+  })
   @ApiConflictResponse({
     description: 'Could not allocate a unique tier slug.',
   })
@@ -92,7 +98,9 @@ export class AdminOrgTiersController {
   @ApiOperation({ summary: 'Update an organisation tier' })
   @ApiOkResponse({ description: 'The updated tier.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiForbiddenResponse({
+    description: 'Requires the admin role, or the `partnerships` staff role.',
+  })
   @ApiNotFoundResponse({ description: 'The tier does not exist.' })
   update(
     @Param('id', ParseUUIDPipe) id: string,
@@ -106,7 +114,9 @@ export class AdminOrgTiersController {
   @ApiOperation({ summary: 'Delete an organisation tier' })
   @ApiNoContentResponse({ description: 'The tier was deleted.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiForbiddenResponse({
+    description: 'Requires the admin role, or the `partnerships` staff role.',
+  })
   @ApiNotFoundResponse({ description: 'The tier does not exist.' })
   remove(@Param('id', ParseUUIDPipe) id: string) {
     return this.orgTiersService.remove(id);

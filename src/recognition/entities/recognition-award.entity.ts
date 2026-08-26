@@ -35,6 +35,20 @@ export class RecognitionAward {
   @Column({ type: 'text', nullable: true })
   context!: string | null;
 
+  /**
+   * The member has hidden this badge from how other people see them (SUS-04).
+   * Read path: their OWN recognition still returns the badge, flagged
+   * `hiddenFromProfile` so the badges page can show it as hidden; another
+   * member's view of them omits the row entirely
+   * (`RecognitionService.getForUser`, `includePerks = false`). Default false:
+   * a badge you earn is visible until you say otherwise.
+   *
+   * Before this column, the toggle in `BadgeDrawer` wrote to `localStorage`
+   * and its own help text admitted it changed nothing for anyone else.
+   */
+  @Column({ type: 'boolean', default: false })
+  hiddenFromProfile!: boolean;
+
   @CreateDateColumn({ type: 'timestamptz' })
   awardedAt!: Date;
 }

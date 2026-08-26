@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -102,6 +103,7 @@ export class AdminCommunityModeratorsService {
    *
    *  - 404 if `memberId` is not on this community's roster (a moderator is a
    *    promotion of an existing member, never a way to force-add someone).
+   *  - 403 if the target is the caller. See below.
    *  - 400 if the target is the owner — the founder is already the community's
    *    root moderator and their role is immovable (see the class doc).
    *  - Idempotent: re-adding an existing moderator is a no-op that returns the
@@ -114,6 +116,31 @@ export class AdminCommunityModeratorsService {
     actorUserId: string,
   ): Promise<AdminCommunityModeratorDTO> {
     const community = await this.loadOr404(slug);
+
+    // NOBODY APPOINTS THEMSELVES. A self-appointment is not a delegation, and
+    // this route is the shortest path from "holds a grant" to "reads a private
+    // room": since OPS-03 a plain member holding the additive `communities`
+    // grant can call this, so without the check they could join any open
+    // community and hand themselves its roster, its bans, its scoped reports
+    // and its members-only posts, with the governance log recording them as
+    // both the actor and the target. Same reasoning as
+    // `VolunteeringService.confirmCompletion`, which refuses to let anyone
+    // attest their own hours: the whole value of the appointment is that
+    // somebody else stood behind it.
+    //
+    // This binds a platform ADMIN too, deliberately. An admin can reach the
+    // same end state in two steps (reassign ownership to themselves, or have a
+    // second admin promote them), so the rule costs them nothing they cannot
+    // do; what it buys is an invariant with no exception clause and a
+    // governance trail where the actor and the target on a promotion are never
+    // the same person. A rule that bends for the most privileged caller is the
+    // one nobody can reason about later.
+    if (memberId === actorUserId) {
+      throw new ForbiddenException(
+        'Someone else has to appoint you as a moderator of this community',
+      );
+    }
+
     const membership = await this.membershipOr404(community.id, memberId);
 
     if (membership.role === RosterRole.Owner) {

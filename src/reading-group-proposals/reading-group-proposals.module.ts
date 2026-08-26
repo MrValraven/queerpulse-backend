@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { CommunitiesModule } from '../communities/communities.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { Profile } from '../users/entities/profile.entity';
@@ -14,7 +15,15 @@ import { ReadingGroupProposalsService } from './reading-group-proposals.service'
   // admin read model can resolve proposer refs — same pattern as
   // `AdminInvitesModule`.
   imports: [
-    TypeOrmModule.forFeature([ReadingGroupProposal, Profile]),
+    TypeOrmModule.forFeature([
+      // Read-only, and only for `RolesOrStaffGuard` on this module's admin
+      // controllers: it resolves the caller's additive staff grants when their
+      // account tier alone does not satisfy `@Roles(...)`. Same registration
+      // precedent as `HousingListingsModule` for `HousingModerationGuard`.
+      UserStaffRole,
+      ReadingGroupProposal,
+      Profile,
+    ]),
     // `CommunitiesService.create` — approving a proposal builds the real
     // community the member asked for, owned by them (LOC-19), reusing that
     // service rather than reimplementing slug allocation, the ref sequence and

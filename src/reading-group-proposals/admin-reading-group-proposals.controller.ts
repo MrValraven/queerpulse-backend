@@ -23,8 +23,9 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminReadingGroupProposalsService } from './admin-reading-group-proposals.service';
 import { DecideReadingGroupProposalDto } from './dto/decide-reading-group-proposal.dto';
@@ -46,13 +47,15 @@ import { ListAdminReadingGroupProposalsQuery } from './dto/list-admin-reading-gr
  *
  * The member-facing write stays on `ReadingGroupProposalsController`.
  */
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)
+@StaffRoles('communities')
 @ApiTags('Admin — Reading-group proposals')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
 @ApiForbiddenResponse({
-  description: 'Requires the moderator or admin role.',
+  description:
+    'Requires a moderator or admin role, or the `communities` staff role.',
 })
 @Controller('admin/reading-group-proposals')
 export class AdminReadingGroupProposalsController {

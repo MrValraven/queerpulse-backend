@@ -164,6 +164,22 @@ export class CommunityCard {
   @Column({ type: 'boolean', default: false })
   allowsPronouns!: boolean;
 
+  // Whether a HOLDER may put their own card back in date once it is close to
+  // expiry, without an owner running the roster bulk issue.
+  //
+  // OFF by default, on the same reasoning as the photo and pronoun switches
+  // above: who holds a valid credential is the issuing community's deliberate
+  // choice, and an existing programme must not start handing out renewals
+  // because the platform shipped a feature. A community that turns it on is
+  // saying "staying on our roster is the only condition", which is exactly
+  // what `MembershipCardsService.renewOwnCard` then checks, live, on every
+  // renewal.
+  //
+  // It never reaches a suspended or revoked card. An issuer withdrew those on
+  // purpose, and only an issuer can undo it.
+  @Column({ type: 'boolean', default: false })
+  allowsSelfRenew!: boolean;
+
   // The three-letter serial prefix, derived once from the community name at
   // programme creation and frozen thereafter so serials stay stable.
   @Column({ type: 'varchar', length: 3 })

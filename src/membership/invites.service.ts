@@ -5,6 +5,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { RecognitionEntitlementsService } from '../recognition/recognition-entitlements.service';
+import { DEFAULT_INVITE_MONTHLY_QUOTA } from '../recognition/recognition.catalog';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { randomBytes } from 'node:crypto';
@@ -79,6 +81,7 @@ export class InvitesService {
     private readonly usersService: UsersService,
     private readonly dataSource: DataSource,
     private readonly config: ConfigService,
+    private readonly recognitionEntitlements: RecognitionEntitlementsService,
   ) {}
 
   async createInvite(
@@ -130,7 +133,9 @@ export class InvitesService {
    * Mints the invite that a join-request approval hands to the applicant, in
    * the CALLER'S transaction so the approval and the invite commit or roll back
    * together (no "approved but no invite" stuck state). Returns the id as well
-   * as the code because the caller records it on `join_requests.invite_id`.
+   * as the code because the caller records it on `join_requests.invite_id`, and
+   * the expiry because the review queue prints how long the reviewer has to
+   * hand the link over.
    *
    * Also used by `GenesisService` for the one-time founder bootstrap invite,
    * which needs identical semantics (quota-exempt, email-pinned, minted in the
@@ -153,7 +158,7 @@ export class InvitesService {
     manager: EntityManager,
     inviterId: string,
     email: string,
-  ): Promise<{ id: string; code: string }> {
+  ): Promise<{ id: string; code: string; expiresAt: Date | null }> {
     const saved = await this.mintInvite(
       manager,
       inviterId,
@@ -162,7 +167,7 @@ export class InvitesService {
       // personal endorsement, so redeeming it must not auto-vouch them.
       { email, note: null, vouch: null, skipQuota: true, personal: false },
     );
-    return { id: saved.id, code: saved.code };
+    return { id: saved.id, code: saved.code, expiresAt: saved.expiresAt };
   }
 
   private async mintInvite(
@@ -186,7 +191,13 @@ export class InvitesService {
     const invite = manager.create(Invite, {
       inviterId,
       code,
-      email: fields.email,
+      // Normalised on write so the stored value is the canonical form the
+      // sent-invites list renders and `validateInviteForSignup` compares
+      // against. That comparison already lowercases both sides, so casing was
+      // never able to defeat the pin; storing it normalised keeps the value the
+      // member reads back identical to the one that will be matched, and keeps
+      // the same shape as `hashSuppressedEmail` (trim + lowercase).
+      email: fields.email ? fields.email.trim().toLowerCase() : null,
       note: fields.note,
       vouch: fields.vouch,
       personal: fields.personal,
@@ -360,6 +371,62 @@ export class InvitesService {
     if (!invite) {
       throw new NotFoundException('Invite not found');
     }
+    const refreshed = await this.refreshExpiredInvite(invite, now);
+    // Just-refreshed to Pending with a future expiry, so it resolves to 'valid'
+    // and is never 'used' — acceptedBy is null.
+    return toMyInviteView(refreshed, now);
+  }
+
+  /**
+   * Re-mint an approval-minted invite ADDRESSED BY ITS ROW ID, with no
+   * ownership scoping — the admin counterpart to `resendInvite`.
+   *
+   * It exists because `resendInvite` is scoped to `{ code, inviterId }`, and
+   * `createInviteForApproval` records the APPROVING reviewer as the inviter.
+   * A second moderator picking up "what happened to this applicant?" therefore
+   * had no way at all to revive a lapsed approval invite: their resend would
+   * 404, indistinguishable from a code that never existed. Same asymmetry, and
+   * the same answer, as `AdminInvitesService.revoke` next door.
+   *
+   * Deliberately NOT exposed on a route of its own: the only caller is
+   * `JoinRequestsService.reissueInvite`, which reaches it through the
+   * moderator/admin-guarded join-request queue and has already established that
+   * this invite belongs to an approved request. Guards, statuses and the
+   * conditional write are `resendInvite`'s, shared verbatim through
+   * `refreshExpiredInvite`.
+   */
+  async reissueApprovalInvite(inviteId: string): Promise<Invite> {
+    const now = new Date();
+    const invite = await this.invites.findOne({ where: { id: inviteId } });
+    if (!invite) {
+      throw new NotFoundException('Invite not found');
+    }
+    return this.refreshExpiredInvite(invite, now);
+  }
+
+  /**
+   * The shared body of both re-mint paths: assert the invite is EXPIRED (the
+   * only resendable state), reset `expires_at` to now + INVITE_TTL, flip the
+   * status back to Pending, and return the re-read row.
+   *
+   * Ownership is the CALLER'S business — by the time a row reaches here it has
+   * already been fetched by whatever key that caller is entitled to use.
+   *
+   * Guards, all surfacing as HTTP:
+   *  - 409 if it was accepted (redeemed — resending would re-open a used
+   *    invite), revoked (a revoke is deliberate and stays revoked), or still
+   *    valid (nothing to resend yet).
+   *
+   * The write is a conditional update guarded on the row still being resendable
+   * (status IN pending/expired). A pending row can be past its `expires_at` but
+   * not yet swept — it resolves to 'expired' and is resendable; a redemption
+   * racing the resend flips it to Accepted, the loser sees `affected === 0` and
+   * re-reads the true terminal state to report (mirrors `revokeInvite`).
+   */
+  private async refreshExpiredInvite(
+    invite: Invite,
+    now: Date,
+  ): Promise<Invite> {
     const status = resolveInviteStatus(invite, now);
     if (status === 'used') {
       throw new ConflictException(
@@ -384,7 +451,6 @@ export class InvitesService {
       // unexpired row is still `Pending` in the DB; a swept one is `Expired`.
       {
         id: invite.id,
-        inviterId,
         status: In([InviteStatus.Pending, InviteStatus.Expired]),
       },
       { status: InviteStatus.Pending, expiresAt: refreshedExpiry },
@@ -407,19 +473,21 @@ export class InvitesService {
     }
 
     const resent = await this.invites.findOne({ where: { id: invite.id } });
-    // Just-refreshed to Pending with a future expiry, so it resolves to 'valid'
-    // and is never 'used' — acceptedBy is null.
-    return toMyInviteView(resent!, now);
+    if (!resent) {
+      throw new NotFoundException('Invite not found');
+    }
+    return resent;
   }
 
   // Read-only quota snapshot for the compose page's "N invites available this
   // month" panel. Deliberately takes NO row lock (unlike enforcement) — a stale
   // read here at worst shows a number one off for a moment, and the real POST
   // still serializes through the locked check. Reuses resolveMonthlyLimit +
-  // currentMonthStart so the displayed number matches the enforced one.
+  // currentMonthStart (and the same recognition bonus) so the displayed number
+  // matches the enforced one.
   async getQuota(inviterId: string): Promise<InviteQuotaView> {
     const now = new Date();
-    const [inviter, used, memberCount] = await Promise.all([
+    const [inviter, used, memberCount, levelBonus] = await Promise.all([
       this.usersService.findById(inviterId),
       this.invites.count({
         where: {
@@ -428,8 +496,9 @@ export class InvitesService {
         },
       }),
       this.usersService.countActiveMembers(),
+      this.recognitionEntitlements.getInviteQuotaBonus(inviterId),
     ]);
-    const limit = this.resolveMonthlyLimit(inviter);
+    const limit = this.resolveMonthlyLimit(inviter, levelBonus);
     return toInviteQuotaView(limit, used, nextMonthStart(now), memberCount);
   }
 
@@ -510,14 +579,36 @@ export class InvitesService {
     }
   }
 
-  // Per-user override wins; NULL (or a missing user) falls back to the global
-  // default configured via INVITE_MONTHLY_QUOTA. Shared by the enforcement path
-  // (assertWithinMonthlyQuota) and the read path (getQuota) so they never drift.
-  private resolveMonthlyLimit(inviter: User | null): number {
-    return (
-      inviter?.inviteMonthlyQuota ??
-      this.config.get<number>('app.inviteMonthlyQuota', 5)
+  /**
+   * The member's monthly invite limit.
+   *
+   * PRECEDENCE, highest first:
+   *   1. the per-user `inviteMonthlyQuota` override, which an admin set
+   *      deliberately for this one member and which therefore still wins
+   *      outright, bonus included;
+   *   2. the configured base (INVITE_MONTHLY_QUOTA, default
+   *      `DEFAULT_INVITE_MONTHLY_QUOTA`) plus `levelBonus`, the recognition
+   *      perk the member has unlocked AND claimed.
+   *
+   * `levelBonus` comes from `RecognitionEntitlementsService`, which reads it
+   * out of `INVITE_QUOTA_BONUS_BY_LEVEL` — the same constant the perks page
+   * renders its copy from. Before SUS-04 this method took no recognition input
+   * at all while the perks catalogue advertised "your allowance increases from
+   * 1 to 2", so the advertised number was fiction in both directions.
+   *
+   * Shared by the enforcement path (assertWithinMonthlyQuota) and the read path
+   * (getQuota) so the number shown and the number enforced never drift.
+   */
+  private resolveMonthlyLimit(
+    inviter: User | null,
+    levelBonus: number,
+  ): number {
+    if (inviter?.inviteMonthlyQuota != null) return inviter.inviteMonthlyQuota;
+    const base = this.config.get<number>(
+      'app.inviteMonthlyQuota',
+      DEFAULT_INVITE_MONTHLY_QUOTA,
     );
+    return base + levelBonus;
   }
 
   // Enforces "N invites per calendar month". Counts every invite the member
@@ -529,14 +620,19 @@ export class InvitesService {
     manager: EntityManager,
     inviterId: string,
   ): Promise<void> {
-    // Lock the inviter's row for the duration of the transaction. Per-user
-    // override wins; NULL (or a missing user) falls back to the global default
-    // configured via INVITE_MONTHLY_QUOTA (itself defaulting to 5).
+    // Read the recognition bonus BEFORE taking the lock: it touches only the
+    // recognition tables, nothing in this transaction writes them, and doing
+    // it first keeps the inviter row locked for as short a time as possible.
+    const levelBonus =
+      await this.recognitionEntitlements.getInviteQuotaBonus(inviterId);
+    // Lock the inviter's row for the duration of the transaction. See
+    // `resolveMonthlyLimit` for how the per-user override, the configured base
+    // and the recognition bonus combine.
     const inviter = await manager.getRepository(User).findOne({
       where: { id: inviterId },
       lock: { mode: 'pessimistic_write' },
     });
-    const limit = this.resolveMonthlyLimit(inviter);
+    const limit = this.resolveMonthlyLimit(inviter, levelBonus);
     const now = new Date();
     const monthStart = currentMonthStart(now);
     const used = await manager.count(Invite, {

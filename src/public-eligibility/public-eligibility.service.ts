@@ -268,6 +268,59 @@ export class PublicEligibilityService {
     return [...counts.values()].reduce((sum, count) => sum + count, 0);
   }
 
+  /**
+   * Gatherings this member hosted or co-hosted that ACTUALLY HAPPENED and
+   * drew somebody: published, public, `startAt` already in the past, and
+   * carrying at least one "going" RSVP from a person who is neither the
+   * event's host nor this member.
+   *
+   * Deliberately stricter than `hostedOpenEventTimestamps` above, and kept
+   * separate from it. `hostedOpenEvents` answers "is this member visible
+   * enough to have a public profile", where an announced-but-future gathering
+   * is honest evidence. This answers "did this member do the work", which is
+   * what recognition XP pays for, and XP converts into monthly invitations
+   * (`INVITE_QUOTA_BONUS_BY_LEVEL`). Creating a published, public event is a
+   * single unguarded API call, and one recurrence rule expands to 52 rows, so
+   * the looser definition would have handed a brand-new account the whole
+   * `hosting` XP cap for free. The two requirements this adds cost a farmer
+   * real calendar time and a second person's cooperation per gathering.
+   *
+   * Changing THIS definition does not move public-profile eligibility, and
+   * changing that one does not move XP. That separation is the point.
+   */
+  async countHeldGatherings(userId: string, now = new Date()): Promise<number> {
+    const cohosted = await this.cohosts.find({
+      where: { userId },
+      select: ['eventId'],
+    });
+    const cohostIds = cohosted.map((row) => row.eventId);
+    return this.events
+      .createQueryBuilder('event')
+      .where('event.status = :status', { status: EventStatus.Published })
+      .andWhere('event.visibility = :visibility', {
+        visibility: EventVisibility.Public,
+      })
+      .andWhere('event.startAt < :now', { now })
+      .andWhere(
+        new Brackets((qb) => {
+          qb.where('event.hostId = :userId', { userId });
+          if (cohostIds.length)
+            qb.orWhere('event.id IN (:...cohostIds)', { cohostIds });
+        }),
+      )
+      .andWhere(
+        `EXISTS (
+           SELECT 1 FROM event_rsvps rsvp
+           WHERE rsvp.event_id = event.id
+             AND rsvp.status = :goingStatus
+             AND rsvp.user_id IS DISTINCT FROM event.host_id
+             AND rsvp.user_id <> :userId
+         )`,
+        { goingStatus: RsvpStatus.Going, userId },
+      )
+      .getCount();
+  }
+
   private async attendedEventCount(userId: string, now: Date): Promise<number> {
     return this.rsvps
       .createQueryBuilder('rsvp')

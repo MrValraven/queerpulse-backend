@@ -28,8 +28,9 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminResourceListingsService } from './admin-resource-listings.service';
 import { CreateResourceListingDto } from './dto/create-resource-listing.dto';
@@ -44,12 +45,15 @@ import { UpdateResourceListingDto } from './dto/update-resource-listing.dto';
  * decision queue, publishing a real organisation's contact details is an
  * admin-only act (mirrors `AdminOrgTiersController`).
  */
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Admin)
+@StaffRoles('resource_curator')
 @ApiTags('Admin — Resource listings')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires the admin role.' })
+@ApiForbiddenResponse({
+  description: 'Requires the admin role, or the `resource_curator` staff role.',
+})
 @Controller('admin/resource-listings')
 export class AdminResourceListingsController {
   constructor(

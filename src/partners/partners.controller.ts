@@ -14,11 +14,14 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { Feature } from '../common/feature.decorator';
+import { QueueAssignmentDto } from '../common/queue-assignment.dto';
 import { UserRole } from '../users/entities/user.entity';
 import { CreatePartnerApplicationDto } from './dto/create-partner-application.dto';
+import { ListPartnerApplicationsQuery } from './dto/list-partner-applications.query';
 import { ListPartnersQuery } from './dto/list-partners.query';
 import { TriagePartnerApplicationDto } from './dto/triage-partner-application.dto';
 import { UpdatePartnerAdminDto } from './dto/update-partner-admin.dto';
@@ -102,8 +105,9 @@ export class PartnerApplicationsController {
 @ApiTags('Admin — Partners')
 @ApiCookieAuth()
 @Controller('admin/partners')
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Admin)
+@StaffRoles('partnerships')
 export class AdminPartnersController {
   constructor(private readonly partnersService: PartnersService) {}
 
@@ -111,7 +115,9 @@ export class AdminPartnersController {
   @ApiOperation({ summary: 'List approved partners for admin editing' })
   @ApiOkResponse({ description: 'Every approved partner, newest first.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiForbiddenResponse({
+    description: 'Requires the admin role, or the `partnerships` staff role.',
+  })
   list() {
     return this.partnersService.listApproved();
   }
@@ -122,16 +128,69 @@ export class AdminPartnersController {
   @ApiOperation({ summary: 'List pending partner applications' })
   @ApiOkResponse({ description: 'The pending-triage application queue.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
-  listApplications() {
-    return this.partnersService.listApplications();
+  @ApiForbiddenResponse({
+    description: 'Requires the admin role, or the `partnerships` staff role.',
+  })
+  listApplications(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: ListPartnerApplicationsQuery,
+  ) {
+    return this.partnersService.listApplications({
+      // `me` is resolved here, from the session, so the wire never carries a
+      // reviewer's id and one reviewer cannot ask what another is holding.
+      // Mirrors `AdminVerificationController.listRequests` exactly.
+      assignedTo:
+        query.assignedTo === 'me'
+          ? user.userId
+          : (query.assignedTo ?? undefined),
+    });
+  }
+
+  /**
+   * Claim or release a partner application (OPS-04).
+   *
+   * The same route shape, body and semantics as
+   * `PATCH /mod/reports/:id/assignment`: self-assign only, 409 when someone
+   * else holds it, release only what you hold. Declared before
+   * `PATCH applications/:id` for the literal-before-parameterized convention
+   * this controller already follows, and it inherits the class gate unchanged
+   * (`@Roles(Admin)` union `@StaffRoles('partnerships')`) — claiming is part
+   * of working the queue, so whoever may triage an application may hold one.
+   */
+  @Patch('applications/:id/assignment')
+  @ApiOperation({ summary: 'Claim or release a partner application' })
+  @ApiOkResponse({ description: 'The updated partner application.' })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({
+    description: 'Requires the admin role, or the `partnerships` staff role.',
+  })
+  @ApiNotFoundResponse({
+    description: 'The partner application does not exist.',
+  })
+  @ApiConflictResponse({
+    description:
+      'Already claimed by someone else, or it changed while you were acting on it.',
+  })
+  setApplicationAssignment(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: QueueAssignmentDto,
+  ) {
+    return this.partnersService.setApplicationAssignment(
+      id,
+      user.userId,
+      user.role,
+      dto.assign,
+    );
   }
 
   @Patch('applications/:id')
   @ApiOperation({ summary: 'Approve or reject a partner application' })
   @ApiOkResponse({ description: 'The triaged partner application.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiForbiddenResponse({
+    description: 'Requires the admin role, or the `partnerships` staff role.',
+  })
   @ApiNotFoundResponse({
     description: 'The partner application does not exist.',
   })
@@ -146,7 +205,9 @@ export class AdminPartnersController {
   @ApiOperation({ summary: "Update a partner's featured/testimonial fields" })
   @ApiOkResponse({ description: 'The updated partner.' })
   @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-  @ApiForbiddenResponse({ description: 'Requires an admin role.' })
+  @ApiForbiddenResponse({
+    description: 'Requires the admin role, or the `partnerships` staff role.',
+  })
   @ApiNotFoundResponse({ description: 'The partner does not exist.' })
   @ApiConflictResponse({
     description: 'A testimonial quote requires an author.',

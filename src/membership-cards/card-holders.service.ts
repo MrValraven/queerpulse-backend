@@ -6,6 +6,7 @@ import { CommunityMember } from '../communities/entities/community-member.entity
 import { CommunityMembershipService } from '../communities/community-membership.service';
 import { Profile } from '../users/entities/profile.entity';
 import { toImageUrl } from '../common/image-url';
+import { CardScanLogService } from './card-scan-log.service';
 import { effectiveCardStatus } from './card-status';
 import { CardProgramsService } from './card-programs.service';
 import { CardTokenService } from './card-token.service';
@@ -23,6 +24,7 @@ export class CardHoldersService {
     private readonly programs: CardProgramsService,
     private readonly cards: MembershipCardsService,
     private readonly tokens: CardTokenService,
+    private readonly scanLog: CardScanLogService,
     @InjectRepository(Community)
     private readonly communities: Repository<Community>,
     @InjectRepository(CommunityMember)
@@ -94,8 +96,19 @@ export class CardHoldersService {
       roleRows.map((row) => [row.userId, row.role as string]),
     );
 
+    // Per-CARD verification COUNTS, batched the same way. This roster is
+    // already owner-or-mod gated, and a card verified far more often than the
+    // rest of the roster is the leaked-or-shared-card signal. It stops at the
+    // count: a "last verified at" beside a named holder's photo and pronouns
+    // would be an attendance log for that person, so the query does not even
+    // compute one. The programme-wide aggregate keeps its timestamp.
+    const tallyByCardId = await this.scanLog.talliesForCards(
+      cards.map((card) => card.id),
+    );
+
     return cards.map((card) => {
       const profile = profileByUserId.get(card.userId);
+      const tally = tallyByCardId.get(card.id);
       return toIssuerCard(
         card,
         program,
@@ -115,6 +128,7 @@ export class CardHoldersService {
           pronouns: profile?.pronouns ?? null,
           role: roleByUserId.get(card.userId) ?? 'member',
           token: this.tokenFor(card),
+          verificationCount: tally?.count ?? 0,
         },
       );
     });

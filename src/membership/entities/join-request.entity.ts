@@ -17,6 +17,7 @@ import {
   Index,
   PrimaryGeneratedColumn,
 } from 'typeorm';
+import { QueueAssignmentColumns } from '../../common/queue-assignment.columns';
 
 export enum PlatformJoinRequestStatus {
   Pending = 'pending',
@@ -37,8 +38,14 @@ export enum PlatformJoinRequestStatus {
 // `lower("email"), "status"` expression index the public submit path needs —
 // that one has no decorator form (TypeORM cannot express a function index).
 @Index('IDX_join_requests_status_created_at', ['status', 'createdAt'])
+// OPS-04: backs the queue's "Assigned to me" filter (`list`'s `assignedTo`
+// narrowing), a plain equality on this column. Named here rather than on the
+// shared `QueueAssignmentColumns` base because a Postgres index name is
+// global and one declared on the base would collide across every table that
+// extends it.
+@Index('IDX_join_requests_assigned_staff_id', ['assignedStaffId'])
 @Entity('join_requests')
-export class PlatformJoinRequest {
+export class PlatformJoinRequest extends QueueAssignmentColumns {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
@@ -133,6 +140,28 @@ export class PlatformJoinRequest {
   @Index('IDX_join_requests_invite_id')
   @Column({ type: 'uuid', nullable: true })
   inviteId!: string | null;
+
+  /**
+   * SHA-256 (hex) of the opaque status token minted at submit time, which is
+   * what `GET /join-requests/status?token=...` resolves.
+   *
+   * HASHED, never stored in the clear, for the same reason refresh tokens are
+   * (`AuthService.hashToken`): the plaintext is a bearer credential for a
+   * public, unauthenticated read, so a leaked database dump must not hand an
+   * attacker a working set of lookup tokens. The plaintext exists exactly once,
+   * in the 201 body of `POST /join-requests`, and is never recoverable
+   * afterwards — the platform sends the applicant no email, so it cannot be
+   * re-delivered.
+   *
+   * Nullable: every row written before this column existed has no token, and
+   * those applicants simply have no status page. A unique index
+   * (`UQ_join_requests_status_token_hash`) guarantees one token resolves to at
+   * most one request; Postgres does not treat NULLs as equal, so the legacy
+   * rows do not collide with each other.
+   */
+  @Index('UQ_join_requests_status_token_hash', { unique: true })
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  statusTokenHash!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

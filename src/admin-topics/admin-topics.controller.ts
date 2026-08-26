@@ -25,8 +25,9 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminTopicsService } from './admin-topics.service';
 import { CreateTopicDto } from './dto/create-topic.dto';
@@ -53,10 +54,14 @@ import { UpdateTopicDto } from './dto/update-topic.dto';
 @ApiTags('Admin — Topics')
 @ApiCookieAuth('access_token')
 @Controller('admin/topics')
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)
+@StaffRoles('communities')
 @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
-@ApiForbiddenResponse({ description: 'Requires a moderator or admin role.' })
+@ApiForbiddenResponse({
+  description:
+    'Requires a moderator or admin role, or the `communities` staff role.',
+})
 export class AdminTopicsController {
   constructor(private readonly adminTopics: AdminTopicsService) {}
 

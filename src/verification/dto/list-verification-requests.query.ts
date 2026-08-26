@@ -36,4 +36,18 @@ export class ListVerificationRequestsQuery {
   @IsOptional()
   @IsString()
   cursor?: string;
+
+  /**
+   * OPS-04's "Assigned to me" filter, as a closed set rather than a user id.
+   *
+   * `me` resolves to the CALLER server-side and `unassigned` to a NULL
+   * assignee. Deliberately not "any user id": the queue only ever needs
+   * "mine" and "nobody's", and accepting an arbitrary id would turn a filter
+   * into a way to enumerate what a named colleague is working on. Part of the
+   * keyset, like every other narrowing here, so a cursor issued under one
+   * value must not be reused under another.
+   */
+  @IsOptional()
+  @IsIn(['me', 'unassigned'])
+  assignedTo?: 'me' | 'unassigned';
 }

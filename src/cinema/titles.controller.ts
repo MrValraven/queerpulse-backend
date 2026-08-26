@@ -44,7 +44,9 @@ export class TitlesController {
 
   @Get()
   @ApiOperation({
-    summary: 'List published cinema titles (or all titles for moderators).',
+    summary:
+      'List published cinema titles (or every title, drafts and failed ' +
+      'ingests included, for a maintainer).',
   })
   @ApiOkResponse({
     description:
@@ -54,7 +56,9 @@ export class TitlesController {
       '`pageSize` is the last one.',
   })
   @ApiForbiddenResponse({
-    description: 'all=true requires a moderator or admin role.',
+    description:
+      'all=true requires the moderator or admin role, or the editorial staff ' +
+      'grant (see staff-roles.registry.ts).',
   })
   list(@CurrentUser() user: CurrentUserData, @Query() query: ListTitlesQuery) {
     return this.cinema.listTitles(

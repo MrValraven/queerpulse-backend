@@ -2,7 +2,21 @@ import {
   PlatformJoinRequest,
   PlatformJoinRequestStatus,
 } from './entities/join-request.entity';
+import { PublicInviteStatus } from './invite-response';
 import { JoinRequestFlag } from './join-request-flags';
+
+/**
+ * The approval-minted invite as the review queue needs to see it: the code to
+ * hand over, plus the two things that decide whether handing it over is still
+ * worth anything. Resolved by the caller through `resolveInviteStatus`, the
+ * same lazily-computed status the invite landing page and the member's own
+ * invite list read, so a lapsed-but-unswept row never reports itself valid.
+ */
+export interface JoinRequestInviteRef {
+  code: string;
+  status: PublicInviteStatus;
+  expiresAt: Date | null;
+}
 
 /**
  * The admin-queue view of a join request. Mapped explicitly (never the raw
@@ -31,7 +45,33 @@ export interface JoinRequestView {
   reviewedAt: Date | null;
   reviewedBy: string | null;
   declineReason: string | null;
+  /**
+   * OPS-04. The reviewer currently working this request, or null when nobody
+   * has claimed it. Distinct from `reviewedBy`, which is who DECIDED it: a
+   * claim says "I am looking at this now" so a second reviewer does not open
+   * the same applicant, and it is released again if they walk away.
+   */
+  assignedStaffId: string | null;
+  /** Only set when `assignedStaffId` is. "Deleted member" after that
+   *  reviewer's erasure (see `queueAssigneeName`). */
+  assignedStaffName?: string;
+  /**
+   * When this request should have been answered by, stamped at submission from
+   * `JOIN_REQUEST_REVIEW_WINDOW_MS`. NULL means NO CLOCK, never overdue:
+   * requests decided before OPS-04 existed carry none, and the queue reads a
+   * null as nothing to say.
+   */
+  dueAt: Date | null;
   inviteCode: string | null;
+  /**
+   * Lifecycle of the approval-minted invite, computed at read time. Null when
+   * no invite was minted (a pending, waitlisted or declined request). Without
+   * it the queue can print a link it has no way of knowing is already dead:
+   * approval invites lapse after 7 days, and nothing else on this view says so.
+   */
+  inviteStatus: PublicInviteStatus | null;
+  /** ISO-serialisable expiry of that invite, or null when it has none. */
+  inviteExpiresAt: Date | null;
   /**
    * Confidence-tiered triage signals computed at read time from the current
    * fetched batch (see `computeBatchFlags`) — never persisted, never used to
@@ -68,15 +108,83 @@ export interface SubmittedJoinRequestView {
   id: string;
   status: PlatformJoinRequestStatus;
   createdAt: Date;
+  /**
+   * The PLAINTEXT status token, returned HERE AND NOWHERE ELSE, ever.
+   *
+   * Only its sha256 hash is stored (`PlatformJoinRequest.statusTokenHash`), so
+   * no later request — not the admin queue, not a re-submission, not a support
+   * lookup — can reproduce this value. This one response is the whole delivery
+   * mechanism, because the platform sends the applicant no email and never
+   * will: if the frontend does not show and persist it at submission time, the
+   * applicant has permanently lost their only route to
+   * `GET /join-requests/status`.
+   */
+  statusToken: string;
+}
+
+/**
+ * What an APPLICANT is told about their own request at
+ * `GET /join-requests/status?token=…`.
+ *
+ * `pending` and `waitlisted` deliberately collapse into ONE public value,
+ * `under_review`. Waitlisting is an internal triage label the review queue
+ * uses to park a request it has not settled; telling an applicant "you were
+ * shelved" communicates a decision that has not been made, and a waitlisted
+ * request can still be approved. From outside, both states are honestly
+ * described by "we are still looking at this", so the public union has three
+ * members and the internal enum keeps its four.
+ */
+export type PublicJoinRequestStatus = 'under_review' | 'approved' | 'declined';
+
+/**
+ * The applicant's own view of their request. NARROW on purpose: it carries the
+ * outcome and nothing else. No name, no email, no city, no submitted message,
+ * no reviewer, no triage flags, no prior-decline count, no id — anyone holding
+ * the token can read this, and the token travels in a URL, so it must not be
+ * worth stealing for anything beyond "what happened to my request".
+ */
+export interface PublicJoinRequestStatusView {
+  status: PublicJoinRequestStatus;
+  /** ISO 8601. When the applicant submitted. */
+  submittedAt: string;
+  /**
+   * ISO 8601, or null while still under review. Null for a WAITLISTED request
+   * too, even though the row carries a `reviewedAt`: a decision timestamp
+   * beside "under review" would give away that the request had been touched
+   * and parked.
+   */
+  decidedAt: string | null;
+  /**
+   * The reviewer's closed-set reason key (`spam_pattern`, `underage`,
+   * `implausible`, `safety_concern`, `other`, …), present ONLY on a decline.
+   * The frontend owns the catalogue that renders it, exactly as the admin
+   * queue does.
+   */
+  declineReason: string | null;
+  /**
+   * The invite CODE minted by an approval — never a URL, because the backend
+   * has no business assuming the frontend's origin or route map (`inviteCode`
+   * on `JoinRequestView` makes the same call). Present ONLY when the request
+   * was approved AND that invite is still redeemable: null once it has been
+   * used, revoked or expired, so the page can say "this invite is no longer
+   * valid" instead of offering a dead link. This is what lets an approved
+   * applicant recover their own way in without anyone emailing it to them.
+   */
+  inviteCode: string | null;
 }
 
 export function toJoinRequestView(
   request: PlatformJoinRequest,
-  inviteCode: string | null,
+  invite: JoinRequestInviteRef | null,
   flags: JoinRequestFlag[] = [],
   priorDeclineCount = 0,
   referenceMemberName: string | null = null,
   referenceMemberSlug: string | null = null,
+  // OPS-04. Resolved by the caller through `optionalQueueAssigneeName` against
+  // a batched profile lookup, so a page of rows costs no extra query per row.
+  // Undefined on an unclaimed request, and on a single just-reviewed row where
+  // the caller has no batch to resolve against.
+  assignedStaffName?: string,
 ): JoinRequestView {
   return {
     id: request.id,
@@ -93,7 +201,12 @@ export function toJoinRequestView(
     reviewedAt: request.reviewedAt,
     reviewedBy: request.reviewedBy,
     declineReason: request.declineReason,
-    inviteCode,
+    assignedStaffId: request.assignedStaffId,
+    ...(assignedStaffName ? { assignedStaffName } : {}),
+    dueAt: request.dueAt,
+    inviteCode: invite?.code ?? null,
+    inviteStatus: invite?.status ?? null,
+    inviteExpiresAt: invite?.expiresAt ?? null,
     flags,
     priorDeclineCount,
     referenceMemberName,
@@ -103,10 +216,55 @@ export function toJoinRequestView(
 
 export function toSubmittedJoinRequestView(
   request: PlatformJoinRequest,
+  statusToken: string,
 ): SubmittedJoinRequestView {
   return {
     id: request.id,
     status: request.status,
     createdAt: request.createdAt,
+    statusToken,
+  };
+}
+
+/**
+ * Collapses the four internal statuses onto the three an applicant is told
+ * about. See `PublicJoinRequestStatus` for why `waitlisted` is not one of
+ * them.
+ */
+export function toPublicJoinRequestStatus(
+  status: PlatformJoinRequestStatus,
+): PublicJoinRequestStatus {
+  switch (status) {
+    case PlatformJoinRequestStatus.Approved:
+      return 'approved';
+    case PlatformJoinRequestStatus.Declined:
+      return 'declined';
+    case PlatformJoinRequestStatus.Pending:
+    case PlatformJoinRequestStatus.Waitlisted:
+    default:
+      return 'under_review';
+  }
+}
+
+/**
+ * Maps a request onto the applicant-facing status view. `inviteCode` is
+ * resolved by the caller (it lives on another table and has its own
+ * redeemability check) and is dropped unless the request was approved, so a
+ * caller mistake cannot leak a code onto a pending row.
+ */
+export function toPublicJoinRequestStatusView(
+  request: PlatformJoinRequest,
+  redeemableInviteCode: string | null,
+): PublicJoinRequestStatusView {
+  const publicStatus = toPublicJoinRequestStatus(request.status);
+  const isDecided = publicStatus === 'approved' || publicStatus === 'declined';
+  return {
+    status: publicStatus,
+    submittedAt: request.createdAt.toISOString(),
+    decidedAt:
+      isDecided && request.reviewedAt ? request.reviewedAt.toISOString() : null,
+    declineReason:
+      publicStatus === 'declined' ? (request.declineReason ?? null) : null,
+    inviteCode: publicStatus === 'approved' ? redeemableInviteCode : null,
   };
 }

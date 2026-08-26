@@ -309,3 +309,20 @@ export function toAdminMemberRole(input: {
     isSystem: input.isSystem,
   };
 }
+
+/**
+ * One member holding at least one additive staff-role grant, for the
+ * `/admin/staff` roster. Deliberately NOT served from `GET /platform/staff`:
+ * that roster is readable by every active member (it badges moderators and
+ * admins across the app), and who holds which functional grant is operational
+ * information for the people running the place, so it stays behind the
+ * admin-only members controller.
+ */
+export interface AdminStaffRoleHolderDTO {
+  id: string;
+  slug: string;
+  firstName: string;
+  lastName: string;
+  platformRole: UserRole;
+  staffRoles: string[];
+}

@@ -38,6 +38,7 @@ import {
   AdminMemberDetailDTO,
   AdminMemberListDTO,
   AdminMemberRoleDTO,
+  AdminStaffRoleHolderDTO,
   FlaggedMemberDTO,
   VouchAvatarDTO,
   VouchGraphNodeDTO,
@@ -204,6 +205,42 @@ export class AdminMembersService {
     );
 
     return { items, total, page, pageSize: ADMIN_MEMBERS_PAGE_SIZE };
+  }
+
+  /**
+   * Everyone holding at least one additive staff-role grant, with the grants
+   * they hold. Two batched queries (the grant table, then the profiles behind
+   * it), never one per holder, matching the rest of this service.
+   *
+   * Admins are NOT listed here unless they were granted a role explicitly:
+   * they are a superset at the guard, so a grant row is never written for
+   * them. The `/admin/staff` page shows them from the platform roster instead.
+   */
+  async listStaffRoleHolders(): Promise<AdminStaffRoleHolderDTO[]> {
+    const grantRows = await this.staffRoles.find({
+      select: ['userId', 'role'],
+    });
+    if (!grantRows.length) return [];
+
+    const grantsByUserId = new Map<string, string[]>();
+    for (const grantRow of grantRows) {
+      const existing = grantsByUserId.get(grantRow.userId);
+      if (existing) existing.push(grantRow.role);
+      else grantsByUserId.set(grantRow.userId, [grantRow.role]);
+    }
+
+    const profileRows = await this.profiles.find({
+      where: { userId: In([...grantsByUserId.keys()]) },
+      relations: { user: true },
+    });
+    return profileRows.map((profileRow) => ({
+      id: profileRow.userId,
+      slug: profileRow.slug,
+      firstName: profileRow.firstName,
+      lastName: profileRow.lastName,
+      platformRole: profileRow.user.role,
+      staffRoles: (grantsByUserId.get(profileRow.userId) ?? []).sort(),
+    }));
   }
 
   async listFlagged(): Promise<FlaggedMemberDTO[]> {

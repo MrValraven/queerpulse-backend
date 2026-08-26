@@ -10,6 +10,7 @@ import { SignupRejectedError } from '../auth/errors/signup-rejected.error';
 import { Invite, InviteStatus } from './entities/invite.entity';
 import { resolveInviteStatus, toPublicInviteView } from './invite-response';
 import { InvitesService } from './invites.service';
+import { RecognitionEntitlementsService } from '../recognition/recognition-entitlements.service';
 
 // NOTE: the `InvitesService.acceptInvite` suite that used to sit here is gone
 // along with the method and the `POST /invites/:code/accept` route. The route
@@ -150,6 +151,13 @@ describe('InvitesService.resolveInvite', () => {
         { provide: UsersService, useValue: users },
         { provide: DataSource, useValue: {} },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        // SUS-04: the invite quota now adds a recognition bonus on top of the
+        // configured base. These suites cover the base/override behaviour, so
+        // the bonus is stubbed at 0 throughout.
+        {
+          provide: RecognitionEntitlementsService,
+          useValue: { getInviteQuotaBonus: jest.fn().mockResolvedValue(0) },
+        },
         { provide: ConfigService, useValue: { get: jest.fn(() => 1) } },
       ],
     }).compile();
@@ -213,6 +221,13 @@ describe('InvitesService.getQuota', () => {
         { provide: UsersService, useValue: users },
         { provide: DataSource, useValue: {} },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        // SUS-04: the invite quota now adds a recognition bonus on top of the
+        // configured base. These suites cover the base/override behaviour, so
+        // the bonus is stubbed at 0 throughout.
+        {
+          provide: RecognitionEntitlementsService,
+          useValue: { getInviteQuotaBonus: jest.fn().mockResolvedValue(0) },
+        },
         { provide: ConfigService, useValue: config },
       ],
     }).compile();
@@ -304,6 +319,13 @@ describe('InvitesService.createInvite', () => {
         { provide: UsersService, useValue: { findById: jest.fn() } },
         { provide: DataSource, useValue: dataSource },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        // SUS-04: the invite quota now adds a recognition bonus on top of the
+        // configured base. These suites cover the base/override behaviour, so
+        // the bonus is stubbed at 0 throughout.
+        {
+          provide: RecognitionEntitlementsService,
+          useValue: { getInviteQuotaBonus: jest.fn().mockResolvedValue(0) },
+        },
         { provide: ConfigService, useValue: config },
       ],
     }).compile();
@@ -509,6 +531,13 @@ describe('InvitesService.listMyInvites', () => {
         { provide: UsersService, useValue: users },
         { provide: DataSource, useValue: {} },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        // SUS-04: the invite quota now adds a recognition bonus on top of the
+        // configured base. These suites cover the base/override behaviour, so
+        // the bonus is stubbed at 0 throughout.
+        {
+          provide: RecognitionEntitlementsService,
+          useValue: { getInviteQuotaBonus: jest.fn().mockResolvedValue(0) },
+        },
         { provide: ConfigService, useValue: { get: jest.fn(() => 1) } },
       ],
     }).compile();
@@ -591,6 +620,13 @@ describe('InvitesService.validateInviteForSignup + claimInvite', () => {
         { provide: UsersService, useValue: usersService },
         { provide: DataSource, useValue: {} },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
+        // SUS-04: the invite quota now adds a recognition bonus on top of the
+        // configured base. These suites cover the base/override behaviour, so
+        // the bonus is stubbed at 0 throughout.
+        {
+          provide: RecognitionEntitlementsService,
+          useValue: { getInviteQuotaBonus: jest.fn().mockResolvedValue(0) },
+        },
         { provide: ConfigService, useValue: { get: jest.fn(() => 1) } },
       ],
     }).compile();

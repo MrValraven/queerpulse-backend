@@ -23,8 +23,9 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminResourceSuggestionsService } from './admin-resource-suggestions.service';
 import { DecideResourceSuggestionDto } from './dto/decide-resource-suggestion.dto';
@@ -40,12 +41,15 @@ import { ListAdminResourceSuggestionsQuery } from './dto/list-admin-resource-sug
  * overrides the class via `Reflector.getAllAndOverride`). The member-facing
  * write stays on `ResourcesController`.
  */
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Admin)
+@StaffRoles('resource_curator')
 @ApiTags('Admin — Resource suggestions')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires the admin role.' })
+@ApiForbiddenResponse({
+  description: 'Requires the admin role, or the `resource_curator` staff role.',
+})
 @Controller('admin/resource-suggestions')
 export class AdminResourceSuggestionsController {
   constructor(

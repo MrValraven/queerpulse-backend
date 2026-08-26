@@ -19,8 +19,15 @@ import {
   CurrentUser,
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
+import { Readable } from 'node:stream';
+import { StorageService } from '../storage/storage.service';
 import { AccountService } from './account.service';
-import { ExportEntry } from './export-archive';
+import { ExportDownload, ExportEntry } from './export-archive';
+import {
+  ExportMediaContribution,
+  ExportMediaReadFailure,
+  buildExportMediaManifest,
+} from './export-media';
 import { DeactivateDto } from './dto/deactivate.dto';
 import { RequestDeletionDto } from './dto/request-deletion.dto';
 import { RequestExportDto } from './dto/request-export.dto';
@@ -60,7 +67,13 @@ import {
 export class AccountController {
   private readonly logger = new Logger(AccountController.name);
 
-  constructor(private readonly accountService: AccountService) {}
+  constructor(
+    private readonly accountService: AccountService,
+    // The member's own uploaded files are streamed into the export zip from
+    // the bucket at DOWNLOAD time — never carried in `data_export_job.data`.
+    // See `streamZip`/`appendStoredEntry`.
+    private readonly storage: StorageService,
+  ) {}
 
   @ApiOperation({ summary: 'Deactivate (reversibly hide) the account.' })
   @ApiCreatedResponse({ description: 'Account deactivated.' })
@@ -202,16 +215,20 @@ export class AccountController {
     // building the whole archive in memory — the exact thing we are avoiding.
     // Express therefore falls back to chunked transfer-encoding, which is also
     // what makes a mid-stream abort detectable by the client (below).
-    await this.streamZip(download.entries, download.modifiedAt, res);
+    await this.streamZip(download, res);
   }
 
   /**
-   * Stream the entries as a zip into an already-headered response.
+   * Stream the download's entries as a zip into an already-headered response.
    *
    * BACKPRESSURE: `archive.pipe(res)` is the whole mechanism — `pipe` stops
    * pulling from the archiver whenever `res.write()` returns false and resumes
    * on `drain`, so a slow client throttles compression instead of growing an
    * unbounded output buffer. We never call `toBuffer()`/`concat` on the zip.
+   * That is also why a `stored` entry is appended as the bucket's own
+   * `Readable` rather than being read into a Buffer first: the member's media
+   * is the one part of the archive big enough for the difference to matter, and
+   * the backpressure chain now reaches all the way back to the bucket.
    *
    * FAILURE AFTER HEADERS: by the time anything in here can fail, `200` plus
    * `Content-Type: application/zip` are already on the wire, so there is no
@@ -223,17 +240,22 @@ export class AccountController {
    * strictly better than a `200 OK` carrying a silently truncated, unopenable
    * `.zip`. The returned promise therefore RESOLVES on failure; it never
    * rejects, deliberately.
+   *
+   * ONE UNREADABLE OBJECT IS NOT A FAILED DOWNLOAD. A member's Art. 20 archive
+   * must not be destroyed because a single bucket object has gone missing, so
+   * an object that cannot be OPENED is logged, skipped, and recorded in
+   * `media/manifest.json` — see `appendMediaEntries`.
    */
   private streamZip(
-    entries: ExportEntry[],
-    modifiedAt: Date,
+    download: Extract<ExportDownload, { kind: 'zip' }>,
     res: Response,
   ): Promise<void> {
     return new Promise<void>((resolve) => {
       const archive = archiver('zip', {
         // Deflate default. The payload is JSON/CSV text and compresses ~10x at
         // this level; level 9 buys single-digit percent for several times the
-        // CPU, on a request that is already synchronous.
+        // CPU, on a request that is already synchronous. Media is already
+        // compressed (JPEG/PNG/WebP) and gains nothing either way.
         zlib: { level: 6 },
       });
 
@@ -260,10 +282,10 @@ export class AccountController {
 
       archive.on('error', fail);
       // `warning` is archiver's non-fatal channel, and it is non-fatal for
-      // FILE sources (a missing path). We only ever append in-memory strings,
-      // so there is no benign warning available to us — anything arriving here
-      // means the archive is not what we promised, and shipping it anyway
-      // would be shipping a corrupt export.
+      // FILE sources (a missing path). We append in-memory strings and bucket
+      // streams, never a filesystem path, so there is no benign warning
+      // available to us — anything arriving here means the archive is not what
+      // we promised, and shipping it anyway would be shipping a corrupt export.
       archive.on('warning', fail);
       res.on('error', fail);
       res.on('finish', settle);
@@ -277,16 +299,175 @@ export class AccountController {
       });
 
       archive.pipe(res);
-      for (const entry of entries) {
-        // `date` is pinned to the job's generation time so the same job always
-        // yields a byte-identical zip.
-        archive.append(entry.content, { name: entry.name, date: modifiedAt });
-      }
       // `finalize` rejects with the same error already delivered to the
       // `error` handler; `fail` is idempotent, and catching keeps it off the
-      // unhandled-rejection path.
-      archive.finalize().catch(fail);
+      // unhandled-rejection path. The append pass is async now (media is
+      // fetched from the bucket one object at a time), so finalization has to
+      // wait for it rather than running in the same tick.
+      void this.appendEntries(archive, download, () => settled)
+        .then(() => archive.finalize())
+        .catch(fail);
     });
+  }
+
+  /**
+   * Append every entry, in order, then `media/manifest.json`.
+   *
+   * Sequential on purpose: appending each stored object and waiting for
+   * archiver to consume it means exactly ONE bucket connection is open at a
+   * time, so a member with a large gallery does not open a connection per
+   * object and does not buffer the set anywhere.
+   *
+   * `isSettled` lets the loop stop early when the response already died (the
+   * member cancelled the download, or the archive errored) instead of
+   * continuing to pull objects out of the bucket for a socket nobody reads.
+   */
+  private async appendEntries(
+    archive: archiver.Archiver,
+    download: Extract<ExportDownload, { kind: 'zip' }>,
+    isSettled: () => boolean,
+  ): Promise<void> {
+    const failedToRead: ExportMediaReadFailure[] = [];
+    for (const entry of download.entries) {
+      if (isSettled()) {
+        return;
+      }
+      if (entry.kind === 'text') {
+        // `date` is pinned to the job's generation time so the same job always
+        // yields a byte-identical zip.
+        archive.append(entry.content, {
+          name: entry.name,
+          date: download.modifiedAt,
+        });
+        continue;
+      }
+      await this.appendStoredEntry(
+        archive,
+        entry,
+        download.modifiedAt,
+        failedToRead,
+      );
+    }
+    this.appendMediaManifest(archive, download, failedToRead);
+  }
+
+  /**
+   * Append ONE bucket object, or record why it could not be read.
+   *
+   * The split between the two failure modes is deliberate:
+   *
+   *  - failing to OPEN the object (deleted key, credentials, network) happens
+   *    before a single byte is written, so it is fully recoverable: log, record
+   *    it for the manifest, and carry on with the rest of the archive;
+   *  - failing PART-WAY through the body is not recoverable — those bytes are
+   *    already inside a zip entry whose size and CRC were promised. That error
+   *    reaches archiver, which is wired to `fail`, and the download breaks
+   *    visibly rather than handing the member a corrupt archive.
+   */
+  private async appendStoredEntry(
+    archive: archiver.Archiver,
+    entry: Extract<ExportEntry, { kind: 'stored' }>,
+    modifiedAt: Date,
+    failedToRead: ExportMediaReadFailure[],
+  ): Promise<void> {
+    let body: Readable;
+    try {
+      body = await this.storage.openObjectStream(entry.storageKey);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `Export media skipped, could not read ${entry.storageKey}: ${reason}`,
+      );
+      failedToRead.push({
+        name: entry.name.replace(/^media\//, ''),
+        storageKey: entry.storageKey,
+        reason,
+      });
+      return;
+    }
+    archive.append(body, { name: entry.name, date: modifiedAt });
+    await this.waitForEntry(archive, entry.name);
+  }
+
+  /**
+   * Resolve once archiver has finished consuming the named entry.
+   *
+   * Archiver's `append` is fire-and-forget into an internal queue and exposes
+   * no per-append promise, but it emits `entry` with the entry's data as each
+   * one completes. Matching on the NAME rather than taking the next event is
+   * what keeps exactly one bucket connection open: the text entries were
+   * queued first and their `entry` events are still in flight, so a
+   * take-the-next-event wait would return on somebody else's completion and
+   * let the loop run ahead of the archive. Rejects on archive error so the
+   * caller stops pulling objects into a dead archive.
+   *
+   * `close` is watched as well: a member who cancels the download triggers
+   * `archive.abort()`, after which the pending entry never completes. Without
+   * that listener this promise would never settle and would hold its handlers
+   * (and the bucket stream) for the life of the process.
+   */
+  private waitForEntry(
+    archive: archiver.Archiver,
+    name: string,
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const cleanUp = () => {
+        archive.removeListener('entry', onEntry);
+        archive.removeListener('error', onError);
+        archive.removeListener('close', onClose);
+      };
+      const onEntry = (data: archiver.EntryData) => {
+        if (data.name !== name) {
+          return;
+        }
+        cleanUp();
+        resolve();
+      };
+      const onError = (error: Error) => {
+        cleanUp();
+        reject(error);
+      };
+      // The archive went away under us. Resolve rather than reject: the caller
+      // checks `isSettled()` on its next turn and stops, and a rejection here
+      // would be logged as a stream failure for something that already failed
+      // (or was cancelled) somewhere the member can see.
+      const onClose = () => {
+        cleanUp();
+        resolve();
+      };
+      archive.on('entry', onEntry);
+      archive.once('error', onError);
+      archive.once('close', onClose);
+    });
+  }
+
+  /**
+   * `media/manifest.json` — what the bucket held, what made it into this zip,
+   * and what did not.
+   *
+   * Written LAST because `failedToRead` is only knowable once the streaming
+   * pass is done, and written even when the member has NO uploaded files at
+   * all: an empty `media/` folder cannot tell "we hold nothing of yours" apart
+   * from "everything failed", and Art. 20 is exactly the moment that
+   * distinction matters. The manifest doubles as the index, mapping every file
+   * in `media/` back to its storage key and its upload kind (avatar, listing
+   * photo, gathering photo…).
+   */
+  private appendMediaManifest(
+    archive: archiver.Archiver,
+    download: Extract<ExportDownload, { kind: 'zip' }>,
+    failedToRead: ExportMediaReadFailure[],
+  ): void {
+    const media: ExportMediaContribution | null = download.media;
+    if (!media) {
+      // The member did not request the `media` category (or the job predates
+      // it). No `media/` folder at all, and no manifest claiming there is one.
+      return;
+    }
+    archive.append(
+      JSON.stringify(buildExportMediaManifest(media, failedToRead), null, 2),
+      { name: 'media/manifest.json', date: download.modifiedAt },
+    );
   }
 
   @ApiOperation({ summary: 'Submit a data-subject access request (DSAR).' })

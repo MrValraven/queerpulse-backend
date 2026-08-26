@@ -359,6 +359,26 @@ export enum NotificationType {
   // nobody reads. Carries the adding owner/mod as `payload.actorId` plus the
   // resource title and community slug.
   CommunityResourceAdded = 'community_resource_added',
+  // Sent to a community's owner, co-owners and moderators when PLATFORM STAFF
+  // offer that community support (OPS-05, `community_support_offers`). The
+  // admin health modal's "Offer support" button wrote nothing at all until
+  // this existed: it showed a success toast and the community never heard
+  // from anyone.
+  //
+  // System-driven in the same sense as `CommunityReportFiled`: it carries NO
+  // actor id, so a moderator's personal block of whichever staff member typed
+  // the offer cannot swallow it, and the bell reads as the platform speaking.
+  // The payload carries the community's own name and slug and nothing else —
+  // the staff member's note is member-authored prose that lives behind the
+  // community's own mod-tools authentication, which is where it is read.
+  //
+  // Always delivered, like the other governance types: it is the platform
+  // reaching a room that is having a hard time, which is not a volume a
+  // category switch may turn down. IN-APP is the channel; QueerPulse sends no
+  // email, so no copy for this type may say anything is on its way. Appended
+  // to `notifications_type_enum` by migration
+  // `AddCommunitySupportOfferedNotificationType1795660200000`.
+  CommunitySupportOffered = 'community_support_offered',
 
   // "Tell a moderator a report has landed" (TS-04). Until these existed,
   // filing a report fired no notification of any kind: the only signal was a
@@ -686,6 +706,38 @@ export enum NotificationType {
    * Payload: `{ source: 'governance', proposalId, title, note }`.
    */
   GovernanceMotionRejected = 'governance_motion_rejected',
+
+  /**
+   * Sent to a card HOLDER thirty days before their membership card expires
+   * (SUS-07). Emitted by `CardExpiryWarningService`, a daily cron in the
+   * membership-cards module.
+   *
+   * The gap it closes: a card expires on the programme's `validityMonths`
+   * clock and nothing said so. The only route back in date was an owner
+   * remembering to run the roster bulk issue, so members found out their card
+   * was dead standing at a door.
+   *
+   * Fires ONCE per term. The daily tick is what makes that the hard part, so
+   * the row is CLAIMED with a conditional UPDATE on
+   * `membership_cards.expiry_warning_sent_at`, the same shape
+   * `deletion_request.final_warning_sent_at` uses, and every path that puts the
+   * card back in date clears the marker so the NEXT term earns its own warning.
+   *
+   * System-driven: no actor, and no `NotificationPreferenceCategory`. A
+   * credential running out is not content volume, and there is no other channel
+   * it arrives on. QueerPulse sends no email, so nothing about this type may be
+   * described as one.
+   *
+   * Payload carries `{ source: 'card', communitySlug, communityName,
+   * daysRemaining, canSelfRenew }`. `daysRemaining` is a NUMBER, which the
+   * frontend mirrors onto `count` for CLDR pluralisation, exactly like
+   * `AccountDeletionFinalWarning`. `canSelfRenew` is the programme's
+   * `allows_self_renew` read at send time, so the copy either points at the
+   * member's own Renew button or tells them their community issues the new
+   * card. `source: 'card'` deep-links to /account/cards. See migration
+   * `AddCardSelfRenewAndExpiryWarning1795620000000`.
+   */
+  CardExpiring = 'card_expiring',
 }
 
 @Entity('notifications')

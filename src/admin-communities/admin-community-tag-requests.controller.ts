@@ -22,8 +22,9 @@ import {
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { StaffRoles } from '../auth/decorators/staff-roles.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminCommunityTagRequestsService } from './admin-community-tag-requests.service';
 import { ListAdminCommunityTagRequestsQuery } from './dto/list-admin-community-tag-requests.query';
@@ -42,12 +43,16 @@ import { ListAdminCommunityTagRequestsQuery } from './dto/list-admin-community-t
  * admin who wants to act on a request does so by hand, editing
  * `src/communities/community-tags.ts` in a separate, code-reviewed change.
  */
-@UseGuards(ActiveMemberGuard, RolesGuard)
+@UseGuards(ActiveMemberGuard, RolesOrStaffGuard)
 @Roles(UserRole.Moderator, UserRole.Admin)
+@StaffRoles('communities')
 @ApiTags('Admin — Community tag requests')
 @ApiCookieAuth('access_token')
 @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
-@ApiForbiddenResponse({ description: 'Requires the moderator or admin role.' })
+@ApiForbiddenResponse({
+  description:
+    'Requires a moderator or admin role, or the `communities` staff role.',
+})
 @Controller('admin/community-tag-requests')
 export class AdminCommunityTagRequestsController {
   constructor(
@@ -58,8 +63,13 @@ export class AdminCommunityTagRequestsController {
   @ApiOperation({ summary: 'List community tag requests (paginated).' })
   @ApiOkResponse({ description: 'One page of community tag requests.' })
   @ApiBadRequestResponse({ description: 'Malformed query parameters.' })
-  list(@Query() query: ListAdminCommunityTagRequestsQuery) {
-    return this.adminCommunityTagRequests.list(query);
+  list(
+    @CurrentUser() user: CurrentUserData,
+    @Query() query: ListAdminCommunityTagRequestsQuery,
+  ) {
+    // `user.role` is the caller's ACCOUNT TIER, passed so the service can
+    // withhold the requester's identity from a `communities` grant holder.
+    return this.adminCommunityTagRequests.list(query, user.role);
   }
 
   @Patch(':id/resolve')
@@ -70,6 +80,6 @@ export class AdminCommunityTagRequestsController {
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: CurrentUserData,
   ) {
-    return this.adminCommunityTagRequests.resolve(id, user.userId);
+    return this.adminCommunityTagRequests.resolve(id, user.userId, user.role);
   }
 }

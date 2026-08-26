@@ -46,15 +46,29 @@ function makeService() {
       avatarUrl: 'media/rita.jpg',
     }),
   };
+  // Records a resolved verification. Stubbed as a plain spy because the real
+  // one never awaits and never rejects: the service treats it as fire and
+  // forget, so nothing here needs to resolve.
+  const scanLog = { record: jest.fn() };
   const service = new CardVerificationService(
     tokens as never,
     cards as never,
+    scanLog as never,
     programs as never,
     communities as never,
     members as never,
     users as never,
   );
-  return { service, tokens, cards, programs, communities, members, users };
+  return {
+    service,
+    tokens,
+    cards,
+    scanLog,
+    programs,
+    communities,
+    members,
+    users,
+  };
 }
 
 describe('CardVerificationService.verify', () => {
@@ -85,6 +99,39 @@ describe('CardVerificationService.verify', () => {
     const { service, cards } = makeService();
     cards.cardById.mockResolvedValue(null);
     expect(await service.verify('good.token')).toBeNull();
+  });
+
+  it('records one verification once the token resolves to a card', async () => {
+    const { service, scanLog } = makeService();
+    await service.verify('good.token');
+    expect(scanLog.record).toHaveBeenCalledTimes(1);
+    expect(scanLog.record).toHaveBeenCalledWith('card-1', 'active');
+  });
+
+  it('records the outcome, so a revoked presentation is distinguishable', async () => {
+    const { service, scanLog, communities } = makeService();
+    communities.findOne.mockResolvedValue({
+      id: 'com-1',
+      name: 'Azores Queer',
+      frozenAt: null,
+      archivedAt: new Date('2026-08-20T00:00:00Z'),
+    });
+    await service.verify('good.token');
+    expect(scanLog.record).toHaveBeenCalledWith('card-1', 'revoked');
+  });
+
+  it('records nothing for a token that does not verify', async () => {
+    const { service, scanLog, tokens } = makeService();
+    tokens.verify.mockReturnValue(null);
+    await service.verify('bad.token');
+    expect(scanLog.record).not.toHaveBeenCalled();
+  });
+
+  it('records nothing when the token resolves to no card', async () => {
+    const { service, scanLog, cards } = makeService();
+    cards.cardById.mockResolvedValue(null);
+    await service.verify('good.token');
+    expect(scanLog.record).not.toHaveBeenCalled();
   });
 
   // Spec §L.2

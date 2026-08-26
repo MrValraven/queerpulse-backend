@@ -6,7 +6,7 @@ import {
   IsString,
   MaxLength,
 } from 'class-validator';
-import type { InquiryKind } from '../entities/inquiry.entity';
+import { INQUIRY_KINDS, InquiryKind } from '../entities/inquiry.entity';
 
 /**
  * Body for `POST /inquiries` — a public marketing-form submission. Validated
@@ -17,7 +17,7 @@ import type { InquiryKind } from '../entities/inquiry.entity';
  * from accepting unbounded text.
  */
 export class CreateInquiryDto {
-  @IsIn(['contact', 'partner'])
+  @IsIn(INQUIRY_KINDS)
   kind!: InquiryKind;
 
   @IsString()

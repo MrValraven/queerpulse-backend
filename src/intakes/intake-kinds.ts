@@ -84,6 +84,32 @@ export const CONCERN_TRIAGE_STATUSES = [
 export type ConcernTriageStatus = (typeof CONCERN_TRIAGE_STATUSES)[number];
 
 /**
+ * Every state `PATCH /intakes/:id` accepts — the concern trio above PLUS the
+ * plain `reviewed`.
+ *
+ * WHY THIS EXISTS. `governance_concern` is one kind out of twelve, and the
+ * three-state worklist is shaped for it: a confidential concern gets an
+ * outcome. The other eleven — a grant application, a glossary suggestion, a
+ * sober-host signup, Culture's four member-submission forms — only ever need
+ * "seen and dealt with", which is what `reviewed` means. Restricting the PATCH
+ * to the concern trio left those eleven inboxes with no way to be worked at
+ * all: an admin could read them and never clear them, so the queue grew
+ * forever and nothing recorded that a submission had been answered.
+ *
+ * `new` is still absent, and stays absent: it is the state a row is created
+ * in, never a manual target. Nothing here forbids `reviewed` on a concern or
+ * the trio on another kind — a kind-by-status matrix in the API would just be
+ * a second, drifting copy of a rule the console already expresses in which
+ * buttons it shows.
+ */
+export const ADMIN_TRIAGE_STATUSES = [
+  'reviewed',
+  ...CONCERN_TRIAGE_STATUSES,
+] as const;
+
+export type AdminTriageStatus = (typeof ADMIN_TRIAGE_STATUSES)[number];
+
+/**
  * Kinds that require an authenticated member. These are reached only from the
  * gated `/economy/*` incubator surface (see the frontend `authGate` —
  * `/economy` and `/economy/*` are member-only), so an anonymous submission is

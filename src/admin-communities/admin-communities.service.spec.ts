@@ -707,7 +707,7 @@ describe('AdminCommunitiesService', () => {
     it('404s on an unknown slug', async () => {
       communities.findOne.mockResolvedValue(null);
 
-      await expect(service.getCommunity('no-such-place')).rejects.toThrow(
+      await expect(service.getCommunity('no-such-place', true)).rejects.toThrow(
         NotFoundException,
       );
       expect(communities.findOne).toHaveBeenCalledWith({
@@ -769,7 +769,7 @@ describe('AdminCommunitiesService', () => {
         }),
       ]);
 
-      const result = await service.getCommunity('circle-of-care');
+      const result = await service.getCommunity('circle-of-care', true);
 
       expect(communityMembers.find).toHaveBeenCalledWith({
         where: {
@@ -866,7 +866,7 @@ describe('AdminCommunitiesService', () => {
         ],
       );
 
-      const result = await service.getCommunity('circle-of-care');
+      const result = await service.getCommunity('circle-of-care', true);
 
       // Reports are fetched first, narrowed only by subject type — never by a
       // subject-id list built from every post and reply on the platform, which
@@ -981,7 +981,7 @@ describe('AdminCommunitiesService', () => {
         }),
       ]);
 
-      const result = await service.getCommunity('circle-of-care');
+      const result = await service.getCommunity('circle-of-care', true);
 
       // Only the real, UUID-shaped id is bound into either lookup — 'x' never
       // reaches a uuid column comparison.
@@ -1007,7 +1007,7 @@ describe('AdminCommunitiesService', () => {
       );
       stubReportsQueryBuilder(reports.createQueryBuilder, manyReports);
 
-      const result = await service.getCommunity('circle-of-care');
+      const result = await service.getCommunity('circle-of-care', true);
 
       expect(result.truncated).toBe(true);
     });
@@ -1015,7 +1015,7 @@ describe('AdminCommunitiesService', () => {
     it('is not truncated under the cap', async () => {
       communities.findOne.mockResolvedValue(makeCommunity());
 
-      const result = await service.getCommunity('circle-of-care');
+      const result = await service.getCommunity('circle-of-care', true);
 
       expect(result.truncated).toBe(false);
     });

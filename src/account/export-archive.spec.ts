@@ -113,7 +113,9 @@ describe('describeExportDownload', () => {
       }
       const messages = result.entries.find((e) => e.name === 'messages.csv');
       expect(messages).toBeDefined();
-      expect(messages?.content).toBe('\uFEFF');
+      expect(messages?.kind === 'text' ? messages.content : null).toBe(
+        '\uFEFF',
+      );
     });
 
     it('uses the archive key, not the request category id, for the filename', () => {
@@ -187,7 +189,9 @@ describe('describeExportDownload', () => {
         'queerpulse-export-job-1.json',
       ]);
       const json = result.entries.at(-1);
-      expect(json?.content).toBe(JSON.stringify(payload, null, 2));
+      expect(json?.kind === 'text' ? json.content : null).toBe(
+        JSON.stringify(payload, null, 2),
+      );
     });
   });
 

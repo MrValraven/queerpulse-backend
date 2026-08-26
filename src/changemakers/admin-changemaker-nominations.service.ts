@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { isPlatformStaffTier } from '../auth/platform-staff-tier';
 import { MemberLookup } from '../common/member-ref';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -44,9 +45,18 @@ export class AdminChangemakerNominationsService {
     private readonly notifications: NotificationsService,
   ) {}
 
+  /**
+   * `actorRole` is the caller's ACCOUNT TIER off the JWT. Since OPS-03 this
+   * queue also opens on the additive `partnerships` grant, so the handler can
+   * no longer assume its caller is Moderator/Admin: a grant holder reads every
+   * row without the nominator being named. See
+   * `AdminChangemakerNominationDTO`.
+   */
   async list(
     query: ListAdminChangemakerNominationsQuery,
+    actorRole: string,
   ): Promise<AdminChangemakerNominationsPageDTO> {
+    const isPlatformStaffReader = isPlatformStaffTier(actorRole);
     const page = query.page && query.page > 0 ? query.page : 1;
     const pageSize = ADMIN_CHANGEMAKER_NOMINATIONS_PAGE_SIZE;
 
@@ -62,14 +72,16 @@ export class AdminChangemakerNominationsService {
 
     const memberLookup = new MemberLookup(this.profiles);
     // One batched lookup covers both nominator and reviewer refs — never one
-    // query per row, mirroring `AdminWriterApplicationsService.list`.
+    // query per row, mirroring `AdminWriterApplicationsService.list`. The
+    // nominator ids are looked up only when the reader is platform staff; for
+    // anyone else the ref is never built, so it cannot be serialized by
+    // accident later.
     const userIds = [
       ...new Set(
-        rows.flatMap((row) =>
-          row.reviewedBy
-            ? [row.nominatorId, row.reviewedBy]
-            : [row.nominatorId],
-        ),
+        rows.flatMap((row) => [
+          ...(isPlatformStaffReader ? [row.nominatorId] : []),
+          ...(row.reviewedBy ? [row.reviewedBy] : []),
+        ]),
       ),
     ];
     const refsByUserId = await memberLookup.byUserIds(userIds);
@@ -81,6 +93,7 @@ export class AdminChangemakerNominationsService {
         nomination.reviewedBy
           ? (refsByUserId.get(nomination.reviewedBy) ?? null)
           : null,
+        isPlatformStaffReader,
       ),
     );
 
@@ -97,9 +110,11 @@ export class AdminChangemakerNominationsService {
    */
   async triage(
     actorUserId: string,
+    actorRole: string,
     id: string,
     dto: TriageChangemakerNominationDto,
   ): Promise<AdminChangemakerNominationDTO> {
+    const isPlatformStaffReader = isPlatformStaffTier(actorRole);
     const nomination = await this.nominations.findOne({ where: { id } });
     if (!nomination) {
       throw new NotFoundException('Nomination not found');
@@ -146,7 +161,9 @@ export class AdminChangemakerNominationsService {
 
     const memberLookup = new MemberLookup(this.profiles);
     const refsByUserId = await memberLookup.byUserIds([
-      nomination.nominatorId,
+      // Same narrowing as `list`: the nominator's profile is not even fetched
+      // for a caller who reached this on the `partnerships` grant.
+      ...(isPlatformStaffReader ? [nomination.nominatorId] : []),
       actorUserId,
     ]);
     return toAdminChangemakerNominationDTO(
@@ -159,6 +176,7 @@ export class AdminChangemakerNominationsService {
       },
       refsByUserId.get(nomination.nominatorId) ?? null,
       refsByUserId.get(actorUserId) ?? null,
+      isPlatformStaffReader,
     );
   }
 }

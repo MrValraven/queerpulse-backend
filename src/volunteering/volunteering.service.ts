@@ -1,12 +1,21 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { DataSource, FindOptionsWhere, In, Repository } from 'typeorm';
+import {
+  DataSource,
+  FindOptionsWhere,
+  In,
+  IsNull,
+  Repository,
+  SelectQueryBuilder,
+} from 'typeorm';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
 import {
   DEFAULT_LIST_LIMIT,
@@ -23,6 +32,10 @@ import { Profile } from '../users/entities/profile.entity';
 import {
   CommunityRef,
   MyOpportunitySummary,
+  MyVolunteerContributionDTO,
+  VolunteerHoursByCommunityDTO,
+  VolunteerHoursByOpportunityDTO,
+  VolunteerHoursTotalsDTO,
   OpportunityCardDTO,
   OpportunityDetailDTO,
   PartnerRef,
@@ -37,6 +50,10 @@ import {
   SignupStatus,
   VolunteerSignup,
 } from './entities/volunteer-signup.entity';
+import {
+  VOLUNTEER_SESSION_COMPLETED,
+  VolunteerSessionCompletedEvent,
+} from './volunteering.events';
 import {
   OpportunityCause,
   OpportunityCommitLevel,
@@ -100,6 +117,31 @@ export interface CreateSignupInput {
   note?: string;
 }
 
+/** `confirmCompletion`'s input. See `CompleteSignupDto` for the validation
+ *  that bounds `hours` to a single day at the request boundary. */
+export interface CompleteSignupInput {
+  attended: boolean;
+  hours: number;
+}
+
+/** `volunteerHoursTotals`'s window and optional community scope. Both `from`
+ *  and `to` are optional; omitting both reports over all time. */
+export interface VolunteerHoursQuery {
+  from?: Date;
+  to?: Date;
+  communityId?: string;
+}
+
+/** Hard ceiling on one confirmed session, mirroring `CompleteSignupDto`'s
+ *  `@Max(24)` and the `CK_volunteer_signups_hours_range` CHECK. Repeated here
+ *  so the service refuses an out-of-range value even when a caller bypasses
+ *  the request pipe (a future admin console calling the service directly). */
+const MAX_SESSION_HOURS = 24;
+
+/** How many rows the per-opportunity / per-community breakdowns return. The
+ *  platform totals are exact regardless; only the breakdown lists are cut. */
+export const HOURS_BREAKDOWN_LIMIT = 100;
+
 /** Fills every `OpportunityDetailBody` subfield so the `jsonb NOT NULL`
  * `detail` column is always fully populated, even when a caller only
  * supplies part of it (or omits it entirely at creation). Mirrors
@@ -134,6 +176,11 @@ export class VolunteeringService {
     private readonly partnersService: PartnersService,
     private readonly communityMembership: CommunityMembershipService,
     private readonly notifications: NotificationsService,
+    // Fires `VOLUNTEER_SESSION_COMPLETED` once a session is confirmed, which
+    // `RecognitionListener` consumes so contribution finally earns XP. Same
+    // fire-and-forget, post-commit `emit` idiom as `EVENT_RSVPED` in
+    // `RsvpService`; one-way, nothing in recognition calls back into here.
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   async create(
@@ -537,6 +584,310 @@ export class VolunteeringService {
     }
 
     return toVolunteerSignup(signup, member);
+  }
+
+  /**
+   * THE COMPLETION STEP (SUS-05). The poster (or a community organiser
+   * standing in for them) attests that an accepted volunteer turned up, and
+   * for how long.
+   *
+   * Four properties, each of them load-bearing:
+   *
+   *   1. **Only an accepted signup can be completed.** A pending application
+   *      is not a session and a declined one never happened. Enforced in the
+   *      claiming UPDATE's WHERE clause, not only in the pre-check.
+   *   2. **Only the review tier may confirm.** `assertCanManageApplicants` is
+   *      the same authority that accepted the applicant in the first place:
+   *      the poster, or an owner/co-owner/mod of the community the
+   *      opportunity is attributed to. Hours are therefore attested by
+   *      someone other than the person who earns recognition for them.
+   *   3. **Idempotent.** `AND completed_at IS NULL` in the guarded UPDATE is
+   *      what makes it so, exactly as `decideSignup`'s `AND status =
+   *      'pending'` closes its own double-decide race. A second confirmation
+   *      affects zero rows, 409s, and emits nothing, so nothing downstream
+   *      double-counts.
+   *   4. **Bounded hours.** Rejected above `MAX_SESSION_HOURS` here as well as
+   *      by `CompleteSignupDto` and by the CHECK constraint, so a caller that
+   *      skips the request pipe still cannot write a number a funder would be
+   *      shown.
+   *
+   * A no-show (`attended: false`) is recorded with zero hours rather than
+   * refused: it closes the signup, stops the poster being asked again, and
+   * keeps the platform total honest.
+   *
+   * NO NOTIFICATION IS SENT TO THE VOLUNTEER. There is no notification type
+   * for this and this task did not add one, so no copy anywhere may claim the
+   * member will hear about it. What they do get is real: the confirmed
+   * session and its hours appear on `GET /volunteering/me/contribution`, and
+   * the recognition recompute this emit triggers can raise their level or
+   * grant a badge, both of which notify through their own existing channels.
+   */
+  async confirmCompletion(
+    slug: string,
+    signupId: string,
+    confirmerId: string,
+    input: CompleteSignupInput,
+  ): Promise<VolunteerSignupDTO> {
+    const opportunity = await this.loadOr404(slug);
+    await this.assertCanManageApplicants(
+      opportunity,
+      confirmerId,
+      'confirm volunteer sessions for',
+    );
+
+    if (
+      !Number.isFinite(input.hours) ||
+      input.hours < 0 ||
+      input.hours > MAX_SESSION_HOURS
+    ) {
+      throw new BadRequestException(
+        `Hours must be between 0 and ${MAX_SESSION_HOURS}`,
+      );
+    }
+    // A no-show contributed no hours, whatever was typed in the box.
+    const hours = input.attended ? Math.round(input.hours * 100) / 100 : 0;
+
+    const signup = await this.signups.findOne({
+      where: { id: signupId, opportunityId: opportunity.id },
+    });
+    if (!signup) {
+      throw new NotFoundException('Signup not found');
+    }
+    // NOBODY ATTESTS THEIR OWN HOURS. `signup()` already blocks applying to
+    // your own posting, but a community organiser can apply to an opportunity
+    // a co-organiser posted for that community and would otherwise pass
+    // `assertCanManageApplicants` on their own row. The whole value of the
+    // hours total is that someone else stood behind the number.
+    if (signup.userId === confirmerId) {
+      throw new ForbiddenException(
+        'Someone else has to confirm your own volunteer session',
+      );
+    }
+    if (signup.status !== SignupStatus.Accepted) {
+      throw new ConflictException(
+        'Only an accepted application can be confirmed as a session',
+      );
+    }
+    if (signup.completedAt !== null) {
+      throw new ConflictException('This session was already confirmed');
+    }
+
+    const completedAt = new Date();
+    const claim = await this.signups
+      .createQueryBuilder()
+      .update(VolunteerSignup)
+      .set({
+        attended: input.attended,
+        hoursContributed: hours,
+        completedAt,
+        completedById: confirmerId,
+      })
+      .where('id = :id AND status = :accepted AND completed_at IS NULL', {
+        id: signup.id,
+        accepted: SignupStatus.Accepted,
+      })
+      .execute();
+    if (claim.affected === 0) {
+      throw new ConflictException('This session was already confirmed');
+    }
+
+    signup.attended = input.attended;
+    signup.hoursContributed = hours;
+    signup.completedAt = completedAt;
+    signup.completedById = confirmerId;
+
+    // After the write lands (an emit before it could announce a row that never
+    // committed). Fire-and-forget: `RecognitionListener` routes its recompute
+    // through `safeRecompute`, so a recognition failure can never break this
+    // flow, and nothing here waits on it either.
+    this.eventEmitter.emit(VOLUNTEER_SESSION_COMPLETED, {
+      signupId: signup.id,
+      opportunityId: opportunity.id,
+      opportunitySlug: opportunity.slug,
+      volunteerId: signup.userId,
+      confirmedById: confirmerId,
+      attended: input.attended,
+      hoursContributed: hours,
+      completedAt: completedAt.toISOString(),
+    } satisfies VolunteerSessionCompletedEvent);
+
+    const member = await this.memberRefFor(signup.userId);
+    return toVolunteerSignup(signup, member);
+  }
+
+  /**
+   * What the signed-in member has actually contributed, as confirmed by
+   * someone else. The only per-member volunteering read that exists, and it
+   * only ever answers about the caller themselves.
+   *
+   * `attended = true` only: a recorded no-show is not a contribution and is
+   * not reflected back at the member. `awaitingConfirmationCount` is the
+   * accepted signups nobody has confirmed yet, which is what stops the
+   * surface reading as "you have done nothing" while a poster is simply
+   * behind on their desk.
+   */
+  async myContribution(userId: string): Promise<MyVolunteerContributionDTO> {
+    const [totals, awaitingConfirmationCount] = await Promise.all([
+      this.signups
+        .createQueryBuilder('signup')
+        .select('COUNT(*)', 'sessionCount')
+        .addSelect('COALESCE(SUM(signup.hours_contributed), 0)', 'hours')
+        .addSelect('MAX(signup.completed_at)', 'lastCompletedAt')
+        .where('signup.user_id = :userId', { userId })
+        .andWhere('signup.completed_at IS NOT NULL')
+        .andWhere('signup.attended = true')
+        .getRawOne<{
+          sessionCount: string;
+          hours: string;
+          lastCompletedAt: Date | null;
+        }>(),
+      this.signups.count({
+        where: {
+          userId,
+          status: SignupStatus.Accepted,
+          completedAt: IsNull(),
+        },
+      }),
+    ]);
+
+    return {
+      sessionCount: Number(totals?.sessionCount ?? 0),
+      hoursContributed: Number(totals?.hours ?? 0),
+      lastCompletedAt: totals?.lastCompletedAt
+        ? new Date(totals.lastCompletedAt).toISOString()
+        : null,
+      awaitingConfirmationCount,
+    };
+  }
+
+  /**
+   * THE FUNDER ANSWER: confirmed volunteer hours over a period, platform-wide
+   * and split per opportunity and per community.
+   *
+   * No endpoint calls this yet by design. It is the read an admin oversight
+   * console sits on, written now so the console has something real to call
+   * rather than inventing a second definition of "a volunteer hour" that
+   * would drift from the one recognition rewards. Whoever exposes it must put
+   * it behind an `Admin*Controller` with `@Roles(UserRole.Moderator,
+   * UserRole.Admin)`.
+   *
+   * Scope discipline, deliberately: every number here is an aggregate
+   * operational count. Sessions, hours and a DISTINCT count of how many
+   * people contributed. There is no per-member row, no ranking and no
+   * timeline, because "which member volunteered how much" is not an
+   * operational count and nobody has asked for it.
+   *
+   * Only `attended = true` rows count, so a recorded no-show never inflates a
+   * number a partner is shown.
+   */
+  async volunteerHoursTotals(
+    query: VolunteerHoursQuery = {},
+  ): Promise<VolunteerHoursTotalsDTO> {
+    const applyWindow = <T extends SelectQueryBuilder<VolunteerSignup>>(
+      qb: T,
+    ): T => {
+      qb.where('signup.completed_at IS NOT NULL').andWhere(
+        'signup.attended = true',
+      );
+      if (query.from)
+        qb.andWhere('signup.completed_at >= :from', {
+          from: query.from,
+        });
+      if (query.to) qb.andWhere('signup.completed_at < :to', { to: query.to });
+      if (query.communityId) {
+        qb.andWhere('opportunity.community_id = :communityId', {
+          communityId: query.communityId,
+        });
+      }
+      return qb;
+    };
+
+    const base = () =>
+      applyWindow(
+        this.signups
+          .createQueryBuilder('signup')
+          .innerJoin(
+            VolunteerOpportunity,
+            'opportunity',
+            'opportunity.id = signup.opportunity_id',
+          ),
+      );
+
+    const [totals, byOpportunityRows, byCommunityRows] = await Promise.all([
+      base()
+        .select('COUNT(*)', 'sessionCount')
+        .addSelect('COALESCE(SUM(signup.hours_contributed), 0)', 'hours')
+        .addSelect('COUNT(DISTINCT signup.user_id)', 'volunteerCount')
+        .getRawOne<{
+          sessionCount: string;
+          hours: string;
+          volunteerCount: string;
+        }>(),
+      // `.limit()` rather than `.take()`: this is a grouped raw query, where
+      // `.take()`'s entity-aware pagination does not apply (the house rule
+      // about joined ORDER BY, for the same underlying reason).
+      base()
+        .select('opportunity.slug', 'opportunitySlug')
+        .addSelect('opportunity.role', 'role')
+        .addSelect('opportunity.org', 'org')
+        .addSelect('COUNT(*)', 'sessionCount')
+        .addSelect('COALESCE(SUM(signup.hours_contributed), 0)', 'hours')
+        .groupBy('opportunity.slug')
+        .addGroupBy('opportunity.role')
+        .addGroupBy('opportunity.org')
+        .orderBy('COALESCE(SUM(signup.hours_contributed), 0)', 'DESC')
+        .limit(HOURS_BREAKDOWN_LIMIT)
+        .getRawMany<{
+          opportunitySlug: string;
+          role: string;
+          org: string;
+          sessionCount: string;
+          hours: string;
+        }>(),
+      // Opportunities with no community attribution are dropped rather than
+      // bucketed under a fake "none" community; the platform total above
+      // already covers them.
+      base()
+        .andWhere('opportunity.community_id IS NOT NULL')
+        .select('opportunity.community_id', 'communityId')
+        .addSelect('COUNT(*)', 'sessionCount')
+        .addSelect('COALESCE(SUM(signup.hours_contributed), 0)', 'hours')
+        .groupBy('opportunity.community_id')
+        .orderBy('COALESCE(SUM(signup.hours_contributed), 0)', 'DESC')
+        .limit(HOURS_BREAKDOWN_LIMIT)
+        .getRawMany<{
+          communityId: string;
+          sessionCount: string;
+          hours: string;
+        }>(),
+    ]);
+
+    const byOpportunity: VolunteerHoursByOpportunityDTO[] =
+      byOpportunityRows.map((row) => ({
+        opportunitySlug: row.opportunitySlug,
+        role: row.role,
+        org: row.org,
+        sessionCount: Number(row.sessionCount),
+        hoursContributed: Number(row.hours),
+      }));
+
+    const byCommunity: VolunteerHoursByCommunityDTO[] = byCommunityRows.map(
+      (row) => ({
+        communityId: row.communityId,
+        sessionCount: Number(row.sessionCount),
+        hoursContributed: Number(row.hours),
+      }),
+    );
+
+    return {
+      from: query.from ? query.from.toISOString() : null,
+      to: query.to ? query.to.toISOString() : null,
+      sessionCount: Number(totals?.sessionCount ?? 0),
+      hoursContributed: Number(totals?.hours ?? 0),
+      volunteerCount: Number(totals?.volunteerCount ?? 0),
+      byOpportunity,
+      byCommunity,
+    };
   }
 
   /**

@@ -20,6 +20,10 @@ export enum MembershipCardStatus {
 @Unique('UQ_membership_cards_program_user', ['programId', 'userId'])
 // Covers the "my cards" read: WHERE user_id = ... ORDER BY issued_at DESC.
 @Index('IDX_membership_cards_user_issued', ['userId', 'issuedAt'])
+// Covers the daily expiry-warning sweep, which asks for the cards falling due
+// inside the next thirty days. Without it that sweep is a full scan every
+// night of a table that grows with (members x card programmes).
+@Index('IDX_membership_cards_expires_at', ['expiresAt'])
 export class MembershipCard {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -51,6 +55,22 @@ export class MembershipCard {
   // Null means no expiry (the programme's `validityMonths` was null at issue).
   @Column({ type: 'timestamptz', nullable: true })
   expiresAt!: Date | null;
+
+  // When the T-30 expiry warning was written for the CURRENT term of this
+  // card. Null means "not warned yet for this term".
+  //
+  // The whole reason this column exists: the warning sweep is a DAILY cron, so
+  // without a marker every member inside the window would be told again every
+  // morning for thirty days. Claimed with a conditional UPDATE whose WHERE
+  // still carries `expiry_warning_sent_at IS NULL`, exactly the shape
+  // `deletion_request.final_warning_sent_at` uses, so two ticks racing cannot
+  // both send.
+  //
+  // Cleared back to null by every path that puts the card back in date (self
+  // renew, the roster bulk issue, and reactivation on rejoin), because the
+  // next term earns its own warning.
+  @Column({ type: 'timestamptz', nullable: true })
+  expiryWarningSentAt!: Date | null;
 
   @Column({ type: 'timestamptz', nullable: true })
   revokedAt!: Date | null;

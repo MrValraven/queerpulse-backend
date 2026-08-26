@@ -16,14 +16,22 @@ export enum CardScanResult {
 }
 
 /**
- * Door check-in log. Created in Phase 1 so Phase 2 needs no second migration,
- * and DELIBERATELY UNWRITTEN in Phase 1: this phase has no check-in, and
- * logging every public verification would build the behavioural record the
- * design forbids (spec §K.2).
+ * Card verification log. Written by `CardScanLogService`, and ONLY once a
+ * signed token has resolved to a real card of the right generation, so the
+ * public verify endpoint cannot be used to spam rows in here and a forged
+ * code leaves no trace.
  *
- * Fields are the minimum door reconciliation and dispute resolution need.
- * Rows are auto-purged on a 90 day window by the Phase 2 sweeper. There is
- * deliberately no "where has this member shown their card" query surface.
+ * Fields are the minimum dispute resolution and abuse detection need. No IP,
+ * no user agent, no geolocation, no fingerprint of whoever scanned:
+ * `scannedByUserId` is null for every row a public verification writes,
+ * because that caller has no identity. `eventId` stays null until a door
+ * check-in surface exists.
+ *
+ * Rows are purged on a 90 day window by `CardScanRetentionService`. There is
+ * deliberately no "where has this member shown their card" query surface: the
+ * only reads are an aggregate for one card programme and a per-CARD tally on
+ * the issuer's roster, which is the leaked-or-shared-card signal (spec
+ * §K.2). Nothing may turn this into a behavioural record of a member.
  */
 @Entity('membership_card_scans')
 export class MembershipCardScan {
