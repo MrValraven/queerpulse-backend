@@ -924,12 +924,25 @@ export class CommunitiesService {
       );
     this.excludeModeratedCommunities(qb);
 
+    // The alias MUST be lower-case and the `orderBy` criteria MUST be the bare
+    // alias with no quotes of its own, exactly as `relatedCommunities` does
+    // with `overlap`. `.take()` + a join sends TypeORM down its two-query
+    // "distinct ids" path, which rebuilds the ORDER BY by looking the criteria
+    // string up against the registered select ALIASES. A quoted
+    // `'"connectionCount"'` matches no alias, so that lookup yields an empty
+    // select entry and the outer query is emitted as
+    // `SELECT DISTINCT ...ids_c_id, , "distinctAlias"."c_created_at"`: a
+    // doubled comma, i.e. `syntax error at or near ","`. Unquoted camelCase
+    // would clear that hurdle and then fail in the second query, where
+    // Postgres folds the bare identifier to `connectioncount` and never finds
+    // the `"connectionCount"` output alias. Lower-case + unquoted is the only
+    // spelling that survives both.
     qb.addSelect(
       `(SELECT COUNT(DISTINCT "cm2"."user_id") FROM "community_members" "cm2"
         WHERE "cm2"."community_id" = c.id AND "cm2"."user_id" IN (:...connectionIds))`,
-      'connectionCount',
+      'connection_count',
     )
-      .orderBy('"connectionCount"', 'DESC')
+      .orderBy('connection_count', 'DESC')
       .addOrderBy('c.createdAt', 'DESC')
       .take(SUGGESTED_COMMUNITIES_LIMIT);
 
