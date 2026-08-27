@@ -408,8 +408,10 @@ export class CommunitiesService {
   // moderated-away card is withheld from members and non-members only. Assumes
   // the querybuilder has joined `CommunityMember` as `m` on the viewer (both
   // `list` and `searchByText` do).
-  private excludeModeratedCommunities(qb: SelectQueryBuilder<Community>): void {
-    qb.andWhere(
+  private excludeModeratedCommunities(
+    communitiesQuery: SelectQueryBuilder<Community>,
+  ): void {
+    communitiesQuery.andWhere(
       `(NOT EXISTS (
           SELECT 1 FROM "content_moderation" "cm"
           WHERE "cm"."subject_type" = :communitySubjectType
@@ -585,10 +587,10 @@ export class CommunitiesService {
     const page = normalizePage(query.page);
     const filter = query.filter ?? 'discover';
 
-    const qb = this.communities.createQueryBuilder('c');
+    const communitiesQuery = this.communities.createQueryBuilder('c');
 
     if (filter === 'mine') {
-      qb.innerJoin(
+      communitiesQuery.innerJoin(
         CommunityMember,
         'm',
         'm.community_id = c.id AND m.user_id = :viewerId',
@@ -598,28 +600,32 @@ export class CommunitiesService {
       // 'discover' — a LEFT JOIN so a non-member row still surfaces (as long
       // as it isn't private); a member always sees their own communities
       // regardless of tier.
-      qb.leftJoin(
-        CommunityMember,
-        'm',
-        'm.community_id = c.id AND m.user_id = :viewerId',
-        { viewerId },
-      ).andWhere('(c.access_tier != :privateTier OR m.user_id = :viewerId)', {
-        privateTier: AccessTier.Private,
-        viewerId,
-      });
+      communitiesQuery
+        .leftJoin(
+          CommunityMember,
+          'm',
+          'm.community_id = c.id AND m.user_id = :viewerId',
+          { viewerId },
+        )
+        .andWhere('(c.access_tier != :privateTier OR m.user_id = :viewerId)', {
+          privateTier: AccessTier.Private,
+          viewerId,
+        });
     }
 
     if (query.type) {
-      qb.andWhere('c.type = :type', { type: query.type });
+      communitiesQuery.andWhere('c.type = :type', { type: query.type });
     }
     if (query.access) {
-      qb.andWhere('c.access_tier = :access', { access: query.access });
+      communitiesQuery.andWhere('c.access_tier = :access', {
+        access: query.access,
+      });
     }
     if (query.q) {
       // ANDed onto the existing filters (not a replacement) — mirrors
       // `searchByText`'s ILIKE clause over the same three columns.
       const pattern = `%${escapeLikeTerm(query.q)}%`;
-      qb.andWhere(
+      communitiesQuery.andWhere(
         '(c.name ILIKE :qPattern OR c.tagline ILIKE :qPattern OR c.purpose ILIKE :qPattern)',
         { qPattern: pattern },
       );
@@ -630,7 +636,9 @@ export class CommunitiesService {
     // on `LOWER(city)` is the follow-up if the filter ever gets hot, and that
     // needs a migration this task does not own.
     if (query.city) {
-      qb.andWhere('LOWER(c.city) = LOWER(:city)', { city: query.city });
+      communitiesQuery.andWhere('LOWER(c.city) = LOWER(:city)', {
+        city: query.city,
+      });
     }
     // Language filter: the community's `languages` array must CONTAIN the
     // requested code. Array overlap (`&&`) against the GIN-indexed column
@@ -640,16 +648,18 @@ export class CommunitiesService {
     if (query.language) {
       const languages = knownLanguages([query.language]);
       if (!languages.length) {
-        qb.andWhere('1 = 0');
+        communitiesQuery.andWhere('1 = 0');
       } else {
-        qb.andWhere('c.languages && :languages', { languages });
+        communitiesQuery.andWhere('c.languages && :languages', { languages });
       }
     }
     // Both directions are real answers here: `false` narrows to communities
     // that meet in person, it does not mean "no filter" (see
     // `ListCommunitiesQuery.online`).
     if (query.online !== undefined) {
-      qb.andWhere('c.is_online = :isOnline', { isOnline: query.online });
+      communitiesQuery.andWhere('c.is_online = :isOnline', {
+        isOnline: query.online,
+      });
     }
     // Curated tag filter. Plain array-overlap against the GIN-indexed
     // `communities.tags` (see `AddCommunityTags`), same shape as
@@ -660,46 +670,47 @@ export class CommunitiesService {
     const tags = knownCommunityTags(csv(query.tags));
     if (csv(query.tags).length) {
       if (!tags.length) {
-        qb.andWhere('1 = 0');
+        communitiesQuery.andWhere('1 = 0');
       } else {
-        qb.andWhere('c.tags && :tags', { tags });
+        communitiesQuery.andWhere('c.tags && :tags', { tags });
       }
     }
     // An archived community leaves every listing (discover AND mine) — it has
     // been taken down by its owner, so it should stop surfacing anywhere a card
     // is rendered, exactly like the moderated-away exclusion just below.
-    qb.andWhere('c.archived_at IS NULL');
-    this.excludeModeratedCommunities(qb);
+    communitiesQuery.andWhere('c.archived_at IS NULL');
+    this.excludeModeratedCommunities(communitiesQuery);
 
     // 'name' ties (names aren't unique) get a stable, deterministic
     // secondary key so pagination doesn't reshuffle rows across pages.
     if (query.sort === 'name') {
-      qb.orderBy('c.name', 'ASC').addOrderBy('c.id', 'ASC');
+      communitiesQuery.orderBy('c.name', 'ASC').addOrderBy('c.id', 'ASC');
     } else if (query.sort === 'active') {
       // Liveliness first, served straight off the indexed
       // `communities.active_this_week` counter. Ties are dense here (every
       // quiet community sits at 0), so the tiebreak matters more than it does
       // for 'name': newest first, then `id`, which is unique and therefore
       // makes the total order deterministic across pages.
-      qb.orderBy('c.activeThisWeek', 'DESC')
+      communitiesQuery
+        .orderBy('c.activeThisWeek', 'DESC')
         .addOrderBy('c.createdAt', 'DESC')
         .addOrderBy('c.id', 'ASC');
     } else {
-      qb.orderBy('c.createdAt', 'DESC');
+      communitiesQuery.orderBy('c.createdAt', 'DESC');
     }
 
-    return paginate(qb, page, async (rows) => {
+    return paginate(communitiesQuery, page, async (rows) => {
       if (!rows.length) return [];
-      const ids = rows.map((c) => c.id);
+      const communityIds = rows.map((community) => community.id);
       const [stats, myRoles] = await Promise.all([
-        this.statsForMany(ids),
-        this.myRoleByCommunity(ids, viewerId),
+        this.statsForMany(communityIds),
+        this.myRoleByCommunity(communityIds, viewerId),
       ]);
-      return rows.map((c) =>
+      return rows.map((community) =>
         toCommunityCard(
-          c,
-          stats.get(c.id) ?? EMPTY_STATS,
-          myRoles.get(c.id) ?? null,
+          community,
+          stats.get(community.id) ?? EMPTY_STATS,
+          myRoles.get(community.id) ?? null,
         ),
       );
     });
@@ -715,7 +726,7 @@ export class CommunitiesService {
    * hero card never leaks a private community to a non-member.
    */
   async getFeatured(viewerId: string): Promise<CommunityCardDTO | null> {
-    const qb = this.communities
+    const featuredCommunityQuery = this.communities
       .createQueryBuilder('c')
       .leftJoin(
         CommunityMember,
@@ -729,9 +740,9 @@ export class CommunitiesService {
         privateTier: AccessTier.Private,
         viewerId,
       });
-    this.excludeModeratedCommunities(qb);
+    this.excludeModeratedCommunities(featuredCommunityQuery);
 
-    const community = await qb.getOne();
+    const community = await featuredCommunityQuery.getOne();
     if (!community) return null;
 
     const [stats, myRoles] = await Promise.all([
@@ -754,7 +765,7 @@ export class CommunitiesService {
     limit: number,
   ): Promise<CommunityCardDTO[]> {
     const pattern = `%${escapeLikeTerm(term)}%`;
-    const rowsQb = this.communities
+    const matchingCommunitiesQuery = this.communities
       .createQueryBuilder('c')
       .leftJoin(
         CommunityMember,
@@ -771,14 +782,17 @@ export class CommunitiesService {
         { pattern },
       )
       .andWhere('c.archived_at IS NULL');
-    this.excludeModeratedCommunities(rowsQb);
-    const rows = await rowsQb.orderBy('c.name', 'ASC').take(limit).getMany();
+    this.excludeModeratedCommunities(matchingCommunitiesQuery);
+    const rows = await matchingCommunitiesQuery
+      .orderBy('c.name', 'ASC')
+      .take(limit)
+      .getMany();
 
     if (!rows.length) return [];
-    const ids = rows.map((community) => community.id);
+    const communityIds = rows.map((community) => community.id);
     const [stats, myRoles] = await Promise.all([
-      this.statsForMany(ids),
-      this.myRoleByCommunity(ids, viewerId),
+      this.statsForMany(communityIds),
+      this.myRoleByCommunity(communityIds, viewerId),
     ]);
     return rows.map((community) =>
       toCommunityCard(
@@ -816,7 +830,7 @@ export class CommunitiesService {
     const community = await this.loadOr404(slug);
     if (!community.tags.length) return [];
 
-    const qb = this.communities
+    const relatedCommunitiesQuery = this.communities
       .createQueryBuilder('c')
       .leftJoin(
         CommunityMember,
@@ -831,29 +845,30 @@ export class CommunitiesService {
         privateTier: AccessTier.Private,
         viewerId,
       });
-    this.excludeModeratedCommunities(qb);
+    this.excludeModeratedCommunities(relatedCommunitiesQuery);
 
-    qb.addSelect(
-      'cardinality(ARRAY(SELECT unnest(c.tags) INTERSECT SELECT unnest(CAST(:tags AS text[]))))',
-      'overlap',
-    )
+    relatedCommunitiesQuery
+      .addSelect(
+        'cardinality(ARRAY(SELECT unnest(c.tags) INTERSECT SELECT unnest(CAST(:tags AS text[]))))',
+        'overlap',
+      )
       .orderBy('overlap', 'DESC')
       .addOrderBy('c.createdAt', 'DESC')
       .take(4);
 
-    const rows = await qb.getMany();
+    const rows = await relatedCommunitiesQuery.getMany();
     if (!rows.length) return [];
 
-    const ids = rows.map((c) => c.id);
+    const communityIds = rows.map((community) => community.id);
     const [stats, myRoles] = await Promise.all([
-      this.statsForMany(ids),
-      this.myRoleByCommunity(ids, viewerId),
+      this.statsForMany(communityIds),
+      this.myRoleByCommunity(communityIds, viewerId),
     ]);
-    return rows.map((c) =>
+    return rows.map((community) =>
       toCommunityCard(
-        c,
-        stats.get(c.id) ?? EMPTY_STATS,
-        myRoles.get(c.id) ?? null,
+        community,
+        stats.get(community.id) ?? EMPTY_STATS,
+        myRoles.get(community.id) ?? null,
       ),
     );
   }
@@ -902,7 +917,7 @@ export class CommunitiesService {
       await this.connectionsService.allAcceptedConnectionUserIds(userId);
     if (!connectionIds.length) return [];
 
-    const qb = this.communities
+    const suggestedCommunitiesQuery = this.communities
       .createQueryBuilder('c')
       .leftJoin(
         CommunityMember,
@@ -922,7 +937,7 @@ export class CommunitiesService {
         )`,
         { connectionIds },
       );
-    this.excludeModeratedCommunities(qb);
+    this.excludeModeratedCommunities(suggestedCommunitiesQuery);
 
     // The alias MUST be lower-case and the `orderBy` criteria MUST be the bare
     // alias with no quotes of its own, exactly as `relatedCommunities` does
@@ -937,28 +952,29 @@ export class CommunitiesService {
     // Postgres folds the bare identifier to `connectioncount` and never finds
     // the `"connectionCount"` output alias. Lower-case + unquoted is the only
     // spelling that survives both.
-    qb.addSelect(
-      `(SELECT COUNT(DISTINCT "cm2"."user_id") FROM "community_members" "cm2"
+    suggestedCommunitiesQuery
+      .addSelect(
+        `(SELECT COUNT(DISTINCT "cm2"."user_id") FROM "community_members" "cm2"
         WHERE "cm2"."community_id" = c.id AND "cm2"."user_id" IN (:...connectionIds))`,
-      'connection_count',
-    )
+        'connection_count',
+      )
       .orderBy('connection_count', 'DESC')
       .addOrderBy('c.createdAt', 'DESC')
       .take(SUGGESTED_COMMUNITIES_LIMIT);
 
-    const rows = await qb.getMany();
+    const rows = await suggestedCommunitiesQuery.getMany();
     if (!rows.length) return [];
 
-    const ids = rows.map((c) => c.id);
+    const communityIds = rows.map((community) => community.id);
     const [stats, myRoles] = await Promise.all([
-      this.statsForMany(ids),
-      this.myRoleByCommunity(ids, userId),
+      this.statsForMany(communityIds),
+      this.myRoleByCommunity(communityIds, userId),
     ]);
-    return rows.map((c) =>
+    return rows.map((community) =>
       toCommunityCard(
-        c,
-        stats.get(c.id) ?? EMPTY_STATS,
-        myRoles.get(c.id) ?? null,
+        community,
+        stats.get(community.id) ?? EMPTY_STATS,
+        myRoles.get(community.id) ?? null,
       ),
     );
   }
@@ -1825,7 +1841,7 @@ export class CommunitiesService {
     }
 
     const normalizedPage = normalizePage(page);
-    const qb = this.members
+    const rosterMembersQuery = this.members
       .createQueryBuilder('m')
       .where('m.community_id = :communityId', { communityId: community.id })
       .orderBy('m.joined_at', 'ASC');
@@ -1839,7 +1855,7 @@ export class CommunitiesService {
     const searchTerm = q?.trim().slice(0, ROSTER_SEARCH_MAX_LENGTH);
     if (searchTerm) {
       const pattern = `%${escapeLikeTerm(searchTerm)}%`;
-      qb.andWhere(
+      rosterMembersQuery.andWhere(
         `EXISTS (
            SELECT 1 FROM "profiles" "rp"
            WHERE "rp"."user_id" = m.user_id
@@ -1854,14 +1870,16 @@ export class CommunitiesService {
       );
     }
 
-    return paginate(qb, normalizedPage, async (rows) => {
+    return paginate(rosterMembersQuery, normalizedPage, async (rows) => {
       if (!rows.length) return [];
-      const refs = await new MemberLookup(this.profiles).byUserIds(
-        rows.map((m) => m.userId),
+      const profilesByUserId = await new MemberLookup(this.profiles).byUserIds(
+        rows.map((member) => member.userId),
       );
       return rows
-        .filter((m) => refs.has(m.userId))
-        .map((m) => toRosterEntry(m, refs.get(m.userId)!));
+        .filter((member) => profilesByUserId.has(member.userId))
+        .map((member) =>
+          toRosterEntry(member, profilesByUserId.get(member.userId)!),
+        );
     });
   }
 
