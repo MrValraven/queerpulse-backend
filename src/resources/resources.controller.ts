@@ -11,6 +11,7 @@ import {
   CurrentUser,
   CurrentUserData,
 } from '../auth/decorators/current-user.decorator';
+import { Public } from '../auth/decorators/public.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { Feature } from '../common/feature.decorator';
 import { CreateResourceSuggestionDto } from './dto/create-resource-suggestion.dto';
@@ -70,15 +71,24 @@ export class ResourcesController {
 
   // Same declaration-order rule as `listListings` above: this MUST stay
   // before `getBySlug(':slug')` or a slug wildcard swallows "/resources/index".
+  // `@Public()` on the three guide reads (this one, `list` and `getBySlug`).
+  // The guide PAGES are deliberately reachable by a logged-out visitor — a
+  // questioning teenager, or somebody in crisis, must not have to sign up
+  // first — so the data behind them has to answer an anonymous caller too.
+  // Without it the global `JwtAuthGuard` and the class-level
+  // `ActiveMemberGuard` both reject before the handler runs, the frontend
+  // reads that rejection as "could not ask" and falls open, and the editorial
+  // review gate would bind signed-in members only. None of the three
+  // responses is caller-specific, so there is nothing here to leak.
+  @Public()
   @Get('index')
   @ApiOperation({
-    summary: 'Every published guide, for the category-grouped guide index',
+    summary: 'Every published, editorially reviewed guide, for the guide index',
   })
   @ApiOkResponse({
-    description: 'Every published guide: slug, title, category, route.',
+    description:
+      'Every published guide an editor has reviewed: slug, title, category, route. Never-reviewed guides are omitted.',
   })
-  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
-  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
   listIndex() {
     return this.resourcesService.listIndex();
   }
@@ -99,21 +109,27 @@ export class ResourcesController {
     return this.resourceSuggestionsService.create(user.userId, dto);
   }
 
-  @ApiOperation({ summary: 'List published resources, optionally by category' })
-  @ApiOkResponse({ description: 'A page of published resources.' })
-  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
-  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
+  @Public()
+  @ApiOperation({
+    summary:
+      'List published, editorially reviewed resources, optionally by category',
+  })
+  @ApiOkResponse({
+    description: 'A page of published, editorially reviewed resources.',
+  })
   @Get()
   list(@Query() query: ListResourcesQuery) {
     return this.resourcesService.list(query);
   }
 
-  @ApiOperation({ summary: 'Get a published resource by slug' })
+  @Public()
+  @ApiOperation({
+    summary: 'Get a published, editorially reviewed resource by slug',
+  })
   @ApiOkResponse({ description: 'The resource.' })
-  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
-  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
   @ApiNotFoundResponse({
-    description: 'No published resource with that slug.',
+    description:
+      'No published resource with that slug, or it has never been reviewed by an editor.',
   })
   @Get(':slug')
   getBySlug(@Param('slug') slug: string) {

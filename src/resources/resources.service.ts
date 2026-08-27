@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, SelectQueryBuilder } from 'typeorm';
 import { escapeLikeTerm } from '../common/like-escape';
 import {
   DEFAULT_LIST_LIMIT,
@@ -35,18 +35,54 @@ export class ResourcesService {
     private readonly glossaryTerms: Repository<GlossaryTerm>,
   ) {}
 
-  // Public directory: published resources only (`publishedAt` set and not in
-  // the future), optionally filtered by category. Mirrors
+  /**
+   * The public visibility gate for a guide, in one place because four public
+   * reads share it and a fifth would otherwise be written without it.
+   *
+   * Published is necessary but not sufficient. A guide nobody has read end to
+   * end is not something to put in front of someone looking for a crisis
+   * line, a clinic's hours or a legal deadline, so `last_reviewed_on` has to
+   * be stamped too. `POST /admin/resources/:id/review` is the endpoint that
+   * exists to stamp it, held apart from editing prose so a typo fix cannot
+   * quietly reset a crisis guide's freshness clock (the admin create/update
+   * DTOs can also carry the date, for an editor correcting a mis-stamped
+   * one). Either way it takes a staff account, so "visible" means a named
+   * person took responsibility for the words.
+   *
+   * A LAPSED review (`reviewDueOn` in the past) does NOT hide the guide. A
+   * stale date the reader footer prints honestly is a far smaller harm than a
+   * health guide disappearing because a calendar date passed.
+   */
+  private applyPublicGate(
+    qb: SelectQueryBuilder<Resource>,
+  ): SelectQueryBuilder<Resource> {
+    return qb
+      .where('r.publishedAt IS NOT NULL')
+      .andWhere('r.publishedAt <= :now', { now: new Date() })
+      .andWhere('r.lastReviewedOn IS NOT NULL');
+  }
+
+  /** The row-level twin of `applyPublicGate`, for the single-row reads that
+   *  go through `findOne` rather than a query builder. */
+  private isPubliclyVisible(resource: Resource | null): resource is Resource {
+    return Boolean(
+      resource &&
+      resource.publishedAt &&
+      resource.publishedAt.getTime() <= Date.now() &&
+      resource.lastReviewedOn,
+    );
+  }
+
+  // Public directory: published AND editorially reviewed resources only (see
+  // `applyPublicGate`), optionally filtered by category. Mirrors
   // `PartnersService.list`'s approved-only + optional-filter shape.
   async list(
     query: ListResourcesInput,
   ): Promise<Paginated<ResourceResponseDTO>> {
     const page = normalizePage(query.page);
-    const qb = this.resources
-      .createQueryBuilder('r')
-      .where('r.publishedAt IS NOT NULL')
-      .andWhere('r.publishedAt <= :now', { now: new Date() })
-      .orderBy('r.publishedAt', 'DESC');
+    const qb = this.applyPublicGate(
+      this.resources.createQueryBuilder('r'),
+    ).orderBy('r.publishedAt', 'DESC');
 
     if (query.category) {
       qb.andWhere('r.category = :category', { category: query.category });
@@ -56,8 +92,10 @@ export class ResourcesService {
   }
 
   /**
-   * Every published guide in one unpaginated, compact response — what the
-   * public guide index (CON-10) renders as a category-grouped list.
+   * Every publicly visible guide in one unpaginated, compact response — what
+   * the public guide index (CON-10) renders as a category-grouped list.
+   * "Publicly visible" is published AND editorially reviewed; see
+   * `applyPublicGate`.
    *
    * Seventeen guides had no `routes.*` reference anywhere and were reachable
    * only by typing the URL; the ones worst affected served the least-served
@@ -66,43 +104,43 @@ export class ResourcesService {
    * page one of the library.
    */
   async listIndex(): Promise<ResourceIndexEntryDTO[]> {
-    const rows = await this.resources
-      .createQueryBuilder('r')
-      .where('r.publishedAt IS NOT NULL')
-      .andWhere('r.publishedAt <= :now', { now: new Date() })
+    const rows = await this.applyPublicGate(
+      this.resources.createQueryBuilder('r'),
+    )
       .orderBy('r.category', 'ASC')
       .addOrderBy('r.title', 'ASC')
       .getMany();
     return rows.map(toResourceIndexEntry);
   }
 
-  // 404s anything unpublished/future-dated — hides its existence from the
-  // public rather than surfacing a distinct "not visible yet" response
-  // (mirrors `PartnersService.getBySlug`'s treatment of non-approved
-  // partners).
+  // 404s anything unpublished, future-dated or never editorially reviewed —
+  // hides its existence from the public rather than surfacing a distinct
+  // "not visible yet" response (mirrors `PartnersService.getBySlug`'s
+  // treatment of non-approved partners).
+  //
+  // The frontend's `ManagedGuide` reads a 404 here as "this guide is not
+  // managed in the database yet" and renders its hardcoded page instead, so
+  // an unreviewed guide that still has a hardcoded page degrades to that page
+  // without its review footer, rather than to a dead end.
   async getBySlug(slug: string): Promise<ResourceResponseDTO> {
     const resource = await this.resources.findOne({ where: { slug } });
-    if (
-      !resource ||
-      !resource.publishedAt ||
-      resource.publishedAt.getTime() > Date.now()
-    ) {
+    if (!this.isPubliclyVisible(resource)) {
       throw new NotFoundException('Resource not found');
     }
     return toResourceResponse(resource);
   }
 
-  // Cross-entity global search (SearchService) — published resources only
-  // (same gate as `list`), ILIKE over title / description. Body/meta stay out.
+  // Cross-entity global search (SearchService) — published and reviewed
+  // resources only (same gate as `list`), ILIKE over title / description.
+  // Body/meta stay out.
   async searchByText(
     term: string,
     limit: number,
   ): Promise<ResourceSearchRow[]> {
     const pattern = `%${escapeLikeTerm(term)}%`;
-    const rows = await this.resources
-      .createQueryBuilder('r')
-      .where('r.publishedAt IS NOT NULL')
-      .andWhere('r.publishedAt <= :now', { now: new Date() })
+    const rows = await this.applyPublicGate(
+      this.resources.createQueryBuilder('r'),
+    )
       .andWhere('(r.title ILIKE :pattern OR r.description ILIKE :pattern)', {
         pattern,
       })

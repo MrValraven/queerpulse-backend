@@ -9,10 +9,18 @@ import { ResourcesService } from './resources.service';
 // results by default (mirrors `partners.service.spec.ts`'s `qbStub`).
 const qbStub = () => {
   const qb: Record<string, jest.Mock> = {};
-  for (const m of ['where', 'andWhere', 'orderBy', 'skip', 'take']) {
+  for (const m of [
+    'where',
+    'andWhere',
+    'orderBy',
+    'addOrderBy',
+    'skip',
+    'take',
+  ]) {
     qb[m] = jest.fn().mockReturnValue(qb);
   }
   qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
+  qb.getMany = jest.fn().mockResolvedValue([]);
   return qb;
 };
 
@@ -44,9 +52,12 @@ describe('ResourcesService', () => {
     sections: [],
     sectionsPt: null,
     routePath: '/safety/legal',
-    reviewDueOn: null,
-    lastReviewedOn: null,
-    reviewedBy: null,
+    // Published is no longer enough to be public: a guide only reaches a
+    // reader once an editor has stamped a review, so the "visible" fixture
+    // carries one. The never-reviewed case gets its own tests below.
+    reviewDueOn: '2027-01-01',
+    lastReviewedOn: '2026-01-01',
+    reviewedBy: 'Trans Hub',
     updatedBy: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
@@ -100,6 +111,35 @@ describe('ResourcesService', () => {
       expect(qb.andWhere).toHaveBeenCalledWith('r.publishedAt <= :now', {
         now: expect.any(Date) as Date,
       });
+    });
+
+    // A guide nobody has read end to end must not reach a reader looking for
+    // a crisis line or a legal deadline, however long ago it was published.
+    it('excludes guides no editor has reviewed', async () => {
+      await service.list({});
+
+      const qb = resources.createQueryBuilder.mock.results[0]!.value as {
+        andWhere: jest.Mock;
+      };
+      expect(qb.andWhere).toHaveBeenCalledWith('r.lastReviewedOn IS NOT NULL');
+    });
+
+    // Hiding a health guide because a calendar date passed is worse than the
+    // reader footer printing an honestly stale date, so nothing filters on
+    // `reviewDueOn`.
+    it('does not hide a guide whose review has merely fallen due', async () => {
+      await service.list({});
+
+      const qb = resources.createQueryBuilder.mock.results[0]!.value as {
+        andWhere: jest.Mock;
+      };
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        expect.stringContaining('reviewDueOn'),
+        expect.anything(),
+      );
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        expect.stringContaining('reviewDueOn'),
+      );
     });
 
     it('adds a category filter when provided', async () => {
@@ -156,15 +196,44 @@ describe('ResourcesService', () => {
             sections: [],
             sectionsPt: null,
             routePath: '/safety/legal',
-            lastReviewedOn: null,
-            reviewedBy: null,
-            reviewDueOn: null,
+            lastReviewedOn: '2026-01-01',
+            reviewedBy: 'Trans Hub',
+            reviewDueOn: '2027-01-01',
           },
         ],
         total: 1,
         page: 1,
         pageSize: 20,
       });
+    });
+  });
+
+  // `listIndex` and `searchByText` share `applyPublicGate` with `list`, but
+  // they are separate call sites: an inlined rewrite of either one would put
+  // unreviewed guides back in front of readers without failing `list`'s tests.
+  describe('listIndex', () => {
+    it('serves only published guides an editor has reviewed', async () => {
+      await service.listIndex();
+
+      const qb = resources.createQueryBuilder.mock.results[0]!.value as {
+        where: jest.Mock;
+        andWhere: jest.Mock;
+      };
+      expect(qb.where).toHaveBeenCalledWith('r.publishedAt IS NOT NULL');
+      expect(qb.andWhere).toHaveBeenCalledWith('r.lastReviewedOn IS NOT NULL');
+    });
+  });
+
+  describe('searchByText', () => {
+    it('never surfaces an unreviewed guide in global search', async () => {
+      await service.searchByText('discrimination', 5);
+
+      const qb = resources.createQueryBuilder.mock.results[0]!.value as {
+        where: jest.Mock;
+        andWhere: jest.Mock;
+      };
+      expect(qb.where).toHaveBeenCalledWith('r.publishedAt IS NOT NULL');
+      expect(qb.andWhere).toHaveBeenCalledWith('r.lastReviewedOn IS NOT NULL');
     });
   });
 
@@ -196,6 +265,32 @@ describe('ResourcesService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
     });
 
+    it('404s a published guide no editor has ever reviewed', async () => {
+      resources.findOne.mockResolvedValue({
+        ...publishedResource,
+        lastReviewedOn: null,
+        reviewedBy: null,
+      });
+      await expect(
+        service.getBySlug('workplace-discrimination-guide'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    // The frontend reads this 404 as "not managed in the database yet" and
+    // falls back to the hardcoded page, so an overdue review must not trigger
+    // it — that would silently strip an editor's prose off a live guide.
+    it('serves a guide whose review has fallen due', async () => {
+      resources.findOne.mockResolvedValue({
+        ...publishedResource,
+        lastReviewedOn: '2020-01-01',
+        reviewDueOn: '2020-07-01',
+      });
+
+      const detail = await service.getBySlug('workplace-discrimination-guide');
+
+      expect(detail.lastReviewedOn).toBe('2020-01-01');
+    });
+
     it('returns the full ResourceResponse (with body) for a published resource', async () => {
       resources.findOne.mockResolvedValue(publishedResource);
 
@@ -216,9 +311,9 @@ describe('ResourcesService', () => {
         sections: [],
         sectionsPt: null,
         routePath: '/safety/legal',
-        lastReviewedOn: null,
-        reviewedBy: null,
-        reviewDueOn: null,
+        lastReviewedOn: '2026-01-01',
+        reviewedBy: 'Trans Hub',
+        reviewDueOn: '2027-01-01',
       });
     });
 
