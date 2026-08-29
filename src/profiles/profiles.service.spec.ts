@@ -47,6 +47,9 @@ const qbStub = () => {
     'orderBy',
     'addOrderBy',
     'setParameters',
+    // Singular, and distinct from `setParameters` above: the facet count
+    // queries bind one parameter per filter clause as they build the select.
+    'setParameter',
     'take',
     'skip',
   ]) {
@@ -54,10 +57,14 @@ const qbStub = () => {
   }
   qb.getMany = jest.fn().mockResolvedValue([]);
   qb.getRawMany = jest.fn().mockResolvedValue([]);
+  // Each facet count query reads one aggregate row. `undefined` is the honest
+  // stub: `countByFilterClauses` treats a missing row as zero for every option.
+  qb.getRawOne = jest.fn().mockResolvedValue(undefined);
   qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
   return qb as Record<string, jest.Mock> & {
     getMany: jest.Mock;
     getRawMany: jest.Mock;
+    getRawOne: jest.Mock;
     getManyAndCount: jest.Mock;
   };
 };

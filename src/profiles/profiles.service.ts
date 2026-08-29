@@ -8,13 +8,12 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { handleFormatError, normalizeHandle } from '../common/handles';
 import { toImageUrl } from '../common/image-url';
 import { ConnectionsService } from '../connections/connections.service';
 import { ConnectionStatus } from '../connections/entities/connection.entity';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
-import { escapeLikeTerm } from '../common/like-escape';
 import {
   PROFILE_SEARCH_COLUMNS,
   PROFILE_SEARCH_FIELDS,
@@ -51,15 +50,15 @@ import {
   communityTypeLabel,
 } from './featured-communities';
 import { ProfileFeaturedCommunity } from './entities/profile-featured-community.entity';
-import { labelsForFacets, pruneDiscoverable } from './identities';
-import { normalizeOpenTo, OPEN_TO_PRESET_IDS } from './open-to';
-import { knownLanguages } from './languages';
-import { knownNeighbourhoods } from './neighbourhoods';
+import { pruneDiscoverable } from './identities';
+import { normalizeOpenTo } from './open-to';
+import { reconcileDisciplineProfession } from './professions';
 import {
-  knownDisciplines,
-  knownProfessions,
-  reconcileDisciplineProfession,
-} from './professions';
+  applyDirectoryFilters,
+  countDirectoryFacets,
+  type DirectoryFacetCounts,
+  type DirectoryFacetGroup,
+} from './member-directory.query';
 import { Activity } from './entities/activity.entity';
 import {
   BoardKind,
@@ -116,16 +115,6 @@ const BOARD_ITEM_LIFESPAN_DAYS: Record<BoardKind, number> = {
   [BoardKind.Looking]: 30,
   [BoardKind.Offering]: 90,
 };
-
-// Comma-separated query param -> trimmed, non-empty values.
-function csv(raw: string | undefined): string[] {
-  return raw
-    ? raw
-        .split(',')
-        .map((v) => v.trim())
-        .filter(Boolean)
-    : [];
-}
 
 @Injectable()
 export class ProfilesService {
@@ -1099,21 +1088,21 @@ export class ProfilesService {
     return this.loadGroups(userId);
   }
 
-  async searchMembers(
+  /**
+   * A fresh directory query builder carrying the viewer's visibility gates and
+   * every facet predicate — the single definition of "who is in this
+   * directory". `searchMembers` orders and pages one of these; each facet count
+   * query gets its own with that group's predicate skipped.
+   *
+   * Returns a NEW builder every call, because both callers mutate what they are
+   * handed (select lists, joins, ordering) and a shared one would leak a count
+   * query's aggregate select into the page query.
+   */
+  private directoryBaseQuery(
     q: ListMembersQuery,
     viewerUserId: string,
-    // Global search paginates by a flat offset, not by the directory's fixed
-    // 20-per-page window (SOC-08): the search page's "load more" on the Members
-    // tab asks for rows 50..99 of one type, which `q.page` cannot express. When
-    // absent, paging is exactly what it was.
-    pagination?: { offset: number; limit: number },
-  ): Promise<{
-    items: MemberCard[];
-    total: number;
-    page: number;
-    pageSize: number;
-  }> {
-    const page = q.page && q.page > 0 ? q.page : 1;
+    skip?: DirectoryFacetGroup,
+  ): SelectQueryBuilder<Profile> {
     const qb = this.profiles
       .createQueryBuilder('p')
       .innerJoin('p.user', 'u', 'u.status = :active', {
@@ -1135,144 +1124,45 @@ export class ProfilesService {
     // directly (`getMine`/`getBySlug` own the owner exception via
     // `findBySlugOrThrow`).
     qb.andWhere('("p"."hidden_until" IS NULL OR "p"."hidden_until" <= now())');
+    applyDirectoryFilters(qb, q, skip);
+    return qb;
+  }
 
-    // Free-text search (SOC-08). Two branches, OR'd:
-    //
-    //  - an accent-folded full-text match, so "Sao" finds "São" and a hit in a
-    //    name outranks one in a bio (the weights live in `PROFILE_SEARCH_FIELDS`);
-    //  - the original substring match, folded the same way. Kept because full
-    //    text matches whole tokens: dropping it would stop "trans" finding
-    //    "transfeminine", a regression on what members already rely on.
-    //
-    // The haystack now includes `bio` and `bio_pt`, which member search skipped
-    // entirely. `bio_pt` matters most: a Portuguese-speaking member writes their
-    // real self-description there.
+  async searchMembers(
+    q: ListMembersQuery,
+    viewerUserId: string,
+    // Global search paginates by a flat offset, not by the directory's fixed
+    // 20-per-page window (SOC-08): the search page's "load more" on the Members
+    // tab asks for rows 50..99 of one type, which `q.page` cannot express. When
+    // absent, paging is exactly what it was.
+    pagination?: { offset: number; limit: number },
+  ): Promise<{
+    items: MemberCard[];
+    total: number;
+    page: number;
+    pageSize: number;
+    /**
+     * Per-option availability counts for the directory sidebar's filter groups.
+     *
+     * Absent for the offset-paginated caller (global search), which renders a
+     * plain results list with no filter sidebar: computing five aggregates for
+     * a surface that cannot show them is wasted work, and returning them anyway
+     * would invite a future caller to display numbers describing a filter UI
+     * that isn't on screen.
+     */
+    facets?: DirectoryFacetCounts;
+  }> {
+    const page = q.page && q.page > 0 ? q.page : 1;
+    const qb = this.directoryBaseQuery(q, viewerUserId);
+
+    // The relevance ordering below needs the same folded search expressions the
+    // search PREDICATE uses (now in `applyDirectoryFilters`). They are pure
+    // string builders over the alias, so rebuilding them here costs nothing and
+    // keeps the shared filter function free of any ordering concern.
     const memberSearchVector = weightedSearchVector('p', PROFILE_SEARCH_FIELDS);
     const memberSearchHaystack = foldedHaystack('p', PROFILE_SEARCH_COLUMNS);
     const memberSearchTsQuery = foldedSearchQuery('memberSearchTerm');
     const hasSearchTerm = Boolean(q.query);
-    if (q.query) {
-      // Escape LIKE metacharacters (\ % _) so a user-supplied term is matched
-      // literally and can't inject wildcards. Postgres treats backslash as the
-      // default LIKE escape character.
-      const term = `%${escapeLikeTerm(q.query)}%`;
-      qb.andWhere(
-        `(${memberSearchVector} @@ ${memberSearchTsQuery} ` +
-          `OR ${memberSearchHaystack} LIKE ${foldedSearchTerm('memberSearchPattern')})`,
-        { memberSearchTerm: q.query, memberSearchPattern: term },
-      );
-    }
-
-    const tags = csv(q.tags);
-    if (tags.length) {
-      qb.andWhere('p.tags && :tags', { tags });
-    }
-
-    // Identity filter. Reads `discoverable_identities` — the subset each member
-    // OPTED IN to publishing — and never `identities`, which is private (see the
-    // entity, and AddDiscoverableIdentities1782800770000 for why pointing this
-    // at `identities` would be a special-category-data leak).
-    //
-    // The query param carries the directory's coarse facet ids
-    // (`transNonBinary`), the column stores the member's own interest labels
-    // ('Trans', 'Genderfluid', …), so facets expand to their label sets here.
-    // Unknown facet ids expand to nothing; if EVERY id was unknown the caller
-    // asked for a facet that cannot exist, and returning the unfiltered
-    // directory instead would be a silently wrong answer — so match nothing.
-    const facets = csv(q.identities);
-    if (facets.length) {
-      const identityLabels = labelsForFacets(facets);
-      if (!identityLabels.length) {
-        qb.andWhere('1 = 0');
-      } else {
-        qb.andWhere('p.discoverable_identities && :identityLabels', {
-          identityLabels,
-        });
-      }
-    }
-
-    // "Open to" filter. `profiles.open_to` is jsonb (preset/custom union, see
-    // open-to.ts), not a plain array, so the `&&` overlap the array facets
-    // below use doesn't apply — an EXISTS over its unpacked elements does.
-    // Customs never participate: they're the member's own words, not a
-    // searchable vocabulary. Same "unknown id -> match nothing" rule as
-    // identities above.
-    const openToIds = csv(q.openTo).filter((id) =>
-      (OPEN_TO_PRESET_IDS as readonly string[]).includes(id),
-    );
-    if (csv(q.openTo).length) {
-      if (!openToIds.length) {
-        qb.andWhere('1 = 0');
-      } else {
-        qb.andWhere(
-          `EXISTS (
-             SELECT 1 FROM jsonb_array_elements(p.open_to) elem
-             WHERE elem->>'kind' = 'preset' AND elem->>'id' = ANY(:openToIds)
-           )`,
-          { openToIds },
-        );
-      }
-    }
-
-    // "Where they're based" filter. `profiles.location` is free text, so a
-    // neighbourhood "match" is the same substring test `matchNeighbourhood`
-    // uses for the card's `hood` field — filtering and display can't drift
-    // apart because they share one function.
-    const hoods = knownNeighbourhoods(csv(q.hoods));
-    if (csv(q.hoods).length) {
-      if (!hoods.length) {
-        qb.andWhere('1 = 0');
-      } else {
-        qb.andWhere(
-          '(' +
-            hoods.map((_, i) => `p.location ILIKE :hood${i}`).join(' OR ') +
-            ')',
-          Object.fromEntries(hoods.map((h, i) => [`hood${i}`, `%${h}%`])),
-        );
-      }
-    }
-
-    // "What they do" / "Profession" filters. Plain array-overlap, same shape
-    // as `tags` above. See src/profiles/professions.ts.
-    const disciplines = knownDisciplines(csv(q.disciplines));
-    if (csv(q.disciplines).length) {
-      if (!disciplines.length) {
-        qb.andWhere('1 = 0');
-      } else {
-        qb.andWhere('p.discipline && :disciplines', { disciplines });
-      }
-    }
-    const professions = knownProfessions(csv(q.professions));
-    if (csv(q.professions).length) {
-      if (!professions.length) {
-        qb.andWhere('1 = 0');
-      } else {
-        qb.andWhere('p.profession && :professions', { professions });
-      }
-    }
-
-    // Languages filter. Plain array-overlap, same shape as `tags`.
-    const languages = knownLanguages(csv(q.languages));
-    if (csv(q.languages).length) {
-      if (!languages.length) {
-        qb.andWhere('1 = 0');
-      } else {
-        qb.andWhere('p.languages && :languages', { languages });
-      }
-    }
-
-    // Member age (tenure) filter — years since joined, computed from
-    // `profiles.joined_at`. Either bound may be sent alone.
-    if (q.yearsFrom !== undefined) {
-      qb.andWhere(`date_part('year', age(now(), p.joined_at)) >= :yearsFrom`, {
-        yearsFrom: q.yearsFrom,
-      });
-    }
-    if (q.yearsTo !== undefined) {
-      qb.andWhere(`date_part('year', age(now(), p.joined_at)) <= :yearsTo`, {
-        yearsTo: q.yearsTo,
-      });
-    }
 
     // Ordering. Applied here rather than on the client because the directory is
     // paginated — the client only ever holds one page and cannot sort across the
@@ -1395,7 +1285,16 @@ export class ProfilesService {
       .skip(pagination ? pagination.offset : (page - 1) * PAGE_SIZE)
       .take(pagination ? pagination.limit : PAGE_SIZE);
 
-    const [rows, total] = await qb.getManyAndCount();
+    // The page and the five facet aggregates are independent reads of the same
+    // committed snapshot, so they go out together rather than in series.
+    const [[rows, total], facets] = await Promise.all([
+      qb.getManyAndCount(),
+      pagination
+        ? Promise.resolve(undefined)
+        : countDirectoryFacets((skip) =>
+            this.directoryBaseQuery(q, viewerUserId, skip),
+          ),
+    ]);
     const memberIds = rows.map((r) => r.userId);
     const counts = await this.vouchService.getVouchCounts(memberIds);
     // ONE batched lookup for the whole page's activity bands, never one per
@@ -1422,6 +1321,7 @@ export class ProfilesService {
       total,
       page,
       pageSize: pagination ? pagination.limit : PAGE_SIZE,
+      facets,
     };
   }
 }

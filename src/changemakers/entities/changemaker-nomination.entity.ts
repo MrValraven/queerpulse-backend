@@ -43,6 +43,22 @@ export class ChangemakerNomination {
   @Column({ type: 'text', nullable: true })
   reason!: string | null;
 
+  // COM-18: the nominee, when they are already a member here. The form's
+  // member search submits a profile `slug`; the service resolves it to this
+  // user id so the admin queue can render a real profile the reviewer can
+  // open. No FK, mirroring `nominatorId` above — a dangling id resolves to no
+  // `MemberRef` and the row reads "A former member".
+  @Index('IDX_changemaker_nomination_nominee_user_id')
+  @Column({ type: 'uuid', nullable: true })
+  nomineeUserId!: string | null;
+
+  // COM-18: where to find a nominee who is NOT a member — an Instagram
+  // handle, a website, an email. Free text on purpose: a reviewer needs
+  // whatever the nominator actually knows, and the platform has no business
+  // insisting a stranger's presence online fit one shape.
+  @Column({ type: 'varchar', length: 200, nullable: true })
+  nomineeContact!: string | null;
+
   @Column({
     type: 'enum',
     enum: ChangemakerNominationStatus,

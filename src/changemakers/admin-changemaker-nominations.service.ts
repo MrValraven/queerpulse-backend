@@ -71,15 +71,18 @@ export class AdminChangemakerNominationsService {
     }
 
     const memberLookup = new MemberLookup(this.profiles);
-    // One batched lookup covers both nominator and reviewer refs — never one
-    // query per row, mirroring `AdminWriterApplicationsService.list`. The
-    // nominator ids are looked up only when the reader is platform staff; for
-    // anyone else the ref is never built, so it cannot be serialized by
-    // accident later.
+    // One batched lookup covers the nominator, the linked nominee (COM-18) and
+    // the reviewer refs — never one query per row, mirroring
+    // `AdminWriterApplicationsService.list`. The nominator and nominee ids are
+    // looked up only when the reader is platform staff; for anyone else the
+    // ref is never built, so it cannot be serialized by accident later.
     const userIds = [
       ...new Set(
         rows.flatMap((row) => [
           ...(isPlatformStaffReader ? [row.nominatorId] : []),
+          ...(isPlatformStaffReader && row.nomineeUserId
+            ? [row.nomineeUserId]
+            : []),
           ...(row.reviewedBy ? [row.reviewedBy] : []),
         ]),
       ),
@@ -90,6 +93,9 @@ export class AdminChangemakerNominationsService {
       toAdminChangemakerNominationDTO(
         nomination,
         refsByUserId.get(nomination.nominatorId) ?? null,
+        nomination.nomineeUserId
+          ? (refsByUserId.get(nomination.nomineeUserId) ?? null)
+          : null,
         nomination.reviewedBy
           ? (refsByUserId.get(nomination.reviewedBy) ?? null)
           : null,
@@ -161,9 +167,13 @@ export class AdminChangemakerNominationsService {
 
     const memberLookup = new MemberLookup(this.profiles);
     const refsByUserId = await memberLookup.byUserIds([
-      // Same narrowing as `list`: the nominator's profile is not even fetched
-      // for a caller who reached this on the `partnerships` grant.
+      // Same narrowing as `list`: neither the nominator's profile nor the
+      // linked nominee's is even fetched for a caller who reached this on the
+      // `partnerships` grant.
       ...(isPlatformStaffReader ? [nomination.nominatorId] : []),
+      ...(isPlatformStaffReader && nomination.nomineeUserId
+        ? [nomination.nomineeUserId]
+        : []),
       actorUserId,
     ]);
     return toAdminChangemakerNominationDTO(
@@ -175,6 +185,9 @@ export class AdminChangemakerNominationsService {
         reviewedAt: new Date(),
       },
       refsByUserId.get(nomination.nominatorId) ?? null,
+      nomination.nomineeUserId
+        ? (refsByUserId.get(nomination.nomineeUserId) ?? null)
+        : null,
       refsByUserId.get(actorUserId) ?? null,
       isPlatformStaffReader,
     );

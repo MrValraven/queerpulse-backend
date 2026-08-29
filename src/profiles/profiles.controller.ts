@@ -271,7 +271,10 @@ export class MembersController {
 
   @ApiOperation({ summary: 'Search and page the member directory' })
   @ApiOkResponse({
-    description: 'A page of member cards with `total`, `page`, and `pageSize`.',
+    description:
+      'A page of member cards with `total`, `page`, `pageSize`, and `facets` — ' +
+      'per-option availability counts for the sidebar filter groups, each ' +
+      "counted with its own group's filter left out.",
   })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
   @ApiForbiddenResponse({ description: 'Caller is not an active member.' })

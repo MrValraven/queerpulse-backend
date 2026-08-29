@@ -28,6 +28,17 @@ export function toAdminPerson(ref: MemberRef | null): AdminPersonDTO | null {
  * row), and the free-text nominee name + reason (COM-16) are carried through
  * verbatim.
  *
+ * `nominator`, `nominee` and `nomineeContact` all ride ONE rule, described
+ * below for `nominator` and applied identically to the other two. COM-18 added
+ * the last pair: where to find the person who was named. A linked member is a
+ * profile, and a contact string is a stranger's handle or address, which is
+ * personal data about someone who never opted in and cannot see or delete it
+ * here. Both are "how to reach a third party", the same category of fact as
+ * "who named them", so they are withheld from the same readers rather than
+ * getting a looser rule of their own. What a `partnerships` grant holder reads
+ * is unchanged in kind: the nominee's name, the nominator's reason, and the
+ * whole triage history, which is what maintaining the roster needs.
+ *
  * `nominator` is WHO PUT THEM FORWARD, and is present only for a caller whose
  * account tier is platform Moderator or Admin. Since OPS-03 this queue is also
  * reachable with the additive `partnerships` grant. A nomination is a private
@@ -45,6 +56,13 @@ export interface AdminChangemakerNominationDTO {
   id: string;
   nominator?: AdminPersonDTO | null;
   nomineeName: string;
+  /** The nominee themselves, when the nominator picked them out of the member
+   *  search (COM-18) — null when they aren't a member here, or when the
+   *  account behind the stored id is gone. Withheld like `nominator`. */
+  nominee?: AdminPersonDTO | null;
+  /** Where else to find the nominee, in the nominator's own words (COM-18) —
+   *  a handle, a link, an email. Withheld like `nominator`. */
+  nomineeContact?: string | null;
   /** The nominator's own words on why — null for nominations submitted
    *  before this field existed (COM-16). */
   reason: string | null;
@@ -72,12 +90,19 @@ export interface AdminChangemakerNominationsPageDTO {
 export function toAdminChangemakerNominationDTO(
   nomination: ChangemakerNomination,
   nominator: MemberRef | null,
+  nominee: MemberRef | null,
   reviewer: MemberRef | null,
   isPlatformStaffReader: boolean,
 ): AdminChangemakerNominationDTO {
   return {
     id: nomination.id,
-    ...(isPlatformStaffReader ? { nominator: toAdminPerson(nominator) } : {}),
+    ...(isPlatformStaffReader
+      ? {
+          nominator: toAdminPerson(nominator),
+          nominee: toAdminPerson(nominee),
+          nomineeContact: nomination.nomineeContact,
+        }
+      : {}),
     nomineeName: nomination.nomineeName,
     reason: nomination.reason,
     status: nomination.status,
