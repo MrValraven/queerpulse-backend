@@ -16,7 +16,7 @@ import {
   type DirectoryIdentityFacet,
 } from './identities';
 import { LANGUAGE_CODES, knownLanguages } from './languages';
-import { knownNeighbourhoods } from './neighbourhoods';
+import { NEIGHBOURHOODS, knownNeighbourhoods } from './neighbourhoods';
 import { OPEN_TO_PRESET_IDS } from './open-to';
 import {
   DISCIPLINE_BY_PROFESSION,
@@ -57,20 +57,35 @@ import {
  */
 
 /** Which sidebar group a count is for — and, in `applyDirectoryFilters`, which
- *  predicate to leave out. Neighbourhoods are deliberately absent: they match
- *  by `ILIKE` substring over free-text `location`, so counting them would cost
- *  one sequential-scan predicate per neighbourhood and they are the one group
- *  nobody asked to see numbers on. */
+ *  predicate to leave out. */
 export type DirectoryFacetGroup =
-  'openTo' | 'identities' | 'disciplines' | 'professions' | 'languages';
+  | 'openTo'
+  | 'hoods'
+  | 'identities'
+  | 'disciplines'
+  | 'professions'
+  | 'languages';
 
 export interface DirectoryFacetCounts {
   openTo: Record<string, number>;
+  hoods: Record<string, number>;
   identities: Record<string, number>;
   disciplines: Record<string, number>;
   professions: Record<string, number>;
   languages: Record<string, number>;
 }
+
+/** The frontend's "show every neighbourhood" row. It is chrome: the FE strips
+ *  it from `?hoods=` before the request reaches the wire (see
+ *  `useMemberDirectoryQuery`), so it never becomes a filter predicate. It
+ *  exists here only because it is a row in the sidebar and every row carries a
+ *  count, and its count is the whole hood-unrestricted population, which is
+ *  exactly what ticking it returns. Kept out of `NEIGHBOURHOODS` so no filter
+ *  path can ever treat it as a location. */
+const ALL_OF_LISBON = 'All of Lisbon';
+
+/** Every row of the "Where they're based" card, in sidebar order. */
+const HOOD_FACET_IDS: readonly string[] = [...NEIGHBOURHOODS, ALL_OF_LISBON];
 
 const PROFESSION_IDS = Object.keys(DISCIPLINE_BY_PROFESSION);
 
@@ -85,6 +100,7 @@ export function zeroedFacetCounts(): DirectoryFacetCounts {
     disciplines: zero(DISCIPLINE_IDS),
     professions: zero(PROFESSION_IDS),
     languages: zero(LANGUAGE_CODES),
+    hoods: zero(HOOD_FACET_IDS),
   };
 }
 
@@ -204,18 +220,20 @@ export function applyDirectoryFilters<E extends ObjectLiteral>(
   // "Where they're based" filter. `profiles.location` is free text, so a
   // neighbourhood "match" is the same substring test `matchNeighbourhood` uses
   // for the card's `hood` field — filtering and display can't drift apart
-  // because they share one function. Never skipped: hoods carry no counts.
-  const hoods = knownNeighbourhoods(csv(q.hoods));
-  if (csv(q.hoods).length) {
-    if (!hoods.length) {
-      qb.andWhere('1 = 0');
-    } else {
-      qb.andWhere(
-        '(' +
-          hoods.map((_, i) => `p.location ILIKE :hood${i}`).join(' OR ') +
-          ')',
-        Object.fromEntries(hoods.map((h, i) => [`hood${i}`, `%${h}%`])),
-      );
+  // because they share one function.
+  if (skip !== 'hoods') {
+    const hoods = knownNeighbourhoods(csv(q.hoods));
+    if (csv(q.hoods).length) {
+      if (!hoods.length) {
+        qb.andWhere('1 = 0');
+      } else {
+        qb.andWhere(
+          '(' +
+            hoods.map((_, i) => `p.location ILIKE :hood${i}`).join(' OR ') +
+            ')',
+          Object.fromEntries(hoods.map((h, i) => [`hood${i}`, `%${h}%`])),
+        );
+      }
     }
   }
 
@@ -315,11 +333,11 @@ async function countByFilterClauses<E extends ObjectLiteral>(
  *
  * `base(skip)` must return a FRESH query builder each call — carrying the
  * viewer's visibility gates and `applyDirectoryFilters(qb, q, skip)` — because
- * each of these five queries mutates the builder it is handed.
+ * each of these six queries mutates the builder it is handed.
  *
- * The five run concurrently. They are five extra round trips per directory
+ * The six run concurrently. They are six extra round trips per directory
  * request; at this directory's size that is cheaper than the alternatives
- * (grouping sets over five different predicate sets, or a materialized facet
+ * (grouping sets over six different predicate sets, or a materialized facet
  * table that would go stale). If it ever stops being cheap, the escape hatch is
  * to have the sidebar ask for them only when it is open, rather than to make
  * the numbers less true.
@@ -327,13 +345,26 @@ async function countByFilterClauses<E extends ObjectLiteral>(
 export async function countDirectoryFacets(
   base: (skip: DirectoryFacetGroup) => SelectQueryBuilder<ObjectLiteral>,
 ): Promise<DirectoryFacetCounts> {
-  const [openTo, identities, disciplines, professions, languages] =
+  const [openTo, hoods, identities, disciplines, professions, languages] =
     await Promise.all([
       countByFilterClauses(
         base('openTo'),
         OPEN_TO_PRESET_IDS,
         (param) => openToPresetExists(param, false),
         (option) => option,
+      ),
+      // Neighbourhoods are the one group that matches by substring over
+      // free-text `location` rather than by set overlap, so their count clause
+      // is the same `ILIKE` the filter uses. `All of Lisbon` is the "no hood
+      // restriction" row, so it binds the pattern that matches everyone, and
+      // the COALESCE is what makes that true of members who never wrote a
+      // location at all (`NULL ILIKE '%'` is NULL, which would quietly
+      // undercount exactly the members that row promises to include).
+      countByFilterClauses(
+        base('hoods'),
+        HOOD_FACET_IDS,
+        (param) => `COALESCE("p"."location", '') ILIKE :${param}`,
+        (option) => (option === ALL_OF_LISBON ? '%' : `%${option}%`),
       ),
       // Identities count per FACET, not per stored label, and so cannot use the
       // array-unnest shape the plain-array groups could: a member holding both
@@ -367,6 +398,7 @@ export async function countDirectoryFacets(
   return {
     ...zeroedFacetCounts(),
     openTo,
+    hoods,
     identities,
     disciplines,
     professions,

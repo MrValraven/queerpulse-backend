@@ -1285,7 +1285,7 @@ export class ProfilesService {
       .skip(pagination ? pagination.offset : (page - 1) * PAGE_SIZE)
       .take(pagination ? pagination.limit : PAGE_SIZE);
 
-    // The page and the five facet aggregates are independent reads of the same
+    // The page and the six facet aggregates are independent reads of the same
     // committed snapshot, so they go out together rather than in series.
     const [[rows, total], facets] = await Promise.all([
       qb.getManyAndCount(),

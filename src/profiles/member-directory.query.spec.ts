@@ -6,6 +6,7 @@ import {
   type DirectoryFacetGroup,
 } from './member-directory.query';
 import { DIRECTORY_IDENTITY_FACETS } from './identities';
+import { NEIGHBOURHOODS } from './neighbourhoods';
 import { LANGUAGE_CODES } from './languages';
 import { OPEN_TO_PRESET_IDS } from './open-to';
 import { DISCIPLINE_IDS } from './professions';
@@ -66,6 +67,7 @@ describe('applyDirectoryFilters', () => {
   it.each<[DirectoryFacetGroup, string]>([
     ['identities', 'discoverable_identities'],
     ['openTo', 'open_to'],
+    ['hoods', 'p.location ILIKE :hood0'],
     ['disciplines', 'p.discipline && :disciplines'],
     ['professions', 'p.profession && :professions'],
     ['languages', 'p.languages && :languages'],
@@ -73,6 +75,7 @@ describe('applyDirectoryFilters', () => {
     const query = {
       identities: 'lesbian',
       openTo: 'mentoring',
+      hoods: 'Anjos',
       disciplines: 'design',
       professions: 'illustrator',
       languages: 'PT',
@@ -89,18 +92,18 @@ describe('applyDirectoryFilters', () => {
     expect(survivors).toBe(1);
   });
 
-  it('keeps the search term, hoods and the age range in every count query', () => {
+  it('keeps the search term and the age range in every count query', () => {
     const spy = qbSpy();
     applyDirectoryFilters(
       spy.qb,
-      { query: 'sao', hoods: 'Anjos', yearsFrom: 2, yearsTo: 5 },
+      { query: 'sao', yearsFrom: 2, yearsTo: 5 },
       'openTo',
     );
     const sql = spy.sql();
-    // A count answers "how many of MY results", and these three are part of
-    // what makes them the member's — none of them is a counted facet group.
+    // A count answers "how many of MY results", and these are part of what
+    // makes them the member's — neither is a counted facet group, so unlike
+    // hoods above they survive every skip.
     expect(sql).toContain('websearch_to_tsquery');
-    expect(sql).toContain('p.location ILIKE :hood0');
     expect(sql).toContain('>= :yearsFrom');
     expect(sql).toContain('<= :yearsTo');
   });
@@ -134,6 +137,11 @@ describe('countDirectoryFacets', () => {
       expect(counts.identities[id]).toBe(0);
     for (const id of DISCIPLINE_IDS) expect(counts.disciplines[id]).toBe(0);
     for (const id of LANGUAGE_CODES) expect(counts.languages[id]).toBe(0);
+    for (const id of NEIGHBOURHOODS) expect(counts.hoods[id]).toBe(0);
+    // The "All of Lisbon" row is chrome, not a place, so it is absent from
+    // `NEIGHBOURHOODS` — but it is a row in the sidebar and so must still be
+    // counted, or it would render with no badge beside seven that have one.
+    expect(counts.hoods['All of Lisbon']).toBe(0);
     expect(Object.keys(counts.professions).length).toBeGreaterThan(0);
   });
 
@@ -146,6 +154,7 @@ describe('countDirectoryFacets', () => {
     expect(asked.sort()).toEqual(
       [
         'disciplines',
+        'hoods',
         'identities',
         'languages',
         'openTo',
@@ -173,6 +182,14 @@ describe('countDirectoryFacets', () => {
     expect(spies.get('identities')!.parameters.facetOption0).toEqual(
       expect.arrayContaining(['Trans']),
     );
+    // Hoods bind an ILIKE pattern, the same substring test the filter uses.
+    expect(spies.get('hoods')!.parameters.facetOption0).toBe('%Anjos%');
+    // …and the last row, "All of Lisbon", binds the pattern that matches
+    // everyone: it is the "no hood restriction" row, so its count is the whole
+    // population rather than any one neighbourhood's.
+    expect(
+      spies.get('hoods')!.parameters[`facetOption${NEIGHBOURHOODS.length}`],
+    ).toBe('%');
   });
 });
 
@@ -180,6 +197,7 @@ describe('zeroedFacetCounts', () => {
   it('covers every counted group', () => {
     expect(Object.keys(zeroedFacetCounts()).sort()).toEqual([
       'disciplines',
+      'hoods',
       'identities',
       'languages',
       'openTo',
