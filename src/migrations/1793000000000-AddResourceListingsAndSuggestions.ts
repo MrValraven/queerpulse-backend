@@ -13,8 +13,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * `category` uses ONE shared enum type across both tables (the same real-world
  * categories apply to a listing and the suggestion that might become one).
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddResourceListingsAndSuggestions1793000000000 implements MigrationInterface {
   name = 'AddResourceListingsAndSuggestions1793000000000';

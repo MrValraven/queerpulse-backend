@@ -55,8 +55,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Ordinary transactional DDL: one statement, no enum changes, no concurrent
  * index. No `IF NOT EXISTS` guard, so a ledger mismatch fails loudly rather
  * than writing a second row for work already done (see CLAUDE.md).
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class AddHidePushPreviews1794650000000 implements MigrationInterface {
   name = 'AddHidePushPreviews1794650000000';

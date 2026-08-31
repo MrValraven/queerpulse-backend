@@ -7,8 +7,14 @@ import { UpdatePublicProfileDto } from './dto/update-public-profile.dto';
 import { UpdateWorkPreferencesDto } from './dto/update-work-preferences.dto';
 import { UpdateLoginAlertsDto } from './dto/update-login-alerts.dto';
 import { UpdatePushPreviewsDto } from './dto/update-push-previews.dto';
+import { UpdateContentSensitivityDto } from './dto/update-content-sensitivity.dto';
+import { UpdateSuggestionVisibilityDto } from './dto/update-suggestion-visibility.dto';
 import {
+  DEFAULT_HIDE_DATING_CONTENT,
+  DEFAULT_HIDE_FROM_SUGGESTIONS,
+  DEFAULT_HIDE_MENTAL_HEALTH_CONTENT,
   DEFAULT_HIDE_PUSH_PREVIEWS,
+  DEFAULT_HIDE_SEXUALITY_IDENTITY_CONTENT,
   DEFAULT_LOGIN_ALERTS_ENABLED,
   DEFAULT_OUT_AT_WORK,
   DEFAULT_PUBLIC_PROFILE_ENABLED,
@@ -16,13 +22,17 @@ import {
   MemberPreferences,
 } from './entities/member-preferences.entity';
 import {
+  ContentSensitivityDTO,
   LoginAlertsDTO,
   PublicProfileDTO,
   PushPreviewsDTO,
   WorkPreferencesDTO,
+  SuggestionVisibilityDTO,
+  toContentSensitivityDTO,
   toLoginAlertsDTO,
   toPublicProfileDTO,
   toPushPreviewsDTO,
+  toSuggestionVisibilityDTO,
   toWorkPreferencesDTO,
 } from './preferences-response';
 import { normalizeTransSupport } from './trans-support';
@@ -53,6 +63,10 @@ export class PreferencesService {
     row.publicProfileEnabled = DEFAULT_PUBLIC_PROFILE_ENABLED;
     row.loginAlertsEnabled = DEFAULT_LOGIN_ALERTS_ENABLED;
     row.hidePushPreviews = DEFAULT_HIDE_PUSH_PREVIEWS;
+    row.hideDatingContent = DEFAULT_HIDE_DATING_CONTENT;
+    row.hideMentalHealthContent = DEFAULT_HIDE_MENTAL_HEALTH_CONTENT;
+    row.hideSexualityIdentityContent = DEFAULT_HIDE_SEXUALITY_IDENTITY_CONTENT;
+    row.hideFromSuggestions = DEFAULT_HIDE_FROM_SUGGESTIONS;
     return row;
   }
 
@@ -187,5 +201,81 @@ export class PreferencesService {
     row.hidePushPreviews = dto.hidePreviews;
 
     return toPushPreviewsDTO(await this.preferences.save(row));
+  }
+
+  // --- Content sensitivity --------------------------------------------------
+
+  async getContentSensitivity(userId: string): Promise<ContentSensitivityDTO> {
+    return toContentSensitivityDTO(await this.loadOrDefault(userId));
+  }
+
+  /**
+   * Replace all three content-sensitivity filters (PRD-10).
+   *
+   * A full replace like `updateWorkPreferences`, for the same reason: the
+   * Interests pane holds the whole triple and submits it whole, so a partial
+   * body would leave one switch showing a value the member thought they had
+   * just changed. Merged onto `loadOrDefault` like every other writer here, so
+   * flipping a filter never clobbers `publicProfileEnabled`, the login alert
+   * or the work settings sharing the row.
+   *
+   * These are the only settings on this entity that change what the member
+   * SEES rather than what other people or their own lock screen see. They are
+   * read on the feed path by `FeedService`, which resolves them into a set of
+   * excluded tags through `src/feed/content-sensitivity.ts` and applies that
+   * set in the candidate queries, so opted-out content is never fetched rather
+   * than fetched and then dropped.
+   *
+   * The scope is the feed and nothing else. Community browse, search, the
+   * member's own rooms and every direct link keep working exactly as before,
+   * which is what the pane promises in so many words.
+   */
+  async updateContentSensitivity(
+    userId: string,
+    dto: UpdateContentSensitivityDto,
+  ): Promise<ContentSensitivityDTO> {
+    const row = await this.loadOrDefault(userId);
+    row.hideDatingContent = dto.hideDating;
+    row.hideMentalHealthContent = dto.hideMentalHealth;
+    row.hideSexualityIdentityContent = dto.hideSexualityIdentity;
+
+    return toContentSensitivityDTO(await this.preferences.save(row));
+  }
+
+  // --- Suggestion visibility ------------------------------------------------
+
+  async getSuggestionVisibility(
+    userId: string,
+  ): Promise<SuggestionVisibilityDTO> {
+    return toSuggestionVisibilityDTO(await this.loadOrDefault(userId));
+  }
+
+  /**
+   * Stop, or resume, being recommended to strangers (PRD-16).
+   *
+   * Merged onto `loadOrDefault` like every other writer here. Read by
+   * `MemberSuggestionsService.visibleCandidates` as a correlated `NOT EXISTS`
+   * in the candidate query, so an opted-out member is excluded before scoring
+   * rather than scored and then filtered: a member who asked not to be
+   * recommended should never reach a code path that could leak them.
+   *
+   * ONE-DIRECTIONAL. Opting out never costs the member their own suggestions.
+   * The switch sits on the Visibility pane, which is about what others see of
+   * them, and withholding their own discovery in exchange would put a price on
+   * a privacy choice. The receiving side has its own controls already:
+   * per-person dismissal, and the 24-hour blackout on `profiles.hidden_until`.
+   *
+   * Both directions are always allowed. There is no eligibility gate here, in
+   * contrast with `updatePublicProfile`, because nothing is being published:
+   * this only ever narrows who the platform pushes the member at.
+   */
+  async updateSuggestionVisibility(
+    userId: string,
+    dto: UpdateSuggestionVisibilityDto,
+  ): Promise<SuggestionVisibilityDTO> {
+    const row = await this.loadOrDefault(userId);
+    row.hideFromSuggestions = dto.hideFromSuggestions;
+
+    return toSuggestionVisibilityDTO(await this.preferences.save(row));
   }
 }

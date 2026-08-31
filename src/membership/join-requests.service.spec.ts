@@ -24,6 +24,12 @@ const uniqueViolation = () =>
     code: '23505',
   } as unknown as Error);
 
+// The deadline a reissued approval invite comes back with. Seven days out from
+// whenever the suite runs, so `resolveInviteStatus` reads it as `valid`.
+const REISSUED_INVITE_EXPIRES_AT = new Date(
+  Date.now() + 7 * 24 * 60 * 60 * 1000,
+);
+
 const dto = (overrides: Partial<CreateMembershipJoinRequestDto> = {}) =>
   ({
     name: 'Sam Costa',
@@ -42,6 +48,7 @@ describe('JoinRequestsService', () => {
     find: jest.Mock;
     save: jest.Mock;
     create: jest.Mock;
+    update: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
   let qb: {
@@ -58,7 +65,11 @@ describe('JoinRequestsService', () => {
     getRawMany: jest.Mock;
   };
   let txRepo: { findOne: jest.Mock; update: jest.Mock };
-  let invites: { createInviteForApproval: jest.Mock };
+  let invites: {
+    createInviteForApproval: jest.Mock;
+    startApprovalRedemptionWindow: jest.Mock;
+    reissueApprovalInvite: jest.Mock;
+  };
   let inviteRepo: { find: jest.Mock; findOne: jest.Mock };
   let userRepo: { findOne: jest.Mock };
   let profileRepo: { find: jest.Mock };
@@ -95,12 +106,30 @@ describe('JoinRequestsService', () => {
         }),
       ),
       create: jest.fn((value: Partial<PlatformJoinRequest>) => value),
+      // The `approval_seen_at` latch and the refresh counter's conditional
+      // claim both go through this. Winning by default: a test that wants the
+      // losing branch overrides it.
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
       createQueryBuilder: jest.fn(() => qb),
     };
     invites = {
       createInviteForApproval: jest
         .fn()
         .mockResolvedValue({ id: 'inv-1', code: 'QP-ABCD-EFGH' }),
+      // PRD-02: the redemption window the applicant's first status read starts.
+      startApprovalRedemptionWindow: jest
+        .fn()
+        .mockResolvedValue(new Date('2026-07-28T00:00:00.000Z')),
+      // The deadline is RELATIVE to now on purpose: `resolveInviteStatus`
+      // compares it against the real clock, so a hardcoded calendar date turns
+      // this fixture into a time bomb that silently reports the reissued
+      // invite as `expired` once that date passes (it did).
+      reissueApprovalInvite: jest.fn().mockResolvedValue({
+        id: 'inv-1',
+        code: 'QP-ABCD-EFGH',
+        status: 'pending',
+        expiresAt: REISSUED_INVITE_EXPIRES_AT,
+      }),
     };
     inviteRepo = {
       find: jest.fn().mockResolvedValue([]),
@@ -416,6 +445,8 @@ describe('JoinRequestsService', () => {
         reviewedAt: null,
         declineReason: null,
         inviteId: null,
+        approvalSeenAt: null,
+        inviteRefreshCount: 0,
         ...overrides,
       }) as PlatformJoinRequest;
 
@@ -440,6 +471,8 @@ describe('JoinRequestsService', () => {
         decidedAt: null,
         declineReason: null,
         inviteCode: null,
+        inviteStatus: null,
+        inviteExpiresAt: null,
       });
     });
 
@@ -470,6 +503,8 @@ describe('JoinRequestsService', () => {
         decidedAt: '2026-07-20T00:00:00.000Z',
         declineReason: 'implausible',
         inviteCode: null,
+        inviteStatus: null,
+        inviteExpiresAt: null,
       });
     });
 
@@ -526,9 +561,273 @@ describe('JoinRequestsService', () => {
         'decidedAt',
         'declineReason',
         'inviteCode',
+        'inviteExpiresAt',
+        'inviteStatus',
         'status',
         'submittedAt',
       ]);
+    });
+
+    // PRD-02. Approval mints an invite nothing delivers, so this read is the
+    // only moment the applicant learns it exists, and therefore the only
+    // honest moment for its clock to start.
+    describe('the redemption window (PRD-02)', () => {
+      const approvedRequest = (overrides: Partial<PlatformJoinRequest> = {}) =>
+        storedRequest({
+          status: PlatformJoinRequestStatus.Approved,
+          reviewedAt: new Date('2026-07-20T00:00:00.000Z'),
+          inviteId: 'inv-1',
+          ...overrides,
+        });
+
+      const liveInvite = () => ({
+        id: 'inv-1',
+        code: 'QP-ABCD-EFGH',
+        status: 'pending',
+        expiresAt: new Date(Date.now() + 20 * 24 * 60 * 60 * 1000),
+      });
+
+      it('starts the window on the FIRST read that hands over the code', async () => {
+        repo.findOne.mockResolvedValue(approvedRequest());
+        inviteRepo.findOne.mockResolvedValue(liveInvite());
+
+        const view = await service.getPublicStatus('t');
+
+        expect(invites.startApprovalRedemptionWindow).toHaveBeenCalledWith(
+          'inv-1',
+          expect.any(Date),
+        );
+        // The deadline reported is the one just set, never the shelf date.
+        expect(view?.inviteExpiresAt).toBe('2026-07-28T00:00:00.000Z');
+      });
+
+      it('latches on approval_seen_at IS NULL so two reads cannot both move it', async () => {
+        repo.findOne.mockResolvedValue(approvedRequest());
+        inviteRepo.findOne.mockResolvedValue(liveInvite());
+
+        await service.getPublicStatus('t');
+
+        const [criteria, patch] = repo.update.mock.calls[0] as [
+          { id: string; approvalSeenAt: { type: string } },
+          { approvalSeenAt: Date },
+        ];
+        expect(criteria.id).toBe('r1');
+        // A FindOperator, so the UPDATE carries `approval_seen_at IS NULL`:
+        // of two concurrent reads exactly one can win the latch.
+        expect(criteria.approvalSeenAt.type).toBe('isNull');
+        expect(patch.approvalSeenAt).toBeInstanceOf(Date);
+      });
+
+      it('leaves the deadline alone on every later read', async () => {
+        repo.findOne.mockResolvedValue(
+          approvedRequest({
+            approvalSeenAt: new Date('2026-07-21T00:00:00.000Z'),
+          }),
+        );
+        inviteRepo.findOne.mockResolvedValue(liveInvite());
+
+        await service.getPublicStatus('t');
+
+        expect(invites.startApprovalRedemptionWindow).not.toHaveBeenCalled();
+        expect(repo.update).not.toHaveBeenCalled();
+      });
+
+      it("reports the winner's deadline when a concurrent read took the latch", async () => {
+        repo.findOne.mockResolvedValue(approvedRequest());
+        repo.update.mockResolvedValue({ affected: 0 });
+        inviteRepo.findOne
+          .mockResolvedValueOnce(liveInvite())
+          .mockResolvedValueOnce({
+            ...liveInvite(),
+            expiresAt: new Date('2026-07-28T00:00:00.000Z'),
+          });
+
+        const view = await service.getPublicStatus('t');
+
+        expect(invites.startApprovalRedemptionWindow).not.toHaveBeenCalled();
+        expect(view?.inviteExpiresAt).toBe('2026-07-28T00:00:00.000Z');
+      });
+
+      it('never starts a window on an invite that is already spent', async () => {
+        repo.findOne.mockResolvedValue(approvedRequest());
+        inviteRepo.findOne.mockResolvedValue({
+          ...liveInvite(),
+          status: 'accepted',
+        });
+
+        const view = await service.getPublicStatus('t');
+
+        expect(invites.startApprovalRedemptionWindow).not.toHaveBeenCalled();
+        // The reason the code is missing now reaches the applicant, so the
+        // page can stop collapsing used/revoked/expired into one dead end.
+        expect(view?.inviteStatus).toBe('used');
+        expect(view?.inviteCode).toBeNull();
+      });
+    });
+  });
+
+  // PRD-02. The applicant reviving their own lapsed approval invite, holding
+  // nothing but the status token.
+  describe('refreshApprovalInvite', () => {
+    const lapsedRequest = (overrides: Partial<PlatformJoinRequest> = {}) =>
+      ({
+        id: 'r1',
+        status: PlatformJoinRequestStatus.Approved,
+        createdAt: new Date('2026-07-18T00:00:00.000Z'),
+        reviewedAt: new Date('2026-07-20T00:00:00.000Z'),
+        declineReason: null,
+        inviteId: 'inv-1',
+        approvalSeenAt: new Date('2026-07-21T00:00:00.000Z'),
+        inviteRefreshCount: 0,
+        ...overrides,
+      }) as PlatformJoinRequest;
+
+    const lapsedInvite = (status = 'pending') => ({
+      id: 'inv-1',
+      code: 'QP-ABCD-EFGH',
+      status,
+      expiresAt: new Date(Date.now() - 60 * 60 * 1000),
+    });
+
+    it('returns null for a token that resolves to nothing, exactly as the read does', async () => {
+      repo.findOne.mockResolvedValue(null);
+      await expect(service.refreshApprovalInvite('nope')).resolves.toBeNull();
+    });
+
+    it('revives a lapsed invite and reports the new deadline', async () => {
+      repo.findOne.mockResolvedValue(lapsedRequest());
+      inviteRepo.findOne.mockResolvedValue(lapsedInvite());
+
+      const view = await service.refreshApprovalInvite('t');
+
+      expect(invites.reissueApprovalInvite).toHaveBeenCalledWith('inv-1');
+      expect(view).toMatchObject({
+        status: 'approved',
+        inviteCode: 'QP-ABCD-EFGH',
+        inviteStatus: 'valid',
+        inviteExpiresAt: REISSUED_INVITE_EXPIRES_AT.toISOString(),
+      });
+    });
+
+    it('spends a refresh slot with a conditional claim on the count it read', async () => {
+      repo.findOne.mockResolvedValue(lapsedRequest({ inviteRefreshCount: 1 }));
+      inviteRepo.findOne.mockResolvedValue(lapsedInvite());
+
+      await service.refreshApprovalInvite('t');
+
+      expect(repo.update).toHaveBeenCalledWith(
+        { id: 'r1', inviteRefreshCount: 1 },
+        { inviteRefreshCount: 2 },
+      );
+    });
+
+    it('refuses once the per-request cap is spent', async () => {
+      repo.findOne.mockResolvedValue(lapsedRequest({ inviteRefreshCount: 3 }));
+      inviteRepo.findOne.mockResolvedValue(lapsedInvite());
+
+      await expect(service.refreshApprovalInvite('t')).rejects.toMatchObject({
+        response: { code: 'INVITE_REFRESH_LIMIT' },
+      });
+      expect(invites.reissueApprovalInvite).not.toHaveBeenCalled();
+    });
+
+    it('refuses to re-open an invite an account was already created with', async () => {
+      repo.findOne.mockResolvedValue(lapsedRequest());
+      inviteRepo.findOne.mockResolvedValue(lapsedInvite('accepted'));
+
+      await expect(service.refreshApprovalInvite('t')).rejects.toMatchObject({
+        response: { code: 'INVITE_ALREADY_USED' },
+      });
+      expect(invites.reissueApprovalInvite).not.toHaveBeenCalled();
+    });
+
+    it('refuses to undo a moderator revoke', async () => {
+      repo.findOne.mockResolvedValue(lapsedRequest());
+      inviteRepo.findOne.mockResolvedValue(lapsedInvite('revoked'));
+
+      await expect(service.refreshApprovalInvite('t')).rejects.toMatchObject({
+        response: { code: 'INVITE_REVOKED' },
+      });
+    });
+
+    it('answers a still-valid invite with the live view rather than an error', async () => {
+      repo.findOne.mockResolvedValue(lapsedRequest());
+      inviteRepo.findOne.mockResolvedValue({
+        ...lapsedInvite(),
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      });
+
+      const view = await service.refreshApprovalInvite('t');
+
+      expect(view).toMatchObject({ inviteCode: 'QP-ABCD-EFGH' });
+      expect(invites.reissueApprovalInvite).not.toHaveBeenCalled();
+    });
+
+    it('refuses a request that never minted an invite', async () => {
+      repo.findOne.mockResolvedValue(lapsedRequest({ inviteId: null }));
+
+      await expect(service.refreshApprovalInvite('t')).rejects.toMatchObject({
+        response: { code: 'INVITE_REFRESH_UNAVAILABLE' },
+      });
+    });
+  });
+
+  // PRD-14. The lost-token path. Reachable ONLY behind a proof of address
+  // ownership the caller supplies; there is no route into this from a typed
+  // email, and there must never be one.
+  describe('recoverStatusTokenForVerifiedEmail', () => {
+    it('returns null when the address has never applied', async () => {
+      qb.getOne.mockResolvedValue(null);
+      await expect(
+        service.recoverStatusTokenForVerifiedEmail('nobody@example.com'),
+      ).resolves.toBeNull();
+      expect(repo.update).not.toHaveBeenCalled();
+    });
+
+    it('matches the address case-insensitively, as the submit path stores it', async () => {
+      qb.getOne.mockResolvedValue({ id: 'r1' });
+      await service.recoverStatusTokenForVerifiedEmail('  Sam@Example.COM ');
+      expect(qb.where).toHaveBeenCalledWith('lower(jr.email) = :email', {
+        email: 'sam@example.com',
+      });
+    });
+
+    it('takes the most recent request, whatever its outcome', async () => {
+      qb.getOne.mockResolvedValue({ id: 'r1' });
+      await service.recoverStatusTokenForVerifiedEmail('sam@example.com');
+      expect(qb.orderBy).toHaveBeenCalledWith('jr.createdAt', 'DESC');
+      // No status narrowing: a declined applicant is entitled to read their
+      // own decline.
+      expect(qb.andWhere).not.toHaveBeenCalled();
+    });
+
+    it('stores only the HASH of the new token and returns the plaintext once', async () => {
+      qb.getOne.mockResolvedValue({ id: 'r1' });
+
+      const token =
+        await service.recoverStatusTokenForVerifiedEmail('sam@example.com');
+
+      expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(repo.update).toHaveBeenCalledWith(
+        { id: 'r1' },
+        {
+          statusTokenHash: createHash('sha256')
+            .update(token as string)
+            .digest('hex'),
+        },
+      );
+    });
+
+    it('ROTATES, so the token it replaces stops working', async () => {
+      qb.getOne.mockResolvedValue({ id: 'r1' });
+
+      const first = await service.recoverStatusTokenForVerifiedEmail('a@b.co');
+      const second = await service.recoverStatusTokenForVerifiedEmail('a@b.co');
+
+      expect(first).not.toBe(second);
+      const [, firstWrite] = repo.update.mock.calls[0] as [unknown, unknown];
+      const [, secondWrite] = repo.update.mock.calls[1] as [unknown, unknown];
+      expect(firstWrite).not.toEqual(secondWrite);
     });
   });
 

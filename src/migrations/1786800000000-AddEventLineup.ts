@@ -14,8 +14,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `event_cohosts` / `event_bookmarks`. Both FKs cascade on delete, matching
  * the rest of the events family.
  *
- * Additive only. DO NOT RUN — authored for review only; the maintainer runs
- * migrations.
+ * Additive only.
  */
 export class AddEventLineup1786800000000 implements MigrationInterface {
   name = 'AddEventLineup1786800000000';

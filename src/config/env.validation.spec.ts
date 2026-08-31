@@ -126,6 +126,53 @@ describe('env validate()', () => {
     expect(errorFor(withoutPublic)).toMatch(/CARD_SIGNING_PUBLIC_KEY/);
   });
 
+  // MetricsTokenGuard fails CLOSED in production, so an unset METRICS_TOKEN
+  // shuts /metrics, /health and /health/ready with a 403 while the ungated
+  // /health/live keeps the deploy green. Boot must not refuse over it (that
+  // would break a production already running without a token), so the contract
+  // asserted here is exactly: survivable, and loud.
+  it('warns without refusing to boot when production has no METRICS_TOKEN', () => {
+    const production: Record<string, string> = {
+      ...base,
+      NODE_ENV: 'production',
+      FRONTEND_URL: 'https://queerpulse.com',
+      API_URL: 'https://api.queerpulse.com',
+      AWS_ENDPOINT_URL: 'https://bucket.example',
+      AWS_DEFAULT_REGION: 'auto',
+      AWS_S3_BUCKET_NAME: 'bucket',
+      AWS_ACCESS_KEY_ID: 'key',
+      AWS_SECRET_ACCESS_KEY: 'secret',
+      CARD_SIGNING_PRIVATE_KEY: 'card-signing-private-pem',
+      CARD_SIGNING_PUBLIC_KEY: 'card-signing-public-pem',
+    };
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      expect(() => validate(production)).not.toThrow();
+
+      const warningText = warnSpy.mock.calls.map(String).join('\n');
+      expect(warningText).toMatch(/METRICS_TOKEN/);
+      // The consequence has to be named, route by route, or the warning is just
+      // as easy to skip as the silence it replaced.
+      expect(warningText).toMatch(/\/metrics/);
+      expect(warningText).toMatch(/\/health\/ready/);
+      expect(warningText).toMatch(/403/);
+
+      warnSpy.mockClear();
+      expect(() =>
+        validate({
+          ...production,
+          METRICS_TOKEN: 'metrics-token-sixteen-plus-chars',
+        }),
+      ).not.toThrow();
+      expect(warnSpy.mock.calls.map(String).join('\n')).not.toMatch(
+        /METRICS_TOKEN/,
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('accepts all five MUX_* vars as strings', () => {
     expect(() =>
       validate({

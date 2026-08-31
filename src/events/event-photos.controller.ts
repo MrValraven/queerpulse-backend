@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Param,
+  ParseUUIDPipe,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -16,6 +17,7 @@ import {
 import { AttachEventPhotoDto } from './dto/attach-event-photo.dto';
 import { EventPhotosService } from './event-photos.service';
 import {
+  ApiBadRequestResponse,
   ApiConflictResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
@@ -74,9 +76,10 @@ export class EventPhotosController {
   @ApiOkResponse({ description: 'Removal acknowledged.' })
   @ApiForbiddenResponse({ description: 'You cannot remove this photo.' })
   @ApiNotFoundResponse({ description: 'No such event or photo.' })
+  @ApiBadRequestResponse({ description: 'Malformed photo id.' })
   remove(
     @Param('slug') slug: string,
-    @Param('photoId') photoId: string,
+    @Param('photoId', ParseUUIDPipe) photoId: string,
     @CurrentUser() user: CurrentUserData,
   ) {
     return this.eventPhotos.remove(slug, user, photoId);

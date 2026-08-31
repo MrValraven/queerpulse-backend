@@ -1,4 +1,3 @@
-// DO NOT RUN: authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -26,8 +25,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * answers the race.
  *
  * TRANSACTIONAL. `community_support_offers` was created empty by
- * `1795660000000-CreateCommunitySupportOffers.ts`, which has not been run yet
- * either, so this index builds on no rows and needs no
+ * `1795660000000-CreateCommunitySupportOffers.ts`, which had not run either
+ * when this file was authored, so the index built on no rows and needed no
  * `CREATE INDEX CONCURRENTLY`. `IF NOT EXISTS` on the create so a re-run after
  * a partial failure is harmless.
  */

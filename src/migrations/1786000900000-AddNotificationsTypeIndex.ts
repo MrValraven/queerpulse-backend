@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -22,8 +21,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `data-source.ts` sets `migrationsTransactionMode: 'each'`). Run alone:
  *
  *   pnpm run typeorm migration:run -- --transaction none
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class AddNotificationsTypeIndex1786000900000 implements MigrationInterface {
   name = 'AddNotificationsTypeIndex1786000900000';

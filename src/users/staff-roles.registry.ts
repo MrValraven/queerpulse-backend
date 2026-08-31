@@ -53,11 +53,42 @@ export interface StaffRoleDef {
   id: StaffRoleId;
   /** Human-readable note of what this unlocks. Not enforced, guards key off id. */
   grants: string[];
+  /**
+   * Whether holding this grant earns a public staff badge on the member's name
+   * across the platform (`GET /platform/staff`, rendered by the frontend's
+   * `StaffBadge`). Presentation only: this flag opens nothing, closes nothing
+   * and is read by no guard. The one question it answers is whether the people
+   * whose listings, pieces and communities this grant reaches get to see, from
+   * the name alone, that the person acting on them works for the platform.
+   *
+   * The rule for setting it: badge a grant when its holder exercises power over
+   * OTHER members' content or membership. Someone who can decline a housing
+   * listing or spike a magazine piece is acting as the platform, and the member
+   * on the other side of that decision deserves to know it without having to
+   * ask. Two roles are deliberately left unbadged, and a new role should have to
+   * clear the same bar rather than inherit a default:
+   *
+   *   - `magazine_writer` holds no power over anyone. Its own `grants` list says
+   *     every read is scoped server-side to the caller's own work, so it never
+   *     touches another member's piece, fee, pitch or thread. Badging it would
+   *     tell readers that a contributor speaks for the platform when they only
+   *     write for it.
+   *   - `partnerships` decides about organisations and about changemaker
+   *     nominations, so its decisions land on applying organisations and on
+   *     third-party nominees rather than on a member's own membership or their
+   *     own content. Nothing it decides changes what a member may post or
+   *     whether they stay.
+   *
+   * Account tiers are a separate axis entirely: moderators and admins are on the
+   * roster because of `User.role`, and never need a grant to be badged.
+   */
+  hasPublicStaffBadge: boolean;
 }
 
 export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
   magazine_editor: {
     id: 'magazine_editor',
+    hasPublicStaffBadge: true,
     grants: [
       'The magazine editorial desk (/magazine/editor): every piece with its brief, draft and version history, the issue production record, the pitch inbox and the published archive',
       'The desk money tab: each piece’s agreed fee, expenses, invoice reference and payment status, plus the per-issue cost roll-up',
@@ -67,6 +98,7 @@ export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
   },
   magazine_writer: {
     id: 'magazine_writer',
+    hasPublicStaffBadge: false,
     grants: [
       'Draft and submit magazine pieces from the writer workspace (magazine/writer): your OWN assignments, pitches, payments, byline and editor thread',
       'NOT anything about another contributor: every read is scoped server-side to the caller’s own writerId/submitterId, so the workspace never lists another writer’s piece, fee, pitch or thread',
@@ -75,12 +107,14 @@ export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
   },
   housing_moderator: {
     id: 'housing_moderator',
+    hasPublicStaffBadge: true,
     grants: [
       'Moderate Housing listings and groups (admin/housing-listings, admin/housing-groups)',
     ],
   },
   directory_moderator: {
     id: 'directory_moderator',
+    hasPublicStaffBadge: true,
     grants: [
       'Review the local directory queue: approve, reject and edit listings (admin/listings)',
       'Work the safe-space nomination queue (admin/safe-space-nominations)',
@@ -93,6 +127,7 @@ export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
   },
   resource_curator: {
     id: 'resource_curator',
+    hasPublicStaffBadge: true,
     grants: [
       'Write and revise the resource guides, and stamp an editorial review (admin/resources)',
       'Maintain the service and crisis-line listings (admin/resource-listings)',
@@ -104,6 +139,7 @@ export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
   },
   editorial: {
     id: 'editorial',
+    hasPublicStaffBadge: true,
     grants: [
       'Triage reader story submissions (admin/magazine-submissions), including the text and cover the member submitted, which is what the decision is made on',
       'Review writer applications (admin/magazine-writer-applications), and grant the magazine_writer role by approving one (recorded in the moderation audit log)',
@@ -118,6 +154,7 @@ export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
   },
   communities: {
     id: 'communities',
+    hasPublicStaffBadge: true,
     grants: [
       'Read every community with its health metrics and governance log, and set its safety-policy options (admin/communities)',
       'NOT the free text a reporter wrote: the scoped report queue on a community arrives with its severity, reason and counts and without the narrative',
@@ -133,6 +170,7 @@ export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
   },
   partnerships: {
     id: 'partnerships',
+    hasPublicStaffBadge: false,
     grants: [
       'Review partner applications and maintain the partner directory (admin/partners), including the applying organisation’s own contact block: the phone, email, website and address it submitted, which go public on its directory page the moment it is approved',
       'Maintain the organisation tiers (admin/org-tiers). The only money here is `priceDisplay`, the figure the public For Organisations page prints; there is no negotiated fee and no internal number in this domain',
@@ -143,6 +181,21 @@ export const STAFF_ROLES: Record<StaffRoleId, StaffRoleDef> = {
 };
 
 export const STAFF_ROLE_IDS = Object.keys(STAFF_ROLES) as StaffRoleId[];
+
+/**
+ * The grants whose holders earn a public staff badge, in registry order so the
+ * roster and the badge row read the same way everywhere. Derived from the flag
+ * rather than hand-listed: a hand-kept second list beside the catalog it mirrors
+ * is drift nobody can see until a badge is missing.
+ */
+export const BADGED_STAFF_ROLE_IDS: StaffRoleId[] = STAFF_ROLE_IDS.filter(
+  (staffRoleId) => STAFF_ROLES[staffRoleId].hasPublicStaffBadge,
+);
+
+/** Whether a raw `user_staff_roles.role` value is a grant that earns a badge. */
+export function isBadgedStaffRoleId(value: string): value is StaffRoleId {
+  return isStaffRoleId(value) && STAFF_ROLES[value].hasPublicStaffBadge;
+}
 
 export function isStaffRoleId(value: string): value is StaffRoleId {
   return Object.prototype.hasOwnProperty.call(STAFF_ROLES, value);

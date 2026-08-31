@@ -95,24 +95,36 @@ describe('EventsService', () => {
 
   // A chainable query-builder stub for the RSVP queries: `attendees`'
   // paginated page (`.skip().take().getManyAndCount()`, matching
-  // `common/pagination.ts`'s `paginate()`) and the detail's
+  // `common/pagination.ts`'s `paginate()`), the detail's
   // `goingAttendeesPreview`, which counts first and then takes a capped slice
-  // (`.getCount()` then `.take().getMany()`).
+  // (`.getCount()` then `.take().getMany()`), and `rosterCounts`, which folds
+  // going/seats/waitlist/checked-in into ONE aggregate
+  // (`.select().addSelect()….setParameters().getRawOne()`).
   const attendeesQbStub = () => {
     const qb: Record<string, jest.Mock> = {};
-    for (const m of [
+    for (const method of [
+      'select',
+      'addSelect',
       'where',
       'andWhere',
+      'setParameters',
       'orderBy',
       'addOrderBy',
       'skip',
       'take',
     ]) {
-      qb[m] = jest.fn().mockReturnValue(qb);
+      qb[method] = jest.fn().mockReturnValue(qb);
     }
     qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
     qb.getCount = jest.fn().mockResolvedValue(0);
     qb.getMany = jest.fn().mockResolvedValue([]);
+    // `rosterCounts`' single aggregate row: an empty roster by default.
+    qb.getRawOne = jest.fn().mockResolvedValue({
+      goingCount: '0',
+      seatsTaken: '0',
+      waitlistCount: '0',
+      checkedInCount: '0',
+    });
     return qb;
   };
 
@@ -197,6 +209,17 @@ describe('EventsService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         EventsService,
+        // `rosterCounts` reads `retention.eventAttendanceDays` to decide
+        // whether a check-in count still exists to report. Nothing here
+        // overrides it, so the service's own default stands.
+        {
+          provide: ConfigService,
+          useValue: {
+            get: jest.fn(
+              (_key: string, defaultValue?: unknown) => defaultValue,
+            ),
+          },
+        },
         { provide: getRepositoryToken(Event), useValue: events },
         { provide: getRepositoryToken(EventCohost), useValue: cohosts },
         { provide: getRepositoryToken(EventRsvp), useValue: rsvps },
@@ -206,6 +229,12 @@ describe('EventsService', () => {
           useValue: lineupEntries,
         },
         { provide: getRepositoryToken(EventSeries), useValue: eventSeries },
+        // Host announcements (LOC-06) ride along on an event's detail. No
+        // fixture here posts one, so the detail carries an empty list.
+        {
+          provide: getRepositoryToken(EventAnnouncement),
+          useValue: { find: jest.fn().mockResolvedValue([]) },
+        },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: UsersService, useValue: { findById: jest.fn() } },
         { provide: RsvpService, useValue: rsvpService },
@@ -255,8 +284,14 @@ describe('EventsService', () => {
       slug: 'party',
       hostId: 'host-1',
       status: EventStatus.Published,
+      cost: null,
       visibility: EventVisibility.Public,
       capacity: 20,
+      // `rosterCounts` decides whether a check-in count is still knowable from
+      // the gathering's own end (`endAt ?? startAt`) against the attendance
+      // retention window, so every fixture that reaches it needs a real date.
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
     };
 
     it('filters going attendees by status, in-query and block-excluded', async () => {
@@ -352,7 +387,10 @@ describe('EventsService', () => {
       slug: 'd',
       hostId: 'host',
       status: EventStatus.Draft,
+      cost: null,
       visibility: EventVisibility.Public,
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
     });
     cohosts.exists.mockResolvedValue(false);
     await expect(service.getBySlug('d', 'viewer')).rejects.toBeInstanceOf(
@@ -366,7 +404,10 @@ describe('EventsService', () => {
       slug: 'd',
       hostId: 'host',
       status: EventStatus.Draft,
+      cost: null,
       visibility: EventVisibility.Public,
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
     });
     const detail = await service.getBySlug('d', 'host');
     expect(detail.isOrganizer).toBe(true);
@@ -385,7 +426,10 @@ describe('EventsService', () => {
       slug: 'io',
       hostId: 'host',
       status: EventStatus.Published,
+      cost: null,
       visibility: EventVisibility.InviteOnly,
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
     });
     cohosts.exists.mockResolvedValue(false);
     audienceGate.assertViewable.mockRejectedValue(
@@ -407,7 +451,10 @@ describe('EventsService', () => {
       slug: 'io',
       hostId: 'host',
       status: EventStatus.Published,
+      cost: null,
       visibility: EventVisibility.InviteOnly,
+      startAt: new Date(Date.now() + 3_600_000),
+      endAt: null,
     });
     cohosts.exists.mockResolvedValue(false);
     audienceGate.assertViewable.mockResolvedValue(undefined);
@@ -426,6 +473,7 @@ describe('EventsService', () => {
       slug: 'x',
       hostId: 'u1',
       status: EventStatus.Cancelled,
+      cost: null,
       startAt: new Date(Date.now() + 3_600_000),
       endAt: null,
       capacity: null,
@@ -441,6 +489,7 @@ describe('EventsService', () => {
       slug: 'x',
       hostId: 'u1',
       status: EventStatus.Published,
+      cost: null,
       visibility: EventVisibility.Public,
       startAt: new Date(Date.now() + 3_600_000),
       endAt: null,
@@ -456,6 +505,7 @@ describe('EventsService', () => {
       slug: 'x',
       hostId: 'u1',
       status: EventStatus.Published,
+      cost: null,
       visibility: EventVisibility.Public,
       startAt: new Date(Date.now() + 3_600_000),
       endAt: null,
@@ -479,6 +529,7 @@ describe('EventsService', () => {
       slug: 'x',
       hostId: 'host',
       status: EventStatus.Published,
+      cost: null,
       visibility: EventVisibility.Public,
       startAt: new Date(Date.now() + 3_600_000),
       endAt: null,
@@ -514,6 +565,7 @@ describe('EventsService', () => {
       slug: 'x',
       hostId: 'u1',
       status: EventStatus.Published,
+      cost: null,
       visibility: EventVisibility.Public,
       startAt: new Date(Date.now() + 3_600_000),
       endAt: null,
@@ -588,6 +640,7 @@ describe('EventsService', () => {
       slug: 'party',
       hostId: 'host',
       status: EventStatus.Published,
+      cost: null,
       startAt: new Date('2030-01-01T00:00:00.000Z'),
       title: 'Party',
     });

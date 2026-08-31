@@ -21,8 +21,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `migrationsTransactionMode: 'each'`) and is kept as its own migration file,
  * separate from the FK-cascade fix, exactly because of that transaction-mode
  * constraint.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddCommunityMembersOwnerUniqueIndex1790100000000 implements MigrationInterface {
   name = 'AddCommunityMembersOwnerUniqueIndex1790100000000';

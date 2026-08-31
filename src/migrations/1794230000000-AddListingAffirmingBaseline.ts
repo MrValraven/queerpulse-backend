@@ -41,8 +41,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * Fully transactional: one `ADD COLUMN` (nullable, no default, catalog-only)
  * plus one `UPDATE`.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class AddListingAffirmingBaseline1794230000000 implements MigrationInterface {
   name = 'AddListingAffirmingBaseline1794230000000';

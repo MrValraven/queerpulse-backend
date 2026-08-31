@@ -48,10 +48,15 @@ const PUBLIC_IMAGE_MAX_AGE_SECONDS = PRESIGN_EXPIRY_SECONDS - 60;
 // 302s to a short-lived presigned GET, and the browser fetches from the bucket
 // directly. No service egress, one signature per image load.
 //
-// It works with a plain `<img src>` because the session is an httpOnly cookie
-// (`jwt.strategy.ts`), not a Bearer header — browsers attach cookies to image
-// requests. The cookie is SameSite=Lax, so this depends on the frontend and API
-// being same-site, which the session already requires.
+// It works with a plain `<img src>` because the session travels as an httpOnly
+// cookie (`jwt.strategy.ts`) rather than a Bearer header, and browsers attach
+// cookies to image requests. The cookie is SameSite=Lax, so it only rides along
+// when the app and this API share a site. Nothing here asserts that topology
+// from memory: `security/csrf.guard.ts` derives it by comparing the configured
+// `FRONTEND_URL` origins against `API_URL`, and uses the same verdict to decide
+// whether it may enforce `Sec-Fetch-Site`. Serving the app from another site
+// would break these images and the session in one stroke, so the two questions
+// have one answer and one place that computes it.
 //
 // Images are inert (never executed), already authorized per-kind below, and a
 // lockdown that blanks the admin console's own avatars/photos would prevent

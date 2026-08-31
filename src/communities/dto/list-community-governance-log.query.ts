@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, Min } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, Max, Min } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 import { GovernanceLogAction } from '../entities/community-governance-log.entity';
 
 /**
@@ -21,6 +22,7 @@ export class ListCommunityGovernanceLogQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 
   @IsOptional()

@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -10,8 +9,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * All columns are `NOT NULL` with defaults so the migration is safe against
  * existing rows — no backfill step needed.
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class AddIssueProduction1786700000000 implements MigrationInterface {
   name = 'AddIssueProduction1786700000000';

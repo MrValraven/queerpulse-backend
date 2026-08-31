@@ -83,8 +83,14 @@ describe('ListingEditSuggestionsService', () => {
 
       const result = await service.submit('galeria-lume', 'member-1', dto);
 
+      // Mirrors `DirectoryService.loadLiveOr404`: an owner-paused listing has
+      // no public detail page, so it cannot receive a suggestion either.
       expect(listings.findOne).toHaveBeenCalledWith({
-        where: { slug: 'galeria-lume', status: ListingStatus.Live },
+        where: {
+          slug: 'galeria-lume',
+          status: ListingStatus.Live,
+          isHiddenByOwner: false,
+        },
       });
       expect(suggestions.create).toHaveBeenCalledWith({
         listingId: 'listing-1',

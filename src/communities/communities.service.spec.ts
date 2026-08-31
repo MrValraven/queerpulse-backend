@@ -24,8 +24,14 @@ import {
   CreateCommunityInput,
 } from './communities.service';
 import { CommunityAutoFreezeService } from './community-auto-freeze.service';
+import { CommunityBanRatificationService } from './community-ban-ratification.service';
+import { COMMUNITY_BAN_UNRATIFIED_FALLBACK_DAYS } from './community-ban-ratification-window';
 import { CommunityBan } from './entities/community-ban.entity';
-import { CommunityGovernanceLogService } from './community-governance-log.service';
+import {
+  COMMUNITY_BAN_AUDIT_ACTION,
+  COMMUNITY_REMOVAL_AUDIT_ACTION,
+  CommunityGovernanceLogService,
+} from './community-governance-log.service';
 import {
   CommunityJoinRequest,
   JoinRequestStatus,
@@ -144,11 +150,16 @@ describe('CommunitiesService', () => {
   // answer: no connections, and zero open reports.
   let connections: { allAcceptedConnectionUserIds: jest.Mock };
   let autoFreeze: { openReportCount: jest.Mock };
-  let bans: { exists: jest.Mock; createQueryBuilder: jest.Mock };
+  let bans: {
+    exists: jest.Mock;
+    findOne: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
   let tagRequests: { create: jest.Mock; save: jest.Mock; find: jest.Mock };
   // Fire-and-forget roster-membership domain events
   // (`COMMUNITY_MEMBER_JOINED` / `COMMUNITY_MEMBER_LEFT`).
   let eventEmitter: { emit: jest.Mock };
+  let banRatifications: { proposePermanentBar: jest.Mock };
   // The transaction manager `createWithUniqueRef` runs inside; `query` is the
   // raw `SELECT nextval('communities_ref_seq')` ref allocation.
   let manager: { query: jest.Mock; getRepository: jest.Mock };
@@ -227,10 +238,13 @@ describe('CommunitiesService', () => {
       openReportCount: jest.fn().mockResolvedValue(0),
     };
     // `join` asks whether the applicant is barred (`exists`), and
-    // `removeMember` writes the bar through an insert chain. Default: nobody
-    // is banned.
+    // `removeMember` writes the bar through an insert chain then READS IT BACK
+    // (`barReturn` trusts the row on file, never the values it just sent, so
+    // the conflict path describes the ban actually in force). Default: nobody
+    // is banned, and the read-back finds nothing.
     bans = {
       exists: jest.fn().mockResolvedValue(false),
+      findOne: jest.fn().mockResolvedValue(null),
       createQueryBuilder: jest.fn(() => insertQbStub()),
     };
     tagRequests = {
@@ -239,6 +253,16 @@ describe('CommunitiesService', () => {
       find: jest.fn().mockResolvedValue([]),
     };
     eventEmitter = { emit: jest.fn() };
+    // PRD-25. A permanent bar opens a hold for a second owner, co-owner or
+    // moderator. The DEFAULT here is "this community has somebody else who
+    // could sign", because that is the ordinary case; the solo-owner fallback
+    // is the null return, exercised explicitly below.
+    banRatifications = {
+      proposePermanentBar: jest.fn().mockResolvedValue({
+        id: 'hold-1',
+        expiresAt: new Date('2026-01-04T00:00:00.000Z'),
+      }),
+    };
 
     // `manager.getRepository(Entity)` routes to the same mocks the outer
     // `@InjectRepository` tokens use, so `communities.save`/`members.save`
@@ -305,6 +329,10 @@ describe('CommunitiesService', () => {
         { provide: ConnectionsService, useValue: connections },
         { provide: CommunityAutoFreezeService, useValue: autoFreeze },
         { provide: EventEmitter2, useValue: eventEmitter },
+        {
+          provide: CommunityBanRatificationService,
+          useValue: banRatifications,
+        },
       ],
     }).compile();
     service = module.get(CommunitiesService);
@@ -952,6 +980,11 @@ describe('CommunitiesService', () => {
         id: 'c1',
         slug: 'x',
         accessTier: AccessTier.Public,
+        // `rules` is NOT NULL with a `{}` default on the entity, so a real
+        // row always carries an array here. The join/approve paths read it to
+        // decide whether house rules must be agreed to at the door.
+        rules: [],
+        rulesVersion: 1,
       });
       members.findOne.mockResolvedValue(null);
       const insertQb = insertQbStub();
@@ -979,6 +1012,8 @@ describe('CommunitiesService', () => {
         id: 'c1',
         slug: 'x',
         accessTier: AccessTier.Request,
+        rules: [],
+        rulesVersion: 1,
       });
       members.findOne.mockResolvedValue(null);
       profiles.find.mockResolvedValue([
@@ -1071,6 +1106,8 @@ describe('CommunitiesService', () => {
         id: 'c1',
         slug: 'x',
         accessTier: AccessTier.Request,
+        rules: [],
+        rulesVersion: 1,
       });
       members.findOne.mockResolvedValue({
         id: 'm1',
@@ -1122,6 +1159,8 @@ describe('CommunitiesService', () => {
         id: 'c1',
         slug: 'x',
         ownerId: 'owner-1',
+        rules: [],
+        rulesVersion: 1,
       });
 
       // A plain member cannot triage.
@@ -1268,23 +1307,336 @@ describe('CommunitiesService', () => {
         }),
       );
     });
+
+    // PRD-28. The removal used to write the community's own governance log and
+    // stop there, so the decision existed nowhere `POST /appeals` could see it
+    // (it resolves an appeal's target out of `mod_audit_logs`). Both rows now.
+    it('mirrors a staff removal that allows the return into mod_audit_logs', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        ownerId: 'owner-1',
+      });
+      const qb = qbStub();
+      qb.getMany!.mockResolvedValue([
+        { slug: 'member-slug', userId: 'member-1' },
+      ]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+      members.findOne
+        .mockResolvedValueOnce({
+          id: 'm5',
+          role: RosterRole.Member,
+          userId: 'member-1',
+        })
+        .mockResolvedValueOnce({ role: RosterRole.Mod, userId: 'mod-1' });
+
+      await service.removeMember('x', 'mod-1', 'member-slug', {
+        allowReturn: true,
+        reason: 'Kept derailing the welcome thread',
+      });
+
+      expect(governanceLog.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          communityId: 'c1',
+          actorUserId: 'mod-1',
+          action: GovernanceLogAction.MemberRemoved,
+          targetUserId: 'member-1',
+        }),
+      );
+      expect(governanceLog.logModerationAudit).toHaveBeenCalledWith({
+        actorUserId: 'mod-1',
+        action: COMMUNITY_REMOVAL_AUDIT_ACTION,
+        targetUserId: 'member-1',
+        note: 'Kept derailing the welcome thread',
+        // A removal serves no term: the member may come back at once.
+        duration: null,
+      });
+    });
+
+    // The guard that matters most. A member leaving takes the same code path,
+    // and an audit row here would put "you appealed leaving your own
+    // community" in front of them.
+    it('writes the governance entry but no audit row for a self-leave', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        ownerId: 'owner-1',
+      });
+      const qb = qbStub();
+      qb.getMany!.mockResolvedValue([
+        { slug: 'member-slug', userId: 'member-1' },
+      ]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+      members.findOne.mockResolvedValue({
+        id: 'm5',
+        role: RosterRole.Member,
+        userId: 'member-1',
+      });
+
+      await service.removeMember('x', 'member-1', 'member-slug', {
+        allowReturn: true,
+      });
+
+      expect(governanceLog.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: GovernanceLogAction.MemberRemoved,
+          targetUserId: 'member-1',
+        }),
+      );
+      const loggedEntry = governanceLog.log.mock.calls[0]?.[0] as {
+        metadata?: { removedBySelf?: boolean };
+      };
+      expect(loggedEntry.metadata?.removedBySelf).toBe(true);
+      expect(governanceLog.logModerationAudit).not.toHaveBeenCalled();
+      // Nor the "you were removed" notification, for the same reason.
+      expect(notifications.create).not.toHaveBeenCalled();
+    });
+
+    // The two are different acts and the appeals queue reads them apart by
+    // action alone, so a bar must never arrive under the removal's code.
+    it('records a bar under the ban action alone, never the removal action', async () => {
+      communities.findOne.mockResolvedValue({
+        id: 'c1',
+        slug: 'x',
+        name: 'Trans Joy',
+        ownerId: 'owner-1',
+      });
+      const qb = qbStub();
+      qb.getMany!.mockResolvedValue([
+        { slug: 'member-slug', userId: 'member-1' },
+      ]);
+      profiles.createQueryBuilder.mockReturnValue(qb);
+      members.findOne
+        .mockResolvedValueOnce({
+          id: 'm5',
+          role: RosterRole.Member,
+          userId: 'member-1',
+        })
+        .mockResolvedValueOnce({ role: RosterRole.Mod, userId: 'mod-1' });
+      // The read-back `barReturn` does after the insert: the bar now on file.
+      bans.findOne.mockResolvedValue({
+        userId: 'member-1',
+        reason: 'Harassment',
+        expiresAt: null,
+        ruleIndex: null,
+        ruleVersion: null,
+        ruleText: null,
+      });
+
+      await service.removeMember('x', 'mod-1', 'member-slug', {
+        reason: 'Harassment',
+      });
+
+      expect(governanceLog.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: GovernanceLogAction.MemberBanned,
+          targetUserId: 'member-1',
+        }),
+      );
+      expect(governanceLog.logModerationAudit).toHaveBeenCalledWith(
+        expect.objectContaining({ action: COMMUNITY_BAN_AUDIT_ACTION }),
+      );
+      expect(governanceLog.logModerationAudit).not.toHaveBeenCalledWith(
+        expect.objectContaining({ action: COMMUNITY_REMOVAL_AUDIT_ACTION }),
+      );
+    });
+
+    // PRD-25. The finding: one moderator could bar a member from a community
+    // forever with no second signature, while the platform-level equivalent has
+    // needed one since TS-12.
+    describe('permanent bar needs a second signature (PRD-25)', () => {
+      // The `expiresAt` the insert chain was actually given.
+      const insertedBanExpiresAt = (): Date | null => {
+        const insertQb = bans.createQueryBuilder.mock.results[0]?.value as
+          { values: jest.Mock } | undefined;
+        const values = insertQb?.values.mock.calls[0]?.[0] as
+          { expiresAt: Date | null } | undefined;
+        return values?.expiresAt ?? null;
+      };
+
+      // Puts a staff removal of an ordinary member on the happy path, with the
+      // ban read-back returning whatever `barReturn` just wrote.
+      const arrangeStaffRemoval = () => {
+        communities.findOne.mockResolvedValue({
+          id: 'c1',
+          slug: 'x',
+          name: 'Trans Joy',
+          ownerId: 'owner-1',
+          rules: [],
+          rulesVersion: 1,
+        });
+        const qb = qbStub();
+        qb.getMany!.mockResolvedValue([
+          { slug: 'member-slug', userId: 'member-1' },
+        ]);
+        profiles.createQueryBuilder.mockReturnValue(qb);
+        members.findOne
+          .mockResolvedValueOnce({
+            id: 'm5',
+            role: RosterRole.Member,
+            userId: 'member-1',
+          })
+          .mockResolvedValueOnce({ role: RosterRole.Mod, userId: 'mod-1' });
+        // The read-back: whatever the insert chain was handed is what comes
+        // back, so the 30-day term the service computed is observable here.
+        bans.findOne.mockImplementation(() =>
+          Promise.resolve({
+            id: 'ban-1',
+            userId: 'member-1',
+            reason: 'Harassment',
+            expiresAt: insertedBanExpiresAt(),
+            ruleIndex: null,
+            ruleVersion: null,
+            ruleText: null,
+          }),
+        );
+      };
+
+      const THIRTY_DAYS_MS =
+        COMMUNITY_BAN_UNRATIFIED_FALLBACK_DAYS * 24 * 60 * 60 * 1000;
+
+      it('removes the member at once and leaves the bar pending at 30 days', async () => {
+        arrangeStaffRemoval();
+
+        const before = Date.now();
+        const outcome = await service.removeMember(
+          'x',
+          'mod-1',
+          'member-slug',
+          {
+            reason: 'Harassment',
+          },
+        );
+
+        // The removal never waits on anybody.
+        expect(members.delete).toHaveBeenCalledWith({ id: 'm5' });
+        // Nor does the bar: it lands at the 30-day fallback, not as permanent.
+        const writtenExpiry = insertedBanExpiresAt();
+        expect(writtenExpiry).not.toBeNull();
+        expect(writtenExpiry!.getTime()).toBeGreaterThanOrEqual(
+          before + THIRTY_DAYS_MS - 5000,
+        );
+        // And a second signature is now being waited on.
+        expect(banRatifications.proposePermanentBar).toHaveBeenCalledWith(
+          expect.objectContaining({
+            proposerUserId: 'mod-1',
+            reason: 'Harassment',
+          }),
+        );
+        expect(outcome.isRemoved).toBe(true);
+        expect(outcome.hasBarredReturn).toBe(true);
+        expect(outcome.isPendingRatification).toBe(true);
+        expect(outcome.ratificationId).toBe('hold-1');
+        expect(outcome.hasNoSecondSignatory).toBe(false);
+      });
+
+      // The case the finding is most worried about, and the one with no
+      // exemption: a solo owner cannot bar anybody permanently alone.
+      it('falls back to 30 days with no hold when nobody else could sign', async () => {
+        arrangeStaffRemoval();
+        banRatifications.proposePermanentBar.mockResolvedValue(null);
+
+        const outcome = await service.removeMember(
+          'x',
+          'mod-1',
+          'member-slug',
+          {
+            reason: 'Harassment',
+          },
+        );
+
+        expect(insertedBanExpiresAt()).not.toBeNull();
+        expect(outcome.hasBarredReturn).toBe(true);
+        expect(outcome.isPendingRatification).toBe(false);
+        expect(outcome.ratificationId).toBeNull();
+        expect(outcome.hasNoSecondSignatory).toBe(true);
+        // Said in words, because a caller told nothing believes they got the
+        // permanent bar they asked for.
+        expect(outcome.message).toContain('30 days');
+      });
+
+      // A bounded bar was never one person's forever, so it needs nobody.
+      it('leaves a banDays-bounded bar alone and asks for no signature', async () => {
+        arrangeStaffRemoval();
+
+        const before = Date.now();
+        const outcome = await service.removeMember(
+          'x',
+          'mod-1',
+          'member-slug',
+          {
+            reason: 'Harassment',
+            banDays: 7,
+          },
+        );
+
+        const writtenExpiry = insertedBanExpiresAt();
+        expect(writtenExpiry).not.toBeNull();
+        // Seven days, not the thirty a permanent request would have settled at.
+        expect(writtenExpiry!.getTime()).toBeLessThan(
+          before + THIRTY_DAYS_MS - 5000,
+        );
+        expect(banRatifications.proposePermanentBar).not.toHaveBeenCalled();
+        expect(outcome.isPendingRatification).toBe(false);
+        expect(outcome.hasNoSecondSignatory).toBe(false);
+      });
+
+      // The guard that matters most, restated against the new code path: a
+      // member leaving writes no bar, so there is nothing to countersign.
+      it('bars nothing and proposes nothing on a self-leave', async () => {
+        communities.findOne.mockResolvedValue({
+          id: 'c1',
+          slug: 'x',
+          ownerId: 'owner-1',
+          rules: [],
+          rulesVersion: 1,
+        });
+        const qb = qbStub();
+        qb.getMany!.mockResolvedValue([
+          { slug: 'member-slug', userId: 'member-1' },
+        ]);
+        profiles.createQueryBuilder.mockReturnValue(qb);
+        members.findOne.mockResolvedValue({
+          id: 'm5',
+          role: RosterRole.Member,
+          userId: 'member-1',
+        });
+
+        const outcome = await service.removeMember(
+          'x',
+          'member-1',
+          'member-slug',
+        );
+
+        expect(bans.createQueryBuilder).not.toHaveBeenCalled();
+        expect(banRatifications.proposePermanentBar).not.toHaveBeenCalled();
+        expect(outcome.hasBarredReturn).toBe(false);
+        expect(outcome.isPendingRatification).toBe(false);
+        expect(governanceLog.logModerationAudit).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe('myCommunities', () => {
     it('returns a bare, unpaginated array of the caller`s roster rows', async () => {
       const qb = qbStub();
+      // `cardProgramId` is a selected alias on the left join, so every raw row
+      // carries the key: the id when the community runs a card program, null
+      // when it does not. It is what `hasCardProgram` is derived from.
       qb.getRawMany!.mockResolvedValue([
         {
           slug: 'trans-joy',
           name: 'Trans Joy',
           role: RosterRole.Mod,
           joinedAt: new Date('2026-02-02T00:00:00.000Z'),
+          cardProgramId: 'cp-1',
         },
         {
           slug: 'book-club',
           name: 'Book Club',
           role: RosterRole.Member,
           joinedAt: new Date('2026-01-01T00:00:00.000Z'),
+          cardProgramId: null,
         },
       ]);
       members.createQueryBuilder.mockReturnValue(qb);
@@ -1300,12 +1652,15 @@ describe('CommunitiesService', () => {
           name: 'Trans Joy',
           role: RosterRole.Mod,
           joinedAt: '2026-02-02T00:00:00.000Z',
+          // The raw id is never handed out; only whether there is one.
+          hasCardProgram: true,
         },
         {
           slug: 'book-club',
           name: 'Book Club',
           role: RosterRole.Member,
           joinedAt: '2026-01-01T00:00:00.000Z',
+          hasCardProgram: false,
         },
       ]);
       expect(qb.skip).not.toHaveBeenCalled();

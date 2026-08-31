@@ -21,8 +21,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * The matching `@Index` decorator lives on `MagazineArticle.publishedAt` so a
  * future `migration:generate` diff does not see drift.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddMagazineArticlePublishedAtIndex1793540200000 implements MigrationInterface {
   name = 'AddMagazineArticlePublishedAtIndex1793540200000';

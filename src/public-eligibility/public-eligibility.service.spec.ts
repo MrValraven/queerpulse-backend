@@ -12,6 +12,7 @@ import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
+import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import { ConnectionsService } from '../connections/connections.service';
 import { SubprofileEndorsementsService } from '../subprofiles/subprofile-endorsements.service';
@@ -129,6 +130,13 @@ describe('PublicEligibilityService', () => {
         },
         {
           provide: getRepositoryToken(CommunityPostReply),
+          useValue: repoMock({ count: async () => 0 }),
+        },
+        {
+          // Roster rows, read only by the XP-side audience counts. The
+          // eligibility score never touches them, so an empty roster is
+          // enough for these assertions.
+          provide: getRepositoryToken(CommunityMember),
           useValue: repoMock({ count: async () => 0 }),
         },
         {

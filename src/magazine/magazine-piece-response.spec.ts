@@ -397,6 +397,7 @@ describe('toPieceRecordSummary', () => {
 
     expect(record.audit[0]).toMatchObject({
       actorId: 'writer-9',
+      isSystem: false,
       who: 'Someone on the team',
       what: 'filed a draft of this piece',
     });
@@ -440,6 +441,7 @@ describe('toDeskSummary', () => {
       {
         id: 'event-1',
         actorId: 'editor-1',
+        isSystem: false,
         who: 'Sara Pinheiro',
         what: 'moved The chosen-family budget to drafting',
         when: '2026-08-02T09:00:00.000Z',
@@ -473,6 +475,7 @@ describe('toDeskSummary', () => {
       {
         id: 'event-1',
         actorId: 'writer-9',
+        isSystem: false,
         who: 'Someone on the team',
         what: 'edited the article draft for a piece',
         when: '2026-08-02T09:00:00.000Z',
@@ -497,6 +500,7 @@ describe('toDeskSummary', () => {
       {
         id: 'event-1',
         actorId: null,
+        isSystem: true,
         who: 'System',
         what: 'moved Nine rooms in Arroios to ready',
         when: '2026-08-02T09:00:00.000Z',
@@ -556,6 +560,7 @@ describe('toDeskSummary', () => {
       {
         id: 'event-4',
         actorId: 'editor-1',
+        isSystem: false,
         who: 'Sara Pinheiro',
         what: 'edited the article draft for The chosen-family budget',
         when: '2026-08-02T09:06:00.000Z',
@@ -563,6 +568,7 @@ describe('toDeskSummary', () => {
       {
         id: 'event-2',
         actorId: 'editor-1',
+        isSystem: false,
         who: 'Sara Pinheiro',
         what: 'edited the article draft for What we owe old friends',
         when: '2026-08-02T09:03:00.000Z',
@@ -570,6 +576,7 @@ describe('toDeskSummary', () => {
       {
         id: 'event-1',
         actorId: 'editor-1',
+        isSystem: false,
         who: 'Sara Pinheiro',
         what: 'edited the article draft for The chosen-family budget',
         when: '2026-08-02T09:00:00.000Z',

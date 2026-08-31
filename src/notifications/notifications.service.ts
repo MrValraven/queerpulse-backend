@@ -1,6 +1,7 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
+import * as Sentry from '@sentry/node';
 import { In, MoreThan, Repository } from 'typeorm';
 // TypeORM's update mapped type rejects a plain `Record<string, unknown>` for a
 // jsonb column: it has no index signature the type can recurse into (the same
@@ -17,6 +18,8 @@ import { Community } from '../communities/entities/community.entity';
 import { BlockFilterService } from '../social/block-filter.service';
 import { Mute } from '../social/entities/mute.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { User } from '../users/entities/user.entity';
+import { isForeignKeyViolation } from '../common/db-errors';
 import { Notification, NotificationType } from './entities/notification.entity';
 import { NotificationPreferencesService } from './notification-preferences.service';
 import {
@@ -54,11 +57,23 @@ const COMMUNITY_LEVELS_WANTING: Partial<
   ],
 };
 
+/**
+ * The foreign key `notifications.user_id` carries to `users(id)` (see
+ * `AddNotifications1782692000000`). Named here so the fan-out's recovery path
+ * can tell "one recipient id no longer names a user" apart from any other
+ * referential failure, which it has no business swallowing.
+ */
+const NOTIFICATIONS_USER_FK = 'FK_notifications_user_id';
+
 @Injectable()
 export class NotificationsService {
+  private readonly logger = new Logger(NotificationsService.name);
+
   constructor(
     @InjectRepository(Notification)
     private readonly notifications: Repository<Notification>,
+    @InjectRepository(User)
+    private readonly users: Repository<User>,
     @InjectRepository(Profile)
     private readonly profiles: Repository<Profile>,
     @InjectRepository(Mute)
@@ -195,11 +210,7 @@ export class NotificationsService {
     );
     const bundleKey = bundleKeyFor(type, payload);
     const inserted = freshRecipients.length
-      ? await this.notifications.save(
-          freshRecipients.map((userId) =>
-            this.notifications.create({ userId, type, payload, bundleKey }),
-          ),
-        )
+      ? await this.insertFanOutRows(freshRecipients, type, payload, bundleKey)
       : [];
     const saved = [...absorbed.values(), ...inserted];
     for (const notification of saved) {
@@ -208,19 +219,102 @@ export class NotificationsService {
     // One batch announcement for the whole write, alongside the per-row
     // `announce()` loop above — see `NOTIFICATION_BATCH_CREATED`'s docstring
     // for why these are two different events with two different listeners.
-    // `saved[0]` is the batch's shared representative row; `recipients.length`
-    // was already checked non-empty above, so `saved` is never empty either.
+    // `saved[0]` is the batch's shared representative row. `saved` is normally
+    // as long as `recipients` (every recipient either absorbed or gained a
+    // row), but the fan-out's dangling-recipient recovery can drop one, so the
+    // announcement carries the ids that ACTUALLY hold a row rather than the
+    // requested list, and the empty case is guarded rather than assumed away.
+    const savedUserIds = saved.map((notification) => notification.userId);
     const [representative] = saved;
     if (representative) {
       this.announceBatch(
-        recipients,
+        savedUserIds,
         type,
         payload,
         actorId ?? null,
         representative,
       );
     }
-    return saved.map((notification) => notification.userId);
+    return savedUserIds;
+  }
+
+  /**
+   * The fan-out's INSERT, made survivable.
+   *
+   * `save([...])` is ONE multi-row statement in one transaction, so a single
+   * row Postgres refuses rolls back every other row with it: one recipient id
+   * that no longer names a user cost every other matching member their
+   * notification, silently and repeatedly (the caller only ever saw a rejected
+   * promise). That is not hypothetical. `notifications.user_id` carries a real
+   * foreign key to `users(id)`, and at least one recipient source
+   * (`housing_saved_searches.member_id`) has historically had no foreign key of
+   * its own, so an erased account could leave a dangling id behind that matched
+   * every new listing forever.
+   *
+   * Recovery runs ONLY for a foreign-key violation on that one constraint, and
+   * only after the batch has already failed:
+   *  - one query resolves which of the recipient ids still name a user,
+   *  - the batch is retried with just those.
+   * So the happy path costs nothing (no pre-flight existence check on every
+   * fan-out on the platform), and the failure path costs two extra round trips
+   * for the whole batch rather than one per recipient.
+   *
+   * Any other failure is rethrown untouched: a deadlock, a dropped connection
+   * or a violation on a different constraint is not something a narrower retry
+   * fixes, and swallowing it here would hide a real incident.
+   */
+  private async insertFanOutRows(
+    userIds: string[],
+    type: NotificationType,
+    payload: Record<string, unknown>,
+    bundleKey: string | null,
+  ): Promise<Notification[]> {
+    const buildRows = (recipientIds: string[]): Notification[] =>
+      recipientIds.map((userId) =>
+        this.notifications.create({ userId, type, payload, bundleKey }),
+      );
+    try {
+      return await this.notifications.save(buildRows(userIds));
+    } catch (error) {
+      if (!isForeignKeyViolation(error, NOTIFICATIONS_USER_FK)) {
+        throw error;
+      }
+      const existingUsers = await this.users.find({
+        where: { id: In(userIds) },
+        select: ['id'],
+      });
+      const existingUserIds = new Set(existingUsers.map((user) => user.id));
+      const danglingUserIds = userIds.filter(
+        (userId) => !existingUserIds.has(userId),
+      );
+      // Loud on purpose. This used to be invisible: the batch threw, the
+      // caller logged a warning at most, and nobody learned that a stale
+      // recipient id was quietly costing everyone else their notification on
+      // every single fan-out. Stable message prefix so it is greppable and
+      // alertable; the ids name the rows an operator has to go clean up.
+      this.logger.error(
+        `Notification fan-out hit a dangling recipient: type=${type} dangling=${danglingUserIds.length}/${userIds.length} userIds=${danglingUserIds.join(',')}`,
+      );
+      if (process.env.SENTRY_DSN) {
+        Sentry.captureException(error, {
+          tags: { area: 'notifications', reason: 'dangling_recipient' },
+          extra: {
+            notificationType: type,
+            recipientCount: userIds.length,
+            danglingUserIds,
+          },
+        });
+      }
+      const deliverableUserIds = userIds.filter((userId) =>
+        existingUserIds.has(userId),
+      );
+      if (!deliverableUserIds.length) {
+        return [];
+      }
+      // If this second attempt also fails it is no longer the known,
+      // recoverable shape, so it propagates like any other write failure.
+      return await this.notifications.save(buildRows(deliverableUserIds));
+    }
   }
 
   async list(

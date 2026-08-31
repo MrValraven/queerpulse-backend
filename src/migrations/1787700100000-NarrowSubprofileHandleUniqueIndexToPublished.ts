@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -24,8 +23,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * so no duplicate published handle can slip through. Run alone:
  *
  *   pnpm run typeorm migration:run -- --transaction none
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class NarrowSubprofileHandleUniqueIndexToPublished1787700100000 implements MigrationInterface {
   name = 'NarrowSubprofileHandleUniqueIndexToPublished1787700100000';

@@ -81,8 +81,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * No new index. `recogniseDevice` filters on `user_id` alone and reads the
  * labels back in memory, which the existing `IDX_refresh_tokens_user_id`
  * already covers — a member has a handful of live sessions, not a table scan.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class AddSecurityAlertsAndDeviceLabel1794610100000 implements MigrationInterface {
   name = 'AddSecurityAlertsAndDeviceLabel1794610100000';

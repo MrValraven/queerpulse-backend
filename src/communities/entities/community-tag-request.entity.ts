@@ -39,10 +39,14 @@ export class CommunityTagRequest {
   @Column({ type: 'uuid' })
   communityId!: string;
 
-  // No FK relation, mirroring `CommunityJoinRequest.userId` — a plain
-  // `userId` column so a requester's later account deletion never blocks
-  // this row (history should outlive the account, like `decidedBy`
-  // elsewhere in this codebase).
+  // FK-backed as of `AddCommunityTagRequestUserForeignKeys1795811000000` with
+  // `ON DELETE CASCADE`, replacing an earlier plain-`uuid` column justified as
+  // "history should outlive the account". It does not: a tag request is a
+  // one-person loop that changes nothing (see this class's docstring) and
+  // closes with a notification back to whoever filed it, so with that person
+  // erased the row is a dead letter carrying their free text. Stays NOT NULL,
+  // which is what the resolve notification's recipient relies on.
+  @Index('IDX_community_tag_request_requested_by_user_id')
   @Column({ type: 'uuid' })
   requestedByUserId!: string;
 
@@ -71,8 +75,13 @@ export class CommunityTagRequest {
   @Column({ type: 'timestamptz', nullable: true })
   resolvedAt!: Date | null;
 
-  // No FK, same reasoning as `requestedByUserId`/`ResourceSuggestion.decidedBy`
-  // — a resolution is history that must outlive a staff account's deletion.
+  // FK-backed as of `AddCommunityTagRequestUserForeignKeys1795811000000` with
+  // `ON DELETE SET NULL`, matching `mod_audit_logs.actor_id` and
+  // `listing_edit_suggestions.resolvedByUserId`: a moderation stamp survives
+  // erasure severed from the person, so an erased admin neither takes the
+  // record of their decisions with them nor takes other people's pending
+  // feedback down on the way out.
+  @Index('IDX_community_tag_request_resolved_by_user_id')
   @Column({ type: 'uuid', nullable: true })
   resolvedByUserId!: string | null;
 }

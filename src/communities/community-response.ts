@@ -252,6 +252,18 @@ export interface MyCommunityDTO {
   name: string;
   role: RosterRole;
   joinedAt: string;
+  /**
+   * Whether this community runs a LIVE membership-card programme, so the
+   * client can answer a cardless member's "why do I have no card, and can I
+   * get one?" without a per-community request each.
+   *
+   * True only while the programme is enabled: a paused one issues nothing
+   * today, so pointing a member at it would be a dead end. It says nothing
+   * about whether this member holds a card (their wallet is
+   * `GET /me/cards`), only that this community is somewhere a card can come
+   * from.
+   */
+  hasCardProgram: boolean;
 }
 
 /** Result of a role change on `PATCH /communities/:slug/members/:memberSlug`.

@@ -55,8 +55,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * ADD CONSTRAINT, every object but `users` created inside this same
  * transaction, so nothing waits on a lock another session holds and no
  * `CONCURRENTLY` two-phase split is needed.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class CreateStatusIncidents1794630000000 implements MigrationInterface {
   name = 'CreateStatusIncidents1794630000000';

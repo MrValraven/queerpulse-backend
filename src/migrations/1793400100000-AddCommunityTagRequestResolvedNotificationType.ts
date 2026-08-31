@@ -19,8 +19,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * notification type refers to) but does not touch it — kept in a separate,
  * later-timestamped migration because it must run non-transactionally while
  * the table migration is safely transactional.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddCommunityTagRequestResolvedNotificationType1793400100000 implements MigrationInterface {
   name = 'AddCommunityTagRequestResolvedNotificationType1793400100000';

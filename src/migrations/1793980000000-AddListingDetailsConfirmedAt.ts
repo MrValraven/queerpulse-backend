@@ -31,8 +31,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * column is read per-listing on the detail payload and never filtered on) and
  * no `CONCURRENTLY`, so nothing here needs to escape the migration
  * transaction.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class AddListingDetailsConfirmedAt1793980000000 implements MigrationInterface {
   name = 'AddListingDetailsConfirmedAt1793980000000';

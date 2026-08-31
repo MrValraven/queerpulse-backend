@@ -35,8 +35,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * No existing row's relative order changes: rounding microseconds to
  * milliseconds can only make same-millisecond rows compare equal, which is
  * the case the `id` tie-break in every keyset already disambiguates.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class NarrowReportCursorPrecision1793520300000 implements MigrationInterface {
   name = 'NarrowReportCursorPrecision1793520300000';

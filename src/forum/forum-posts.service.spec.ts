@@ -33,6 +33,11 @@ function build() {
       transaction: jest.fn(
         async (cb: (m: typeof manager) => Promise<unknown>) => cb(manager),
       ),
+      // `mapOne` reads the thread's accepted-answer pointer through the
+      // entity manager; default to "this thread has no accepted answer".
+      findOne: jest.fn().mockResolvedValue(null),
+      // `tombstonePost` releases the accepted-answer mark the same way.
+      update: jest.fn().mockResolvedValue({ affected: 0 }),
     },
   };
   const votes = { findOne: jest.fn().mockResolvedValue(null) };

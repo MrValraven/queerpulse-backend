@@ -8,21 +8,78 @@
 // dash. Must stay identical to the frontend mirror and the migration's regex.
 export const HANDLE_RE = /^[a-z0-9][a-z0-9-]{2,29}$/;
 
-// Names that can never be claimed — they collide with route prefixes or would
-// be confusing as a public handle. Moved here verbatim from
-// `subprofiles/subprofile-validation.ts` (which now re-exports for back-compat).
+// Names that can never be claimed, in two sorted groups.
+//
+// ROUTE COLLISIONS are names that shadow a top-level path in the app, so a
+// member holding one would make `/settings` ambiguous between the screen and
+// the person. This group is the original list and is unchanged.
+//
+// IMPERSONATION are names a reader could take as the platform itself speaking.
+// Staff identity on QueerPulse is carried by a badge rather than by a name, so
+// a member holding `@support` or `@moderator` can open a DM that reads as an
+// official one long before anyone thinks to check for the badge, and the only
+// thing standing behind that today is another member reporting it after the
+// harm. Reserving a name costs a real member the chance to use it, so the test
+// applied here is narrow: a word stays claimable when it merely sounds
+// institutional, and is withheld only when a member receiving a message from
+// it would reasonably believe the platform sent it. That is why the desk names
+// an organisation actually writes from are here (`billing`, `legal`, `press`,
+// `info`, `contact`, `noreply`, `notifications`), why the trust-and-safety desk
+// is covered as a set (`abuse`, `safety`, `security`, `trust`), and why `team`
+// is included: "the team" is how a company signs a message to its members.
+// `verified` is here because it asserts the platform's own endorsement, which
+// is exactly what the badge means. Both `queerpulse` and the one-hyphen
+// lookalike `queer-pulse` are withheld because the brand name in the sender
+// slot is the strongest impersonation signal there is; longer brand-adjacent
+// constructions are left alone, since that set has no end and each extra name
+// is taken from somebody.
+//
+// Moved here verbatim from `subprofiles/subprofile-validation.ts` (which now
+// re-exports for back-compat).
 export const RESERVED_HANDLES = [
-  'p',
-  'me',
+  // Route collisions.
+  'account',
   'admin',
+  'api',
+  'directory',
+  'me',
   'members',
+  'p',
   'profile',
   'profiles',
   'settings',
-  'account',
-  'api',
   'subprofiles',
-  'directory',
+  // Impersonation: the platform's own voice.
+  'abuse',
+  'admins',
+  'billing',
+  'contact',
+  'help',
+  'helpdesk',
+  'info',
+  'legal',
+  'mod',
+  'moderation',
+  'moderator',
+  'moderators',
+  'mods',
+  'no-reply',
+  'noreply',
+  'notification',
+  'notifications',
+  'official',
+  'press',
+  'queer-pulse',
+  'queerpulse',
+  'root',
+  'safety',
+  'security',
+  'staff',
+  'support',
+  'system',
+  'team',
+  'trust',
+  'verified',
 ];
 
 // How long a just-released handle stays reserved to its previous owner before

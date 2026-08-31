@@ -42,7 +42,7 @@ export class MeCommunitiesController {
   })
   @ApiOkResponse({
     description:
-      "A bare array of the caller's memberships ({ slug, name, role, joinedAt }).",
+      "A bare array of the caller's memberships ({ slug, name, role, joinedAt, hasCardProgram }).",
   })
   list(@CurrentUser() user: CurrentUserData) {
     return this.communitiesService.myCommunities(user.userId);

@@ -1,8 +1,9 @@
 import { Logger, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { Request, Response } from 'express';
+import { Response } from 'express';
 import { PassThrough } from 'node:stream';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
+import { StorageService } from '../storage/storage.service';
 import { AccountController } from './account.controller';
 import { AccountService } from './account.service';
 
@@ -22,18 +23,17 @@ describe('AccountController', () => {
     revokeSession: jest.Mock;
     revokeOtherSessions: jest.Mock;
   };
+  let storage: { openObjectStream: jest.Mock };
 
   const user: CurrentUserData = {
     userId: 'u1',
     email: 'a@b.com',
     status: 'pending',
     role: 'member',
+    // The `sid` claim JwtStrategy surfaces: the refresh-token family this
+    // caller's access token was minted for.
+    sessionId: 'fam-current',
   };
-
-  // Minimal Express request stub carrying the presenting refresh-token cookie.
-  const req = {
-    cookies: { refresh_token: 'raw-refresh' },
-  } as unknown as Request;
 
   beforeEach(async () => {
     service = {
@@ -50,9 +50,15 @@ describe('AccountController', () => {
       revokeSession: jest.fn(),
       revokeOtherSessions: jest.fn(),
     };
+    storage = { openObjectStream: jest.fn() };
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AccountController],
-      providers: [{ provide: AccountService, useValue: service }],
+      providers: [
+        { provide: AccountService, useValue: service },
+        // Only `stored` entries reach the bucket, and every fixture below is
+        // `text`, so this must never be called.
+        { provide: StorageService, useValue: storage },
+      ],
     }).compile();
     controller = module.get(AccountController);
   });
@@ -185,9 +191,10 @@ describe('AccountController', () => {
         filename: 'queerpulse-export-job-1.zip',
         contentType: 'application/zip',
         entries: [
-          { name: 'messages.csv', content: '\uFEFFid\r\nm1\r\n' },
-          { name: 'manifest.json', content: '{}' },
+          { kind: 'text', name: 'messages.csv', content: '\uFEFFid\r\nm1\r\n' },
+          { kind: 'text', name: 'manifest.json', content: '{}' },
         ],
+        media: null,
         modifiedAt: new Date('2026-07-15T12:00:00.000Z'),
       });
       const res = responseStub();
@@ -215,7 +222,14 @@ describe('AccountController', () => {
         kind: 'zip' as const,
         filename: 'queerpulse-export-job-1.zip',
         contentType: 'application/zip' as const,
-        entries: [{ name: 'messages.csv', content: '\uFEFFid\r\nm1\r\n' }],
+        entries: [
+          {
+            kind: 'text' as const,
+            name: 'messages.csv',
+            content: '\uFEFFid\r\nm1\r\n',
+          },
+        ],
+        media: null,
         modifiedAt: new Date('2026-07-15T12:00:00.000Z'),
       };
       service.getExportDownload.mockResolvedValue(download);
@@ -250,7 +264,10 @@ describe('AccountController', () => {
         kind: 'zip',
         filename: 'queerpulse-export-job-1.zip',
         contentType: 'application/zip',
-        entries: [{ name: 'messages.csv', content: 'id\r\nm1\r\n' }],
+        entries: [
+          { kind: 'text', name: 'messages.csv', content: 'id\r\nm1\r\n' },
+        ],
+        media: null,
         modifiedAt: new Date('2026-07-15T12:00:00.000Z'),
       });
       const res = responseStub();
@@ -309,10 +326,12 @@ describe('AccountController', () => {
     expect(result).toHaveLength(1);
   });
 
-  it('GET /sessions passes the presenting refresh-token cookie through', async () => {
+  // The session id rides on the caller's own access token (`sid`), because the
+  // `refresh_token` cookie is scoped to `/auth` and never reaches this route.
+  it('GET /sessions passes the caller session id through', async () => {
     service.listSessions.mockResolvedValue([]);
-    await controller.listSessions(user, req);
-    expect(service.listSessions).toHaveBeenCalledWith('u1', 'raw-refresh');
+    await controller.listSessions(user);
+    expect(service.listSessions).toHaveBeenCalledWith('u1', 'fam-current');
   });
 
   it('DELETE /sessions/:id revokes one session via the service', async () => {
@@ -321,12 +340,12 @@ describe('AccountController', () => {
     expect(service.revokeSession).toHaveBeenCalledWith('u1', 'rt-1');
   });
 
-  it('DELETE /sessions revokes OTHER sessions, passing the presenting refresh-token cookie', async () => {
+  it('DELETE /sessions revokes OTHER sessions, passing the caller session id', async () => {
     service.revokeOtherSessions.mockResolvedValue(undefined);
-    await controller.revokeOtherSessions(user, req);
+    await controller.revokeOtherSessions(user);
     expect(service.revokeOtherSessions).toHaveBeenCalledWith(
       'u1',
-      'raw-refresh',
+      'fam-current',
     );
   });
 

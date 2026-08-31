@@ -13,8 +13,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * deletes an `event_series` row, but if it ever did, that must not cascade
  * into deleting real, independently-RSVPable `Event` rows — it should just
  * orphan them back to standalone events.
- *
- * DO NOT RUN. Authored for review only; the maintainer runs migrations.
  */
 export class AddEventRecurrence1792800000000 implements MigrationInterface {
   name = 'AddEventRecurrence1792800000000';

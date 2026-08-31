@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { NotificationType } from '../notifications/entities/notification.entity';
+import { NotificationDeliveryService } from '../notifications/notification-delivery.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PushPayload, PushService } from '../push/push.service';
 import { EventRsvp } from './entities/event-rsvp.entity';
@@ -22,6 +23,10 @@ describe('EventRemindersService', () => {
   };
   let preferences: { find: jest.Mock };
   let notifications: { createForRecipients: jest.Mock };
+  // Quiet hours are applied to the reminder push specifically (this is the one
+  // push path that bypasses `PushNotificationListener`). Defaults to "nobody
+  // has asked for silence", so the payload tests below still see their buzz.
+  let notificationDelivery: { recipientsOutsideQuietHours: jest.Mock };
   let push: { sendToUsers: jest.Mock };
 
   beforeEach(async () => {
@@ -48,6 +53,11 @@ describe('EventRemindersService', () => {
     };
     preferences = { find: jest.fn().mockResolvedValue([]) };
     notifications = { createForRecipients: jest.fn() };
+    notificationDelivery = {
+      recipientsOutsideQuietHours: jest.fn((userIds: string[]) =>
+        Promise.resolve(userIds),
+      ),
+    };
     push = { sendToUsers: jest.fn().mockResolvedValue(undefined) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -60,6 +70,10 @@ describe('EventRemindersService', () => {
         },
         { provide: NotificationsService, useValue: notifications },
         { provide: PushService, useValue: push },
+        {
+          provide: NotificationDeliveryService,
+          useValue: notificationDelivery,
+        },
       ],
     }).compile();
     service = module.get(EventRemindersService);

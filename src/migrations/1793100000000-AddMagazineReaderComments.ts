@@ -21,8 +21,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `1792900000000-AddMagazineIssueDigestSchedule.ts`), but a concurrent branch
  * has since landed `1793000000000-AddPlatformAnnouncement.ts`. Bumped to
  * `1793100000000` to stay unique and ordered after it.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddMagazineReaderComments1793100000000 implements MigrationInterface {
   name = 'AddMagazineReaderComments1793100000000';

@@ -37,6 +37,7 @@ import { EventAnnouncementsService } from './event-announcements.service';
 import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBansService } from './event-bans.service';
 import { EventBookmarksService } from './event-bookmarks.service';
+import { EventCapacityAlertsService } from './event-capacity-alerts.service';
 import { EventCheckInService } from './event-check-in.service';
 import { EventCohostInvitesService } from './event-cohost-invites.service';
 import { EventInvitesService } from './event-invites.service';
@@ -124,6 +125,10 @@ import { RsvpService } from './rsvp.service';
   providers: [
     EventsService,
     EventBookmarksService,
+    // "Last few spots" (PRD-18). Called post-commit by `RsvpService` whenever a
+    // seat is taken or freed; owns its own at-most-once claim on the event row
+    // and swallows its own failures, so it can never reach an RSVP.
+    EventCapacityAlertsService,
     RsvpService,
     EventInvitesService,
     EventCohostInvitesService,

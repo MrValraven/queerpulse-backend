@@ -3,10 +3,12 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
   MinLength,
 } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 
 /**
  * Query of `GET /communities/:slug/posts`.
@@ -22,6 +24,7 @@ export class ListCommunityPostsQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 
   @IsOptional()

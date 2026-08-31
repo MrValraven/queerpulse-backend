@@ -12,8 +12,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * raising 23505. The composite unique already leads with `user_id`, so it also
  * covers the "which topics does this user follow?" read; `IDX_topic_follows_user_id`
  * is added as the explicit single-column index the P2-15 spec calls for.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class CreateTopicFollows1786001100000 implements MigrationInterface {
   name = 'CreateTopicFollows1786001100000';

@@ -12,8 +12,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * Existing rows start at 0, which is the column default, so no backfill is
  * needed.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddDraftVersion1793540300000 implements MigrationInterface {
   name = 'AddDraftVersion1793540300000';

@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -8,8 +7,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * every existing and new row to `'none'` — a plain `varchar`, matching the
  * repo idiom of no Postgres `CREATE TYPE` for string-union "enums" (see
  * `MagazinePiece.format`/`stage`).
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class AddPieceArtState1786900000000 implements MigrationInterface {
   name = 'AddPieceArtState1786900000000';

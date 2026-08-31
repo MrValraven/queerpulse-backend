@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -12,9 +11,10 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * notification of this type per active member instead, deep-linking to the
  * issue's own "In this issue" panel.
  *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`. The app BOOTS
- * without it (the enum column only rejects the new label at INSERT time), but
- * shipping an issue with "announce with the issue" on will fail until it runs.
+ * This migration is applied. The app boots with or without it, because the
+ * enum column only rejects an unknown label at INSERT time. Shipping an issue
+ * with "announce with the issue" on is the path that needs the label, so that
+ * path stayed broken until this ran.
  */
 export class AddMagazineIssuePublishedNotificationType1794833000000 implements MigrationInterface {
   name = 'AddMagazineIssuePublishedNotificationType1794833000000';

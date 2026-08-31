@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -13,8 +12,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * values are enforced by the DTO on write. There is no `user_id`/FK: the POST is
  * public and anonymous, so the sender identifies themselves by the name/email
  * they type.
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class CreateInquiries1786001300000 implements MigrationInterface {
   name = 'CreateInquiries1786001300000';

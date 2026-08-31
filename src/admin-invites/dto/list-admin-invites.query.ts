@@ -5,9 +5,11 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 
 // The resolved-status vocabulary an admin filters by — the SAME values the rows
 // display (see `AdminInviteDTO.status`), so filtering "expired" returns exactly
@@ -26,6 +28,7 @@ export class ListAdminInvitesQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 
   @IsOptional()

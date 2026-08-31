@@ -8,8 +8,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * submitted before this field existed and have nothing to backfill;
  * `CreateChangemakerNominationDto.reason` requires it going forward so every
  * new nomination actually carries what the copy promises reviewers will see.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddChangemakerNominationReason1792500000000 implements MigrationInterface {
   name = 'AddChangemakerNominationReason1792500000000';

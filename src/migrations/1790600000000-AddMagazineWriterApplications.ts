@@ -9,8 +9,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * most one PENDING application per user, so a user can re-apply after a
  * decline while a concurrent double-submit is rejected with a 23505 the
  * service maps to 409.
- *
- * DO NOT RUN. Authored for review only; the maintainer runs migrations.
  */
 export class AddMagazineWriterApplications1790600000000 implements MigrationInterface {
   name = 'AddMagazineWriterApplications1790600000000';

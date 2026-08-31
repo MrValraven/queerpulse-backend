@@ -8,6 +8,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 import { SubprofileKind } from '../entities/subprofile.entity';
 
 // Sane paging defaults for the authenticated directory browse — replaces the
@@ -29,6 +30,7 @@ export class ListSubprofileDirectoryQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 
   @IsOptional()

@@ -4,9 +4,11 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 import { LandlordStatus } from '../entities/landlord.entity';
 
 /**
@@ -25,6 +27,7 @@ export class ListAdminLandlordsQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 
   /** The queue filter the console opens on. Omitted means every state. */

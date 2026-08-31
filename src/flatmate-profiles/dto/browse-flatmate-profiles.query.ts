@@ -7,9 +7,11 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 import { FlatmateProfileType } from '../entities/flatmate-profile.entity';
 
 /** Optional filters for GET /flatmate-directory. `tags` may arrive as repeated
@@ -35,5 +37,10 @@ export class BrowseFlatmateProfilesQuery {
   @MaxLength(40, { each: true })
   tags?: string[];
 
-  @IsOptional() @Type(() => Number) @IsInt() @Min(1) page?: number;
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(MAX_PAGE)
+  page?: number;
 }

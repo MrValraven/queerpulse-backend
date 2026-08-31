@@ -15,6 +15,7 @@ import { ConfigService } from '@nestjs/config';
 import {
   ApiCookieAuth,
   ApiCreatedResponse,
+  ApiForbiddenResponse,
   ApiFoundResponse,
   ApiOkResponse,
   ApiOperation,
@@ -26,6 +27,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { Request, Response } from 'express';
 import { User } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
+import { JoinRequestsService } from '../membership/join-requests.service';
 import {
   setAuthCookies,
   clearAuthCookies,
@@ -46,7 +48,9 @@ import { CompleteOnboardingDto } from './dto/complete-onboarding.dto';
 import { SignupRejectedError } from './errors/signup-rejected.error';
 import { OAuthCallbackFilter } from './filters/oauth-callback.filter';
 import { Public } from './decorators/public.decorator';
+import { ActiveMemberGuard } from './guards/active-member.guard';
 import { GoogleAuthGuard } from './guards/google-auth.guard';
+import { RefreshSessionThrottlerGuard } from './refresh-session-throttler.guard';
 import { decodeOAuthState } from './oauth-state';
 import {
   reauthFailureUrl,
@@ -93,6 +97,9 @@ export class AuthController {
     private readonly config: ConfigService,
     private readonly mediaCropService: MediaCropService,
     private readonly underAgeDisclosure: UnderAgeDisclosureService,
+    // PRD-14: lets an `invite_required` rejection hand a lost status
+    // token back to the applicant Google has just verified.
+    private readonly joinRequestsService: JoinRequestsService,
   ) {}
 
   /**
@@ -245,6 +252,29 @@ export class AuthController {
       );
     } catch (err) {
       if (err instanceof SignupRejectedError) {
+        // PRD-14. An applicant who lost their status token has no other way
+        // back: nothing is ever emailed, and they have no account to be
+        // notified in. Google has just VERIFIED this address, which is the
+        // only proof of ownership available anywhere in the product, so an
+        // `invite_required` rejection is the right moment to hand them a fresh
+        // token for their own request instead of a "you need an invite" notice.
+        //
+        // NOT AN ENUMERATION ORACLE: reaching here costs a full OAuth round
+        // trip as the owner of the address, and an address that never applied
+        // falls through to exactly the redirect it already got, so nothing
+        // distinguishes "never applied" from "not a member".
+        if (err.reason === 'invite_required') {
+          const statusToken =
+            await this.joinRequestsService.recoverStatusTokenForVerifiedEmail(
+              profile.email,
+            );
+          if (statusToken) {
+            const target = new URL('/auth/request-invite/status', frontendUrl);
+            target.searchParams.set('token', statusToken);
+            res.redirect(target.toString());
+            return;
+          }
+        }
         res.redirect(
           signInErrorUrl(
             this.config.getOrThrow<string>('app.frontendUrl'),
@@ -288,7 +318,19 @@ export class AuthController {
   @ApiTooManyRequestsResponse({ description: 'Rate limit exceeded.' })
   @Version(VERSION_NEUTRAL)
   @Public()
-  @Throttle({ default: { limit: 10, ttl: seconds(60) } })
+  // Rate-limited per refresh CREDENTIAL, not per client IP. The old
+  // `@Throttle({ limit: 10, ttl: seconds(60) })` here was IP-keyed, so behind one
+  // venue's wifi or a carrier's CGNAT the eleventh renewal in a minute ACROSS
+  // ALL the co-located members got a 429 on the one route a signed-in browser
+  // cannot do without. `RefreshSessionThrottlerGuard` carries both the tracker
+  // and its own limit; see the note on its `handleRequest` for why the limit
+  // deliberately does not live in a decorator here.
+  //
+  // No route-level `@Throttle` remains on purpose: the global IP-keyed guard
+  // therefore falls back to the app-wide default, which is what every other
+  // route already lives with, instead of singling this one out as the tightest
+  // IP bucket in the app.
+  @UseGuards(RefreshSessionThrottlerGuard)
   @Post('refresh')
   async refresh(
     @Req() req: Request,
@@ -443,6 +485,29 @@ export class AuthController {
     };
   }
 
+  /**
+   * Finish onboarding: stamp `onboarded_at` and record agreement to the current
+   * community guidelines.
+   *
+   * Behind `ActiveMemberGuard`, which is the one route on this controller that
+   * wants it. Stamping those two columns is the member declaring themselves
+   * fully joined, and until now nothing here read `status`, so a suspended,
+   * banned or deactivated account could complete its own onboarding while under
+   * moderation and hand itself the stamps that every "is this member finished?"
+   * check downstream reads.
+   *
+   * The guard does not lock out the legitimate caller, which is the case worth
+   * being careful about. Being partway through the wizard is not a status:
+   * `UserStatus` has exactly `active`, `suspended` and `deactivated`, every
+   * newly created member starts `active` (`UsersService.create` defaults to it),
+   * and "not yet onboarded" is a null `onboarded_at` on an otherwise active row.
+   * So the guard rejects the three accounts it is aimed at and passes everybody
+   * who is genuinely mid-wizard.
+   *
+   * A 403 rather than a silent no-op: a suspended member reloading the wizard
+   * should be told the account is locked, and the client already renders the
+   * suspension screen from `GET /auth/me`.
+   */
   @ApiOperation({
     summary:
       'Mark the current member as having finished onboarding and agreed to the community guidelines.',
@@ -453,6 +518,10 @@ export class AuthController {
       'Onboarding recorded; returns the onboarding + guidelines-agreement stamps.',
   })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({
+    description: 'The account is suspended, banned or deactivated.',
+  })
+  @UseGuards(ActiveMemberGuard)
   @Post('onboarding/complete')
   async completeOnboarding(
     @CurrentUser() current: CurrentUserData,

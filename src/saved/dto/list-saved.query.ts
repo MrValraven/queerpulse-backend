@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, IsUUID, Min } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 import { SavedKind } from '../entities/saved-item.entity';
 
 /** `GET /me/saved?kind=&listId=&page=` query params (`getSaved` in
@@ -24,5 +25,6 @@ export class ListSavedQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 }

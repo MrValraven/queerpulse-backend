@@ -8,8 +8,14 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { DEFAULT_LIST_LIMIT } from '../common/pagination';
+import {
+  DEFAULT_LIST_LIMIT,
+  normalizePage,
+  paginate,
+  Paginated,
+} from '../common/pagination';
 import { MemberLookup } from '../common/member-ref';
+import { ListListingClaimsQuery } from './dto/list-listing-claims.query';
 import { MessagingService } from '../messaging/messaging.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -169,46 +175,96 @@ export class ListingClaimsService {
       .filter((dto): dto is ListingClaimDTO => dto !== null);
   }
 
-  /** Moderator/admin-only: every pending claim, oldest first — the review
-   * queue. Bounded like `ListingEditSuggestionsService.listForAdmin` so it
-   * can never dump an unbounded table. Resolves every distinct listing/
-   * claimant in ONE batched lookup each, never N+1. */
-  async listPending(): Promise<ListingClaimDTO[]> {
-    const rows = await this.claims.find({
-      where: { status: ListingClaimStatus.Pending },
-      order: { createdAt: 'ASC' },
-      take: DEFAULT_LIST_LIMIT,
-    });
-    if (!rows.length) return [];
-
-    const listingIds = [...new Set(rows.map((row) => row.listingId))];
-    const listingRows = await this.listings.find({
-      where: { id: In(listingIds) },
-    });
-    const listingById = new Map(
-      listingRows.map((listing) => [listing.id, listing]),
-    );
-
-    const claimantIds = rows
-      .map((row) => row.claimantId)
-      .filter((id): id is string => id !== null);
-    const refs = await new MemberLookup(this.profiles).byUserIds(claimantIds);
-
-    // A claim whose listing has since been hard-deleted has nothing left to
-    // render a queue row against — skip it rather than throw (mirrors
-    // `ListingEditSuggestionsService.listForAdmin`'s identical precedent;
-    // `listingId` deliberately carries no FK, so this can happen in practice).
-    return rows
-      .map((row): ListingClaimDTO | null => {
-        const listing = listingById.get(row.listingId);
-        if (!listing) return null;
-        return toListingClaimDTO(
-          row,
-          listing,
-          row.claimantId ? (refs.get(row.claimantId) ?? null) : null,
-        );
+  /**
+   * Moderator/admin-only: the pending claim review queue, oldest first,
+   * paginated (ENG-41).
+   *
+   * Supersedes the earlier note here, which bounded the queue at
+   * `DEFAULT_LIST_LIMIT` and returned a flat array. Bounding it was right;
+   * returning nothing but the bounded slab was not. Oldest-first plus a hard
+   * 200-row cap means the claims that fall off the end are the ones filed most
+   * recently, so a desk with 201 pending claims hid the newest of them from
+   * every moderator with nothing in the response saying so. The envelope now
+   * carries `total`, the size of the whole pending set, and `page`, which is how
+   * a moderator reaches the rest of it.
+   *
+   * ORDERING STAYS OLDEST-FIRST, deliberately: the claim that has waited
+   * longest is the one closest to breaking the published turnaround this
+   * service promises (`listing-claim-policy.ts`). Newest-first would be the
+   * wrong sort for a work queue even now that nothing is hidden, so please do
+   * not "fix" it.
+   *
+   * The `EXISTS` against `listings` is what keeps `total` honest. `listingId`
+   * deliberately carries no FK (see the entity), so a hard-deleted listing
+   * leaves a claim with nothing to render a queue row against, and those rows
+   * used to be dropped AFTER the fetch: `total` would then have counted claims
+   * no moderator could ever see or act on, and the page would have come back
+   * short with no explanation. Filtering in the query instead means `total` is
+   * exactly the number of claims reachable through these pages. Expressed as
+   * `EXISTS` rather than a join (mirroring `CommunitiesService.roster`), so
+   * `paginate`'s `.skip()/.take()` stays clear of the distinct-alias pass a
+   * joined query runs into.
+   *
+   * Every distinct listing and claimant on the page is still resolved in ONE
+   * batched lookup each, never N+1: pagination narrowed what "the whole set"
+   * means, it did not turn either lookup into a per-row call.
+   */
+  async listPending(
+    query: ListListingClaimsQuery = {},
+  ): Promise<Paginated<ListingClaimDTO>> {
+    const page = normalizePage(query.page);
+    const claimsQuery = this.claims
+      .createQueryBuilder('claim')
+      .where('claim.status = :pending', {
+        pending: ListingClaimStatus.Pending,
       })
-      .filter((dto): dto is ListingClaimDTO => dto !== null);
+      .andWhere(
+        `EXISTS (
+           SELECT 1 FROM "listings" "claimed_listing"
+           WHERE "claimed_listing"."id" = claim.listing_id
+         )`,
+      )
+      // `created_at` alone is not a total order, so it is not a safe sort key for
+      // offset pagination: two rows written in the same transaction share a
+      // statement timestamp, and Postgres is then free to return that tie in
+      // either order per query, which is how a row appears on two pages and
+      // another appears on none. `id` breaks the tie deterministically. Same
+      // reasoning as `PlatformSettingsService.listChanges`.
+      .orderBy('claim.created_at', 'ASC')
+      .addOrderBy('claim.id', 'ASC');
+
+    return paginate(claimsQuery, page, async (rows) => {
+      if (!rows.length) return [];
+
+      const listingIds = [...new Set(rows.map((row) => row.listingId))];
+      const listingRows = await this.listings.find({
+        where: { id: In(listingIds) },
+      });
+      const listingById = new Map(
+        listingRows.map((listing) => [listing.id, listing]),
+      );
+
+      const claimantIds = rows
+        .map((row) => row.claimantId)
+        .filter((id): id is string => id !== null);
+      const refs = await new MemberLookup(this.profiles).byUserIds(claimantIds);
+
+      // Unreachable given the `EXISTS` above (a listing cannot vanish between
+      // the two statements of one page load without also leaving `total`
+      // stale, which the next page load corrects). Kept as the type-level
+      // guard that lets the mapper take a non-null `listing`.
+      return rows
+        .map((row): ListingClaimDTO | null => {
+          const listing = listingById.get(row.listingId);
+          if (!listing) return null;
+          return toListingClaimDTO(
+            row,
+            listing,
+            row.claimantId ? (refs.get(row.claimantId) ?? null) : null,
+          );
+        })
+        .filter((dto): dto is ListingClaimDTO => dto !== null);
+    });
   }
 
   /**

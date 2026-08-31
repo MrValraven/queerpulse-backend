@@ -53,7 +53,14 @@ import { ModAuditLog } from './entities/mod-audit-log.entity';
 import { ModAuditService } from './mod-audit.service';
 import { statusForAction } from './mod-action-status';
 import { enforcementTargetUnresolved } from './enforcement-refusals';
-import { COMMUNITY_BAN_AUDIT_ACTION } from '../communities/community-governance-log.service';
+import {
+  COMMUNITY_BAN_AUDIT_ACTION,
+  COMMUNITY_REMOVAL_AUDIT_ACTION,
+} from '../communities/community-governance-log.service';
+// The `member_removed` label the removal's community lookup filters on. A bare
+// string enum from an entity file, so it adds no provider and no edge to the
+// module graph, the same way the audit-action constants above do not.
+import { GovernanceLogAction } from '../communities/entities/community-governance-log.entity';
 import { BAN_PENDING_AUDIT_ACTION } from './ban-ratification-window';
 import { BanRatificationService } from './ban-ratification.service';
 import { BanRatificationStatus } from './entities/ban-ratification.entity';
@@ -175,6 +182,12 @@ const APPEALABLE_ACTIONS = [
   // member was told to "contact its moderators", which the product offers no
   // way to do.
   COMMUNITY_BAN_AUDIT_ACTION,
+  // PRD-28. The other half of the same act. A removal that lets the member
+  // come back is still a moderator's decision about them, and it now leaves a
+  // `community_member_removed` row (`CommunitiesService.removeMember`) so it
+  // can be contested. Listed separately from the bar so an appeal against a
+  // removal is labelled, and reasoned about, as the removal it is.
+  COMMUNITY_REMOVAL_AUDIT_ACTION,
 ];
 
 // Loose enough to guard `Repository.findOne({ where: { userId: subjectId } })`
@@ -1471,7 +1484,7 @@ export class ModerationService {
   }> {
     const community = report
       ? await this.communitySlugForAppealReport(report)
-      : await this.communitySlugForCommunityBan(log);
+      : await this.communitySlugForCommunitySanction(log);
     return {
       actionId: log.id,
       reportId: report ? report.id : null,
@@ -1495,6 +1508,59 @@ export class ModerationService {
       return report.subjectId;
     }
     return this.communitySlugForReport(report);
+  }
+
+  /**
+   * The community behind a report-less community-level sanction, whichever of
+   * the two it is. A bar is found through the `community_bans` row it left; a
+   * removal (PRD-28) has no such row by definition, so it is found through the
+   * community's own governance log instead. Any other action has no community
+   * and says so.
+   */
+  private async communitySlugForCommunitySanction(
+    log: ModAuditLog,
+  ): Promise<string | null> {
+    if (log.action === COMMUNITY_REMOVAL_AUDIT_ACTION) {
+      return this.communitySlugForCommunityRemoval(log);
+    }
+    return this.communitySlugForCommunityBan(log);
+  }
+
+  /**
+   * The community behind a report-less community REMOVAL (PRD-28).
+   *
+   * A removal that lets the member come back writes no `community_bans` row,
+   * so the route the bar uses does not exist here. The governance log is the
+   * one place that records which room the removal happened in: the audit
+   * mirror is written immediately after the `member_removed` entry, in the
+   * same call, so the newest such entry for this member is the removal being
+   * appealed. Same "most recent wins" rule the bar lookup follows for a member
+   * removed from more than one community.
+   *
+   * Read through the shared `DataSource` with a parameterized statement, for
+   * exactly the reason `communitySlugForCommunityBan` gives: importing
+   * `CommunitiesModule` here would close a real cycle in the module graph.
+   *
+   * Returns `null` when nothing matches. An appeal with no community is the
+   * state the column was in before TS-11 and is handled everywhere.
+   */
+  private async communitySlugForCommunityRemoval(
+    log: ModAuditLog,
+  ): Promise<string | null> {
+    if (!log.targetUserId || !UUID_RE.test(log.targetUserId)) {
+      return null;
+    }
+    const rows = await this.dataSource.query<{ slug: string }[]>(
+      `SELECT c.slug AS "slug"
+         FROM community_governance_log entry
+         JOIN communities c ON c.id = entry.community_id
+        WHERE entry.target_user_id = $1
+          AND entry.action = $2
+        ORDER BY entry.created_at DESC
+        LIMIT 1`,
+      [log.targetUserId, GovernanceLogAction.MemberRemoved],
+    );
+    return rows[0]?.slug ?? null;
   }
 
   /**
@@ -1667,6 +1733,9 @@ export class ModerationService {
    *    `restriction_lifted` entry. Deliberately does NOT touch `status`: a
    *    restriction never changed it (see
    *    `AccountEnforcementService.enforceAgainstUser`).
+   *  - `community_member_removed` -> nothing is undone. See the comment at the
+   *    branch: an overturn records that the removal was wrong, and the member
+   *    can rejoin themselves, because the removal never barred the return.
    *  - `suspend` / `ban`, `warn`, or a cold appeal with no resolvable original
    *    action -> the pre-existing account-restore path, which is a silent
    *    no-op when the member is not actually suspended.
@@ -1725,6 +1794,20 @@ export class ModerationService {
           manager,
         );
       }
+      return;
+    }
+
+    // PRD-28. A WON APPEAL AGAINST A COMMUNITY REMOVAL RECORDS THE OUTCOME AND
+    // PUTS NOBODY BACK ON A ROSTER. The decision is deliberate: re-adding a
+    // member is a write into a community's own roster, taken by the platform
+    // over the heads of the people who run that room, and the removal already
+    // left the door open, so the member can rejoin themselves the moment the
+    // decision goes their way. Auto-adding would also have to re-create a
+    // roster row with a role, a joined-at and any invite provenance the
+    // original had, none of which the appeal knows. The overturn stands as the
+    // record that the removal was wrong, which is what the member asked for
+    // and what the community's moderators then act on.
+    if (action === COMMUNITY_REMOVAL_AUDIT_ACTION) {
       return;
     }
 

@@ -33,6 +33,32 @@ export interface PushPreviewsDTO {
   hidePreviews: boolean;
 }
 
+/**
+ * `GET|PUT /me/content-sensitivity` (PRD-10): the three feed filters, on their
+ * own.
+ *
+ * `hide*` throughout, so the value means the same thing on the wire, in the
+ * column and in the feed query. The Interests pane's checkbox reads the other
+ * way round ("show me this"), and that single inversion lives at the render
+ * site beside the label.
+ */
+export interface ContentSensitivityDTO {
+  hideDating: boolean;
+  hideMentalHealth: boolean;
+  hideSexualityIdentity: boolean;
+}
+
+/**
+ * `GET|PUT /me/suggestion-visibility` (PRD-16): the "stop recommending me to
+ * strangers" switch, on its own.
+ *
+ * One-directional by design. It governs whether this member is offered to
+ * OTHER people, never whether they are offered other people.
+ */
+export interface SuggestionVisibilityDTO {
+  hideFromSuggestions: boolean;
+}
+
 export function toWorkPreferencesDTO(
   row: MemberPreferences,
 ): WorkPreferencesDTO {
@@ -55,4 +81,20 @@ export function toLoginAlertsDTO(row: MemberPreferences): LoginAlertsDTO {
 
 export function toPushPreviewsDTO(row: MemberPreferences): PushPreviewsDTO {
   return { hidePreviews: row.hidePushPreviews };
+}
+
+export function toContentSensitivityDTO(
+  row: MemberPreferences,
+): ContentSensitivityDTO {
+  return {
+    hideDating: row.hideDatingContent,
+    hideMentalHealth: row.hideMentalHealthContent,
+    hideSexualityIdentity: row.hideSexualityIdentityContent,
+  };
+}
+
+export function toSuggestionVisibilityDTO(
+  row: MemberPreferences,
+): SuggestionVisibilityDTO {
+  return { hideFromSuggestions: row.hideFromSuggestions };
 }

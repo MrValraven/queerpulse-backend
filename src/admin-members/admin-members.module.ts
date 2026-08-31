@@ -9,6 +9,14 @@ import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { UsersModule } from '../users/users.module';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import { VouchModule } from '../vouch/vouch.module';
+import { AccountDeactivation } from '../account/entities/account-deactivation.entity';
+import { DeletionRequest } from '../account/entities/deletion-request.entity';
+import { EmailSuppression } from '../account/entities/email-suppression.entity';
+import { AuthModule } from '../auth/auth.module';
+import { IdentityRelinkCandidate } from '../auth/entities/identity-relink-candidate.entity';
+import { AdminEmailSuppressionController } from './admin-email-suppression.controller';
+import { AdminIdentityService } from './admin-identity.service';
+import { AdminMemberIdentityController } from './admin-identity.controller';
 import { AdminMembersController } from './admin-members.controller';
 import { AdminMembersService } from './admin-members.service';
 
@@ -33,6 +41,18 @@ import { AdminMembersService } from './admin-members.service';
       Vouch,
       ModAuditLog,
       UserStaffRole,
+      // The identity-recovery levers' own entities (PRD-06/11/13). Registered
+      // here rather than by importing `AccountModule`, following the precedent
+      // `AuthModule` already sets for exactly these three: `AccountModule`
+      // depends on `AuthModule`, so an import in that direction would close a
+      // cycle. `AdminIdentityService` reads the deactivation and deletion
+      // ledgers to REFUSE work; `AccountService` still owns every write to
+      // them. `IdentityRelinkCandidate` is written pending by the sign-up path
+      // and decided here.
+      IdentityRelinkCandidate,
+      EmailSuppression,
+      AccountDeactivation,
+      DeletionRequest,
     ]),
     // `ReportsModule` exports `TypeOrmModule` (re-exporting its own
     // `forFeature([Report])`), so importing it is how `Repository<Report>`
@@ -45,9 +65,18 @@ import { AdminMembersService } from './admin-members.service';
     // `countAdmins` last-admin guard `updateRole` uses (also used by
     // `AccountService.deactivate`/`requestDeletion`).
     UsersModule,
+    // `AuthService`, for `applyGoogleIdRelink` (the conditional `google_id`
+    // write) and `revokeAllForUser` (ending every session after a re-link).
+    // `AuthModule` exports it and its own import graph reaches nothing in this
+    // module, so this edge closes no cycle.
+    AuthModule,
   ],
-  controllers: [AdminMembersController],
-  providers: [AdminMembersService],
+  controllers: [
+    AdminMembersController,
+    AdminMemberIdentityController,
+    AdminEmailSuppressionController,
+  ],
+  providers: [AdminMembersService, AdminIdentityService],
   // Exported so `MagazineModule`'s writer-application triage can grant the
   // `magazine_writer` staff role via the same `grantStaffRole` the manual
   // admin role-assignment screen uses, instead of a second mechanism.

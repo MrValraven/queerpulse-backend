@@ -19,6 +19,15 @@ export enum NotificationPreferenceCategory {
   EventReminders = 'event_reminders',
   /** "Someone RSVP'd" / "co-host invite" — activity on gatherings you run. */
   EventActivity = 'event_activity',
+  /**
+   * "Last few spots" — a gathering you saved, or said maybe to, is nearly full.
+   *
+   * Its own category rather than a share of `EventReminders`: that one is the
+   * lead-time nudge before a gathering you are ALREADY attending, and this one
+   * reaches people who have not decided yet. A member who wants the reminder
+   * and not the scarcity nudge (or the other way round) can have exactly that.
+   */
+  EventCapacity = 'event_capacity',
   /** "New message" — a new direct message (delivered as push only, see below). */
   NewMessages = 'new_messages',
   /** "Connection request" — someone asked to connect, or accepted your request. */
@@ -90,6 +99,8 @@ export const NOTIFICATION_TYPE_CATEGORY: Partial<
   [NotificationType.EventRsvp]: NotificationPreferenceCategory.EventActivity,
   [NotificationType.EventCohostInvite]:
     NotificationPreferenceCategory.EventActivity,
+  [NotificationType.EventNearlyFull]:
+    NotificationPreferenceCategory.EventCapacity,
 
   // --- Messages and connections --------------------------------------------
   [NotificationType.NewMessage]: NotificationPreferenceCategory.NewMessages,
@@ -216,6 +227,14 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     // already deduplicated at source (one per queue per state change, not one
     // per hourly tick), so there is no volume here for a switch to control.
     NotificationType.ModerationQueueAlert,
+    // A community moderator handing platform staff a ban-evasion question
+    // (PRD-31). Reaches platform `moderator`/`admin` accounts only (a member
+    // can never receive one), and it is duty mail on a question somebody asked
+    // the platform: a volume control that could silence it would put the case
+    // back where it started, findable only by whoever happens to open the
+    // queue. It arrives at most once per open escalation, so there is no volume
+    // here for a switch to control.
+    NotificationType.BanEvasionEscalationRaised,
 
     // 2. Account lifecycle.
     NotificationType.PromotedToMember,
@@ -272,6 +291,13 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     // everything a concern. Same reasoning as `ConcernUpdate`: a decision on
     // something you personally sent in is always delivered.
     NotificationType.IntakeReviewed,
+    // Staff closing the ban-evasion escalation this moderator raised (PRD-31).
+    // It answers a question they asked by hand, one per escalation, and there
+    // is no other channel it arrives on: reopening the community's own
+    // escalation list is the only way to notice otherwise. It carries the fact
+    // of the closure and nothing about what staff found, so there is nothing
+    // here a member would want turned down.
+    NotificationType.BanEvasionEscalationResolved,
   ];
 
 /** The category a type belongs to, or `null` when it has no member switch. */

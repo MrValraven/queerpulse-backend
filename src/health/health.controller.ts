@@ -25,9 +25,12 @@ import { PlatformProbesService } from './platform-probes.service';
  * a connection from a pool whose max is 10, and Terminus puts the driver's own
  * failure text in the 503 body. They re-enable throttling per method and sit
  * behind {@link MetricsTokenGuard}, the same shared-secret gate as `/metrics`,
- * so an operator scrapes them with `Authorization: Bearer $METRICS_TOKEN`. The
- * guard is open when `METRICS_TOKEN` is unset, which is only possible outside
- * production (env validation requires it there), so local probing is unchanged.
+ * so an operator scrapes them with `Authorization: Bearer $METRICS_TOKEN`. With
+ * `METRICS_TOKEN` unset the guard is open in development and test, so local
+ * probing is unchanged, and closed in production, where both of these routes
+ * then answer 403 to everyone until a token is set. Env validation permits an
+ * unset token in every environment and warns loudly at boot when production
+ * starts without one.
  */
 // Version-neutral: the Railway/orchestrator healthcheck probes fixed, unversioned
 // paths (`/health`, `/health/live`, `/health/ready`) that cannot be changed in

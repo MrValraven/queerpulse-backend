@@ -17,8 +17,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * refers to) but does not touch it — kept in a separate, later-timestamped
  * migration because it must run non-transactionally while the table migration
  * is safely transactional.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddBarterProposalReceivedNotificationType1793720000000 implements MigrationInterface {
   name = 'AddBarterProposalReceivedNotificationType1793720000000';

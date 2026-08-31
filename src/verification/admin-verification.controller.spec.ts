@@ -373,6 +373,12 @@ describe('AdminVerificationController', () => {
         reviewedBy: null,
         signals: { accountAgeDays: 42 },
         isAppeal: false,
+        // OPS-04 queue-assignment columns (inherited from
+        // `QueueAssignmentColumns`). Both nullable, so a stored row always
+        // carries the keys: nobody claimed this one, and it predates the SLA
+        // clock.
+        assignedStaffId: null,
+        dueAt: null,
         createdAt: new Date('2026-08-12T00:00:00.000Z'),
         updatedAt: new Date('2026-08-13T00:00:00.000Z'),
       };
@@ -403,6 +409,10 @@ describe('AdminVerificationController', () => {
         updatedAt: '2026-08-13T00:00:00.000Z',
         // No `duplicateProviderRef` on this row's signals snapshot.
         hasDuplicateSignal: false,
+        // Unclaimed, and no SLA clock. `assignedStaffName` is omitted entirely
+        // rather than sent as undefined, so it must not appear here.
+        assignedStaffId: null,
+        dueAt: null,
       });
       // Reviewer-only / detail-only fields never reach the list-row response
       // — the raw `signals` object itself never leaks, only the derived flag.

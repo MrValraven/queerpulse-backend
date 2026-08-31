@@ -32,6 +32,27 @@ describe('SaveCropDto', () => {
     ).toBeGreaterThan(0);
   });
 
+  it.each(['1:1', '2:1', '3:1', 'original', 'free'])(
+    'accepts the %s frame label the reframe editor emits',
+    (aspect) => {
+      expect(
+        errorsFor({
+          key: 'avatars/owner-1/pic.jpg',
+          crop: { x: 0.1, y: 0.1, width: 0.5, height: 0.5, aspect },
+        }),
+      ).toEqual([]);
+    },
+  );
+
+  it('rejects an aspect outside the known frame labels', () => {
+    expect(
+      errorsFor({
+        key: 'avatars/owner-1/pic.jpg',
+        crop: { x: 0.1, y: 0.1, width: 0.5, height: 0.5, aspect: '9:16' },
+      }),
+    ).toContain('isIn');
+  });
+
   it('rejects a missing key', () => {
     expect(
       errorsFor({

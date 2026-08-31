@@ -23,8 +23,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * the migration transaction on PostgreSQL 12+ — mirrors
  * `AddListingClaimNotificationTypes1790800200000` and
  * `AddListingEditSuggestionAcceptedNotificationType1791900000000`.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class AddListingPublicQuestionNotificationTypes1794300000000 implements MigrationInterface {
   name = 'AddListingPublicQuestionNotificationTypes1794300000000';

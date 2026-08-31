@@ -27,6 +27,8 @@ import { AccountEnforcementService } from './account-enforcement.service';
 import { ModAuditService } from './mod-audit.service';
 import { ModerationService } from './moderation.service';
 import { BanRatificationService } from './ban-ratification.service';
+import { BanRatification } from './entities/ban-ratification.entity';
+import { BAN_PENDING_AUDIT_ACTION } from './ban-ratification-window';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -141,6 +143,14 @@ describe('ModerationService', () => {
     findOne: jest.Mock;
   };
   let users: { findOne: jest.Mock; createQueryBuilder: jest.Mock };
+  // TS-12: the second-moderator hold a permanent ban now opens instead of
+  // removing the account outright.
+  let banRatifications: {
+    findOne: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+    update: jest.Mock;
+  };
   let profiles: { findOne: jest.Mock; find: jest.Mock };
   let revokeAllForUser: jest.Mock;
   let notificationsCreate: NotificationsCreateMock;
@@ -174,7 +184,12 @@ describe('ModerationService', () => {
       createQueryBuilder: jest.fn(() => appealsQb),
       findOne: jest.fn(),
       find: jest.fn().mockResolvedValue([]),
-      save: jest.fn((a: unknown) => Promise.resolve(a)),
+      // `save` echoes the row back with the columns the DATABASE fills in, the
+      // way TypeORM's does: `submitAppeal` maps the saved entity straight to
+      // `SubmittedAppealDTO`, which reads `id` and `createdAt` off it.
+      save: jest.fn((a: object) =>
+        Promise.resolve({ id: 'appeal-1', createdAt: new Date(), ...a }),
+      ),
       create: jest.fn((v: object) => v),
       count: jest.fn().mockResolvedValue(0),
     };
@@ -191,6 +206,17 @@ describe('ModerationService', () => {
     profiles = {
       findOne: jest.fn().mockResolvedValue(null),
       find: jest.fn().mockResolvedValue([]),
+    };
+    // Defaults to "no hold stands yet", so a ban opens a fresh one. `save`
+    // echoes the row back with an id, which is what the enforcement result
+    // reports as `ratificationId`.
+    banRatifications = {
+      findOne: jest.fn().mockResolvedValue(null),
+      create: jest.fn((values: object) => values),
+      save: jest.fn((row: object) =>
+        Promise.resolve({ id: 'ratification-1', ...row }),
+      ),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
     revokeAllForUser = jest.fn().mockResolvedValue(undefined);
     notificationsCreate = jest
@@ -257,8 +283,11 @@ describe('ModerationService', () => {
           return auditLogs.findOne(opts) as Promise<unknown>;
         return reports.findOne(opts) as Promise<unknown>;
       },
-      getRepository: (entity: unknown) =>
-        entity === ModAuditLog ? auditLogs : reports,
+      getRepository: (entity: unknown) => {
+        if (entity === ModAuditLog) return auditLogs;
+        if (entity === BanRatification) return banRatifications;
+        return reports;
+      },
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -271,6 +300,14 @@ describe('ModerationService', () => {
         { provide: getRepositoryToken(ModAuditLog), useValue: auditLogs },
         { provide: getRepositoryToken(User), useValue: users },
         { provide: getRepositoryToken(Profile), useValue: profiles },
+        // TS-12: `AccountEnforcementService` injects the hold repository so it
+        // can write the hold and the interim suspension in one transaction.
+        // The hold itself is opened through the transaction's own
+        // `getRepository`, so this token only has to exist.
+        {
+          provide: getRepositoryToken(BanRatification),
+          useValue: banRatifications,
+        },
         // Item #13: a `listing`-subject report's detail surfaces the live
         // listing's pasted evidence. A bare findOne mock suffices.
         {
@@ -1318,7 +1355,24 @@ describe('ModerationService', () => {
 
     // The boundary that matters more than the notification itself.
     it('never discloses the moderator, the action, the duration or the note to the reporter', async () => {
-      reports.find.mockResolvedValue([baseReport({ id: 'report-1' })]);
+      // A member report with a resolvable account, so the suspend actually
+      // lands and the reporter notification this test is about gets written.
+      reports.find.mockResolvedValue([
+        baseReport({
+          id: 'report-1',
+          subjectType: ReportSubjectType.Member,
+          subjectId: 'reported-member',
+        }),
+      ]);
+      profiles.findOne.mockResolvedValue({
+        userId: 'user-1',
+        slug: 'reported-member',
+      });
+      users.findOne.mockResolvedValue({
+        id: 'user-1',
+        role: UserRole.Member,
+        status: UserStatus.Active,
+      });
 
       await service.bulkActOnReports('actor-1', {
         ids: ['report-1'],
@@ -1579,12 +1633,17 @@ describe('ModerationService', () => {
   });
 
   describe('submitAppeal (TS-11)', () => {
+    // A real UUID, because the community-ban lookup guards its `community_bans`
+    // read with a UUID shape test (a slug or content id in `target_user_id`
+    // would be an "invalid input syntax for type uuid" from Postgres, not a
+    // match) and returns null for anything else.
+    const APPELLANT_ID = '11111111-2222-4333-8444-555555555555';
     const auditRow = (createdAt: Date) => ({
       id: 'log-1',
       reportId: null,
       actorId: 'mod-1',
       action: 'community_ban_applied',
-      targetUserId: 'member-1',
+      targetUserId: APPELLANT_ID,
       createdAt,
     });
 
@@ -1602,7 +1661,7 @@ describe('ModerationService', () => {
       auditLogs.findOne.mockResolvedValue(auditRow(new Date()));
       dataSourceQuery.mockResolvedValue([{ slug: 'lisbon-queers' }]);
 
-      await service.submitAppeal('member-1', {
+      await service.submitAppeal(APPELLANT_ID, {
         reason: 'I was barred for a post that was not mine.',
       });
 
@@ -1625,7 +1684,7 @@ describe('ModerationService', () => {
       dataSourceQuery.mockResolvedValue([]);
 
       await expect(
-        service.submitAppeal('member-1', {
+        service.submitAppeal(APPELLANT_ID, {
           reason: 'This was a mistake and I would like it looked at again.',
         }),
       ).rejects.toThrow(/14 days/);
@@ -1637,7 +1696,7 @@ describe('ModerationService', () => {
     it('applies no deadline to a cold appeal', async () => {
       auditLogs.findOne.mockResolvedValue(null);
 
-      await service.submitAppeal('member-1', {
+      await service.submitAppeal(APPELLANT_ID, {
         reason: 'Nobody told me what I did and I want it reviewed.',
       });
 
@@ -1906,18 +1965,30 @@ describe('ModerationService', () => {
       expect(days).toBeLessThan(7.1);
     });
 
-    it('ban suspends permanently — no expiry', async () => {
+    // TS-12: a `ban` no longer removes the account here. It opens a
+    // second-moderator ratification hold and suspends the member for exactly
+    // the length of that hold, so the write carries the hold's expiry rather
+    // than the permanent `suspendedUntil: null`. The permanent shape is
+    // written later, by `applyRatifiedBan`, once a second moderator confirms.
+    it('ban opens a ratification hold and suspends only for its window', async () => {
       await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
         action: 'ban',
         reasonCode: 'harassment',
         note: 'Out.',
       });
 
+      expect(banRatifications.save).toHaveBeenCalledTimes(1);
+      const [hold] = banRatifications.save.mock.calls[0] as [
+        { targetUserId: string; expiresAt: Date; requestedBy: string | null },
+      ];
+      expect(hold.targetUserId).toBe('user-1');
+      expect(hold.requestedBy).toBe('actor-1');
+
       const [, , patch] = userUpdates()[0]!;
-      expect(patch).toEqual({
-        status: UserStatus.Suspended,
-        suspendedUntil: null,
-      });
+      expect(patch.status).toBe(UserStatus.Suspended);
+      // Never the permanent `null` before a second signature exists.
+      expect(patch.suspendedUntil).toBeInstanceOf(Date);
+      expect(patch.suspendedUntil?.getTime()).toBe(hold.expiresAt.getTime());
     });
 
     it('revokes the suspended member’s live sessions', async () => {
@@ -1978,7 +2049,11 @@ describe('ModerationService', () => {
         );
       });
 
-      it('ban notifies the member with no expiry', async () => {
+      // TS-12: while the hold stands, the member is suspended and nothing has
+      // been removed, so the outcome they are told is the suspension it
+      // currently is, with the hold's expiry. They hear again, as a ban, only
+      // if a second moderator confirms it.
+      it('a ban awaiting ratification notifies the member as the suspension it is', async () => {
         await service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
           action: 'ban',
           reasonCode: 'harassment',
@@ -1987,8 +2062,8 @@ describe('ModerationService', () => {
 
         const call = memberCall();
         expect(call?.[0]).toBe('user-1');
-        expect(call?.[2]).toMatchObject({ action: 'ban' });
-        expect(call?.[2]).not.toHaveProperty('expiresAt');
+        expect(call?.[2]).toMatchObject({ action: 'suspend' });
+        expect(call?.[2]).toHaveProperty('expiresAt');
       });
 
       it('is delivered with no actor — bypassing the block/mute + mute gate', async () => {
@@ -2124,8 +2199,20 @@ describe('ModerationService', () => {
       ).rejects.toBeInstanceOf(BadRequestException);
     });
 
-    it('rejects suspend on a non-member report instead of silently no-op-ing', async () => {
+    // TS-03 replaced "a non-member report can never be suspended" with "it is
+    // suspended against the AUTHOR the subject resolves to" (covered by
+    // 'suspend lands on the post author instead of 400ing'). What survives,
+    // and is the half that matters, is the fail-closed arm: a subject that
+    // resolves to nobody still 400s and touches no account, rather than
+    // silently no-op-ing into a resolved report nobody was sanctioned for.
+    it('rejects suspend on a report whose subject resolves to no account', async () => {
       reports.findOne.mockResolvedValue(baseReport()); // subjectType: Post
+      subjectResolver.resolve.mockResolvedValue({
+        authorUserId: null,
+        excerpt: null,
+        communityId: null,
+        isAuthorAmbiguous: false,
+      });
 
       await expect(
         service.actOnReport('report-1', 'actor-1', UserRole.Moderator, {
@@ -2213,10 +2300,11 @@ describe('ModerationService', () => {
       });
 
       // `status` is untouched — they asked to be hidden — but the suspension is
-      // still recorded, so reactivating brings them back suspended.
+      // still recorded, so reactivating brings them back suspended. TS-12: the
+      // recorded expiry is the ratification hold's, not the permanent `null`.
       const [, , patch] = userUpdates()[0]!;
       expect(patch).not.toHaveProperty('status');
-      expect(patch.suspendedUntil).toBeNull();
+      expect(patch.suspendedUntil).toBeInstanceOf(Date);
       const deactivationCall = (managerUpdate.mock.calls as UpdateCall[]).find(
         ([entity]) => entity === AccountDeactivation,
       );
@@ -2233,8 +2321,28 @@ describe('ModerationService', () => {
     it('bulk suspend applies the enforceable reports and reports the rest per item', async () => {
       reports.find.mockResolvedValue([
         memberReport(),
-        baseReport({ id: 'report-2' }), // a Post — unenforceable
+        baseReport({ id: 'report-2' }),
       ]);
+      // `report-2` is a Post whose author resolves to nobody, so it is the
+      // unenforceable half of the batch (TS-03 made a Post with a resolvable
+      // author enforceable, so "a Post" is no longer what makes it fail).
+      subjectResolver.resolve.mockImplementation((report: { id: string }) =>
+        Promise.resolve(
+          report.id === 'report-2'
+            ? {
+                authorUserId: null,
+                excerpt: null,
+                communityId: null,
+                isAuthorAmbiguous: false,
+              }
+            : {
+                authorUserId: 'user-1',
+                excerpt: null,
+                communityId: null,
+                isAuthorAmbiguous: false,
+              },
+        ),
+      );
 
       const res = await service.bulkActOnReports('actor-1', {
         ids: ['report-1', 'report-2'],
@@ -2261,9 +2369,14 @@ describe('ModerationService', () => {
     // is inside the per-report transaction, so its rollback takes the status
     // change with it rather than leaving a `resolved` report nobody acted on.
     it('does not enforce against anyone for the failed half of the batch', async () => {
-      reports.find.mockResolvedValue([
-        baseReport({ id: 'report-2' }), // a Post — unenforceable
-      ]);
+      reports.find.mockResolvedValue([baseReport({ id: 'report-2' })]);
+      // Unenforceable for the same reason as above: nobody behind the subject.
+      subjectResolver.resolve.mockResolvedValue({
+        authorUserId: null,
+        excerpt: null,
+        communityId: null,
+        isAuthorAmbiguous: false,
+      });
 
       const res = await service.bulkActOnReports('actor-1', {
         ids: ['report-2'],
@@ -2442,8 +2555,14 @@ describe('ModerationService', () => {
         note: 'Out.',
       });
 
+      // TS-12: recorded as the hold it actually is, so the trail cannot claim
+      // a member was removed while a second moderator has yet to confirm it.
+      // The bare `ban` row is written by `BanRatificationService.decide`.
       expect(auditLogs.save).toHaveBeenCalledWith(
-        expect.objectContaining({ reportId: 'report-1', action: 'ban' }),
+        expect.objectContaining({
+          reportId: 'report-1',
+          action: BAN_PENDING_AUDIT_ACTION,
+        }),
       );
     });
 
@@ -2776,8 +2895,9 @@ describe('ModerationService', () => {
       const page = await service.list({});
 
       expect(page.data[0]?.community).toBe('trans-and-friends');
-      // A community subject needs no lookup: its `subjectId` IS the slug.
-      expect(subjectResolver.resolveMany).toHaveBeenCalledWith([]);
+      // A community subject needs no lookup at all: its `subjectId` IS the
+      // slug, so the resolver is never asked.
+      expect(subjectResolver.resolveMany).not.toHaveBeenCalled();
     });
 
     it('narrows the queue to one community when asked', async () => {

@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { UsersModule } from '../users/users.module';
 import { VerificationModule } from '../verification/verification.module';
 import { AffirmingPledgeModule } from '../affirming-pledge/affirming-pledge.module';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { AdminLandlordsController } from './admin-landlords.controller';
 import { LandlordIntroRequest } from './entities/landlord-intro-request.entity';
@@ -21,6 +22,11 @@ import { LandlordsService } from './landlords.service';
     UsersModule, // exports the Profile repository (member-ref hydration)
     VerificationModule, // step-up gating (intro request) + honest badge hydration
     AffirmingPledgeModule, // mandatory LGBTQ+ affirming pledge gate (suggest/intro)
+    // Exports ContentModerationService: `hide_content`/`remove_content` on a
+    // `landlord` subject withholds the entry from the member browse/detail and
+    // from every route that loads a live landlord by slug. No cycle:
+    // ContentModerationModule imports nothing but TypeOrmModule.
+    ContentModerationModule,
     // LOC-19: a member who suggested an entry, or asked for an introduction,
     // is told what staff decided. No cycle — NotificationsModule does not
     // import this one.

@@ -8,9 +8,11 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 import { HousingListingType } from '../entities/housing-listing.entity';
 
 /**
@@ -71,5 +73,10 @@ export class BrowseHousingListingsQuery {
   // with no `availableFrom` set.
   @IsOptional() @IsDateString() availableBy?: string;
 
-  @IsOptional() @Type(() => Number) @IsInt() @Min(1) page?: number;
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(MAX_PAGE)
+  page?: number;
 }

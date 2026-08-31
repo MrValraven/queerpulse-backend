@@ -24,8 +24,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * itself is NOT NULL with no application-level default, mirroring how
  * `PlatformSettings.announcementVersion` is typed as `string`, never
  * `string | null`.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddPlatformAnnouncement1793000000000 implements MigrationInterface {
   name = 'AddPlatformAnnouncement1793000000000';

@@ -1,3 +1,7 @@
+import type {
+  LegalRequestOutcome,
+  LegalRequestType,
+} from '../legal-requests/legal-request-vocabulary';
 import { ReasonCode } from '../reports/reason-catalogue';
 
 /**
@@ -228,6 +232,91 @@ export interface TransparencyReportDTO {
      *  however many times they were frozen. */
     frozen: PublishedCountDTO;
   };
+  /**
+   * Demands from courts, police forces, ministries and other arms of a state
+   * (PRD-32). Counted off `legal_requests`, the register an admin writes at
+   * `/admin/legal-requests`.
+   *
+   * This section is ALWAYS present, and an empty register publishes an explicit
+   * zero. "How often were we asked to hand over member data" is the line a
+   * queer community reads first, and a section that appeared only once there
+   * was something to report would make its own absence the answer. A reader has
+   * to be able to tell "nobody has ever asked" from "we are not saying", so
+   * `received` is `{ value: 0, isSuppressed: false }` on an empty quarter and
+   * `hasEverReceivedRequest` says whether the register has ever held a live
+   * record at all.
+   *
+   * A failed count is never dressed as a zero: the service lets a query error
+   * reject the whole report rather than substituting 0, so an outage surfaces
+   * as an error and never as a published "we were never asked".
+   */
+  legalRequests: TransparencyLegalRequestsDTO;
+}
+
+/**
+ * The published aggregate over the legal-request register. Counts and sums
+ * only: no requesting body, no jurisdiction, no internal note, no reason a
+ * record was struck, no data-category list, no date, and no per-request row of
+ * any kind. There is no field here whose value could be one demand's content.
+ *
+ * ## Gag orders are counted
+ *
+ * A demand QueerPulse is legally barred from describing is still one more
+ * demand that arrived, and it is counted in `received`, in both breakdowns and
+ * in both account sums exactly like any other. Counting is not describing, and
+ * this report never itemises anything anyway, so a gagged request and an
+ * ordinary one are published identically. Nothing here marks which is which.
+ *
+ * ## Voided records are excluded and disclosed
+ *
+ * A record struck from the register (`POST /admin/legal-requests/:id/void`)
+ * drops out of `received`, both breakdowns and both account sums, and is
+ * counted in `recordsVoided` instead. Emptying the register is therefore itself
+ * a published number rather than a quiet subtraction.
+ *
+ * Every count on this section runs through the SAME small-count suppression as
+ * the rest of the report (`suppressCount` / `suppressBreakdown`,
+ * `SMALL_COUNT_FLOOR`). A demand naming two accounts is two identifiable people
+ * to anybody who knows the room, so the floor applies here for the same reason
+ * it applies to an outing report, and zero is published as zero here for the
+ * same reason too.
+ */
+export interface TransparencyLegalRequestsDTO {
+  /**
+   * Whether the register has EVER held a live record, over all time rather
+   * than this period. Publishing it as a plain boolean is the point of the
+   * disclosure: "we have never been asked" is a sentence a platform can only
+   * say if it is tracked, and a quarter of zeroes on a young register cannot
+   * say it on its own. False plus a zero `received` is the strongest statement
+   * this report makes.
+   */
+  hasEverReceivedRequest: boolean;
+  /** Demands received inside the period, by the day they reached QueerPulse. */
+  received: PublishedCountDTO;
+  /** Breakdown of `received` by the kind of instrument that arrived. Every
+   *  type is listed even at zero, so the table's shape is never itself a
+   *  signal. */
+  byType: TransparencyBreakdownRowDTO<LegalRequestType>[];
+  /** Breakdown of `received` by what QueerPulse did about it. `pending` is one
+   *  of the buckets: a demand still being answered is reported as one. */
+  byOutcome: TransparencyBreakdownRowDTO<LegalRequestOutcome>[];
+  /** Member accounts named across the period's demands, summed. Zero is
+   *  ordinary: a takedown demand about one post names no account. */
+  accountsAffected: PublishedCountDTO;
+  /**
+   * How many of those accounts were told, summed. Recorded by the team from
+   * what they actually did. Nothing in this register sends anything, and
+   * QueerPulse sends no email at any point.
+   */
+  accountsNotified: PublishedCountDTO;
+  /**
+   * Records recorded as arriving in this period that have since been struck
+   * from the register, and are therefore in none of the figures above. Sliced
+   * on the same receipt date as everything else on this section, so
+   * `received` plus `recordsVoided` is every row the register holds for the
+   * window.
+   */
+  recordsVoided: PublishedCountDTO;
 }
 
 /** Suppress one standalone count. */

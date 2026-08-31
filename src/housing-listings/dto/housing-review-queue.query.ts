@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, Min } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, Max, Min } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 import { HousingListingStatus } from '../entities/housing-listing.entity';
 
 /**
@@ -52,5 +53,10 @@ export class HousingReviewQueueQuery {
 
   @IsOptional() @IsEnum(HousingReviewQueueSort) sort?: HousingReviewQueueSort;
 
-  @IsOptional() @Type(() => Number) @IsInt() @Min(1) page?: number;
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(MAX_PAGE)
+  page?: number;
 }

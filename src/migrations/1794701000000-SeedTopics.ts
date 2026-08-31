@@ -26,8 +26,6 @@ import { topicsSeed } from '../topics/topics.seed';
  * IDEMPOTENT. `ON CONFLICT ("tag") DO NOTHING` against `UQ_topics_tag`, so
  * re-running never duplicates a topic and never overwrites an edit an admin
  * has already made to one through `admin-topics`.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class SeedTopics1794701000000 implements MigrationInterface {
   name = 'SeedTopics1794701000000';

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
+import * as Sentry from '@sentry/node';
 import { Repository } from 'typeorm';
 import { presentActorIds } from '../common/nullable-actor';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -100,24 +101,60 @@ export class HousingSavedSearchAlertsListener {
         // No actor — this is the platform telling you a home matched your
         // search, so no block/mute actorId. Payload carries what the bell/push
         // render + deep-link to the listing.
+        //
+        // Scoped catch: one page's write failing must not abandon the pages
+        // behind it. The outer catch below wraps the SCAN, so before this an
+        // error on page 2 also cost pages 3..N their alerts even though
+        // nothing was wrong with them.
         if (recipientIds.length) {
-          await this.notifications.createForRecipients(
-            recipientIds,
-            NotificationType.HousingListingMatch,
-            {
-              slug: listing.slug,
-              title: listing.title,
-              area: listing.area || listing.city,
-            },
-          );
+          try {
+            await this.notifications.createForRecipients(
+              recipientIds,
+              NotificationType.HousingListingMatch,
+              {
+                slug: listing.slug,
+                title: listing.title,
+                area: listing.area || listing.city,
+              },
+            );
+          } catch (error) {
+            this.report(
+              `Housing saved-search alert page failed: listing=${listing.slug} recipients=${recipientIds.length}`,
+              error,
+            );
+          }
         }
 
         if (page.length < HousingSavedSearchAlertsListener.BATCH_SIZE) break;
       }
     } catch (error) {
-      // Alerting is best-effort — a failure here must never affect the
-      // moderator's approve action that produced the event.
-      this.logger.warn(`Housing saved-search alert failed: ${String(error)}`);
+      // Alerting is best-effort, so a failure here is absorbed: it must never
+      // affect the moderator's approve action that produced the event. It is
+      // absorbed LOUDLY. `report` puts an error-level line with the stack and
+      // a Sentry event on the record, so a failure that recurs on every new
+      // listing is visible to someone who can go fix it.
+      this.report(
+        `Housing saved-search alert scan failed: listing=${event.listing.slug}`,
+        error,
+      );
+    }
+  }
+
+  /**
+   * How a swallowed alert failure becomes visible: an error-level log with a
+   * stable, greppable prefix plus a Sentry capture, the same pair the app's
+   * exception filters use for anything that would otherwise fail silently
+   * (`AllExceptionsFilter`, `WsAllExceptionsFilter`). No new channel, and no
+   * per-member detail on the wire beyond what the log line already carries.
+   */
+  private report(message: string, error: unknown): void {
+    this.logger.error(
+      `${message}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+    );
+    if (process.env.SENTRY_DSN) {
+      Sentry.captureException(error, {
+        tags: { area: 'housing-saved-search-alerts' },
+      });
     }
   }
 

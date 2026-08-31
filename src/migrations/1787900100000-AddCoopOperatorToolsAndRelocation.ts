@@ -7,8 +7,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * steward logs the relocation outcome).
  *
  * Additive and safe: the new column defaults to false; the new table is empty.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddCoopOperatorToolsAndRelocation1787900100000 implements MigrationInterface {
   name = 'AddCoopOperatorToolsAndRelocation1787900100000';

@@ -29,6 +29,32 @@ export interface ArticleCommentResponse {
 export const UNRESOLVED_COMMENT_AUTHOR_LABEL = 'Someone on the team';
 
 /**
+ * Byline for a comment whose author erased their account. `authorId` is NULL
+ * rather than dangling as of
+ * `AddMagazineDeskAuthorForeignKeys1795810000000` (`ON DELETE SET NULL`), so
+ * the note itself survives for the editors still working the thread while the
+ * person behind it does not. Deliberately distinct from
+ * `UNRESOLVED_COMMENT_AUTHOR_LABEL`, which means "we could not resolve this
+ * id" — here we know exactly why there is no name.
+ */
+export const FORMER_MEMBER_COMMENT_AUTHOR_LABEL = 'A former member';
+
+/**
+ * Resolves a comment's `authorId` (nullable since the erasure foreign key) to
+ * a display name, never a raw id or email. Mirrors
+ * `resolveVersionAuthorName` in `magazine-article-version-response.ts`.
+ */
+export function resolveCommentAuthorLabel(
+  authorId: string | null,
+  authorNameById: Map<string, string>,
+): string {
+  if (authorId === null) {
+    return FORMER_MEMBER_COMMENT_AUTHOR_LABEL;
+  }
+  return authorNameById.get(authorId) ?? UNRESOLVED_COMMENT_AUTHOR_LABEL;
+}
+
+/**
  * Pure mapper from one persisted `MagazineArticleComment` to a single
  * `ArticleCommentResponse` node with no replies attached — used by the
  * mutation endpoints (`addArticleComment`/`replyToArticleComment`/
@@ -61,7 +87,9 @@ export function toArticleCommentResponse(
  * the caller (a batched editor-directory ∪ Profile lookup, mirroring
  * `listMagazineNotifications`) so this stays a pure function of its inputs —
  * an author id missing from the map (defensive) falls back to
- * `UNRESOLVED_COMMENT_AUTHOR_LABEL`, never a raw id or email.
+ * `UNRESOLVED_COMMENT_AUTHOR_LABEL`, and a NULL `authorId` (the author erased
+ * their account) to `FORMER_MEMBER_COMMENT_AUTHOR_LABEL`, never a raw id or
+ * email.
  */
 export function toArticleCommentTree(
   comments: MagazineArticleComment[],
@@ -92,8 +120,7 @@ export function toArticleCommentTree(
       id: comment.id,
       blockId: comment.blockId,
       parentId: comment.parentId,
-      author:
-        authorNameById.get(comment.authorId) ?? UNRESOLVED_COMMENT_AUTHOR_LABEL,
+      author: resolveCommentAuthorLabel(comment.authorId, authorNameById),
       body: comment.body,
       resolved: comment.resolved,
       createdAt: comment.createdAt.toISOString(),

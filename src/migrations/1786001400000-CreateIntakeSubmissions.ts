@@ -12,8 +12,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * de-link — never delete — the ops record of their submission. `status` starts
  * `new` and staff flip it to `reviewed` during triage. The three indexes back
  * the admin triage list's filters (kind / status) and the submitter de-link.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class CreateIntakeSubmissions1786001400000 implements MigrationInterface {
   name = 'CreateIntakeSubmissions1786001400000';

@@ -6,6 +6,8 @@ import {
 import { UpdateLoginAlertsDto } from './dto/update-login-alerts.dto';
 import { UpdatePublicProfileDto } from './dto/update-public-profile.dto';
 import { UpdatePushPreviewsDto } from './dto/update-push-previews.dto';
+import { UpdateContentSensitivityDto } from './dto/update-content-sensitivity.dto';
+import { UpdateSuggestionVisibilityDto } from './dto/update-suggestion-visibility.dto';
 import { UpdateWorkPreferencesDto } from './dto/update-work-preferences.dto';
 import { PreferencesService } from './preferences.service';
 import {
@@ -182,5 +184,83 @@ export class PreferencesController {
     @Body() body: UpdatePushPreviewsDto,
   ) {
     return this.preferencesService.updatePushPreviews(user.userId, body);
+  }
+
+  // Defaults to all three `false` when no row exists (PRD-10), so a member who
+  // has never opened settings is shown the whole platform. This is the one
+  // group here whose safe default is the permissive one: nothing escapes the
+  // member's control when a content filter is off, and shipping it on would
+  // subtract communities from the feed of everybody who never asked.
+  //
+  // Read on the feed path only. The pane's helper copy promises that turning
+  // one off never affects community access, and `FeedService` is the single
+  // place these are enforced, so the promise holds by construction.
+  @ApiOperation({
+    summary: "Get the member's content-sensitivity feed filters.",
+  })
+  @ApiOkResponse({
+    description: 'The three filters (all off by default).',
+  })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @Get('content-sensitivity')
+  getContentSensitivity(@CurrentUser() user: CurrentUserData) {
+    return this.preferencesService.getContentSensitivity(user.userId);
+  }
+
+  // Full replace of all three, echoing the persisted state back: the same
+  // shape as `work-preferences`, and for the same reason (the pane submits the
+  // whole triple).
+  @ApiOperation({
+    summary: "Replace the member's content-sensitivity feed filters.",
+  })
+  @ApiOkResponse({ description: 'The persisted filters.' })
+  @ApiBadRequestResponse({ description: 'Validation failed.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @Put('content-sensitivity')
+  updateContentSensitivity(
+    @CurrentUser() user: CurrentUserData,
+    @Body() body: UpdateContentSensitivityDto,
+  ) {
+    return this.preferencesService.updateContentSensitivity(user.userId, body);
+  }
+
+  // Defaults to `{ hideFromSuggestions: false }` when no row exists (PRD-16):
+  // members are recommendable unless they say otherwise, since the suggestion
+  // strip only ever surfaces people the member directory would already list.
+  //
+  // The controller-level guard note applies here too, and it matters: a member
+  // who has deactivated must still be able to say "stop offering me to
+  // strangers", which is exactly the moment `ActiveMemberGuard` would have
+  // taken the switch away.
+  @ApiOperation({
+    summary: 'Get whether the member may be recommended to other members.',
+  })
+  @ApiOkResponse({
+    description:
+      'The suggestion-visibility setting (recommendable by default).',
+  })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @Get('suggestion-visibility')
+  getSuggestionVisibility(@CurrentUser() user: CurrentUserData) {
+    return this.preferencesService.getSuggestionVisibility(user.userId);
+  }
+
+  @ApiOperation({
+    summary: 'Replace whether the member may be recommended to other members.',
+  })
+  @ApiOkResponse({
+    description: 'The persisted suggestion-visibility setting.',
+  })
+  @ApiBadRequestResponse({ description: 'Validation failed.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @Put('suggestion-visibility')
+  updateSuggestionVisibility(
+    @CurrentUser() user: CurrentUserData,
+    @Body() body: UpdateSuggestionVisibilityDto,
+  ) {
+    return this.preferencesService.updateSuggestionVisibility(
+      user.userId,
+      body,
+    );
   }
 }

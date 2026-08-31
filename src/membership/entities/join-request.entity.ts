@@ -163,6 +163,36 @@ export class PlatformJoinRequest extends QueueAssignmentColumns {
   @Column({ type: 'varchar', length: 64, nullable: true })
   statusTokenHash!: string | null;
 
+  /**
+   * PRD-02. The first moment the APPLICANT's own status lookup handed them the
+   * invite code an approval minted. Null until then, including for every row
+   * approved before this column existed.
+   *
+   * It exists because the approval invite's redemption window cannot honestly
+   * start at approval: QueerPulse sends no email, so approval is a moment only
+   * the reviewer knows about. `createInviteForApproval` mints with a long
+   * SHELF life instead, and the first status read that hands the code over
+   * latches this column and re-pins `invites.expires_at` to the short
+   * redemption window, counted from here. The latch is a conditional
+   * `approval_seen_at IS NULL` update, so two concurrent reloads start the
+   * window exactly once.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  approvalSeenAt!: Date | null;
+
+  /**
+   * How many times the applicant has revived their own lapsed approval invite
+   * from the status page (`POST /join-requests/status/invite/refresh`).
+   *
+   * Bounded by `MAX_SELF_SERVE_INVITE_REFRESHES` in `JoinRequestsService`: the
+   * status token is a bearer credential with no second factor behind it, so an
+   * approval must not be renewable from it forever. A moderator's
+   * `POST /admin/join-requests/:id/invite/reissue` deliberately does NOT touch
+   * this counter. That path has a human decision behind it.
+   */
+  @Column({ type: 'integer', default: 0 })
+  inviteRefreshCount!: number;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 }

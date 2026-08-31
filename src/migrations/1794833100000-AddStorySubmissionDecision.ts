@@ -31,8 +31,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * transaction, so it is safe inside the migration transaction on PostgreSQL
  * 12+ (same precedent as `AddChangemakerNominationTriage1792500100000`).
  * `down()` cannot undo it; Postgres has no DROP VALUE.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddStorySubmissionDecision1794833100000 implements MigrationInterface {
   name = 'AddStorySubmissionDecision1794833100000';

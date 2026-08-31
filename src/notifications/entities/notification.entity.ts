@@ -778,6 +778,119 @@ export enum NotificationType {
    * migration `AddModerationQueueAlertNotificationType1795720200000`.
    */
   ModerationQueueAlert = 'moderation_queue_alert',
+
+  /**
+   * Sent to members holding an INTEREST in a gathering (a `maybe` RSVP, or a
+   * saved/bookmarked event) when the last few seats go (PRD-18). Raised by
+   * `EventCapacityAlertsService` off a successful `going` RSVP.
+   *
+   * The gap it closes: capacity, the waitlist and bookmarks all existed, and
+   * nothing ever told the member weighing up whether to go that the room was
+   * about to close. A settings row called "Last few spots" advertised this and
+   * was wired to nothing at all.
+   *
+   * WHO IS EXCLUDED, and why. Anyone already `going` has a seat, so the news is
+   * noise to them; anyone `waitlisted` learned the event was full by being put
+   * on the waitlist. What is left is exactly the members who might still act.
+   *
+   * FIRES ONCE per gathering. The daily/every-RSVP tick is what makes that the
+   * hard part, so the row is CLAIMED with a conditional UPDATE on
+   * `events.nearly_full_notified_at`, the same shape
+   * `membership_cards.expiry_warning_sent_at` uses.
+   *
+   * System-driven: no actor. The room filling up is not one member's act, and
+   * naming the person whose RSVP crossed the line would let a block between
+   * those two swallow the alert.
+   *
+   * Gated on the `event_capacity` preference category, so a member who does not
+   * want to be told a gathering is filling can turn it off in one place for
+   * both channels. IN-APP PLUS PUSH: QueerPulse sends no email and never will,
+   * so nothing about this type may be described as one.
+   *
+   * Payload carries `{ source: 'event', eventSlug, title, seatsRemaining }`.
+   * `seatsRemaining` is a NUMBER, which the frontend mirrors onto `count` for
+   * CLDR pluralisation, exactly like `AccountDeletionFinalWarning`. See
+   * migration `AddEventNearlyFullNotification1796020000000`.
+   */
+  EventNearlyFull = 'event_nearly_full',
+
+  /**
+   * Sent to PLATFORM STAFF (`users.role` of `moderator` or `admin`) when a
+   * community's owner, co-owner or moderator escalates a join-request applicant
+   * as a possible ban evasion (PRD-31). Raised by
+   * `BanEvasionNotificationsListener` off `ban_evasion.escalation_raised`.
+   *
+   * The gap it closes: the escalation appeared on
+   * `GET /admin/ban-evasion/escalations` and pinged nobody, so it was found only
+   * if a staff member happened to open the queue. A community moderator has
+   * somebody standing at their door and is waiting on an answer.
+   *
+   * STAFF ONLY, AND UNMUTABLE. The recipient list is a role query, exactly the
+   * roles `BanEvasionController` is guarded by, so a member can never receive
+   * one. No `NotificationPreferenceCategory`, matching
+   * `ReportFiled`/`ModerationQueueAlert`: this is duty mail on a question
+   * somebody asked the platform, and a volume control that could swallow it
+   * would defeat the only thing it exists to do. Carries NO actor id: the bell
+   * must not name the escalating moderator, and a block or mute between two
+   * staff accounts must never drop an operational alert.
+   *
+   * IN-APP ONLY. Deliberately absent from `PushNotificationListener`'s push
+   * whitelist, like `ModerationQueueAlert`: the queue is worked at a console,
+   * and quiet hours therefore never come into it (they gate the push channel
+   * only, see `notification-delivery.service.ts`). QueerPulse sends no email, so
+   * nothing about this type may be described as one.
+   *
+   * WHAT THE PAYLOAD DOES NOT CARRY, and why it matters here more than usual.
+   * Nothing about the APPLICANT: no user id, no name, no slug, no assessment,
+   * no tier, no score. Nothing about the escalating moderator either, and not
+   * their free-text `note`, which is member-authored prose. Staff read all of
+   * it on `/admin/ban-evasion`, under that console's own authentication, one
+   * click from this row. A bell payload is the wrong place for a ban history.
+   *
+   * Payload carries `{ source: 'moderation', escalationId, communitySlug,
+   * communityName }`. `communityName` is the copy's only interpolation token;
+   * `escalationId` lets the console select the row. See migration
+   * `AddBanEvasionEscalationNotificationTypes1796200000000`.
+   */
+  BanEvasionEscalationRaised = 'ban_evasion_escalation_raised',
+
+  /**
+   * Sent to the COMMUNITY MODERATOR WHO RAISED an escalation, and to nobody
+   * else, once platform staff close it (PRD-31). Raised by
+   * `BanEvasionNotificationsListener` off `ban_evasion.escalation_resolved`.
+   *
+   * The gap it closes: the raiser could see `status` flip to `resolved` by
+   * reopening the queue, and nothing ever pushed it. They asked a question and
+   * were never told it had been answered.
+   *
+   * IT CARRIES THE FACT AND NOTHING ELSE. No `resolutionNote`, no `resolvedBy`,
+   * no `resolvedAt`, no assessment, no tier, no score, no matched signal: not
+   * in the payload, not in the copy, not anywhere. What staff found is a
+   * CROSS-COMMUNITY judgement, and this recipient is precisely the person the
+   * one-bit design of `CommunityBanEvasionFlagDTO` exists to withhold it from.
+   * A notification is the easiest place on the platform to leak it by accident,
+   * so the rule is stated at the event
+   * (`BanEvasionEscalationResolvedEvent`), at the listener, and here. The
+   * moderator learns that somebody looked and the case is closed. Do not
+   * enrich this.
+   *
+   * Every key it does carry is something this recipient already holds from
+   * `GET /communities/:slug/join-requests/escalations`, which is the test any
+   * future field has to pass.
+   *
+   * Unmutable, for the reason group 4 of `ALWAYS_DELIVERED_NOTIFICATION_TYPES`
+   * names: it is the answer to something the member themself asked for. Carries
+   * NO actor id, which is the same rule as the paragraph above seen from the
+   * other side: naming the staff member who closed it would say who looked, and
+   * would let a block between those two swallow the answer.
+   *
+   * IN-APP ONLY, so quiet hours never apply. QueerPulse sends no email.
+   *
+   * Payload carries `{ source: 'community', escalationId, joinRequestId,
+   * communitySlug, communityName }`. See migration
+   * `AddBanEvasionEscalationNotificationTypes1796200000000`.
+   */
+  BanEvasionEscalationResolved = 'ban_evasion_escalation_resolved',
 }
 
 @Entity('notifications')

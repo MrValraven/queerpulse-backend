@@ -1,6 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource } from 'typeorm';
 import { UsersService } from '../users/users.service';
 import {
   PolicyAcceptance,
@@ -23,19 +22,25 @@ export interface PolicyAcceptanceDTO {
 @Injectable()
 export class PolicyAcceptanceService {
   constructor(
-    @InjectRepository(PolicyAcceptance)
-    private readonly acceptances: Repository<PolicyAcceptance>,
     private readonly usersService: UsersService,
+    private readonly dataSource: DataSource,
   ) {}
 
   /**
    * Record that `userId` has agreed to the policy revisions CURRENTLY in effect.
    *
-   * Two writes, in this order and deliberately not in a transaction:
+   * Two writes, in ONE transaction:
    *   1. the member's `users` row moves forward, which is what the gate reads
    *      and therefore what stops re-prompting them;
    *   2. an append-only `policy_acceptance` row preserves the dated before/after
    *      pair, which is what makes the agreement evidence rather than a cell.
+   *
+   * They commit together because the failure mode of splitting them is silent
+   * and permanent: if the stamp lands and the ledger row does not, the member
+   * shows as having agreed to a revision that no evidence row records, and the
+   * gate never re-prompts them, so nothing ever surfaces the discrepancy. The
+   * reverse split is just as bad in an audit. Either both land or neither does,
+   * and the member is re-prompted on their next request.
    *
    * The versions are read from the SERVER's constants and never from a request
    * body. A member cannot be asked to agree to a revision the platform is not
@@ -53,21 +58,29 @@ export class PolicyAcceptanceService {
     userId: string,
     source: PolicyAcceptanceSource = PolicyAcceptanceSource.Reacceptance,
   ): Promise<PolicyAcceptanceDTO> {
-    const stamp = await this.usersService.recordPolicyAcceptance(userId, {
-      termsVersion: CURRENT_TERMS_VERSION,
-      guidelinesVersion: CURRENT_GUIDELINES_VERSION,
-    });
-
-    await this.acceptances.save(
-      this.acceptances.create({
+    const stamp = await this.dataSource.transaction(async (manager) => {
+      const recorded = await this.usersService.recordPolicyAcceptance(
         userId,
-        termsVersion: stamp.termsVersion,
-        guidelinesVersion: stamp.guidelinesVersion,
-        previousTermsVersion: stamp.previousTermsVersion,
-        previousGuidelinesVersion: stamp.previousGuidelinesVersion,
-        source,
-      }),
-    );
+        {
+          termsVersion: CURRENT_TERMS_VERSION,
+          guidelinesVersion: CURRENT_GUIDELINES_VERSION,
+        },
+        manager,
+      );
+
+      await manager.save(
+        manager.create(PolicyAcceptance, {
+          userId,
+          termsVersion: recorded.termsVersion,
+          guidelinesVersion: recorded.guidelinesVersion,
+          previousTermsVersion: recorded.previousTermsVersion,
+          previousGuidelinesVersion: recorded.previousGuidelinesVersion,
+          source,
+        }),
+      );
+
+      return recorded;
+    });
 
     return {
       termsVersion: stamp.termsVersion,

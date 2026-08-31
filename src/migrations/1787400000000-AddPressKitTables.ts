@@ -8,8 +8,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * active and orders by position, the admin surface sees every row. The page's
  * headline FACTS are derived from live DB counts at read time and are NOT
  * stored, so no table is added for them.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddPressKitTables1787400000000 implements MigrationInterface {
   name = 'AddPressKitTables1787400000000';

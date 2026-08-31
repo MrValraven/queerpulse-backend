@@ -15,8 +15,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *    existing `FK_community_posts_community_id` foreign key is untouched —
  *    Postgres foreign keys don't apply to NULL values, so nothing else needs
  *    to change.
- *
- * DO NOT RUN — authored for review only, per the task's instructions.
  */
 export class AddCommunityPostLikes1782800220000 implements MigrationInterface {
   name = 'AddCommunityPostLikes1782800220000';

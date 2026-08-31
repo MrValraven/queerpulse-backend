@@ -5,6 +5,7 @@ import { EntityManager, In, Repository } from 'typeorm';
 import { Profile } from './entities/profile.entity';
 import { User, UserRole, UserStatus } from './entities/user.entity';
 import { Handle, HandleOwnerKind } from '../handles/entities/handle.entity';
+import { handleWriteError } from '../handles/handles.service';
 import { CURRENT_GUIDELINES_VERSION } from '../consent/policy-versions';
 
 // Bounds the slug-collision retry loop (see insertProfileWithUniqueSlug). This
@@ -13,6 +14,26 @@ import { CURRENT_GUIDELINES_VERSION } from '../consent/policy-versions';
 // It would only be exhausted by this many sign-ups racing the exact same base
 // slug in the same instant.
 const MAX_SLUG_ATTEMPTS = 5;
+
+/**
+ * Longest base slug a sign-up builds before the collision suffix is appended.
+ *
+ * `HANDLE_RE` in `common/handles.ts` caps a handle at 30 characters, and every
+ * candidate produced below is either the base itself or `base-<n>`. Holding the
+ * base at 24 leaves six characters for `-99999`, so a hundred thousand members
+ * could share one base name before a candidate reached the cap. A longer Google
+ * display name is truncated rather than refused, because sign-up has nowhere to
+ * send a person whose legal name happens to be long.
+ */
+const SIGNUP_HANDLE_BASE_MAX_LENGTH = 24;
+
+/**
+ * Base slug for a display name that survives slugification as nothing at all
+ * (a name written entirely in a script `slugify` strips, say). Deliberately the
+ * singular `member`: the plural `members` is a reserved route name, so a
+ * fallback built on it would be withheld from every account that needed it.
+ */
+const SIGNUP_HANDLE_FALLBACK_BASE = 'member';
 
 /**
  * How long a counted "N active members" figure is trusted.
@@ -31,7 +52,9 @@ const ACTIVE_MEMBER_COUNT_TTL_MS = 60_000;
 
 /**
  * The community-guidelines revision a member agrees to when they finish
- * onboarding, used when the client does not send an explicit version.
+ * onboarding. It is the ONLY value `markOnboarded` ever writes to
+ * `users.guidelines_version`; the request body has no say in it (ENG-23, and
+ * see the essay on that method).
  *
  * DECLARED IN `consent/policy-versions.ts` and merely re-exported here, so that
  * every policy revision (Terms, Guidelines, Privacy) lives in one file instead
@@ -97,24 +120,32 @@ export class UsersService {
   }
 
   /**
-   * Does an account already hold this verified Google address? Signup looks a
-   * returning member up by `googleId`; a MISS there with the same email still
-   * exists (a re-created Workspace account presenting a new Google subject, a
-   * seeded fixture, the documented HOUSE_EMAIL collision), and the insert then
-   * violates the `email` unique constraint. `AuthService` checks this first so
-   * that case becomes a sign-in error page instead of a raw 500 landing
-   * mid-OAuth-redirect.
+   * WHICH account already holds this verified Google address, if any? Signup
+   * looks a returning member up by `googleId`; a MISS there with the same email
+   * still happens (a re-created Workspace account presenting a new Google
+   * subject, a seeded fixture, the documented HOUSE_EMAIL collision), and the
+   * insert then violates the `email` unique constraint. `AuthService` checks
+   * this first so that case becomes a sign-in error page instead of a raw 500
+   * landing mid-OAuth-redirect.
    *
-   * Returns only the id: the caller needs existence, not the row, and `email`
-   * stays `select: false` everywhere it is not explicitly needed.
+   * Returns the OWNER'S ID rather than a bare boolean (it was `existsByEmail`
+   * until PRD-06). The colliding account is exactly the account that a
+   * re-created Google identity is trying to get back into, so `AuthService`
+   * records an `identity_relink_candidates` row against it before rejecting the
+   * sign-in. That row is the ONLY thing the admin re-link lever will act on, so
+   * this id is what makes locked-out members recoverable without a hand-written
+   * UPDATE against production.
+   *
+   * Selects only the id: the caller never needs the row, and `email` stays
+   * `select: false` everywhere it is not explicitly needed.
    */
-  async existsByEmail(email: string): Promise<boolean> {
+  async findIdByEmail(email: string): Promise<string | null> {
     const found = await this.usersRepo
       .createQueryBuilder('user')
       .select('user.id')
       .where('user.email = :email', { email })
       .getOne();
-    return found !== null;
+    return found?.id ?? null;
   }
 
   findById(id: string): Promise<User | null> {
@@ -165,13 +196,37 @@ export class UsersService {
    * the authenticated member (JwtStrategy has already confirmed the row exists),
    * so a missing row is treated as a no-op stamp rather than an error.
    *
-   * The guidelines version is taken from the client when it sends one (the
-   * revision it actually showed the member), otherwise it falls back to the
-   * server-side `CURRENT_GUIDELINES_VERSION`.
+   * The guidelines revision written here is ALWAYS the server's
+   * `CURRENT_GUIDELINES_VERSION`, and never a version string carried on the
+   * request body (ENG-23). `users.guidelines_version` is evidence: it is the
+   * column an audit reads to answer "which revision of the community guidelines
+   * did this member actually agree to". A string the caller invented answers
+   * that question with whatever the caller felt like sending. A member cannot
+   * have agreed to a revision the platform never published, and a client must
+   * not be able to pin its own record to one. This is the rule
+   * `PolicyAcceptanceService.accept` already follows, which is why that endpoint
+   * takes no body at all.
+   *
+   * The wizard shows the revision it read from `GET /platform-status`, which is
+   * this same constant, so the displayed version and the stored version agree in
+   * every honest case. If a bump lands between the render and the click, the
+   * member is recorded against the newer one and the wizard does not re-open,
+   * matching how the re-acceptance sheet resolves the same race.
+   *
+   * `_opts` is accepted and deliberately discarded. `CompleteOnboardingDto`
+   * still declares `guidelinesVersion` and the frontend still sends it (the
+   * value it read from `GET /platform-status`), so the field has to keep
+   * existing and keep validating: the global `ValidationPipe` runs with
+   * `forbidNonWhitelisted`, so deleting it from the DTO would turn every
+   * onboarding POST from a client that still sends it into a 400 and strand
+   * members on the last wizard step. The field is therefore accepted, length
+   * checked, and then ignored in favour of the constant. The `_` prefix is this
+   * codebase's marker for an argument a signature must keep and a body has no
+   * use for.
    */
   async markOnboarded(
     id: string,
-    opts: { guidelinesVersion?: string | null } = {},
+    _opts: { guidelinesVersion?: string | null } = {},
   ): Promise<OnboardingResult> {
     const existing = await this.usersRepo.findOne({
       where: { id },
@@ -196,15 +251,19 @@ export class UsersService {
       };
     }
     const now = new Date();
-    const trimmedVersion = opts.guidelinesVersion?.trim();
-    const guidelinesVersion = trimmedVersion
-      ? trimmedVersion
-      : CURRENT_GUIDELINES_VERSION;
     await this.usersRepo.update(
       { id },
-      { onboardedAt: now, guidelinesAcceptedAt: now, guidelinesVersion },
+      {
+        onboardedAt: now,
+        guidelinesAcceptedAt: now,
+        guidelinesVersion: CURRENT_GUIDELINES_VERSION,
+      },
     );
-    return { onboardedAt: now, guidelinesAcceptedAt: now, guidelinesVersion };
+    return {
+      onboardedAt: now,
+      guidelinesAcceptedAt: now,
+      guidelinesVersion: CURRENT_GUIDELINES_VERSION,
+    };
   }
 
   /**
@@ -229,17 +288,26 @@ export class UsersService {
    *
    * Returns the before/after pair. A missing row (impossible in practice — the
    * caller is the authenticated member) reports the new versions with no prior.
+   *
+   * `manager` lets a caller run the read and the overwrite inside its own
+   * transaction. `PolicyAcceptanceService.accept` passes one so this stamp and
+   * the `policy_acceptance` evidence row commit together: a stamp that moved
+   * forward with no ledger row behind it would silently stop the re-acceptance
+   * gate from ever re-prompting, which is the one failure nothing surfaces.
+   * Omitted, it runs on the default connection as before.
    */
   async recordPolicyAcceptance(
     id: string,
     versions: { termsVersion: string; guidelinesVersion: string },
+    manager?: EntityManager,
   ): Promise<PolicyAcceptanceStamp> {
-    const existing = await this.usersRepo.findOne({
+    const usersRepo = manager ? manager.getRepository(User) : this.usersRepo;
+    const existing = await usersRepo.findOne({
       where: { id },
       select: { id: true, termsVersion: true, guidelinesVersion: true },
     });
     const acceptedAt = new Date();
-    await this.usersRepo.update(
+    await usersRepo.update(
       { id },
       {
         termsVersion: versions.termsVersion,
@@ -311,15 +379,28 @@ export class UsersService {
     });
     const saved = await manager.save(user);
 
-    const base =
-      this.slugify(`${input.firstName} ${input.lastName}`) || 'member';
-    const slug = await this.nextAvailableSlug(manager, base);
+    // A `users.is_system` sign-up is the platform creating its own account, and
+    // it is the ONE case allowed to keep a reserved name: the genesis bootstrap
+    // creates the house account as "QueerPulse", whose slug `queerpulse` is in
+    // the impersonation group that `common/handles.ts` withholds from everyone
+    // else. Read off the same flag the row itself is stamped with, so an account
+    // can only hold a reserved handle while it is genuinely a system account.
+    const isSystemOwnedSignup = input.isSystem === true;
+    const base = this.handleBaseForSignup(
+      `${input.firstName} ${input.lastName}`,
+    );
+    const slug = await this.nextAvailableSlug(
+      manager,
+      base,
+      isSystemOwnedSignup,
+    );
     await this.insertProfileWithUniqueSlug(
       manager,
       saved.id,
       base,
       slug,
       input,
+      isSystemOwnedSignup,
     );
 
     return saved;
@@ -335,6 +416,7 @@ export class UsersService {
     base: string,
     slug: string,
     input: CreateGoogleUserInput,
+    isSystemOwnedSignup: boolean,
   ): Promise<void> {
     for (let attempt = 1; ; attempt++) {
       try {
@@ -353,6 +435,18 @@ export class UsersService {
           // retry below. `insert` (not `save`) guarantees an INSERT — `save`
           // would UPDATE an existing row and silently steal another user's
           // handle instead of colliding.
+          //
+          // Deliberately a direct insert rather than `HandlesService.claim`.
+          // `claim` translates that same 23505 into a `ConflictException`, so
+          // routing through it would hide the one signal the retry above reads
+          // and turn an ordinary same-name collision into a failed sign-up. Its
+          // reclaim-cooldown branch throws for the same reason, which a person
+          // arriving with a Google display name can do nothing about. The
+          // namespace rule `claim` exists to enforce is applied instead where
+          // sign-up can act on it: `nextAvailableSlug` below asks the same
+          // `handleWriteError` and steps PAST a withheld name onto the next
+          // suffix, so every row this method writes honours the reserved rule
+          // while the collision retry and the SAVEPOINT semantics stay intact.
           await m.insert(Handle, {
             name: slug,
             ownerKind: HandleOwnerKind.Profile,
@@ -365,7 +459,11 @@ export class UsersService {
           // A concurrent sign-up claimed `slug` between our query and this
           // insert. Recompute from the CURRENT max and retry, so only true
           // contention — never the count of same-named members — bounds us.
-          slug = await this.nextAvailableSlug(manager, base);
+          slug = await this.nextAvailableSlug(
+            manager,
+            base,
+            isSystemOwnedSignup,
+          );
           continue;
         }
         throw err;
@@ -373,15 +471,30 @@ export class UsersService {
     }
   }
 
-  // Picks the next free slug for `base` by finding the highest suffix already
-  // taken and adding 1: `base`, then `base-1`, `base-2`, ... — so the Nth
-  // "Tiago Costa" is `tiago-costa-(N-1)` regardless of how many already exist,
-  // in a single query rather than probing one candidate at a time. Queries the
-  // `handles` registry (not just `profiles`) because that is the ONE global
-  // username namespace: a subprofile handle can occupy a suffix no profile holds.
+  /**
+   * Picks the next free slug for `base` by finding the highest suffix already
+   * taken and adding 1: `base`, then `base-1`, `base-2`, and so on, so the Nth
+   * "Tiago Costa" is `tiago-costa-(N-1)` regardless of how many already exist,
+   * in a single query rather than probing one candidate at a time. Queries the
+   * `handles` registry (not just `profiles`) because that is the ONE global
+   * username namespace: a subprofile handle can occupy a suffix no profile
+   * holds.
+   *
+   * A name the namespace withholds counts here exactly like a name somebody
+   * already holds. Sign-up is the one write into `handles` that a person does
+   * not drive by typing a name, so refusing them is not an option: a member
+   * whose Google display name is "Support" has to come out of this with a
+   * handle, and the only question is which one. Treating `support` as occupied
+   * hands them `support-1` through machinery that already exists, and leaves
+   * `@support` unclaimable by anyone who is not the platform, which is the
+   * whole point of the impersonation group in `common/handles.ts`: a DM from
+   * `@support` reads as an official one long before a reader thinks to look for
+   * a staff badge.
+   */
   private async nextAvailableSlug(
     manager: EntityManager,
     base: string,
+    isSystemOwnedSignup: boolean,
   ): Promise<string> {
     const taken = await manager
       .getRepository(Handle)
@@ -394,7 +507,20 @@ export class UsersService {
     // `base` itself counts as suffix 0; `base-<n>` counts as <n>. `base` is
     // slugified to [a-z0-9-] only, so it is safe to embed in the regex as-is.
     const suffixOf = new RegExp(`^${base}-(\\d+)$`);
-    let maxSuffix = -1; // -1 => nothing taken, `base` is free
+
+    // Whether the bare `base` may be written at all, asked of the namespace
+    // itself so this path and `HandlesService.claim` cannot answer differently.
+    // `isSystemOwnedClaim` waives the reserved rule for the house account and
+    // nothing else; the format rule holds for every account, which is why a base
+    // that came back too short (`handleBaseForSignup` has already capped the
+    // long end) also starts the search at 0. Starting at 0 is precisely "treat
+    // it as taken": the first candidate becomes `base-1`, and a `base-<n>` can
+    // never itself be withheld, because every reserved name is a bare word with
+    // no numeric tail.
+    const baseWriteError = handleWriteError(base, {
+      isSystemOwnedClaim: isSystemOwnedSignup,
+    });
+    let maxSuffix = baseWriteError === null ? -1 : 0; // -1 => `base` is free
     for (const { name } of taken) {
       if (name === base) {
         maxSuffix = Math.max(maxSuffix, 0);
@@ -405,6 +531,33 @@ export class UsersService {
     }
 
     return maxSuffix < 0 ? base : `${base}-${maxSuffix + 1}`;
+  }
+
+  /**
+   * The base slug a new member's handle is built from: their display name,
+   * slugified, cut to `SIGNUP_HANDLE_BASE_MAX_LENGTH` and stripped of a
+   * trailing dash the cut may have exposed, so the base is always a well-formed
+   * handle prefix that leaves room for a suffix.
+   *
+   * Everything here is about sign-up having no second chance. `slugify` can
+   * return something the namespace would reject: nothing at all for a name it
+   * strips entirely, one or two characters for a short name, more than thirty
+   * for a long one. Every one of those used to reach the registry unexamined.
+   * The long end is fixed by truncation here and the empty end by
+   * `SIGNUP_HANDLE_FALLBACK_BASE`; the short end is left to
+   * `nextAvailableSlug`, which turns a two-character base into `al-1` and so
+   * keeps the person's own name instead of replacing it with a generic one.
+   *
+   * `slugify` strips leading and trailing dashes, so a non-empty result starts
+   * with an alphanumeric; truncating from the right and trimming dashes off the
+   * tail cannot take that first character away, which is what makes the result
+   * a legal handle prefix rather than merely a shorter string.
+   */
+  private handleBaseForSignup(displayName: string): string {
+    const slug = this.slugify(displayName)
+      .slice(0, SIGNUP_HANDLE_BASE_MAX_LENGTH)
+      .replace(/-+$/, '');
+    return slug || SIGNUP_HANDLE_FALLBACK_BASE;
   }
 
   private slugify(value: string): string {

@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -16,8 +15,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `users(id)` — `ON DELETE SET NULL`, mirroring `AddUserRefForeignKeys`'s
  * convention for user references — so an account erasure nulls the actor out
  * while the audit row survives.
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class CreateListingModerationEvents1785902000000 implements MigrationInterface {
   name = 'CreateListingModerationEvents1785902000000';

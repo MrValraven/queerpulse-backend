@@ -52,10 +52,13 @@ function build(opts: {
     sendToUsers: jest.fn().mockResolvedValue(undefined),
     sendSplitByPreviewPreference: jest.fn(),
   };
+  // The real split AWAITS its sends and rethrows the first fault, so the stub
+  // has to propagate too. Dropping the returned promise on the floor turned a
+  // primed rejection into an unhandled rejection that killed the worker
+  // instead of reaching the listener's own best-effort catch.
   push.sendSplitByPreviewPreference.mockImplementation(
-    (userIds: string[], payload: unknown): Promise<void> => {
-      push.sendToUsers(userIds, payload);
-      return Promise.resolve();
+    async (userIds: string[], payload: unknown): Promise<void> => {
+      await push.sendToUsers(userIds, payload);
     },
   );
   // Echoes back whichever of the input userIds are still enabled — in the

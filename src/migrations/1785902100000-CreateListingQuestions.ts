@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -13,8 +12,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `listing_moderation_events.listing_id` (see that migration's doc comment).
  * `asked_by` gets a foreign key to `users(id)` `ON DELETE SET NULL`, same
  * rationale as that table's `actor_id`.
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class CreateListingQuestions1785902100000 implements MigrationInterface {
   name = 'CreateListingQuestions1785902100000';

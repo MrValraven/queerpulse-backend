@@ -5,6 +5,7 @@ import { SelectQueryBuilder } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { Activity } from '../profiles/entities/activity.entity';
+import { ActivityVisibilityService } from '../profiles/activity-visibility.service';
 import { SocialLink } from '../profiles/entities/social-link.entity';
 import { WorkItem } from '../profiles/entities/work-item.entity';
 import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
@@ -190,6 +191,17 @@ describe('PublicProfilesService', () => {
         { provide: getRepositoryToken(WorkItem), useValue: workItems },
         { provide: getRepositoryToken(Activity), useValue: activities },
         { provide: getRepositoryToken(MemberPreferences), useValue: {} },
+        {
+          // The read-side activity gate. Its own spec covers which rows it
+          // drops; here it passes the page through so these assertions stay
+          // about the public projection.
+          provide: ActivityVisibilityService,
+          useValue: {
+            filterVisible: jest.fn((rows: Activity[]): Promise<Activity[]> =>
+              Promise.resolve(rows),
+            ),
+          },
+        },
         {
           // No takedown by default: every published fixture is servable unless
           // a test says otherwise. A hidden/removed member is 404'd by the same

@@ -145,6 +145,24 @@ const COMMON_PAYLOAD_KEYS: readonly string[] = [
  */
 const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
   {
+    // PRD-15. The connection this row is about, so the bell can carry a real
+    // Accept action instead of only deep-linking to a profile that (before
+    // PRD-03) could not accept either. The id is already in the payload
+    // `NotificationsListener.onConnectionRequested` writes; it was simply
+    // stripped at this boundary, so the client had nothing to PATCH.
+    //
+    // Safe to forward: the recipient is the addressee of this very request, so
+    // `PATCH /connections/:id` is a route they already hold. The requester's
+    // own `requestMessage` is member-authored prose and appears in no entry
+    // here, so it still cannot reach the bell.
+    [NotificationType.ConnectionRequest]: ['connectionId'],
+    // PRD-18, "last few spots". The gathering's own public title for the copy,
+    // and how many seats are left. `seatsRemaining` is a NUMBER the copy is
+    // CLDR-pluralised on. `source` + `eventSlug` ride in COMMON_PAYLOAD_KEYS
+    // and are what the deep link is built from. Nothing about who is attending
+    // rides along: a roster is read on the gathering's own page, under the
+    // member's own authentication.
+    [NotificationType.EventNearlyFull]: ['title', 'seatsRemaining'],
     [NotificationType.Mention]: ['entityKind', 'entityRef'],
     [NotificationType.ForumReply]: ['threadTitle'],
     [NotificationType.ForumThreadReply]: ['threadTitle'],
@@ -446,6 +464,38 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'landlordSlug',
       'landlordName',
       'reason',
+    ],
+    // A community moderator handing platform staff a ban-evasion question
+    // (PRD-31). The write site's recipient list is a `moderator`/`admin` role
+    // query, so these keys never reach an ordinary member. `communityName` is
+    // the copy's only interpolation token and `escalationId` lets the console
+    // select the row; `communitySlug` and `source` ride in
+    // `COMMON_PAYLOAD_KEYS`.
+    //
+    // What is absent is the point of the whole feature: NOTHING about the
+    // applicant (no id, no name, no slug, no assessment, no tier, no score) and
+    // nothing about the escalating moderator, including their free-text note.
+    // Staff read all of that on `/admin/ban-evasion`, behind that console's own
+    // authentication, one click from this row.
+    [NotificationType.BanEvasionEscalationRaised]: [
+      'escalationId',
+      'communityName',
+    ],
+    // Staff closing that escalation, sent to the moderator who raised it and to
+    // nobody else (PRD-31).
+    //
+    // EVERY KEY HERE IS SOMETHING THIS RECIPIENT ALREADY HOLDS from
+    // `GET /communities/:slug/join-requests/escalations`, which is the test any
+    // future addition has to pass. Absent, and never to be added: the
+    // `resolutionNote`, the resolving staff member, the resolution timestamp,
+    // and any part of the assessment (tier, score, matched signals). That is a
+    // cross-community judgement, and this recipient is exactly the person
+    // `CommunityBanEvasionFlagDTO` withholds it from. Widening this entry would
+    // hand it to them through the bell.
+    [NotificationType.BanEvasionEscalationResolved]: [
+      'escalationId',
+      'joinRequestId',
+      'communityName',
     ],
   };
 

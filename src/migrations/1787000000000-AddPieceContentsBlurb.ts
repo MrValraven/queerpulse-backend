@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -7,8 +6,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * every existing and new row to `''` — matches the repo idiom of a plain
  * `varchar` with a blank default for free-text fields filled in later (see
  * `MagazinePiece.byline`).
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class AddPieceContentsBlurb1787000000000 implements MigrationInterface {
   name = 'AddPieceContentsBlurb1787000000000';

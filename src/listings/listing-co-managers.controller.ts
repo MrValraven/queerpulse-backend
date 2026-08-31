@@ -6,6 +6,7 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  ParseUUIDPipe,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -103,10 +104,14 @@ export class ListingCoManagersController {
   @ApiConflictResponse({
     description: 'The invitation has already been answered.',
   })
+  @ApiBadRequestResponse({ description: 'Malformed invitation id.' })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
-  acceptInvite(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
+  acceptInvite(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     return this.listingCoManagersService.respondToInvite(
       id,
       user.userId,
@@ -124,10 +129,14 @@ export class ListingCoManagersController {
   @ApiConflictResponse({
     description: 'The invitation has already been answered.',
   })
+  @ApiBadRequestResponse({ description: 'Malformed invitation id.' })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
-  declineInvite(@CurrentUser() user: CurrentUserData, @Param('id') id: string) {
+  declineInvite(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     return this.listingCoManagersService.respondToInvite(
       id,
       user.userId,

@@ -221,16 +221,36 @@ describe('evaluatePublicEligibility', () => {
       expect(trust(4)).toBe(25);
     });
 
+    // Held exactly at the tenure floor so the longevity term (2 points per
+    // full 90 days BEYOND the floor) contributes nothing and the only moving
+    // part left in the family is the active-window bonus itself.
     it('pays the recent-activity bonus only inside the active window', () => {
       const participation = (lastActiveDaysAgo: number) =>
         evaluatePublicEligibility(
-          signals({ lastActiveDaysAgo }),
+          signals({ lastActiveDaysAgo, tenureDays: TENURE_FLOOR_DAYS }),
           NOW,
         ).score.families.find((family) => family.key === 'participation')!
           .points;
 
       expect(participation(30)).toBe(6);
       expect(participation(31)).toBe(0);
+    });
+
+    // The longevity term is the other half of the same family: two points per
+    // full 90 days past the floor, capped at eight.
+    it('pays the longevity term per full 90 days beyond the tenure floor', () => {
+      const longevity = (tenureDays: number) =>
+        evaluatePublicEligibility(
+          signals({ tenureDays, lastActiveDaysAgo: 999 }),
+          NOW,
+        ).score.families.find((family) => family.key === 'participation')!
+          .points;
+
+      expect(longevity(TENURE_FLOOR_DAYS)).toBe(0);
+      expect(longevity(TENURE_FLOOR_DAYS + 89)).toBe(0);
+      expect(longevity(TENURE_FLOOR_DAYS + 90)).toBe(2);
+      expect(longevity(TENURE_FLOOR_DAYS + 4 * 90)).toBe(8);
+      expect(longevity(TENURE_FLOOR_DAYS + 40 * 90)).toBe(8);
     });
   });
 });

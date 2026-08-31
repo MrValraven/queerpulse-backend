@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import { IsInt, IsOptional, Max, Min } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 
 // The owner-facing follower / endorser lists are capped at 50 rows per page.
 // Keep this in lockstep with `FOLLOWERS_LIST_CAP` / `ENDORSERS_LIST_CAP` in the
@@ -18,6 +19,7 @@ export class ListAudienceQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 
   @IsOptional()

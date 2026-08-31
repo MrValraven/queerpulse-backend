@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -22,8 +21,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `memberName("andre")` calls to their plain display names ("Inês Tavares",
  * "André Quintela") since this migration has no access to the frontend's
  * member registry at seed time.
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class CreateMagazineDecks1785800501000 implements MigrationInterface {
   name = 'CreateMagazineDecks1785800501000';

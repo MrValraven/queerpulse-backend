@@ -20,8 +20,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Kept as a dedicated table rather than a column on `platform_settings` so the
  * whole genesis feature stays self-contained and deletable in one commit, the
  * property `GenesisService`'s header calls out.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddGenesisBootstrapMarker1793500000000 implements MigrationInterface {
   name = 'AddGenesisBootstrapMarker1793500000000';

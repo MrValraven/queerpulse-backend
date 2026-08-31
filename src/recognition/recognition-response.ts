@@ -14,8 +14,8 @@ import {
   levelStartXp,
 } from './recognition.catalog';
 import {
-  BADGE_BONUS_BY_RARITY,
   BADGE_REQUIREMENTS,
+  badgeBonusFor,
   badgeBonusXp,
   badgeProgress,
   RecognitionSignals,
@@ -235,7 +235,16 @@ export function buildBadges(
   const lockedBadges: BadgeDTO[] = [];
   for (const def of BADGE_CATALOG) {
     const row = earnedByKey.get(def.key);
-    const xpReward = BADGE_BONUS_BY_RARITY[def.rarity];
+    // What this badge really pays, from the one function that decides it
+    // (`badgeBonusFor`), rather than from rarity alone. A badge a member
+    // earns with nobody else involved is awarded and displayed and carries no
+    // XP (PRD-05), and `xpReward` is optional precisely so a card can say
+    // nothing about XP instead of advertising a reward the member will not
+    // receive. Reading `BADGE_BONUS_BY_RARITY` directly here is what made the
+    // perk copy fiction the last time (SUS-04); the same mistake, one level
+    // down.
+    const bonus = badgeBonusFor(def.key);
+    const xpReward = bonus > 0 ? bonus : undefined;
     if (row) {
       const isHiddenFromProfile = row.hiddenFromProfile === true;
       // A badge the member has hidden is dropped from ANOTHER member's view
@@ -301,7 +310,7 @@ function buildSeasonalBadges(): BadgeDTO[] {
     context: def.lockedContext,
     rarity: def.rarity,
     tint: def.tint,
-    xpReward: BADGE_BONUS_BY_RARITY[def.rarity],
+    xpReward: badgeBonusFor(def.key),
     verifiedBy: def.verifiedBy,
     seasonal: { when: def.window },
   }));

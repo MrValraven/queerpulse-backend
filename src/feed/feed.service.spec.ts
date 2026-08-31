@@ -25,6 +25,7 @@ import { emptyAccessibilityAnswers } from '../listings/listing-accessibility';
 import { ConnectionsService } from '../connections/connections.service';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { BlockFilterService } from '../social/block-filter.service';
+import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { TopicFollow } from '../topics/entities/topic-follow.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
@@ -157,6 +158,7 @@ const baseEvent = (overrides: Partial<Event> = {}): Event => ({
   isOnline: false,
   onlineUrl: null,
   capacity: null,
+  nearlyFullNotifiedAt: null,
   visibility: EventVisibility.Public,
   status: EventStatus.Published,
   coverImageUrl: null,
@@ -302,6 +304,7 @@ describe('FeedService', () => {
   let profiles: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let communityMembers: { createQueryBuilder: jest.Mock; find: jest.Mock };
   let topicFollows: { find: jest.Mock };
+  let memberPreferences: { findOne: jest.Mock };
   let blockFilter: { hiddenUserIds: jest.Mock };
   let connectionsService: { allAcceptedConnectionUserIds: jest.Mock };
   let feedInteractions: { forPosts: jest.Mock };
@@ -324,6 +327,11 @@ describe('FeedService', () => {
       find: jest.fn().mockResolvedValue([]),
     };
     topicFollows = { find: jest.fn().mockResolvedValue([]) };
+    // PRD-10: no stored row, so the viewer has never opened the Interests
+    // pane and every content-sensitivity filter is off. That is the real
+    // default (`PreferencesService` synthesises it), and it keeps every
+    // pre-existing test seeing the unchanged candidate queries.
+    memberPreferences = { findOne: jest.fn().mockResolvedValue(null) };
     // `dropBlocked` now resolves the whole page's hidden authors in one batched
     // `hiddenUserIds(viewerId, authorIds)` call (union of blocked + muted),
     // returning a Set, rather than one `isBlockedEitherWay`/`isMutedBy` call
@@ -364,6 +372,10 @@ describe('FeedService', () => {
           useValue: communityMembers,
         },
         { provide: getRepositoryToken(TopicFollow), useValue: topicFollows },
+        {
+          provide: getRepositoryToken(MemberPreferences),
+          useValue: memberPreferences,
+        },
         { provide: BlockFilterService, useValue: blockFilter },
         { provide: ConnectionsService, useValue: connectionsService },
         { provide: FeedInteractionsService, useValue: feedInteractions },
@@ -1390,6 +1402,113 @@ describe('FeedService', () => {
       await service.getFeed('viewer-1', 'posts', undefined);
 
       expect(predicateOf(postQb, 'mutedCommunityIds')).toBeUndefined();
+    });
+  });
+
+  describe('content sensitivity (PRD-10)', () => {
+    const predicateOf = (qb: QbStub, needle: string) =>
+      qb.andWhere.mock.calls.find(
+        (call) => typeof call[0] === 'string' && call[0].includes(needle),
+      );
+
+    // The default, and the one that has to stay cheap: a member who has never
+    // opened the Interests pane has no preferences row, so no predicate is
+    // emitted anywhere.
+    it('emits nothing when the viewer has no preferences row', async () => {
+      const postQb = qbStub([]);
+      const threadQb = qbStub([]);
+      communityPosts.createQueryBuilder.mockReturnValue(postQb);
+      forumThreads.createQueryBuilder.mockReturnValue(threadQb);
+
+      await service.getFeed('viewer-1', 'posts', undefined);
+
+      expect(predicateOf(postQb, 'feedExcludedCommunityTags')).toBeUndefined();
+      expect(predicateOf(threadQb, 'excludedItemTags')).toBeUndefined();
+    });
+
+    it('emits nothing when every filter is switched off', async () => {
+      memberPreferences.findOne.mockResolvedValue({
+        hideDatingContent: false,
+        hideMentalHealthContent: false,
+        hideSexualityIdentityContent: false,
+      });
+      const postQb = qbStub([]);
+      communityPosts.createQueryBuilder.mockReturnValue(postQb);
+
+      await service.getFeed('viewer-1', 'posts', undefined);
+
+      expect(predicateOf(postQb, 'feedExcludedCommunityTags')).toBeUndefined();
+    });
+
+    it('excludes posts, threads and gatherings whose community carries an opted-out tag', async () => {
+      memberPreferences.findOne.mockResolvedValue({
+        hideDatingContent: false,
+        hideMentalHealthContent: true,
+        hideSexualityIdentityContent: false,
+      });
+      const postQb = qbStub([]);
+      const threadQb = qbStub([]);
+      const eventQb = qbStub([]);
+      communityPosts.createQueryBuilder.mockReturnValue(postQb);
+      forumThreads.createQueryBuilder.mockReturnValue(threadQb);
+      events.createQueryBuilder.mockReturnValue(eventQb);
+
+      await service.getFeed('viewer-1', 'all', undefined);
+
+      for (const [qb, column] of [
+        [postQb, 'cp.community_id'],
+        [threadQb, 't.community_id'],
+        [eventQb, 'e.community_id'],
+      ] as const) {
+        const call = predicateOf(qb, 'feedExcludedCommunityTags');
+        expect(call?.[0]).toContain(column);
+        // A flat/global item has no community to classify, so it stays.
+        expect(call?.[0]).toContain('IS NULL OR NOT EXISTS');
+        const params = call?.[1] as
+          { feedExcludedCommunityTags: string[] } | undefined;
+        expect(params?.feedExcludedCommunityTags).toContain('mental-health');
+      }
+    });
+
+    // The branch that reaches a thread with no community at all: it carries
+    // its own freeform tags, so it can be classified on its own.
+    it('excludes forum threads by their own tags, aliases included', async () => {
+      memberPreferences.findOne.mockResolvedValue({
+        hideDatingContent: false,
+        hideMentalHealthContent: true,
+        hideSexualityIdentityContent: false,
+      });
+      const threadQb = qbStub([]);
+      forumThreads.createQueryBuilder.mockReturnValue(threadQb);
+
+      await service.getFeed('viewer-1', 'posts', undefined);
+
+      const call = predicateOf(threadQb, 'excludedItemTags');
+      expect(call?.[0]).toBe('NOT (t.tags && :excludedItemTags)');
+      const params = call?.[1] as { excludedItemTags: string[] } | undefined;
+      expect(params?.excludedItemTags).toContain('mental-health');
+      // The derived alias, so a thread the author tagged `#mentalhealth` is
+      // caught by the same switch.
+      expect(params?.excludedItemTags).toContain('mentalhealth');
+    });
+
+    // A new member is a person, and `profiles.tags` holds skills. There is
+    // nothing here a content filter could honestly classify.
+    it('never filters the new-member source', async () => {
+      memberPreferences.findOne.mockResolvedValue({
+        hideDatingContent: true,
+        hideMentalHealthContent: true,
+        hideSexualityIdentityContent: true,
+      });
+      const profileQb = qbStub([]);
+      profiles.createQueryBuilder.mockReturnValue(profileQb);
+
+      await service.getFeed('viewer-1', 'people', undefined);
+
+      expect(
+        predicateOf(profileQb, 'feedExcludedCommunityTags'),
+      ).toBeUndefined();
+      expect(predicateOf(profileQb, 'excludedItemTags')).toBeUndefined();
     });
   });
 });

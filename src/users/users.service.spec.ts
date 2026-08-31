@@ -19,6 +19,98 @@ function handleRegistryRepoStub() {
   };
 }
 
+/**
+ * A sign-up harness that models the global `handles` registry as a live list
+ * rather than a fixed answer, because everything worth asserting about the slug
+ * picker is about how it reads that list a SECOND time.
+ *
+ * `registryNames` starts as whatever the namespace already holds and grows on
+ * every simulated collision, so the retry inside `insertProfileWithUniqueSlug`
+ * re-queries and sees the name that just lost the race, which is exactly what
+ * happens against Postgres. `uniqueViolationsBeforeSuccess` makes the first N
+ * handle inserts raise a 23505 the way a concurrent sign-up would.
+ */
+function signupHarness(options?: {
+  registryNames?: string[];
+  uniqueViolationsBeforeSuccess?: number;
+}) {
+  const registryNames = [...(options?.registryNames ?? [])];
+  let remainingUniqueViolations = options?.uniqueViolationsBeforeSuccess ?? 0;
+  const insertedHandleNames: string[] = [];
+  const savedProfileSlugs: string[] = [];
+
+  const handleRegistryRepo = {
+    createQueryBuilder: jest.fn(() => {
+      // `nextAvailableSlug` asks for `base` plus everything matching `base-%`;
+      // the stub captures the base off the parameter and filters the same way.
+      let base = '';
+      // Annotated because the fluent mocks return `builder` from inside its own
+      // initializer, which TypeScript cannot infer a type through.
+      const builder: {
+        select: jest.Mock;
+        where: jest.Mock;
+        orWhere: jest.Mock;
+        getRawMany: jest.Mock;
+      } = {
+        select: jest.fn().mockReturnThis(),
+        where: jest.fn((_sql: string, params: { base: string }) => {
+          base = params.base;
+          return builder;
+        }),
+        orWhere: jest.fn().mockReturnThis(),
+        getRawMany: jest.fn(() =>
+          Promise.resolve(
+            registryNames
+              .filter((name) => name === base || name.startsWith(`${base}-`))
+              .map((name) => ({ name })),
+          ),
+        ),
+      };
+      return builder;
+    }),
+  };
+
+  const manager = {
+    create: jest.fn(
+      (_entity: unknown, value: Record<string, unknown>) => value,
+    ),
+    save: jest.fn((value: Record<string, unknown>) => {
+      if (typeof value.slug === 'string') {
+        savedProfileSlugs.push(value.slug);
+        return Promise.resolve({ id: 'new-profile', ...value });
+      }
+      return Promise.resolve({ id: 'new-user', ...value });
+    }),
+    getRepository: jest.fn(() => handleRegistryRepo),
+    insert: jest.fn((_entity: unknown, value: { name: string }) => {
+      if (remainingUniqueViolations > 0) {
+        remainingUniqueViolations -= 1;
+        // The losing insert still leaves the winner's row behind, so the retry
+        // has something new to read.
+        registryNames.push(value.name);
+        return Promise.reject(
+          Object.assign(new Error('duplicate key'), {
+            code: '23505',
+          }),
+        );
+      }
+      insertedHandleNames.push(value.name);
+      registryNames.push(value.name);
+      return Promise.resolve(undefined);
+    }),
+    transaction: jest.fn((cb: (m: unknown) => Promise<void>) => cb(manager)),
+  } as unknown as EntityManager;
+
+  return {
+    manager,
+    insertedHandleNames,
+    savedProfileSlugs,
+    // The handle the sign-up actually came away with.
+    claimedHandle: (): string =>
+      insertedHandleNames[insertedHandleNames.length - 1] ?? '',
+  };
+}
+
 describe('UsersService', () => {
   let service: UsersService;
   let usersRepo: {
@@ -202,6 +294,132 @@ describe('UsersService', () => {
         User,
         expect.objectContaining({ isSystem: false }),
       );
+    });
+  });
+
+  // Sign-up is the one write into the global `handles` namespace that nobody
+  // types: the handle is derived from whatever Google reports as the display
+  // name. That made it the way around the reserved list: a member calling
+  // themselves "Support" on Google was handed `@support`, and a DM from
+  // `@support` reads as the platform speaking. These cover that the sign-up
+  // path now honours the same rule `HandlesService.claim` enforces, and that it
+  // does so by stepping past a withheld name rather than by refusing anyone.
+  describe('createGoogleUser handle namespace rules', () => {
+    it('gives a member whose name lands on a reserved word a suffixed handle', async () => {
+      const harness = signupHarness();
+
+      await service.createGoogleUser(harness.manager, {
+        googleId: 'g-support',
+        email: 'support-person@example.com',
+        firstName: 'Support',
+        lastName: '',
+      });
+
+      expect(harness.claimedHandle()).toBe('support-1');
+      expect(harness.savedProfileSlugs).toEqual(['support-1']);
+    });
+
+    it('keeps bumping the suffix for the next member on the same reserved word', async () => {
+      const harness = signupHarness({ registryNames: ['support-1'] });
+
+      await service.createGoogleUser(harness.manager, {
+        googleId: 'g-support-2',
+        email: 'another@example.com',
+        firstName: 'Support',
+        lastName: '',
+      });
+
+      expect(harness.claimedHandle()).toBe('support-2');
+    });
+
+    it('lets a system account keep its reserved handle', async () => {
+      const harness = signupHarness();
+
+      await service.createGoogleUser(harness.manager, {
+        googleId: 'system:queerpulse',
+        email: 'system@queerpulse.com',
+        firstName: 'QueerPulse',
+        lastName: '',
+        isSystem: true,
+      });
+
+      expect(harness.claimedHandle()).toBe('queerpulse');
+    });
+
+    it('withholds the same name from a member sign-up that is not system-owned', async () => {
+      const harness = signupHarness();
+
+      await service.createGoogleUser(harness.manager, {
+        googleId: 'g-impostor',
+        email: 'impostor@example.com',
+        firstName: 'QueerPulse',
+        lastName: '',
+      });
+
+      expect(harness.claimedHandle()).toBe('queerpulse-1');
+    });
+
+    it('suffixes a display name too short to be a legal handle', async () => {
+      const harness = signupHarness();
+
+      await service.createGoogleUser(harness.manager, {
+        googleId: 'g-short',
+        email: 'al@example.com',
+        firstName: 'Al',
+        lastName: '',
+      });
+
+      // `al` is two characters, which `HANDLE_RE` rejects. The suffix makes it
+      // legal while keeping the person's own name.
+      expect(harness.claimedHandle()).toBe('al-1');
+    });
+
+    it('falls back to `member` when the display name slugifies to nothing', async () => {
+      const harness = signupHarness();
+
+      await service.createGoogleUser(harness.manager, {
+        googleId: 'g-empty',
+        email: 'empty@example.com',
+        firstName: '???',
+        lastName: '!!!',
+      });
+
+      expect(harness.claimedHandle()).toBe('member');
+    });
+
+    it('truncates a display name too long to be a legal handle', async () => {
+      const harness = signupHarness();
+
+      await service.createGoogleUser(harness.manager, {
+        googleId: 'g-long',
+        email: 'long@example.com',
+        firstName: 'Maximiliana Bartholomew',
+        lastName: 'Featherstonehaugh',
+      });
+
+      const claimed = harness.claimedHandle();
+      expect(claimed).toBe('maximiliana-bartholomew');
+      expect(claimed.length).toBeLessThanOrEqual(30);
+    });
+
+    it('still retries with a bumped suffix when the handle insert collides', async () => {
+      // A concurrent sign-up takes `ada-lovelace` between the slug query and
+      // the insert: the 23505 has to keep reaching the retry loop rather than
+      // being converted into a failed sign-up.
+      const harness = signupHarness({ uniqueViolationsBeforeSuccess: 1 });
+
+      await service.createGoogleUser(harness.manager, {
+        googleId: 'g-ada',
+        email: 'ada@example.com',
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+      });
+
+      expect(harness.claimedHandle()).toBe('ada-lovelace-1');
+      expect(harness.savedProfileSlugs).toEqual([
+        'ada-lovelace',
+        'ada-lovelace-1',
+      ]);
     });
   });
 });

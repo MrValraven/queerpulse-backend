@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -8,8 +7,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * party (editor → writer, or writer → editor) through the app's normal
  * `NotificationsService.create` path — no separate magazine-only mechanism.
  * Mirrors `AddForumReplyNotificationType`.
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class AddMagazinePieceMessageNotificationType1787300100000 implements MigrationInterface {
   name = 'AddMagazinePieceMessageNotificationType1787300100000';

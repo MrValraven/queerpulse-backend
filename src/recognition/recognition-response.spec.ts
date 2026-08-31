@@ -137,11 +137,16 @@ describe('buildBadges', () => {
     const ZERO_SIGNALS: RecognitionSignals = {
       profileComplete: false,
       communitiesJoined: 0,
+      audiencedCommunities: 0,
       personasPublished: 0,
       vouchCount: 0,
       connectionCount: 0,
       eventsAttended: 2,
+      // The gated unit the attendance badges read (PRD-05); the raw
+      // `eventsAttended` beside it is a readout only.
+      gatheringsAttended: 2,
       communityPosts: 0,
+      engagedCommunityPosts: 0,
       endorsementCount: 0,
       eventsHosted: 0,
       eventsHeld: 0,

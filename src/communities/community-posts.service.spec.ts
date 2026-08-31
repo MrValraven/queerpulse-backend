@@ -3,6 +3,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { MentionNotificationService } from '../mentions/mention-notification.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { StorageService } from '../storage/storage.service';
@@ -187,7 +188,9 @@ const REPLY: CommunityPostReply = {
 describe('CommunityPostsService', () => {
   let service: CommunityPostsService;
   let communities: { findOne: jest.Mock };
-  let members: { findOne: jest.Mock };
+  // `find` is the roster fan-out's single recipient projection (see
+  // `notifyRosterOfPost`); `findOne` is every roster-membership gate.
+  let members: { findOne: jest.Mock; find: jest.Mock };
   let posts: {
     findOne: jest.Mock;
     find: jest.Mock;
@@ -218,6 +221,9 @@ describe('CommunityPostsService', () => {
   let postEdits: { create: jest.Mock; save: jest.Mock; find: jest.Mock };
   let replyEdits: { create: jest.Mock; save: jest.Mock; find: jest.Mock };
   let mentions: { notify: jest.Mock; notifyPostReply: jest.Mock };
+  // Roster-wide post fan-out. Batched: `notifyRosterOfPost` calls
+  // `createForRecipients` once per chunk of recipients, never once per member.
+  let notifications: { createForRecipients: jest.Mock };
   // `statesForAnyType` returns an empty map by default (every subject falls
   // back to `CommunityPostsService.VISIBLE`); `excludeHidden` is a pass-through
   // on the query builder, mirroring the `blockFilter` stub above — the real
@@ -234,7 +240,12 @@ describe('CommunityPostsService', () => {
 
   beforeEach(async () => {
     communities = { findOne: jest.fn().mockResolvedValue(COMMUNITY) };
-    members = { findOne: jest.fn().mockResolvedValue(null) };
+    members = {
+      findOne: jest.fn().mockResolvedValue(null),
+      // Empty roster by default, so the post fan-out is a no-op unless a test
+      // seeds recipients for it.
+      find: jest.fn().mockResolvedValue([]),
+    };
     posts = {
       // Fresh clone per call: the service mutates the resolved post in place
       // (body/pinned/editedAt/deletedAt), so returning the shared `POST`
@@ -278,7 +289,11 @@ describe('CommunityPostsService', () => {
       createQueryBuilder: jest.fn(() => insertQbStub()),
     };
     replies = {
-      findOne: jest.fn().mockResolvedValue(REPLY),
+      // Fresh clone per call, for the same reason `posts.findOne` clones: the
+      // service mutates the resolved reply in place (text/editedAt/deletedAt),
+      // and handing out the shared `REPLY` reference leaked those mutations
+      // into later tests that read the same fixture.
+      findOne: jest.fn(() => Promise.resolve({ ...REPLY })),
       find: jest.fn().mockResolvedValue([]),
       create: jest.fn((v: object) => v),
       save: jest.fn((v: unknown) =>
@@ -323,6 +338,9 @@ describe('CommunityPostsService', () => {
     storage = {
       deleteObjectByReference: jest.fn().mockResolvedValue(undefined),
     };
+    notifications = {
+      createForRecipients: jest.fn().mockResolvedValue(undefined),
+    };
     reports = { createQueryBuilder: jest.fn(() => reportsQbStub()) };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -345,6 +363,7 @@ describe('CommunityPostsService', () => {
         },
         { provide: getRepositoryToken(Report), useValue: reports },
         { provide: MentionNotificationService, useValue: mentions },
+        { provide: NotificationsService, useValue: notifications },
         { provide: ContentModerationService, useValue: contentModeration },
         { provide: StorageService, useValue: storage },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },

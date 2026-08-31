@@ -12,8 +12,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `member_count` is now derived: the DTO no longer accepts it, and
  * `HousingGroupsService.refreshMemberCount` recounts it on every triage
  * decision. This aligns the rows written before that change.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class BackfillHousingGroupMemberCount1793630000000 implements MigrationInterface {
   name = 'BackfillHousingGroupMemberCount1793630000000';

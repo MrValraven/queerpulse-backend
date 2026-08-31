@@ -39,8 +39,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * TRANSACTIONAL. One CREATE TABLE, one CREATE INDEX and one ADD CONSTRAINT,
  * every one against an object created in this same transaction against an empty
  * table, so no `CONCURRENTLY` two-phase split is needed.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class CreateProfileLastActive1794760000000 implements MigrationInterface {
   name = 'CreateProfileLastActive1794760000000';

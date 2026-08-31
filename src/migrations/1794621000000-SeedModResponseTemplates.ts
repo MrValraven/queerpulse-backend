@@ -30,8 +30,6 @@ import { modResponseTemplatesSeed } from '../mod-response-templates/mod-response
  * IDEMPOTENT. `ON CONFLICT ("label") DO NOTHING` against
  * `UQ_mod_response_templates_label`, so re-running never duplicates a template
  * and never overwrites an edit an admin has already made to one.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class SeedModResponseTemplates1794621000000 implements MigrationInterface {
   name = 'SeedModResponseTemplates1794621000000';

@@ -26,8 +26,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `user_id`, so it also serves the "what has this member muted?" read that
  * every feed page issues; `IDX_feed_source_mutes_user_id` is kept as the
  * explicit single-column index for it.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddFeedSourceMutes1795000000000 implements MigrationInterface {
   name = 'AddFeedSourceMutes1795000000000';

@@ -5,8 +5,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * community it belongs to, so a community's page can show its own upcoming
  * events (part of "Personalized Community Pulse"). Nullable: events aren't
  * required to be tied to a specific community.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddEventCommunityId1785903400000 implements MigrationInterface {
   name = 'AddEventCommunityId1785903400000';

@@ -12,6 +12,11 @@ import {
 } from '../common/image-url';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { UnderAgeDisclosureService } from './under-age-disclosure.service';
+import { JoinRequestsService } from '../membership/join-requests.service';
+import {
+  CURRENT_GUIDELINES_VERSION,
+  CURRENT_TERMS_VERSION,
+} from '../consent/policy-versions';
 
 const FRONTEND = 'https://app.example.com';
 
@@ -89,15 +94,22 @@ function build(configNodeEnv = 'test', domain?: string) {
       status: 'suspended',
     }),
   };
+  // PRD-14. Defaults to "this address never applied", so every existing case
+  // keeps falling through to the unchanged `signInErrorUrl` redirect.
+  const joinRequestsService = {
+    recoverStatusTokenForVerifiedEmail: jest.fn().mockResolvedValue(null),
+  };
   const controller = new AuthController(
     authService as unknown as AuthService,
     usersService as unknown as UsersService,
     config as unknown as ConfigService,
     mediaCropService as unknown as MediaCropService,
     underAgeDisclosure as unknown as UnderAgeDisclosureService,
+    joinRequestsService as unknown as JoinRequestsService,
   );
   return {
     controller,
+    joinRequestsService,
     authService,
     usersService,
     config,
@@ -531,6 +543,11 @@ describe('AuthController.me', () => {
       email: 'a@b.c',
       status: 'active',
       role: 'member',
+      // Both nullable on the entity, so a stored row always carries the keys.
+      // NULL is the account that predates the re-acceptance columns, which is
+      // what this fixture stands for.
+      termsVersion: null,
+      guidelinesVersion: null,
       profile: {
         slug: 'ada',
         firstName: 'Ada',
@@ -570,6 +587,15 @@ describe('AuthController.me', () => {
       },
       // Mocked `staffRolesFor` — no staff-role grants for this fixture.
       staffRoles: [],
+      // The re-acceptance signal (ID-14): what the member has on file paired
+      // with what is currently in effect. Both `accepted*` are null here, which
+      // the frontend reads as "behind", so the re-acceptance sheet opens.
+      policyVersions: {
+        currentTerms: CURRENT_TERMS_VERSION,
+        currentGuidelines: CURRENT_GUIDELINES_VERSION,
+        acceptedTerms: null,
+        acceptedGuidelines: null,
+      },
       // Suspension detail — null for an active member (mocked `suspensionInfoFor`).
       suspendedUntil: null,
       suspension: null,

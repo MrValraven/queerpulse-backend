@@ -171,7 +171,11 @@ describe('MediaReferenceResolver', () => {
     expect(degraded).toBe(true);
   });
 
-  it('resolves a listing reference from the photos jsonb map', async () => {
+  // The ordered `photoGallery` is the only listing-photo source. The legacy
+  // `photos` slot pair is a derived mirror of its first four entries, so every
+  // key it holds is already in the gallery and a second source over it would
+  // report the same listing twice for one key.
+  it('resolves a listing reference from the ordered photo gallery', async () => {
     const bareKey = 'listing-photos/owner-1/wide.jpg';
     const dataSource = createMockDataSource([
       [
@@ -182,7 +186,9 @@ describe('MediaReferenceResolver', () => {
               id: 'listing-1',
               name: 'Great Listing',
               slug: 'great-listing',
-              photos: { wide: bareKey, d1: '', d2: '', vibe: '' },
+              photoGallery: [
+                { image: bareKey, alt: 'The storefront', caption: '' },
+              ],
             },
           ],
         }),

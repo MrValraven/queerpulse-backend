@@ -21,6 +21,7 @@ import { HousingService } from '../housing/housing.service';
 import { CreateCoopDto } from '../housing/dto/create-coop.dto';
 import { UpdateCoopDto } from '../housing/dto/update-coop.dto';
 import { TriageHousingJoinRequestDto } from '../housing/dto/triage-join-request.dto';
+import { ListCoopJoinRequestsQuery } from '../housing/dto/list-coop-join-requests.query';
 import {
   ApiBadRequestResponse,
   ApiConflictResponse,
@@ -85,12 +86,25 @@ export class AdminHousingController {
   }
 
   @ApiOperation({
-    summary: 'List co-op join requests, optionally filtered by co-op slug.',
+    summary:
+      'List one page of co-op join requests, newest first, optionally ' +
+      'filtered by status and co-op slug.',
+    description:
+      'Answers with a `{ items, total, page, pageSize }` page (ENG-41). It ' +
+      'used to answer with a flat array of the newest 200 requests in every ' +
+      'status, so a platform with more than 200 requests hid the rest with ' +
+      'nothing in the response saying so, and a console filtering to pending ' +
+      'in the browser could show an empty queue while people waited. `total` ' +
+      'is the size of the whole filtered queue, not of this page. Omitting ' +
+      '`status` still returns every status.',
   })
-  @ApiOkResponse({ description: 'The join requests.' })
+  @ApiOkResponse({
+    description: 'One page of join requests, with the queue total.',
+  })
+  @ApiBadRequestResponse({ description: 'Malformed query parameters.' })
   @Get('join-requests')
-  listJoinRequests(@Query('coop') coopSlug?: string) {
-    return this.housing.listJoinRequests(coopSlug);
+  listJoinRequests(@Query() query: ListCoopJoinRequestsQuery) {
+    return this.housing.listJoinRequests(query);
   }
 
   @ApiOperation({ summary: 'Triage (approve/reject) a co-op join request.' })

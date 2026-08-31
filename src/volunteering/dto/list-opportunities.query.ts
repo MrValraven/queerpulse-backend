@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, Min } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, Max, Min } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 import {
   OpportunityCause,
   OpportunityCommitLevel,
@@ -16,5 +17,6 @@ export class ListOpportunitiesQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 }

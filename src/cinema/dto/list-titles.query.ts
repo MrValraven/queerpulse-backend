@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import { IsBooleanString, IsInt, IsOptional, Max, Min } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 
 /**
  * Page size used when the caller sends no `pageSize`. Equal to the previous
@@ -35,6 +36,7 @@ export class ListTitlesQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 
   @IsOptional()

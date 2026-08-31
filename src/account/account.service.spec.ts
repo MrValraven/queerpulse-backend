@@ -959,18 +959,17 @@ describe('AccountService', () => {
     // happened. Fixtures spell both out because the mapping depends on them.
     const started = new Date('2026-08-01T10:00:00Z');
 
-    it('listSessions flags the presenting session as current, others as not', async () => {
-      // The presenting refresh_token cookie hashes to a row in fam-current.
-      refreshTokens.findOne.mockResolvedValue({
-        id: 'rt-current',
-        familyId: 'fam-current',
-      });
+    it('listSessions flags the caller own session as current, others as not', async () => {
       refreshTokens.find.mockResolvedValue([
         {
           id: 'rt-current',
           familyId: 'fam-current',
           userId: 'u1',
           userAgent: 'Chrome',
+          // Nullable on the entity, so a stored row always carries the key.
+          // A row minted before the column existed reads back as null, which
+          // is the case this fixture stands for.
+          deviceLabel: null,
           sessionStartedAt: started,
           createdAt: now,
           expiresAt: now,
@@ -981,13 +980,14 @@ describe('AccountService', () => {
           familyId: 'fam-other',
           userId: 'u1',
           userAgent: 'Firefox',
+          deviceLabel: null,
           sessionStartedAt: started,
           createdAt: now,
           expiresAt: now,
           revokedAt: null,
         },
       ]);
-      const result = await service.listSessions('u1', 'raw-refresh');
+      const result = await service.listSessions('u1', 'fam-current');
       expect(result).toEqual([
         {
           // The FAMILY id, which is what the frontend revokes by.
@@ -1079,7 +1079,10 @@ describe('AccountService', () => {
       expect(result[0]?.createdAt).toBe(started.toISOString());
     });
 
-    it('listSessions marks nothing current when no refresh cookie is presented', async () => {
+    // A legacy access token minted before the `sid` claim existed. The list is
+    // still correct, it just cannot point at one row, and such a token expires
+    // within one access TTL.
+    it('listSessions marks nothing current when the caller names no session', async () => {
       refreshTokens.find.mockResolvedValue([
         {
           id: 'rt-1',
@@ -1093,7 +1096,6 @@ describe('AccountService', () => {
         },
       ]);
       const result = await service.listSessions('u1');
-      expect(refreshTokens.findOne).not.toHaveBeenCalled();
       expect(result[0]?.current).toBe(false);
     });
 
@@ -1130,12 +1132,7 @@ describe('AccountService', () => {
       });
     });
 
-    it('revokeOtherSessions revokes every live session EXCEPT the presenting one', async () => {
-      // The cookie resolves to a row in fam-current.
-      refreshTokens.findOne.mockResolvedValue({
-        id: 'rt-current',
-        familyId: 'fam-current',
-      });
+    it('revokeOtherSessions revokes every live session EXCEPT the caller own', async () => {
       refreshTokens.find.mockResolvedValue([
         {
           id: 'rt-current',
@@ -1157,7 +1154,7 @@ describe('AccountService', () => {
         },
       ]);
 
-      await service.revokeOtherSessions('u1', 'raw-refresh');
+      await service.revokeOtherSessions('u1', 'fam-current');
 
       // Exactly the two non-current rows are saved with a revokedAt stamp; the
       // current session is left intact so the caller stays signed in here.
@@ -1178,10 +1175,6 @@ describe('AccountService', () => {
       // Two live rows, one family: the caller's browser after a rotation race.
       // Matching on the row id alone would have revoked the sibling and left
       // this device one rotation away from a spurious "session expired".
-      refreshTokens.findOne.mockResolvedValue({
-        id: 'rt-current',
-        familyId: 'fam-current',
-      });
       refreshTokens.find.mockResolvedValue([
         {
           id: 'rt-current',
@@ -1197,16 +1190,12 @@ describe('AccountService', () => {
         },
       ]);
 
-      await service.revokeOtherSessions('u1', 'raw-refresh');
+      await service.revokeOtherSessions('u1', 'fam-current');
 
       expect(refreshTokens.save).not.toHaveBeenCalled();
     });
 
     it('revokeOtherSessions drops live sockets too', async () => {
-      refreshTokens.findOne.mockResolvedValue({
-        id: 'rt-current',
-        familyId: 'fam-current',
-      });
       refreshTokens.find.mockResolvedValue([
         {
           id: 'rt-current',
@@ -1222,7 +1211,7 @@ describe('AccountService', () => {
         },
       ]);
 
-      await service.revokeOtherSessions('u1', 'raw-refresh');
+      await service.revokeOtherSessions('u1', 'fam-current');
 
       expect(events.emit).toHaveBeenCalledWith('user.session.revoked', {
         userId: 'u1',
@@ -1230,10 +1219,6 @@ describe('AccountService', () => {
     });
 
     it('revokeOtherSessions with no live others is a no-op', async () => {
-      refreshTokens.findOne.mockResolvedValue({
-        id: 'rt-current',
-        familyId: 'fam-current',
-      });
       refreshTokens.find.mockResolvedValue([
         {
           id: 'rt-current',
@@ -1243,9 +1228,38 @@ describe('AccountService', () => {
         },
       ]);
 
-      await service.revokeOtherSessions('u1', 'raw-refresh');
+      await service.revokeOtherSessions('u1', 'fam-current');
       expect(refreshTokens.save).not.toHaveBeenCalled();
       // Nothing was revoked, so nothing should be disconnected either.
+      expect(events.emit).not.toHaveBeenCalled();
+    });
+
+    // The P0. While the current session was resolved from a `refresh_token`
+    // cookie the browser never sends to /account, the filter excluded nothing
+    // and "sign out my other devices" signed out every device including the
+    // caller's. Refusing is the only acceptable answer to "which session is
+    // this?" when we do not know.
+    it('revokeOtherSessions refuses rather than revoking everything when the caller names no session', async () => {
+      refreshTokens.find.mockResolvedValue([
+        {
+          id: 'rt-current',
+          familyId: 'fam-current',
+          userId: 'u1',
+          revokedAt: null,
+        },
+        {
+          id: 'rt-other',
+          familyId: 'fam-other',
+          userId: 'u1',
+          revokedAt: null,
+        },
+      ]);
+
+      await expect(service.revokeOtherSessions('u1')).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+      expect(refreshTokens.save).not.toHaveBeenCalled();
+      expect(refreshTokens.update).not.toHaveBeenCalled();
       expect(events.emit).not.toHaveBeenCalled();
     });
 

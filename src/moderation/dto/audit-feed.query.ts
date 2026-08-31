@@ -8,6 +8,7 @@ import {
   Max,
   Min,
 } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 
 const RANGES = ['today', 'week', 'quarter'] as const;
 export type AuditRange = (typeof RANGES)[number];
@@ -42,6 +43,7 @@ export class AuditFeedQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 
   @IsOptional()

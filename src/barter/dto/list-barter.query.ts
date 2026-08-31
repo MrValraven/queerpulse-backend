@@ -4,9 +4,11 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 import { BarterCategory, BarterMode } from '../entities/barter-listing.entity';
 
 /**
@@ -37,5 +39,6 @@ export class ListBarterQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 }

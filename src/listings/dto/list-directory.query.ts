@@ -6,9 +6,11 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Max,
   Min,
   MaxLength,
 } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 import {
   LISTING_ACCESSIBILITY_QUESTION_SLUGS,
   ListingAccessibilityQuestionSlug,
@@ -80,6 +82,7 @@ export class ListListingDirectoryQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 
   /**

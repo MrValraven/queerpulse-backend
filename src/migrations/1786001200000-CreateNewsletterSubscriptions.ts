@@ -10,8 +10,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * is also what lets the subscribe endpoint stay silent about whether an address
  * was already on the list. `email` is stored lowercased by the service, so the
  * plain UNIQUE constraint is case-safe without needing the `citext` extension.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class CreateNewsletterSubscriptions1786001200000 implements MigrationInterface {
   name = 'CreateNewsletterSubscriptions1786001200000';

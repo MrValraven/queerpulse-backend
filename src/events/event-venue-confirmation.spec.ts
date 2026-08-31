@@ -1,4 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
@@ -106,8 +107,11 @@ describe('EventsService venue confirmation (LOC-16)', () => {
   const qbStub = () => {
     const qb: Record<string, jest.Mock> = {};
     for (const method of [
+      'select',
+      'addSelect',
       'where',
       'andWhere',
+      'setParameters',
       'orderBy',
       'addOrderBy',
       'skip',
@@ -118,6 +122,14 @@ describe('EventsService venue confirmation (LOC-16)', () => {
     qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
     qb.getCount = jest.fn().mockResolvedValue(0);
     qb.getMany = jest.fn().mockResolvedValue([]);
+    // `rosterCounts` folds going/seats/waitlist/checked-in into ONE aggregate
+    // row; nothing here has RSVPed.
+    qb.getRawOne = jest.fn().mockResolvedValue({
+      goingCount: '0',
+      seatsTaken: '0',
+      waitlistCount: '0',
+      checkedInCount: '0',
+    });
     return qb;
   };
 
@@ -156,6 +168,16 @@ describe('EventsService venue confirmation (LOC-16)', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         EventsService,
+        // Only `rosterCounts` reads config (the attendance retention window),
+        // so the service's own default stands here.
+        {
+          provide: ConfigService,
+          useValue: {
+            get: jest.fn(
+              (_key: string, defaultValue?: unknown) => defaultValue,
+            ),
+          },
+        },
         { provide: getRepositoryToken(Event), useValue: events },
         {
           provide: getRepositoryToken(EventCohost),
@@ -370,6 +392,7 @@ describe('EventsService venue confirmation (LOC-16)', () => {
         endAt: null,
         timezone: 'Europe/Lisbon',
         venue: 'Lux Cafe',
+        cost: null,
         listingId: null,
         communityId: null,
         status: EventStatus.Published,

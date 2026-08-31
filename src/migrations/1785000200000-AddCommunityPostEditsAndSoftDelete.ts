@@ -19,8 +19,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *   editor's account erasure); `post_id`/`reply_id` FKs are `ON DELETE CASCADE`
  *   (revisions are meaningless without their post/reply). `DEFAULT
  *   uuid_generate_v4()` matches `1782693200000-AddCommunities.ts`.
- *
- * DO NOT RUN — authored for review only, per the program's instructions.
  */
 export class AddCommunityPostEditsAndSoftDelete1785000200000 implements MigrationInterface {
   name = 'AddCommunityPostEditsAndSoftDelete1785000200000';

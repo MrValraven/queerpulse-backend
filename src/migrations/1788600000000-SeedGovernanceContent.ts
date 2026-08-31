@@ -31,8 +31,6 @@ import {
  * Idempotent: `ON CONFLICT DO NOTHING` on the overview PK and the finance
  * report's unique `quarter`, so re-running (or running after a partial dev
  * seed) never duplicates or errors.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class SeedGovernanceContent1788600000000 implements MigrationInterface {
   name = 'SeedGovernanceContent1788600000000';

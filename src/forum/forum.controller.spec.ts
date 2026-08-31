@@ -221,12 +221,14 @@ describe('ForumController', () => {
 
   it('delegates reply with the caller user', async () => {
     await controller.reply(user, 'hello-world', { body: 'A reply' });
-    // reply also takes the full CurrentUserData, plus the optional parentPostId
-    // (undefined when replying at thread level).
+    // reply also takes the full CurrentUserData, plus the optional
+    // parentPostId (undefined when replying at thread level) and the optional
+    // attached image.
     expect(postsService.reply).toHaveBeenCalledWith(
       'hello-world',
       user,
       'A reply',
+      undefined,
       undefined,
     );
   });

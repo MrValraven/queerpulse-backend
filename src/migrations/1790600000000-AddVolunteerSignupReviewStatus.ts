@@ -7,8 +7,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Existing rows predate the review step, so they're backfilled to `accepted`
  * with `decided_at` set to their own `created_at` — they were already an
  * informal yes before this feature existed.
- *
- * DO NOT RUN. Authored for review only; the maintainer runs migrations.
  */
 export class AddVolunteerSignupReviewStatus1790600000000 implements MigrationInterface {
   name = 'AddVolunteerSignupReviewStatus1790600000000';

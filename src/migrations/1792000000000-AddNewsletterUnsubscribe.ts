@@ -13,8 +13,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `IDX_newsletter_confirm_token` (`CreateNewsletterSubscriptions`) already
  * covers — the same token doubles as the unsubscribe key, so no second lookup
  * path exists to index.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddNewsletterUnsubscribe1792000000000 implements MigrationInterface {
   name = 'AddNewsletterUnsubscribe1792000000000';

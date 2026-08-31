@@ -10,6 +10,7 @@ import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
+import { CommunityMember } from '../communities/entities/community-member.entity';
 import { Vouch } from '../vouch/entities/vouch.entity';
 import { ConnectionsModule } from '../connections/connections.module';
 import { SubprofilesModule } from '../subprofiles/subprofiles.module';
@@ -38,6 +39,10 @@ import { PublicEligibilityService } from './public-eligibility.service';
       ForumPost,
       CommunityPost,
       CommunityPostReply,
+      // Roster rows, for the XP-side "does anybody else stand in this room?"
+      // counts on the service. A repository only: this module never calls into
+      // `CommunitiesModule`, so no dependency (and no cycle) is created.
+      CommunityMember,
       Vouch,
     ]),
     // Exports `ConnectionsService` (connection counts).

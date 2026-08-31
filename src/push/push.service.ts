@@ -9,6 +9,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Agent as HttpsAgent } from 'node:https';
 import { In, Repository } from 'typeorm';
 import webPush from 'web-push';
+import { runWithConcurrency } from '../common/run-with-concurrency';
 import {
   assertPublicUrl,
   pinnedHttpsAgent,
@@ -63,6 +64,29 @@ interface WebPushError {
 // request path — abandon the send after this long (the underlying request may
 // still be in flight, which is fine for fire-and-forget delivery).
 const PUSH_SEND_TIMEOUT_MS = 10_000;
+
+// One reminder or event-update broadcast resolves every recipient's devices in
+// a single query, and each row then costs an outbound HTTPS POST plus a
+// `last_used_at` write. Handing all of those to one `Promise.all` starts them in
+// the same tick, so a popular gathering opens hundreds of concurrent sockets and
+// queues hundreds of writes against a `DATABASE_POOL_MAX` that defaults to 10 on
+// a single-replica backend: unrelated requests then sit behind the fan-out and
+// can burn the whole 10s `DATABASE_CONNECTION_TIMEOUT_MS` waiting for a pool
+// slot. Waves of at most this many sends keep both the socket count and the
+// write concurrency bounded.
+//
+// Deliberately wider than search's 5 concurrent queries, because the two
+// fan-outs are bound by different things: a search thunk holds a pool
+// connection for its whole life, while a push holds a socket for up to
+// `PUSH_SEND_TIMEOUT_MS` and only touches the pool for a short write afterwards.
+//
+// What this bound actually gives, stated precisely: one fan-out never holds
+// more than 8 of the 10 pool slots at once, so it leaves headroom for
+// concurrent request traffic instead of queueing hundreds of writes ahead of
+// it. It is not a guarantee that a live request always finds a free slot, and
+// it is per-call, so `PushPreviewPrivacyService` sends its two payload variants
+// one after the other rather than concurrently to keep the real ceiling at 8.
+const MAX_CONCURRENT_PUSH_SENDS = 8;
 
 @Injectable()
 export class PushService implements OnModuleInit {
@@ -183,52 +207,109 @@ export class PushService implements OnModuleInit {
     if (!this.enabled || userIds.length === 0) return;
     const rows = await this.subscriptions.find({
       where: { userId: In(userIds) },
+      // Only what `deliverToSubscription` reads. A broadcast to a popular
+      // gathering materializes every recipient's every device before the cap
+      // does anything, and `userAgent` is an unbounded string that nothing on
+      // this path looks at.
+      select: ['id', 'endpoint', 'p256dh', 'auth'],
     });
     const body = JSON.stringify(payload);
-    await Promise.all(
-      rows.map(async (row) => {
-        // SSRF guard: the endpoint is member-supplied and we are about to POST
-        // to it. Re-validate at send time (DNS resolution can differ from the
-        // subscribe-time DTO check) that it resolves to a public host. On
-        // rejection, skip this subscription and keep delivering to the others —
-        // do NOT prune the row, since a transient DNS failure here would
-        // otherwise drop a legitimate device.
-        let validated: ValidatedTarget;
-        try {
-          validated = await assertPublicUrl(row.endpoint);
-        } catch (error) {
-          this.logger.warn(
-            `Skipping push to non-public endpoint for ${row.id}: ${String(error)}`,
-          );
-          return;
-        }
-        try {
-          // Pin the send to the exact IP we just validated: web-push uses Node's
-          // `https`, which would otherwise re-resolve the endpoint host at
-          // connect time and could be rebound to an internal address between the
-          // check above and the socket. The pinned Agent fixes the dialled IP
-          // while keeping the original host for TLS SNI / cert validation.
-          await this.sendWithTimeout(
-            {
-              endpoint: row.endpoint,
-              keys: { p256dh: row.p256dh, auth: row.auth },
-            },
-            body,
-            pinnedHttpsAgent(validated),
-          );
-          await this.subscriptions.update(row.id, { lastUsedAt: new Date() });
-        } catch (error) {
-          const statusCode = (error as WebPushError).statusCode;
-          if (statusCode === 404 || statusCode === 410) {
-            await this.subscriptions.delete(row.id);
-          } else {
-            this.logger.warn(
-              `Web Push send failed for ${row.id}: ${statusCode ?? String(error)}`,
-            );
-          }
-        }
-      }),
+    // Each entry is a THUNK (not a started promise) so `runWithConcurrency`
+    // decides when a send actually starts; mapping to started promises here
+    // would open every socket in the same tick and defeat the cap entirely.
+    // `deliverToSubscription` is structurally incapable of rejecting, which
+    // matters: a rejection would take one of the pool's workers out of service
+    // for the rest of this fan-out.
+    // The trailing `catch` makes the thunk total no matter what
+    // `deliverToSubscription` does, including its own last-resort logger call
+    // throwing. Without it "can never reject" would be a claim about that
+    // method's body that the next editor has to keep true by hand, and a
+    // rejection takes one of the pool's workers out of service for the rest of
+    // this fan-out.
+    const sendThunks = rows.map(
+      (row) => (): Promise<void> =>
+        this.deliverToSubscription(row, body).catch(() => undefined),
     );
+    await runWithConcurrency(sendThunks, MAX_CONCURRENT_PUSH_SENDS);
+  }
+
+  // One subscription's delivery. Wrapped end to end because every failure mode
+  // here is per-device and must not affect the other recipients in the fan-out.
+  // The outer catch is what makes the awaits inside the inner catch (the prune)
+  // and any future log or write added there safe. It is belt to the caller's
+  // braces: the only statement it cannot itself cover is its own logger call,
+  // which is why the thunk in `sendToUsers` catches as well.
+  private async deliverToSubscription(
+    row: PushSubscription,
+    body: string,
+  ): Promise<void> {
+    try {
+      // SSRF guard: the endpoint is member-supplied and we are about to POST
+      // to it. Re-validate at send time (DNS resolution can differ from the
+      // subscribe-time DTO check) that it resolves to a public host. On
+      // rejection, skip this subscription and keep delivering to the others.
+      // Do NOT prune the row, since a transient DNS failure here would
+      // otherwise drop a legitimate device.
+      let validated: ValidatedTarget;
+      try {
+        validated = await assertPublicUrl(row.endpoint);
+      } catch (error) {
+        this.logger.warn(
+          `Skipping push to non-public endpoint for ${row.id}: ${String(error)}`,
+        );
+        return;
+      }
+
+      let hasDelivered = false;
+      try {
+        // Pin the send to the exact IP we just validated: web-push uses Node's
+        // `https`, which would otherwise re-resolve the endpoint host at
+        // connect time and could be rebound to an internal address between the
+        // check above and the socket. The pinned Agent fixes the dialled IP
+        // while keeping the original host for TLS SNI / cert validation.
+        await this.sendWithTimeout(
+          {
+            endpoint: row.endpoint,
+            keys: { p256dh: row.p256dh, auth: row.auth },
+          },
+          body,
+          pinnedHttpsAgent(validated),
+        );
+        hasDelivered = true;
+        // Left as one write per delivered device rather than a batched
+        // `UPDATE ... WHERE id IN (...)`: `last_used_at` is what the 90-day
+        // retention purge reads, so a device we just delivered to has to have
+        // it recorded even if the process dies mid fan-out, and a batched write
+        // would also have to defer the 404/410 prune below to the same flush.
+        // The concurrency cap already bounds these to
+        // `MAX_CONCURRENT_PUSH_SENDS` in flight, which is the pool pressure
+        // that mattered; what is left is a per-row round trip against a
+        // primary key.
+        await this.subscriptions.update(row.id, { lastUsedAt: new Date() });
+      } catch (error) {
+        // Optional chaining, not a bare cast: the cast is erased at runtime, so
+        // a rejection value that is null or undefined would make a plain
+        // property read throw from inside this catch.
+        const statusCode = (error as WebPushError | null)?.statusCode;
+        if (hasDelivered) {
+          // The push itself landed, only the `last_used_at` bump failed. Saying
+          // "send failed" here would send someone hunting the wrong system.
+          this.logger.warn(
+            `Delivered push but failed to record last_used_at for ${row.id}: ${String(error)}`,
+          );
+        } else if (statusCode === 404 || statusCode === 410) {
+          await this.subscriptions.delete(row.id);
+        } else {
+          this.logger.warn(
+            `Web Push send failed for ${row.id}: ${statusCode ?? String(error)}`,
+          );
+        }
+      }
+    } catch (unexpectedError) {
+      this.logger.warn(
+        `Unexpected push delivery failure for ${row.id}: ${String(unexpectedError)}`,
+      );
+    }
   }
 
   // Races the web-push send against a wall-clock timeout so a stalled endpoint

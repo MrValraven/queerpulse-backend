@@ -75,6 +75,15 @@ export interface CommunityGovernanceLogDetailsDTO {
   note?: string;
   /** `ban_lifted`: when the ban being lifted was originally placed, ISO 8601. */
   bannedAt?: string;
+  /** `member_banned` and the four `member_ban_*` ratification actions: when
+   *  the bar ends by itself, ISO 8601, or absent when it is permanent. The
+   *  same audience already reads this as `CommunityBanDTO.expiresAt`, and
+   *  without it a log entry about a bar cannot say the one thing anyone reads
+   *  it for. */
+  banExpiresAt?: string;
+  /** `member_ban_proposed` (PRD-25): when the proposal lapses if no second
+   *  owner, co-owner or moderator signs it, ISO 8601. */
+  ratificationExpiresAt?: string;
   /** The card actions: which card was suspended, revoked, reinstated or reissued. */
   cardSerial?: string;
   /** `settings_changed`: the field-by-field diff, in the order it was written. */
@@ -208,6 +217,8 @@ export function toCommunityGovernanceLogDetails(
     readString(metadata, 'reason') ?? readString(metadata, 'banReason');
   const note = readString(metadata, 'note');
   const bannedAt = readString(metadata, 'bannedAt');
+  const banExpiresAt = readString(metadata, 'banExpiresAt');
+  const ratificationExpiresAt = readString(metadata, 'ratificationExpiresAt');
   const cardSerial = readString(metadata, 'serial');
   const changedSettings = readChangedSettings(metadata);
 
@@ -217,6 +228,10 @@ export function toCommunityGovernanceLogDetails(
   if (reason !== undefined) details.reason = reason;
   if (note !== undefined) details.note = note;
   if (bannedAt !== undefined) details.bannedAt = bannedAt;
+  if (banExpiresAt !== undefined) details.banExpiresAt = banExpiresAt;
+  if (ratificationExpiresAt !== undefined) {
+    details.ratificationExpiresAt = ratificationExpiresAt;
+  }
   if (cardSerial !== undefined) details.cardSerial = cardSerial;
   if (changedSettings !== undefined) details.changedSettings = changedSettings;
   return details;

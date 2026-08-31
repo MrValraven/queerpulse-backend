@@ -14,12 +14,16 @@ type LedgerRow = {
   userId: string;
   description: string;
   xp: number;
+  reason?: string;
 };
 
 function makeService(opts: {
   stat?: Stat | null;
   awards?: Award[];
   signals: RecognitionSignals;
+  /** Defaults to true. False stands for a live moderator takedown against
+   *  this member, which lifts the no-regression floor (PRD-05). */
+  isStandingOk?: boolean;
 }) {
   const savedStats: Stat[] = [];
   const insertedAwards: Award[] = [];
@@ -43,11 +47,16 @@ function makeService(opts: {
       if (sql.includes('SELECT xp FROM recognition_stats')) {
         return Promise.resolve(opts.stat ? [{ xp: opts.stat.xp }] : []);
       }
-      // Mirrors the real atomic GREATEST upsert: resolves the max of the
-      // currently stored xp and the computed xp passed as the 2nd param.
+      // Mirrors the real upsert: the no-regression floor resolves the max of
+      // the stored and computed xp, EXCEPT for a member under a live
+      // moderator takedown (3rd param, `standingOk`), where the computed
+      // value wins outright (PRD-05).
       const storedXp = opts.stat?.xp ?? 0;
       const computedXp = Number(params[1]);
-      const resolvedXp = Math.max(storedXp, computedXp);
+      const isStandingOk = params[2] !== false;
+      const resolvedXp = isStandingOk
+        ? Math.max(storedXp, computedXp)
+        : computedXp;
       savedStats.push({
         userId: params[0] as string,
         xp: resolvedXp,
@@ -89,15 +98,21 @@ function makeService(opts: {
     }),
   };
   const ledgerRepo = {
-    insert: (rows: LedgerRow[]) => {
-      insertedLedgerRows.push(...rows);
+    // TypeORM's `Repository.insert` takes one entity OR an array of them, and
+    // the service uses both shapes: the signed takedown correction is a single
+    // row, the badge/activity receipts are a batch. Normalise here so the
+    // assertions always read a flat list.
+    insert: (rows: LedgerRow | LedgerRow[]) => {
+      insertedLedgerRows.push(...(Array.isArray(rows) ? rows : [rows]));
       return Promise.resolve({ identifiers: [] });
     },
   };
   const profilesRepo = {
     findOne: () => Promise.resolve({ avatarUrl: 'x', bio: 'hi' }),
   };
-  const communityMembersRepo = { count: () => Promise.resolve(0) };
+  const communityMembersRepo = {
+    count: () => Promise.resolve(opts.signals.communitiesJoined),
+  };
   const savedItemsRepo = {
     count: (query: { where: { subjectType: string } }) => {
       if (query.where.subjectType === 'listing') {
@@ -129,8 +144,16 @@ function makeService(opts: {
     count: () => Promise.resolve(opts.signals.resourcesApproved),
   };
   const eligibility = {
-    getSignals: () => Promise.resolve(signalsToDto(opts.signals)),
+    getSignals: () => Promise.resolve(signalsToDto(opts.signals, opts)),
     countHeldGatherings: () => Promise.resolve(opts.signals.eventsHeld),
+    // The three PRD-05 gated counts. Each has a looser twin on the DTO above
+    // that the scoring rules no longer read.
+    countAudiencedCommunities: () =>
+      Promise.resolve(opts.signals.audiencedCommunities),
+    countEngagedCommunityPosts: () =>
+      Promise.resolve(opts.signals.engagedCommunityPosts),
+    countAttendedGatherings: () =>
+      Promise.resolve(opts.signals.gatheringsAttended),
   };
   const notifications = {
     create: (
@@ -159,8 +182,14 @@ function makeService(opts: {
 }
 
 // Minimal PublicEligibilitySignalsDto stand-in: only the fields gatherSignals reads.
-function signalsToDto(signals: RecognitionSignals) {
+function signalsToDto(
+  signals: RecognitionSignals,
+  opts: { isStandingOk?: boolean } = {},
+) {
   return {
+    // Defaults to true: the no-regression floor holds for a member nobody has
+    // moderated, which is every fixture that does not say otherwise.
+    standingOk: opts.isStandingOk ?? true,
     verified: signals.verified,
     tenureDays: signals.tenureDays,
     // Inbound vouchCount isn't read by gatherSignals; it derives its own
@@ -187,11 +216,14 @@ function signalsToDto(signals: RecognitionSignals) {
 const BASE: RecognitionSignals = {
   profileComplete: true,
   communitiesJoined: 0,
+  audiencedCommunities: 0,
   personasPublished: 0,
   vouchCount: 0,
   connectionCount: 0,
   eventsAttended: 0,
+  gatheringsAttended: 0,
   communityPosts: 0,
+  engagedCommunityPosts: 0,
   endorsementCount: 0,
   eventsHosted: 0,
   eventsHeld: 0,
@@ -215,7 +247,7 @@ describe('RecognitionAwardingService.recompute', () => {
     const { service, savedStats, insertedAwards } = makeService({
       stat: null,
       awards: [],
-      signals: { ...BASE, eventsAttended: 1 }, // first-gathering qualifies
+      signals: { ...BASE, gatheringsAttended: 1 }, // first-gathering qualifies
     });
     const result = await service.recompute(USER, { force: true });
     expect(result.xpAfter).toBeGreaterThan(0);
@@ -238,7 +270,7 @@ describe('RecognitionAwardingService.recompute', () => {
     const { service, insertedAwards } = makeService({
       stat: { userId: 'u1', xp: 0, updatedAt: new Date(0) },
       awards: [{ userId: 'u1', badgeKey: 'first-gathering', context: null }],
-      signals: { ...BASE, eventsAttended: 1 },
+      signals: { ...BASE, gatheringsAttended: 1 },
     });
     const result = await service.recompute(USER, { force: true });
     expect(insertedAwards).toHaveLength(0);
@@ -248,7 +280,7 @@ describe('RecognitionAwardingService.recompute', () => {
   it('keeps a badge earned even after its signal drops (stickiness)', async () => {
     const stickinessSignals: RecognitionSignals = {
       ...BASE,
-      eventsAttended: 0,
+      gatheringsAttended: 0,
     }; // no longer qualifies
     const { service, insertedAwards } = makeService({
       stat: { userId: 'u1', xp: 0, updatedAt: new Date(0) },
@@ -272,10 +304,10 @@ describe('RecognitionAwardingService.recompute', () => {
       awards: [],
       signals: {
         ...BASE,
-        eventsAttended: 12,
+        gatheringsAttended: 12,
         connectionCount: 25,
         vouchCount: 10,
-        communityPosts: 20,
+        engagedCommunityPosts: 20,
       },
     });
     await service.recompute(USER, { force: true });
@@ -317,7 +349,7 @@ describe('RecognitionAwardingService.recompute', () => {
     const { service, savedStats } = makeService({
       stat: { userId: 'u1', xp: 100, updatedAt: new Date() },
       awards: [],
-      signals: { ...BASE, eventsAttended: 12 },
+      signals: { ...BASE, gatheringsAttended: 12 },
     });
     const result = await service.recompute(USER); // no force
     expect(result.xpAfter).toBe(100);
@@ -329,7 +361,7 @@ describe('RecognitionAwardingService.recompute', () => {
       const { service, insertedLedgerRows } = makeService({
         stat: null,
         awards: [],
-        signals: { ...BASE, eventsAttended: 1 }, // first-gathering (common, +40)
+        signals: { ...BASE, gatheringsAttended: 1 }, // first-gathering (common, +40)
       });
       await service.recompute(USER, { force: true });
       expect(insertedLedgerRows).toContainEqual({
@@ -361,6 +393,50 @@ describe('RecognitionAwardingService.recompute', () => {
       });
       await service.recompute(USER, { force: true });
       expect(insertedLedgerRows).toHaveLength(0);
+    });
+
+    it('records a signed correction row when a takedown lowers XP', async () => {
+      const { service, insertedLedgerRows } = makeService({
+        stat: { userId: 'u1', xp: 5000, updatedAt: new Date(0) },
+        awards: [],
+        signals: BASE,
+        isStandingOk: false,
+      });
+      const result = await service.recompute(USER, { force: true });
+      expect(result.xpAfter).toBeLessThan(5000);
+      expect(insertedLedgerRows).toEqual([
+        {
+          userId: 'u1',
+          description: 'Recognition recalculated after a moderator takedown',
+          xp: result.xpAfter - 5000,
+          reason: 'moderation_removal',
+        },
+      ]);
+    });
+  });
+
+  describe('the no-regression floor (PRD-05)', () => {
+    it('holds for a member in good standing who deleted their own work', async () => {
+      const { service, savedStats } = makeService({
+        stat: { userId: 'u1', xp: 5000, updatedAt: new Date(0) },
+        awards: [],
+        signals: BASE,
+      });
+      const result = await service.recompute(USER, { force: true });
+      expect(result.xpAfter).toBe(5000);
+      expect(savedStats[0]!.xp).toBe(5000);
+    });
+
+    it('lifts for a member under a live moderator takedown, so removed content stops paying', async () => {
+      const { service, savedStats } = makeService({
+        stat: { userId: 'u1', xp: 5000, updatedAt: new Date(0) },
+        awards: [],
+        signals: BASE,
+        isStandingOk: false,
+      });
+      const result = await service.recompute(USER, { force: true });
+      expect(result.xpAfter).toBe(scoreSignals(BASE));
+      expect(savedStats[0]!.xp).toBe(scoreSignals(BASE));
     });
   });
 });

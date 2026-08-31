@@ -3,7 +3,6 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import { POSTGRES_UNIQUE_VIOLATION } from '../common/db-errors';
-import { DEFAULT_LIST_LIMIT } from '../common/pagination';
 import {
   CoopJoinRequest,
   JoinRequestStatus,
@@ -13,24 +12,39 @@ import {
   HousingCoop,
   HousingPhase,
 } from './entities/housing-coop.entity';
-import { HousingService } from './housing.service';
+import {
+  COOP_JOIN_REQUEST_QUEUE_PAGE_SIZE,
+  HousingService,
+} from './housing.service';
 
 type QueryBuilderStub = Record<string, jest.Mock>;
 
 /** Fluent `createQueryBuilder` chain: every builder method returns the builder;
- *  the terminal `getMany` resolves to whatever rows the test supplies. */
-function makeQueryBuilderStub(rows: unknown[] = []): QueryBuilderStub {
+ *  the terminal `getMany`/`getManyAndCount` resolves to whatever rows the test
+ *  supplies. `total` defaults to the row count, so a test that only cares about
+ *  the rows does not have to state it; `totalOverride` is how a test says "there
+ *  are more rows than this page holds". */
+function makeQueryBuilderStub(
+  rows: unknown[] = [],
+  totalOverride?: number,
+): QueryBuilderStub {
   const builder: QueryBuilderStub = {};
   for (const method of [
     'leftJoinAndSelect',
     'where',
     'andWhere',
     'orderBy',
+    'addOrderBy',
     'take',
+    'offset',
+    'limit',
   ]) {
     builder[method] = jest.fn().mockReturnValue(builder);
   }
   builder.getMany = jest.fn().mockResolvedValue(rows);
+  builder.getManyAndCount = jest
+    .fn()
+    .mockResolvedValue([rows, totalOverride ?? rows.length]);
   return builder;
 }
 
@@ -296,18 +310,13 @@ describe('HousingService', () => {
   });
 
   describe('listJoinRequests', () => {
-    it('caps the unfiltered list and never scopes by co-op slug', async () => {
-      const builder = makeQueryBuilderStub([]);
-      joinRequests.createQueryBuilder.mockReturnValue(builder);
-
-      await service.listJoinRequests();
-
-      expect(builder.take).toHaveBeenCalledWith(DEFAULT_LIST_LIMIT);
-      expect(builder.where).not.toHaveBeenCalled();
-    });
-
-    it('scopes to a single co-op when a slug is supplied and maps the rows', async () => {
-      const row = {
+    // Supersedes the two assertions that stood here, which pinned the old
+    // behaviour: a `take(DEFAULT_LIST_LIMIT)` cap and a flat array return
+    // (ENG-41). The queue now answers with a page, so what is worth pinning is
+    // the page window, the honest `total`, and the two optional filters
+    // travelling in the query rather than being applied in the browser.
+    function makeRow(overrides: Record<string, unknown> = {}) {
+      return {
         id: 'request-1',
         name: 'Sam',
         householdSize: '2',
@@ -315,19 +324,91 @@ describe('HousingService', () => {
         status: JoinRequestStatus.Pending,
         createdAt: new Date('2026-01-01T00:00:00.000Z'),
         coop: { slug: 'rainbow-commons', name: 'Rainbow Commons' },
+        ...overrides,
       };
-      const builder = makeQueryBuilderStub([row]);
+    }
+
+    it('pages the unfiltered list from the first page and filters nothing', async () => {
+      const builder = makeQueryBuilderStub([]);
       joinRequests.createQueryBuilder.mockReturnValue(builder);
 
-      const result = await service.listJoinRequests('rainbow-commons');
+      const result = await service.listJoinRequests();
 
-      expect(builder.where).toHaveBeenCalledWith('coop.slug = :coopSlug', {
+      expect(builder.offset).toHaveBeenCalledWith(0);
+      expect(builder.limit).toHaveBeenCalledWith(
+        COOP_JOIN_REQUEST_QUEUE_PAGE_SIZE,
+      );
+      expect(builder.andWhere).not.toHaveBeenCalled();
+      // `created_at` alone is not a total order, so offset pagination on it can
+      // show one row on two pages and another on none. The `id` tiebreak is
+      // part of the contract, not an implementation detail.
+      expect(builder.orderBy).toHaveBeenCalledWith('request.createdAt', 'DESC');
+      expect(builder.addOrderBy).toHaveBeenCalledWith('request.id', 'DESC');
+      expect(result).toEqual({
+        items: [],
+        total: 0,
+        page: 1,
+        pageSize: COOP_JOIN_REQUEST_QUEUE_PAGE_SIZE,
+      });
+    });
+
+    it('offsets by whole pages and reports the queue total, not the page length', async () => {
+      const builder = makeQueryBuilderStub([makeRow()], 201);
+      joinRequests.createQueryBuilder.mockReturnValue(builder);
+
+      const result = await service.listJoinRequests({ page: 3 });
+
+      expect(builder.offset).toHaveBeenCalledWith(
+        2 * COOP_JOIN_REQUEST_QUEUE_PAGE_SIZE,
+      );
+      expect(result.page).toBe(3);
+      // The whole point of the envelope: 201 requests exist even though this
+      // page carries one, which is exactly what the flat 200-row array hid.
+      expect(result.total).toBe(201);
+      expect(result.items).toHaveLength(1);
+    });
+
+    it('pushes the status filter into the query rather than leaving it to the caller', async () => {
+      const builder = makeQueryBuilderStub([makeRow()]);
+      joinRequests.createQueryBuilder.mockReturnValue(builder);
+
+      await service.listJoinRequests({ status: JoinRequestStatus.Pending });
+
+      expect(builder.andWhere).toHaveBeenCalledWith(
+        'request.status = :status',
+        { status: JoinRequestStatus.Pending },
+      );
+    });
+
+    it('scopes to a single co-op when a slug is supplied and maps the rows', async () => {
+      const builder = makeQueryBuilderStub([makeRow()]);
+      joinRequests.createQueryBuilder.mockReturnValue(builder);
+
+      const result = await service.listJoinRequests({
+        coop: 'rainbow-commons',
+      });
+
+      expect(builder.andWhere).toHaveBeenCalledWith('coop.slug = :coopSlug', {
         coopSlug: 'rainbow-commons',
       });
-      expect(result[0]).toMatchObject({
+      expect(result.items[0]).toMatchObject({
         id: 'request-1',
         coop: { slug: 'rainbow-commons', name: 'Rainbow Commons' },
       });
+    });
+
+    it('keeps a row whose co-op relation is missing, mapping it to a null coop', async () => {
+      // Why this matters for `total`: the FK is ON DELETE CASCADE, so this row
+      // should not be reachable, but if it ever were the mapper returns it with
+      // `coop: null` instead of dropping it. Nothing is filtered out after the
+      // fetch, which is what keeps `total` equal to the rows the pages reach.
+      const builder = makeQueryBuilderStub([makeRow({ coop: null })]);
+      joinRequests.createQueryBuilder.mockReturnValue(builder);
+
+      const result = await service.listJoinRequests();
+
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0]?.coop).toBeNull();
     });
   });
 

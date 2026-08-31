@@ -1,7 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
-// DO NOT RUN — authored for review only (Personas redesign Phase 1b, Task 1).
-//
 // Adds a nullable `removed_at` timestamptz to `subprofiles`, backing the new
 // `removed` restricted-state signal on the public persona read
 // (`SubprofilesService.resolvePublicAccess`/`buildPublicView`; see the design

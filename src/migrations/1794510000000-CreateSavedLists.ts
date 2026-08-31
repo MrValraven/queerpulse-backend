@@ -46,8 +46,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * two INSERT ... SELECTs. The only pre-existing table touched is `saved_item`,
  * and only by reading it plus one FK that takes a brief lock on it, so no
  * `CONCURRENTLY` two-phase split is needed.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class CreateSavedLists1794510000000 implements MigrationInterface {
   name = 'CreateSavedLists1794510000000';

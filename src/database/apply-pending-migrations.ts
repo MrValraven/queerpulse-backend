@@ -1,23 +1,15 @@
 import type { LoggerService } from '@nestjs/common';
 import { DataSource, MigrationExecutor, type QueryRunner } from 'typeorm';
 import type { PostgresConnectionOptions } from 'typeorm/driver/postgres/PostgresConnectionOptions';
+import {
+  MIGRATION_LOCK_POLL_INTERVAL_MS,
+  MIGRATION_LOCK_WAIT_TIMEOUT_MS,
+  releaseMigrationLock,
+  tryTakeMigrationLock,
+} from './migration-lock';
 import { reconcileRenamedMigrations } from './renamed-migrations';
 
 const CONTEXT = 'MigrationRunner';
-
-/**
- * Postgres advisory-lock key. Arbitrary but FIXED: every instance of this app
- * must pick the same number or the lock does not serialize anything. Session-
- * scoped (`pg_try_advisory_lock`), so a crashed instance releases it when its
- * connection dies, so there is no stale-lock cleanup to write.
- */
-const MIGRATION_LOCK_KEY = 481_205_733_107_400;
-
-/** How long a waiting instance keeps polling before it gives up and fails. */
-const LOCK_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
-
-/** Poll interval while another instance holds the lock. */
-const LOCK_POLL_INTERVAL_MS = 2_000;
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -45,13 +37,21 @@ type LockOutcome = 'acquired' | 'applied-elsewhere' | 'timed-out';
  *     does before `migration:run:prod`. An interrupted `CREATE INDEX
  *     CONCURRENTLY` leaves a non-functional index stub occupying the name
  *     without being recorded in the ledger, so the retry fails with "already
- *     exists" forever. Dropping the stub first makes the retry rebuild it.
+ *     exists" forever. Dropping the stub first makes the retry rebuild it. It
+ *     runs INSIDE the lock on purpose: see dropInvalidIndexes below for why the
+ *     lock, rather than the catalog predicate, is what stops it from dropping
+ *     an index another runner is still building.
  *
  *  3. A LEDGER RENAME PASS. A migration renumbered after it shipped is recorded
  *     under a class name no build carries any more, so it reads as pending and
  *     re-runs its `up()` against a schema that already has the change. Renaming
  *     the ledger row is the fix; `IF NOT EXISTS` guards on the DDL are not (see
- *     CLAUDE.md). See renamed-migrations.ts.
+ *     CLAUDE.md). See renamed-migrations.ts. The deploy chain runs the same pass
+ *     ahead of `migration:run:prod` (`npm run migration:reconcile:prod`,
+ *     reconcile-renamed-migrations-cli.ts), because the stock TypeORM CLI in
+ *     that step would otherwise hit the un-renamed rows long before this boot
+ *     path could heal them. Both callers stay: this one is what covers every
+ *     environment that has no pre-deploy step at all.
  *
  *  4. A SEPARATE DATA SOURCE for the run. The app's pool sets
  *     `statement_timeout` (30s by default) on every connection it opens, which
@@ -91,7 +91,7 @@ export async function applyPendingMigrations(
     }
     if (outcome === 'timed-out') {
       throw new Error(
-        `Timed out after ${Math.round(LOCK_WAIT_TIMEOUT_MS / 1000)}s waiting ` +
+        `Timed out after ${Math.round(MIGRATION_LOCK_WAIT_TIMEOUT_MS / 1000)}s waiting ` +
           'for another instance to finish applying migrations. Refusing to ' +
           'start on a schema that is still behind this build.',
       );
@@ -147,9 +147,7 @@ export async function applyPendingMigrations(
   } finally {
     if (isLockHeld) {
       try {
-        await lockRunner.query('SELECT pg_advisory_unlock($1)', [
-          MIGRATION_LOCK_KEY,
-        ]);
+        await releaseMigrationLock(lockRunner);
       } catch (error) {
         // Losing the unlock is not fatal (the lock dies with the session), so
         // it must not mask whatever error is already unwinding.
@@ -173,15 +171,11 @@ async function acquireMigrationLock(
   lockRunner: QueryRunner,
   logger: LoggerService,
 ): Promise<LockOutcome> {
-  const deadline = Date.now() + LOCK_WAIT_TIMEOUT_MS;
+  const deadline = Date.now() + MIGRATION_LOCK_WAIT_TIMEOUT_MS;
   let hasLoggedWait = false;
 
   for (;;) {
-    const rows = (await lockRunner.query(
-      'SELECT pg_try_advisory_lock($1) AS locked',
-      [MIGRATION_LOCK_KEY],
-    )) as Array<{ locked: boolean }>;
-    if (rows[0]?.locked) return 'acquired';
+    if (await tryTakeMigrationLock(lockRunner)) return 'acquired';
 
     const pending = await new MigrationExecutor(
       dataSource,
@@ -197,16 +191,31 @@ async function acquireMigrationLock(
         CONTEXT,
       );
     }
-    await sleep(LOCK_POLL_INTERVAL_MS);
+    await sleep(MIGRATION_LOCK_POLL_INTERVAL_MS);
   }
 }
 
 /**
  * Drop indexes Postgres has marked INVALID, the debris of an interrupted
- * `CREATE INDEX CONCURRENTLY`. Mirrors `scripts/migration-preflight.mjs`; see
- * that file's header for why the migrations cannot use `IF NOT EXISTS` to
- * tolerate them instead. A valid index is never touched, so this is a no-op on
- * a healthy database.
+ * `CREATE INDEX CONCURRENTLY`. Mirrors `scripts/migration-preflight.mjs` query
+ * for query; see that file's header for why the migrations cannot use
+ * `IF NOT EXISTS` to tolerate them instead. A valid index is never touched, so
+ * this is a no-op on a healthy database.
+ *
+ * WHAT MAKES THIS SAFE IS THE ADVISORY LOCK, NOT THE CATALOG FILTER. A healthy
+ * `CREATE INDEX CONCURRENTLY` that is still running sits in exactly the state
+ * this query selects for: the build sets `indisready = true` early and only
+ * flips `indisvalid = true` at the very end, so for almost all of its life an
+ * in-flight build is indistinguishable in `pg_index` from the debris of a dead
+ * one. The `indisready = true` predicate therefore excludes only the first
+ * moments of a build, and dropping a live one would destroy work in progress.
+ * What actually keeps that from happening is that this runs while the caller
+ * holds MIGRATION_LOCK_KEY, and every process in this repo that builds an index
+ * concurrently does so from a migration run that holds the same lock: the boot
+ * catch-up here, and `npm run migration:preflight` / `migration:run:prod` in the
+ * deploy chain. The residual case the lock cannot cover is a human running
+ * `CREATE INDEX CONCURRENTLY` by hand at a psql prompt during a deploy. Do not
+ * do that; take the lock in your session first if you must.
  */
 async function dropInvalidIndexes(
   migrationDataSource: DataSource,

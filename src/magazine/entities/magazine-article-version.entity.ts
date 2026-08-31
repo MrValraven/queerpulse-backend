@@ -31,6 +31,11 @@ export class MagazineArticleVersion {
   @Column({ type: 'varchar' })
   label!: string;
 
+  // Already nullable (an automatic snapshot has no human actor); FK-backed as
+  // of `AddMagazineDeskAuthorForeignKeys1795810000000` with `ON DELETE SET
+  // NULL`, so erasing an editor's account never removes restore points other
+  // people still rely on.
+  @Index('IDX_magazine_article_version_author_id')
   @Column({ type: 'uuid', nullable: true })
   authorId!: string | null;
 

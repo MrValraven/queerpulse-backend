@@ -2,6 +2,7 @@ import { Logger, UseFilters, UsePipes, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { OnEvent } from '@nestjs/event-emitter';
 import { JwtService } from '@nestjs/jwt';
+import { InjectRepository } from '@nestjs/typeorm';
 import {
   ConnectedSocket,
   MessageBody,
@@ -14,7 +15,10 @@ import {
 } from '@nestjs/websockets';
 import { parseCookie } from 'cookie';
 import { DefaultEventsMap, Namespace, Socket } from 'socket.io';
+import { IsNull, MoreThan, Repository } from 'typeorm';
+import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { DEFAULT_LOCKDOWN_MESSAGE } from '../common/lockdown.constants';
+import { VALIDATION_PIPE_OPTIONS } from '../common/validation-pipe.options';
 import { resolveFrontendOrigins } from '../config/frontend-origins';
 import { ConnectionsService } from '../connections/connections.service';
 import {
@@ -95,6 +99,14 @@ interface AccessTokenClaims {
   status: UserStatus;
   /** Standard JWT expiry, seconds since epoch. */
   exp: number;
+  /**
+   * The SESSION this token was minted for: the `refresh_tokens.family_id` of
+   * the sign-in it descends from, assigned once and carried through every
+   * rotation. `AuthService` signs it into every access token it mints, and
+   * `JwtStrategy` reads the same claim on the HTTP path. See
+   * `assertSessionLive` for why it is OPTIONAL and must stay that way.
+   */
+  sid?: string;
 }
 
 /**
@@ -169,10 +181,37 @@ function allowHandshakeOrigin(
   transports: ['websocket'],
 })
 @UseFilters(new WsAllExceptionsFilter())
+// ONE validation contract, shared by both transports.
+//
+// `message:send` and `POST /conversations/:id/messages` land in the identical
+// `MessagingService.sendMessage`, so they must be validated identically. This
+// pipe used to list `whitelist` and `transform` by hand and omitted
+// `forbidNonWhitelisted`, which meant an unknown body key was a 400 over HTTP
+// and a silent strip over the socket: the same write accepted under weaker
+// rules on the transport a client is most likely to get wrong (a hand-rolled
+// `socket.emit` has no OpenAPI-ish contract to check itself against, so a typo
+// like `replyTo` instead of `replyToId` was dropped on the floor and the
+// message was persisted without its reply reference). Spreading
+// `VALIDATION_PIPE_OPTIONS` (the same object `main.ts` binds globally) makes
+// the two impossible to drift apart again.
+//
+// `transformOptions: { exposeUnsetFields: false }` comes along with the spread
+// and is safe here: every `@SubscribeMessage` handler below reads named fields
+// off the payload (`data.conversationId`, `data.replyToId`, ...) and passes
+// them on as positional arguments or as a freshly-built literal. Nothing in
+// this gateway spreads a WS payload over an entity, `Object.assign`s one, or
+// asks whether a key was ABSENT versus present-and-undefined, which is the one
+// case that option changes (see its doc comment in
+// `common/validation-pipe.options.ts`).
+//
+// The `exceptionFactory` stays gateway-specific: HTTP wants the default
+// `BadRequestException`, while a WS handler must throw `WsException` so
+// `WsAllExceptionsFilter` can deliver it down the socket as an `exception`
+// frame instead of crashing the handler. It is listed AFTER the spread so it
+// keeps winning if the shared options ever grow one of their own.
 @UsePipes(
   new ValidationPipe({
-    whitelist: true,
-    transform: true,
+    ...VALIDATION_PIPE_OPTIONS,
     exceptionFactory: (errors) => new WsException(errors),
   }),
 )
@@ -216,6 +255,15 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly users: UsersService,
     private readonly platformSettings: PlatformSettingsService,
     private readonly metrics: MetricsService,
+    // Read-side only, and for a single `exists` on one indexed column: the
+    // handshake asks whether the session behind the presented access token is
+    // still live (`assertSessionLive`). `AuthService` owns every write to this
+    // table. Injecting the repository rather than `AuthService` keeps the edge
+    // out of `ChatModule` a TypeORM feature registration instead of a module
+    // import. `AuthModule` pulls membership, vouch, connections and
+    // media-crops in behind it, all for one `exists` query.
+    @InjectRepository(RefreshToken)
+    private readonly refreshTokens: Repository<RefreshToken>,
   ) {}
 
   async handleConnection(client: ChatSocket): Promise<void> {
@@ -632,7 +680,83 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // The role has to come from the database: the access token carries `sub`,
     // `status` and `exp`, but no role claim.
     await this.assertNotLockedOut(payload.sub);
+    // Ordered AFTER the lockdown check on purpose: `platformSettings.get()` is
+    // served from an in-process cache, so an unlocked platform pays nothing for
+    // it, and a LOCKED one refuses here without ever spending the query below,
+    // which is exactly when the gateway is being retried by every signed-in
+    // member at once. A revoked device refused during a lockdown is told
+    // `PLATFORM_LOCKED` rather than `Unauthorized`, which is the friendlier of
+    // the two answers and the one that makes the client back off hardest.
+    await this.assertSessionLive(payload.sid);
     return { userId: payload.sub, exp: payload.exp };
+  }
+
+  /**
+   * Throws unless the refresh-token FAMILY this access token was minted for is
+   * still alive.
+   *
+   * "Sign out this device" on the security page revokes a family and emits
+   * {@link USER_SESSION_REVOKED}, which {@link handleSessionRevoked} above turns
+   * into a one-shot drop of the member's `user:<id>` room. That drop is the
+   * whole story only for sockets that are open at that instant. The signed-out
+   * device still holds a valid access token for the rest of its 15-minute TTL,
+   * so it simply reconnected and was let straight back in, because the
+   * handshake asked only whether the token verified. The member was told the
+   * device was signed out while it went on receiving direct messages and
+   * presence. This is the check that makes the security page's promise true on
+   * the socket path, the same way `JwtStrategy.validate` makes it true on the
+   * HTTP path.
+   *
+   * SEMANTICS MIRROR `JwtStrategy.isSessionLive` EXACTLY, and they have to: a
+   * device refused on one transport and admitted on the other is the bug this
+   * closes, wearing a different hat.
+   *
+   * - An ABSENT `sid` is ADMITTED. A token with no `sid` can only be one this
+   *   server minted before the deploy that added the claim, and the signature
+   *   proves it came from us. Such a token expires within one access TTL, so
+   *   the gap closes itself. Rejecting it instead would drop every signed-in
+   *   member's socket the moment the deploy landed, which is a worse outcome
+   *   than a fifteen-minute tail on revocations reaching devices that already
+   *   hold a valid token.
+   * - A `sid` present but not a string is REFUSED. It would otherwise skip the
+   *   lookup silently, and a check that can be switched off by sending the
+   *   wrong type is not a check. The claims interface says `string`; a decoded
+   *   JWT is runtime data, so the parameter is `unknown` and earns its type
+   *   here.
+   * - A family that is revoked OR expired is REFUSED. Both conditions are
+   *   needed, matching what `AccountService.listSessions` shows the member as a
+   *   live session: `revoked_at IS NULL` alone would keep a family that had run
+   *   out its 30-day life usable for the further 30 days the purge job waits.
+   *
+   * CHEAP, which matters because this runs on every connection: one `exists`
+   * against `IDX_refresh_tokens_family_id`, so Postgres stops at the first
+   * matching row and returns a boolean rather than hydrating an entity. Nothing
+   * is cached, and nothing should be: a cache here would reintroduce the very
+   * window the check exists to close.
+   */
+  private async assertSessionLive(sessionId: unknown): Promise<void> {
+    if (sessionId === undefined) {
+      return;
+    }
+    if (typeof sessionId !== 'string') {
+      throw new WsException('Malformed access token payload');
+    }
+    // An empty string names no session, and `JwtStrategy.isSessionLive` reads
+    // it the same way (its falsy guard covers both). No minted token carries
+    // one, since a family id is always a uuid.
+    if (sessionId === '') {
+      return;
+    }
+    const isSessionLive = await this.refreshTokens.exists({
+      where: {
+        familyId: sessionId,
+        revokedAt: IsNull(),
+        expiresAt: MoreThan(new Date()),
+      },
+    });
+    if (!isSessionLive) {
+      throw new WsException('Session has been signed out');
+    }
   }
 
   /**

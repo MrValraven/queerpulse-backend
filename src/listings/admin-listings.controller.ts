@@ -26,6 +26,7 @@ import { AnswerListingPublicQuestionDto } from './dto/answer-listing-public-ques
 import { AskListingQuestionDto } from './dto/ask-listing-question.dto';
 import { BulkRemoveDto, BulkStatusDto } from './dto/bulk-listing.dto';
 import { ListEditSuggestionsQuery } from './dto/list-edit-suggestions.query';
+import { ListListingClaimsQuery } from './dto/list-listing-claims.query';
 import { ListListingQueueQuery } from './dto/list-listing-queue.query';
 import { RemoveListingDto } from './dto/remove-listing.dto';
 import { ResolveEditSuggestionDto } from './dto/resolve-edit-suggestion.dto';
@@ -154,9 +155,16 @@ export class AdminListingsController {
 
   @Get('claims')
   @ApiOperation({ summary: 'List the pending listing-claim review queue' })
-  @ApiOkResponse({ description: 'The pending claims, oldest first.' })
-  listPendingClaims() {
-    return this.listingClaimsService.listPending();
+  @ApiOkResponse({
+    description:
+      'A `{ items, total, page, pageSize }` page of the pending claims, oldest ' +
+      'first (ENG-41: this used to be a flat array silently capped at 200, ' +
+      'which hid the most recently filed claims). `total` is the size of the ' +
+      'whole pending queue, so the desk can state its real depth and a ' +
+      'moderator can page to the end of it.',
+  })
+  listPendingClaims(@Query() query: ListListingClaimsQuery) {
+    return this.listingClaimsService.listPending(query);
   }
 
   // On approval this reassigns the listing's `ownerId` to the claimant.

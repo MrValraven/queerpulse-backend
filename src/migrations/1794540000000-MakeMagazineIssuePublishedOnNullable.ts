@@ -9,8 +9,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * optional at creation and stays NULL until someone sets it or ships the
  * issue (`MagazinePieceService.shipIssue` already stamps today's date when
  * `publishedOn` is unset — that branch was unreachable until now).
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class MakeMagazineIssuePublishedOnNullable1794540000000 implements MigrationInterface {
   name = 'MakeMagazineIssuePublishedOnNullable1794540000000';

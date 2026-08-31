@@ -10,8 +10,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * route with no `CommunityGovernanceLogService.log` call at all (BE-COM-22).
  * Every neighbouring action (role change, removal, transfer, archive,
  * freeze/unfreeze) already logs.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddCommunityGovernanceSettingsChangedAction1793520200000 implements MigrationInterface {
   name = 'AddCommunityGovernanceSettingsChangedAction1793520200000';

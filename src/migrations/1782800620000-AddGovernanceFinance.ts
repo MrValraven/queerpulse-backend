@@ -7,8 +7,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * frontend's `queerpulse/src/features/governance/governance.data.ts`
  * (`FIN_STATS`/`INCOME`/`EXPENSE`/`EVENTS`) — see
  * `src/governance/governance-finance.seed.ts`. No authoring endpoint.
- *
- * DO NOT RUN — authored for review only, per the task's instructions.
  */
 export class AddGovernanceFinance1782800620000 implements MigrationInterface {
   name = 'AddGovernanceFinance1782800620000';

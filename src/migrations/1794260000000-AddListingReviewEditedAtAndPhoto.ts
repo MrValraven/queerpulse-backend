@@ -37,8 +37,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Fully transactional. Two `ALTER TABLE ... ADD COLUMN`s, one nullable and one
  * with a constant default, which on PostgreSQL 11+ are catalog-only changes
  * with no table rewrite. Same shape as `1794220000000-AddListingServices`.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class AddListingReviewEditedAtAndPhoto1794260000000 implements MigrationInterface {
   name = 'AddListingReviewEditedAtAndPhoto1794260000000';

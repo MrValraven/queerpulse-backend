@@ -184,6 +184,7 @@ pnpm run migration:run                              # apply pending migrations (
 pnpm run migration:revert                           # revert the last migration
 pnpm run migration:generate src/migrations/<Name>   # diff entities -> migration
 pnpm run migration:create   src/migrations/<Name>   # empty migration
+pnpm run migration:reconcile:prod                   # repair renamed ledger rows (deploy step)
 pnpm run migration:run:prod                         # apply migrations from compiled dist/
 pnpm run seed                                       # local fixture members (refuses NODE_ENV=production)
 ```
@@ -239,12 +240,14 @@ pnpm run test:e2e
 
 ## Deployment
 
-Order matters: **build → preflight → migrate → apply bucket CORS → start**.
+Order matters: **build → preflight → reconcile ledger → migrate → apply bucket
+CORS → start**.
 
 ```bash
 pnpm install --frozen-lockfile
 pnpm run build
 pnpm run migration:preflight       # drop leftover INVALID indexes (see below)
+pnpm run migration:reconcile:prod  # repair renamed ledger rows (see below)
 pnpm run migration:run:prod        # apply migrations against the target DB
 pnpm run storage:cors              # apply the bucket's browser-CORS policy
 pnpm run start:prod                # node dist/main
@@ -267,6 +270,30 @@ touched) and idempotent, so it's safe to leave in the deploy chain unconditional
 — it also skips cleanly when `DATABASE_URL` is unset. Note these migrations do
 **not** use `IF NOT EXISTS` to self-heal; per the migrations note above, that
 would hide genuine schema drift, so recovery lives in the preflight instead.
+
+`migration:reconcile:prod` repairs migration-ledger rows recorded under a class
+name no build carries any more. An applied migration's `name` is frozen history
+(see the migrations note above), but a rename has shipped once, so seven ledger
+rows in production were left pointing at names that no longer exist. TypeORM
+identifies a migration solely by that string, so `migration:run:prod` reads those
+rows as seven *pending* migrations and re-runs their `up()` against a schema that
+already has the change: the first of them fails on `ALTER TABLE "topics" ADD
+"archived_at"` and wedges the whole chain, and forcing past that failure would
+re-run a backfill that resurrects saved lists members have deleted. The repair
+belongs in the ledger, so this step renames the rows before the CLI ever looks at
+them. The list is in `src/database/renamed-migrations.ts` and is closed: give a
+new migration a unique timestamp rather than adding to it. It is idempotent and a
+no-op on any database that never held the old names, including every fresh one,
+and it skips cleanly when `DATABASE_URL` is unset. The app's boot path runs the
+same repair under the same advisory lock, which is what covers environments with
+no pre-deploy step at all (`docker compose up`, a bare `start:prod`).
+
+`migration:preflight`, `migration:reconcile:prod` and the boot-time catch-up all
+take the same Postgres advisory lock (`src/database/migration-lock.ts`), so no
+two of them can touch the ledger or an in-flight `CREATE INDEX CONCURRENTLY` at
+the same time. That lock, rather than any `pg_index` predicate, is what makes the
+invalid-index sweep safe: a healthy concurrent build is indistinguishable in the
+catalog from the debris of a dead one for almost all of its life.
 
 `storage:cors` applies the object-storage bucket's CORS policy (so the browser
 can PUT directly to presigned upload URLs). It's a provisioning step, not app
@@ -292,8 +319,9 @@ Or build just the image (multi-stage; runs `node dist/main`):
 ```bash
 docker build -t queerpulse-backend .
 docker run --rm -p 3000:3000 --env-file .env queerpulse-backend
-# preflight + migrate + apply CORS first:
+# preflight + reconcile ledger + migrate + apply CORS first:
 #   docker run --rm --env-file .env queerpulse-backend npm run migration:preflight
+#   docker run --rm --env-file .env queerpulse-backend npm run migration:reconcile:prod
 #   docker run --rm --env-file .env queerpulse-backend npm run migration:run:prod
 #   docker run --rm --env-file .env queerpulse-backend npm run storage:cors
 ```

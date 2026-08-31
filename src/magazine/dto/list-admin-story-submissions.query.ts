@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, Min } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, Max, Min } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 import { SubmissionStatus } from '../entities/magazine-story-submission.entity';
 
 /** Query for the admin magazine-submission oversight list: paginated,
@@ -9,6 +10,7 @@ export class ListAdminStorySubmissionsQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 
   @IsOptional()

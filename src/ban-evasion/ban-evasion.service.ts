@@ -38,7 +38,7 @@ export interface RecordRemovedAccountInput {
  * Assembling both into the same shape keeps one matcher instead of two that
  * could drift apart.
  */
-interface SubjectCorrelationMaterial {
+export interface SubjectCorrelationMaterial {
   subjectId: string;
   /**
    * A removed-account row for this very account is not evidence about it. Set
@@ -204,39 +204,93 @@ export class BanEvasionService {
   }
 
   /**
-   * Score one account that already exists, for the case where someone got in
-   * and staff are now asking whether this is a return. Same signals as a join
-   * request plus the OAuth subject, which a stranger's application cannot
-   * carry.
+   * Assemble the correlation material for a batch of accounts that already
+   * exist, in a fixed number of queries however many accounts are asked about.
+   *
+   * PUBLIC because two readers need the SAME material: `assessUsers` below, and
+   * `CommunityBanEvasionService`, which scores the identical subject against a
+   * community-narrowed set of rows. Assembling it in one place is what stops a
+   * moderator and a staff member forming two different ideas of who an
+   * applicant is.
+   *
+   * A user id with no account row yields nothing, so the caller sees a shorter
+   * array rather than a subject with every hash null.
    */
-  async assessUser(userId: string): Promise<BanEvasionAssessmentDTO> {
+  async correlationMaterialForUsers(
+    userIds: string[],
+  ): Promise<SubjectCorrelationMaterial[]> {
+    if (!userIds.length) return [];
     const pepper = this.pepper();
 
-    const user = await this.users.findOne({
-      where: { id: userId },
+    const accounts = await this.users.find({
+      where: { id: In(userIds) },
+      // `email` and `googleId` are `select: false` on the entity, so they are
+      // named explicitly. They are read, hashed, and dropped.
       select: { id: true, email: true, googleId: true },
     });
-    if (!user) return toBanEvasionAssessment(userId, []);
+    if (!accounts.length) return [];
 
-    const invite = await this.invites.findOne({
-      where: { acceptedBy: userId },
+    const accountIds = accounts.map((account) => account.id);
+    // The invite each account came in on carries the inviter. Ordered newest
+    // first, so the first row seen for an account is the one to keep.
+    const invites = await this.invites.find({
+      where: { acceptedBy: In(accountIds) },
       order: { usedAt: 'DESC' },
     });
-    const joinRequest = invite
-      ? await this.joinRequests.findOne({ where: { inviteId: invite.id } })
-      : null;
+    const inviteByUserId = new Map<string, Invite>();
+    for (const invite of invites) {
+      const acceptedBy = invite.acceptedBy;
+      if (!acceptedBy || inviteByUserId.has(acceptedBy)) continue;
+      inviteByUserId.set(acceptedBy, invite);
+    }
 
-    const [assessment] = await this.assessSubjects([
-      {
-        subjectId: userId,
-        ownRemovedUserId: userId,
-        emailHash: hashEmailIdentifier(user.email, pepper),
-        oauthSubjectHash: hashOauthSubject(user.googleId, pepper),
-        statedNameHash: hashStatedName(joinRequest?.name ?? null, pepper),
+    const inviteIds = [...inviteByUserId.values()].map((invite) => invite.id);
+    const platformRequests = inviteIds.length
+      ? await this.joinRequests.find({ where: { inviteId: In(inviteIds) } })
+      : [];
+    const platformRequestByInviteId = new Map<string, PlatformJoinRequest>();
+    for (const platformRequest of platformRequests) {
+      if (!platformRequest.inviteId) continue;
+      platformRequestByInviteId.set(platformRequest.inviteId, platformRequest);
+    }
+
+    return accounts.map((account) => {
+      const invite = inviteByUserId.get(account.id) ?? null;
+      const platformRequest = invite
+        ? (platformRequestByInviteId.get(invite.id) ?? null)
+        : null;
+      return {
+        subjectId: account.id,
+        ownRemovedUserId: account.id,
+        emailHash: hashEmailIdentifier(account.email, pepper),
+        oauthSubjectHash: hashOauthSubject(account.googleId, pepper),
+        statedNameHash: hashStatedName(platformRequest?.name ?? null, pepper),
         inviterUserId: invite?.inviterId ?? null,
-        referenceUserId: joinRequest?.referenceUserId ?? null,
-      },
-    ]);
+        referenceUserId: platformRequest?.referenceUserId ?? null,
+      };
+    });
+  }
+
+  /**
+   * Score a batch of accounts that already exist. Same signals as a join
+   * request plus the OAuth subject, which a stranger's application cannot
+   * carry.
+   *
+   * Batched because the staff escalation queue assesses a page of applicants at
+   * once, and a per-row call would put an N+1 on the console this module exists
+   * to serve.
+   */
+  async assessUsers(userIds: string[]): Promise<BanEvasionAssessmentDTO[]> {
+    const subjects = await this.correlationMaterialForUsers(userIds);
+    return this.assessSubjects(subjects);
+  }
+
+  /**
+   * Score one account that already exists, for the case where someone got in
+   * and staff are now asking whether this is a return.
+   */
+  async assessUser(userId: string): Promise<BanEvasionAssessmentDTO> {
+    const [assessment] = await this.assessUsers([userId]);
     return assessment ?? toBanEvasionAssessment(userId, []);
   }
 
@@ -401,8 +455,13 @@ function unique(values: (string | null)[]): string[] {
  *
  * Every branch is an exact match on material the product already holds. Nothing
  * here is a similarity score or a guess about who someone is.
+ *
+ * Exported so `CommunityBanEvasionService` can run the SAME matcher over a
+ * narrowed set of rows. There is one matcher on purpose: a second copy scoped
+ * to a community would drift from this one, and a moderator and a staff member
+ * looking at the same applicant would then be reading two different answers.
  */
-function matchKinds(
+export function matchKinds(
   subject: SubjectCorrelationMaterial,
   row: RemovedAccountSignal,
 ): BanEvasionSignalKind[] {

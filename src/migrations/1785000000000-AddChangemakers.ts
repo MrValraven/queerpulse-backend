@@ -5,8 +5,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `changemaker_directory_settings` (the two admin-set hero stats), backing the
  * real-data Change Makers feature. See
  * `queerpulse/docs/superpowers/specs/2026-07-22-changemakers-real-data-design.md`.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddChangemakers1785000000000 implements MigrationInterface {
   name = 'AddChangemakers1785000000000';

@@ -8,8 +8,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `src/content/entities/topic.entity.ts` for why it isn't a `content_pages`
  * row). Both are seeded from the frontend mock (see `src/content/content.seed.ts`)
  * with no authoring endpoint.
- *
- * DO NOT RUN — authored for review only, per the task's instructions.
  */
 export class AddContentPages1782800530000 implements MigrationInterface {
   name = 'AddContentPages1782800530000';

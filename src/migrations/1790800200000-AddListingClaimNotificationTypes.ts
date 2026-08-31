@@ -9,8 +9,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * only, never used in the same transaction, so this is safe inside the
  * migration transaction on PostgreSQL 12+. `down()` is a documented no-op;
  * Postgres cannot drop an enum value.
- *
- * DO NOT RUN. Authored for review only; the maintainer runs migrations.
  */
 export class AddListingClaimNotificationTypes1790800200000 implements MigrationInterface {
   name = 'AddListingClaimNotificationTypes1790800200000';

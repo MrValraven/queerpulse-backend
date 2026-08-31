@@ -51,7 +51,7 @@ export class CommunityBansController {
   })
   @ApiOkResponse({
     description:
-      "The community's ban list, newest first, with its current house rules for the citation picker.",
+      "The community's ban list, newest first, with its current house rules for the citation picker. Each entry says whether a permanent bar is waiting on a second signature.",
   })
   @ApiForbiddenResponse({
     description: 'Owner, co-owner or moderator role required.',
@@ -67,12 +67,18 @@ export class CommunityBansController {
   @Throttle({ default: { limit: 20, ttl: seconds(60) } })
   @ApiOperation({
     summary:
-      'Revise a ban in place: give it an end date, make it permanent again, rewrite the reason, or cite a house rule.',
+      'Revise a ban in place: give it an end date, ask for it to be made permanent, rewrite the reason, or cite a house rule.',
+    description:
+      '`makePermanent` PROPOSES the permanent bar to a second owner, co-owner ' +
+      'or moderator (PRD-25) rather than applying it. The end date stays where ' +
+      'it is until somebody signs on ' +
+      '`PATCH /communities/:slug/ban-ratifications/:id`, and the response ' +
+      'carries `isPendingRatification` and `ratificationId`.',
   })
   @ApiOkResponse({ description: 'The revised ban.' })
   @ApiBadRequestResponse({
     description:
-      "Contradictory fields (an end date with `makePermanent`, or a rule with `clearRule`), a rule index outside the community's current rules, or an empty body.",
+      "Contradictory fields (an end date with `makePermanent`, or a rule with `clearRule`), a rule index outside the community's current rules, an empty body, or a `makePermanent` this community has nobody else who could sign.",
   })
   @ApiForbiddenResponse({
     description: 'Owner, co-owner or moderator role required.',

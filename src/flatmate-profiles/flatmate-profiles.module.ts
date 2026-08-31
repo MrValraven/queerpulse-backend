@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ContentModerationModule } from '../content-moderation/content-moderation.module';
 import { MessagingModule } from '../messaging/messaging.module';
 import { SocialModule } from '../social/social.module';
 import { UsersModule } from '../users/users.module';
@@ -21,6 +22,11 @@ import { FlatmateProfilesService } from './flatmate-profiles.service';
     SocialModule, // exports BlockFilterService (block severance on detail-by-slug)
     VerificationModule, // step-up gating + honest badge hydration
     AffirmingPledgeModule, // mandatory LGBTQ+ affirming pledge gate (upsert/hello)
+    // Exports ContentModerationService: `hide_content`/`remove_content` on a
+    // `flatmate` subject withholds the profile from browse, detail, the
+    // discovery deck and "say hello". No cycle: ContentModerationModule imports
+    // nothing but TypeOrmModule.
+    ContentModerationModule,
   ],
   controllers: [FlatmateProfilesController, FlatmateDirectoryController],
   providers: [

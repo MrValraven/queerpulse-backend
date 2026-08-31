@@ -23,8 +23,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * moderator account must not take the content with it, and must not leave a
  * dangling uuid either. No index — the column is only ever read on a row
  * already loaded by primary key, never filtered on.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddContentTombstoneActor1793520000000 implements MigrationInterface {
   name = 'AddContentTombstoneActor1793520000000';

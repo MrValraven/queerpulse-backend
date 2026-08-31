@@ -12,8 +12,8 @@ import {
 } from '@nestjs/swagger';
 
 // Always-on member primitive (no @Feature flag) — mirrors the FE's staff.api.ts
-// exactly: `GET /platform/staff`, consumed by `useStaffRole` to badge moderators
-// and admins across the app.
+// exactly: `GET /platform/staff`, consumed by `useStaffRole` to badge moderators,
+// admins and the holders of a badge-earning staff grant across the app.
 @ApiTags('Platform Staff')
 @ApiCookieAuth()
 @Controller('platform/staff')
@@ -26,8 +26,14 @@ export class PlatformStaffController {
   // people holding moderation power — the frontend enforces the same rule in
   // `useStaffMap`, and this guard is what makes that more than a client-side
   // courtesy.
-  @ApiOperation({ summary: 'List the platform moderators and admins.' })
-  @ApiOkResponse({ description: 'The staff roster (moderators and admins).' })
+  @ApiOperation({
+    summary:
+      'List the platform moderators, admins and badge-earning grant holders.',
+  })
+  @ApiOkResponse({
+    description:
+      'The staff roster: the moderator and admin tiers, plus every member holding an additive grant that earns a badge.',
+  })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @ApiForbiddenResponse({ description: 'Not an active member.' })
   @Get()

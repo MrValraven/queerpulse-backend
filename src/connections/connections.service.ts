@@ -34,10 +34,13 @@ import {
   ConnectionCounts,
   ConnectionListItem,
   ConnectionRelationship,
+  ConnectionRelationshipSlugs,
+  IncomingConnectionRef,
   VouchBadge,
   toConnectionListItem,
 } from './connection-response';
 import { Connection, ConnectionStatus } from './entities/connection.entity';
+import { ConnectionDecline } from './entities/connection-decline.entity';
 import { ConnectionNote } from './entities/connection-note.entity';
 import { Paginated, PAGE_SIZE, normalizePage } from '../common/pagination';
 import { escapeLikeTerm } from '../common/like-escape';
@@ -71,6 +74,35 @@ export interface ConnectionListOptions {
  */
 const MUTUAL_SORT_MAX = 300;
 
+/**
+ * How long a refused requester must wait before asking the SAME member again,
+ * indexed by how many times that member has already declined them (PRD-20).
+ *
+ * A first "no" is often "not right now", so it is a pause rather than a wall:
+ * two weeks is long enough that asking again is a considered act instead of a
+ * reflex, short enough that a genuine reconnection is still possible. A second
+ * refusal arrives after the requester already waited out the first one, which
+ * makes it a much clearer answer, so it costs three months. The back-off is
+ * deliberate: each repeat is a stronger signal and should be priced like one.
+ */
+const DECLINE_COOLDOWN_DAYS = [14, 90] as const;
+
+/**
+ * How many refusals from the same member end the requests permanently.
+ *
+ * Three "no"s from one person is a durable answer, and the member who gave
+ * them should not have to keep re-declining forever, nor reach for Block (a
+ * heavier, mutual severance) just to be left alone. Past this the requester
+ * cannot open a new request at all.
+ *
+ * This caps ONE DIRECTION. The member who declined may still send their own
+ * request whenever they like, and accepting one clears the record, so the cap
+ * closes a channel rather than severing the pair.
+ */
+const DECLINE_REQUEST_CAP = 3;
+
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
+
 /** The relationship for a member the viewer shares nothing with (yet). */
 const NO_RELATIONSHIP: ConnectionRelationship = {
   mutuals: 0,
@@ -84,6 +116,8 @@ export class ConnectionsService {
     private readonly connections: Repository<Connection>,
     @InjectRepository(ConnectionNote)
     private readonly connectionNotes: Repository<ConnectionNote>,
+    @InjectRepository(ConnectionDecline)
+    private readonly connectionDeclines: Repository<ConnectionDecline>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
     private readonly vouchService: VouchService,
     private readonly eventEmitter: EventEmitter2,
@@ -134,8 +168,32 @@ export class ConnectionsService {
         case ConnectionStatus.Accepted:
           throw new ConflictException('You are already connected');
         case ConnectionStatus.Pending:
+          // PRD-03. Which way the pending request points changes what the
+          // requester is being told, so the two directions get two different
+          // messages. Their OWN outgoing request keeps the original wording;
+          // a request the OTHER member sent THEM says so, because the previous
+          // single message drove the client's "you've already reached out"
+          // panel and that is the opposite of what had happened. Discloses
+          // nothing: this member is the addressee of that request, so it is
+          // already in their bell and on their connections page.
+          //
+          // The masked cases stay masked. A block by the other party (above)
+          // and a decline hold (below) both keep throwing the unchanged
+          // 'A request is already pending', which is what makes them
+          // indistinguishable from one another.
+          if (existing.addresseeId === requesterId) {
+            throw new ConflictException(
+              'This member has already asked to connect with you',
+            );
+          }
           throw new ConflictException('A request is already pending');
         case ConnectionStatus.Declined: {
+          // PRD-20. A refusal now holds: this throws while the cooldown for
+          // this direction is running, and permanently once the cap is hit.
+          const { hasPriorDecline } = await this.assertRequestNotOnDeclineHold(
+            requesterId,
+            addresseeId,
+          );
           const gate = await this.resolveRequestGate(
             requesterId,
             target,
@@ -146,8 +204,14 @@ export class ConnectionsService {
           existing.requesterId = requesterId;
           existing.addresseeId = addresseeId;
           existing.status = ConnectionStatus.Pending;
-          existing.requestMessage = message ?? null;
-          existing.requestReason = reason ?? null;
+          existing.requestMessage = this.messageAfterDecline(
+            message,
+            hasPriorDecline,
+          );
+          existing.requestReason = this.messageAfterDecline(
+            reason,
+            hasPriorDecline,
+          );
           existing.respondedAt = null;
           existing.blockedBy = null;
           existing.introducedBy = gate.introducedBy;
@@ -159,6 +223,14 @@ export class ConnectionsService {
       }
     }
 
+    // Also gated on the fresh-create path, deliberately. `remove` DELETEs a
+    // declined pair row, so "decline, delete, ask again" would otherwise walk
+    // straight past a guard that only ran on the re-open branch. The decline
+    // record outlives the edge, so both paths meet the same hold.
+    const { hasPriorDecline } = await this.assertRequestNotOnDeclineHold(
+      requesterId,
+      addresseeId,
+    );
     const gate = await this.resolveRequestGate(
       requesterId,
       target,
@@ -172,8 +244,8 @@ export class ConnectionsService {
       userLow: low,
       userHigh: high,
       status: ConnectionStatus.Pending,
-      requestMessage: message ?? null,
-      requestReason: reason ?? null,
+      requestMessage: this.messageAfterDecline(message, hasPriorDecline),
+      requestReason: this.messageAfterDecline(reason, hasPriorDecline),
       introducedBy: gate.introducedBy,
       flagged: gate.flagged,
     });
@@ -278,6 +350,100 @@ export class ConnectionsService {
     return { introducedBy: introducerId, flagged: false };
   }
 
+  /**
+   * PRD-20. Refuse a new request from `requesterId` to `addresseeId` while a
+   * previous refusal still holds, and refuse it for good once this addressee
+   * has declined this requester {@link DECLINE_REQUEST_CAP} times.
+   *
+   * THE REFUSAL IS SILENT ON PURPOSE. Both branches throw the exact
+   * `'A request is already pending'` conflict the file already uses for "the
+   * other member blocked you", so a cooldown, a cap and a block are one
+   * indistinguishable answer. Saying "you have been declined twice" would hand
+   * the requester a running report of a decision the decliner never chose to
+   * share: today a decline reveals only that the outgoing request quietly went
+   * away, and that is exactly as much as this keeps revealing.
+   *
+   * Returns whether ANY prior decline exists in this direction, which decides
+   * whether the request may still carry the requester's own words.
+   */
+  private async assertRequestNotOnDeclineHold(
+    requesterId: string,
+    addresseeId: string,
+  ): Promise<{ hasPriorDecline: boolean }> {
+    const record = await this.connectionDeclines.findOne({
+      where: { requesterId, addresseeId },
+    });
+    if (!record) {
+      return { hasPriorDecline: false };
+    }
+    if (record.declineCount >= DECLINE_REQUEST_CAP) {
+      throw new ConflictException('A request is already pending');
+    }
+    const cooldownDays =
+      DECLINE_COOLDOWN_DAYS[
+        Math.min(record.declineCount, DECLINE_COOLDOWN_DAYS.length) - 1
+      ]!;
+    const reopensAt = new Date(
+      new Date(record.lastDeclinedAt).getTime() +
+        cooldownDays * MILLISECONDS_PER_DAY,
+    );
+    if (reopensAt.getTime() > Date.now()) {
+      throw new ConflictException('A request is already pending');
+    }
+    return { hasPriorDecline: true };
+  }
+
+  /**
+   * The requester's own words, dropped once this member has declined them.
+   *
+   * WHY DROP RATHER THAN 400. `requestMessage` (2000 chars) and the
+   * `custom:<label>` form of `requestReason` (200 chars) are free text that the
+   * addressee is shown. Carrying them into a re-request after a refusal makes
+   * the request note a message channel that survives being told no, which is
+   * the actual harm here: the point of asking again should be to ask again, so
+   * a re-request after a decline is the bare question and nothing attached.
+   *
+   * It is dropped silently rather than rejected because a 400 saying "you may
+   * not include a message" would itself announce the decline, undoing the
+   * quiet that {@link assertRequestNotOnDeclineHold} is protecting. The
+   * addressee still sees who is asking, and can accept, decline, or block.
+   */
+  private messageAfterDecline(
+    text: string | undefined,
+    hasPriorDecline: boolean,
+  ): string | null {
+    if (hasPriorDecline) {
+      return null;
+    }
+    return text ?? null;
+  }
+
+  /**
+   * Record one refusal of `requesterId` by `addresseeId`, inside the caller's
+   * transaction so a decline can never commit without the count that guards it.
+   *
+   * Written as a raw upsert because the increment has to read the stored value
+   * in the same statement (`decline_count + 1`); a read-then-write pair would
+   * lose a count to a concurrent decline, and TypeORM's `orUpdate` can only
+   * overwrite with the incoming values.
+   */
+  private async recordDecline(
+    manager: EntityManager,
+    requesterId: string,
+    addresseeId: string,
+    declinedAt: Date,
+  ): Promise<void> {
+    await manager.query(
+      `INSERT INTO "connection_declines"
+         ("requester_id", "addressee_id", "decline_count", "last_declined_at")
+       VALUES ($1, $2, 1, $3)
+       ON CONFLICT ("requester_id", "addressee_id") DO UPDATE
+         SET "decline_count" = "connection_declines"."decline_count" + 1,
+             "last_declined_at" = EXCLUDED."last_declined_at"`,
+      [requesterId, addresseeId, declinedAt],
+    );
+  }
+
   async respond(
     connectionId: string,
     actorId: string,
@@ -309,17 +475,42 @@ export class ConnectionsService {
             ? ConnectionStatus.Accepted
             : ConnectionStatus.Declined;
         const respondedAt = new Date();
-        // Conditional claim: only one responder flips it out of pending. A
-        // concurrent accept/decline sees affected === 0 and loses, so
-        // CONNECTION_ACCEPTED (which materializes the conversation, §7) fires
-        // exactly once.
-        const claim = await this.connections.update(
-          { id: conn.id, status: ConnectionStatus.Pending },
-          { status: newStatus, respondedAt },
-        );
-        if (claim.affected !== 1) {
-          throw new ConflictException('There is no pending request');
-        }
+        // One transaction so the status flip and the decline ledger cannot
+        // disagree (PRD-20). A decline that committed without its
+        // `connection_declines` row would leave the pair with no cooldown at
+        // all, which is precisely the hole this closes; a rollback here simply
+        // leaves the request pending, which the addressee can retry.
+        await this.dataSource.transaction(async (manager) => {
+          // Conditional claim: only one responder flips it out of pending. A
+          // concurrent accept/decline sees affected === 0 and loses, so
+          // CONNECTION_ACCEPTED (which materializes the conversation, §7) fires
+          // exactly once.
+          const claim = await manager.update(
+            Connection,
+            { id: conn.id, status: ConnectionStatus.Pending },
+            { status: newStatus, respondedAt },
+          );
+          if (claim.affected !== 1) {
+            throw new ConflictException('There is no pending request');
+          }
+          if (action === 'decline') {
+            await this.recordDecline(
+              manager,
+              conn.requesterId,
+              conn.addresseeId,
+              respondedAt,
+            );
+            return;
+          }
+          // Accepting resolves the history in BOTH directions. A connection
+          // both members ended up wanting settles whatever the earlier
+          // refusals were about, so if they ever part the count starts from
+          // nothing rather than from a hold neither of them remembers.
+          await manager.delete(ConnectionDecline, [
+            { requesterId: conn.requesterId, addresseeId: conn.addresseeId },
+            { requesterId: conn.addresseeId, addresseeId: conn.requesterId },
+          ]);
+        });
         conn.status = newStatus;
         conn.respondedAt = respondedAt;
         if (action === 'accept') {
@@ -953,6 +1144,74 @@ export class ConnectionsService {
     return counterpartUserIds
       .map((counterpartUserId) => profilesByUserId.get(counterpartUserId)?.slug)
       .filter((slug): slug is string => typeof slug === 'string');
+  }
+
+  /**
+   * Every relationship the viewer holds, in one call (PRD-03): accepted
+   * connections, requests waiting for their answer, and requests they sent.
+   *
+   * Supersedes `getAcceptedConnectionSlugs` for the client store, which only
+   * ever learned about the accepted half. A member with a request waiting from
+   * somebody was shown "Say hello" on that person's profile and had the send
+   * refused, because the only relationship signal the app had was "connected or
+   * not". `incoming` carries the connection id as well as the slug, so the
+   * profile can answer the request where it is read.
+   *
+   * ONE query, uncapped, selecting four columns. Uncapped because a truncated
+   * set here is a wrong answer rather than a short list: the one relationship
+   * that fell off the end is exactly the one whose profile would then offer the
+   * wrong action. A member's accepted-plus-pending edge count is small by
+   * design here (this platform has no follower graph), and both the accepted
+   * and the pending lookups this replaces already ran per session.
+   *
+   * Declined and blocked pairs are deliberately absent. A decline hold is
+   * silent by design (see `assertRequestNotOnDeclineHold`) and a block by the
+   * other party is masked, so neither may be inferable from what this returns.
+   */
+  async getRelationshipSlugs(
+    userId: string,
+  ): Promise<ConnectionRelationshipSlugs> {
+    const wanted = In([ConnectionStatus.Accepted, ConnectionStatus.Pending]);
+    const rows = await this.connections.find({
+      where: [
+        { requesterId: userId, status: wanted },
+        { addresseeId: userId, status: wanted },
+      ],
+      select: {
+        id: true,
+        status: true,
+        requesterId: true,
+        addresseeId: true,
+      },
+    });
+    if (rows.length === 0) {
+      return { connected: [], incoming: [], sent: [] };
+    }
+    const counterpartIds = rows.map((row) =>
+      row.requesterId === userId ? row.addresseeId : row.requesterId,
+    );
+    const profilesByUserId = await this.profilesByUserIds(counterpartIds);
+    const connected: string[] = [];
+    const incoming: IncomingConnectionRef[] = [];
+    const sent: string[] = [];
+    for (const row of rows) {
+      const counterpartId =
+        row.requesterId === userId ? row.addresseeId : row.requesterId;
+      // A counterpart whose profile no longer resolves (an erased account) has
+      // no slug for the client to key on, so the edge is simply not reported.
+      const slug = profilesByUserId.get(counterpartId)?.slug;
+      if (!slug) {
+        continue;
+      }
+      if (row.status === ConnectionStatus.Accepted) {
+        connected.push(slug);
+      } else if (row.addresseeId === userId) {
+        incoming.push({ slug, connectionId: row.id });
+      } else {
+        sent.push(slug);
+      }
+    }
+    return { connected, incoming, sent };
   }
 
   // --- internals ---

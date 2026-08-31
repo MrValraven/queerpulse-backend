@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { CommunityMembershipService } from '../communities/community-membership.service';
@@ -16,6 +17,7 @@ import { MediaCropService } from '../media-crops/media-crops.service';
 import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBookmarksService } from './event-bookmarks.service';
 import { EventSeries } from './entities/event-series.entity';
+import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventCohost } from './entities/event-cohost.entity';
 import { EventInvite } from './entities/event-invite.entity';
 import { EventLineupEntry } from './entities/event-lineup-entry.entity';
@@ -82,6 +84,16 @@ describe('EventsService — event lineup (Personas Phase 5, Moment 5)', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         EventsService,
+        // Only `rosterCounts` reads config (the attendance retention window),
+        // so the service's own default stands here.
+        {
+          provide: ConfigService,
+          useValue: {
+            get: jest.fn(
+              (_key: string, defaultValue?: unknown) => defaultValue,
+            ),
+          },
+        },
         { provide: getRepositoryToken(Event), useValue: events },
         { provide: getRepositoryToken(EventCohost), useValue: cohosts },
         { provide: getRepositoryToken(EventRsvp), useValue: {} },
@@ -94,6 +106,10 @@ describe('EventsService — event lineup (Personas Phase 5, Moment 5)', () => {
         // lineup paths never touch is stubbed to its inert default.
         {
           provide: getRepositoryToken(EventSeries),
+          useValue: { find: jest.fn().mockResolvedValue([]) },
+        },
+        {
+          provide: getRepositoryToken(EventAnnouncement),
           useValue: { find: jest.fn().mockResolvedValue([]) },
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },

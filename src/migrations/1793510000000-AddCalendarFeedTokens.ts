@@ -33,8 +33,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * LIVE credential, and a deleted account must not leave a working feed URL
  * behind. The unique index on it is what makes the row a per-member singleton
  * (mint is an upsert on that key).
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddCalendarFeedTokens1793510000000 implements MigrationInterface {
   name = 'AddCalendarFeedTokens1793510000000';

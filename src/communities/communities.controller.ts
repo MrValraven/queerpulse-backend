@@ -31,6 +31,7 @@ import { CreatePostDto } from './dto/create-post.dto';
 import { FreezeCommunityDto } from './dto/freeze-community.dto';
 import { JoinCommunityDto } from './dto/join-community.dto';
 import { ListCommunitiesQuery } from './dto/list-communities.query';
+import { ListJoinRequestsQuery } from './dto/list-join-requests.query';
 import { ReactionDto } from './dto/reaction.dto';
 import { RemoveMemberQuery } from './dto/remove-member.query';
 import { ReplyDto } from './dto/reply.dto';
@@ -48,7 +49,6 @@ import {
   ApiCookieAuth,
   ApiCreatedResponse,
   ApiForbiddenResponse,
-  ApiNoContentResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
@@ -690,19 +690,24 @@ export class CommunitiesController {
   })
   @ApiOkResponse({
     description:
-      'The pending join requests. Each carries the applicant (slug and ' +
-      'pronouns ride on `member`), their stated `involvement`, when their ' +
-      'ACCOUNT was created, how many connections they share with the ' +
-      'reviewing moderator, and how many communities they share with this ' +
-      "community's roster. All of it computed in batch for the whole queue.",
+      'A `{ items, total, page, pageSize }` page of the pending join requests, ' +
+      'oldest first (ENG-41: this used to be a flat array silently capped at ' +
+      '200, which hid the newest arrivals). `total` is the size of the whole ' +
+      'pending queue, so a moderator can see there is more to reach and page ' +
+      'to it. Each item carries the applicant (slug and pronouns ride on ' +
+      '`member`), their stated `involvement`, when their ACCOUNT was created, ' +
+      'how many connections they share with the reviewing moderator, and how ' +
+      "many communities they share with this community's roster. All of it " +
+      'computed in batch for the whole page.',
   })
   @ApiForbiddenResponse({ description: 'Owner or moderator role required.' })
   @ApiNotFoundResponse({ description: 'No community exists for this slug.' })
   listJoinRequests(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
+    @Query() query: ListJoinRequestsQuery,
   ) {
-    return this.communitiesService.listJoinRequests(slug, user.userId);
+    return this.communitiesService.listJoinRequests(slug, user.userId, query);
   }
 
   @Patch(':slug/join-requests/:id')
@@ -738,18 +743,28 @@ export class CommunitiesController {
     });
   }
 
+  // PRD-25: answers 200 with a `CommunityRemovalOutcomeDTO` rather than the
+  // bare 204 it used to. Asking for a permanent bar can now land in three
+  // different places (waiting on a second signature, standing as 30 days
+  // because this community has nobody else who could sign, or unchanged
+  // because a `banDays` term was given), and a caller told nothing would
+  // believe they got the one they asked for. The body carries the outcome
+  // plus one server-owned sentence to show.
   @Delete(':slug/members/:memberSlug')
-  @HttpCode(HttpStatus.NO_CONTENT)
+  @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
       'Remove a member (barring their return unless `allowReturn=true`), or leave the community yourself.',
   })
-  @ApiNoContentResponse({
+  @ApiOkResponse({
     description:
       'The member was removed. Unless `allowReturn=true`, the removal also ' +
       'bars them from re-joining at any access tier. A member removing ' +
       'THEMSELVES is never barred, whatever the query says. `banDays` makes ' +
-      'that bar temporary (absent means permanent), and `ruleIndex` cites one ' +
+      'that bar temporary; ABSENT means permanent, which applies a 30-day bar ' +
+      'at once and opens a hold for a second owner, co-owner or moderator to ' +
+      'sign within 72 hours (a community with no second eligible signatory ' +
+      'keeps the 30-day bar and opens no hold). `ruleIndex` cites one ' +
       "of the community's own house rules as the grounds.",
   })
   @ApiBadRequestResponse({

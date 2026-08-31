@@ -11,6 +11,7 @@ import {
 } from '../common/image-url';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { POSTGRES_UNIQUE_VIOLATION } from '../common/db-errors';
 import { PAGE_SIZE } from '../common/pagination';
 import { Profile } from '../users/entities/profile.entity';
@@ -178,6 +179,7 @@ describe('LandlordsService', () => {
   let affirmingPledge: { requireAccepted: jest.Mock };
   // LOC-19: every staff decision now reaches the member it is about.
   let notifications: { create: jest.Mock };
+  let contentModeration: { stateFor: jest.Mock };
 
   beforeEach(async () => {
     landlords = {
@@ -218,6 +220,9 @@ describe('LandlordsService', () => {
       requireAccepted: jest.fn().mockResolvedValue(undefined),
     };
     notifications = { create: jest.fn().mockResolvedValue(null) };
+    contentModeration = {
+      stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -235,6 +240,7 @@ describe('LandlordsService', () => {
         { provide: VerificationService, useValue: verification },
         { provide: AffirmingPledgeService, useValue: affirmingPledge },
         { provide: NotificationsService, useValue: notifications },
+        { provide: ContentModerationService, useValue: contentModeration },
       ],
     }).compile();
     service = module.get(LandlordsService);
@@ -276,6 +282,36 @@ describe('LandlordsService', () => {
         { hood: 'Arroios' },
       );
     });
+
+    it('drops moderator-taken-down entries in-query, so the page and total agree', async () => {
+      const builder = makePaginatedBuilder([], 0);
+      landlords.createQueryBuilder.mockReturnValue(builder);
+
+      await service.browse({ page: 1 });
+
+      // A NOT EXISTS subquery (no join, so `paginate`'s skip/take stays
+      // correct) bound to the `landlord` subject type, matching hidden OR
+      // removed.
+      // A NOT EXISTS subquery, so no join is added and the offset pagination
+      // above stays correct. Both `hidden_at` and `removed_at` withhold.
+      const takedownParams = { landlordSubjectType: 'landlord' };
+      expect(builder.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('NOT EXISTS'),
+        takedownParams,
+      );
+      expect(builder.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('"content_moderation"'),
+        takedownParams,
+      );
+      expect(builder.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('"cm"."hidden_at" IS NOT NULL'),
+        takedownParams,
+      );
+      expect(builder.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('"cm"."removed_at" IS NOT NULL'),
+        takedownParams,
+      );
+    });
   });
 
   describe('detail', () => {
@@ -283,6 +319,34 @@ describe('LandlordsService', () => {
       landlords.findOne.mockResolvedValue(null);
 
       await expect(service.detail('ghost')).rejects.toThrow(NotFoundException);
+    });
+
+    it('404s a live entry a moderator hid', async () => {
+      landlords.findOne.mockResolvedValue(makeLandlord());
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: false,
+      });
+
+      await expect(service.detail('friendly-landlord')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(contentModeration.stateFor).toHaveBeenCalledWith(
+        'landlord',
+        'friendly-landlord',
+      );
+    });
+
+    it('404s a live entry a moderator removed', async () => {
+      landlords.findOne.mockResolvedValue(makeLandlord());
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: true,
+      });
+
+      await expect(service.detail('friendly-landlord')).rejects.toThrow(
+        NotFoundException,
+      );
     });
 
     it('assembles the detail view with recommendations and a computed rating', async () => {
@@ -335,6 +399,22 @@ describe('LandlordsService', () => {
           text: 'x',
         }),
       ).rejects.toThrow(NotFoundException);
+    });
+
+    it('404s a taken-down entry, so it collects no new public rating', async () => {
+      landlords.findOne.mockResolvedValue(makeLandlord());
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: false,
+      });
+
+      await expect(
+        service.recommend('friendly-landlord', 'author-1', {
+          stars: 5,
+          text: 'x',
+        }),
+      ).rejects.toThrow(NotFoundException);
+      expect(recommendations.save).not.toHaveBeenCalled();
     });
 
     it('inserts a fresh recommendation when the author has none', async () => {
@@ -404,6 +484,21 @@ describe('LandlordsService', () => {
       await expect(
         service.createIntroRequest('ghost', 'user-1', { name: 'Sam' }),
       ).rejects.toThrow(NotFoundException);
+    });
+
+    it('404s a taken-down entry, so it collects no new intro request', async () => {
+      landlords.findOne.mockResolvedValue(makeLandlord());
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: true,
+      });
+
+      await expect(
+        service.createIntroRequest('friendly-landlord', 'user-1', {
+          name: 'Sam',
+        }),
+      ).rejects.toThrow(NotFoundException);
+      expect(introRequests.save).not.toHaveBeenCalled();
     });
 
     it('stores the intro request and returns its id and status', async () => {

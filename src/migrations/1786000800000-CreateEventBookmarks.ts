@@ -10,8 +10,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * this user bookmarked?" batch lookup; `IDX_event_bookmarks_event_id` supports
  * the event-side join / cascade. Both FKs cascade on delete, matching the
  * events family (`event_cohosts` / `event_rsvps` / `event_invites`).
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class CreateEventBookmarks1786000800000 implements MigrationInterface {
   name = 'CreateEventBookmarks1786000800000';

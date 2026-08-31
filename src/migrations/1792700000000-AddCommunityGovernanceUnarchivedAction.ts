@@ -6,8 +6,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `unarchive` action (`POST /admin/communities/:slug/unarchive`), and that
  * action needs its own audit-trail entry, symmetric with the existing
  * `archived`/`frozen`/`unfrozen` values.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddCommunityGovernanceUnarchivedAction1792700000000 implements MigrationInterface {
   name = 'AddCommunityGovernanceUnarchivedAction1792700000000';

@@ -96,10 +96,20 @@ const REASON_LABELS: Record<ReasonCode, string> = {
  * `../report-severity.ts`) — the reporter never chooses it.
  */
 const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
+  // `hate_speech` sits right after `harassment` on every subject that offers
+  // both (`post`, `reply`, `message`, `community`, `magazine_comment`), and it
+  // belongs on the person-shaped subjects for the same reason it belongs on
+  // their words: a member who uses a slur was, until now, filable only as
+  // `discrimination`. The severity band is identical either way, so nothing
+  // about the response changes. What changes is the taxonomy the moderation
+  // queue and the transparency report are counted from, which previously said
+  // the platform receives hate-speech reports about posts and none about
+  // people.
   [ReportSubjectType.Member]: [
     'outing',
     'doxxing',
     'harassment',
+    'hate_speech',
     'unwanted_contact',
     'impersonation',
     'discrimination',
@@ -141,8 +151,33 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'spam',
     'other',
   ],
-  [ReportSubjectType.Community]: ['hate_speech', 'spam', 'other'],
+  // A whole community, reported by a member or an outsider. Shaped on `Post`,
+  // the closest analogue: a community is a body of user-generated posting, and
+  // the harms it can carry are the harms a post can carry. `outing` and
+  // `doxxing` are the load-bearing additions. A community whose culture is to
+  // name who turned up, or to circulate somebody's address, transition status
+  // or old name, is the shape that needs the one-hour Emergency band, and
+  // before this entry was widened the worst a reporter could say about it was
+  // `hate_speech`, which tops out at Medium.
+  [ReportSubjectType.Community]: [
+    'outing',
+    'doxxing',
+    'harassment',
+    'hate_speech',
+    'discrimination',
+    'spam',
+    'off_topic',
+    'other',
+  ],
+  // `outing` and `doxxing` lead all three housing subjects for the same reason
+  // they lead `Member` and `Message`: a landlord threatening to tell somebody's
+  // family, or a flatmate posting their address, transition status or old name,
+  // is the central physical danger in queer housing, and it is the only thing
+  // here that earns the one-hour Emergency band (see `report-severity.ts`).
+  // Without them a housing report topped out at High.
   [ReportSubjectType.Housing]: [
+    'outing',
+    'doxxing',
     'housing_scam',
     'housing_unsafe',
     'not_affirming',
@@ -152,7 +187,10 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'other',
   ],
   [ReportSubjectType.Flatmate]: [
+    'outing',
+    'doxxing',
     'harassment',
+    'hate_speech',
     'not_affirming',
     'discrimination',
     'impersonation',
@@ -160,9 +198,12 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'other',
   ],
   [ReportSubjectType.Landlord]: [
+    'outing',
+    'doxxing',
     'not_affirming',
     'discrimination',
     'harassment',
+    'hate_speech',
     'impersonation',
     'spam',
     'other',
@@ -228,11 +269,13 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'harassment',
     'other',
   ],
-  // A member subprofile / persona. Person-shaped like `Member`/`Flatmate`:
-  // `harassment`, `impersonation` (a persona impersonating someone),
+  // A member subprofile / persona. Person-shaped like `Member`/`Flatmate`, so
+  // it carries the same set: `harassment`, `hate_speech` (a slur in a persona's
+  // name, bio or pronouns), `impersonation` (a persona impersonating someone),
   // `discrimination`, `spam`, and `other`.
   [ReportSubjectType.Subprofile]: [
     'harassment',
+    'hate_speech',
     'impersonation',
     'discrimination',
     'spam',

@@ -32,8 +32,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * CLAUDE.md ("Duplicate timestamps between migrations are harmless — leave
  * them alone rather than renumbering to break the tie"), that collision is
  * left as-is rather than renumbered.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class CreateResourceGuideRating1793000000000 implements MigrationInterface {
   name = 'CreateResourceGuideRating1793000000000';

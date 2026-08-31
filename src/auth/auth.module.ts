@@ -21,9 +21,11 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { AuthMaintenanceService } from './auth-maintenance.service';
 import { RefreshToken } from './entities/refresh-token.entity';
+import { IdentityRelinkCandidate } from './entities/identity-relink-candidate.entity';
 import { UnderAgeDisclosureService } from './under-age-disclosure.service';
 import { GoogleStrategy } from './strategies/google.strategy';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import { RefreshSessionThrottlerGuard } from './refresh-session-throttler.guard';
 
 @Module({
   imports: [
@@ -84,6 +86,11 @@ import { JwtStrategy } from './strategies/jwt.strategy';
       // branch, via `AuthService.mintReauthToken`) is what writes this row.
       // `AccountService.assertReauth` still owns reading it back.
       AccountReauthToken,
+      // Write-side too (PRD-06): the sign-up path records the Google subject
+      // that presented an existing account's verified address before it rejects
+      // the sign-in. `AdminMembersModule` registers its own copy for the admin
+      // console that decides those rows.
+      IdentityRelinkCandidate,
     ]),
     JwtModule.registerAsync({
       inject: [ConfigService],
@@ -110,6 +117,13 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     UnderAgeDisclosureService,
     GoogleStrategy,
     JwtStrategy,
+    // Registered for the same reason `StorageModule` registers
+    // `UserPresignThrottlerGuard`: the guard resolves under DI either way,
+    // because `ThrottlerModule` is `@Global()`, so listing it here is about
+    // making the enhancer visible to anyone reading the module rather than
+    // about making it work. It throttles `POST /auth/refresh` per refresh
+    // credential instead of per client IP.
+    RefreshSessionThrottlerGuard,
   ],
   exports: [AuthService],
 })

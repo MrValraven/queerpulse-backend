@@ -21,8 +21,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * due_by ASC`, so `(status, due_by)` serves both the filter and the ordering
  * from one index, and the unfiltered "all" tab still walks it in `due_by`
  * order for the leading-column-free scan.
- *
- * DO NOT RUN. Authored for review only; the maintainer runs migrations.
  */
 export class AddDsarOutcome1794570000000 implements MigrationInterface {
   name = 'AddDsarOutcome1794570000000';

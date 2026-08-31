@@ -12,8 +12,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * exactly; one outstanding invite per (event, invitee) pair, inserted with
  * `.orIgnore()`; re-inviting after a decline is out of scope for this pass.
  * Both FKs cascade on delete, matching the rest of the events family.
- *
- * DO NOT RUN. Authored for review only; the maintainer runs migrations.
  */
 export class AddEventCohostInvites1790400000000 implements MigrationInterface {
   name = 'AddEventCohostInvites1790400000000';

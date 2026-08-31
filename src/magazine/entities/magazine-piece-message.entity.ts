@@ -23,6 +23,12 @@ export class MagazinePieceMessage {
   @Column({ type: 'uuid' })
   pieceId!: string;
 
+  // FK-backed as of `AddMagazineDeskAuthorForeignKeys1795810000000` with `ON
+  // DELETE CASCADE`, matching `messages.sender_id`: this thread is private
+  // correspondence between the piece's editor and its writer, so an erased
+  // member's messages go with them rather than staying readable by whoever the
+  // piece is reassigned to. Stays NOT NULL, which is what `fromMe` compares.
+  @Index('IDX_magazine_piece_message_author_id')
   @Column({ type: 'uuid' })
   authorId!: string;
 

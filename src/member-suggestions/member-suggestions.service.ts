@@ -84,7 +84,20 @@ interface ScoredCandidate {
  *   4. anyone a moderator has hidden or removed. The directory does not carry
  *      this gate (it is applied per profile, on open), but pushing a
  *      taken-down member into someone's feed is a different thing from
- *      listing them behind a search.
+ *      listing them behind a search;
+ *   5. anyone who has switched off "Appear in suggested connections"
+ *      (`member_preferences.hide_from_suggestions`, PRD-16). Until that column
+ *      existed the only lever a member had over being recommended to strangers
+ *      was the 24-hour `hidden_until` blackout, which also took them out of
+ *      the member directory. This one is narrower and permanent: they stay
+ *      listed, findable and visible exactly as `profiles.visibility` says, and
+ *      the platform stops walking up to people with them.
+ *
+ * The fifth gate is ONE-DIRECTIONAL. Opting out stops a member being
+ * suggested; it never stops them seeing suggestions. Their own strip is built
+ * from their graph and their own visibility choices, none of which they have
+ * changed, and charging them their own discovery for a privacy decision would
+ * make the switch something members warn each other not to touch.
  */
 @Injectable()
 export class MemberSuggestionsService {
@@ -452,6 +465,25 @@ export class MemberSuggestionsService {
           AND "__suggestion_dismissal"."dismissed_user_id" = "p"."user_id"
       )`,
       { suggestionViewerId: viewerUserId },
+    );
+    // PRD-16: anyone who asked to stop being recommended to strangers.
+    //
+    // IN THE QUERY, on purpose. Scoring an opted-out member and dropping them
+    // afterwards would leave a code path where a mapping change could leak
+    // them, and the whole point of the switch is that it cannot be worked
+    // around from another surface. Here they are never a candidate at all.
+    //
+    // `NOT EXISTS` rather than a join, so the ABSENT ROW resolves correctly:
+    // a member who has never opened Settings has no `member_preferences` row,
+    // `PreferencesService` synthesises the defaults for them, and the default
+    // is recommendable. An inner join would have silently excluded every
+    // member who never touched a setting, which is most of them.
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "member_preferences" "__suggestion_optout"
+        WHERE "__suggestion_optout"."user_id" = "p"."user_id"
+          AND "__suggestion_optout"."hide_from_suggestions" = true
+      )`,
     );
     return qb.getMany();
   }

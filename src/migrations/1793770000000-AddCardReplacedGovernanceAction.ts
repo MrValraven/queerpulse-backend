@@ -18,8 +18,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * Kept separate from and later than `AddMembershipCardCodeVersion` because
  * that one is safely transactional and this one must not be.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddCardReplacedGovernanceAction1793770000000 implements MigrationInterface {
   name = 'AddCardReplacedGovernanceAction1793770000000';

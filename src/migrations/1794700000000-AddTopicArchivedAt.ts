@@ -20,8 +20,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * NO INDEX. The directory is an operating-curated list of tens of rows read in
  * full by `GET /topics`, so the predicate rides along on a sequential scan. An
  * index here would cost writes and save nothing measurable.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class AddTopicArchivedAt1794700000000 implements MigrationInterface {
   name = 'AddTopicArchivedAt1794700000000';

@@ -18,8 +18,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Types1790700000000` — safe inside the migration transaction on
  * PostgreSQL 12+; `down()` for that part is a documented no-op (Postgres
  * cannot drop an enum value).
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddChangemakerNominationTriage1792500100000 implements MigrationInterface {
   name = 'AddChangemakerNominationTriage1792500100000';

@@ -21,8 +21,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * honoured because `data-source.ts` sets `migrationsTransactionMode: 'each'`).
  * `IF NOT EXISTS` keeps it re-run-safe. `down()` is a no-op: Postgres has no
  * `ALTER TYPE ... DROP VALUE`, and the added label is harmless if left.
- *
- * DO NOT RUN — authored for review only, per the task's instructions.
  */
 export class AddTopicNewPostNotificationType1792400100000 implements MigrationInterface {
   name = 'AddTopicNewPostNotificationType1792400100000';

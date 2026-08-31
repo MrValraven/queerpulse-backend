@@ -19,6 +19,7 @@ import {
   TitleStatus,
 } from './entities/cinema-title.entity';
 import { WatchProgress } from './entities/watch-progress.entity';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { MuxService } from './mux.service';
 
 const member: CurrentUserData = {
@@ -76,6 +77,11 @@ describe('CinemaService', () => {
     remove: jest.Mock;
   };
   let progress: { findOne: jest.Mock; find: jest.Mock; upsert: jest.Mock };
+  // The `editorial` staff grant is the second way to reach unpublished titles
+  // (OPS-03), so the service asks this repository whenever the caller's tier
+  // alone does not answer. Defaults to "no grant" and a test that cares about
+  // the grant opts in with `staffRoles.exists.mockResolvedValue(true)`.
+  let staffRoles: { exists: jest.Mock };
   let mux: {
     signPlaybackTokens: jest.Mock;
     deleteAsset: jest.Mock;
@@ -105,6 +111,7 @@ describe('CinemaService', () => {
         .mockImplementation((t: CinemaTitle) => Promise.resolve(t)),
       remove: jest.fn().mockResolvedValue(undefined),
     };
+    staffRoles = { exists: jest.fn().mockResolvedValue(false) };
     progress = {
       findOne: jest.fn().mockResolvedValue(null),
       find: jest.fn().mockResolvedValue([]),
@@ -142,6 +149,7 @@ describe('CinemaService', () => {
         CinemaService,
         { provide: getRepositoryToken(CinemaTitle), useValue: titles },
         { provide: getRepositoryToken(WatchProgress), useValue: progress },
+        { provide: getRepositoryToken(UserStaffRole), useValue: staffRoles },
         { provide: MuxService, useValue: mux },
         { provide: DataSource, useValue: dataSource },
       ],

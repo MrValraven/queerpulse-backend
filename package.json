@@ -11,7 +11,7 @@
     "pnpm": ">=9.0.0"
   },
   "scripts": {
-    "build": "node scripts/check-migration-timestamps.mjs && nest build",
+    "build": "node scripts/check-migration-timestamps.mjs && node scripts/check-migration-lock-key.mjs && nest build",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "start:dev": "nest start --watch",
@@ -29,10 +29,12 @@
     "migration:revert": "pnpm run typeorm migration:revert",
     "migration:create": "typeorm-ts-node-commonjs migration:create",
     "migration:preflight": "node scripts/migration-preflight.mjs",
+    "migration:reconcile:prod": "node dist/database/reconcile-renamed-migrations-cli.js",
     "migration:run:prod": "typeorm -d dist/data-source.js migration:run",
     "migration:revert:prod": "typeorm -d dist/data-source.js migration:revert",
     "storage:cors": "node scripts/set-bucket-cors.mjs",
     "seed": "ts-node -r tsconfig-paths/register src/database/seed.ts",
+    "recognition:rebase": "ts-node -r tsconfig-paths/register src/recognition/recognition-xp-rebase-cli.ts",
     "seed:safe-spaces": "ts-node -r tsconfig-paths/register src/database/seed-safe-spaces.ts"
   },
   "dependencies": {

@@ -9,6 +9,7 @@ import { isUniqueViolation } from '../common/db-errors';
 import { Repository } from 'typeorm';
 import { MemberLookup } from '../common/member-ref';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
@@ -49,7 +50,20 @@ export class FlatmateProfilesService {
     private readonly messaging: MessagingService,
     private readonly verification: VerificationService,
     private readonly affirmingPledge: AffirmingPledgeService,
+    // A profile under a `flatmate` takedown cannot be greeted through its slug.
+    private readonly contentModeration: ContentModerationService,
   ) {}
+
+  /** The subject code a flatmate profile is reported and taken down under,
+   *  keyed by the profile slug. Same value `FlatmateDirectoryService` filters
+   *  browse and detail on.
+   *
+   *  Deliberately NOT applied to `getMine`/`upsertMine`/`deleteMine`: those are
+   *  the owner's own management routes, and the housing precedent
+   *  (`HousingDirectoryService`) keeps a takedown on the public reads while the
+   *  owner keeps managing their row. A member whose profile was taken down can
+   *  still see and edit it, and it stays withheld from everyone else. */
+  private static readonly SUBJECT_TYPE = 'flatmate';
 
   async upsertMine(
     ownerId: string,
@@ -112,6 +126,16 @@ export class FlatmateProfilesService {
     if (profile.ownerId === fromUserId) {
       throw new BadRequestException('You cannot say hello to your own profile');
     }
+    // A moderator takedown (hidden OR removed) withholds the profile, so the
+    // hello it fronts goes nowhere either: a 404 identical to an unknown slug,
+    // which is what the directory now serves for this profile.
+    const moderation = await this.contentModeration.stateFor(
+      FlatmateProfilesService.SUBJECT_TYPE,
+      slug,
+    );
+    if (moderation.hidden || moderation.removed) {
+      throw new NotFoundException('Flatmate profile not found');
+    }
     // Baseline gate: reaching out requires the affirming pledge.
     await this.affirmingPledge.requireAccepted(fromUserId);
     // Step-up gate: reaching out needs a phone-verified account.
@@ -173,7 +197,12 @@ export class FlatmateProfilesService {
       profile,
       refs.get(profile.ownerId) ?? null,
       null,
-      { isOwner: true, viewerProfileType: null },
+      // The owner's own management read. `hasMutualMatch` is irrelevant when
+      // `isOwner` is true (the gate short-circuits) and is passed false so the
+      // value can never be mistaken for a grant; `isListSurface` is false
+      // because this is a single-profile response, and the owner sees their own
+      // special-category fields either way.
+      { isOwner: true, hasMutualMatch: false, isListSurface: false },
       level,
     );
   }

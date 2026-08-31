@@ -17,7 +17,7 @@ import {
   setQueueAssignment,
 } from '../common/queue-assignment';
 import { joinRequestDueAt } from './join-request-sla';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, In, IsNull, Repository } from 'typeorm';
 import { CreateMembershipJoinRequestDto } from './dto/create-join-request.dto';
 import { Invite } from './entities/invite.entity';
 import {
@@ -51,6 +51,20 @@ const MIN_AGE_YEARS = 18;
 const STATUS_TOKEN_BYTES = 32;
 
 /**
+ * PRD-02. How many times an applicant may revive their OWN lapsed approval
+ * invite from the status page.
+ *
+ * The status token is a bearer credential with nothing behind it, so an
+ * approval that could be renewed from it without limit would stay redeemable
+ * for as long as the token existed anywhere. Three is enough to survive the
+ * realistic failure (came back late, missed the window, tried again from
+ * another device) without turning one approval into a permanent open door. A
+ * moderator's `POST /admin/join-requests/:id/invite/reissue` is not counted
+ * and is not capped: a human is making that call.
+ */
+const MAX_SELF_SERVE_INVITE_REFRESHES = 3;
+
+/**
  * The stored form of a status token. Sha256 hex, matching
  * `AuthService.hashToken` and `AccountService`'s deletion tokens: the column
  * holds this, the applicant holds the plaintext, and the two only ever meet
@@ -58,6 +72,37 @@ const STATUS_TOKEN_BYTES = 32;
  */
 function hashStatusToken(statusToken: string): string {
   return createHash('sha256').update(statusToken).digest('hex');
+}
+
+/**
+ * PRD-14. The body of the 409 a re-submission gets when this email already has
+ * an open request.
+ *
+ * A `code` rides along so the frontend can render the way BACK to that request
+ * (paste the reference code, or sign in with the Google account for this
+ * address) instead of a bare "you already asked" that ends the journey there.
+ * Same shape as the `JOIN_REQUESTS_CLOSED` / `UNDER_18` rejections above it, so
+ * the client has one way of reading a typed refusal on this route.
+ *
+ * THE DISCLOSURE HERE IS UNCHANGED, deliberately. This route already answered
+ * 409 for an open request and 201 for a new one, and that difference is what an
+ * enumeration attempt reads; adding a machine-readable label to the refusal
+ * tells a caller nothing the status code did not. The recovery path this label
+ * points at is the one that had to be built enumeration-proof, and it is:
+ * proving control of the address is the entry condition, not a claim about it.
+ */
+function duplicateJoinRequestBody(): {
+  statusCode: number;
+  error: string;
+  code: string;
+  message: string;
+} {
+  return {
+    statusCode: 409,
+    error: 'Conflict',
+    code: 'JOIN_REQUEST_PENDING',
+    message: 'An invite request for this email is already awaiting review',
+  };
 }
 
 /**
@@ -184,9 +229,7 @@ export class JoinRequestsService {
       })
       .getOne();
     if (existing) {
-      throw new ConflictException(
-        'An invite request for this email is already awaiting review',
-      );
+      throw new ConflictException(duplicateJoinRequestBody());
     }
 
     const mutualMemberEmail =
@@ -244,9 +287,7 @@ export class JoinRequestsService {
       // index UQ_join_requests_pending_email is the real backstop. Map 23505 to
       // a 409 instead of a 500.
       if (isUniqueViolation(err)) {
-        throw new ConflictException(
-          'An invite request for this email is already awaiting review',
-        );
+        throw new ConflictException(duplicateJoinRequestBody());
       }
       throw err;
     }
@@ -256,7 +297,7 @@ export class JoinRequestsService {
    * PUBLIC status lookup for the applicant's own request (ACQ-01). The token
    * the caller holds is the whole credential — there is no session behind this
    * — so the answer is deliberately the narrowest thing that closes the loop:
-   * the outcome, when it was made, why it was declined, and the invite code an
+   * the outcome, when it was made, why it was declined, and the invite an
    * approval minted. Never the submitted message, never the reviewer, never
    * another row.
    *
@@ -265,6 +306,15 @@ export class JoinRequestsService {
    * answer with one indistinguishable 404. The card-verification route makes
    * the same call for the same reason: confirming that a token merely exists
    * would turn this into an oracle for guessing them.
+   *
+   * PRD-02: THIS READ IS ALSO A WRITE, and that is the fix, not a side
+   * effect. Approval mints an email-pinned invite that nothing delivers, so
+   * this lookup is the only moment the applicant is ever told it exists. The
+   * FIRST such moment latches `approval_seen_at` and starts the invite's short
+   * redemption window from there, so the deadline the applicant is shown is
+   * one that began when they were told about it. Before this, the window ran
+   * from a reviewer's click the applicant never saw, and the sweeper routinely
+   * reclaimed the invite before they next opened the page.
    */
   async getPublicStatus(
     statusToken: string,
@@ -277,25 +327,234 @@ export class JoinRequestsService {
     if (!request) {
       return null;
     }
+    return toPublicJoinRequestStatusView(
+      request,
+      await this.applicantInviteRef(request),
+    );
+  }
 
-    // The invite code is fetched only for an approval that actually minted
-    // one, and only while it is still redeemable — `resolveInviteStatus` is
-    // the same expiry/revocation/used check the invite landing page runs, so
-    // an applicant is never handed a code that would fail at signup.
-    let redeemableInviteCode: string | null = null;
+  /**
+   * The approval invite as the APPLICANT is allowed to see it: its code, its
+   * live status and its deadline. Null for a request that never minted one
+   * (still pending, declined, or an approval whose invite row was purged).
+   *
+   * `resolveInviteStatus` is the same lazily-computed expiry/revocation/used
+   * check the invite landing page and the member's own invite list run, so a
+   * lapsed-but-unswept row never reports itself valid here either.
+   *
+   * Starts the redemption window on the first read that finds a still-valid
+   * invite the applicant has not seen (see `getPublicStatus`). The latch is a
+   * conditional `approval_seen_at IS NULL` UPDATE, so of two concurrent
+   * reloads exactly one moves the deadline. The loser re-reads the invite
+   * before answering: the expiry it fetched a moment earlier is the shelf
+   * date the winner has since replaced, and reporting that would show the
+   * applicant a deadline that is not theirs.
+   */
+  private async applicantInviteRef(
+    request: PlatformJoinRequest,
+  ): Promise<JoinRequestInviteRef | null> {
     if (
-      request.status === PlatformJoinRequestStatus.Approved &&
-      request.inviteId
+      request.status !== PlatformJoinRequestStatus.Approved ||
+      !request.inviteId
     ) {
-      const invite = await this.dataSource
-        .getRepository(Invite)
-        .findOne({ where: { id: request.inviteId } });
-      if (invite && resolveInviteStatus(invite, new Date()) === 'valid') {
-        redeemableInviteCode = invite.code;
+      return null;
+    }
+    const invites = this.dataSource.getRepository(Invite);
+    const invite = await invites.findOne({ where: { id: request.inviteId } });
+    if (!invite) {
+      return null;
+    }
+    const now = new Date();
+    const status = resolveInviteStatus(invite, now);
+    let expiresAt = invite.expiresAt;
+
+    if (status === 'valid' && !request.approvalSeenAt) {
+      const latch = await this.joinRequests.update(
+        { id: request.id, approvalSeenAt: IsNull() },
+        { approvalSeenAt: now },
+      );
+      if (latch.affected === 1) {
+        request.approvalSeenAt = now;
+        expiresAt = await this.invitesService.startApprovalRedemptionWindow(
+          invite.id,
+          now,
+        );
+      } else {
+        // A concurrent read won the latch and moved the deadline a moment ago.
+        // Re-read rather than report the stale shelf date we fetched above.
+        const current = await invites.findOne({ where: { id: invite.id } });
+        expiresAt = current?.expiresAt ?? expiresAt;
       }
     }
 
-    return toPublicJoinRequestStatusView(request, redeemableInviteCode);
+    return { code: invite.code, status, expiresAt };
+  }
+
+  /**
+   * PRD-02. The applicant reviving their OWN lapsed approval invite, from the
+   * status page, with nothing but the token they already hold.
+   *
+   * This is the end of the dead end. An approval invite that lapsed used to be
+   * terminal for the applicant: the page said the invite was gone, no route
+   * re-minted one, and the only remaining path was a moderator noticing. With
+   * the redemption window now starting when the applicant reads the code, a
+   * lapse means they genuinely had their seven days and let them pass, which is
+   * a normal thing to do and should cost a click to undo.
+   *
+   * WHAT IT REFUSES, and why each refusal is not an oracle: every outcome here
+   * is reachable only by a caller who already resolved the token, so nothing
+   * below distinguishes anything for someone who has not. A token that does not
+   * resolve returns `null` and the controller answers the same 404 the read
+   * does.
+   *
+   *  - `used`: an account exists on this invite. Refreshing would re-open a
+   *    redeemed invitation, which is exactly what `refreshExpiredInvite`
+   *    refuses for members and must refuse here.
+   *  - `revoked`: a moderator's deliberate act, and not the applicant's to
+   *    undo.
+   *  - `valid`: nothing to do. Returns the current view rather than an error:
+   *    the page that asked will now render the live code, which is what the
+   *    applicant wanted.
+   *  - the cap, `MAX_SELF_SERVE_INVITE_REFRESHES`. The token is a bearer
+   *    credential; an approval must not be renewable from it forever.
+   */
+  async refreshApprovalInvite(
+    statusToken: string,
+  ): Promise<PublicJoinRequestStatusView | null> {
+    const request = await this.joinRequests.findOne({
+      where: { statusTokenHash: hashStatusToken(statusToken) },
+    });
+    if (!request) {
+      return null;
+    }
+    const invite = await this.applicantInviteRef(request);
+    if (!invite) {
+      throw new ConflictException({
+        statusCode: 409,
+        error: 'Conflict',
+        code: 'INVITE_REFRESH_UNAVAILABLE',
+        message: 'There is no invite on this request to refresh.',
+      });
+    }
+    if (invite.status === 'valid') {
+      return toPublicJoinRequestStatusView(request, invite);
+    }
+    if (invite.status === 'used') {
+      throw new ConflictException({
+        statusCode: 409,
+        error: 'Conflict',
+        code: 'INVITE_ALREADY_USED',
+        message: 'An account has already been created with this invite.',
+      });
+    }
+    if (invite.status === 'revoked') {
+      throw new ConflictException({
+        statusCode: 409,
+        error: 'Conflict',
+        code: 'INVITE_REVOKED',
+        message: 'This invite is no longer available.',
+      });
+    }
+    if (request.inviteRefreshCount >= MAX_SELF_SERVE_INVITE_REFRESHES) {
+      throw new ConflictException({
+        statusCode: 409,
+        error: 'Conflict',
+        code: 'INVITE_REFRESH_LIMIT',
+        message: 'This invite has been refreshed as many times as it can be.',
+      });
+    }
+
+    // Conditional on the count we just read, so two clicks in flight together
+    // cannot each spend a slot and hand out two windows. The loser reports the
+    // cap, which is the truthful answer for it.
+    const claim = await this.joinRequests.update(
+      { id: request.id, inviteRefreshCount: request.inviteRefreshCount },
+      { inviteRefreshCount: request.inviteRefreshCount + 1 },
+    );
+    if (claim.affected !== 1) {
+      throw new ConflictException({
+        statusCode: 409,
+        error: 'Conflict',
+        code: 'INVITE_REFRESH_LIMIT',
+        message: 'This invite has been refreshed as many times as it can be.',
+      });
+    }
+    request.inviteRefreshCount += 1;
+
+    // `reissueApprovalInvite` re-runs the same expired/used/revoked guards on
+    // the row itself, so a redemption that landed between our read and here
+    // surfaces as its 409 rather than a silently re-opened invite.
+    const refreshed = await this.invitesService.reissueApprovalInvite(
+      request.inviteId as string,
+    );
+    return toPublicJoinRequestStatusView(request, {
+      code: refreshed.code,
+      status: resolveInviteStatus(refreshed, new Date()),
+      expiresAt: refreshed.expiresAt,
+    });
+  }
+
+  /**
+   * PRD-14. Hands back a FRESH status token for the most recent request from
+   * an address whose owner has already been PROVEN, by the caller, to be the
+   * person asking.
+   *
+   * THE ENTRY CONDITION IS THE WHOLE SECURITY MODEL. There is no channel that
+   * can deliver a re-issued token to an applicant: QueerPulse sends no email,
+   * and an applicant has no account, so no in-app notification reaches them
+   * either. A recovery route keyed on a TYPED email would therefore have to
+   * answer the typist directly, which on an invite-gated platform for this
+   * audience means answering "has this person applied?" to anyone who asks.
+   * That route does not exist and must never be built.
+   *
+   * What does exist is Google sign-in, which already proves control of an
+   * address (`email_verified` is checked in `GoogleStrategy`, and
+   * `AuthService` rejects an unverified one outright) without sending
+   * anything. So this method takes an ALREADY-VERIFIED address and is
+   * deliberately not reachable from any controller in this module.
+   *
+   * CALLER CONTRACT, and it is not optional: the caller must have authenticated
+   * the address it passes. The only intended caller is the Google callback's
+   * `invite_required` branch, where an applicant who lost their token signs in
+   * with the address they applied under and is carried to their own status page
+   * instead of a "you need an invite" notice.
+   *
+   * ROTATES rather than recovers, because it must: only the SHA-256 hash is
+   * stored, so the old plaintext is unrecoverable by construction. The previous
+   * token stops working the moment this returns, which is the correct
+   * behaviour for a recovery anyway.
+   *
+   * Returns `null` when the address has never applied. Callers must render that
+   * identically to their existing "no". See the Google callback, where it
+   * falls through to exactly the notice it showed before.
+   */
+  async recoverStatusTokenForVerifiedEmail(
+    verifiedEmail: string,
+  ): Promise<string | null> {
+    const email = verifiedEmail.trim().toLowerCase();
+    if (!email) {
+      return null;
+    }
+    // The MOST RECENT request, whatever its status. A declined applicant is
+    // entitled to read their own decline, and a re-application after the
+    // cooldown is the row they are waiting on now.
+    const request = await this.joinRequests
+      .createQueryBuilder('jr')
+      .where('lower(jr.email) = :email', { email })
+      .orderBy('jr.createdAt', 'DESC')
+      .getOne();
+    if (!request) {
+      return null;
+    }
+    const statusToken = randomBytes(STATUS_TOKEN_BYTES).toString('base64url');
+    await this.joinRequests.update(
+      { id: request.id },
+      { statusTokenHash: hashStatusToken(statusToken) },
+    );
+    this.logger.log(
+      `Re-issued the status token on join request ${request.id} to a verified address`,
+    );
+    return statusToken;
   }
 
   async list(

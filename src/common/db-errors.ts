@@ -40,3 +40,44 @@ export function isUniqueViolation(
     candidate?.driverError?.constraint === constraint
   );
 }
+
+/**
+ * Postgres foreign-key-violation SQLSTATE. Raised when an INSERT/UPDATE
+ * references a row that does not exist (or a DELETE removes one that is still
+ * referenced). Unlike a unique violation this is almost never a lost race: it
+ * usually means the referenced row was erased while a dangling id survived in a
+ * table that carries no FK of its own.
+ */
+export const POSTGRES_FOREIGN_KEY_VIOLATION = '23503';
+
+/**
+ * True when `error` is a Postgres foreign-key violation (SQLSTATE 23503) as
+ * surfaced by TypeORM.
+ *
+ * Checks both error shapes for the same reason {@link isUniqueViolation} does:
+ * the SQLSTATE sits on the top-level object on some paths and on the wrapped
+ * `driverError` on others.
+ *
+ * Pass `constraint` to additionally require the violation to be on a specific
+ * named foreign key, so a caller that only knows how to recover from ONE
+ * dangling reference does not swallow a violation on a different column.
+ */
+export function isForeignKeyViolation(
+  error: unknown,
+  constraint?: string,
+): boolean {
+  const candidate = error as {
+    code?: string;
+    constraint?: string;
+    driverError?: { code?: string; constraint?: string };
+  };
+  const isForeignKeyViolationCode =
+    candidate?.code === POSTGRES_FOREIGN_KEY_VIOLATION ||
+    candidate?.driverError?.code === POSTGRES_FOREIGN_KEY_VIOLATION;
+  if (!isForeignKeyViolationCode) return false;
+  if (!constraint) return true;
+  return (
+    candidate?.constraint === constraint ||
+    candidate?.driverError?.constraint === constraint
+  );
+}

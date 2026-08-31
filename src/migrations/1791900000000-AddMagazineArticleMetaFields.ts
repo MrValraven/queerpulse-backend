@@ -16,8 +16,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `AddMemberRestriction1791700000000` (and `1791800000000` by
  * `AddCommunityGovernanceUnarchivedAction`) by the time this ran — used
  * `1791900000000` instead to avoid a collision.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddMagazineArticleMetaFields1791900000000 implements MigrationInterface {
   name = 'AddMagazineArticleMetaFields1791900000000';

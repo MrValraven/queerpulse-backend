@@ -10,8 +10,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * (extensible without a migration); indexed for the queue's status filter.
  * `IDX_safe_space_nominations_nominator_id` supports the per-member lookup and
  * the FK cascade.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class CreateSafeSpaceNominations1786001000000 implements MigrationInterface {
   name = 'CreateSafeSpaceNominations1786001000000';

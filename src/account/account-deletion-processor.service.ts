@@ -331,6 +331,30 @@ export class AccountDeletionProcessorService {
       //    `deletion_request` itself is the one table that must NOT cascade —
       //    its FK was dropped in the same migration so this erasure ledger
       //    survives the row it describes.
+      //
+      //    UPDATE 2026-08-31. "Every other member-owned table carries an FK"
+      //    was an assumption, and a deep scan found nine columns where it was
+      //    false. Those rows survived an erasure keyed to a dead user id:
+      //    `flatmate_likes.from_user_id` (who you liked or passed),
+      //    `housing_saved_searches.member_id` (named searches and criteria),
+      //    `media_crops.owner_id`, `housing_reviews_superseded.author_id` and
+      //    `.subject_id` (archived review text), `community_tag_request`'s two
+      //    actor columns, and the magazine desk's comment, version and message
+      //    authors. Four migrations in the `1795800000000`-`1795811000000` band
+      //    close them, each deleting the already-unreachable orphans first so
+      //    `ADD CONSTRAINT` can succeed.
+      //
+      //    They are not all CASCADE, and the split follows the rule step 2 and
+      //    `SetNullContentAuthorFksOnUserErasure1794610000000` already set:
+      //    a member-private artefact goes with the member, and something other
+      //    people are part of stays with a NULL byline. So the likes, searches,
+      //    crops, archived reviews, tag requests and private desk messages
+      //    cascade; the editorial comment and article version null out and read
+      //    as `FORMER_MEMBER_COMMENT_AUTHOR_LABEL`, which is why
+      //    `magazine_article_comment.author_id` had to become nullable.
+      //
+      //    The count is therefore no longer worth quoting from memory. Derive
+      //    it when you need it rather than trusting the number above.
       await manager.delete(User, { id: userId });
     });
 

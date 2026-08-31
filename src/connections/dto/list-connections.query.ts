@@ -4,9 +4,11 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 import { ConnectionSort, ConnectionTab } from '../connections.service';
 
 /** The orderings the list endpoint accepts. `recent` is the default. */
@@ -26,6 +28,7 @@ export class ListConnectionsQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 
   /**

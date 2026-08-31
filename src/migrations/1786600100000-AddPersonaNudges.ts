@@ -18,8 +18,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * Plain CREATE TABLE (no enum ADD VALUE), so a single-phase transactional
  * migration is fine.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddPersonaNudges1786600100000 implements MigrationInterface {
   name = 'AddPersonaNudges1786600100000';

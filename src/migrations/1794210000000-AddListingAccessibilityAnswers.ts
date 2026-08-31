@@ -47,8 +47,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Fully transactional. Two `ADD COLUMN`s with constant defaults (catalog-only
  * on PostgreSQL 11+, no table rewrite) plus two `UPDATE`s over a table with a
  * few thousand rows at most.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class AddListingAccessibilityAnswers1794210000000 implements MigrationInterface {
   name = 'AddListingAccessibilityAnswers1794210000000';

@@ -31,8 +31,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * Purely additive and transactional — no enum is touched, so nothing here needs
  * the non-transactional runbook.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddInquiryAndIntakeTriageColumns1795410000000 implements MigrationInterface {
   name = 'AddInquiryAndIntakeTriageColumns1795410000000';

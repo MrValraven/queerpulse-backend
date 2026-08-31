@@ -7,6 +7,14 @@ import { ReasonCode } from './reason-catalogue';
  * are derived server-side" per its `ReportDTO` doc comment); this is the one
  * place that mapping lives.
  */
+/**
+ * The emergency band. This set is the ONLY definition of it in the codebase.
+ *
+ * It decides three things at once, so widening or narrowing it moves all
+ * three together: the 1-hour SLA below, the moderation queue's emergency band,
+ * and the per-subject flood-cap exemption in `ReportsService` (which reads it
+ * through `deriveSeverity`, never by re-listing the codes). Keep it that way.
+ */
 const EMERGENCY_REASONS: ReadonlySet<ReasonCode> = new Set([
   'outing',
   'doxxing',

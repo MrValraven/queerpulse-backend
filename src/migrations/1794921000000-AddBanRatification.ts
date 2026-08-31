@@ -39,8 +39,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * took effect. Bans already in force stay in force and are untouched, which is
  * correct. Retroactively suspending every previously banned member's ban
  * pending a ratification nobody can now give would un-ban them all on expiry.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddBanRatification1794921000000 implements MigrationInterface {
   name = 'AddBanRatification1794921000000';

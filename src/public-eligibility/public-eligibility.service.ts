@@ -21,6 +21,7 @@ import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { ForumPost } from '../forum/entities/forum-post.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
+import { CommunityMember } from '../communities/entities/community-member.entity';
 import { ConnectionsService } from '../connections/connections.service';
 import { SubprofileEndorsementsService } from '../subprofiles/subprofile-endorsements.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
@@ -38,6 +39,26 @@ import {
 } from './public-eligibility.rules';
 
 const RESULT_CAP = 50;
+/**
+ * How many people OTHER than the author a community must hold before a post
+ * inside it counts towards recognition XP.
+ *
+ * XP converts into monthly invitations at levels 4 and 5
+ * (`INVITE_QUOTA_BONUS_BY_LEVEL`), so on an invite-gated platform every XP
+ * signal has to cost the earner either a second person's cooperation or a
+ * moderator's decision. Creating a community is one API call and the creator
+ * is written onto its roster by `CommunitiesService.create`, so a member
+ * could stand up a room nobody else is in and talk to themselves twenty
+ * times for the whole `posts` cap. Two other people is the smallest audience
+ * that is an audience: one other person is a conversation, and a pair of
+ * accounts is the cheapest thing somebody farming invitations can produce.
+ *
+ * Real communities clear this the day they open. A brand-new community's
+ * first posts start counting the moment its second and third member arrive,
+ * and nothing is taken back from posts written before that: `communityPosts`
+ * on the eligibility DTO is untouched by this and still counts every post.
+ */
+const COMMUNITY_AUDIENCE_FLOOR = 2;
 const MS_PER_DAY = 1000 * 60 * 60 * 24;
 const MEMBER_SUBJECT_TYPE = 'member';
 
@@ -62,6 +83,11 @@ export class PublicEligibilityService {
     private readonly communityPosts: Repository<CommunityPost>,
     @InjectRepository(CommunityPostReply)
     private readonly communityReplies: Repository<CommunityPostReply>,
+    // Roster rows, read only to answer "does anybody else stand in this
+    // room?" for the XP-side counts below. The eligibility score itself never
+    // reads them.
+    @InjectRepository(CommunityMember)
+    private readonly communityMembers: Repository<CommunityMember>,
     private readonly connections: ConnectionsService,
     private readonly endorsements: SubprofileEndorsementsService,
     private readonly contentModeration: ContentModerationService,
@@ -319,6 +345,174 @@ export class PublicEligibilityService {
         { goingStatus: RsvpStatus.Going, userId },
       )
       .getCount();
+  }
+
+  /**
+   * ── THE XP-SIDE COUNTS ────────────────────────────────────────────────────
+   *
+   * Everything below answers "did somebody other than this member take part?"
+   * for `RecognitionAwardingService`. They are deliberately separate from the
+   * looser counts `collectSignals` assembles above, for exactly the reason
+   * `countHeldGatherings` is separate from `hostedOpenEventTimestamps`:
+   * public-profile eligibility asks whether a member is visible enough to be
+   * citable on the open web, where their own output is honest evidence, and
+   * recognition XP asks whether they did work other people were part of,
+   * because XP buys monthly invitations (`INVITE_QUOTA_BONUS_BY_LEVEL`) and
+   * invitations are the membrane around an invite-only platform.
+   *
+   * Changing a count here never moves public-profile eligibility, and changing
+   * one up there never moves XP. That separation is the point, and every one
+   * of these has a looser twin above that must stay looser.
+   */
+
+  /**
+   * Communities this member belongs to that hold at least
+   * `COMMUNITY_AUDIENCE_FLOOR` people besides them.
+   *
+   * `communityMembers.count({ userId })`, which is what recognition used to
+   * pay the `communities` rule on, counts a roster row the member wrote
+   * themselves: `CommunitiesService.create` puts the creator on the roster of
+   * every community they found, and nothing caps how many they may found. So
+   * three API calls bought the entire capped 120 XP. This asks the different
+   * question: is there a room, and are there people in it.
+   */
+  async countAudiencedCommunities(userId: string): Promise<number> {
+    return this.communityMembers
+      .createQueryBuilder('membership')
+      .where('membership.userId = :userId', { userId })
+      .andWhere(
+        `(
+           SELECT count(*) FROM community_members peer
+           WHERE peer.community_id = membership.community_id
+             AND peer.user_id <> :userId
+         ) >= :audienceFloor`,
+        { userId, audienceFloor: COMMUNITY_AUDIENCE_FLOOR },
+      )
+      .getCount();
+  }
+
+  /**
+   * Posts and replies by this member with a second person on the other end of
+   * them.
+   *
+   * The four parts, and why each one is shaped the way it is. A member's own
+   * volume is never the unit:
+   *
+   *   1. A forum THREAD they started that drew a reply from somebody else.
+   *      The forum has no roster to measure an audience against, so the test
+   *      is whether the thread reached anyone.
+   *   2. A forum POST of theirs on a thread somebody else started, excluding
+   *      the opening post (`is_op`, which part 1 already accounts for, and
+   *      which the old count double-paid: a thread row plus its OP row are
+   *      two units for one act).
+   *   3. A community post of theirs in a community with a real audience
+   *      (`COMMUNITY_AUDIENCE_FLOOR`). Communities do have a roster, so here
+   *      the audience is a thing that can be counted directly.
+   *   4. A reply of theirs to a post somebody else wrote. `IS DISTINCT FROM`
+   *      rather than `<>` so a reply to a post whose author erased their
+   *      account still counts: there really was another person there.
+   *
+   * Deleted rows are excluded throughout, the same as the eligibility count.
+   */
+  async countEngagedCommunityPosts(userId: string): Promise<number> {
+    const [
+      answeredThreads,
+      repliesOnOthersThreads,
+      postsWithAudience,
+      repliesToOthers,
+    ] = await Promise.all([
+      this.forumThreads
+        .createQueryBuilder('thread')
+        .where('thread.authorId = :userId', { userId })
+        .andWhere(
+          `EXISTS (
+             SELECT 1 FROM forum_post reply
+             WHERE reply.thread_id = thread.id
+               AND reply.author_id <> :userId
+               AND reply.deleted_at IS NULL
+           )`,
+          { userId },
+        )
+        .getCount(),
+      this.forumPosts
+        .createQueryBuilder('post')
+        .innerJoin(ForumThread, 'thread', 'thread.id = post.threadId')
+        .where('post.authorId = :userId', { userId })
+        .andWhere('post.deletedAt IS NULL')
+        .andWhere('post.isOp = false')
+        .andWhere('thread.authorId <> :userId', { userId })
+        .getCount(),
+      this.communityPosts
+        .createQueryBuilder('post')
+        .where('post.authorId = :userId', { userId })
+        .andWhere('post.deletedAt IS NULL')
+        .andWhere('post.communityId IS NOT NULL')
+        .andWhere(
+          `(
+             SELECT count(*) FROM community_members peer
+             WHERE peer.community_id = post.community_id
+               AND peer.user_id <> :userId
+           ) >= :audienceFloor`,
+          { userId, audienceFloor: COMMUNITY_AUDIENCE_FLOOR },
+        )
+        .getCount(),
+      this.communityReplies
+        .createQueryBuilder('reply')
+        .innerJoin(CommunityPost, 'post', 'post.id = reply.postId')
+        .where('reply.authorId = :userId', { userId })
+        .andWhere('reply.deletedAt IS NULL')
+        .andWhere('post.authorId IS DISTINCT FROM :userId', { userId })
+        .getCount(),
+    ]);
+
+    return (
+      answeredThreads +
+      repliesOnOthersThreads +
+      postsWithAudience +
+      repliesToOthers
+    );
+  }
+
+  /**
+   * Gatherings this member turned up to that somebody ELSE was running:
+   * a `going` RSVP on a published gathering whose start time has passed,
+   * where the member is neither the host nor a co-host.
+   *
+   * `attendedEventCount` below counts every past `going` RSVP, including one
+   * a host left on their own gathering, and that made the whole 600 XP
+   * `events` cap solo. `EventsService.create` rejects a start time in the
+   * past, so the naive version of that farm costs a wait, but `update` calls
+   * `assertScheduleValid` with `rejectPast: false`, so a host can create a
+   * gathering for tomorrow, PATCH `startAt` into last week, RSVP to it and
+   * collect immediately. Twelve of those is one script.
+   *
+   * Requiring a host other than the member is what puts a second person in
+   * the loop. Hosting is already paid separately and on its own stricter
+   * unit (`countHeldGatherings`), so nothing here takes credit away from a
+   * host: it stops one gathering paying its organiser twice.
+   */
+  async countAttendedGatherings(
+    userId: string,
+    now = new Date(),
+  ): Promise<number> {
+    const cohosted = await this.cohosts.find({
+      where: { userId },
+      select: ['eventId'],
+    });
+    const cohostIds = cohosted.map((row) => row.eventId);
+    const query = this.rsvps
+      .createQueryBuilder('rsvp')
+      .innerJoin(Event, 'event', 'event.id = rsvp.eventId')
+      .where('rsvp.userId = :userId', { userId })
+      .andWhere('rsvp.status = :status', { status: RsvpStatus.Going })
+      .andWhere('event.startAt < :now', { now })
+      // `IS DISTINCT FROM` so a gathering whose host erased their account
+      // still counts for the people who went to it.
+      .andWhere('event.hostId IS DISTINCT FROM :userId', { userId });
+    if (cohostIds.length) {
+      query.andWhere('event.id NOT IN (:...cohostIds)', { cohostIds });
+    }
+    return query.getCount();
   }
 
   private async attendedEventCount(userId: string, now: Date): Promise<number> {

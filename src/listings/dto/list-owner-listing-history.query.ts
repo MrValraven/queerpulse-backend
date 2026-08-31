@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, Min } from 'class-validator';
+import { IsInt, IsOptional, Max, Min } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 
 /** `GET /listings/:ref/history?page=` query (C3). Mirrors
  * `ListMyListingsQuery`'s shape exactly (page-number offset pagination, the
@@ -9,5 +10,6 @@ export class ListOwnerListingHistoryQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 }

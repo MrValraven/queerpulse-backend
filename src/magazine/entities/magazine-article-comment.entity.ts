@@ -32,8 +32,14 @@ export class MagazineArticleComment {
   @Column({ type: 'uuid', nullable: true })
   parentId!: string | null;
 
-  @Column({ type: 'uuid' })
-  authorId!: string;
+  // Nullable and FK-backed as of
+  // `AddMagazineDeskAuthorForeignKeys1795810000000`: erasing the author's
+  // account nulls the byline (`ON DELETE SET NULL`) and leaves the thread
+  // whole, because other editors reply to these comments and a piece ships on
+  // the back of them. `null` reads as `FORMER_MEMBER_COMMENT_AUTHOR_LABEL`.
+  @Index('IDX_magazine_article_comment_author_id')
+  @Column({ type: 'uuid', nullable: true })
+  authorId!: string | null;
 
   @Column({ type: 'text' })
   body!: string;

@@ -2,6 +2,7 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
@@ -69,6 +70,7 @@ describe('FlatmateProfilesService', () => {
     levelsForUsers: jest.Mock;
   };
   let affirmingPledge: { requireAccepted: jest.Mock };
+  let contentModeration: { stateFor: jest.Mock };
 
   beforeEach(async () => {
     flatmates = {
@@ -90,6 +92,9 @@ describe('FlatmateProfilesService', () => {
     affirmingPledge = {
       requireAccepted: jest.fn().mockResolvedValue(undefined),
     };
+    contentModeration = {
+      stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -99,6 +104,7 @@ describe('FlatmateProfilesService', () => {
         { provide: MessagingService, useValue: messaging },
         { provide: VerificationService, useValue: verification },
         { provide: AffirmingPledgeService, useValue: affirmingPledge },
+        { provide: ContentModerationService, useValue: contentModeration },
       ],
     }).compile();
 
@@ -184,6 +190,32 @@ describe('FlatmateProfilesService', () => {
       await expect(
         service.sayHello('ghost', 'sender', { body: 'hi' }),
       ).rejects.toThrow(NotFoundException);
+    });
+
+    it('404s a profile a moderator hid, so the hello goes nowhere', async () => {
+      flatmates.findOne.mockResolvedValue(makeFlatmate({ ownerId: 'owner-1' }));
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: false,
+      });
+
+      await expect(
+        service.sayHello('sam-flatmate', 'sender', { body: 'hi' }),
+      ).rejects.toThrow(NotFoundException);
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
+    });
+
+    it('404s a profile a moderator removed', async () => {
+      flatmates.findOne.mockResolvedValue(makeFlatmate({ ownerId: 'owner-1' }));
+      contentModeration.stateFor.mockResolvedValue({
+        hidden: true,
+        removed: true,
+      });
+
+      await expect(
+        service.sayHello('sam-flatmate', 'sender', { body: 'hi' }),
+      ).rejects.toThrow(NotFoundException);
+      expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
     });
 
     it('rejects saying hello to your own profile', async () => {

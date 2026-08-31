@@ -41,8 +41,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * this same transactional migration rather than `CONCURRENTLY` in a separate
  * file precisely BECAUSE the rewrite already holds that lock, so a concurrent
  * build would buy nothing.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddAppealDecisionWindows1794920000000 implements MigrationInterface {
   name = 'AddAppealDecisionWindows1794920000000';

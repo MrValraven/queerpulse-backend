@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { DEFAULT_LIST_LIMIT } from '../common/pagination';
+import { normalizePage } from '../common/pagination';
 import { Repository } from 'typeorm';
 import {
   CoopJoinRequest,
@@ -18,14 +18,23 @@ import { UpdateCoopDto } from './dto/update-coop.dto';
 import { CreateHousingJoinRequestDto } from './dto/create-join-request.dto';
 import {
   AdminJoinRequestDTO,
+  AdminJoinRequestsPageDTO,
   HousingCoopDTO,
   toAdminJoinRequestDTO,
   toHousingCoopDTO,
 } from './housing-coop-response';
+import { ListCoopJoinRequestsQuery } from './dto/list-coop-join-requests.query';
 
 // Postgres unique-violation SQLSTATE. Mirrors `ListingsService`'s/
 // `CompaniesService`'s identical file-local helper (not shared/exported, kept
 // consistent with that precedent).
+/**
+ * Page size for the admin co-op join-request triage queue (ENG-41). 20 matches
+ * the platform-wide `PAGE_SIZE` and the sibling
+ * `GROUP_JOIN_REQUEST_QUEUE_PAGE_SIZE`, so both housing queues page identically.
+ */
+export const COOP_JOIN_REQUEST_QUEUE_PAGE_SIZE = 20;
+
 @Injectable()
 export class HousingService {
   constructor(
@@ -120,22 +129,93 @@ export class HousingService {
     if (!result.affected) throw new NotFoundException('Co-op not found');
   }
 
-  async listJoinRequests(coopSlug?: string): Promise<AdminJoinRequestDTO[]> {
-    // `take` bounds this admin list to `DEFAULT_LIST_LIMIT` (AUDIT item #19) —
-    // it previously returned every join request on the platform, newest first,
-    // with no cap. The response stays a flat `AdminJoinRequestDTO[]` (no
-    // pagination envelope callers read), matching every other bounded-but-
-    // unpaginated list in the repo. The coop-scoped path is served by
-    // `IDX_coop_join_requests_coop_id_created_at`
-    // (`1785903100000-AddCoopJoinRequestsCoopCreatedAtIndex`).
-    const query = this.joinRequests
+  /**
+   * Admin-only: the co-op join-request triage queue, newest first, paginated
+   * (ENG-41).
+   *
+   * Supersedes the note that stood here, which recorded the response as "a flat
+   * `AdminJoinRequestDTO[]` (no pagination envelope callers read)". Bounding the
+   * query at `DEFAULT_LIST_LIMIT` (AUDIT item #19) was right, because before
+   * that it returned every join request on the platform with no cap at all.
+   * Returning nothing BUT the bounded slab was not: a platform with 201 requests
+   * dropped one of them with nothing in the response saying so, and once the
+   * queue passes 200 the drop grows silently with it. The envelope now carries
+   * `total`, the size of the whole filtered queue, and `page`, which is how an
+   * admin reaches the rest of it.
+   *
+   * ORDERING STAYS NEWEST-FIRST, deliberately. That is this queue's existing
+   * behaviour and the sibling `HousingGroupsService.listJoinRequests`'s too. The
+   * truncation was the defect here, never the sort, so please do not "fix" the
+   * direction: with `total` and `page` in the envelope nothing is hidden at
+   * either end of the order.
+   *
+   * `status` is what makes this more than a truncation fix. The console rendered
+   * pending requests only, and it got there by filtering `status === 'pending'`
+   * in the browser over whatever the newest 200 rows happened to be. So 200
+   * decided requests newer than one pending request showed every admin an empty
+   * queue while somebody waited. Filtering in the query is also what lets
+   * `total` count the pending set rather than the whole table.
+   *
+   * `total` is honest without any `EXISTS` guard, and that is worth stating
+   * because the sibling `ListingClaimsService.listPending` needed one. Nothing
+   * is dropped after the fetch here: `coop_id` carries a real FK to
+   * `housing_coops` `ON DELETE CASCADE` (`1785000010000-AddHousing`), so a
+   * deleted co-op takes its requests with it and cannot leave an orphan behind,
+   * and even if one somehow existed `toAdminJoinRequestDTO` maps a missing
+   * relation to `coop: null` and still returns the row rather than discarding
+   * it. Every row these pages fetch reaches the caller, so `total` is exactly
+   * the number of requests reachable through them.
+   *
+   * `.offset()`/`.limit()` rather than `.skip()`/`.take()`: those two go through
+   * TypeORM's distinct-primary-id subquery pass, which exists to stop a joined
+   * collection from multiplying rows and eating into the page, and it misreads
+   * an ORDER BY that names a joined alias. `request.coop` is a ManyToOne, so the
+   * join can only ever produce one row per request and there is nothing to
+   * de-duplicate; the raw offset/limit keeps the joined-alias `coop.slug` filter
+   * and the ordered limit in one plain query. Mirrors the sibling housing-groups
+   * queue, which has the identical join shape.
+   *
+   * Indexes: the co-op-scoped path stays on
+   * `IDX_coop_join_requests_coop_id_created_at`
+   * (`1785903100000-AddCoopJoinRequestsCoopCreatedAtIndex`). The unscoped path,
+   * which is the console's default, and the new `COUNT(*)` are served by
+   * `IDX_coop_join_requests_status_created_at`
+   * (`1796100100000-AddCoopJoinRequestQueueIndex`).
+   */
+  async listJoinRequests(
+    query: ListCoopJoinRequestsQuery = {},
+  ): Promise<AdminJoinRequestsPageDTO> {
+    const page = normalizePage(query.page);
+    const pageSize = COOP_JOIN_REQUEST_QUEUE_PAGE_SIZE;
+
+    const joinRequestsQuery = this.joinRequests
       .createQueryBuilder('request')
       .leftJoinAndSelect('request.coop', 'coop')
+      // `created_at` alone is not a total order, so it is not a safe sort key for
+      // offset pagination: two rows written in the same transaction share a
+      // statement timestamp, and Postgres is then free to return that tie in
+      // either order per query, which is how a row appears on two pages and
+      // another appears on none. `id` breaks the tie deterministically. Same
+      // reasoning as `PlatformSettingsService.listChanges`.
       .orderBy('request.createdAt', 'DESC')
-      .take(DEFAULT_LIST_LIMIT);
-    if (coopSlug) query.where('coop.slug = :coopSlug', { coopSlug });
-    const requests = await query.getMany();
-    return requests.map(toAdminJoinRequestDTO);
+      .addOrderBy('request.id', 'DESC')
+      .offset((page - 1) * pageSize)
+      .limit(pageSize);
+
+    if (query.status) {
+      joinRequestsQuery.andWhere('request.status = :status', {
+        status: query.status,
+      });
+    }
+    if (query.coop) {
+      joinRequestsQuery.andWhere('coop.slug = :coopSlug', {
+        coopSlug: query.coop,
+      });
+    }
+
+    const [requests, total] = await joinRequestsQuery.getManyAndCount();
+    const items: AdminJoinRequestDTO[] = requests.map(toAdminJoinRequestDTO);
+    return { items, total, page, pageSize };
   }
 
   async triageJoinRequest(

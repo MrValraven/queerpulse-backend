@@ -16,6 +16,7 @@ import {
   EventRsvpedEvent,
   EventWaitlistPromotedEvent,
 } from './event.events';
+import { EventCapacityAlertsService } from './event-capacity-alerts.service';
 import { RsvpDetailsView, toRsvpDetailsView } from './event-response';
 import { EventAudienceGateService } from './event-audience-gate.service';
 import { EventBan } from './entities/event-ban.entity';
@@ -63,6 +64,10 @@ export class RsvpService {
     // were standing next to. Checked in `assertMayRsvp` now, in both
     // directions.
     private readonly blockFilter: BlockFilterService,
+    // "Last few spots" (PRD-18). Called post-commit whenever a seat is taken or
+    // freed. Owns its own at-most-once claim and swallows its own failures, so
+    // an alert can never fail somebody's RSVP.
+    private readonly capacityAlerts: EventCapacityAlertsService,
   ) {}
 
   async rsvp(
@@ -203,6 +208,11 @@ export class RsvpService {
     });
 
     this.emitPromotions(outcome.eventId, outcome.eventSlug, outcome.promoted);
+    // A seat was taken (going) or handed back (maybe), so the gathering may
+    // have just crossed into its last few spots, or back out of them. After
+    // commit, and deliberately not awaited: the member's RSVP is done, and this
+    // is a side effect that reads its own committed truth.
+    void this.capacityAlerts.onSeatsChanged(outcome.eventId);
     // After commit (a mid-transaction emit would survive a rollback): tell the
     // host someone RSVPed. Fire-and-forget on the same bus as the waitlist
     // promotions above; the listener writes + pushes the notification.
@@ -267,6 +277,9 @@ export class RsvpService {
     // told they got a seat.
     for (const outcome of outcomes) {
       this.emitPromotions(outcome.eventId, outcome.eventSlug, outcome.promoted);
+      // Seats came back. Releasing the spent "last few spots" claim here is
+      // what lets a gathering that empties and fills again earn a second alert.
+      void this.capacityAlerts.onSeatsChanged(outcome.eventId);
     }
     return { ok: true };
   }

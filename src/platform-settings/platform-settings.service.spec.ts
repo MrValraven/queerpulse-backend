@@ -5,9 +5,16 @@ import {
   PLATFORM_SETTINGS_ID,
 } from './entities/platform-settings.entity';
 import { PlatformSettingChange } from './entities/platform-setting-change.entity';
+import { Profile } from '../users/entities/profile.entity';
 
+/**
+ * Built through `Object.assign(new PlatformSettings(), ...)` rather than as an
+ * object literal because `get()` now returns a prototype-preserving copy of the
+ * cached row, and a fixture that was never a `PlatformSettings` would not
+ * exercise that.
+ */
 function makeRow(overrides: Partial<PlatformSettings> = {}): PlatformSettings {
-  return {
+  return Object.assign(new PlatformSettings(), {
     id: PLATFORM_SETTINGS_ID,
     registrationEnabled: true,
     joinRequestsEnabled: true,
@@ -22,12 +29,15 @@ function makeRow(overrides: Partial<PlatformSettings> = {}): PlatformSettings {
     updatedAt: new Date('2026-07-19T00:00:00Z'),
     updatedBy: null,
     ...overrides,
-  };
+  });
 }
 
 describe('PlatformSettingsService', () => {
   let settingsRepo: jest.Mocked<Pick<Repository<PlatformSettings>, 'findOne'>>;
-  let changesRepo: jest.Mocked<Pick<Repository<PlatformSettingChange>, 'find'>>;
+  let changesRepo: jest.Mocked<
+    Pick<Repository<PlatformSettingChange>, 'findAndCount'>
+  >;
+  let profilesRepo: jest.Mocked<Pick<Repository<Profile>, 'find'>>;
   let manager: {
     findOneOrFail: jest.Mock;
     create: jest.Mock<unknown, [unknown, unknown]>;
@@ -42,7 +52,8 @@ describe('PlatformSettingsService', () => {
     jest.setSystemTime(new Date('2026-07-19T12:00:00Z'));
 
     settingsRepo = { findOne: jest.fn() };
-    changesRepo = { find: jest.fn() };
+    changesRepo = { findAndCount: jest.fn() };
+    profilesRepo = { find: jest.fn() };
     manager = {
       findOneOrFail: jest.fn(),
       create: jest.fn((_entity: unknown, data: unknown) => data),
@@ -56,6 +67,7 @@ describe('PlatformSettingsService', () => {
     service = new PlatformSettingsService(
       settingsRepo as never,
       changesRepo as never,
+      profilesRepo as never,
       dataSource as never,
       events as never,
     );
@@ -71,7 +83,7 @@ describe('PlatformSettingsService', () => {
       const row = makeRow();
       settingsRepo.findOne.mockResolvedValue(row);
 
-      await expect(service.get()).resolves.toBe(row);
+      await expect(service.get()).resolves.toEqual(row);
       expect(settingsRepo.findOne).toHaveBeenCalledWith({
         where: { id: PLATFORM_SETTINGS_ID },
       });
@@ -117,7 +129,7 @@ describe('PlatformSettingsService', () => {
         new Error('connection terminated'),
       );
 
-      await expect(service.get()).resolves.toBe(row);
+      await expect(service.get()).resolves.toEqual(row);
       expect(settingsRepo.findOne).toHaveBeenCalledTimes(2);
     });
 
@@ -136,13 +148,123 @@ describe('PlatformSettingsService', () => {
 
       jest.advanceTimersByTime(10_001);
       settingsRepo.findOne.mockRejectedValue(new Error('pool exhausted'));
-      await expect(service.get()).resolves.toBe(stale);
+      await expect(service.get()).resolves.toEqual(stale);
 
       // Serving the fallback must not refresh `cachedAt` — otherwise a blip
       // would freeze the kill switch for a further full TTL after recovery.
       const fresh = makeRow({ lockdownEnabled: true });
       settingsRepo.findOne.mockResolvedValue(fresh);
-      await expect(service.get()).resolves.toBe(fresh);
+      await expect(service.get()).resolves.toEqual(fresh);
+    });
+
+    // ENG-44. Callers receive an entity, and the ordinary thing to do with an
+    // entity is assign to a field on it. On the shared cached instance that
+    // would rewrite the platform's lockdown state for every concurrent request
+    // until the TTL lapsed.
+    it('hands out a copy, so a caller mutating what it received cannot rewrite the cache', async () => {
+      settingsRepo.findOne.mockResolvedValue(
+        makeRow({ lockdownEnabled: true }),
+      );
+
+      const first = await service.get();
+      first.lockdownEnabled = false;
+      first.lockdownMessage = 'mutated by a caller';
+
+      const second = await service.get();
+      expect(second.lockdownEnabled).toBe(true);
+      expect(second.lockdownMessage).toBeNull();
+      // Still one read: the copy comes off the cache, it does not defeat it.
+      expect(settingsRepo.findOne).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns a real PlatformSettings, not a bare object', async () => {
+      // The copy is handed back as the entity type, so the prototype has to
+      // survive it — a spread would satisfy the compiler and fail instanceof.
+      settingsRepo.findOne.mockResolvedValue(makeRow());
+
+      await expect(service.get()).resolves.toBeInstanceOf(PlatformSettings);
+    });
+  });
+
+  // ENG-50. A bare array left an admin unable to tell a last page from a
+  // truncated one.
+  describe('listChanges', () => {
+    function makeChange(
+      overrides: Partial<PlatformSettingChange> = {},
+    ): PlatformSettingChange {
+      return Object.assign(new PlatformSettingChange(), {
+        id: 'chg-1',
+        actorId: 'admin-1',
+        settingKey: 'lockdownEnabled',
+        oldValue: 'false',
+        newValue: 'true',
+        note: null,
+        createdAt: new Date('2026-07-19T11:00:00Z'),
+        ...overrides,
+      });
+    }
+
+    it('answers with the Paginated envelope carrying the real total', async () => {
+      changesRepo.findAndCount.mockResolvedValue([[makeChange()], 137]);
+      profilesRepo.find.mockResolvedValue([]);
+
+      const result = await service.listChanges(50, 100);
+
+      expect(result.total).toBe(137);
+      expect(result.items).toHaveLength(1);
+      // page/pageSize are derived from the endpoint's limit/offset contract.
+      expect(result.pageSize).toBe(50);
+      expect(result.page).toBe(3);
+    });
+
+    it('breaks createdAt ties by id so a window cannot shift under a caller', async () => {
+      changesRepo.findAndCount.mockResolvedValue([[], 0]);
+      profilesRepo.find.mockResolvedValue([]);
+
+      await service.listChanges(50, 0);
+
+      expect(changesRepo.findAndCount).toHaveBeenCalledWith({
+        order: { createdAt: 'DESC', id: 'DESC' },
+        take: 50,
+        skip: 0,
+      });
+    });
+
+    it('resolves the actor to a display shape and never ships the raw id', async () => {
+      changesRepo.findAndCount.mockResolvedValue([[makeChange()], 1]);
+      profilesRepo.find.mockResolvedValue([
+        {
+          userId: 'admin-1',
+          slug: 'ada',
+          firstName: 'Ada',
+          lastName: 'Lovelace',
+          pronouns: 'she/her',
+          avatarUrl: null,
+          photoVisible: true,
+        },
+      ] as never);
+
+      const result = await service.listChanges(50, 0);
+
+      expect(result.items[0]?.actor).toMatchObject({
+        slug: 'ada',
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+      });
+      expect(result.items[0]).not.toHaveProperty('actorId');
+    });
+
+    it('reports a null actor for an erased admin without looking the NULL up', async () => {
+      changesRepo.findAndCount.mockResolvedValue([
+        [makeChange({ actorId: null })],
+        1,
+      ]);
+
+      const result = await service.listChanges(50, 0);
+
+      expect(result.items[0]?.actor).toBeNull();
+      // No non-null id to resolve, so no profile query at all.
+      expect(profilesRepo.find).not.toHaveBeenCalled();
     });
   });
 

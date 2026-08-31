@@ -1,5 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { getRepositoryToken } from '@nestjs/typeorm';
 import { ROLES_KEY } from '../auth/decorators/roles.decorator';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminResourceGuideRatingsController } from './admin-resource-guide-ratings.controller';
 import { AdminResourceGuideRatingsService } from './admin-resource-guide-ratings.service';
@@ -14,6 +16,13 @@ describe('AdminResourceGuideRatingsController', () => {
       controllers: [AdminResourceGuideRatingsController],
       providers: [
         { provide: AdminResourceGuideRatingsService, useValue: service },
+        // `RolesOrStaffGuard` (class-level) injects the staff-grant repository.
+        // The guard is never exercised here, so an inert mock is enough to let
+        // the testing module instantiate it.
+        {
+          provide: getRepositoryToken(UserStaffRole),
+          useValue: { exists: jest.fn().mockResolvedValue(false) },
+        },
       ],
     }).compile();
     controller = module.get(AdminResourceGuideRatingsController);

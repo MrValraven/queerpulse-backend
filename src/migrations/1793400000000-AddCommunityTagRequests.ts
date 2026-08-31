@@ -16,8 +16,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * constraint, same as `community_join_requests.user_id`), indexed on both
  * `community_id` and `status` since the admin queue filters on the latter
  * and a future community-scoped view would filter on the former.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddCommunityTagRequests1793400000000 implements MigrationInterface {
   name = 'AddCommunityTagRequests1793400000000';

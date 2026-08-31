@@ -24,6 +24,30 @@ import {
 export const COMMUNITY_BAN_AUDIT_ACTION = 'community_ban_applied';
 export const COMMUNITY_BAN_LIFTED_AUDIT_ACTION = 'community_ban_lifted';
 
+/**
+ * The `mod_audit_logs.action` string a removal that LETS THE MEMBER COME BACK
+ * writes (PRD-28).
+ *
+ * The bar had this row and the plain removal did not, so a removal wrote only
+ * `community_governance_log` and the appeal machinery, which reads
+ * `mod_audit_logs`, could not see it. The member can rejoin, so what was lost
+ * is the record of a moderator's decision about them and with it any way to
+ * contest it.
+ *
+ * A DISTINCT ACTION RATHER THAN `COMMUNITY_BAN_AUDIT_ACTION` WITH A FLAG: the
+ * appeals queue labels and reasons about a row by its action alone
+ * (`OUTCOME_LABEL` in `moderation-response.ts`,
+ * `ModerationService.revertOriginalAction`), so a removal filed under the ban's
+ * action would be read, labelled and possibly reversed as a bar. The same
+ * distinction `GovernanceLogAction.MemberRemoved` vs `MemberBanned` already
+ * draws on the community's own log.
+ *
+ * Written by `CommunitiesService.removeMember` for a STAFF removal only. A
+ * self-leave writes nothing here: leaving is not a moderation act and there is
+ * nothing to appeal.
+ */
+export const COMMUNITY_REMOVAL_AUDIT_ACTION = 'community_member_removed';
+
 /** One `mod_audit_logs` row for a community-level sanction. */
 export interface CommunityModAuditInput {
   actorUserId: string;

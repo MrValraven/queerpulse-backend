@@ -49,8 +49,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * No index is added: the badge is read per-listing off rows the query already
  * fetched, and the existing `IDX_listings_queer_owned_verified` still serves
  * the only predicate anything filters on.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class AddListingQueerOwnedProvenance1794240000000 implements MigrationInterface {
   name = 'AddListingQueerOwnedProvenance1794240000000';

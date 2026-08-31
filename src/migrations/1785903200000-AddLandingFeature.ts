@@ -5,8 +5,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * blurb, changemaker highlight) shown on the live landing page. Each row
  * pairs a `target_id` (the featured entity) with section-shaped `copy`,
  * validated server-side by `validateLandingCopy`.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddLandingFeature1785903200000 implements MigrationInterface {
   name = 'AddLandingFeature1785903200000';

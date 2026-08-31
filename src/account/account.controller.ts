@@ -9,11 +9,10 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
-  Req,
   Res,
 } from '@nestjs/common';
 import archiver from 'archiver';
-import { Request, Response } from 'express';
+import { Response } from 'express';
 import {
   CurrentUser,
   CurrentUserData,
@@ -493,22 +492,18 @@ export class AccountController {
     return this.accountService.listDsar(user.userId);
   }
 
-  // Read the presenting `refresh_token` cookie in a typed way (Express types
-  // `req.cookies` as `any`).
-  private presentingRefreshToken(req: Request): string | undefined {
-    const cookies = req.cookies as Record<string, string | undefined>;
-    return cookies?.['refresh_token'];
-  }
-
+  // The session the caller is holding comes from their own access token
+  // (`CurrentUserData.sessionId`, the `sid` claim). It used to be read off the
+  // presenting `refresh_token` cookie, which never arrives here: that cookie is
+  // scoped to `Path=/auth` on purpose (see `auth-cookies.ts`), so the browser
+  // does not send it to `/account/*`. The list flagged no device as current and
+  // "sign out my other devices" signed out every device including this one.
   @ApiOperation({ summary: "List the caller's active sessions." })
   @ApiOkResponse({ description: 'The active sessions.' })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @Get('sessions')
-  listSessions(@CurrentUser() user: CurrentUserData, @Req() req: Request) {
-    return this.accountService.listSessions(
-      user.userId,
-      this.presentingRefreshToken(req),
-    );
+  listSessions(@CurrentUser() user: CurrentUserData) {
+    return this.accountService.listSessions(user.userId, user.sessionId);
   }
 
   @ApiOperation({ summary: 'Revoke one session.' })
@@ -525,22 +520,23 @@ export class AccountController {
     await this.accountService.revokeSession(user.userId, id);
   }
 
-  // "Sign out all other sessions": revoke every session EXCEPT the presenting
-  // one (identified by the `refresh_token` cookie), so the caller stays signed
-  // in on this device. Matches FE `revokeOtherSessions`.
+  // "Sign out all other sessions": revoke every session EXCEPT this one
+  // (identified by the caller's `sid` claim), so the caller stays signed in on
+  // this device. Matches FE `revokeOtherSessions`. The service refuses when it
+  // cannot name the current session rather than revoking everything; see the
+  // fail-closed reasoning on `AccountService.revokeOtherSessions`.
   @ApiOperation({ summary: 'Sign out all other sessions but this one.' })
   @ApiNoContentResponse({ description: 'Other sessions revoked.' })
-  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiUnauthorizedResponse({
+    description:
+      'Not authenticated, or the access token names no session (renew it and retry).',
+  })
   @Delete('sessions')
   @HttpCode(HttpStatus.NO_CONTENT)
   async revokeOtherSessions(
     @CurrentUser() user: CurrentUserData,
-    @Req() req: Request,
   ): Promise<void> {
-    await this.accountService.revokeOtherSessions(
-      user.userId,
-      this.presentingRefreshToken(req),
-    );
+    await this.accountService.revokeOtherSessions(user.userId, user.sessionId);
   }
 
   // RETIRED: `GET|PATCH /account/email-preferences`.

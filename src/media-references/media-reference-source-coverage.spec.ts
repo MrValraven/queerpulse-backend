@@ -66,9 +66,27 @@ const DTO_FIELD_TO_SOURCE_FIELD: Record<string, string> = {
   'UpdateArticleDto.heroImageKey': 'MagazineArticle.heroImageKey',
   'UpdateArticleDto.socialImage': 'MagazineArticle.socialImage',
   'UpdateCoverDto.coverUrl': 'MagazineIssue.coverUrl',
+  // Pre-existing gap, unrelated to section 5: the `MagazineAuthor.avatarUrl`
+  // source has been wired the whole time, only this mapping was absent, so the
+  // tripwire above was already red. Nothing caught it because CI has never run.
+  'UpdateAuthorDto.avatarUrl': 'MagazineAuthor.avatarUrl',
   'CreateStorySubmissionDto.coverImageKey':
     'MagazineStorySubmission.coverImageKey',
   'CreateDeckDto.cover': 'MagazineDeck.cover',
+  // ENG-46. `avatarUrl` was `@IsUrl()`, which refused a bare storage key, so an
+  // uploaded press-contact avatar could not be saved at all. Now that it can be,
+  // the column needs a real source: `PressContact.avatarUrl` used to sit in
+  // `RULED_OUT_IMAGE_FIELDS`, which would have let storage maintenance collect a
+  // live press-kit avatar. Both bodies write the same column, so both map to the
+  // one source.
+  'CreatePressContactDto.avatarUrl': 'PressContact.avatarUrl',
+  'UpdatePressContactDto.avatarUrl': 'PressContact.avatarUrl',
+  // ENG-47. Collections are deprecated (superseded by `SavedList`) but their
+  // write endpoints stay mounted, so `cover` still accepts member input. The
+  // `Collection.cover` source was already wired; only the DTO mapping was
+  // missing, because the fields were plain `@IsString()` until now.
+  'CreateCollectionDto.cover': 'Collection.cover',
+  'UpdateCollectionDto.cover': 'Collection.cover',
 };
 
 /** Recursively lists every `.ts` file under a `dto/` directory beneath `root`

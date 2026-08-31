@@ -1,3 +1,4 @@
+import { toImageUrl } from '../common/image-url';
 import { PressContact } from './entities/press-contact.entity';
 import { PressCoverage } from './entities/press-coverage.entity';
 
@@ -29,6 +30,9 @@ export interface PressContactDTO {
   description: string;
   languages: string;
   email: string;
+  /** A URL the browser can load, never the raw column: an uploaded avatar is
+   *  stored as a bare storage key and `toPressContactDTO` resolves it through
+   *  `toImageUrl`. `null` when there is no photo. */
   avatarUrl: string | null;
 }
 
@@ -131,7 +135,16 @@ export function toPressContactDTO(row: PressContact): PressContactDTO {
     description: row.description,
     languages: row.languages,
     email: row.email,
-    avatarUrl: row.avatarUrl,
+    // `avatar_url` holds EITHER one of our storage keys (an admin uploaded the
+    // photo) or an `https://` URL on a trusted host — that is what
+    // `@IsImageReference()` on the create/update bodies accepts. A key is not
+    // fetchable by a browser (Railway Buckets are private), so echoing the
+    // column verbatim, as this mapper used to, renders as a broken image on the
+    // public press kit. `toImageUrl` turns a key into the `/files/<key>` URL
+    // our own route serves and passes a trusted absolute URL through unchanged.
+    // The `avatar` upload kind is `requiresSession: false` (`upload-kinds.ts`),
+    // so that URL also loads for the unauthenticated visitor this page is for.
+    avatarUrl: toImageUrl(row.avatarUrl),
   };
 }
 

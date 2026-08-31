@@ -34,8 +34,6 @@ import { RoadmapIdeaStatus } from '../roadmap/entities/roadmap-idea.entity';
  * renders unchanged the moment it's wired to `GET /roadmap`. Seeded ideas are
  * inserted as `published` (they mirror the frontend's already-live
  * `TOP_IDEAS`), not `pending` review.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class CreateRoadmap1785002000000 implements MigrationInterface {
   name = 'CreateRoadmap1785002000000';

@@ -30,8 +30,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `up()` is therefore NOT atomic: a failure partway leaves the labels added so
  * far in place. That is harmless and re-running is safe, but it is stated here
  * rather than discovered.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class AddListingCoManagerEnumValues1794530000000 implements MigrationInterface {
   name = 'AddListingCoManagerEnumValues1794530000000';

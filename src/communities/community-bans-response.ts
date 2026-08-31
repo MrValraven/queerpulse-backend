@@ -59,6 +59,14 @@ export interface CommunityBanDTO {
   isExpired: boolean;
   rule: CommunityBanRuleCitationDTO | null;
   createdAt: string;
+  /** PRD-25. True when someone has asked for this bar to be permanent and it
+   *  is waiting on a second owner, co-owner or moderator. The bar in force is
+   *  still the one `expiresAt` describes: the hold changes nothing until it is
+   *  signed. Without this the list would show a 30-day bar and say nothing
+   *  about the permanent one somebody is waiting on. */
+  isPendingRatification: boolean;
+  /** That hold, so the list can link straight to it. Null when none is open. */
+  ratificationId: string | null;
 }
 
 /**
@@ -92,6 +100,7 @@ export function toCommunityBanDTO(
   bannedBy: MemberRef | null,
   currentRulesVersion: number,
   now: Date = new Date(),
+  pendingRatificationId: string | null = null,
 ): CommunityBanDTO {
   return {
     id: ban.id,
@@ -103,6 +112,8 @@ export function toCommunityBanDTO(
       ban.expiresAt !== null && ban.expiresAt.getTime() <= now.getTime(),
     rule: toCommunityBanRuleCitationDTO(ban, currentRulesVersion),
     createdAt: ban.createdAt.toISOString(),
+    isPendingRatification: pendingRatificationId !== null,
+    ratificationId: pendingRatificationId,
   };
 }
 

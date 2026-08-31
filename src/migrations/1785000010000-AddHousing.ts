@@ -5,8 +5,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `coop_join_requests` (interest/join submissions against a co-op), backing
  * the Housing Co-ops feature. Co-ops start empty by design — this migration
  * creates no seed rows.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddHousing1785000010000 implements MigrationInterface {
   name = 'AddHousing1785000010000';

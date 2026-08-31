@@ -560,24 +560,21 @@ export class AccountService {
 
   // --- Sessions (backed by the existing refresh-token store) ----------------
 
-  // The presenting `refresh_token` cookie identifies THIS device's session.
-  // We resolve it to a refresh-token FAMILY by the same sha-256 allowlist hash
-  // `AuthService` uses, so we can flag `current` and exclude it from
-  // "sign out other devices". A family, not a row id: rotation replaces the row
-  // roughly every 15 minutes, so a row id names a credential the caller may
-  // already have rotated out of, while the family names the session itself.
-  private async resolveCurrentFamilyId(
-    rawRefreshToken: string | undefined,
-  ): Promise<string | null> {
-    if (!rawRefreshToken) {
-      return null;
-    }
-    const tokenHash = createHash('sha256')
-      .update(rawRefreshToken)
-      .digest('hex');
-    const row = await this.refreshTokens.findOne({ where: { tokenHash } });
-    return row?.familyId ?? null;
-  }
+  // Which session is THIS device? It comes from the caller's own access token,
+  // as the `sid` claim `JwtStrategy` surfaces on `CurrentUserData.sessionId`.
+  //
+  // It used to be resolved by hashing the presenting `refresh_token` cookie,
+  // which never worked on these routes: that cookie is scoped to `Path=/auth`
+  // (see `auth-cookies.ts`, where the narrow scope is deliberate and stays), so
+  // the browser does not send it to `/account/sessions`. The lookup therefore
+  // found nothing every time, the security page flagged no device as current,
+  // and `revokeOtherSessions` matched no current session and revoked every one
+  // of them including the caller's.
+  //
+  // A family id, not a row id, for the same reason as everywhere else here:
+  // rotation replaces the row roughly every 15 minutes, so a row id names a
+  // credential the caller may already have rotated out of, while the family
+  // names the session itself.
 
   /**
    * The caller's live sessions, one entry per DEVICE.
@@ -598,9 +595,8 @@ export class AccountService {
    */
   async listSessions(
     userId: string,
-    rawRefreshToken?: string,
+    currentSessionId?: string,
   ): Promise<SessionResponse[]> {
-    const currentFamilyId = await this.resolveCurrentFamilyId(rawRefreshToken);
     const rows = await this.refreshTokens.find({
       where: {
         userId,
@@ -617,8 +613,16 @@ export class AccountService {
         newestPerFamily.set(row.familyId, row);
       }
     }
+    // `currentSessionId === undefined` flags nothing as current rather than
+    // matching a family whose id happens to be undefined. That is the read-only
+    // half of the same "we do not know which device this is" case that
+    // `revokeOtherSessions` refuses outright, and here it is harmless: the list
+    // is still correct, it just cannot point at one row.
     return [...newestPerFamily.values()].map((row) =>
-      toSessionResponse(row, row.familyId === currentFamilyId),
+      toSessionResponse(
+        row,
+        currentSessionId !== undefined && row.familyId === currentSessionId,
+      ),
     );
   }
 
@@ -639,13 +643,20 @@ export class AccountService {
    * `ChatGateway.authenticate` accepts it, so without this the "signed out"
    * device kept a live socket (messages, presence) for up to 15 minutes.
    *
-   * The drop is per-MEMBER, not per-session: the access token carries no
-   * session id, so the gateway can only empty the whole `user:${userId}` room.
-   * The member's other devices reconnect immediately with their own still-valid
-   * cookies, so the visible cost is a socket reconnect, and the revoked device
-   * cannot come back because its refresh rows are gone. Narrowing this to the
-   * one device needs a `sessionId` claim on the access token plus a filtered
-   * drop in the gateway.
+   * The drop is still per-MEMBER: the event carries only `userId`, so the
+   * gateway empties the whole `user:${userId}` room. The member's other devices
+   * reconnect immediately with their own still-valid cookies, so the visible
+   * cost is a socket reconnect, and the revoked device cannot come back because
+   * its refresh rows are gone.
+   *
+   * Narrowing it to the one device is now POSSIBLE: access tokens carry a `sid`
+   * claim naming this exact family (see `AccessTokenPayload`), so the event
+   * could carry `sessionId` and the gateway could drop only the sockets whose
+   * handshake token matches. That is a change inside `ChatGateway`, and it is
+   * an ergonomics fix rather than a security one: `JwtStrategy.validate` now
+   * rejects the revoked device's access token on its next request, and the
+   * gateway re-reads the same token at every handshake, so the revoked device
+   * cannot reconnect either way.
    */
   async revokeSession(userId: string, sessionId: string): Promise<void> {
     const result = await this.refreshTokens.update(
@@ -663,22 +674,45 @@ export class AccountService {
     } satisfies UserSessionRevokedEvent);
   }
 
-  // "Log out other devices": revoke every live session EXCEPT the presenting
-  // one, so the caller stays signed in on this device. FE `revokeOtherSessions`.
-  // Scoped by FAMILY, so the caller keeps every row of their own session (a
-  // rotation race can leave two) and loses every row of every other one.
-  // Emits `USER_SESSION_REVOKED` on the same reasoning as `revokeSession`; the
-  // caller's own socket reconnects on the cookie it still holds.
+  /**
+   * "Log out other devices": revoke every live session EXCEPT the caller's own,
+   * so they stay signed in on this device. FE `revokeOtherSessions`.
+   *
+   * Scoped by FAMILY, so the caller keeps every row of their own session (a
+   * rotation race can leave two) and loses every row of every other one.
+   * Emits `USER_SESSION_REVOKED` on the same reasoning as `revokeSession`; the
+   * caller's own socket reconnects on the cookie it still holds.
+   *
+   * FAILS CLOSED, and that guard is the point of the method rather than a
+   * defensive flourish. "Sign out my other devices" and "sign out everything
+   * including me" are different acts with different buttons, and a member
+   * reaching for the first one is usually reacting to a device they believe is
+   * compromised: the one outcome they must not get is being thrown out of the
+   * session they are standing in. Without a current session id the filter below
+   * excludes nothing and the method silently becomes `revokeAllSessions`, which
+   * is exactly what shipped while the id was being read from a cookie the
+   * browser never sends here. Refusing means the only route to a mass revoke is
+   * somebody deliberately calling the method that says so in its name.
+   *
+   * The refusal is reachable in exactly one benign case: an access token minted
+   * before the deploy that added the `sid` claim, which carries no session id
+   * and expires within one access TTL. A 401 sends the client through its
+   * silent refresh, and the retry arrives with a `sid` and succeeds.
+   */
   async revokeOtherSessions(
     userId: string,
-    rawRefreshToken?: string,
+    currentSessionId?: string,
   ): Promise<void> {
-    const currentFamilyId = await this.resolveCurrentFamilyId(rawRefreshToken);
+    if (!currentSessionId) {
+      throw new UnauthorizedException(
+        'Cannot identify the current session; sign in again and retry',
+      );
+    }
     const rows = await this.refreshTokens.find({
       where: { userId, revokedAt: IsNull() },
     });
     const now = new Date();
-    const toRevoke = rows.filter((r) => r.familyId !== currentFamilyId);
+    const toRevoke = rows.filter((row) => row.familyId !== currentSessionId);
     if (toRevoke.length === 0) {
       return;
     }

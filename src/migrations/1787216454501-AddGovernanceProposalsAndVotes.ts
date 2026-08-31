@@ -23,8 +23,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *   Unlike `roadmap_votes`, no extra index is needed for the live tally
  *   query: the unique constraint already leads with `proposal_id`, which is
  *   the column the tally groups by.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddGovernanceProposalsAndVotes1787216454501 implements MigrationInterface {
   name = 'AddGovernanceProposalsAndVotes1787216454501';

@@ -19,8 +19,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * NULL (not archived, no draft), which is the correct existing state for
  * every conversation participant today. Two plain `ADD COLUMN`s against an
  * existing table with no new index — no `CONCURRENTLY` split needed.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class AddConversationParticipantArchiveAndDraft1794720000000 implements MigrationInterface {
   name = 'AddConversationParticipantArchiveAndDraft1794720000000';

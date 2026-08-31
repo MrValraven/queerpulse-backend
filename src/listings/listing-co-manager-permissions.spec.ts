@@ -167,6 +167,22 @@ describe('listing co-manager permission boundary', () => {
     isActiveCoManager: jest.Mock;
     listingIdsCoManagedBy: jest.Mock;
   };
+  let transactionManager: {
+    save: jest.Mock;
+    remove: jest.Mock;
+    getRepository: jest.Mock;
+  };
+
+  /**
+   * A listing edit commits down one of two paths: a LIVE listing whose edit
+   * actually moved a field saves inside `dataSource.transaction`, so the
+   * `owner_edited` audit row lands with it, and everything else falls back to
+   * the plain repository save. Either one means the write happened, so the
+   * permission assertions below ask this rather than naming one path.
+   */
+  const hasSavedTheListing = () =>
+    listings.save.mock.calls.length > 0 ||
+    transactionManager.save.mock.calls.length > 0;
 
   /** Loads by `ref` alone, exactly as `loadOr404` does, so a test that expects
    * a 404 for a non-owner is proving the SEAT check rather than an empty
@@ -209,7 +225,7 @@ describe('listing co-manager permission boundary', () => {
       listingIdsCoManagedBy: jest.fn().mockResolvedValue([]),
     };
 
-    const transactionManager = {
+    transactionManager = {
       save: jest.fn((first: unknown, second?: object) =>
         Promise.resolve(
           second !== undefined ? { id: 'event-1', ...second } : first,
@@ -316,7 +332,7 @@ describe('listing co-manager permission boundary', () => {
         }),
       ).rejects.toBeInstanceOf(ForbiddenException);
 
-      expect(listings.save).not.toHaveBeenCalled();
+      expect(hasSavedTheListing()).toBe(false);
     });
 
     it('rejects consentOuting: false, which is a real consent withdrawal', async () => {
@@ -333,7 +349,7 @@ describe('listing co-manager permission boundary', () => {
         hoursNote: 'Closed on public holidays',
       });
 
-      expect(listings.save).toHaveBeenCalled();
+      expect(hasSavedTheListing()).toBe(true);
       expect(result.managementRole).toBe(ListingManagementRole.CoManager);
     });
 
@@ -343,7 +359,7 @@ describe('listing co-manager permission boundary', () => {
         consentOuting: false,
       });
 
-      expect(listings.save).toHaveBeenCalled();
+      expect(hasSavedTheListing()).toBe(true);
     });
   });
 

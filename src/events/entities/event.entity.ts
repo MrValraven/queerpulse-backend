@@ -201,6 +201,25 @@ export class Event {
   @Column({ type: 'int', nullable: true })
   capacity!: number | null;
 
+  /**
+   * When the "last few spots" alert went out for this gathering, or null while
+   * it has not (PRD-18).
+   *
+   * The at-most-once claim for `EventCapacityAlertsService`: the check runs on
+   * every `going` RSVP, so without a stamp every RSVP past the threshold would
+   * re-alert the same people. Claimed with a conditional UPDATE
+   * (`nearly_full_notified_at IS NULL`), the same shape
+   * `membership_cards.expiry_warning_sent_at` and
+   * `deletion_request.final_warning_sent_at` use, so two concurrent RSVPs
+   * cannot both send.
+   *
+   * Cleared again whenever seats free up past the threshold, so a gathering
+   * that fills, empties and fills again earns a second alert rather than
+   * staying silent forever after the first.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  nearlyFullNotifiedAt!: Date | null;
+
   @Column({
     type: 'enum',
     enum: EventVisibility,

@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { In, Repository } from 'typeorm';
+import { In, Repository, SelectQueryBuilder } from 'typeorm';
 import { MemberLookup, MemberRef } from '../common/member-ref';
 import {
   DEFAULT_LIST_LIMIT,
@@ -24,6 +24,7 @@ import { Profile } from '../users/entities/profile.entity';
 import { VerificationLevel } from '../verification/verification-level';
 import { VerificationService } from '../verification/verification.service';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
+import { ContentModerationService } from '../content-moderation/content-moderation.service';
 import { CreateIntroRequestDto } from './dto/create-intro-request.dto';
 import { CreateLandlordDto } from './dto/create-landlord.dto';
 import { CreateRecommendationDto } from './dto/create-recommendation.dto';
@@ -93,7 +94,40 @@ export class LandlordsService {
     // LOC-19: the member who suggested an entry, or asked for an
     // introduction, is told what was decided. In-app plus push, never email.
     private readonly notifications: NotificationsService,
+    // Read-only: a `hide_content`/`remove_content` takedown on a `landlord`
+    // subject (keyed by the entry slug, which is what the report modal on
+    // `LandlordPage` sends) withholds the entry from every member read below.
+    private readonly contentModeration: ContentModerationService,
   ) {}
+
+  // A landlord entry is reported (and taken down) under the `landlord` subject
+  // code, keyed by the entry slug. A hidden OR removed entry vanishes from the
+  // member browse and detail, and from every member route that loads a live
+  // landlord by slug: this is a member surface with no per-viewer staff role,
+  // so a takedown withholds it entirely, exactly as `HousingDirectoryService`
+  // treats a `housing` takedown. The admin routes below deliberately do NOT
+  // filter on it, so staff can still see and triage what they took down.
+  private static readonly SUBJECT_TYPE = 'landlord';
+
+  /**
+   * NOT EXISTS predicate dropping any landlord under a `landlord` takedown
+   * (hidden OR removed) from a landlord query builder (alias `l`). Applied
+   * in-query so the page and its `getManyAndCount` total agree, and written as
+   * a subquery rather than a join so the `.skip()`/`.take()` pagination
+   * `paginate` uses stays correct. Mirrors
+   * `HousingDirectoryService.excludeModeratedListings`.
+   */
+  private excludeModeratedLandlords(qb: SelectQueryBuilder<Landlord>): void {
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "content_moderation" "cm"
+        WHERE "cm"."subject_type" = :landlordSubjectType
+          AND "cm"."subject_id" = l.slug
+          AND ("cm"."hidden_at" IS NOT NULL OR "cm"."removed_at" IS NOT NULL)
+      )`,
+      { landlordSubjectType: LandlordsService.SUBJECT_TYPE },
+    );
+  }
 
   /** Batched recommendation-author verification levels (honest badge). Missing
    * ids resolve to the email floor. */
@@ -112,6 +146,8 @@ export class LandlordsService {
     const qb = this.landlords
       .createQueryBuilder('l')
       .where('l.status = :live', { live: LandlordStatus.Live });
+    // Moderator takedowns, dropped in-query so the page and the total agree.
+    this.excludeModeratedLandlords(qb);
     if (query.hood) {
       qb.andWhere('LOWER(l.hood) = LOWER(:hood)', { hood: query.hood });
     }
@@ -127,12 +163,9 @@ export class LandlordsService {
   }
 
   async detail(slug: string): Promise<LandlordDetailDTO> {
-    const landlord = await this.landlords.findOne({
-      where: { slug, status: LandlordStatus.Live },
-    });
-    if (!landlord) {
-      throw new NotFoundException('Landlord not found');
-    }
+    // Goes through the same loader every other member route uses, so the
+    // moderation takedown check lives in exactly one place.
+    const landlord = await this.loadLiveOr404(slug);
     // Identical to the private builder below, which is the one place the
     // recommendation cap and the rating aggregate are maintained.
     return this.detailFromEntity(landlord);
@@ -688,11 +721,25 @@ export class LandlordsService {
 
   // --- internals ---
 
+  /**
+   * The one member-facing by-slug loader: detail, recommend, withdraw-my-
+   * recommendation and intro-request all come through here, so a moderator
+   * takedown withholds the entry from all four at once. A hidden OR removed
+   * entry 404s identically to an unknown slug, which is also what keeps a
+   * taken-down entry from collecting new public ratings or intro requests.
+   */
   private async loadLiveOr404(slug: string): Promise<Landlord> {
     const landlord = await this.landlords.findOne({
       where: { slug, status: LandlordStatus.Live },
     });
     if (!landlord) {
+      throw new NotFoundException('Landlord not found');
+    }
+    const moderation = await this.contentModeration.stateFor(
+      LandlordsService.SUBJECT_TYPE,
+      slug,
+    );
+    if (moderation.hidden || moderation.removed) {
       throw new NotFoundException('Landlord not found');
     }
     return landlord;

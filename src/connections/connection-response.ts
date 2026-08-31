@@ -27,6 +27,35 @@ export interface ConnectionCounts {
 }
 
 /**
+ * One pending request the viewer has been sent, reduced to the two facts a
+ * profile hero needs: whose profile it is on, and which connection to answer.
+ * The id is what `PATCH /connections/:id` accepts, so the hero can accept or
+ * decline without first loading the connections page.
+ */
+export interface IncomingConnectionRef {
+  slug: string;
+  connectionId: string;
+}
+
+/**
+ * Every relationship the viewer holds with another member, as bare slugs: who
+ * they are connected to, who has asked them, and who they have asked.
+ *
+ * ONE request for all three (PRD-03). The client used to fetch only the
+ * accepted slugs, so a member looking at the profile of somebody who had
+ * ALREADY asked to connect with them was still offered "Say hello", and
+ * sending it was refused with a 409. Nothing on the client could know better,
+ * because nothing on the client had ever been told. Fetching this per profile
+ * view would be a request per card on every members grid, so it is one
+ * session-scoped call the whole app reads.
+ */
+export interface ConnectionRelationshipSlugs {
+  connected: string[];
+  incoming: IncomingConnectionRef[];
+  sent: string[];
+}
+
+/**
  * The viewer-relative relationship signals a card shows beyond the raw
  * connection: how many accepted connections the two share, and the vouch
  * relationship between them. Computed per-viewer, so they live outside the

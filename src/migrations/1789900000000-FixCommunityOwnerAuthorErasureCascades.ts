@@ -29,8 +29,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * promotes the roster's longest-tenured `mod` to owner, or — if none exists —
  * leaves `owner_id` NULL and stamps the new `needs_owner_review_at` column so
  * an admin surface can later query for ownerless communities.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class FixCommunityOwnerAuthorErasureCascades1789900000000 implements MigrationInterface {
   name = 'FixCommunityOwnerAuthorErasureCascades1789900000000';

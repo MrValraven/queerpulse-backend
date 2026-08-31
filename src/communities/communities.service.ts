@@ -37,6 +37,13 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { CommunityAutoFreezeService } from './community-auto-freeze.service';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
 import { GovernanceLogAction } from './entities/community-governance-log.entity';
+// Entity-only import (no provider, no module edge), so this stays a plain
+// table join in `myCommunities` and creates no dependency cycle with
+// MembershipCardsModule, which already depends on this module.
+import {
+  CardIssuerType,
+  CommunityCard,
+} from '../membership-cards/entities/community-card.entity';
 import {
   CommunityCardDTO,
   CommunityDetailDTO,
@@ -61,8 +68,18 @@ import {
   banExpiryFromDays,
   resolveRuleSnapshot,
 } from './community-bans-response';
-import { COMMUNITY_BAN_AUDIT_ACTION } from './community-governance-log.service';
+import { CommunityBanRatificationService } from './community-ban-ratification.service';
+import { COMMUNITY_BAN_UNRATIFIED_FALLBACK_DAYS } from './community-ban-ratification-window';
+import {
+  CommunityRemovalOutcomeDTO,
+  toCommunityRemovalOutcomeDTO,
+} from './community-ban-ratifications-response';
+import {
+  COMMUNITY_BAN_AUDIT_ACTION,
+  COMMUNITY_REMOVAL_AUDIT_ACTION,
+} from './community-governance-log.service';
 import { CommunityBan } from './entities/community-ban.entity';
+import { CommunityBanRatification } from './entities/community-ban-ratification.entity';
 import {
   CommunityJoinRequest,
   CommunityJoinRequestDeclineKind,
@@ -71,6 +88,7 @@ import {
 } from './entities/community-join-request.entity';
 import { CommunityTagRequest } from './entities/community-tag-request.entity';
 import { CreateCommunityTagRequestDto } from './dto/create-community-tag-request.dto';
+import { ListJoinRequestsQuery } from './dto/list-join-requests.query';
 import {
   CommunityTagRequestResponseDTO,
   toCommunityTagRequestResponse,
@@ -250,8 +268,11 @@ export interface TriageJoinRequestInput {
  * the ban row, shown on the mod panel, carried into the governance log, and
  * sent to the removed member.
  *
- * `banDays` makes the bar temporary (absent means permanent, the behaviour
- * every caller had before timed bans existed). `ruleIndex` cites one of the
+ * `banDays` makes the bar temporary. ABSENT MEANS "PERMANENT, PENDING A SECOND
+ * SIGNATURE" (PRD-25): a 30-day bar takes effect at once and a hold opens for
+ * a second owner, co-owner or moderator to make it permanent, or for a
+ * community with no second eligible signatory, the 30-day bar is the whole of
+ * it. `ruleIndex` cites one of the
  * community's own house rules, 0-based into `Community.rules`; the server
  * snapshots the version and wording alongside it so the citation survives a
  * later rules rewrite. Both are ignored when no ban is written at all. */
@@ -319,6 +340,11 @@ export class CommunitiesService {
     // the roster. Same fire-and-forget `emit` idiom as `COMMUNITY_POST_CREATED`
     // in `CommunityPostsService`.
     private readonly eventEmitter: EventEmitter2,
+    // PRD-25. A removal that bars the return FOREVER now opens a hold for a
+    // second owner, co-owner or moderator to sign. Same provider, same module,
+    // no cycle: `CommunityBanRatificationService` depends only on repositories,
+    // the governance log and notifications, and never on this service.
+    private readonly banRatifications: CommunityBanRatificationService,
   ) {}
 
   private readonly logger = new Logger(CommunitiesService.name);
@@ -1916,39 +1942,90 @@ export class CommunitiesService {
     return toCommunityTagRequestResponse(saved);
   }
 
+  /**
+   * The community's PENDING join-request queue, oldest first, paginated
+   * (ENG-41).
+   *
+   * Supersedes the earlier BE-COM-36 note here, which capped the queue at
+   * `DEFAULT_LIST_LIMIT` and called the cap "invisible to today's callers".
+   * Bounding it was right; leaving it invisible was not. Oldest-first plus a
+   * hard 200-row cap means the requests that fall off the end are the NEWEST
+   * arrivals, so a community with 201 pending requests hid the most recent one
+   * from every moderator and said nothing about it. The envelope now carries
+   * `total`, so the queue can state its real size, and `page`, so a moderator
+   * can reach every request in it.
+   *
+   * ORDERING STAYS OLDEST-FIRST, deliberately: this is a work queue, and the
+   * request that has waited longest is the one that most needs an answer.
+   * Newest-first would be the wrong sort for a queue even now that nothing is
+   * hidden, so please do not "fix" it.
+   *
+   * The `EXISTS` against `profiles` is what keeps `total` honest. Every row is
+   * rendered through a `MemberRef`, so a request whose applicant has no profile
+   * row cannot be rendered at all and used to be dropped AFTER the fetch: the
+   * count would then have included rows no moderator could ever see or act on.
+   * Filtering in the query instead means `total` is exactly the number of
+   * requests reachable through these pages. Expressed as `EXISTS` rather than a
+   * join, the same way `roster` does it, so `paginate`'s `.skip()/.take()`
+   * stays clear of the distinct-alias pass a joined query runs into.
+   */
   async listJoinRequests(
     slug: string,
     actorId: string,
-  ): Promise<CommunityJoinRequestDTO[]> {
+    query: ListJoinRequestsQuery = {},
+  ): Promise<Paginated<CommunityJoinRequestDTO>> {
     const community = await this.loadOr404(slug);
     await this.assertOwnerOrMod(community.id, actorId);
 
-    const rows = await this.joinRequests.find({
-      where: { communityId: community.id, status: JoinRequestStatus.Pending },
-      order: { createdAt: 'ASC' },
-      // Bounded (BE-COM-36): the pending queue had no `take` at all, and each
-      // row fans out into a member lookup. The response stays a plain array,
-      // so the cap is invisible to today's callers; a community with a
-      // 200-deep pending queue has a moderation problem this endpoint isn't
-      // the place to solve.
-      take: DEFAULT_LIST_LIMIT,
-    });
-    if (!rows.length) return [];
+    const page = normalizePage(query.page);
+    const joinRequestsQuery = this.joinRequests
+      .createQueryBuilder('request')
+      .where('request.community_id = :communityId', {
+        communityId: community.id,
+      })
+      .andWhere('request.status = :pending', {
+        pending: JoinRequestStatus.Pending,
+      })
+      .andWhere(
+        `EXISTS (
+           SELECT 1 FROM "profiles" "applicant_profile"
+           WHERE "applicant_profile"."user_id" = request.user_id
+         )`,
+      )
+      // `created_at` alone is not a total order, so it is not a safe sort key for
+      // offset pagination: two rows written in the same transaction share a
+      // statement timestamp, and Postgres is then free to return that tie in
+      // either order per query, which is how a row appears on two pages and
+      // another appears on none. `id` breaks the tie deterministically. Same
+      // reasoning as `PlatformSettingsService.listChanges`.
+      .orderBy('request.created_at', 'ASC')
+      .addOrderBy('request.id', 'ASC');
 
-    const applicantIds = rows.map((row) => row.userId);
-    // Both lookups are batched across the WHOLE queue, never per row: this
-    // list is rendered one card per request, and a per-request query here
-    // would be the N+1 that `statsForMany` exists to avoid elsewhere in this
-    // service.
-    const [refs, contexts] = await Promise.all([
-      new MemberLookup(this.profiles).byUserIds(applicantIds),
-      this.applicantContexts(community, actorId, applicantIds),
-    ]);
-    return rows
-      .filter((row) => refs.has(row.userId))
-      .map((row) =>
-        toJoinRequestDTO(row, refs.get(row.userId)!, contexts.get(row.userId)),
-      );
+    return paginate(joinRequestsQuery, page, async (rows) => {
+      if (!rows.length) return [];
+
+      const applicantIds = rows.map((row) => row.userId);
+      // Both lookups are batched across the WHOLE page, never per row: this
+      // list is rendered one card per request, and a per-request query here
+      // would be the N+1 that `statsForMany` exists to avoid elsewhere in this
+      // service. Pagination narrowed what "the whole set" means; it did not
+      // turn either lookup into a per-row call.
+      const [refs, contexts] = await Promise.all([
+        new MemberLookup(this.profiles).byUserIds(applicantIds),
+        this.applicantContexts(community, actorId, applicantIds),
+      ]);
+      // Unreachable given the `EXISTS` above, and kept as a type-level guard so
+      // `refs.get(...)!` is not an unchecked assertion.
+      return rows
+        .filter((row) => refs.has(row.userId))
+        .map((row) =>
+          toJoinRequestDTO(
+            row,
+            refs.get(row.userId)!,
+            contexts.get(row.userId),
+          ),
+        );
+    });
   }
 
   /**
@@ -2273,13 +2350,24 @@ export class CommunitiesService {
    * `allowReturn`. A member removing THEMSELVES never writes one, whatever
    * the caller sent: leaving is not a moderation act, and a member who leaves
    * must be able to come back.
+   *
+   * A PERMANENT BAR NEEDS A SECOND SIGNATURE (PRD-25). Omitting `banDays` used
+   * to bar someone from this community forever on one person's say-so, while
+   * the platform-level equivalent had required a second moderator since TS-12.
+   * It now applies a 30-day bar at once and opens a hold
+   * (`community_ban_ratifications`) for a second owner, co-owner or moderator
+   * to sign inside 72 hours. The member is off the roster immediately either
+   * way: only the permanence waits. A community with no second eligible
+   * signatory opens no hold and the bar stands at 30 days, which the returned
+   * outcome says out loud rather than leaving the caller to believe they did
+   * something they did not.
    */
   async removeMember(
     slug: string,
     actorId: string,
     memberSlug: string,
     options: RemoveMemberOptions = {},
-  ): Promise<void> {
+  ): Promise<CommunityRemovalOutcomeDTO> {
     const community = await this.loadOr404(slug);
 
     const targetUserId = await new MemberLookup(this.profiles).userIdForSlug(
@@ -2337,14 +2425,20 @@ export class CommunitiesService {
     // guard is explicit rather than relying on the caller, because the query
     // param is client-supplied and "leaving banned me from my own community"
     // is the worst possible way to be wrong here.
-    const banReason = options.reason?.trim() || null;
-    const ban =
+    //
+    // The reason the actor typed, if any. It is the ban's reason when the
+    // return is barred, and the note on the removal's audit row either way, so
+    // it is named for what it is rather than for one of the two branches.
+    const statedReason = options.reason?.trim() || null;
+    const barOutcome =
       !isSelfLeave && !options.allowReturn
-        ? await this.barReturn(community, actorId, targetUserId, banReason, {
+        ? await this.barReturn(community, actorId, targetUserId, statedReason, {
             banDays: options.banDays,
             ruleIndex: options.ruleIndex,
           })
         : null;
+    const ban = barOutcome?.ban ?? null;
+    const ratification = barOutcome?.ratification ?? null;
     const hasBarredReturn = ban !== null;
 
     // One entry, under the action that describes what actually happened. A
@@ -2360,7 +2454,7 @@ export class CommunitiesService {
       targetUserId,
       {
         removedBySelf: isSelfLeave,
-        ...(hasBarredReturn && banReason ? { reason: banReason } : {}),
+        ...(hasBarredReturn && statedReason ? { reason: statedReason } : {}),
         // The terms of the bar, so the community's own governance log answers
         // "for how long, and under which rule" without a join onto
         // `community_bans` (a lifted ban deletes that row; this entry stays).
@@ -2388,8 +2482,33 @@ export class CommunitiesService {
         actorUserId: actorId,
         action: COMMUNITY_BAN_AUDIT_ACTION,
         targetUserId,
-        note: banReason,
+        note: statedReason,
         duration: ban.expiresAt ? ban.expiresAt.toISOString() : null,
+      });
+    } else if (!isSelfLeave) {
+      // PRD-28. The mirror the branch above writes used to be the ban's alone,
+      // so a removal that let the member come back wrote `governance_log` and
+      // nothing else, and the appeal machinery reading `mod_audit_logs` could
+      // not see it. Being able to rejoin is not the same as being able to
+      // contest the decision, and the decision was the part with no record.
+      //
+      // A SELF-LEAVE WRITES NOTHING HERE, for the same reason it writes no ban
+      // and sends no notification: leaving is not a moderation act, and
+      // "you appealed leaving your own community" is the worst possible way to
+      // be wrong. Same guard, deliberately spelled out rather than inferred.
+      //
+      // Its own action string, so the appeals queue can tell a removal from a
+      // bar (`COMMUNITY_REMOVAL_AUDIT_ACTION`). Best effort inside the helper,
+      // exactly like the ban: the removal has already committed, so a mirror
+      // that cannot be written must never fail the request.
+      await this.governanceLog.logModerationAudit({
+        actorUserId: actorId,
+        action: COMMUNITY_REMOVAL_AUDIT_ACTION,
+        targetUserId,
+        note: statedReason,
+        // A removal serves no term. The member may come back the same minute,
+        // so there is no end date to record and none to display.
+        duration: null,
       });
     }
     // A self-leave doesn't need a "you were removed" notification telling the
@@ -2403,6 +2522,19 @@ export class CommunitiesService {
         await this.notifyMemberRemoved(community, actorId, targetUserId);
       }
     }
+
+    // PRD-25. The route used to answer 204, which was honest while a removal
+    // had one possible outcome. Asking for a permanent bar now lands in three
+    // different places, and a moderator told nothing would believe they got
+    // the one they asked for.
+    return toCommunityRemovalOutcomeDTO({
+      isSelfLeave,
+      hasBarredReturn,
+      barExpiresAt: ban?.expiresAt ?? null,
+      ratificationId: ratification?.id ?? null,
+      ratificationExpiresAt: ratification?.expiresAt ?? null,
+      hasNoSecondSignatory: barOutcome?.hasNoSecondSignatory ?? false,
+    });
   }
 
   /**
@@ -2419,6 +2551,15 @@ export class CommunitiesService {
    * record still reads correctly after the rules are rewritten. An index that
    * falls outside the current rules is dropped rather than stored.
    *
+   * NO `banDays` MEANS "PERMANENT", AND PERMANENT NEEDS TWO PEOPLE (PRD-25).
+   * What that writes now is a 30-day bar plus a hold for a second owner,
+   * co-owner or moderator to sign, so the member is out of the room at once and
+   * only the permanence waits. If this community has nobody else who could
+   * sign, no hold is opened and the 30-day bar is the whole sanction: a solo
+   * owner does not get to bar someone for life on their own signature, and
+   * that is the case the finding was most worried about. The caller is handed
+   * `hasNoSecondSignatory` so it can say so.
+   *
    * Only the WRITE lives here. Listing, revising and lifting bans is a
    * separate surface with its own service.
    */
@@ -2428,9 +2569,18 @@ export class CommunitiesService {
     targetUserId: string,
     reason: string | null,
     terms: { banDays?: number; ruleIndex?: number },
-  ): Promise<CommunityBan | null> {
-    const expiresAt =
-      terms.banDays !== undefined ? banExpiryFromDays(terms.banDays) : null;
+  ): Promise<{
+    ban: CommunityBan | null;
+    ratification: CommunityBanRatification | null;
+    hasNoSecondSignatory: boolean;
+  }> {
+    const isPermanentRequested = terms.banDays === undefined;
+    // A permanent request lands as the fallback term first. Everything after
+    // this point treats it as an ordinary timed bar, and the hold below is the
+    // only thing that can turn it back into a permanent one.
+    const expiresAt = banExpiryFromDays(
+      terms.banDays ?? COMMUNITY_BAN_UNRATIFIED_FALLBACK_DAYS,
+    );
     const rule = resolveRuleSnapshot(
       community.rules,
       community.rulesVersion,
@@ -2469,9 +2619,30 @@ export class CommunitiesService {
     // path nothing was written and the ban already on file is the one whose
     // terms the member is actually serving, so it is the one the notification
     // and the audit rows have to describe.
-    return this.bans.findOne({
+    const ban = await this.bans.findOne({
       where: { communityId: community.id, userId: targetUserId },
     });
+
+    // Nothing to ratify unless a permanent bar was asked for AND the bar now
+    // in force has an end date to remove. A conflict-path row that is already
+    // permanent needs no second signature: it got one, or it predates this
+    // control, and re-proposing it would ask somebody to sign a decision that
+    // has already been made.
+    if (!isPermanentRequested || !ban || ban.expiresAt === null) {
+      return { ban, ratification: null, hasNoSecondSignatory: false };
+    }
+
+    const ratification = await this.banRatifications.proposePermanentBar({
+      community,
+      ban,
+      proposerUserId: actorId,
+      reason,
+    });
+    return {
+      ban,
+      ratification,
+      hasNoSecondSignatory: ratification === null,
+    };
   }
 
   /**
@@ -2507,10 +2678,31 @@ export class CommunitiesService {
     const rows = await this.members
       .createQueryBuilder('m')
       .innerJoin(Community, 'c', 'c.id = m.community_id')
+      // Whether this community runs a live membership-card programme, carried
+      // on the membership map itself so a cardless member's wallet can name
+      // the communities a card could come from in ONE request. Resolved here
+      // rather than by the client asking `GET /communities/:slug/card` once
+      // per community, which is N requests to render one empty state.
+      //
+      // A LEFT JOIN over `IDX_community_cards_issuer_id`, and at most one row
+      // can match (`UQ_community_cards_issuer`), so it cannot multiply the
+      // membership rows. `is_enabled` is part of the ON clause on purpose: a
+      // paused programme issues nothing today, and putting it in a WHERE
+      // would turn the outer join into an inner one and drop communities.
+      .leftJoin(
+        CommunityCard,
+        'card',
+        'card.issuer_type = :cardIssuerType AND card.issuer_id = c.id AND card.is_enabled = TRUE',
+        { cardIssuerType: CardIssuerType.Community },
+      )
       .select('c.slug', 'slug')
       .addSelect('c.name', 'name')
       .addSelect('m.role', 'role')
       .addSelect('m.joined_at', 'joinedAt')
+      // The id rather than a boolean expression: every driver agrees on
+      // "there was a row or there was not", and `getRawMany` hands booleans
+      // back inconsistently across pg versions.
+      .addSelect('card.id', 'cardProgramId')
       .where('m.user_id = :userId', { userId })
       // An archived community drops out of the caller's membership map too, so
       // the client stops treating it as a live community they belong to.
@@ -2522,13 +2714,15 @@ export class CommunitiesService {
         name: string;
         role: RosterRole;
         joinedAt: Date;
+        cardProgramId: string | null;
       }>();
 
-    return rows.map((r) => ({
-      slug: r.slug,
-      name: r.name,
-      role: r.role,
-      joinedAt: new Date(r.joinedAt).toISOString(),
+    return rows.map((row) => ({
+      slug: row.slug,
+      name: row.name,
+      role: row.role,
+      joinedAt: new Date(row.joinedAt).toISOString(),
+      hasCardProgram: row.cardProgramId !== null,
     }));
   }
 

@@ -381,4 +381,125 @@ describe('PreferencesService', () => {
       expect(repo.save).not.toHaveBeenCalled();
     });
   });
+
+  describe('getContentSensitivity (PRD-10)', () => {
+    // The permissive default is the whole product decision here: a member who
+    // has never opened the Interests pane is shown the entire platform.
+    it('shows everything when no row exists', async () => {
+      repo.findOne.mockResolvedValue(null);
+
+      await expect(service.getContentSensitivity('u1')).resolves.toEqual({
+        hideDating: false,
+        hideMentalHealth: false,
+        hideSexualityIdentity: false,
+      });
+    });
+
+    it('projects the stored flags', async () => {
+      repo.findOne.mockResolvedValue(
+        row({
+          hideDatingContent: false,
+          hideMentalHealthContent: true,
+          hideSexualityIdentityContent: false,
+        }),
+      );
+
+      await expect(service.getContentSensitivity('u1')).resolves.toEqual({
+        hideDating: false,
+        hideMentalHealth: true,
+        hideSexualityIdentity: false,
+      });
+    });
+  });
+
+  describe('updateContentSensitivity (PRD-10)', () => {
+    it("replaces all three and leaves the row's other settings alone", async () => {
+      repo.findOne.mockResolvedValue(
+        row({ publicProfileEnabled: true, hideDatingContent: true }),
+      );
+
+      const result = await service.updateContentSensitivity('u1', {
+        hideDating: false,
+        hideMentalHealth: true,
+        hideSexualityIdentity: true,
+      });
+
+      expect(repo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          hideDatingContent: false,
+          hideMentalHealthContent: true,
+          hideSexualityIdentityContent: true,
+          // The endpoints share one row, so a content filter must never
+          // clobber the switch that publishes to the open web.
+          publicProfileEnabled: true,
+        }),
+      );
+      expect(result).toEqual({
+        hideDating: false,
+        hideMentalHealth: true,
+        hideSexualityIdentity: true,
+      });
+    });
+
+    // A member who has never opened settings has no row; writing one must not
+    // drag every other setting to a value they never chose.
+    it('starts from the documented defaults when no row exists', async () => {
+      repo.findOne.mockResolvedValue(null);
+
+      await service.updateContentSensitivity('u1', {
+        hideDating: true,
+        hideMentalHealth: false,
+        hideSexualityIdentity: false,
+      });
+
+      expect(repo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'u1',
+          hideDatingContent: true,
+          hideMentalHealthContent: false,
+          hideSexualityIdentityContent: false,
+          hideFromSuggestions: false,
+          loginAlertsEnabled: true,
+        }),
+      );
+    });
+  });
+
+  describe('suggestion visibility (PRD-16)', () => {
+    // Recommendable unless the member says otherwise: the strip only ever
+    // surfaces people the member directory would already list.
+    it('defaults to recommendable when no row exists', async () => {
+      repo.findOne.mockResolvedValue(null);
+
+      await expect(service.getSuggestionVisibility('u1')).resolves.toEqual({
+        hideFromSuggestions: false,
+      });
+    });
+
+    it('persists the opt-out and echoes the stored value', async () => {
+      repo.findOne.mockResolvedValue(row({ hideFromSuggestions: false }));
+
+      const result = await service.updateSuggestionVisibility('u1', {
+        hideFromSuggestions: true,
+      });
+
+      expect(repo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ hideFromSuggestions: true }),
+      );
+      expect(result).toEqual({ hideFromSuggestions: true });
+    });
+
+    // Opting back in is an ordinary write with no gate: nothing is being
+    // published, so there is no eligibility question to ask.
+    it('lets a member opt back in without any eligibility check', async () => {
+      repo.findOne.mockResolvedValue(row({ hideFromSuggestions: true }));
+
+      const result = await service.updateSuggestionVisibility('u1', {
+        hideFromSuggestions: false,
+      });
+
+      expect(eligibility.assertMayGoPublic).not.toHaveBeenCalled();
+      expect(result).toEqual({ hideFromSuggestions: false });
+    });
+  });
 });

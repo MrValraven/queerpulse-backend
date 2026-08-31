@@ -9,6 +9,7 @@ import { ConnectionsModule } from '../connections/connections.module';
 import { Event } from '../events/entities/event.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { SocialModule } from '../social/social.module';
+import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { TopicFollow } from '../topics/entities/topic-follow.entity';
 import { UsersModule } from '../users/users.module';
 import { FeedSourceMute } from './entities/feed-source-mute.entity';
@@ -41,6 +42,13 @@ import { FeedService } from './feed.service';
  * that let a feed card act inline instead of only linking out). The writes
  * behind those two still belong to `CommunityPostsService`; the feed only
  * counts them.
+ *
+ * PRD-10 adds one more read-only registration on that same idiom,
+ * `MemberPreferences`: the viewer's three content-sensitivity switches, read
+ * once per feed request and resolved into the tag sets the candidate queries
+ * exclude on (`src/feed/content-sensitivity.ts`). Registering the repository
+ * rather than importing `PreferencesModule` keeps the module graph acyclic,
+ * and the write side of that table stays entirely with `PreferencesService`.
  */
 @Module({
   imports: [
@@ -53,6 +61,7 @@ import { FeedService } from './feed.service';
       CommunityPostReaction,
       CommunityPostReply,
       TopicFollow,
+      MemberPreferences,
       FeedSourceMute,
     ]),
     UsersModule,

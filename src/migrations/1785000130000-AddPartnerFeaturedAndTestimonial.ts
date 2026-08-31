@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 export class AddPartnerFeaturedAndTestimonial1785000130000 implements MigrationInterface {

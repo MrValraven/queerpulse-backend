@@ -71,6 +71,23 @@ export function tierForScore(score: number): BanEvasionTier {
 }
 
 /**
+ * Whether a tier is strong enough to be worth putting in front of a reviewer as
+ * a standalone claim, with no score and no reasons beside it to temper it.
+ *
+ * `low` is deliberately excluded. The only things that reach `low` on their own
+ * are a stated-name match and a single lineage hit, and plenty of unrelated
+ * people share a name or share an inviter. Those are worth showing a staff
+ * reviewer who can see WHY; they are not worth telling anyone, flatly, that the
+ * person in front of them looks like a returning banned member.
+ *
+ * Used by the community-scoped binary badge
+ * (`community-ban-evasion.service.ts`), which has no room to explain itself.
+ */
+export function isReviewWorthyTier(tier: BanEvasionTier): boolean {
+  return tier === 'medium' || tier === 'high';
+}
+
+/**
  * One reason, tied to one removed account. The removed account is named when it
  * still exists so the reviewer can go and read it; once erased, only the date
  * and the kind of removal remain, which is exactly the trade this module makes.
@@ -103,12 +120,24 @@ export interface BanEvasionAssessmentDTO {
  * reviewer should look, not triple the certainty.
  */
 export function scoreSignals(signals: readonly BanEvasionSignalDTO[]): number {
+  return scoreSignalKinds(signals.map((signal) => signal.kind));
+}
+
+/**
+ * The same weighting over bare signal KINDS, for a caller that has decided
+ * which correlations fired and has deliberately not built the reasons behind
+ * them. One weighting table, two entry points, so the community-scoped binary
+ * badge can never drift away from the staff assessment's calibration.
+ */
+export function scoreSignalKinds(
+  kinds: Iterable<BanEvasionSignalKind>,
+): number {
   const countedKinds = new Set<BanEvasionSignalKind>();
   let total = 0;
-  for (const signal of signals) {
-    if (countedKinds.has(signal.kind)) continue;
-    countedKinds.add(signal.kind);
-    total += BAN_EVASION_SIGNAL_WEIGHTS[signal.kind];
+  for (const kind of kinds) {
+    if (countedKinds.has(kind)) continue;
+    countedKinds.add(kind);
+    total += BAN_EVASION_SIGNAL_WEIGHTS[kind];
   }
   return total;
 }

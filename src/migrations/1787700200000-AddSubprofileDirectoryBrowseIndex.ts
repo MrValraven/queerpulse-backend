@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -18,8 +17,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `migrationsTransactionMode: 'each'`). Run alone:
  *
  *   pnpm run typeorm migration:run -- --transaction none
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class AddSubprofileDirectoryBrowseIndex1787700200000 implements MigrationInterface {
   name = 'AddSubprofileDirectoryBrowseIndex1787700200000';

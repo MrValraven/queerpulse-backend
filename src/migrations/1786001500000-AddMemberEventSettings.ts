@@ -11,8 +11,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *    `connections`, mirroring the frontend `DEFAULT_PREFS`.
  *  - `event_emails_enabled` — whether event email notifications are on. Default
  *    true, preserving the prior always-on behaviour for members without a row.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddMemberEventSettings1786001500000 implements MigrationInterface {
   name = 'AddMemberEventSettings1786001500000';

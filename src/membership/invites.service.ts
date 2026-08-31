@@ -38,6 +38,26 @@ import {
 
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
+/**
+ * PRD-02. How long an approval-minted invite sits on the shelf BEFORE the
+ * applicant has been told it exists.
+ *
+ * A member's invite gets `INVITE_TTL_MS` because the member is standing right
+ * there when it is minted and can hand the link over immediately. An approval
+ * invite has nobody to hand it over: QueerPulse sends no email, so the moment
+ * of approval is known only to the reviewer, and a 7-day clock started there
+ * was routinely spent in full before the applicant next opened the status page.
+ * The sweeper then reclaimed it and the applicant met an "invite is gone"
+ * screen for a decision that had gone their way.
+ *
+ * So the mint gets the long shelf life, and the SHORT redemption window is
+ * started by `startApprovalRedemptionWindow` at the first moment the applicant
+ * actually reads the code. The worst-case total exposure of one approval
+ * invite is therefore this shelf plus one `INVITE_TTL_MS` window, and an
+ * invite nobody ever looks at still lapses on its own.
+ */
+const APPROVAL_INVITE_SHELF_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
 // Code groups are drawn from an unambiguous uppercase alphabet (no I/O/0/1) so
 // codes are easy to read aloud and copy from a link preview. 32 symbols.
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -109,7 +129,14 @@ export class InvitesService {
         'That email address can’t be invited — its owner has left the platform.',
       );
     }
-    const fields = { email, note, vouch, skipQuota: false, personal: true };
+    const fields = {
+      email,
+      note,
+      vouch,
+      skipQuota: false,
+      personal: true,
+      ttlMs: INVITE_TTL_MS,
+    };
 
     for (let attempt = 1; ; attempt++) {
       const code = await this.generateUniqueCode();
@@ -165,9 +192,54 @@ export class InvitesService {
       await this.generateUniqueCode(),
       // personal: false — an approval/bootstrap invite is not the inviter's
       // personal endorsement, so redeeming it must not auto-vouch them.
-      { email, note: null, vouch: null, skipQuota: true, personal: false },
+      {
+        email,
+        note: null,
+        vouch: null,
+        skipQuota: true,
+        personal: false,
+        // The shelf life, not the redemption window. See
+        // `APPROVAL_INVITE_SHELF_TTL_MS` and
+        // `startApprovalRedemptionWindow`.
+        ttlMs: APPROVAL_INVITE_SHELF_TTL_MS,
+      },
     );
     return { id: saved.id, code: saved.code, expiresAt: saved.expiresAt };
+  }
+
+  /**
+   * PRD-02. Starts the SHORT redemption window on an approval invite, at the
+   * moment the applicant is first handed its code by their own status lookup.
+   *
+   * Idempotence is the CALLER'S: `JoinRequestsService.getPublicStatus` latches
+   * `join_requests.approval_seen_at` with a conditional `IS NULL` update and
+   * only the winning read calls this, so two concurrent reloads cannot each
+   * push the deadline out. Nothing here re-checks that, deliberately: a second
+   * caller would be a bug in the latch, not something to paper over.
+   *
+   * Conditional on the row still being `Pending`, which is the only state
+   * where a redemption window means anything. A revoked or accepted invite
+   * fails the guard and this is a silent no-op. `getPublicStatus` never
+   * reaches here for one, since it only hands over a code that resolves as
+   * `valid`.
+   *
+   * The new expiry can be LATER than the shelf date it replaces (an applicant
+   * who looks on day 25 of a 30-day shelf gets until day 32). That is the
+   * point: the window is the applicant's, and it starts when they are told.
+   *
+   * Returns the expiry now in force, so the caller can print the deadline in
+   * the same response that handed over the code.
+   */
+  async startApprovalRedemptionWindow(
+    inviteId: string,
+    now: Date,
+  ): Promise<Date> {
+    const redemptionExpiry = new Date(now.getTime() + INVITE_TTL_MS);
+    await this.invites.update(
+      { id: inviteId, status: InviteStatus.Pending },
+      { expiresAt: redemptionExpiry },
+    );
+    return redemptionExpiry;
   }
 
   private async mintInvite(
@@ -180,6 +252,9 @@ export class InvitesService {
       vouch: string | null;
       skipQuota: boolean;
       personal: boolean;
+      /** How long from now the invite lapses. `INVITE_TTL_MS` for a member's
+       *  own invite; the longer shelf life for an approval's. */
+      ttlMs: number;
     },
   ): Promise<Invite> {
     // Quota check + insert run under a per-inviter row lock so parallel
@@ -202,7 +277,7 @@ export class InvitesService {
       vouch: fields.vouch,
       personal: fields.personal,
       status: InviteStatus.Pending,
-      expiresAt: new Date(Date.now() + INVITE_TTL_MS),
+      expiresAt: new Date(Date.now() + fields.ttlMs),
     });
     return manager.save(invite);
   }

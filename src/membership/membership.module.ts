@@ -29,6 +29,12 @@ import { JoinRequestsService } from './join-requests.service';
     AdminJoinRequestsController,
   ],
   providers: [InvitesService, InviteExpirySweeperService, JoinRequestsService],
-  exports: [InvitesService],
+  // JoinRequestsService is exported for ONE caller: the Google callback's
+  // `invite_required` branch (`AuthController`), which asks
+  // `recoverStatusTokenForVerifiedEmail` whether the address Google just
+  // verified has a join request waiting, and carries the applicant to their own
+  // status page instead of a "you need an invite" notice (PRD-14). AuthModule
+  // already imports this module for `InvitesService`, so this adds no new edge.
+  exports: [InvitesService, JoinRequestsService],
 })
 export class MembershipModule {}

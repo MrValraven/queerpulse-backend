@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -11,8 +10,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * No `FOREIGN KEY` constraints are declared: mirrors `AddMagazinePieces` —
  * the entities (`magazine-payment.entity.ts` et al.) model `pieceId` as a
  * plain indexed `uuid` column, not a TypeORM relation.
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class AddMagazinePieceRecord1786500000000 implements MigrationInterface {
   name = 'AddMagazinePieceRecord1786500000000';

@@ -1,4 +1,5 @@
 import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsImageReference } from '../../common/validators/is-image-reference.decorator';
 
 /**
  * Body for `PATCH /me/collections/:id` — rename / re-emoji / re-cover. Every
@@ -21,8 +22,11 @@ export class UpdateCollectionDto {
   @MaxLength(16)
   emoji?: string;
 
+  // Same bound as the create body: one of our storage keys or an `https://` URL
+  // on a trusted host, never a `javascript:`/`data:` URI or an arbitrary host.
+  // See `CreateCollectionDto.cover` for why refusing a non-image value here
+  // breaks no colour cover (there has never been one).
   @IsOptional()
-  @IsString()
-  @MaxLength(200)
+  @IsImageReference()
   cover?: string;
 }

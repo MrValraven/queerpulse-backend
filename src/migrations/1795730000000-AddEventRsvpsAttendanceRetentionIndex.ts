@@ -1,4 +1,3 @@
-// DO NOT RUN. Authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -53,8 +52,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `1795710000000-AddReportsReporterCreatedAtIndex`. Run alone:
  *
  *   pnpm run typeorm migration:run -- --transaction none
- *
- * UNAPPLIED. The maintainer runs `pnpm run migration:run`.
  */
 export class AddEventRsvpsAttendanceRetentionIndex1795730000000 implements MigrationInterface {
   name = 'AddEventRsvpsAttendanceRetentionIndex1795730000000';

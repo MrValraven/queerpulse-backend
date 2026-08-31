@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -24,8 +23,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * `down()` is a documented no-op — Postgres has no `ALTER TYPE ... DROP VALUE`;
  * the added label is harmless if left in place.
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class AddSubprofileMemberRemovedNotificationType1787700100000 implements MigrationInterface {
   name = 'AddSubprofileMemberRemovedNotificationType1787700100000';

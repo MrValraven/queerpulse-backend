@@ -12,6 +12,19 @@ export const PAGE_SIZE = 20;
  */
 export const DEFAULT_LIST_LIMIT = 200;
 
+/**
+ * Hard upper bound for the `page` query parameter on every paginated list
+ * endpoint (ENG-49). `limit`/`pageSize` were capped everywhere and `page` was
+ * not, so `?page=2000000000` became an `OFFSET 39999999980` scan that Postgres
+ * has to walk row by row before discarding: free today at small row counts, and
+ * a cheap unauthenticated way to pin a CPU once any listed table is large.
+ *
+ * 10_000 pages at `PAGE_SIZE` is 200_000 rows deep, far past anything a human
+ * reaches by clicking "next", so no real caller can hit it. A client that wants
+ * to walk a whole table should narrow its filter, not deepen its offset.
+ */
+export const MAX_PAGE = 10_000;
+
 export interface Paginated<T> {
   items: T[];
   total: number;

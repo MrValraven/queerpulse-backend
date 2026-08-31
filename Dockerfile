@@ -51,9 +51,10 @@ COPY --chown=node:node scripts ./scripts
 USER node
 EXPOSE 3000
 
-# Deploy order is preflight -> migrate -> apply-bucket-CORS -> start. Run the
-# out-of-band steps before rollout (all idempotent):
-#   docker run ... npm run migration:preflight   # drop leftover INVALID indexes
+# Deploy order is preflight -> reconcile-ledger -> migrate -> apply-bucket-CORS
+# -> start. Run the out-of-band steps before rollout (all idempotent):
+#   docker run ... npm run migration:preflight        # drop leftover INVALID indexes
+#   docker run ... npm run migration:reconcile:prod   # repair renamed ledger rows
 #   docker run ... npm run migration:run:prod
 #   docker run ... npm run storage:cors
 # then start the server (this default CMD). The preflight guards the CONCURRENTLY
@@ -61,6 +62,10 @@ EXPOSE 3000
 # an invalid, unrecorded index whose name then collides with the retry's rebuild
 # ("already exists"); the preflight drops it so the retry succeeds. These
 # migrations avoid `IF NOT EXISTS` on purpose (it hides drift — see CLAUDE.md).
+# `migration:reconcile:prod` renames ledger rows recorded under a migration class
+# name no build carries any more, which the stock TypeORM CLI in the next step
+# would otherwise read as pending and re-run against a schema that already has
+# the change (see src/database/renamed-migrations.ts).
 # See README "Deployment".
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "dist/main"]

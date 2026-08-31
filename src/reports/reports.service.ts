@@ -13,11 +13,15 @@ import { HousingListing } from '../housing-listings/entities/housing-listing.ent
 import { Message } from '../messaging/entities/message.entity';
 import {
   Report,
+  ReportSeverity,
   ReportStatus,
   ReportSubjectType,
 } from './entities/report.entity';
 import {
   REPORT_DAILY_CAP_MESSAGE,
+  REPORT_DAILY_EMERGENCY_ALLOWANCE,
+  REPORT_DAILY_EMERGENCY_ALLOWANCE_MESSAGE,
+  REPORT_DAILY_EMERGENCY_CEILING,
   REPORT_DAILY_LIMIT,
   REPORT_DAILY_WINDOW_MS,
   REPORT_FLOOD_CAP_CODE,
@@ -171,14 +175,22 @@ export class ReportsService {
       return toReportDTO(existing);
     }
 
+    // Derived BEFORE the flood caps run, because the caps need it: an
+    // Emergency-band filing (`outing` / `doxxing`, per `EMERGENCY_REASONS` in
+    // `report-severity.ts`) is exempt from the per-subject cap and carries a
+    // bounded allowance above the daily one. Deriving it here keeps ONE
+    // definition of the emergency band. Re-listing the two codes beside either
+    // cap check would be a second hand-maintained copy of the same list, which
+    // is exactly the drift that let this bug exist.
+    const severity = deriveSeverity(input.reasonCode);
+
     // Rolling flood caps (TS-05). Checked HERE, after the dedupe fast-path has
     // already returned, so a network retry or a double-tapped submit button
     // never spends a slot and never gets refused: that request is answered
     // idempotently above and never reaches this point. Only a genuinely new
     // report is counted against the caps.
-    await this.assertReportingWindowIsClear(reporterId, input);
+    await this.assertReportingWindowIsClear(reporterId, input, severity);
 
-    const severity = deriveSeverity(input.reasonCode);
     const now = new Date();
 
     try {
@@ -237,6 +249,44 @@ export class ReportsService {
    * Both counts ignore `status` on purpose, so a moderator closing a case does
    * not hand the allowance back. See that file for the rest of the argument.
    *
+   * ## The per-subject cap yields to an Emergency filing
+   *
+   * A report whose derived severity is `Emergency` (`outing` / `doxxing`) is
+   * never refused by the per-subject cap. The whole promise of that band is a
+   * one-hour response, and a cap that answers "you have already reported this
+   * three times" to somebody being outed refuses the one report the platform
+   * commits hardest to reading. The shapes the per-subject cap exists to catch
+   * are re-filing after each closure and piling on a target, and neither is
+   * worth buying at the price of silencing an active outing.
+   *
+   * The count still RUNS for an Emergency filing, so a member who would have
+   * been refused is logged as a bypass rather than passing invisibly. A
+   * reporter reaching for `outing` a fourth time against one subject is either
+   * genuinely in danger or is using the emergency band to walk around the cap,
+   * and the log line is what puts a moderator onto either one.
+   *
+   * ## The daily cap grants an allowance, never an exemption
+   *
+   * The DAILY cap is the ceiling on a single account flooding the whole
+   * platform, and exempting a reason code from it would hand any account an
+   * unbounded allowance for the asking, with the emergency band as the cheapest
+   * way to take it. So the emergency band buys room above the cap rather than
+   * freedom from it: once a reporter is at `REPORT_DAILY_LIMIT`, an Emergency
+   * filing is still accepted up to `REPORT_DAILY_EMERGENCY_CEILING`, and past
+   * that even an Emergency filing is refused. A genuine emergency at report
+   * thirty-one goes through. Nobody files unboundedly by typing `outing` every
+   * time, because the ceiling is absolute and counted per reporter per 24
+   * hours, exactly like the cap it sits above.
+   *
+   * Both branches are written down. Spending the allowance logs a bypass under
+   * `report-flood-cap-emergency-bypass` with `cap=daily`, which is what tells
+   * it apart from the per-subject bypass above. Exhausting the allowance logs
+   * `report-flood-cap-emergency-allowance-exhausted`, and that is the loudest
+   * line this file can write: the reporter is either somebody a very bad day
+   * has run past every ceiling the product has, or somebody who has now spent
+   * thirty-five filings in a day. `report-flood-limits.ts` carries the argument
+   * for the size of the allowance.
+   *
    * ## Counted on the subject, never on the subject's owner
    *
    * The per-subject cap keys on (`subjectType`, `subjectId`) exactly as filed.
@@ -261,8 +311,13 @@ export class ReportsService {
   private async assertReportingWindowIsClear(
     reporterId: string,
     input: CreateReportInput,
+    severity: ReportSeverity,
   ): Promise<void> {
     const now = Date.now();
+    // Read off the severity the caller already derived, so the emergency band
+    // has exactly ONE definition (`EMERGENCY_REASONS` in `report-severity.ts`)
+    // and this file never holds a copy of it that can drift.
+    const isEmergencyReport = severity === ReportSeverity.Emergency;
 
     // Served by `IDX_reports_reporter_created_at` on (reporter_id, created_at
     // DESC) as an index range scan. See
@@ -275,34 +330,75 @@ export class ReportsService {
       },
     });
     if (filedInDailyWindow >= REPORT_DAILY_LIMIT) {
-      this.recordRefusal({
+      // The bounded allowance above the cap. `isEmergencyReport` is read off
+      // the severity `create` already derived, so the emergency band still has
+      // exactly one definition, and a third code added to `EMERGENCY_REASONS`
+      // gets this allowance without a line changing here. The comparison is
+      // against the same `filedInDailyWindow` count the cap used, so the
+      // allowance is counted per reporter over the same rolling 24 hours and
+      // costs no second query on the filing path.
+      const hasEmergencyAllowanceLeft =
+        isEmergencyReport &&
+        filedInDailyWindow < REPORT_DAILY_EMERGENCY_CEILING;
+
+      if (!hasEmergencyAllowanceLeft) {
+        if (isEmergencyReport) {
+          this.recordEmergencyAllowanceExhausted({
+            reporterId,
+            limit: REPORT_DAILY_LIMIT,
+            allowance: REPORT_DAILY_EMERGENCY_ALLOWANCE,
+            windowMs: REPORT_DAILY_WINDOW_MS,
+            filedInWindow: filedInDailyWindow,
+            input,
+          });
+        } else {
+          this.recordRefusal({
+            reporterId,
+            cap: 'daily',
+            limit: REPORT_DAILY_LIMIT,
+            windowMs: REPORT_DAILY_WINDOW_MS,
+            filedInWindow: filedInDailyWindow,
+            input,
+          });
+        }
+        // OBJECT body, never a bare string, so the client can tell this refusal
+        // apart from the OTHER 429 this same route can answer with: the
+        // `@nestjs/throttler` burst refusal, whose body is a string and whose
+        // `message` is a framework exception string a member must never be shown.
+        // Nest ships a string-thrown body with no `code`, so the presence of
+        // `code` IS the discriminator. Matching on message text instead would
+        // break silently the day the throttler reworded its default, and the
+        // failure mode is raw framework prose on a member's screen. See
+        // `report-flood-limits.ts` and `common/all-exceptions.filter.ts`.
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.TOO_MANY_REQUESTS,
+            error: 'Too Many Requests',
+            code: REPORT_FLOOD_CAP_CODE,
+            // Additive detail, safe to ignore: `code` alone is the contract.
+            // `daily` covers both refusals here, since both are the daily
+            // ceiling binding; the member-facing difference is in `message`.
+            cap: 'daily',
+            message: isEmergencyReport
+              ? REPORT_DAILY_EMERGENCY_ALLOWANCE_MESSAGE
+              : REPORT_DAILY_CAP_MESSAGE,
+          },
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+
+      // Accepted on the allowance. Written down rather than passed through
+      // silently, then allowed to fall into the per-subject check below, which
+      // has its own emergency handling: a filing can legitimately clear both.
+      this.recordEmergencyBypass({
         reporterId,
         cap: 'daily',
         limit: REPORT_DAILY_LIMIT,
+        allowance: REPORT_DAILY_EMERGENCY_ALLOWANCE,
         windowMs: REPORT_DAILY_WINDOW_MS,
         filedInWindow: filedInDailyWindow,
         input,
       });
-      // OBJECT body, never a bare string, so the client can tell this refusal
-      // apart from the OTHER 429 this same route can answer with: the
-      // `@nestjs/throttler` burst refusal, whose body is a string and whose
-      // `message` is a framework exception string a member must never be shown.
-      // Nest ships a string-thrown body with no `code`, so the presence of
-      // `code` IS the discriminator. Matching on message text instead would
-      // break silently the day the throttler reworded its default, and the
-      // failure mode is raw framework prose on a member's screen. See
-      // `report-flood-limits.ts` and `common/all-exceptions.filter.ts`.
-      throw new HttpException(
-        {
-          statusCode: HttpStatus.TOO_MANY_REQUESTS,
-          error: 'Too Many Requests',
-          code: REPORT_FLOOD_CAP_CODE,
-          // Additive detail, safe to ignore: `code` alone is the contract.
-          cap: 'daily',
-          message: REPORT_DAILY_CAP_MESSAGE,
-        },
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
     }
 
     // Same index, one range wider. The daily cap above is what keeps this
@@ -320,6 +416,20 @@ export class ReportsService {
       },
     });
     if (filedAgainstSubject >= REPORT_PER_SUBJECT_LIMIT) {
+      if (isEmergencyReport) {
+        this.recordEmergencyBypass({
+          reporterId,
+          cap: 'subject',
+          // No ceiling on this one: the per-subject cap yields to an Emergency
+          // filing outright, and what bounds it is the daily ceiling above.
+          allowance: null,
+          limit: REPORT_PER_SUBJECT_LIMIT,
+          windowMs: REPORT_PER_SUBJECT_WINDOW_MS,
+          filedInWindow: filedAgainstSubject,
+          input,
+        });
+        return;
+      }
       this.recordRefusal({
         reporterId,
         cap: 'subject',
@@ -406,6 +516,104 @@ export class ReportsService {
         `filedInWindow=${refusal.filedInWindow} reporterId=${refusal.reporterId} ` +
         `subjectType=${refusal.input.subjectType} subjectId=${subjectId} ` +
         `reasonCode=${refusal.input.reasonCode}`,
+    );
+  }
+
+  /**
+   * An Emergency filing that walked past a cap: the per-subject one outright,
+   * or the daily one on its bounded allowance.
+   *
+   * Not a refusal, so it increments no refusal counter and shows the member
+   * nothing: the report was accepted and is on the queue. It is written down
+   * because it is where a cap deliberately stops binding, and the two members
+   * who reach it need opposite responses. Somebody being outed repeatedly is in
+   * an escalating situation a moderator should be reading as a pattern rather
+   * than as one more ticket. Somebody reaching for `outing` because it is the
+   * code that gets through is abusing the band, and that is a moderation matter
+   * in its own right.
+   *
+   * Same `Logger` and the same `key=value` shape as `recordRefusal`, with its
+   * own stable grep handle (`report-flood-cap-emergency-bypass`) so the two are
+   * never confused in a search. `cap=` separates the two bypasses from each
+   * other, in the same vocabulary the 429 body and the refusal counter use, and
+   * `allowance=` says how much room the band bought: a number on the daily
+   * path, `unbounded` on the per-subject one, where the daily ceiling is what
+   * bounds it instead. `subjectId` is sanitised for the same reason it is there:
+   * it is the only caller-controlled value on the line. The report `detail`
+   * stays out, as it does everywhere else in this file.
+   *
+   * No Prometheus counter: `MetricsService` exposes one report-flood counter
+   * and it is a REFUSAL counter, labelled by cap. Folding an accepted filing
+   * into it would corrupt the meaning of every existing point on that series.
+   * A counter of its own is worth adding and belongs in `src/metrics`.
+   */
+  private recordEmergencyBypass(bypass: {
+    reporterId: string;
+    cap: ReportFloodCap;
+    /** Room the emergency band bought above the cap; null where it is uncapped. */
+    allowance: number | null;
+    limit: number;
+    windowMs: number;
+    filedInWindow: number;
+    input: CreateReportInput;
+  }): void {
+    const windowHours = Math.round(bypass.windowMs / (60 * 60 * 1000));
+    const subjectId = sanitizeForLogLine(bypass.input.subjectId);
+    this.logger.warn(
+      `report-flood-cap-emergency-bypass let an emergency filing through. ` +
+        `cap=${bypass.cap} limit=${bypass.limit} ` +
+        `allowance=${bypass.allowance ?? 'unbounded'} windowHours=${windowHours} ` +
+        `filedInWindow=${bypass.filedInWindow} reporterId=${bypass.reporterId} ` +
+        `subjectType=${bypass.input.subjectType} subjectId=${subjectId} ` +
+        `reasonCode=${bypass.input.reasonCode}`,
+    );
+  }
+
+  /**
+   * An Emergency filing refused because the daily allowance is spent too.
+   *
+   * The narrowest and loudest thing this service records. Reaching it means one
+   * account has filed `REPORT_DAILY_EMERGENCY_CEILING` reports inside 24 hours
+   * and the last of them said `outing` or `doxxing`, so the platform has just
+   * turned away the one band it promises to answer within the hour. Exactly two
+   * people arrive here and a moderator has to tell them apart quickly: somebody
+   * whose very bad day has run past every ceiling the product has, who needs a
+   * human now, and somebody who spent thirty-five filings in a day and reached
+   * for the emergency band to buy the last five, which is abuse of the report
+   * form at a scale nothing else in this file catches.
+   *
+   * Its own grep handle (`report-flood-cap-emergency-allowance-exhausted`), so
+   * neither a search for ordinary refusals (`report-flood-cap refused`) nor one
+   * for accepted bypasses turns it up, while the shared `report-flood-cap`
+   * prefix still finds all three. `allowance=` is on the line because the
+   * number is the whole story of how this refusal was reached.
+   *
+   * It DOES increment the refusal counter under `cap="daily"`, unlike the
+   * bypass above: this filing was refused, by the daily ceiling, and leaving it
+   * off the one series a moderation dashboard reads would make the worst
+   * refusals the only invisible ones. A third `cap` label value would fragment
+   * a series whose job is to show which cap is under pressure, so the log line
+   * carries the distinction and the counter stays comparable.
+   */
+  private recordEmergencyAllowanceExhausted(exhausted: {
+    reporterId: string;
+    limit: number;
+    allowance: number;
+    windowMs: number;
+    filedInWindow: number;
+    input: CreateReportInput;
+  }): void {
+    this.metrics.incrementReportFloodRefusal('daily');
+
+    const windowHours = Math.round(exhausted.windowMs / (60 * 60 * 1000));
+    const subjectId = sanitizeForLogLine(exhausted.input.subjectId);
+    this.logger.warn(
+      `report-flood-cap-emergency-allowance-exhausted refused an emergency filing. ` +
+        `cap=daily limit=${exhausted.limit} allowance=${exhausted.allowance} ` +
+        `windowHours=${windowHours} filedInWindow=${exhausted.filedInWindow} ` +
+        `reporterId=${exhausted.reporterId} ` +
+        `subjectType=${exhausted.input.subjectType} subjectId=${subjectId} ` +
+        `reasonCode=${exhausted.input.reasonCode}`,
     );
   }
 

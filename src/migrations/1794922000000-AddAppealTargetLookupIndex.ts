@@ -32,8 +32,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * migration in this batch. `mod_audit_logs` is append-only and small at this
  * project's scale; a `CONCURRENTLY` build would need its own non-transactional
  * runbook for no benefit here.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddAppealTargetLookupIndex1794922000000 implements MigrationInterface {
   name = 'AddAppealTargetLookupIndex1794922000000';

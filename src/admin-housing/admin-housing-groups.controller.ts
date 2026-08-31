@@ -30,6 +30,7 @@ import { HousingModerationGuard } from '../auth/guards/housing-moderation.guard'
 import { HousingGroupsService } from '../housing-groups/housing-groups.service';
 import { CreateHousingGroupDto } from '../housing-groups/dto/create-group.dto';
 import { UpdateGroupDto } from '../housing-groups/dto/update-group.dto';
+import { ListGroupJoinRequestsQuery } from '../housing-groups/dto/list-group-join-requests.query';
 import { TriageGroupJoinRequestDto } from '../housing-groups/dto/triage-group-join-request.dto';
 import { HideGroupListingDto } from '../housing-groups/dto/hide-group-listing.dto';
 
@@ -91,14 +92,23 @@ export class AdminHousingGroupsController {
   }
 
   @ApiOperation({
-    summary: 'List group join requests, optionally filtered by group slug.',
+    summary:
+      'List group join requests, paginated, optionally filtered by status and ' +
+      'group slug.',
   })
   @ApiOkResponse({
-    description: 'The join requests, with the mutual-connections trust signal.',
+    description:
+      'A `{ items, total, page, pageSize }` page of join requests, newest ' +
+      'first, each with the mutual-connections trust signal (ENG-41: this used ' +
+      'to be a flat array of the newest 200 requests in every status, which ' +
+      'could bury a pending request behind 200 decided ones and show the ' +
+      'console an empty queue). `total` is the size of the whole filtered ' +
+      'queue. Pass `status=pending` for "what still needs a decision"; omit it ' +
+      'and every status comes back.',
   })
   @Get('join-requests')
-  listJoinRequests(@Query('group') groupSlug?: string) {
-    return this.groups.listJoinRequests(groupSlug);
+  listJoinRequests(@Query() query: ListGroupJoinRequestsQuery) {
+    return this.groups.listJoinRequests(query);
   }
 
   @ApiOperation({ summary: 'Triage (approve/decline) a group join request.' })

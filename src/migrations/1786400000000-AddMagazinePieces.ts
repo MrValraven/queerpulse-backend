@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -20,8 +19,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Features, Reported, Interview, Essays, Service, Photo, Review, Column,
  * "Last word") with their target/note/orderIndex — static reference data,
  * not user-editable in Phase 1.
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class AddMagazinePieces1786400000000 implements MigrationInterface {
   name = 'AddMagazinePieces1786400000000';

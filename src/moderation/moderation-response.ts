@@ -94,6 +94,9 @@ const OUTCOME_LABEL: Record<string, string> = {
   ban_hold_expired: 'Ban lapsed unratified',
   community_ban_applied: 'Barred from a community',
   community_ban_lifted: 'Community bar lifted',
+  // PRD-28. The removal that leaves the door open. Worded so it cannot be read
+  // as the bar above: this member may rejoin.
+  community_member_removed: 'Removed from a community',
 };
 
 export function outcomeLabelFor(

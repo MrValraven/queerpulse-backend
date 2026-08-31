@@ -25,8 +25,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `PATCH /admin/housing-groups/listings/:id/status` route.
  *
  * Additive and safe: no existing column is altered or dropped.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddGroupListingModeration1793530000000 implements MigrationInterface {
   name = 'AddGroupListingModeration1793530000000';

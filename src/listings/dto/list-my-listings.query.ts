@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, Min } from 'class-validator';
+import { IsInt, IsOptional, Max, Min } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 
 /** `GET /listings/mine?page=` query — mirrors `ListPartnersQuery`'s shape. */
 export class ListMyListingsQuery {
@@ -7,5 +8,6 @@ export class ListMyListingsQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 }

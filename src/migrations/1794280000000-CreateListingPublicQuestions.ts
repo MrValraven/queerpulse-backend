@@ -62,8 +62,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * CONSTRAINTs, all against a table created in the same transaction, so no lock
  * is taken on anything another session is reading and no `CONCURRENTLY`
  * two-phase split is needed.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class CreateListingPublicQuestions1794280000000 implements MigrationInterface {
   name = 'CreateListingPublicQuestions1794280000000';

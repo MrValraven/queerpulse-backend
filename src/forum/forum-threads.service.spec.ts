@@ -627,7 +627,7 @@ describe('ForumThreadsService', () => {
       expect(qb.orderBy).toHaveBeenCalledWith('"t"."last_activity_at"', 'DESC');
     });
 
-    it('narrows to reply-less threads on the created_at keyset for sort=unanswered', async () => {
+    it('narrows to unresolved threads on the created_at keyset for sort=unanswered', async () => {
       const qb = qbStub([baseThread()]);
       threads.createQueryBuilder.mockReturnValue(qb);
 
@@ -639,7 +639,9 @@ describe('ForumThreadsService', () => {
         'unanswered',
       );
 
-      expect(qb.andWhere).toHaveBeenCalledWith('t.reply_count = 0');
+      // SOC-13: "unanswered" means no ACCEPTED answer, so a question with
+      // forty replies and no resolution still counts as unanswered.
+      expect(qb.andWhere).toHaveBeenCalledWith('t.accepted_post_id IS NULL');
       // Still the default createdAt keyset (raw ms-precision column), not a
       // swapped leading column.
       expect(qb.orderBy).toHaveBeenCalledWith('"t"."created_at"', 'DESC');
@@ -652,7 +654,9 @@ describe('ForumThreadsService', () => {
       await service.list('viewer-1', undefined, undefined, undefined, 'new');
 
       expect(qb.orderBy).toHaveBeenCalledWith('"t"."created_at"', 'DESC');
-      expect(qb.andWhere).not.toHaveBeenCalledWith('t.reply_count = 0');
+      expect(qb.andWhere).not.toHaveBeenCalledWith(
+        't.accepted_post_id IS NULL',
+      );
     });
   });
 
@@ -1275,7 +1279,16 @@ describe('ForumThreadsService', () => {
       );
 
       expect(res.acceptedPostId).toBeNull();
-      expect(posts.findOne).not.toHaveBeenCalled();
+      // Clearing the mark never looks a post up by id. The one read left is
+      // the response's opening-post hydration, which every read of a thread
+      // does regardless.
+      const postLookupCalls = posts.findOne.mock.calls as [
+        { where?: { id?: string } },
+      ][];
+      const hasLookupById = postLookupCalls.some(
+        ([options]) => options?.where?.id !== undefined,
+      );
+      expect(hasLookupById).toBe(false);
     });
 
     it('narrows the unanswered sort on the accepted mark, not on the reply count', async () => {

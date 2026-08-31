@@ -6,6 +6,7 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
@@ -314,6 +315,7 @@ export class ListingsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Confirm a gathering attached to a venue you own' })
   @ApiOkResponse({ description: 'The confirmed attachment.' })
+  @ApiBadRequestResponse({ description: 'Malformed gathering id.' })
   @ApiNotFoundResponse({
     description: 'No such listing owned by the caller, or no such gathering.',
   })
@@ -323,7 +325,7 @@ export class ListingsController {
   confirmVenueEvent(
     @CurrentUser() user: CurrentUserData,
     @Param('ref') ref: string,
-    @Param('eventId') eventId: string,
+    @Param('eventId', ParseUUIDPipe) eventId: string,
   ) {
     return this.listingVenueEventsService.confirm(ref, eventId, user.userId);
   }
@@ -337,6 +339,7 @@ export class ListingsController {
   @ApiOkResponse({
     description: 'The detached gathering and the venue string it kept.',
   })
+  @ApiBadRequestResponse({ description: 'Malformed gathering id.' })
   @ApiNotFoundResponse({
     description: 'No such listing owned by the caller, or no such gathering.',
   })
@@ -346,7 +349,7 @@ export class ListingsController {
   detachVenueEvent(
     @CurrentUser() user: CurrentUserData,
     @Param('ref') ref: string,
-    @Param('eventId') eventId: string,
+    @Param('eventId', ParseUUIDPipe) eventId: string,
   ) {
     return this.listingVenueEventsService.detach(ref, eventId, user.userId);
   }
@@ -511,14 +514,16 @@ export class ListingsController {
   @ApiForbiddenResponse({
     description: 'The listing is not owned by the caller.',
   })
-  @ApiBadRequestResponse({ description: 'Reply cannot be empty.' })
+  @ApiBadRequestResponse({
+    description: 'Malformed review id, or the reply is empty.',
+  })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
   replyToReview(
     @CurrentUser() user: CurrentUserData,
     @Param('ref') ref: string,
-    @Param('reviewId') reviewId: string,
+    @Param('reviewId', ParseUUIDPipe) reviewId: string,
     @Body() dto: ReplyToReviewDto,
   ) {
     return this.listingsService.replyToReview(ref, user.userId, reviewId, dto);
@@ -592,6 +597,7 @@ export class ListingsController {
   })
   @ApiOkResponse({ description: 'The answered question.' })
   @ApiNotFoundResponse({ description: 'No listing or question found.' })
+  @ApiBadRequestResponse({ description: 'Malformed question id.' })
   @ApiForbiddenResponse({
     description: 'The listing is not owned by the caller.',
   })
@@ -601,7 +607,7 @@ export class ListingsController {
   answerQuestion(
     @CurrentUser() user: CurrentUserData,
     @Param('ref') ref: string,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: AnswerListingQuestionDto,
   ) {
     return this.listingsService.answerQuestion(
@@ -633,14 +639,16 @@ export class ListingsController {
   @ApiForbiddenResponse({
     description: 'The listing is not owned by the caller.',
   })
-  @ApiBadRequestResponse({ description: 'Answer cannot be empty.' })
+  @ApiBadRequestResponse({
+    description: 'Malformed question id, or the answer is empty.',
+  })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
   answerPublicQuestion(
     @CurrentUser() user: CurrentUserData,
     @Param('ref') ref: string,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: AnswerListingPublicQuestionDto,
   ) {
     return this.listingsService.answerPublicQuestion(

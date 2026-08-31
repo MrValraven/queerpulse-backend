@@ -6,8 +6,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * (`queerpulse/src/features/community/ChangemakersPage.tsx`) profiles a
  * curated directory with no server-backed listing — this is the one genuine
  * member-submitted data point on the page (the "Nominate them" form).
- *
- * DO NOT RUN — authored for review only, per the task's instructions.
  */
 export class AddChangemakerNominations1782800640000 implements MigrationInterface {
   name = 'AddChangemakerNominations1782800640000';

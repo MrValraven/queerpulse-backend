@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -11,8 +10,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * and `AddMagazinePieces` — the entity (`magazine-article-comment.entity.ts`)
  * models `articleId`/`parentId` as plain indexed `uuid` columns, not a
  * TypeORM relation.
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class AddMagazineArticleComment1787100000000 implements MigrationInterface {
   name = 'AddMagazineArticleComment1787100000000';

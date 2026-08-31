@@ -1,5 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { getRepositoryToken } from '@nestjs/typeorm';
 import { ROLES_KEY } from '../auth/decorators/roles.decorator';
+import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { UserRole } from '../users/entities/user.entity';
 import { AdminChangemakersController } from './admin-changemakers.controller';
 import { ChangemakersService } from './changemakers.service';
@@ -29,7 +31,16 @@ describe('AdminChangemakersController', () => {
     };
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AdminChangemakersController],
-      providers: [{ provide: ChangemakersService, useValue: service }],
+      providers: [
+        { provide: ChangemakersService, useValue: service },
+        // `RolesOrStaffGuard` (class-level) injects the staff-grant repository.
+        // The guard is never exercised here, so an inert mock is enough to let
+        // the testing module instantiate it.
+        {
+          provide: getRepositoryToken(UserStaffRole),
+          useValue: { exists: jest.fn().mockResolvedValue(false) },
+        },
+      ],
     }).compile();
     controller = module.get(AdminChangemakersController);
   });

@@ -7,8 +7,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * (varchar, not the `subprofile_items_section_enum`) since a revision is a
  * point-in-time record and should not depend on the enum's current members.
  * See `src/subprofiles/entities/subprofile-item-revision.entity.ts`.
- *
- * UNAPPLIED — left for the maintainer to run.
  */
 export class AddSubprofileItemRevisions1789300000000 implements MigrationInterface {
   name = 'AddSubprofileItemRevisions1789300000000';

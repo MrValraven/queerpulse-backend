@@ -1,8 +1,15 @@
-import { ConflictException } from '@nestjs/common';
+import {
+  ConflictException,
+  UnprocessableEntityException,
+} from '@nestjs/common';
 import { EntityManager, QueryFailedError, Repository } from 'typeorm';
 import { Handle, HandleOwnerKind } from './entities/handle.entity';
 import { HandleHistory } from './entities/handle-history.entity';
-import { HandleOwner, HandlesService } from './handles.service';
+import {
+  HandleOwner,
+  HandlesService,
+  handleWriteError,
+} from './handles.service';
 
 // --- in-memory fake registry -------------------------------------------------
 // A tiny stand-in for the `handles` + `handle_history` tables and the slice of
@@ -280,6 +287,42 @@ describe('HandlesService.claim', () => {
     expect(rows.get('aurora')).toMatchObject({ userId: 'user-2' });
     expect(historyRows.has('aurora')).toBe(false);
   });
+
+  // The write boundary enforces the namespace's own rule, so a caller that
+  // skipped its own validation cannot land a reserved or malformed name in the
+  // registry. `check` has always refused these; now the write does too.
+  it('refuses a reserved name and writes nothing', async () => {
+    const { service, manager, rows } = makeService();
+    await expect(
+      service.claim(manager, 'moderator', profileOwner('user-1')),
+    ).rejects.toBeInstanceOf(UnprocessableEntityException);
+    expect(rows.has('moderator')).toBe(false);
+  });
+
+  it('refuses a malformed name and writes nothing', async () => {
+    const { service, manager, rows } = makeService();
+    await expect(
+      service.claim(manager, 'A_B', profileOwner('user-1')),
+    ).rejects.toBeInstanceOf(UnprocessableEntityException);
+    expect(rows.size).toBe(0);
+  });
+
+  it('lets a system-owned claim take a reserved name', async () => {
+    const { service, manager, rows } = makeService();
+    await service.claim(manager, 'queerpulse', profileOwner('house-user'), {
+      isSystemOwnedClaim: true,
+    });
+    expect(rows.get('queerpulse')).toMatchObject({ userId: 'house-user' });
+  });
+
+  it('still refuses a malformed name for a system-owned claim', async () => {
+    const { service, manager } = makeService();
+    await expect(
+      service.claim(manager, 'A_B', profileOwner('house-user'), {
+        isSystemOwnedClaim: true,
+      }),
+    ).rejects.toBeInstanceOf(UnprocessableEntityException);
+  });
 });
 
 // --- rename() ----------------------------------------------------------------
@@ -364,6 +407,34 @@ describe('HandlesService.rename', () => {
       profileOwner('user-1'),
     );
     expect(rows.has('same-name')).toBe(true);
+  });
+
+  // Refused BEFORE the release, so a rejected rename leaves the owner holding
+  // the name they came in with rather than relying on the caller's transaction
+  // to put it back.
+  it('refuses a reserved new name without releasing the old one', async () => {
+    const rows = new Map<string, Handle>();
+    seedProfile(rows, 'old-name', 'user-1');
+    const { service, manager, historyRows } = makeService(rows);
+
+    await expect(
+      service.rename(manager, 'old-name', 'support', profileOwner('user-1')),
+    ).rejects.toBeInstanceOf(UnprocessableEntityException);
+
+    expect(rows.has('old-name')).toBe(true);
+    expect(rows.has('support')).toBe(false);
+    expect(historyRows.has('old-name')).toBe(false);
+  });
+
+  // A member who claimed a name before the reserved list grew to cover it keeps
+  // it: re-asserting the same name is the no-op above, which returns before the
+  // check runs. Only moving to a reserved name is refused.
+  it('stays a no-op when a legacy holder re-asserts a now-reserved name', async () => {
+    const rows = new Map<string, Handle>();
+    seedProfile(rows, 'support', 'user-1');
+    const { service, manager } = makeService(rows);
+    await service.rename(manager, 'support', 'Support', profileOwner('user-1'));
+    expect(rows.get('support')).toMatchObject({ userId: 'user-1' });
   });
 });
 
@@ -508,5 +579,37 @@ describe('HandlesService.release ownership scoping', () => {
       previousOwnerKind: HandleOwnerKind.Profile,
       previousOwnerUserId: 'user-1',
     });
+  });
+});
+
+// --- handleWriteError() ------------------------------------------------------
+// The verdict `assertWritable` throws on, exported so the sign-up path can read
+// the same answer as a value instead of a throw (`UsersService.nextAvailableSlug`
+// steps past a withheld name rather than refusing a Google sign-up). These pin
+// the waiver's exact reach, since two callers now depend on it meaning the same
+// thing in both places.
+describe('handleWriteError', () => {
+  it('passes an ordinary well-formed name', () => {
+    expect(handleWriteError('nightform')).toBeNull();
+  });
+
+  it('withholds a reserved name from an ordinary write', () => {
+    expect(handleWriteError('support')).toBe('reserved');
+  });
+
+  it('waives the reserved rule for a system-owned write', () => {
+    expect(
+      handleWriteError('queerpulse', { isSystemOwnedClaim: true }),
+    ).toBeNull();
+  });
+
+  it('keeps the format rule for a system-owned write', () => {
+    expect(handleWriteError('A_B', { isSystemOwnedClaim: true })).toBe(
+      'invalid',
+    );
+    // Too short to be a handle at all, system account or otherwise.
+    expect(handleWriteError('me', { isSystemOwnedClaim: true })).toBe(
+      'invalid',
+    );
   });
 });

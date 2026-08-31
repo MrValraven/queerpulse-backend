@@ -116,6 +116,19 @@ export function toAdminGroupJoinRequestDTO(
   };
 }
 
+/**
+ * One page of the group join-request triage queue (ENG-41). Same envelope as
+ * `AdminGroupListingsPageDTO` and the shared `Paginated<T>`: `total` is the size
+ * of the whole filtered queue, not of this page, so the console can say how many
+ * people are actually waiting instead of implying the first page is all of them.
+ */
+export interface AdminGroupJoinRequestsPageDTO {
+  items: AdminGroupJoinRequestDTO[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 // An admin-side listing row — includes the moderation fields the public DTO
 // hides, so a moderator can review a listing before it is ever public
 // (`status`, with `riskScore`/`riskReasons` as the queue's sort + rationale)

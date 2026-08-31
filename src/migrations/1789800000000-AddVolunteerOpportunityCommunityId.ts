@@ -8,8 +8,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * frontend; the two columns stay structurally independent on the backend,
  * mirroring `partner_id`'s nullable/indexed/no-FK shape (see
  * `AddVolunteering1782693500000`).
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddVolunteerOpportunityCommunityId1789800000000 implements MigrationInterface {
   name = 'AddVolunteerOpportunityCommunityId1789800000000';

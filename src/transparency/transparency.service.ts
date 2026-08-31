@@ -1,10 +1,17 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, SelectQueryBuilder } from 'typeorm';
 import {
   CommunityGovernanceLog,
   GovernanceLogAction,
 } from '../communities/entities/community-governance-log.entity';
+import { LegalRequest } from '../legal-requests/entities/legal-request.entity';
+import {
+  LEGAL_REQUEST_OUTCOMES,
+  LEGAL_REQUEST_TYPES,
+  LegalRequestOutcome,
+  LegalRequestType,
+} from '../legal-requests/legal-request-vocabulary';
 import { MOD_ACTION_CODES } from '../moderation/dto/mod-action.dto';
 import { Appeal, AppealStatus } from '../moderation/entities/appeal.entity';
 import { ModAuditLog } from '../moderation/entities/mod-audit-log.entity';
@@ -23,6 +30,7 @@ import {
   SMALL_COUNT_FLOOR,
   TRANSPARENCY_REASON_CATEGORIES,
   TransparencyBreakdownRowDTO,
+  TransparencyLegalRequestsDTO,
   TransparencyReasonCategory,
   TransparencyReportDTO,
   categoryForReasonCode,
@@ -54,6 +62,13 @@ interface ResolutionStatsRow {
   sampleSize: string;
   medianSeconds: string | null;
   p90Seconds: string | null;
+}
+
+/** `SUM()` over an empty set is NULL in Postgres, which is a real zero here
+ *  (no rows in the window) rather than a missing answer. */
+interface LegalRequestAccountSumsRow {
+  accountsAffected: string | null;
+  accountsNotified: string | null;
 }
 
 /**
@@ -116,6 +131,11 @@ export class TransparencyService {
     @InjectRepository(Appeal) private readonly appeals: Repository<Appeal>,
     @InjectRepository(CommunityGovernanceLog)
     private readonly governanceLogs: Repository<CommunityGovernanceLog>,
+    // A READ repository over the register, never `LegalRequestsService`. The
+    // write side stays unreachable from a public endpoint, and every query
+    // this class makes against the table is an aggregate.
+    @InjectRepository(LegalRequest)
+    private readonly legalRequests: Repository<LegalRequest>,
   ) {}
 
   async getReport(
@@ -134,6 +154,7 @@ export class TransparencyService {
       actionRows,
       appealRows,
       frozenCommunityCount,
+      legalRequests,
     ] = await Promise.all([
       this.countReportsByReasonCode(period),
       this.countReportsResolved(period),
@@ -141,6 +162,11 @@ export class TransparencyService {
       this.countActionsByType(period),
       this.countAppealsByStatus(period),
       this.countCommunitiesFrozen(period),
+      // Deliberately inside the same `Promise.all` and NOT wrapped in a
+      // try/catch. A failed count must never be published as a zero: if the
+      // register cannot be read the whole report fails, which a reader sees as
+      // an error rather than as "we have never been asked".
+      this.buildLegalRequestsSection(period),
     ]);
 
     const receivedCount = reportsByReasonCode.reduce(
@@ -198,6 +224,7 @@ export class TransparencyService {
       communities: {
         frozen: suppressCount(frozenCommunityCount),
       },
+      legalRequests,
     };
   }
 
@@ -349,6 +376,179 @@ export class TransparencyService {
     return row ? Number(row.rowCount) : 0;
   }
 
+  /**
+   * The legal-request section (PRD-32), counted off `legal_requests`.
+   *
+   * Five aggregate queries, no row loaded. Every figure below is sliced on
+   * `received_on`, the day the demand reached QueerPulse, using the period's
+   * boundaries as `YYYY-MM-DD` strings rather than as timestamps: comparing a
+   * `date` column against a `timestamptz` parameter resolves through the
+   * session time zone, and a report whose quarter boundary moves with a
+   * connection setting is not a report.
+   *
+   * Voided records are excluded from `received`, from both breakdowns and from
+   * both account sums, and counted separately in `recordsVoided` on that same
+   * receipt-date axis. Gag-ordered records are excluded from nothing: a demand
+   * the platform may not describe is still a demand that arrived, and counting
+   * is not describing.
+   *
+   * Nothing here defaults a failure to zero. Each query either answers or
+   * throws, `getReport` does not catch, and the endpoint fails loudly, because
+   * on this section a fabricated zero is the single worst thing the report
+   * could publish.
+   */
+  private async buildLegalRequestsSection(
+    period: TransparencyPeriod,
+  ): Promise<TransparencyLegalRequestsDTO> {
+    const [
+      countsByType,
+      countsByOutcome,
+      accountSums,
+      voidedCount,
+      hasEverReceivedRequest,
+    ] = await Promise.all([
+      this.countLegalRequestsByType(period),
+      this.countLegalRequestsByOutcome(period),
+      this.sumLegalRequestAccounts(period),
+      this.countLegalRequestsVoided(period),
+      this.hasEverReceivedLegalRequest(),
+    ]);
+
+    const receivedCount = countsByType.reduce(
+      (runningTotal, row) => runningTotal + row.count,
+      0,
+    );
+
+    return {
+      hasEverReceivedRequest,
+      received: suppressCount(receivedCount),
+      byType: suppressBreakdown(countsByType),
+      byOutcome: suppressBreakdown(countsByOutcome),
+      accountsAffected: suppressCount(accountSums.accountsAffected),
+      accountsNotified: suppressCount(accountSums.accountsNotified),
+      recordsVoided: suppressCount(voidedCount),
+    };
+  }
+
+  /** Live demands received in the period, by the kind of instrument. Every
+   *  type is listed even at zero, matching `countActionsByType`: a bucket that
+   *  only appears when it is non-empty makes the table's shape a signal. */
+  private async countLegalRequestsByType(
+    period: TransparencyPeriod,
+  ): Promise<{ key: LegalRequestType; count: number }[]> {
+    const rows = await this.liveLegalRequestsIn(period)
+      .select('legalRequest.requestType', 'groupKey')
+      .addSelect('COUNT(*)', 'rowCount')
+      .groupBy('legalRequest.requestType')
+      .getRawMany<GroupedCountRow>();
+    return fillLegalRequestBuckets(LEGAL_REQUEST_TYPES, rows);
+  }
+
+  /** Live demands received in the period, by what QueerPulse did about them.
+   *  `pending` is a published bucket: a demand still being answered is
+   *  reported as one rather than held back until it resolves. */
+  private async countLegalRequestsByOutcome(
+    period: TransparencyPeriod,
+  ): Promise<{ key: LegalRequestOutcome; count: number }[]> {
+    const rows = await this.liveLegalRequestsIn(period)
+      .select('legalRequest.outcome', 'groupKey')
+      .addSelect('COUNT(*)', 'rowCount')
+      .groupBy('legalRequest.outcome')
+      .getRawMany<GroupedCountRow>();
+    return fillLegalRequestBuckets(LEGAL_REQUEST_OUTCOMES, rows);
+  }
+
+  /** Accounts named, and accounts told, summed over the period's live
+   *  demands. */
+  private async sumLegalRequestAccounts(period: TransparencyPeriod): Promise<{
+    accountsAffected: number;
+    accountsNotified: number;
+  }> {
+    const row = await this.liveLegalRequestsIn(period)
+      // Quoted column names rather than an `alias.property` path: TypeORM
+      // only rewrites such a path when it is the whole select expression, so a
+      // path inside `SUM(...)` would reach Postgres verbatim (the caveat
+      // `loadResolutionStats` already works around).
+      .select(
+        'COALESCE(SUM("legalRequest"."accounts_affected"), 0)',
+        'accountsAffected',
+      )
+      .addSelect(
+        'COALESCE(SUM("legalRequest"."accounts_notified"), 0)',
+        'accountsNotified',
+      )
+      .getRawOne<LegalRequestAccountSumsRow>();
+    // An aggregate with no GROUP BY always returns exactly one row, so a
+    // missing one means the query did not answer. Throwing keeps that
+    // distinguishable from a genuine zero, which is the whole point of this
+    // section.
+    if (!row) {
+      throw new Error('Legal-request account sums returned no row');
+    }
+    return {
+      accountsAffected: toRequiredCount(row.accountsAffected),
+      accountsNotified: toRequiredCount(row.accountsNotified),
+    };
+  }
+
+  /** Records recorded as arriving in the period that have since been struck.
+   *  Same receipt-date axis as every other figure on this section, so
+   *  `received` plus this is every row the register holds for the window. */
+  private async countLegalRequestsVoided(
+    period: TransparencyPeriod,
+  ): Promise<number> {
+    // `async` with the await spelled out, so a repository that fails while the
+    // query builder is being assembled rejects this promise instead of
+    // throwing part-way through the `Promise.all` array above and stranding
+    // the sibling queries as unhandled rejections.
+    const voidedCount = await this.legalRequestsIn(period)
+      .andWhere('legalRequest.voidedAt IS NOT NULL')
+      .getCount();
+    return voidedCount;
+  }
+
+  /**
+   * Whether the register has ever held a live record, over all time.
+   *
+   * Published as a plain boolean so the page can say "we have never been
+   * asked" and mean it. A young register's quarter of zeroes cannot carry that
+   * sentence on its own, and this is the disclosure members are actually
+   * looking for. It reveals nothing about any member: it says a state body
+   * once wrote to the platform, with no when, no who and no what.
+   */
+  private async hasEverReceivedLegalRequest(): Promise<boolean> {
+    const liveRecordCount = await this.legalRequests
+      .createQueryBuilder('legalRequest')
+      .where('legalRequest.voidedAt IS NULL')
+      .getCount();
+    return liveRecordCount > 0;
+  }
+
+  /** Every register row whose receipt day falls in the period, voided ones
+   *  included. */
+  private legalRequestsIn(
+    period: TransparencyPeriod,
+  ): SelectQueryBuilder<LegalRequest> {
+    return this.legalRequests
+      .createQueryBuilder('legalRequest')
+      .where('legalRequest.receivedOn >= :startsOn', {
+        startsOn: toIsoDay(period.startsAt),
+      })
+      .andWhere('legalRequest.receivedOn < :endsOn', {
+        endsOn: toIsoDay(period.endsAt),
+      });
+  }
+
+  /** The same window with struck records dropped: the set every published
+   *  figure except `recordsVoided` is computed over. */
+  private liveLegalRequestsIn(
+    period: TransparencyPeriod,
+  ): SelectQueryBuilder<LegalRequest> {
+    return this.legalRequestsIn(period).andWhere(
+      'legalRequest.voidedAt IS NULL',
+    );
+  }
+
   private buildCategoryBreakdown(
     reportsByReasonCode: { reasonCode: string; count: number }[],
   ): TransparencyBreakdownRowDTO<TransparencyReasonCategory>[] {
@@ -367,6 +567,37 @@ export class TransparencyService {
       })),
     );
   }
+}
+
+/** The UTC calendar day of a period boundary, as the `YYYY-MM-DD` a `date`
+ *  column compares against without a time zone in the middle. */
+function toIsoDay(boundary: Date): string {
+  return boundary.toISOString().slice(0, 10);
+}
+
+/**
+ * A grouped count that must be a number. Used only where the query shape
+ * guarantees a value, so a NaN here means the row did not have the column it
+ * was asked for, and publishing that as 0 would be inventing a figure.
+ */
+function toRequiredCount(rawValue: string | null): number {
+  const parsed = Number(rawValue ?? 0);
+  if (!Number.isFinite(parsed)) {
+    throw new Error('Legal-request aggregate returned a non-numeric count');
+  }
+  return parsed;
+}
+
+/** Grouped rows onto the vocabulary's fixed render order, zero-filling every
+ *  bucket the period had none of. */
+function fillLegalRequestBuckets<Key extends string>(
+  keys: readonly Key[],
+  rows: readonly GroupedCountRow[],
+): { key: Key; count: number }[] {
+  const countByKey = new Map(
+    rows.map((row) => [row.groupKey ?? '', toRequiredCount(row.rowCount)]),
+  );
+  return keys.map((key) => ({ key, count: countByKey.get(key) ?? 0 }));
 }
 
 function periodOption(

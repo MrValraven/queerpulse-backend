@@ -2,10 +2,15 @@ import { UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Repository } from 'typeorm';
 import { User, UserRole, UserStatus } from '../../users/entities/user.entity';
+import { RefreshToken } from '../entities/refresh-token.entity';
 import { AccessTokenPayload, JwtStrategy } from './jwt.strategy';
 
 // The DB row backing the token. Defaults to a live user whose status/role match
 // the token claims, so a test that cares about neither can ignore it.
+//
+// `isSessionLive` defaults to true, which is what an unrevoked session answers.
+// A test about session revocation flips it; every other test is unaffected,
+// exactly as a legacy token with no `sid` claim is.
 function makeStrategy(
   dbUser: Partial<User> | null = {
     id: 'u1',
@@ -13,13 +18,23 @@ function makeStrategy(
     status: UserStatus.Active,
     role: UserRole.Member,
   },
-): { strategy: JwtStrategy; findOne: jest.Mock } {
+  isSessionLive = true,
+): { strategy: JwtStrategy; findOne: jest.Mock; sessionExists: jest.Mock } {
   const config = { getOrThrow: jest.fn().mockReturnValue('access-secret') };
   const findOne = jest.fn().mockResolvedValue(dbUser);
   const users = { findOne } as unknown as Repository<User>;
+  const sessionExists = jest.fn().mockResolvedValue(isSessionLive);
+  const refreshTokens = {
+    exists: sessionExists,
+  } as unknown as Repository<RefreshToken>;
   return {
-    strategy: new JwtStrategy(config as unknown as ConfigService, users),
+    strategy: new JwtStrategy(
+      config as unknown as ConfigService,
+      users,
+      refreshTokens,
+    ),
     findOne,
+    sessionExists,
   };
 }
 
@@ -101,5 +116,63 @@ describe('JwtStrategy.validate', () => {
     expect(findOne).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'u1' } }),
     );
+  });
+
+  describe('session liveness (the `sid` claim)', () => {
+    const withSession: AccessTokenPayload = { ...full, sid: 'fam-1' };
+
+    it('surfaces the session id on the request user', async () => {
+      const { strategy } = makeStrategy();
+      await expect(strategy.validate(withSession)).resolves.toEqual(
+        expect.objectContaining({ sessionId: 'fam-1' }),
+      );
+    });
+
+    it('checks the family this token names, live and unexpired', async () => {
+      const { strategy, sessionExists } = makeStrategy();
+      await strategy.validate(withSession);
+      const [options] = sessionExists.mock.calls[0] as [
+        {
+          where: { familyId: string; revokedAt?: unknown; expiresAt?: unknown };
+        },
+      ];
+      expect(options.where.familyId).toBe('fam-1');
+      // Both conditions matter: revocation is "signed out", expiry is the
+      // 30-day life running out before the purge job deletes the rows.
+      expect(options.where.revokedAt).toBeDefined();
+      expect(options.where.expiresAt).toBeDefined();
+    });
+
+    // The whole point of the claim. Before it, a device whose session had been
+    // revoked kept authenticating every HTTP route for the rest of its access
+    // TTL and only its socket was dropped.
+    it('rejects a token whose session has been signed out', async () => {
+      const { strategy } = makeStrategy(undefined, false);
+      await expect(strategy.validate(withSession)).rejects.toThrow(
+        UnauthorizedException,
+      );
+    });
+
+    // Tokens minted before the deploy that added the claim. Rejecting them
+    // would sign every member out at deploy time; they age out within one
+    // access TTL on their own.
+    it('accepts a legacy token with no session id without asking the store', async () => {
+      const { strategy, sessionExists } = makeStrategy(undefined, false);
+      await expect(strategy.validate(full)).resolves.toEqual(
+        expect.objectContaining({ userId: 'u1' }),
+      );
+      expect(sessionExists).not.toHaveBeenCalled();
+    });
+
+    // A claim that can be switched off by sending the wrong type is not a check.
+    it('rejects a non-string session id', async () => {
+      const { strategy } = makeStrategy();
+      await expect(
+        strategy.validate({
+          ...full,
+          sid: 42,
+        } as unknown as AccessTokenPayload),
+      ).rejects.toThrow(UnauthorizedException);
+    });
   });
 });

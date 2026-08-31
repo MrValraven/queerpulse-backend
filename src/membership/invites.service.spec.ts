@@ -278,7 +278,7 @@ describe('InvitesService.getQuota', () => {
 
 describe('InvitesService.createInvite', () => {
   let service: InvitesService;
-  let invitesRepo: { exists: jest.Mock };
+  let invitesRepo: { exists: jest.Mock; update: jest.Mock };
   // The quota check + insert now run inside a transaction against a manager;
   // the inviter row is read under a pessimistic lock (userRepo.findOne).
   let userRepo: { findOne: jest.Mock };
@@ -291,7 +291,12 @@ describe('InvitesService.createInvite', () => {
   let config: { get: jest.Mock };
 
   const build = async (quota = 1) => {
-    invitesRepo = { exists: jest.fn().mockResolvedValue(false) };
+    invitesRepo = {
+      exists: jest.fn().mockResolvedValue(false),
+      // PRD-02's `startApprovalRedemptionWindow` writes through the plain repo,
+      // outside any caller transaction.
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
     // Default: no per-user override, so the quota check falls back to config.
     userRepo = { findOne: jest.fn().mockResolvedValue(null) };
     manager = {
@@ -509,6 +514,56 @@ describe('InvitesService.createInvite', () => {
       ).resolves.toEqual(expect.objectContaining({ id: 'inv-new' }));
       // The quota path was never entered at all.
       expect(callerManager.count).not.toHaveBeenCalled();
+    });
+
+    // PRD-02. An approval invite has nobody to hand it over: the platform
+    // sends no email, so approval is a moment only the reviewer knows about.
+    // The mint therefore gets a SHELF life, and the short redemption window is
+    // started later, when the applicant first reads the code.
+    it('mints with the long SHELF life, not the 7-day redemption window', async () => {
+      const before = Date.now();
+      const callerManager = {
+        getRepository: jest.fn(() => userRepo),
+        count: jest.fn().mockResolvedValue(0),
+        create: jest.fn((_entity: unknown, value: Partial<Invite>) => value),
+        save: jest.fn((value: Partial<Invite>) =>
+          Promise.resolve({ id: 'inv-new', ...value }),
+        ),
+      };
+
+      const result = await service.createInviteForApproval(
+        callerManager as never,
+        'admin-1',
+        'applicant@x.com',
+      );
+
+      const ttl = (result.expiresAt as Date).getTime() - before;
+      const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+      expect(ttl).toBeGreaterThanOrEqual(thirtyDays - 1000);
+      expect(ttl).toBeLessThanOrEqual(thirtyDays + 5000);
+    });
+  });
+
+  describe('startApprovalRedemptionWindow', () => {
+    it('re-pins the expiry to seven days from the moment given', async () => {
+      const now = new Date('2026-07-21T00:00:00.000Z');
+
+      const expiry = await service.startApprovalRedemptionWindow('inv-1', now);
+
+      expect(expiry.toISOString()).toBe('2026-07-28T00:00:00.000Z');
+      expect(invitesRepo.update).toHaveBeenCalledWith(
+        { id: 'inv-1', status: InviteStatus.Pending },
+        { expiresAt: expiry },
+      );
+    });
+
+    it('is conditional on Pending, so it cannot revive a spent invite', async () => {
+      await service.startApprovalRedemptionWindow('inv-1', new Date());
+
+      const [criteria] = invitesRepo.update.mock.calls[0] as [
+        { status: InviteStatus },
+      ];
+      expect(criteria.status).toBe(InviteStatus.Pending);
     });
   });
 });

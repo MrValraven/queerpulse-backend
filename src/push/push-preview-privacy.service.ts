@@ -76,16 +76,43 @@ export class PushPreviewPrivacyService {
       (userId) => !showing.has(userId),
     );
 
-    // Both sends run concurrently and neither is allowed to be skipped because
-    // the other threw. `sendToUsers` already swallows per-endpoint failures,
-    // so a rejection here is a database fault, not a delivery one.
-    await Promise.all([
-      this.pushService.sendToUsers(showingUserIds, richPayload),
-      this.pushService.sendToUsers(
-        hidingUserIds,
-        toGenericPayload(richPayload, genericCopy),
-      ),
-    ]);
+    // One after the other, not concurrently. Every push in this module funnels
+    // through here, and `sendToUsers` caps its OWN fan-out at
+    // `MAX_CONCURRENT_PUSH_SENDS`, so running both at once put twice that many
+    // sockets and `last_used_at` writes in flight against a pool that defaults
+    // to 10 connections. The two recipient sets partition the batch, so
+    // sequencing costs at most one extra round of the cap, and that round is
+    // bounded by a single send (up to `PUSH_SEND_TIMEOUT_MS` if the smaller set
+    // happens to hold a hung endpoint). That is an acceptable trade here
+    // because this runs off the request path with nobody waiting, and it halves
+    // peak concurrency against the pool.
+    //
+    // Neither send may be skipped because the other threw, which the previous
+    // concurrent shape got for free by having both already started. Both run,
+    // then the first fault is rethrown so the caller still sees it.
+    // `sendToUsers` already swallows per-endpoint failures, so a rejection here
+    // is a database fault, not a delivery one.
+    const sends = [
+      () => this.pushService.sendToUsers(showingUserIds, richPayload),
+      () =>
+        this.pushService.sendToUsers(
+          hidingUserIds,
+          toGenericPayload(richPayload, genericCopy),
+        ),
+    ];
+    let hasFailed = false;
+    let firstFailure: unknown;
+    for (const send of sends) {
+      try {
+        await send();
+      } catch (error) {
+        if (!hasFailed) {
+          hasFailed = true;
+          firstFailure = error;
+        }
+      }
+    }
+    if (hasFailed) throw firstFailure;
   }
 
   /**

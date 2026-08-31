@@ -17,8 +17,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * feature (`community_post_edit.editor_id`, `reports.reporter_id`,
  * `mod_audit_logs.actor_id`): an audit trail must outlive the people it
  * names, whether they are the moderator who acted or the member acted upon.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddCommunityGovernanceLog1790000000000 implements MigrationInterface {
   name = 'AddCommunityGovernanceLog1790000000000';

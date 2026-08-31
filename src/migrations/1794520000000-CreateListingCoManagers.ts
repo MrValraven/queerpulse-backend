@@ -54,8 +54,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `CONCURRENTLY` two-phase split is needed. The enum values this feature adds
  * to EXISTING types live in the separate, deliberately non-transactional
  * `AddListingCoManagerEnumValues1794530000000`.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class CreateListingCoManagers1794520000000 implements MigrationInterface {
   name = 'CreateListingCoManagers1794520000000';

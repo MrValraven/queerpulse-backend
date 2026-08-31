@@ -5,9 +5,11 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 import { ListingStatus } from '../entities/listing.entity';
 
 const LISTING_QUEUE_SORTS = ['newest', 'oldest', 'name'] as const;
@@ -26,6 +28,7 @@ export class ListListingQueueQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 
   // Interpolated into three `ILIKE '%...%'` patterns (`listings.service.ts`),

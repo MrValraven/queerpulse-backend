@@ -9,8 +9,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * See `src/content/entities/topic-post.entity.ts` for why this is a
  * dedicated table rather than an aggregation over `forum_thread` /
  * `community_post` / `event` by a shared tag column.
- *
- * DO NOT RUN — authored for review only, per the task's instructions.
  */
 export class AddTopicPosts1782800540000 implements MigrationInterface {
   name = 'AddTopicPosts1782800540000';

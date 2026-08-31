@@ -7,8 +7,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * Groups start empty by design — this migration creates no seed rows.
  * Additive and safe: no existing table is touched.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddHousingGroups1787900000000 implements MigrationInterface {
   name = 'AddHousingGroups1787900000000';

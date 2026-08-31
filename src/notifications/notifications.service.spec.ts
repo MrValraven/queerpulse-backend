@@ -3,8 +3,11 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { BlockFilterService } from '../social/block-filter.service';
+import { CommunityMember } from '../communities/entities/community-member.entity';
+import { Community } from '../communities/entities/community.entity';
 import { Mute } from '../social/entities/mute.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { User } from '../users/entities/user.entity';
 import { Notification, NotificationType } from './entities/notification.entity';
 import { NotificationPreferencesService } from './notification-preferences.service';
 import {
@@ -30,6 +33,9 @@ describe('NotificationsService', () => {
   };
   let profileRepo: { find: jest.Mock };
   let muteRepo: { find: jest.Mock };
+  let userRepo: { find: jest.Mock };
+  let communityRepo: { findOne: jest.Mock };
+  let communityMemberRepo: { find: jest.Mock };
   let notificationPreferences: {
     isInAppEnabled: jest.Mock;
     recipientsInAppEnabled: jest.Mock;
@@ -45,6 +51,14 @@ describe('NotificationsService', () => {
     };
     profileRepo = { find: jest.fn().mockResolvedValue([]) };
     muteRepo = { find: jest.fn().mockResolvedValue([]) };
+    // Only consulted on the fan-out's dangling-recipient recovery path, so the
+    // default is "never asked".
+    userRepo = { find: jest.fn().mockResolvedValue([]) };
+    // Community volume gating short-circuits for every type outside
+    // COMMUNITY_LEVELS_WANTING, so these exist for injection more than for
+    // behaviour.
+    communityRepo = { findOne: jest.fn().mockResolvedValue(null) };
+    communityMemberRepo = { find: jest.fn().mockResolvedValue([]) };
     emit = jest.fn();
     blockFilter = {
       isBlockedEitherWay: jest.fn().mockResolvedValue(false),
@@ -66,6 +80,12 @@ describe('NotificationsService', () => {
         { provide: getRepositoryToken(Notification), useValue: repo },
         { provide: getRepositoryToken(Profile), useValue: profileRepo },
         { provide: getRepositoryToken(Mute), useValue: muteRepo },
+        { provide: getRepositoryToken(User), useValue: userRepo },
+        { provide: getRepositoryToken(Community), useValue: communityRepo },
+        {
+          provide: getRepositoryToken(CommunityMember),
+          useValue: communityMemberRepo,
+        },
         { provide: EventEmitter2, useValue: { emit } },
         { provide: BlockFilterService, useValue: blockFilter },
         {
@@ -181,6 +201,97 @@ describe('NotificationsService', () => {
         actorId: 'organizer-1',
         notification: expect.objectContaining({ id: 'n1' }) as unknown,
       });
+    });
+  });
+
+  // `save([...])` is one multi-row statement in one transaction, so before the
+  // recovery path below a single recipient id that no longer named a user took
+  // the whole fan-out down with it: every other matching member silently lost
+  // their notification, on every new listing, until someone hand-deleted the
+  // dangling row.
+  describe('dangling recipient recovery', () => {
+    const foreignKeyViolation = Object.assign(new Error('insert failed'), {
+      code: '23503',
+      constraint: 'FK_notifications_user_id',
+    });
+
+    it('keeps the rest of the batch when one recipient no longer names a user', async () => {
+      repo.save
+        .mockRejectedValueOnce(foreignKeyViolation)
+        .mockResolvedValueOnce([
+          { id: 'n1', userId: 'u1' },
+          { id: 'n3', userId: 'u3' },
+        ]);
+      // `u2` was erased; its saved-search row outlived it.
+      userRepo.find.mockResolvedValue([{ id: 'u1' }, { id: 'u3' }]);
+
+      const saved = await service.createForRecipients(
+        ['u1', 'u2', 'u3'],
+        NotificationType.HousingListingMatch,
+        { slug: 'sunny-room' },
+      );
+
+      expect(saved).toEqual(['u1', 'u3']);
+      // The retry carries only the recipients that still exist.
+      const saveCalls = repo.save.mock.calls as [{ userId: string }[]][];
+      const [retriedRows] = saveCalls[1] ?? [[]];
+      expect((retriedRows ?? []).map((row) => row.userId)).toEqual([
+        'u1',
+        'u3',
+      ]);
+    });
+
+    it('announces only the recipients that actually hold a row', async () => {
+      repo.save
+        .mockRejectedValueOnce(foreignKeyViolation)
+        .mockResolvedValueOnce([{ id: 'n1', userId: 'u1' }]);
+      userRepo.find.mockResolvedValue([{ id: 'u1' }]);
+
+      await service.createForRecipients(
+        ['u1', 'u2'],
+        NotificationType.HousingListingMatch,
+        { slug: 'sunny-room' },
+      );
+
+      const batchCalls = emit.mock.calls.filter(
+        (call: [string, unknown]) => call[0] === NOTIFICATION_BATCH_CREATED,
+      ) as [string, { userIds: string[] }][];
+      expect(batchCalls).toHaveLength(1);
+      const [, batchEventPayload] = batchCalls[0] ?? ['', { userIds: [] }];
+      expect(batchEventPayload.userIds).toEqual(['u1']);
+    });
+
+    it('writes nothing and announces nothing when every recipient is dangling', async () => {
+      repo.save.mockRejectedValueOnce(foreignKeyViolation);
+      userRepo.find.mockResolvedValue([]);
+
+      const saved = await service.createForRecipients(
+        ['u1'],
+        NotificationType.HousingListingMatch,
+        { slug: 'sunny-room' },
+      );
+
+      expect(saved).toEqual([]);
+      expect(repo.save).toHaveBeenCalledTimes(1);
+      expect(emit).not.toHaveBeenCalled();
+    });
+
+    it('rethrows anything that is not a violation of the recipient foreign key', async () => {
+      const deadlock = Object.assign(new Error('deadlock detected'), {
+        code: '40P01',
+      });
+      repo.save.mockRejectedValueOnce(deadlock);
+
+      await expect(
+        service.createForRecipients(
+          ['u1', 'u2'],
+          NotificationType.HousingListingMatch,
+          { slug: 'sunny-room' },
+        ),
+      ).rejects.toBe(deadlock);
+      // No speculative retry, and no pointless existence lookup.
+      expect(userRepo.find).not.toHaveBeenCalled();
+      expect(repo.save).toHaveBeenCalledTimes(1);
     });
   });
 

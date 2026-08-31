@@ -22,8 +22,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `1787200000000-AddMagazineArticleVersion` (the `magazine_article_version`
  * SNAPSHOT table) already owns that name — two different things, and a
  * migration's class name is its identity in the ledger.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddMagazineArticleVersionColumn1793540000000 implements MigrationInterface {
   name = 'AddMagazineArticleVersionColumn1793540000000';

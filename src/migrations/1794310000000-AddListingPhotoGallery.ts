@@ -54,8 +54,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * on PostgreSQL 11+, no table rewrite) plus one `UPDATE`. Nothing here needs to
  * run outside a transaction, so this migration carries no special run
  * instructions.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class AddListingPhotoGallery1794310000000 implements MigrationInterface {
   name = 'AddListingPhotoGallery1794310000000';

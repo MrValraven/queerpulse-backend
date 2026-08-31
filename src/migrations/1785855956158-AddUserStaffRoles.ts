@@ -12,8 +12,6 @@ import {
  * `STAFF_ROLES` registry, so adding a future role needs no migration.
  * `granted_by` is `ON DELETE SET NULL` so deleting the granting admin keeps
  * the audit-ish row rather than cascading it away.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddUserStaffRoles1785855956158 implements MigrationInterface {
   name = 'AddUserStaffRoles1785855956158';

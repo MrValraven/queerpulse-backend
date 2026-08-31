@@ -4,9 +4,11 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 import { LandlordIntroRequestStatus } from '../entities/landlord-intro-request.entity';
 
 /**
@@ -27,5 +29,6 @@ export class ListIntroRequestsQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 }

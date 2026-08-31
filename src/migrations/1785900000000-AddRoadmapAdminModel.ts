@@ -64,8 +64,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *    — Postgres has no `ALTER TYPE … DROP VALUE`. Left in place; acceptable
  *    (an unused enum label is inert, and no other repo migration's `down()`
  *    attempts this either — see `AddSubprofileInviteNotificationTypes`).
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddRoadmapAdminModel1785900000000 implements MigrationInterface {
   name = 'AddRoadmapAdminModel1785900000000';

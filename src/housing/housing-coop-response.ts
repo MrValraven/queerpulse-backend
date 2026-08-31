@@ -8,6 +8,7 @@ import {
   CoopJoinRequest,
   JoinRequestStatus,
 } from './entities/coop-join-request.entity';
+import { Paginated } from '../common/pagination';
 
 // Mirrors the frontend `HousingCoopDTO` (economy/api/housingCoop.api.ts) field
 // for field. Deliberately drops the entity's `createdAt`/`updatedAt` and the
@@ -96,3 +97,16 @@ export function toAdminJoinRequestDTO(
       : null,
   };
 }
+
+/**
+ * One page of the co-op join-request triage queue (ENG-41). The same envelope as
+ * the shared `Paginated<T>` and as the sibling `AdminGroupJoinRequestsPageDTO`:
+ * `total` is the size of the whole filtered queue, not of this page, so the
+ * console can say how many people are actually waiting instead of implying that
+ * whatever arrived is all there is.
+ *
+ * Declared as an alias of `Paginated<AdminJoinRequestDTO>` rather than a
+ * re-spelled interface so the shape can never drift from the envelope every
+ * other paginated list on the platform answers with.
+ */
+export type AdminJoinRequestsPageDTO = Paginated<AdminJoinRequestDTO>;

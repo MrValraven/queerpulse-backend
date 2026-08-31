@@ -5,9 +5,11 @@ import {
   IsISO8601,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 import { EventListFilter } from '../events.service';
 
 /** The `cost=` axis (LOC-18/LOC-17). `free` matches gatherings whose
@@ -29,6 +31,7 @@ export class ListEventsQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 
   // Narrow `filter=upcoming` to one host's other gatherings — the

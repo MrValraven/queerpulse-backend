@@ -7,12 +7,20 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
+import { MemberLookup, MemberRef } from '../common/member-ref';
+import { presentActorIds } from '../common/nullable-actor';
+import { Paginated } from '../common/pagination';
+import { Profile } from '../users/entities/profile.entity';
 import { UpdatePlatformSettingsDto } from './dto/update-platform-settings.dto';
 import { PlatformSettingChange } from './entities/platform-setting-change.entity';
 import {
   PlatformSettings,
   PLATFORM_SETTINGS_ID,
 } from './entities/platform-settings.entity';
+import {
+  PlatformSettingChangeDTO,
+  toPlatformSettingChangeDTO,
+} from './platform-settings-response';
 import {
   PLATFORM_LOCKDOWN_ENABLED,
   PlatformLockdownEnabledEvent,
@@ -61,6 +69,25 @@ function normaliseValue(
   return value === '' ? null : value;
 }
 
+/**
+ * A per-caller copy of the settings row that is still a `PlatformSettings`.
+ *
+ * `Object.assign(new PlatformSettings(), row)` rather than a spread, because
+ * callers receive this as the entity type and the prototype has to survive:
+ * a plain object would satisfy the compiler and then fail any `instanceof`, and
+ * would not be something TypeORM could be handed back.
+ *
+ * Shallow on purpose. The only reference-typed column is `announcementExpiresAt`
+ * (a `Date`), and the risk being closed here is a caller ASSIGNING to a field
+ * of what it received, not one reaching inside a Date to mutate it in place.
+ * Cloning the Date as well would cost an allocation on every authenticated
+ * request through `PlatformLockdownGuard` to defend against something nobody
+ * writes by accident.
+ */
+function copyOf(row: PlatformSettings): PlatformSettings {
+  return Object.assign(new PlatformSettings(), row);
+}
+
 @Injectable()
 export class PlatformSettingsService {
   private readonly logger = new Logger(PlatformSettingsService.name);
@@ -72,6 +99,15 @@ export class PlatformSettingsService {
     private readonly settings: Repository<PlatformSettings>,
     @InjectRepository(PlatformSettingChange)
     private readonly changes: Repository<PlatformSettingChange>,
+    // Only ever read to resolve an audit row's `actorId` to a display name.
+    // Injected as the bare repository and wrapped in `MemberLookup` (a plain
+    // class, not a provider) rather than depending on `ProfilesService`, so
+    // this module keeps no edge to the profiles module: this service is a
+    // dependency of the GLOBAL lockdown guard, and every module it pulls in
+    // becomes a module that has to be constructible before any request can be
+    // answered.
+    @InjectRepository(Profile)
+    private readonly profiles: Repository<Profile>,
     private readonly dataSource: DataSource,
     private readonly events: EventEmitter2,
   ) {}
@@ -92,10 +128,18 @@ export class PlatformSettingsService {
    *   route — including handlers that would never have touched the database —
    *   purely because a perfectly good cached copy aged past its TTL. With no
    *   cached copy we have nothing to serve, so the error propagates.
+   *
+   * Every return path hands back a COPY, never the cached instance itself
+   * (ENG-44). What callers receive is an entity, and the ordinary thing to do
+   * with an entity is assign to a field on it. Doing that to the shared
+   * instance would rewrite the platform's lockdown state for every concurrent
+   * request until the TTL lapsed, from a caller that never touched Postgres and
+   * has no idea it changed anything. Nothing does it today; the point is that
+   * nothing can.
    */
   async get(): Promise<PlatformSettings> {
     if (this.cached && Date.now() - this.cachedAt < CACHE_TTL_MS) {
-      return this.cached;
+      return copyOf(this.cached);
     }
     let row: PlatformSettings | null;
     try {
@@ -111,7 +155,7 @@ export class PlatformSettingsService {
             this.cachedAt,
           ).toISOString()}`,
         );
-        return this.cached;
+        return copyOf(this.cached);
       }
       throw err;
     }
@@ -126,7 +170,7 @@ export class PlatformSettingsService {
     }
     this.cached = row;
     this.cachedAt = Date.now();
-    return row;
+    return copyOf(row);
   }
 
   /**
@@ -245,12 +289,62 @@ export class PlatformSettingsService {
     return saved;
   }
 
-  /** Audit history, newest first. */
-  listChanges(limit: number, offset: number): Promise<PlatformSettingChange[]> {
-    return this.changes.find({
-      order: { createdAt: 'DESC' },
+  /**
+   * Audit history, newest first, in the repo-wide `Paginated` envelope
+   * (ENG-50). A bare array left an admin auditing "who turned lockdown on"
+   * unable to tell a last page from a truncated one: 50 rows back could mean
+   * 50 changes exist, or that the fifty-first is the one they were looking for.
+   *
+   * `createdAt` alone is not a total order, so it is not a safe sort key for
+   * offset pagination: one PATCH that flips two switches writes both audit rows
+   * inside one transaction, with `createdAt` defaulted from the same
+   * statement timestamp. Postgres is then free to return those ties in either
+   * order per query, which is exactly how a row appears on page 1 and page 2
+   * and another appears on neither. `id` breaks the tie deterministically.
+   *
+   * `limit` is validated `>= 1` by `ListChangesQuery` and defaulted by the
+   * controller, so the `page` derivation below cannot divide by zero.
+   */
+  async listChanges(
+    limit: number,
+    offset: number,
+  ): Promise<Paginated<PlatformSettingChangeDTO>> {
+    const [rows, total] = await this.changes.findAndCount({
+      order: { createdAt: 'DESC', id: 'DESC' },
       take: limit,
       skip: offset,
     });
+
+    const actorsByUserId = await this.actorsFor(rows);
+
+    return {
+      items: rows.map((row) => toPlatformSettingChangeDTO(row, actorsByUserId)),
+      total,
+      // `Paginated` speaks page/pageSize because that is how every other list
+      // endpoint is queried, while this one's established contract (and the
+      // admin client that already calls it) is limit/offset. Rather than break
+      // that contract for the sake of the envelope's vocabulary, the two are
+      // derived from it: `pageSize` IS the requested limit, and `page` is which
+      // limit-sized window this offset lands in. A caller that pages by whole
+      // limits, which is the only way anything here pages, sees exactly the
+      // page numbers it expects.
+      page: Math.floor(offset / limit) + 1,
+      pageSize: limit,
+    };
+  }
+
+  /**
+   * One batched profile lookup for a whole page of audit rows, so the list
+   * costs two queries however many rows it returns rather than one per row.
+   *
+   * `presentActorIds` drops the NULLs an erased admin leaves behind before they
+   * can reach an `IN (...)` for a user that no longer exists.
+   */
+  private actorsFor(
+    rows: PlatformSettingChange[],
+  ): Promise<Map<string, MemberRef>> {
+    return new MemberLookup(this.profiles).byUserIds(
+      presentActorIds(rows.map((row) => row.actorId)),
+    );
   }
 }

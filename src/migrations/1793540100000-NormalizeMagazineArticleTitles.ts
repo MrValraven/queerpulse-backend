@@ -27,8 +27,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * `down()` cannot restore markup this deleted, and would not want to: the
  * previous value was a bug, not a state worth returning to.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class NormalizeMagazineArticleTitles1793540100000 implements MigrationInterface {
   name = 'NormalizeMagazineArticleTitles1793540100000';

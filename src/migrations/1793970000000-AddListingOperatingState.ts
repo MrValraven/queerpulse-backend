@@ -29,8 +29,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * not already taking, and no `CONCURRENTLY` two-phase split is needed. Mirrors
  * `1782800880000-AddListingSafeSpace` exactly, which added the sibling
  * `safe_space_status` enum column and its index the same way.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class AddListingOperatingState1793970000000 implements MigrationInterface {
   name = 'AddListingOperatingState1793970000000';

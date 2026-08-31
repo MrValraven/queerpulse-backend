@@ -7,8 +7,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * content (club picks, art showcase, radio) with no server-backed listing —
  * this is the one genuine member-submitted data point on the page (the
  * "Express interest" form on a Commission Board project).
- *
- * DO NOT RUN — authored for review only, per the task's instructions.
  */
 export class AddCommissionInterest1782800610000 implements MigrationInterface {
   name = 'AddCommissionInterest1782800610000';

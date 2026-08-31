@@ -1,5 +1,13 @@
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import {
+  IsInt,
+  IsOptional,
+  IsString,
+  Max,
+  MaxLength,
+  Min,
+} from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 
 export class ListArticlesQuery {
   // Issue display number, e.g. "09" (matches `MagazineIssue.number`).
@@ -59,5 +67,6 @@ export class ListArticlesQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 }

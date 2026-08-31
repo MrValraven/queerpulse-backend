@@ -10,8 +10,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * invariants over partial unique indexes for admin-only toggles.
  *
  * Defaults to `false` for every existing row, so no community starts featured.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddCommunityFeaturedFlag1793200000000 implements MigrationInterface {
   name = 'AddCommunityFeaturedFlag1793200000000';

@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -25,8 +24,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * `invoice` is deliberately left alone. It holds an invoice REFERENCE
  * ("INV-2026-084"), never a sum, and belongs in no total.
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class AddMagazinePaymentNumericMoney1794833700000 implements MigrationInterface {
   name = 'AddMagazinePaymentNumericMoney1794833700000';

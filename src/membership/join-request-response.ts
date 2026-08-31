@@ -185,6 +185,32 @@ export interface PublicJoinRequestStatusView {
    * applicant recover their own way in without anyone emailing it to them.
    */
   inviteCode: string | null;
+  /**
+   * PRD-02. WHY the code above is or is not there, so the status page can stop
+   * collapsing three different situations into one dead end.
+   *
+   * `expired` is the recoverable one and the reason this field exists: the
+   * applicant can revive it themselves from
+   * `POST /join-requests/status/invite/refresh`. `used` means an account was
+   * already created with it, and `revoked` is a moderator's deliberate act;
+   * neither is refreshable and the page must not offer it. Null when the
+   * approval minted no invite, and on every non-approved request.
+   *
+   * Nothing here is new disclosure: the holder of this token is the applicant,
+   * and every value describes only their own invite.
+   */
+  inviteStatus: PublicInviteStatus | null;
+  /**
+   * PRD-02. ISO 8601 deadline of the invite above, so the page can say when
+   * the link stops working INSTEAD of letting it lapse in silence. Present
+   * whenever there is an invite at all, including a lapsed one (where it is
+   * the date it lapsed on).
+   *
+   * Before this, an approved applicant was handed a code with no deadline
+   * attached, the sweeper reclaimed it seven days later, and the first thing
+   * they learned about the clock was that it had run out.
+   */
+  inviteExpiresAt: string | null;
 }
 
 export function toJoinRequestView(
@@ -269,17 +295,25 @@ export function toPublicJoinRequestStatus(
 }
 
 /**
- * Maps a request onto the applicant-facing status view. `inviteCode` is
- * resolved by the caller (it lives on another table and has its own
- * redeemability check) and is dropped unless the request was approved, so a
- * caller mistake cannot leak a code onto a pending row.
+ * Maps a request onto the applicant-facing status view. The invite is resolved
+ * by the caller (it lives on another table and has its own redeemability
+ * check) and everything derived from it is dropped unless the request was
+ * approved, so a caller mistake cannot leak a code onto a pending row.
+ *
+ * The CODE is additionally withheld unless the invite currently resolves as
+ * `valid`: an expired or revoked code would fail at signup, and offering it
+ * would send the applicant to a door that does not open. The `inviteStatus`
+ * and `inviteExpiresAt` beside it are still reported, because the whole point
+ * of PRD-02 is that the applicant gets to see the clock rather than only its
+ * aftermath.
  */
 export function toPublicJoinRequestStatusView(
   request: PlatformJoinRequest,
-  redeemableInviteCode: string | null,
+  invite: JoinRequestInviteRef | null,
 ): PublicJoinRequestStatusView {
   const publicStatus = toPublicJoinRequestStatus(request.status);
   const isDecided = publicStatus === 'approved' || publicStatus === 'declined';
+  const approvedInvite = publicStatus === 'approved' ? invite : null;
   return {
     status: publicStatus,
     submittedAt: request.createdAt.toISOString(),
@@ -287,6 +321,8 @@ export function toPublicJoinRequestStatusView(
       isDecided && request.reviewedAt ? request.reviewedAt.toISOString() : null,
     declineReason:
       publicStatus === 'declined' ? (request.declineReason ?? null) : null,
-    inviteCode: publicStatus === 'approved' ? redeemableInviteCode : null,
+    inviteCode: approvedInvite?.status === 'valid' ? approvedInvite.code : null,
+    inviteStatus: approvedInvite?.status ?? null,
+    inviteExpiresAt: approvedInvite?.expiresAt?.toISOString() ?? null,
   };
 }

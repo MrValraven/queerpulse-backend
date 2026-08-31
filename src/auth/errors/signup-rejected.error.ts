@@ -20,8 +20,16 @@ export type SignupRejectedReason =
   // HOUSE_EMAIL collision in genesis.constants.ts). The `users.email` unique
   // constraint would reject the insert, which used to surface as a raw JSON
   // 500 on a top-level browser navigation. The frontend has no dedicated copy
-  // for this reason yet, so it falls through to the generic sign-in notice —
-  // that is still a recoverable page instead of an error body.
+  // for this reason yet, so it falls through to the generic sign-in notice,
+  // which is still a recoverable page instead of an error body.
+  //
+  // NO LONGER A DEAD END (PRD-06). Before rejecting, the sign-up path records
+  // an `identity_relink_candidates` row against the account that holds the
+  // address, and an admin can then re-point that account at this Google
+  // identity from the member console. So this rejection is now the FIRST STEP
+  // of a recovery rather than a permanent lockout, and it is also why the
+  // check runs ahead of the invite/suppression/age gates: a member whose
+  // Google account was re-created holds no invite code.
   | 'email_in_use'
   // An admin has switched registration off (`platform_settings`). Existing
   // members are unaffected — this is only reachable on the new-account path.

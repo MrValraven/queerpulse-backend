@@ -100,6 +100,7 @@ import {
 } from './magazine-piece-response';
 import {
   ArticleCommentResponse,
+  FORMER_MEMBER_COMMENT_AUTHOR_LABEL,
   toArticleCommentResponse,
   toArticleCommentTree,
   UNRESOLVED_COMMENT_AUTHOR_LABEL,
@@ -1108,11 +1109,17 @@ export class MagazinePieceService {
       editors.map((editor) => [editor.id, editor.name]),
     );
 
+    // A NULL `authorId` (the author erased their account) has nothing to look
+    // up: `resolveCommentAuthorLabel` renders it as a former member without a
+    // name map entry. Same filter shape as `listArticleVersions`.
     const unresolvedAuthorIds = [
       ...new Set(
         comments
           .map((comment) => comment.authorId)
-          .filter((authorId) => !authorNameById.has(authorId)),
+          .filter(
+            (authorId): authorId is string =>
+              authorId !== null && !authorNameById.has(authorId),
+          ),
       ),
     ];
     if (unresolvedAuthorIds.length > 0) {
@@ -2613,7 +2620,13 @@ export class MagazinePieceService {
    * many comments' authors at once; this is the one-off equivalent for a
    * single actor.
    */
-  private async resolveCommentAuthorName(authorId: string): Promise<string> {
+  private async resolveCommentAuthorName(
+    authorId: string | null,
+  ): Promise<string> {
+    if (authorId === null) {
+      return FORMER_MEMBER_COMMENT_AUTHOR_LABEL;
+    }
+
     const editors = await this.listMagazineEditors();
     const editor = editors.find((candidate) => candidate.id === authorId);
     if (editor) {

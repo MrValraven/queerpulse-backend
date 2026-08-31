@@ -431,8 +431,8 @@ describe('ListingsService', () => {
         where: jest.Mock;
         skip: jest.Mock;
       };
-      expect(qb.where).toHaveBeenCalledWith('l.owner_id = :ownerId', {
-        ownerId: 'owner-1',
+      expect(qb.where).toHaveBeenCalledWith('l.owner_id = :userId', {
+        userId: 'owner-1',
       });
       expect(qb.skip).toHaveBeenCalled();
     });
@@ -595,9 +595,15 @@ describe('ListingsService', () => {
     // The ordered gallery is the source of truth; the legacy `photos`/`alt`
     // slot pair is a derived mirror of its first four entries.
     describe('ordered photo gallery', () => {
+      // Absolute `https://` values, because `toImageUrl` resolves a stored
+      // image to a URL and drops anything that is neither one of our storage
+      // keys nor an absolute https URL. A bare `photo-0.jpg` would come back
+      // as `null` on the response and the assertions below would be reading
+      // the mapper's rejection rather than the gallery.
+      const imageUrlOf = (name: string) => `https://images.test/${name}.jpg`;
       const galleryOf = (count: number) =>
         Array.from({ length: count }, (_unused, index) => ({
-          image: `photo-${index}.jpg`,
+          image: imageUrlOf(`photo-${index}`),
           alt: `Photo ${index}`,
           caption: index === 4 ? 'Open studio night' : '',
         }));
@@ -608,7 +614,7 @@ describe('ListingsService', () => {
         );
 
         const dto = await service.update('QPL-2026-0001', 'owner-1', {
-          photoGallery: [{ image: 'only.jpg', alt: 'The only photo' }],
+          photoGallery: [{ image: imageUrlOf('only'), alt: 'The only photo' }],
         });
 
         expect(dto.photoGallery).toHaveLength(1);
@@ -625,7 +631,7 @@ describe('ListingsService', () => {
         );
 
         const dto = await service.update('QPL-2026-0001', 'owner-1', {
-          photos: { d1: 'replaced.jpg' },
+          photos: { d1: imageUrlOf('replaced') },
         });
 
         expect(dto.photoGallery).toHaveLength(5);
@@ -1128,8 +1134,12 @@ describe('ListingsService', () => {
         2,
       );
 
+      // The seat check moved off the query and into
+      // `loadOwnedOrCoManagedOr404`, which loads by `ref` alone and then
+      // decides owner / co-manager / 404. `listing-co-manager-permissions.spec`
+      // holds the access side of that gate.
       expect(listings.findOne).toHaveBeenCalledWith({
-        where: { ref: 'QPL-2026-0001', ownerId: 'owner-1' },
+        where: { ref: 'QPL-2026-0001' },
       });
       expect(moderationEvents.findAndCount).toHaveBeenCalledWith({
         where: { listingId: 'listing-1' },

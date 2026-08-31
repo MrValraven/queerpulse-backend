@@ -2,12 +2,14 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { CurrentUserData } from '../auth/decorators/current-user.decorator';
 import { ActiveMemberGuard } from '../auth/guards/active-member.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { RolesOrStaffGuard } from '../auth/guards/roles-or-staff.guard';
 import { CreateListingDto } from './dto/create-listing.dto';
 import { ListingStatus } from './entities/listing.entity';
 import { AdminListingsController } from './admin-listings.controller';
 import { ListingClaimsService } from './listing-claims.service';
 import { ListingEditSuggestionsService } from './listing-edit-suggestions.service';
 import { ListingOwnerPendingService } from './listing-owner-pending.service';
+import { ListingVenueEventsService } from './listing-venue-events.service';
 import { ListingsController } from './listings.controller';
 import { ListingsService } from './listings.service';
 
@@ -69,11 +71,14 @@ describe('ListingsController', () => {
           provide: ListingOwnerPendingService,
           useValue: ownerPendingService,
         },
+        { provide: ListingVenueEventsService, useValue: {} },
       ],
     })
       .overrideGuard(ActiveMemberGuard)
       .useValue({ canActivate: () => true })
       .overrideGuard(RolesGuard)
+      .useValue({ canActivate: () => true })
+      .overrideGuard(RolesOrStaffGuard)
       .useValue({ canActivate: () => true })
       .compile();
     controller = module.get(ListingsController);
@@ -195,7 +200,13 @@ describe('ListingsController', () => {
       'owner-1',
       undefined,
     );
-    expect(result).toBe(updated);
+    // The handler now hand-maps the entity through
+    // `toDirectoryModerationListingDTO`, so the response is a fresh object
+    // carrying the transition rather than the entity itself.
+    expect(result).toMatchObject({
+      ref: 'QPL-2026-0001',
+      status: ListingStatus.Live,
+    });
   });
 
   it('PATCH /admin/listings/bulk-status forwards refs/status/actor/reason', async () => {

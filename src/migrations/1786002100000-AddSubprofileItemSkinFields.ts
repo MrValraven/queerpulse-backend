@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 export class AddSubprofileItemSkinFields1786002100000 implements MigrationInterface {

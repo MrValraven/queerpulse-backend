@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Put,
@@ -75,7 +76,7 @@ export class CommunityCardsController {
   async replace(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
-    @Param('cardId') cardId: string,
+    @Param('cardId', ParseUUIDPipe) cardId: string,
   ) {
     await this.cards.replaceCode(slug, user.userId, cardId);
     return { ok: true };
@@ -85,7 +86,7 @@ export class CommunityCardsController {
   async setStatus(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
-    @Param('cardId') cardId: string,
+    @Param('cardId', ParseUUIDPipe) cardId: string,
     @Body() dto: SetCardStatusDto,
   ) {
     await this.cards.setStatus(

@@ -6,8 +6,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * threads (part of "Personalized Community Pulse"). Nullable: threads aren't
  * required to be tied to a specific community. Table name is `forum_thread`
  * (singular), matching `ForumThread`'s `@Entity('forum_thread')`.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddForumThreadCommunityId1785903500000 implements MigrationInterface {
   name = 'AddForumThreadCommunityId1785903500000';

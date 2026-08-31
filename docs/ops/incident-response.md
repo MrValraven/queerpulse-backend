@@ -177,7 +177,7 @@ Restore service before you understand the cause. Available levers:
   (`src/platform-settings/platform-settings.service.ts:33-41`). The public status
   page and the health probes stay reachable throughout
   (`src/admin-status/admin-status-incidents.controller.ts:44-47`,
-  `src/health/health.controller.ts:38`).
+  `src/health/health.controller.ts:41`).
 - **Sitewide announcement banner.** `announcementEnabled` plus
   `announcementMessage`, served by the **public** `GET /platform-status`
   (`src/platform-settings/platform-status.controller.ts:80-124`), so it reaches
@@ -226,12 +226,12 @@ Within **10 working days**. §7.
 What exists:
 
 - `GET /health/live`, public and unthrottled, touching nothing external. This is
-  the one the orchestrator probes (`src/health/health.controller.ts:78-84`,
+  the one the orchestrator probes (`src/health/health.controller.ts:81-87`,
   `railway.json:12`).
 - `GET /health` and `GET /health/ready`, which ping the database and sit behind
   `MetricsTokenGuard`, the same shared-secret gate as `/metrics`, scraped with
   `Authorization: Bearer $METRICS_TOKEN`
-  (`src/health/health.controller.ts:24-30, 54-58, 90-94`).
+  (`src/health/health.controller.ts:24-34, 57-61, 93-97`).
 - `GET /metrics`, public route, token-guarded
   (`src/metrics/metrics.controller.ts:27-31`).
 - Sentry, when `SENTRY_DSN` is set (`src/instrument.ts:22-31`).
@@ -539,8 +539,8 @@ irrecoverably lost, **a second clock starts** and it is not this one.
 | Severity values | `minor`, `major`, `critical` (`src/status/entities/status-incident.entity.ts:18-22`) |
 | Incident statuses | `open`, `monitoring`, `resolved` (`src/status/entities/status-incident.entity.ts:30-34`) |
 | Lockdown and announcement switches | `src/platform-settings/platform-settings.service.ts:33-41` |
-| Liveness probe | `GET /health/live`, public (`src/health/health.controller.ts:78-84`) |
-| Readiness probe | `GET /health/ready`, bearer token (`src/health/health.controller.ts:90-94`) |
+| Liveness probe | `GET /health/live`, public (`src/health/health.controller.ts:81-87`) |
+| Readiness probe | `GET /health/ready`, bearer token (`src/health/health.controller.ts:93-97`) |
 | Metrics | `GET /metrics`, bearer token (`src/metrics/metrics.controller.ts:27-31`) |
 | Data-loss playbook | `docs/ops/backup-restore.md` |
 | Breach procedure | `docs/ops/breach-notification.md` |

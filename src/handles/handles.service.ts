@@ -1,4 +1,8 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  UnprocessableEntityException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
 import { EntityManager, Repository } from 'typeorm';
@@ -21,6 +25,57 @@ export type HandleOwner =
 export interface HandleCheck {
   available: boolean;
   reason: 'invalid' | 'reserved' | 'taken' | null;
+}
+
+/**
+ * Options for a namespace WRITE (`claim` / `rename`).
+ *
+ * `isSystemOwnedClaim` is the single, deliberate way past the reserved-name
+ * rule, and it exists because the platform's own house account legitimately
+ * holds a reserved name: the genesis bootstrap creates it as "QueerPulse",
+ * whose slug is `queerpulse`, which the impersonation group in
+ * `common/handles.ts` now withholds from everyone else. Removing that name from
+ * the list to accommodate one account would hand it to the first member who
+ * asked for it, so the exception is named at the call site instead. It waives
+ * ONLY the reserved rule: a system-owned name still has to be a well-formed
+ * handle, because the registry PK and every URL that reads from it depend on
+ * the format holding for every row.
+ *
+ * Pass it only for a write on behalf of a `users.is_system` account. Every
+ * member-initiated claim and rename must leave it unset.
+ */
+export interface HandleWriteOptions {
+  isSystemOwnedClaim?: boolean;
+}
+
+/**
+ * The reserved/format verdict for a namespace WRITE, returned as a value
+ * rather than thrown.
+ *
+ * `handleFormatError` in `common/handles.ts` answers for the namespace's rules
+ * in the abstract. This wraps it with the one exception a write may carry, so
+ * what `isSystemOwnedClaim` actually waives is written down in exactly one
+ * place. `assertWritable` below turns the verdict into the 422 that a
+ * member-facing request needs, and `UsersService.nextAvailableSlug` reads the
+ * same verdict to route a Google sign-up AROUND a withheld name rather than
+ * failing on it. Sign-up cannot afford a throw here: the person arriving with a
+ * Google display name has no opportunity to pick a different one, so that
+ * caller needs the answer as a value. Exporting it is what keeps the two
+ * readings of "may this name be written?" from drifting apart.
+ *
+ * The waiver covers the reserved rule alone. An `invalid` name stays invalid
+ * for a system account too, because the registry PK and every URL built from it
+ * depend on the format holding for every row.
+ */
+export function handleWriteError(
+  name: string,
+  options?: HandleWriteOptions,
+): 'invalid' | 'reserved' | null {
+  const formatError = handleFormatError(name);
+  if (formatError === 'reserved' && options?.isSystemOwnedClaim) {
+    return null;
+  }
+  return formatError;
 }
 
 /**
@@ -68,7 +123,9 @@ export class HandlesService {
     m: EntityManager,
     name: string,
     owner: HandleOwner,
+    options?: HandleWriteOptions,
   ): Promise<void> {
+    this.assertWritable(name, options);
     const normalized = normalizeHandle(name);
     const reservation = await m.findOne(HandleHistory, {
       where: { name: normalized },
@@ -111,18 +168,29 @@ export class HandlesService {
     oldName: string | null,
     newName: string,
     owner: HandleOwner,
+    options?: HandleWriteOptions,
   ): Promise<void> {
     const normalizedNew = normalizeHandle(newName);
     const normalizedOld = oldName ? normalizeHandle(oldName) : null;
     if (normalizedOld === normalizedNew) {
       return;
     }
+    // Checked here as well as inside `claim`, and deliberately AFTER the no-op
+    // short-circuit above. A rename that keeps the same name is an owner
+    // re-asserting a row they already hold, which stays legal even for a name
+    // the reserved list has since grown to cover, so a legacy holder can still
+    // re-publish without being forced through a rename. A rename that does move
+    // the name has to fail before the `release` below runs: callers wrap this in
+    // a transaction, so a late failure would roll back correctly, but refusing
+    // an unusable name before writing anything keeps that correctness from
+    // depending on the caller's transaction.
+    this.assertWritable(normalizedNew, options);
     if (normalizedOld) {
       // Owner-scoped: `oldName` is the caller's own slug, but it may normalize
       // onto a row someone else owns (see below).
       await this.release(m, normalizedOld, owner);
     }
-    await this.claim(m, normalizedNew, owner);
+    await this.claim(m, normalizedNew, owner, options);
   }
 
   /**
@@ -233,6 +301,42 @@ export class HandlesService {
     }
     // Reserved and still cooling: taken for all but the previous owner.
     return !(exceptOwner && this.reservationHeldBy(reservation, exceptOwner));
+  }
+
+  /**
+   * The namespace's own format/reserved gate, applied at the WRITE boundary.
+   *
+   * `check` has always run `handleFormatError`, so the read side answered
+   * honestly while the write side trusted whichever caller happened to be
+   * asking. That put the strength of a global rule in the hands of every future
+   * caller remembering to apply it, and a caller that forgot would land a
+   * malformed or reserved name in the registry with nothing to catch it.
+   * Enforcing it here makes the registry refuse a name it would never have
+   * offered, whoever is writing.
+   *
+   * Callers keep their own validation where it produces a better member-facing
+   * message (`ProfilesService.updateUsername` names the username field;
+   * `validatePublish` returns the persona checklist codes). This is the
+   * backstop underneath them, and it uses the same 422 body those callers
+   * already return so a caller that skipped its own check still produces an
+   * error shape the frontend recognises.
+   */
+  private assertWritable(name: string, options?: HandleWriteOptions): void {
+    const writeError = handleWriteError(name, options);
+    if (writeError === 'invalid') {
+      throw new UnprocessableEntityException({
+        code: 'HANDLE_INVALID',
+        message: 'That name contains characters that are not allowed.',
+        reason: 'invalid',
+      });
+    }
+    if (writeError === 'reserved') {
+      throw new UnprocessableEntityException({
+        code: 'HANDLE_RESERVED',
+        message: 'That name is reserved.',
+        reason: 'reserved',
+      });
+    }
   }
 
   // Whether a reclaim reservation belongs to `owner` — the previous owner

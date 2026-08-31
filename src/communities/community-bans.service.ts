@@ -23,6 +23,7 @@ import {
   COMMUNITY_BAN_LIFTED_AUDIT_ACTION,
   CommunityGovernanceLogService,
 } from './community-governance-log.service';
+import { CommunityBanRatificationService } from './community-ban-ratification.service';
 import { resolveStaffCommunity } from './community-staff-access';
 import { UpdateCommunityBanDto } from './dto/update-community-ban.dto';
 import { CommunityBan } from './entities/community-ban.entity';
@@ -71,6 +72,12 @@ export class CommunityBansService {
     // reach them as nothing at all, which is what made "contact its
     // moderators" the only thing the product could say to them.
     private readonly notifications: NotificationsService,
+    // PRD-25. `makePermanent` is the other door onto a permanent bar, and
+    // leaving it open would have made the second signature a formality: one
+    // moderator could bar for 30 days and then make it forever in a second
+    // call. It now proposes the same hold the removal path does. Lifting a bar
+    // withdraws any hold still open on it.
+    private readonly banRatifications: CommunityBanRatificationService,
   ) {}
 
   /**
@@ -101,6 +108,13 @@ export class CommunityBansService {
       .map((text, index) => ({ index, text: text.trim() }))
       .filter((rule) => rule.text.length > 0);
 
+    // PRD-25. The lazy sweep runs here as well as on the ratification queue,
+    // because this is the pane a community's staff open most often and the
+    // hold's own status is otherwise only tidied when somebody remembers to
+    // look at it. Nothing about the member's terms depends on it: the 30-day
+    // bar is already on the row below.
+    await this.banRatifications.expireDueHolds(community.id);
+
     const rows = await this.bans.find({
       where: { communityId: community.id },
       order: { createdAt: 'DESC' },
@@ -113,6 +127,9 @@ export class CommunityBansService {
         rulesVersion: community.rulesVersion,
       };
     }
+
+    const pendingHoldIdByUserId =
+      await this.banRatifications.pendingHoldIdsByTargetUser(community.id);
 
     const referencedUserIds = [
       ...new Set(
@@ -135,6 +152,7 @@ export class CommunityBansService {
           : null,
         community.rulesVersion,
         now,
+        pendingHoldIdByUserId.get(row.userId) ?? null,
       ),
     );
     return {
@@ -155,6 +173,14 @@ export class CommunityBansService {
    * contradicts itself, and quietly resolving one of those is how a moderator
    * ends up having done something to a member's standing that they never
    * intended.
+   *
+   * `makePermanent` NO LONGER MAKES ANYTHING PERMANENT BY ITSELF (PRD-25). It
+   * proposes the permanent bar to a second owner, co-owner or moderator, the
+   * same hold the removal path opens, and the end date stays exactly where it
+   * is until somebody signs. A community with nobody else who could sign is
+   * refused outright rather than quietly granted: that is the case the second
+   * signature exists for. The response carries `isPendingRatification` and
+   * `ratificationId` so the panel can say what is now being waited on.
    *
    * Everything that changes is recorded in the community's governance log, in
    * `mod_audit_logs` (so the revised ban stays appealable), and told to the
@@ -187,12 +213,39 @@ export class CommunityBansService {
     );
     const ban = await this.findBanOr404(community.id, memberSlug);
 
+    // PRD-25. `makePermanent` is the second door onto a permanent bar, and it
+    // no longer writes `expires_at = NULL` itself. Leaving it as a direct write
+    // would have made the second signature a formality worth nothing: one
+    // moderator bars for 30 days on the way out, then makes it forever in a
+    // second call nobody has to countersign. It now proposes the same hold the
+    // removal path opens, and the end date stays where it is until somebody
+    // signs.
+    //
+    // A bar already permanent (every bar written before timed bars existed, and
+    // every one that has been ratified) is left alone: it needs no second
+    // signature, because it either got one or predates the requirement, and
+    // re-proposing it would ask somebody to sign a decision already made.
+    const isMakePermanentRequested =
+      dto.makePermanent === true && ban.expiresAt !== null;
+    if (
+      isMakePermanentRequested &&
+      !(await this.banRatifications.hasSecondEligibleSignatory(
+        community.id,
+        actorUserId,
+      ))
+    ) {
+      // Refused up front, before anything is written. A community whose only
+      // staff member is the person asking cannot make a bar permanent at all,
+      // which is exactly the case the second signature exists for.
+      throw new BadRequestException(
+        'A permanent bar needs a second signature from another owner, co-owner or moderator, and this community has nobody else who could give one. Set an end date instead.',
+      );
+    }
+
     const patch: Partial<CommunityBan> = {};
 
     if (dto.banDays !== undefined) {
       patch.expiresAt = banExpiryFromDays(dto.banDays);
-    } else if (dto.makePermanent) {
-      patch.expiresAt = null;
     }
 
     if (dto.reason !== undefined) {
@@ -219,15 +272,46 @@ export class CommunityBansService {
       patch.ruleText = null;
     }
 
-    if (Object.keys(patch).length === 0) {
-      throw new BadRequestException('Nothing to change');
+    const hasColumnChange = Object.keys(patch).length > 0;
+    if (!hasColumnChange && !isMakePermanentRequested) {
+      throw new BadRequestException(
+        dto.makePermanent
+          ? 'That bar is already permanent.'
+          : 'Nothing to change',
+      );
     }
 
-    await this.bans.update({ id: ban.id }, patch);
+    if (hasColumnChange) {
+      await this.bans.update({ id: ban.id }, patch);
+    }
     const updated: CommunityBan = { ...ban, ...patch };
 
-    await this.logBanUpdated(community.id, actorUserId, ban, updated);
-    await this.notifyBanUpdated(community, updated);
+    const ratification = isMakePermanentRequested
+      ? await this.banRatifications.proposePermanentBar({
+          community,
+          ban: updated,
+          proposerUserId: actorUserId,
+          reason: updated.reason,
+        })
+      : null;
+
+    // Only a change to the ban's own columns is worth an audit row and a
+    // message to the member. A proposal changes nothing they are serving, and
+    // it writes its own governance entry inside `proposePermanentBar`.
+    if (hasColumnChange) {
+      await this.logBanUpdated(community.id, actorUserId, ban, updated);
+      await this.notifyBanUpdated(community, updated);
+    }
+
+    // The hold this bar is waiting on, whether it was just proposed or was
+    // already open before this edit. Reported either way so the panel never
+    // shows a 30-day bar with no sign of the permanent one somebody asked for.
+    let pendingHoldId = ratification?.id ?? null;
+    if (pendingHoldId === null) {
+      const pendingHoldIdByUserId =
+        await this.banRatifications.pendingHoldIdsByTargetUser(community.id);
+      pendingHoldId = pendingHoldIdByUserId.get(updated.userId) ?? null;
+    }
 
     const memberRef = await new MemberLookup(this.profiles).byUserIds([
       updated.userId,
@@ -237,6 +321,8 @@ export class CommunityBansService {
       memberRef.get(updated.userId) ?? null,
       null,
       community.rulesVersion,
+      new Date(),
+      pendingHoldId,
     );
   }
 
@@ -264,6 +350,11 @@ export class CommunityBansService {
     const ban = await this.findBanOr404(community.id, memberSlug);
 
     await this.bans.delete({ id: ban.id });
+    // PRD-25. Close the door the hold left open. Without this a bar could be
+    // lifted on Tuesday and made permanent on Wednesday by a second moderator
+    // signing a hold nobody had told about the lift, which would re-bar
+    // somebody a colleague had deliberately let back in.
+    await this.banRatifications.withdrawPendingHold(community.id, ban.userId);
     await this.logBanLifted(community.id, actorUserId, ban);
     return { ok: true };
   }

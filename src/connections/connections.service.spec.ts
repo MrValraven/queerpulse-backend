@@ -13,6 +13,7 @@ import { Profile, ProfileVisibility } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
 import { CONNECTION_ACCEPTED } from './connection.events';
 import { Connection, ConnectionStatus } from './entities/connection.entity';
+import { ConnectionDecline } from './entities/connection-decline.entity';
 import { ConnectionNote } from './entities/connection-note.entity';
 import { VouchService } from '../vouch/vouch.service';
 import { ConnectionsService } from './connections.service';
@@ -50,6 +51,7 @@ describe('ConnectionsService', () => {
     delete: jest.Mock;
     upsert: jest.Mock;
   };
+  let connectionDeclines: { findOne: jest.Mock };
   let profiles: { findOne: jest.Mock; find: jest.Mock };
   let vouchService: {
     getActiveVoucheeIds: jest.Mock;
@@ -59,6 +61,8 @@ describe('ConnectionsService', () => {
   let blockFilter: { isBlockedEitherWay: jest.Mock };
   let manager: {
     update: jest.Mock;
+    delete: jest.Mock;
+    query: jest.Mock;
     findOneByOrFail: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
@@ -127,6 +131,8 @@ describe('ConnectionsService', () => {
     };
     manager = {
       update: jest.fn().mockResolvedValue({ affected: 1 }),
+      delete: jest.fn().mockResolvedValue({ affected: 0 }),
+      query: jest.fn().mockResolvedValue([]),
       findOneByOrFail: jest.fn(),
       createQueryBuilder: jest.fn(() => insertQbStub()),
     };
@@ -143,6 +149,7 @@ describe('ConnectionsService', () => {
       delete: jest.fn().mockResolvedValue({ affected: 0 }),
       upsert: jest.fn().mockResolvedValue({ identifiers: [] }),
     };
+    connectionDeclines = { findOne: jest.fn().mockResolvedValue(null) };
     profiles = { findOne: jest.fn(), find: jest.fn().mockResolvedValue([]) };
     vouchService = {
       getActiveVoucheeIds: jest.fn().mockResolvedValue([]),
@@ -160,6 +167,10 @@ describe('ConnectionsService', () => {
         {
           provide: getRepositoryToken(ConnectionNote),
           useValue: connectionNotes,
+        },
+        {
+          provide: getRepositoryToken(ConnectionDecline),
+          useValue: connectionDeclines,
         },
         { provide: getRepositoryToken(Profile), useValue: profiles },
         { provide: VouchService, useValue: vouchService },
@@ -313,13 +324,16 @@ describe('ConnectionsService', () => {
       ).rejects.toBeInstanceOf(ConflictException);
     });
 
-    it('reopens a previously declined relationship as a fresh request', async () => {
+    it('reopens a declined pair with no decline record on file', async () => {
+      // Rows declined before PRD-20 shipped and never backfilled: nothing is
+      // on hold, so the pair re-opens exactly as it always did.
       profiles.findOne.mockResolvedValue(targetProfile());
       connections.findOne.mockResolvedValue({
         id: 'c1',
         status: ConnectionStatus.Declined,
         blockedBy: null,
       });
+      connectionDeclines.findOne.mockResolvedValue(null);
       const result = await service.requestConnection('me', 'them', 'again?');
       expect(result.status).toBe(ConnectionStatus.Pending);
       expect(result.requestMessage).toBe('again?');
@@ -364,6 +378,236 @@ describe('ConnectionsService', () => {
     });
   });
 
+  // PRD-20. Declining a request used to stop nothing: the pair re-opened
+  // immediately as a fresh pending request carrying a brand-new free-text
+  // message, so the request note was a text channel that survived refusal.
+  describe('re-request after a decline (PRD-20)', () => {
+    const daysAgo = (days: number): Date =>
+      new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    /** A pair row sitting at `declined`, as `respond('decline')` leaves it. */
+    const declinedPair = () => ({
+      id: 'c1',
+      requesterId: 'me',
+      addresseeId: 'them',
+      status: ConnectionStatus.Declined,
+      blockedBy: null,
+    });
+
+    const declineRecord = (declineCount: number, lastDeclinedAt: Date) => ({
+      id: 'd1',
+      requesterId: 'me',
+      addresseeId: 'them',
+      declineCount,
+      lastDeclinedAt,
+    });
+
+    it('refuses a re-request inside the first cooldown', async () => {
+      profiles.findOne.mockResolvedValue(targetProfile());
+      connections.findOne.mockResolvedValue(declinedPair());
+      connectionDeclines.findOne.mockResolvedValue(
+        declineRecord(1, daysAgo(3)),
+      );
+
+      await expect(
+        service.requestConnection('me', 'them', 'please reconsider'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(connections.save).not.toHaveBeenCalled();
+    });
+
+    it('phrases the refusal exactly like a block, revealing nothing new', async () => {
+      profiles.findOne.mockResolvedValue(targetProfile());
+      connections.findOne.mockResolvedValue(declinedPair());
+      connectionDeclines.findOne.mockResolvedValue(
+        declineRecord(2, daysAgo(1)),
+      );
+
+      // The same string `requestConnection` returns when the OTHER member has
+      // blocked you, so a cooldown, a cap and a block are one answer.
+      await expect(
+        service.requestConnection('me', 'them'),
+      ).rejects.toMatchObject({
+        response: { message: 'A request is already pending' },
+      });
+    });
+
+    it('allows a re-request once the first cooldown has run out', async () => {
+      profiles.findOne.mockResolvedValue(targetProfile());
+      connections.findOne.mockResolvedValue(declinedPair());
+      connectionDeclines.findOne.mockResolvedValue(
+        declineRecord(1, daysAgo(20)),
+      );
+
+      const result = await service.requestConnection('me', 'them');
+      expect(result.status).toBe(ConnectionStatus.Pending);
+      expect(result.respondedAt).toBeNull();
+    });
+
+    it('drops the requester free text on a re-request after a decline', async () => {
+      profiles.findOne.mockResolvedValue(targetProfile());
+      connections.findOne.mockResolvedValue(declinedPair());
+      connectionDeclines.findOne.mockResolvedValue(
+        declineRecord(1, daysAgo(20)),
+      );
+
+      const result = await service.requestConnection(
+        'me',
+        'them',
+        'you never replied, here is why you should',
+        undefined,
+        'custom:we met at the fair',
+      );
+      expect(result.status).toBe(ConnectionStatus.Pending);
+      expect(result.requestMessage).toBeNull();
+      expect(result.requestReason).toBeNull();
+    });
+
+    it('escalates: a second decline costs far more than the first', async () => {
+      profiles.findOne.mockResolvedValue(targetProfile());
+      connections.findOne.mockResolvedValue(declinedPair());
+      // 20 days clears a FIRST decline (14 days) but not a second (90 days).
+      connectionDeclines.findOne.mockResolvedValue(
+        declineRecord(2, daysAgo(20)),
+      );
+
+      await expect(
+        service.requestConnection('me', 'them'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(connections.save).not.toHaveBeenCalled();
+    });
+
+    it('allows a re-request once the second, longer cooldown has run out', async () => {
+      profiles.findOne.mockResolvedValue(targetProfile());
+      connections.findOne.mockResolvedValue(declinedPair());
+      connectionDeclines.findOne.mockResolvedValue(
+        declineRecord(2, daysAgo(100)),
+      );
+
+      const result = await service.requestConnection('me', 'them');
+      expect(result.status).toBe(ConnectionStatus.Pending);
+    });
+
+    it('caps at three declines: no waiting period reopens it', async () => {
+      profiles.findOne.mockResolvedValue(targetProfile());
+      connections.findOne.mockResolvedValue(declinedPair());
+      connectionDeclines.findOne.mockResolvedValue(
+        declineRecord(3, daysAgo(400)),
+      );
+
+      await expect(
+        service.requestConnection('me', 'them'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(connections.save).not.toHaveBeenCalled();
+    });
+
+    it('gates the fresh-create path too, so deleting the row does not clear the hold', async () => {
+      // `remove` DELETEs a declined pair row and either party may call it, so
+      // "decline, delete, ask again" must meet the same hold as a re-open.
+      profiles.findOne.mockResolvedValue(targetProfile());
+      connections.findOne.mockResolvedValue(null); // row is gone
+      connectionDeclines.findOne.mockResolvedValue(
+        declineRecord(1, daysAgo(2)),
+      );
+
+      await expect(
+        service.requestConnection('me', 'them', 'hi again'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(connections.save).not.toHaveBeenCalled();
+    });
+
+    it('never gates the OTHER direction: the decliner can still reach out', async () => {
+      // `them` declined `me`. That must cost `them` nothing when they decide to
+      // request `me` themselves.
+      profiles.findOne.mockResolvedValue(
+        targetProfile({ userId: 'me', slug: 'me' }),
+      );
+      connections.findOne.mockResolvedValue(declinedPair());
+      connectionDeclines.findOne.mockImplementation(
+        (options: { where: { requesterId: string; addresseeId: string } }) =>
+          Promise.resolve(
+            options.where.requesterId === 'me' &&
+              options.where.addresseeId === 'them'
+              ? declineRecord(3, daysAgo(1))
+              : null,
+          ),
+      );
+
+      const result = await service.requestConnection(
+        'them',
+        'me',
+        'actually, let us talk',
+      );
+      expect(result.status).toBe(ConnectionStatus.Pending);
+      expect(result.requesterId).toBe('them');
+      expect(result.addresseeId).toBe('me');
+      // The other direction carries no decline history, so the words survive.
+      expect(result.requestMessage).toBe('actually, let us talk');
+      expect(connectionDeclines.findOne).toHaveBeenCalledWith({
+        where: { requesterId: 'them', addresseeId: 'me' },
+      });
+    });
+  });
+
+  describe('decline ledger (PRD-20)', () => {
+    it('records the decline in the same transaction as the status flip', async () => {
+      connections.findOne.mockResolvedValue({
+        id: 'c1',
+        requesterId: 'them',
+        addresseeId: 'me',
+        status: ConnectionStatus.Pending,
+      });
+
+      const result = await service.respond('c1', 'me', 'decline');
+
+      expect(result.status).toBe(ConnectionStatus.Declined);
+      expect(dataSource.transaction).toHaveBeenCalled();
+      const [sql, parameters] = manager.query.mock.calls[0] as [
+        string,
+        unknown[],
+      ];
+      expect(sql).toContain('INSERT INTO "connection_declines"');
+      // Upsert that increments in one statement, so two concurrent declines
+      // cannot both read the same count and write the same value.
+      expect(sql).toContain('"decline_count" + 1');
+      expect(parameters.slice(0, 2)).toEqual(['them', 'me']);
+      // A decline still emits nothing: the requester learns of it only by the
+      // request quietly leaving their outgoing tab.
+      expect(emitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('does not record a decline when the claim loses the race', async () => {
+      connections.findOne.mockResolvedValue({
+        id: 'c1',
+        requesterId: 'them',
+        addresseeId: 'me',
+        status: ConnectionStatus.Pending,
+      });
+      manager.update.mockResolvedValue({ affected: 0 });
+
+      await expect(
+        service.respond('c1', 'me', 'decline'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(manager.query).not.toHaveBeenCalled();
+    });
+
+    it('clears the ledger in both directions when the request is accepted', async () => {
+      connections.findOne.mockResolvedValue({
+        id: 'c1',
+        requesterId: 'them',
+        addresseeId: 'me',
+        status: ConnectionStatus.Pending,
+      });
+
+      await service.respond('c1', 'me', 'accept');
+
+      expect(manager.query).not.toHaveBeenCalled();
+      expect(manager.delete).toHaveBeenCalledWith(ConnectionDecline, [
+        { requesterId: 'them', addresseeId: 'me' },
+        { requesterId: 'me', addresseeId: 'them' },
+      ]);
+    });
+  });
+
   describe('requestConnectionView', () => {
     // The profile the mapper resolves for the addressee (`them`).
     const otherMemberProfile = {
@@ -389,6 +633,10 @@ describe('ConnectionsService', () => {
         direction: 'outgoing',
         requestMessage: 'hi',
         requestReason: null,
+        // The viewer sent this request, so the card can attribute its words.
+        isRequestedByYou: true,
+        // A brand-new request has no private note by definition.
+        note: null,
         createdAt: undefined,
         respondedAt: undefined,
         member: {
@@ -501,7 +749,10 @@ describe('ConnectionsService', () => {
         requestMessage: 'hi',
       });
       const result = await service.respond('c1', 'me', 'accept');
-      expect(connections.update).toHaveBeenCalledWith(
+      // The claim moved inside a transaction alongside the decline-ledger
+      // write (PRD-20), so it goes through the entity manager now.
+      expect(manager.update).toHaveBeenCalledWith(
+        Connection,
         { id: 'c1', status: ConnectionStatus.Pending },
         {
           status: ConnectionStatus.Accepted,
@@ -522,7 +773,7 @@ describe('ConnectionsService', () => {
         addresseeId: 'me',
         status: ConnectionStatus.Pending,
       });
-      connections.update.mockResolvedValue({ affected: 0 });
+      manager.update.mockResolvedValue({ affected: 0 });
       await expect(
         service.respond('c1', 'me', 'accept'),
       ).rejects.toBeInstanceOf(ConflictException);

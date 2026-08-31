@@ -167,7 +167,7 @@ export class GenesisService {
         }));
 
       // Reused verbatim rather than reimplemented: this already means
-      // "platform-minted, quota-exempt, email-pinned, standard TTL", which is
+      // "platform-minted, quota-exempt, email-pinned, shelf TTL", which is
       // exactly the genesis invite. It has no code-collision retry by design,
       // so a 23505 surfaces as a 500 with the transaction rolled back and the
       // founder clicks the button again.

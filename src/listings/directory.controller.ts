@@ -7,6 +7,7 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
@@ -295,14 +296,16 @@ export class DirectoryController {
   @ApiOkResponse({ description: 'The updated review.' })
   @ApiNotFoundResponse({ description: 'No live listing or review found.' })
   @ApiForbiddenResponse({ description: 'The review is not yours.' })
-  @ApiBadRequestResponse({ description: 'Review cannot be empty.' })
+  @ApiBadRequestResponse({
+    description: 'Malformed review id, or the review is empty.',
+  })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
   updateReview(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
-    @Param('reviewId') reviewId: string,
+    @Param('reviewId', ParseUUIDPipe) reviewId: string,
     @Body() dto: UpdateReviewDto,
   ) {
     return this.directoryService.updateReview(slug, reviewId, user.userId, dto);
@@ -326,14 +329,16 @@ export class DirectoryController {
   @ApiOperation({ summary: 'Mark a review helpful' })
   @ApiOkResponse({ description: 'The refreshed helpful count.' })
   @ApiNotFoundResponse({ description: 'No live listing or review found.' })
-  @ApiBadRequestResponse({ description: 'You cannot vote on your own review.' })
+  @ApiBadRequestResponse({
+    description: 'Malformed review id, or you cannot vote on your own review.',
+  })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
   voteHelpful(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
-    @Param('reviewId') reviewId: string,
+    @Param('reviewId', ParseUUIDPipe) reviewId: string,
   ) {
     return this.directoryService.voteHelpful(slug, reviewId, user.userId);
   }
@@ -349,13 +354,14 @@ export class DirectoryController {
   @ApiOperation({ summary: 'Withdraw your helpful vote on a review' })
   @ApiOkResponse({ description: 'The refreshed helpful count.' })
   @ApiNotFoundResponse({ description: 'No live listing or review found.' })
+  @ApiBadRequestResponse({ description: 'Malformed review id.' })
   @ApiUnauthorizedResponse({
     description: 'Not an authenticated active member.',
   })
   withdrawHelpfulVote(
     @CurrentUser() user: CurrentUserData,
     @Param('slug') slug: string,
-    @Param('reviewId') reviewId: string,
+    @Param('reviewId', ParseUUIDPipe) reviewId: string,
   ) {
     return this.directoryService.withdrawHelpfulVote(
       slug,

@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, IsString, Min } from 'class-validator';
+import { IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 
 export class ListResourcesQuery {
   // Filters `Resource.category` (mirrors the FE's `library.data.ts`
@@ -10,5 +11,6 @@ export class ListResourcesQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 }

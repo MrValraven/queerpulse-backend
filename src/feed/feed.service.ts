@@ -22,6 +22,7 @@ import {
 } from '../events/entities/event.entity';
 import { ForumThread } from '../forum/entities/forum-thread.entity';
 import { BlockFilterService } from '../social/block-filter.service';
+import { MemberPreferences } from '../preferences/entities/member-preferences.entity';
 import { TopicFollow } from '../topics/entities/topic-follow.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { UserStatus } from '../users/entities/user.entity';
@@ -40,6 +41,11 @@ import {
   FeedInteractionsService,
   FeedPostInteractions,
 } from './feed-interactions.service';
+import {
+  excludedContentTags,
+  ExcludedContentTags,
+  NO_EXCLUDED_CONTENT_TAGS,
+} from './content-sensitivity';
 import {
   MutedFeedSources,
   NO_MUTED_SOURCES,
@@ -222,6 +228,12 @@ export class FeedService {
     private readonly communityMembers: Repository<CommunityMember>,
     @InjectRepository(TopicFollow)
     private readonly topicFollows: Repository<TopicFollow>,
+    // PRD-10: the viewer's own content-sensitivity switches. Registered
+    // read-only through the same redundant `forFeature` idiom every other
+    // borrowed repository here uses, so `FeedModule` never has to import
+    // `PreferencesModule` and no module edge is added in either direction.
+    @InjectRepository(MemberPreferences)
+    private readonly memberPreferences: Repository<MemberPreferences>,
     private readonly blockFilter: BlockFilterService,
     private readonly connectionsService: ConnectionsService,
     private readonly feedInteractions: FeedInteractionsService,
@@ -306,9 +318,30 @@ export class FeedService {
     // SOC-18: "show me less of this" applies to every tab, including the
     // scoped ones — a member who turned a community down should not meet it
     // again by tapping Communities. One small indexed read per request.
-    const mutedSources = await this.feedMutes.mutedSources(viewerId);
+    // PRD-10: the content-sensitivity switches, resolved once per request
+    // alongside the mutes and applied in exactly the same place, for exactly
+    // the same reason. Filtering these out AFTER the merge would under-fill
+    // the page and make a member pay for their own filter with content from
+    // everywhere else.
+    //
+    // EVERY TAB, including `communities`, matching how SOC-18 decided the same
+    // question for mutes. A member who switched a category off is asking for a
+    // quieter feed rather than a quieter "All" tab, and finding the thing they
+    // filtered by tapping Communities would read as the filter being broken.
+    // Their membership is untouched: the room, its own page, its threads and
+    // every direct link work exactly as before.
+    const [mutedSources, excludedTags] = await Promise.all([
+      this.feedMutes.mutedSources(viewerId),
+      this.excludedContentTagsFor(viewerId),
+    ]);
     if (resolvedTab === 'all') {
-      return this.getRankedAllFeed(viewerId, cursor, limit, mutedSources);
+      return this.getRankedAllFeed(
+        viewerId,
+        cursor,
+        limit,
+        mutedSources,
+        excludedTags,
+      );
     }
     const sources = this.sourcesForTab(resolvedTab);
     // Personalizes the community_post/gathering/forum_thread source cases to
@@ -339,6 +372,7 @@ export class FeedService {
           membershipScoped,
           connectionAuthorIds,
           mutedSources,
+          excludedTags,
         ),
       ),
     );
@@ -378,6 +412,7 @@ export class FeedService {
     cursor: string | undefined,
     limit: number,
     mutedSources: MutedFeedSources,
+    excludedTags: ExcludedContentTags,
   ): Promise<CursorPage<FeedItem>> {
     const { windowCursor, offset } = decodeRankedCursor(cursor);
     const graph = await this.viewerGraph(viewerId);
@@ -393,6 +428,7 @@ export class FeedService {
           false,
           null,
           mutedSources,
+          excludedTags,
         ),
       ),
     );
@@ -479,6 +515,65 @@ export class FeedService {
 
   // --- internals ---
 
+  /**
+   * The viewer's own content-sensitivity switches, resolved into the tag sets
+   * the candidate queries exclude on (PRD-10).
+   *
+   * NO ROW MEANS DEFAULTS, and the default is "show me everything": a member
+   * who has never opened Settings has no `member_preferences` row at all, and
+   * `PreferencesService` synthesises one rather than 404ing. Reading it
+   * directly here keeps that contract without a service dependency, and a
+   * missing row short-circuits to the shared empty value, so the overwhelming
+   * majority of requests add one primary-key lookup and no predicates.
+   */
+  private async excludedContentTagsFor(
+    viewerId: string,
+  ): Promise<ExcludedContentTags> {
+    const row = await this.memberPreferences.findOne({
+      where: { userId: viewerId },
+      select: {
+        hideDatingContent: true,
+        hideMentalHealthContent: true,
+        hideSexualityIdentityContent: true,
+      },
+    });
+    return excludedContentTags(row);
+  }
+
+  /**
+   * "This item's community carries a tag the viewer opted out of."
+   *
+   * `&&` is the array-overlap operator, served by the GIN index
+   * `IDX_communities_tags` that `AddCommunityTags` created for exactly this
+   * shape of predicate. Written as a correlated `NOT EXISTS` rather than a
+   * join for the reason every other gate in this method is: `cursorPaginate`
+   * runs `.take() + getMany()`, and TypeORM's join path cannot emit the raw
+   * ORDER BY those queries need.
+   *
+   * A flat/global item has no community and therefore no tags to be judged
+   * on, so `IS NULL` keeps it. That is the honest answer rather than a
+   * convenient one: nothing about an untagged item says it belongs to the
+   * category the member switched off.
+   *
+   * `communityIdColumn` is spliced verbatim into raw SQL. Pass a literal
+   * alias reference, never user input. Call at most once per query builder
+   * (fixed bound-parameter name).
+   */
+  private excludeSensitiveCommunities<E extends ObjectLiteral>(
+    qb: SelectQueryBuilder<E>,
+    communityIdColumn: string,
+    communityTags: string[],
+  ): void {
+    qb.andWhere(
+      `(${communityIdColumn} IS NULL OR NOT EXISTS (
+        SELECT 1 FROM "communities" "feed_sensitive_com"
+        WHERE "feed_sensitive_com"."id" = ${communityIdColumn}
+          AND "feed_sensitive_com"."tags" && :feedExcludedCommunityTags
+      ))`,
+      { feedExcludedCommunityTags: communityTags },
+    );
+  }
+
   /** `tab` -> which sources are unioned. `people` unions just `new_member`;
    * `all` includes it alongside the other three, so recently-joined members
    * surface in the unfiltered feed too. `communities` unions all four
@@ -532,12 +627,19 @@ export class FeedService {
     // would under-fill the page and let the mute cost the member content
     // from everywhere else.
     mutedSources: MutedFeedSources = NO_MUTED_SOURCES,
+    // PRD-10: the tag sets this viewer's content-sensitivity switches exclude
+    // on. Applied here for the same reason the mutes are: an opted-out item
+    // must never enter the merge, or the filter costs the member a slot on
+    // their page instead of a card they did not want.
+    excludedTags: ExcludedContentTags = NO_EXCLUDED_CONTENT_TAGS,
   ): Promise<Candidate[]> {
     if (connectionAuthorIds !== null && connectionAuthorIds.length === 0) {
       return [];
     }
     const { communityIds: mutedCommunityIds, forumThreadIds: mutedThreadIds } =
       mutedSources;
+    const { communityTags: excludedCommunityTags, itemTags: excludedItemTags } =
+      excludedTags;
     switch (kind) {
       case 'community_post': {
         // Soft-deleted posts are tombstoned in-place in a community's own feed
@@ -603,6 +705,16 @@ export class FeedService {
           qb.andWhere(
             '(cp.community_id IS NULL OR cp.community_id NOT IN (:...mutedCommunityIds))',
             { mutedCommunityIds },
+          );
+        }
+        if (excludedCommunityTags.length) {
+          // PRD-10: a post scoped to a community whose curated tags carry a
+          // sensitivity the viewer switched off. A flat/global post has no
+          // community to classify, so it stays.
+          this.excludeSensitiveCommunities(
+            qb,
+            'cp.community_id',
+            excludedCommunityTags,
           );
         }
         if (connectionAuthorIds !== null) {
@@ -678,6 +790,24 @@ export class FeedService {
             { mutedCommunityIds },
           );
         }
+        if (excludedCommunityTags.length) {
+          this.excludeSensitiveCommunities(
+            qb,
+            't.community_id',
+            excludedCommunityTags,
+          );
+        }
+        if (excludedItemTags.length) {
+          // PRD-10, and this is the branch that reaches flat/global threads:
+          // a thread carries its OWN freeform tags, so it can be classified
+          // without belonging to a community at all. `&&` overlap, served by
+          // `IDX_forum_thread_tags`. The set includes the hyphen-free
+          // spellings, so a thread tagged `#mentalhealth` is caught alongside
+          // one tagged `#mental-health`.
+          qb.andWhere('NOT (t.tags && :excludedItemTags)', {
+            excludedItemTags,
+          });
+        }
         if (connectionAuthorIds !== null) {
           // `connections` tab (DISC-2): see the matching branch in
           // `community_post` above — same stacked-not-swapped rationale.
@@ -751,6 +881,16 @@ export class FeedService {
             { mutedCommunityIds },
           );
         }
+        if (excludedCommunityTags.length) {
+          // PRD-10. A gathering has no tags column of its own, so the only
+          // thing that can classify it is the community hosting it. One
+          // hosted by nobody stays: see `excludeSensitiveCommunities`.
+          this.excludeSensitiveCommunities(
+            qb,
+            'e.community_id',
+            excludedCommunityTags,
+          );
+        }
         if (connectionAuthorIds !== null) {
           // `connections` tab (DISC-2): restrict to gatherings hosted by one
           // of the viewer's accepted connections. The base public/members
@@ -822,6 +962,11 @@ export class FeedService {
           );
         }
 
+        // PRD-10 deliberately does NOT filter this source. A new member is a
+        // person, and `profiles.tags` holds the skills they listed rather than
+        // subject matter, so there is nothing here a content-sensitivity
+        // switch could honestly classify. Filtering people by an identity tag
+        // would be a different feature with a much worse name.
         const rows = await qb.take(limit).getMany();
         return rows.map((row) => ({
           id: row.userId,
@@ -868,6 +1013,17 @@ export class FeedService {
           qb.andWhere('m.community_id NOT IN (:...mutedCommunityIds)', {
             mutedCommunityIds,
           });
+        }
+        if (excludedCommunityTags.length) {
+          // PRD-10: "X joined {community}" names the room in the card, so a
+          // member who asked not to see a category should not meet it as a
+          // join announcement either. `m.community_id` is NOT NULL here, so
+          // the helper's flat-item branch never fires.
+          this.excludeSensitiveCommunities(
+            qb,
+            'm.community_id',
+            excludedCommunityTags,
+          );
         }
 
         const joinedAtExpr = `date_trunc('milliseconds', "m"."joined_at")`;

@@ -44,8 +44,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `CONCURRENTLY` two-phase split is needed. Same shape as
  * `1793970000000-AddListingOperatingState`, which added the sibling
  * `operating_state` column and its index the same way.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class AddListingOwnerHidden1794250000000 implements MigrationInterface {
   name = 'AddListingOwnerHidden1794250000000';

@@ -27,8 +27,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * so it also serves the "who has this member dismissed?" read that every
  * suggestions request issues; `IDX_member_suggestion_dismissals_user_id` is
  * kept as the explicit single-column index for that read.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddMemberSuggestionDismissals1795200000000 implements MigrationInterface {
   name = 'AddMemberSuggestionDismissals1795200000000';

@@ -6,10 +6,12 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   MinLength,
   Min,
 } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 import { CommunityListFilter, CommunityListSort } from '../communities.service';
 import { LANGUAGE_CODES } from '../../profiles/languages';
 import { AccessTier, CommunityType } from '../entities/community.entity';
@@ -45,6 +47,7 @@ export class ListCommunitiesQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 
   // Free-text search over name/tagline/purpose, ANDed with the filters above

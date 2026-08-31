@@ -21,8 +21,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * The column itself is deliberately KEPT rather than dropped: the public DTO
  * still emits it, so removing it would be a breaking wire change for clients
  * that read it. Dropping it is a follow-up for when no client does.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class BackfillHousingListingAffirmingBaseline1793530400000 implements MigrationInterface {
   name = 'BackfillHousingListingAffirmingBaseline1793530400000';

@@ -5,8 +5,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * a read-only guide directory (`resources`) and glossary (`glossary_terms`),
  * both seeded from the frontend's `queerpulse/src/features/resources/` mock
  * (see `src/resources/resources.seed.ts`) with no authoring endpoint.
- *
- * DO NOT RUN — authored for review only, per the task's instructions.
  */
 export class AddResources1782800520000 implements MigrationInterface {
   name = 'AddResources1782800520000';

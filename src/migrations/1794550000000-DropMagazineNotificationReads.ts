@@ -15,8 +15,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * that remain. `down()` recreates the empty table (same columns, PK and
  * cascade FK as `AddMagazineNotificationReads1791300000000`); the cursors
  * themselves are not recoverable.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class DropMagazineNotificationReads1794550000000 implements MigrationInterface {
   name = 'DropMagazineNotificationReads1794550000000';

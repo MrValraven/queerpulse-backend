@@ -43,8 +43,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * TRANSACTIONAL. One CREATE TABLE, two CREATE INDEXes and one ADD CONSTRAINT,
  * all against an object created in this same transaction, so no
  * `CONCURRENTLY` two-phase split is needed.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class CreateModResponseTemplates1794620000000 implements MigrationInterface {
   name = 'CreateModResponseTemplates1794620000000';

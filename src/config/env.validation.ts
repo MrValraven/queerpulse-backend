@@ -218,9 +218,13 @@ export class EnvironmentVariables {
   @IsString()
   VERIFICATION_AUTOMATED_ELEVATION?: string;
 
-  // Bearer token guarding GET /metrics (see MetricsTokenGuard). Optional in
-  // every environment: leave it unset to let Railway scrape /metrics over its
-  // private network, or set it (min 16 chars) to require a bearer token.
+  // Bearer token guarding GET /metrics and the two database-pinging health
+  // routes (see MetricsTokenGuard). Optional to the validator in every
+  // environment, and that optionality has a consequence in production: the
+  // guard fails closed there, so an unset token means `/metrics`, `/health` and
+  // `/health/ready` all answer 403. The cross-field block further down warns
+  // about exactly that at boot. Outside production the guard fails open, so
+  // local scrapes and e2e probes need no setup.
   @IsOptional()
   @IsString()
   @MinLength(16)
@@ -275,6 +279,15 @@ export function validate(
 
   // Cross-field rules that class-validator decorators can't express cleanly.
   const problems: string[] = [];
+
+  // A second, non-fatal channel. `problems` is fatal by construction: every
+  // string pushed into it ends up in the Error thrown at the bottom of this
+  // function, so the process never finishes booting. Some findings are real and
+  // worth shouting about while still being survivable, and for those a boot
+  // refusal would turn a misconfiguration into an outage. Those collect here
+  // and are printed together just above the fatal check, so they still reach
+  // the operator on a boot that then aborts for some other reason.
+  const warnings: string[] = [];
 
   if (validated.JWT_ACCESS_SECRET === validated.JWT_REFRESH_SECRET) {
     problems.push(
@@ -441,12 +454,26 @@ export function validate(
     }
   }
 
-  // /metrics is guarded by METRICS_TOKEN when set (see MetricsTokenGuard) and
-  // fails open when it is unset. It is intentionally NOT required in production:
-  // /metrics is reached over Railway's private network and operational
-  // visibility is served by the built-in admin metrics + Railway's own logs, so
-  // the Prometheus endpoint stays optional and network-isolated by deployment.
-  // Set METRICS_TOKEN (min 16 chars) if the endpoint is ever exposed publicly.
+  // `/metrics` and the two database-pinging health routes (`/health` and
+  // `/health/ready`) are `@Public()` and sit behind MetricsTokenGuard, which
+  // fails CLOSED in production: with METRICS_TOKEN unset it answers 403 to
+  // every caller, the operator's own scrape included. That is the right default
+  // for routes publishing route inventory, connection-pool saturation and
+  // traffic shape, so the guard's behaviour is deliberately left as it is.
+  //
+  // The problem worth fixing is the silence around it. `/health/live` is
+  // ungated and is the single path `railway.json` probes, so a deploy with no
+  // token goes green while every other observability route is shut, and the log
+  // stream says nothing about why the scrape started failing. Hence a loud
+  // warning here. It stays a warning rather than becoming a boot refusal
+  // because production may be running today with no token set, and a fatal
+  // check would convert a configuration gap into a failed deploy the moment
+  // this ships.
+  if (validated.NODE_ENV === NodeEnv.Production && !validated.METRICS_TOKEN) {
+    warnings.push(
+      'METRICS_TOKEN is unset in production, so MetricsTokenGuard fails closed: GET /metrics, GET /health and GET /health/ready answer 403 to every caller, including your own scrape. GET /health/live stays ungated, so the Railway healthcheck still passes and the deploy still goes green. Set METRICS_TOKEN (min 16 chars) and scrape with `Authorization: Bearer $METRICS_TOKEN` to bring those three routes back.',
+    );
+  }
 
   // Automated identity elevation raises a member straight to `id_verified` from
   // a provider callback (see VerificationService.handleIdentityCallback). The
@@ -480,10 +507,11 @@ export function validate(
       );
     } else {
       // Acknowledged. We cannot verify the shared stores are actually wired
-      // (they aren't shipped yet), so this is a loud warning, not silence: the
-      // operator is asserting responsibility for having wired them.
-      console.warn(
-        `[env] ALLOW_MULTI_REPLICA=true with ${declaredReplicas} declared replicas/workers. ` +
+      // (they aren't shipped yet), so this goes out loud on the warnings
+      // channel: the operator is asserting responsibility for having wired
+      // them, and the deploy should carry a record of that assertion.
+      warnings.push(
+        `ALLOW_MULTI_REPLICA=true with ${declaredReplicas} declared replicas/workers. ` +
           'The in-memory throttler, socket.io fan-out and presence map are NOT shared across processes; ' +
           'rate limits, live socket delivery (session-revoke/lockdown/presence) and presence will be WRONG ' +
           'unless you have wired Redis throttler storage, @socket.io/redis-adapter and a shared presence store.',
@@ -496,6 +524,18 @@ export function validate(
   // ships disabled — so this is a no-op until a feature with requiredEnv is
   // switched on.
   problems.push(...missingLaunchedFeatureEnv(config));
+
+  // Survivable findings are printed before the fatal check, so they are visible
+  // even on a boot that is about to abort for an unrelated reason. `console` is
+  // the only channel available this early: validate() runs while ConfigModule
+  // is being constructed inside `NestFactory.create`, so Nest's logger, and the
+  // `withQuietBootLogging` wrapper that main.ts installs over it, exist only
+  // later. Writing straight to stderr also puts these lines outside the boot
+  // burst that wrapper trims, so they survive the Railway per-replica log rate
+  // limit that eats the tail of a noisy startup.
+  for (const warning of warnings) {
+    console.warn(`[env] ${warning}`);
+  }
 
   if (problems.length > 0) {
     throw new Error(problems.join('; '));

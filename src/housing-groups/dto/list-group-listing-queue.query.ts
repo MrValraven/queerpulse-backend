@@ -5,9 +5,11 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 import { GroupListingStatus } from '../entities/group-listing.entity';
 
 /**
@@ -25,6 +27,7 @@ export class ListGroupListingQueueQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 
   // The queue filter the console opens on: `?status=review` is "what still

@@ -39,9 +39,11 @@ import { CreateGroupListingDto } from './dto/create-group-listing.dto';
 import { UpdateGroupListingDto } from './dto/update-group-listing.dto';
 import { HideGroupListingDto } from './dto/hide-group-listing.dto';
 import { SetGroupListingStatusDto } from './dto/set-group-listing-status.dto';
+import { ListGroupJoinRequestsQuery } from './dto/list-group-join-requests.query';
 import { ListGroupListingQueueQuery } from './dto/list-group-listing-queue.query';
 import {
   AdminGroupJoinRequestDTO,
+  AdminGroupJoinRequestsPageDTO,
   AdminGroupListingDTO,
   AdminGroupListingsPageDTO,
   GroupListingDTO,
@@ -56,6 +58,11 @@ import {
 
 /** One page of the moderator's group-listing review queue (LOC-19). */
 export const GROUP_LISTING_QUEUE_PAGE_SIZE = 20;
+
+/** One page of the moderator's group join-request triage queue (ENG-41). Same
+ * size as the listing queue beside it, so the two halves of the same console
+ * page at the same rhythm. */
+export const GROUP_JOIN_REQUEST_QUEUE_PAGE_SIZE = 20;
 
 /** The subset of a group listing the risk scorer reads. Structurally satisfied
  * by both `CreateGroupListingDto` (submission) and the `GroupListing` entity
@@ -230,28 +237,83 @@ export class HousingGroupsService {
     return { id: saved.id };
   }
 
+  /**
+   * The steward/moderator triage queue for group join requests, paginated
+   * (ENG-41).
+   *
+   * What this used to do, and why it was worse than a cap: it returned the
+   * newest `DEFAULT_LIST_LIMIT` requests in EVERY status as a flat array, and
+   * `AdminHousingGroupsPage` then filtered client-side to the pending ones. So
+   * the cap did not merely hide the 201st request, it spent the whole budget on
+   * already-decided rows. A group carrying 200 approvals newer than one pending
+   * request showed a moderator an EMPTY queue while somebody waited. `status`
+   * now filters in the query, `total` counts the whole filtered queue, and
+   * `page` reaches the rest of it.
+   *
+   * ORDERING STAYS NEWEST-FIRST here, unlike the community and listing-claim
+   * queues, and deliberately so: this is the ordering the console has always
+   * shown, the queue is worked as an arrivals list, and nothing is hidden any
+   * more, which was the actual defect. Changing the sort would be a separate,
+   * product-visible decision.
+   *
+   * `.offset()`/`.limit()` rather than `.skip()`/`.take()`, matching
+   * `listListingQueue` below: this query joins the group and pages it, which is
+   * exactly the combination where TypeORM's DISTINCT-subquery pagination
+   * misbehaves. And `computeMutualConnections` still runs as TWO bulk queries
+   * for the whole page, never one per row.
+   */
   async listJoinRequests(
-    groupSlug?: string,
-  ): Promise<AdminGroupJoinRequestDTO[]> {
-    const query = this.joinRequests
+    query: ListGroupJoinRequestsQuery = {},
+  ): Promise<AdminGroupJoinRequestsPageDTO> {
+    const page = query.page && query.page > 0 ? query.page : 1;
+    const pageSize = GROUP_JOIN_REQUEST_QUEUE_PAGE_SIZE;
+
+    const joinRequestsQuery = this.joinRequests
       .createQueryBuilder('request')
       .leftJoinAndSelect('request.group', 'group')
+      // `created_at` alone is not a total order, so it is not a safe sort key for
+      // offset pagination: two rows written in the same transaction share a
+      // statement timestamp, and Postgres is then free to return that tie in
+      // either order per query, which is how a row appears on two pages and
+      // another appears on none. `id` breaks the tie deterministically. Same
+      // reasoning as `PlatformSettingsService.listChanges`.
       .orderBy('request.createdAt', 'DESC')
-      .take(DEFAULT_LIST_LIMIT);
-    if (groupSlug) query.where('group.slug = :groupSlug', { groupSlug });
-    const requests = await query.getMany();
+      .addOrderBy('request.id', 'DESC')
+      .offset((page - 1) * pageSize)
+      .limit(pageSize);
 
+    if (query.status) {
+      joinRequestsQuery.andWhere('request.status = :status', {
+        status: query.status,
+      });
+    }
+    if (query.group) {
+      joinRequestsQuery.andWhere('group.slug = :groupSlug', {
+        groupSlug: query.group,
+      });
+    }
+
+    const [requests, total] = await joinRequestsQuery.getManyAndCount();
+    if (!requests.length) {
+      return { items: [], total, page, pageSize };
+    }
+
+    // Nothing is filtered out after the fetch, so `total` is exactly the number
+    // of rows these pages reach: every request renders, an anonymous applicant
+    // simply reads `mutualConnections: null`.
     const mutuals = await this.computeMutualConnections(requests);
-    return requests.map((request) =>
+    const items = requests.map((request) =>
       toAdminGroupJoinRequestDTO(request, mutuals.get(request.id) ?? null),
     );
+    return { items, total, page, pageSize };
   }
 
   /**
    * Best-effort "mutual connections" trust signal for the admin queue: for each
    * request submitted by a signed-in member, how many of that member's accepted
    * connections are already APPROVED members of the same group. Two extra bulk
-   * queries for the whole (bounded) list — no per-row N+1. Returns a map keyed
+   * queries for the whole PAGE (see `listJoinRequests`), no per-row N+1.
+   * Returns a map keyed
    * by join-request id; requests without a `userId` are absent (→ `null`).
    *
    * Follow-up: this reads live approved-membership from join requests. If a
@@ -268,9 +330,8 @@ export class HousingGroupsService {
     if (identified.length === 0) return result;
 
     const groupIds = [...new Set(identified.map((request) => request.groupId))];
-    const applicantIds = [
-      ...new Set(identified.map((request) => request.userId)),
-    ];
+    const applicantIdSet = new Set(identified.map((request) => request.userId));
+    const applicantIds = [...applicantIdSet];
 
     // Approved members per group (only those with a known user id).
     const approvedRows = await this.joinRequests.find({
@@ -285,9 +346,29 @@ export class HousingGroupsService {
       membersByGroup.set(row.groupId, set);
     }
 
-    // Each applicant's accepted-connection partners.
+    // Each applicant's accepted-connection partners. Indexed by asking the
+    // applicant-id set about each row once, rather than re-walking every
+    // applicant id per row: a page of N requests otherwise scans the whole
+    // accepted-connection set N times, and that product grows with both the
+    // review queue and members' connection graphs.
+    //
+    // The two directions are tested independently (two `if`s, never
+    // `if`/`else if`) because one row can join two applicants to each other,
+    // and it has to be recorded under both of their ids.
+    //
+    // The loop reads exactly two columns, so the row is projected down to them
+    // plus the primary key, which `getMany()` needs to de-duplicate entities.
+    // The unbounded TEXT columns (`requestMessage`, `requestReason`) are
+    // deliberately left unhydrated: a well-connected page of applicants can
+    // match thousands of accepted connections, and none of that prose can
+    // reach a return value that is only counts.
     const connectionRows = await this.connections
       .createQueryBuilder('connection')
+      .select([
+        'connection.id',
+        'connection.requesterId',
+        'connection.addresseeId',
+      ])
       .where('connection.status = :accepted', {
         accepted: ConnectionStatus.Accepted,
       })
@@ -297,15 +378,20 @@ export class HousingGroupsService {
       )
       .getMany();
     const partnersByApplicant = new Map<string, Set<string>>();
-    for (const row of connectionRows) {
-      for (const applicantId of applicantIds) {
-        let partnerId: string | null = null;
-        if (row.requesterId === applicantId) partnerId = row.addresseeId;
-        else if (row.addresseeId === applicantId) partnerId = row.requesterId;
-        if (!partnerId) continue;
-        const set = partnersByApplicant.get(applicantId) ?? new Set<string>();
-        set.add(partnerId);
-        partnersByApplicant.set(applicantId, set);
+    for (const connectionRow of connectionRows) {
+      if (applicantIdSet.has(connectionRow.requesterId)) {
+        const partners =
+          partnersByApplicant.get(connectionRow.requesterId) ??
+          new Set<string>();
+        partners.add(connectionRow.addresseeId);
+        partnersByApplicant.set(connectionRow.requesterId, partners);
+      }
+      if (applicantIdSet.has(connectionRow.addresseeId)) {
+        const partners =
+          partnersByApplicant.get(connectionRow.addresseeId) ??
+          new Set<string>();
+        partners.add(connectionRow.requesterId);
+        partnersByApplicant.set(connectionRow.addresseeId, partners);
       }
     }
 

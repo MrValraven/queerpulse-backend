@@ -6,7 +6,9 @@ jest.mock('cookie', () => ({ parseCookie: jest.fn(() => ({})) }));
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { JwtService } from '@nestjs/jwt';
 import { Test, TestingModule } from '@nestjs/testing';
+import { getRepositoryToken } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
+import { RefreshToken } from '../auth/entities/refresh-token.entity';
 import { parseCookie } from 'cookie';
 import { ConnectionsService } from '../connections/connections.service';
 import { MessagingService } from '../messaging/messaging.service';
@@ -14,7 +16,12 @@ import { MetricsService } from '../metrics/metrics.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { UserRole } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
+import { ArgumentMetadata, ValidationPipe } from '@nestjs/common';
+import { PIPES_METADATA } from '@nestjs/common/constants';
+import { WsException } from '@nestjs/websockets';
+import { VALIDATION_PIPE_OPTIONS } from '../common/validation-pipe.options';
 import { ChatGateway } from './chat.gateway';
+import { SendMessagePayload } from './dto/chat-payloads';
 import { PresenceService } from './presence.service';
 
 const mockedParseCookie = parseCookie as unknown as jest.Mock;
@@ -49,6 +56,16 @@ function makeClient(overrides: Partial<FakeClient> = {}): FakeClient {
 
 const futureExp = (): number => Math.floor(Date.now() / 1000) + 900;
 
+/**
+ * The refresh-token liveness probe the handshake makes, typed on the one field
+ * a test reads back. Naming the arguments lets a test inspect the call without
+ * pulling them out of `any`.
+ */
+type SessionExistsMock = jest.Mock<
+  Promise<boolean>,
+  [{ where: { familyId: string } }]
+>;
+
 describe('ChatGateway', () => {
   let gateway: ChatGateway;
   let verifyAsync: jest.Mock;
@@ -60,6 +77,7 @@ describe('ChatGateway', () => {
   };
   let connections: { getAcceptedConnectionUserIds: jest.Mock };
   let users: { findById: jest.Mock };
+  let refreshTokens: { exists: SessionExistsMock };
   let platformSettings: { get: jest.Mock };
   let presence: PresenceService;
   let roomEmit: jest.Mock;
@@ -84,6 +102,11 @@ describe('ChatGateway', () => {
     // unaffected by the Task 8 check — `findById` is never even reached
     // unless a test flips `lockdownEnabled` to true.
     users = { findById: jest.fn().mockResolvedValue(null) };
+    // Live session by default. Tokens in most tests below carry no `sid` at
+    // all, so the gateway never even asks. See the legacy-token test.
+    refreshTokens = {
+      exists: (jest.fn() as SessionExistsMock).mockResolvedValue(true),
+    };
     platformSettings = {
       get: jest.fn().mockResolvedValue({
         lockdownEnabled: false,
@@ -101,6 +124,7 @@ describe('ChatGateway', () => {
         { provide: MessagingService, useValue: messaging },
         { provide: ConnectionsService, useValue: connections },
         { provide: UsersService, useValue: users },
+        { provide: getRepositoryToken(RefreshToken), useValue: refreshTokens },
         { provide: PlatformSettingsService, useValue: platformSettings },
         {
           provide: MetricsService,
@@ -206,6 +230,81 @@ describe('ChatGateway', () => {
       await gateway.handleConnection(client as never);
       expect(client.disconnect).toHaveBeenCalledWith(true);
       expect(client.data.userId).toBeUndefined();
+    });
+
+    // ENG-19, socket half. `USER_SESSION_REVOKED` drops the member's open
+    // sockets once; without these three the signed-out device just reconnected
+    // on the access token it still held and was admitted for the rest of its
+    // TTL. The rules mirror `JwtStrategy.isSessionLive` exactly, because a
+    // device refused over HTTP and admitted over the socket is the same bug.
+    it('refuses a handshake whose session family has been revoked', async () => {
+      verifyAsync.mockResolvedValue({
+        sub: 'u4',
+        status: 'active',
+        exp: futureExp(),
+        sid: 'family-revoked',
+      });
+      refreshTokens.exists.mockResolvedValue(false);
+      const client = makeClient({
+        handshake: { auth: { token: 'OK' }, headers: {} },
+      });
+
+      await gateway.handleConnection(client as never);
+
+      expect(refreshTokens.exists).toHaveBeenCalledTimes(1);
+      expect(client.disconnect).toHaveBeenCalledWith(true);
+      expect(client.data.userId).toBeUndefined();
+      expect(client.join).not.toHaveBeenCalled();
+      // Generic, like every other auth refusal: the client learns it must
+      // re-authenticate, and nothing more.
+      expect(client.emit).toHaveBeenCalledWith('exception', {
+        status: 'error',
+        message: 'Unauthorized',
+      });
+    });
+
+    it('admits a handshake whose session family is still live', async () => {
+      verifyAsync.mockResolvedValue({
+        sub: 'u5',
+        status: 'active',
+        exp: futureExp(),
+        sid: 'family-live',
+      });
+      refreshTokens.exists.mockResolvedValue(true);
+      const client = makeClient({
+        handshake: { auth: { token: 'OK' }, headers: {} },
+      });
+
+      await gateway.handleConnection(client as never);
+
+      expect(refreshTokens.exists).toHaveBeenCalledTimes(1);
+      expect(refreshTokens.exists.mock.calls[0]?.[0].where.familyId).toBe(
+        'family-live',
+      );
+      expect(client.data.userId).toBe('u5');
+      expect(client.disconnect).not.toHaveBeenCalled();
+      clearTimeout(client.data.expiryTimer as NodeJS.Timeout);
+    });
+
+    it('admits a legacy token that carries no session claim, without querying', async () => {
+      // Access tokens minted before the `sid` deploy stay valid for the rest of
+      // their TTL. Refusing them would have signed every member out the moment
+      // the deploy landed.
+      verifyAsync.mockResolvedValue({
+        sub: 'u6',
+        status: 'active',
+        exp: futureExp(),
+      });
+      const client = makeClient({
+        handshake: { auth: { token: 'LEGACY' }, headers: {} },
+      });
+
+      await gateway.handleConnection(client as never);
+
+      expect(refreshTokens.exists).not.toHaveBeenCalled();
+      expect(client.data.userId).toBe('u6');
+      expect(client.disconnect).not.toHaveBeenCalled();
+      clearTimeout(client.data.expiryTimer as NodeJS.Timeout);
     });
   });
 
@@ -597,6 +696,9 @@ describe('ChatGateway', () => {
         read: false,
         createdAt: new Date(0),
         actor: null,
+        // Bundling count. An ordinary row carries none, and the mapper
+        // defaults it to 0 rather than leaving the field off the wire.
+        otherActorCount: 0,
       });
     });
 
@@ -686,6 +788,72 @@ describe('ChatGateway', () => {
         undefined,
         undefined,
       );
+    });
+  });
+
+  // ENG-48: the socket and `POST /conversations/:id/messages` reach the same
+  // `MessagingService.sendMessage`, so they must validate the same. These read
+  // the pipe off the gateway's own class metadata (rather than building a
+  // second one here) so the assertions cannot pass against a pipe the gateway
+  // does not actually use.
+  describe('validation contract (shared with HTTP)', () => {
+    const conversationId = '11111111-1111-4111-8111-111111111111';
+    const bodyMetadata: ArgumentMetadata = {
+      type: 'body',
+      metatype: SendMessagePayload,
+    };
+
+    function gatewayPipe(): ValidationPipe {
+      const pipes = Reflect.getMetadata(PIPES_METADATA, ChatGateway) as
+        ValidationPipe[] | undefined;
+      const pipe = pipes?.[0];
+      if (!pipe) {
+        throw new Error('ChatGateway declares no @UsePipes validation pipe');
+      }
+      return pipe;
+    }
+
+    it('carries the same options the global HTTP pipe uses', () => {
+      // forbidNonWhitelisted in particular: without it the socket silently
+      // STRIPPED an unknown key that HTTP answers with a 400.
+      expect(VALIDATION_PIPE_OPTIONS.forbidNonWhitelisted).toBe(true);
+      expect(VALIDATION_PIPE_OPTIONS.whitelist).toBe(true);
+    });
+
+    it('accepts the declared send payload', async () => {
+      const validated = (await gatewayPipe().transform(
+        { conversationId, body: 'hi' },
+        bodyMetadata,
+      )) as SendMessagePayload;
+      expect(validated.body).toBe('hi');
+      expect(validated.conversationId).toBe(conversationId);
+    });
+
+    it('rejects an unknown key instead of silently dropping it', async () => {
+      await expect(
+        gatewayPipe().transform(
+          // A plausible client typo: the DTO field is `replyToId`. Dropped
+          // silently, the message persisted with no reply reference at all.
+          { conversationId, body: 'hi', replyTo: conversationId },
+          bodyMetadata,
+        ),
+      ).rejects.toBeInstanceOf(WsException);
+    });
+
+    it('leaves omitted optional fields off the instance entirely', async () => {
+      // `exposeUnsetFields: false` rides along with the shared options; the
+      // handlers only read named fields, so this is behaviour-neutral here, but
+      // assert it so a future WS DTO fed through Object.assign is not a surprise.
+      const validated = await gatewayPipe().transform(
+        { conversationId, body: 'hi' },
+        bodyMetadata,
+      );
+      expect(Object.prototype.hasOwnProperty.call(validated, 'replyToId')).toBe(
+        false,
+      );
+      expect(
+        Object.prototype.hasOwnProperty.call(validated, 'attachment'),
+      ).toBe(false);
     });
   });
 });

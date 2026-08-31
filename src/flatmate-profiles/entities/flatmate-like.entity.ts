@@ -30,12 +30,18 @@ export class FlatmateLike {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
-  /** The member making the decision. Plain uuid (no FK), matching the
-   * `flatmate_profiles.owner_id` convention in this module. */
+  /** The member making the decision. Held as a plain uuid rather than a
+   * TypeORM relation, but it does carry a real FK to `users("id")` with
+   * `ON DELETE CASCADE` as of
+   * `AddMissingUserForeignKeysForErasure1795800000000`, so a decision goes with
+   * the account that made it. */
   @Column({ type: 'uuid' })
   fromUserId!: string;
 
-  /** The flatmate profile being decided on (`flatmate_profiles.id`). */
+  /** The flatmate profile being decided on (`flatmate_profiles.id`). Also FK'd
+   * with `ON DELETE CASCADE` in that migration: a decision about a profile that
+   * no longer exists, because its owner deleted it or erased their account, has
+   * nothing left to mean. */
   @Index('IDX_flatmate_likes_to_profile_id')
   @Column({ type: 'uuid' })
   toProfileId!: string;

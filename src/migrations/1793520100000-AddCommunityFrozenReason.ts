@@ -20,8 +20,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Nullable: NULL means "not frozen", and also covers any row frozen before
  * this column existed (treated as an automatic freeze by `unfreeze` — the
  * safe direction, since a manual freeze is the one an owner may always lift).
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddCommunityFrozenReason1793520100000 implements MigrationInterface {
   name = 'AddCommunityFrozenReason1793520100000';

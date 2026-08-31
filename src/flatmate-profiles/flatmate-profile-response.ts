@@ -16,9 +16,33 @@ import { MatchReason, MatchResult } from './flatmate-match';
 export interface IdentityViewContext {
   /** The viewer is the profile's owner — always sees their own data. */
   isOwner: boolean;
-  /** The viewer's own flatmate-profile type, or null if they have no profile.
-   * Only used to resolve `matches` (opposite-side) visibility. */
-  viewerProfileType: FlatmateProfileType | null;
+  /**
+   * Whether the viewer and this profile's owner have liked each other, which is
+   * what `matches` visibility now requires (ENG-51). Resolved by the caller
+   * through `FlatmateLikesService.mutuallyMatchedProfileIds`, batched across a
+   * whole page, so this stays a plain boolean and the gate stays synchronous.
+   *
+   * Fail closed: pass `false` when the answer is unknown or was not looked up.
+   */
+  hasMutualMatch: boolean;
+  /**
+   * True when the profile is being serialized into a LIST payload (the board
+   * browse) rather than its own detail response.
+   *
+   * A list withholds the Art.9 fields of profiles set to `matches` (ENG-51),
+   * and only those. That setting is the one the finding was about, so belt and
+   * braces there: even if the gate above is later widened or breaks, harvesting
+   * `matches` profiles costs one request each instead of twenty at a time.
+   *
+   * `public` and `members` are honoured on the list, because they are an
+   * explicit, informed choice by the owner to be visible to any member, and the
+   * grid cards and the discovery deck are exactly where that choice does its
+   * work. Overriding it there would be paternalism dressed as a safeguard, and
+   * it protects nobody: those profiles reveal to every viewer on the detail
+   * page anyway, so stripping the list costs the owner reach and costs an
+   * attacker one extra hop.
+   */
+  isListSurface: boolean;
 }
 
 /** Wire shape for a flatmate profile. `member` is the compact identity ref;
@@ -66,6 +90,17 @@ export interface FlatmateProfileDTO {
  * The one place identity gating is decided. Returns true only when the viewer
  * is allowed to see the special-category fields: the owner always; otherwise
  * only if consent is on the record AND the visibility setting admits them.
+ *
+ * `matches` requires an actual mutual match (ENG-51). It used to mean "the
+ * viewer holds a profile whose `type` differs from this one", which sounds like
+ * a narrowing rule and is not one: `type` is a field the viewer sets on their
+ * OWN profile, so any member could flip it and read the consenting half of the
+ * other side of the board in bulk through `GET /flatmates`, with no like, no
+ * match and no contact. The on-screen label read "Only people I could share a
+ * home with", which no member would understand as "everyone looking for the
+ * opposite of what I am", so the setting was collecting consent it did not
+ * honour. The gate now means what the label implies, and the label was
+ * rewritten to "Only people I have matched with" to say it outright.
  */
 export function canRevealIdentity(
   profile: FlatmateProfile,
@@ -81,10 +116,10 @@ export function canRevealIdentity(
       // member, so both audiences resolve the same way here.
       return true;
     case IdentityVisibility.Matches:
-      return (
-        context.viewerProfileType !== null &&
-        context.viewerProfileType !== profile.type
-      );
+      // An actual match, both directions, resolved by the caller. Deliberately
+      // NOT "the viewer's type differs from this profile's": see the note above
+      // this function for why that was not a gate at all.
+      return context.hasMutualMatch;
     case IdentityVisibility.Hidden:
       return false;
     default:
@@ -99,7 +134,24 @@ export function toFlatmateProfileDTO(
   context: IdentityViewContext,
   verificationLevel: VerificationLevel,
 ): FlatmateProfileDTO {
-  const reveal = canRevealIdentity(profile, context);
+  const visibility = profile.identityVisibility ?? IdentityVisibility.Matches;
+  const isPermittedViewer = canRevealIdentity(profile, context);
+  // The gate decides WHETHER this viewer may see the Art.9 fields; the surface
+  // decides whether this RESPONSE is a place to put them (ENG-51). Both must
+  // hold.
+  //
+  // Today this is belt and braces: `mapRows` passes `hasMutualMatch: false`, so
+  // a `matches` profile fails the gate on a list regardless. It is written out
+  // anyway so that a future caller which DOES resolve matches for a list cannot
+  // silently turn the board back into a bulk read of the thing this finding was
+  // about. The owner is exempt because their own management reads go through
+  // this mapper too, and withholding a member's own data from them would be a
+  // bug, not a safeguard.
+  const isWithheldByListSurface =
+    context.isListSurface &&
+    !context.isOwner &&
+    visibility === IdentityVisibility.Matches;
+  const reveal = isPermittedViewer && !isWithheldByListSurface;
   return {
     slug: profile.slug,
     type: profile.type,
@@ -118,8 +170,7 @@ export function toFlatmateProfileDTO(
     householdNorms: profile.householdNorms ?? null,
     // Consent-gated: null unless this viewer is permitted.
     identityHousehold: reveal ? (profile.identityHousehold ?? null) : null,
-    identityVisibility:
-      profile.identityVisibility ?? IdentityVisibility.Matches,
+    identityVisibility: visibility,
     specialCategoryConsent:
       context.isOwner && profile.specialCategoryConsentAt !== null,
     createdAt: profile.createdAt.toISOString(),

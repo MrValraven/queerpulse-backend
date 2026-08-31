@@ -29,8 +29,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * The FK to `newsletter_subscriptions` cascades: a deleted subscriber has
  * nothing left to mail, and the ledger row is not history worth keeping without
  * the address it points at.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddNewsletterDigestLedger1793610000000 implements MigrationInterface {
   name = 'AddNewsletterDigestLedger1793610000000';

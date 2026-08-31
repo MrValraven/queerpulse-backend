@@ -309,6 +309,31 @@ describe('MemberSuggestionsService', () => {
       ).toBe(true);
     });
 
+    // PRD-16. In the QUERY, so an opted-out member cannot be scored and then
+    // leaked by a mapping change further down, and as a `NOT EXISTS` so the
+    // absent row reads as "recommendable": most members have never opened
+    // Settings and have no `member_preferences` row at all.
+    it('excludes anyone who asked not to be recommended', async () => {
+      seedSharedCommunity(['candidate-1']);
+      await service.suggest(VIEWER_ID);
+
+      const builder = candidateBuilder();
+      expect(
+        builder.hasPredicateWith(
+          'NOT EXISTS',
+          '"member_preferences"',
+          '"hide_from_suggestions" = true',
+        ),
+      ).toBe(true);
+      // Keyed to the CANDIDATE, never the viewer: the switch stops a member
+      // being recommended, and never stops them seeing recommendations.
+      expect(
+        builder.hasPredicateWith(
+          '"__suggestion_optout"."user_id" = "p"."user_id"',
+        ),
+      ).toBe(true);
+    });
+
     it('drops a member a moderator has hidden, keyed by slug or by user id', async () => {
       seedSharedCommunity(['candidate-1', 'candidate-2']);
       profiles.createQueryBuilder.mockImplementation(() => {

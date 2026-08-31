@@ -22,8 +22,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * the single all-migrations transaction — the type and its first use are
  * different objects, so none of the "unsafe use of new enum value in the same
  * transaction" restriction applies here.
- *
- * DO NOT RUN — authored for review only, per the task's instructions.
  */
 export class AddReadingGroupProposalStatus1786000600000 implements MigrationInterface {
   name = 'AddReadingGroupProposalStatus1786000600000';

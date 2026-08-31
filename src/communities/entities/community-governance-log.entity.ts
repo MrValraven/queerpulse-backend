@@ -44,6 +44,23 @@ export enum GovernanceLogAction {
   // previously barred member back in. Lifting a ban clears the bar and never
   // restores the roster row: they still have to rejoin.
   BanLifted = 'ban_lifted',
+  // PRD-25, the second signature on a PERMANENT bar. A permanent bar is no
+  // longer one person's decision: the removal and a 30-day bar land at once,
+  // and the permanence waits on a second owner, co-owner or moderator.
+  //
+  // Four actions rather than one with a flag, for the reason `MemberBanned` vs
+  // `MemberRemoved` already gives: the community's log is read to answer "what
+  // happened to this person", and a proposal, a signature, a refusal and a
+  // lapse are four different answers.
+  //
+  // `member_ban_proposed` is written by `CommunityBanRatificationService`
+  // alongside the `member_banned` entry the bar itself writes. The other three
+  // are written when the hold ends, and all three leave the 30-day bar exactly
+  // where it was unless the ending is a ratification.
+  MemberBanProposed = 'member_ban_proposed',
+  MemberBanRatified = 'member_ban_ratified',
+  MemberBanDeclined = 'member_ban_declined',
+  MemberBanHoldExpired = 'member_ban_hold_expired',
   // Written by `AdminCommunitySupportService.create` when platform staff offer
   // a struggling community help (OPS-05), and by
   // `CommunitySupportOffersService.respond` when the community answers. Kept

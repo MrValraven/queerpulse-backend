@@ -56,8 +56,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `EventCancelled` fan-out, and closes the erased member's open jobs,
  * volunteering and housing listings instead of leaving them live with nobody
  * to answer them.
- *
- * DO NOT RUN. Authored for review only; the maintainer runs migrations.
  */
 export class SetNullContentAuthorFksOnUserErasure1794610000000 implements MigrationInterface {
   name = 'SetNullContentAuthorFksOnUserErasure1794610000000';

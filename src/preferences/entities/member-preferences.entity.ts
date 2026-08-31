@@ -41,6 +41,48 @@ export const DEFAULT_LOGIN_ALERTS_ENABLED = true;
 export const DEFAULT_HIDE_PUSH_PREVIEWS = true;
 
 /**
+ * The three content-sensitivity filters default to SHOWING everything
+ * (PRD-10), so `hide*` is false until the member says otherwise.
+ *
+ * The safe default is the one a member would pick if they had read the
+ * setting, and here that is "show me the platform". Every other default in
+ * this file protects the member from something leaving their control: a
+ * preview reaching a lock screen, a profile reaching the open web. A content
+ * filter is the opposite shape. Nothing escapes when it is off, and shipping
+ * it on would silently subtract whole communities from the feed of every
+ * member who has never opened Settings, including the trans and coming-out
+ * rooms that are the reason many of them are here. A filter nobody asked for
+ * that removes content nobody can see they are missing is worse than no
+ * filter at all.
+ *
+ * So the harm is asymmetric in the other direction from `hidePushPreviews`:
+ * a wrongly shown feed card costs one scroll, a wrongly hidden community
+ * costs a member the room they joined for.
+ */
+export const DEFAULT_HIDE_DATING_CONTENT = false;
+export const DEFAULT_HIDE_MENTAL_HEALTH_CONTENT = false;
+export const DEFAULT_HIDE_SEXUALITY_IDENTITY_CONTENT = false;
+
+/**
+ * Being recommended to strangers is ON by default (PRD-16): `hideFromSuggestions`
+ * is false until the member opts out.
+ *
+ * This one follows the shipped behaviour rather than the cautious reading, and
+ * that is a deliberate exception to the rule the constants above state. The
+ * suggestion strip only ever surfaces people a viewer could already find in
+ * the member directory, under exactly the directory's own visibility gates
+ * (see `MemberSuggestionsService`'s docstring). Defaulting to hidden would
+ * therefore protect nothing that `profiles.visibility` does not already
+ * protect, while emptying the strip for a platform whose whole premise is that
+ * members meet each other.
+ *
+ * What was missing was the LEVER, not the default: until this column there was
+ * no way to stop being recommended at all, and the 24-hour `hidden_until`
+ * blackout was the only thing resembling one.
+ */
+export const DEFAULT_HIDE_FROM_SUGGESTIONS = false;
+
+/**
  * One row per member holding the owner-only SAFETY and VISIBILITY switches.
  *
  * Kept off `profiles` on purpose. Everything on `profiles` is loaded by every
@@ -169,6 +211,69 @@ export class MemberPreferences {
    */
   @Column({ type: 'boolean', default: DEFAULT_HIDE_PUSH_PREVIEWS })
   hidePushPreviews!: boolean;
+
+  // --- Content sensitivity (GET/PUT /me/content-sensitivity) ----------------
+
+  /**
+   * The three "do not show me this" filters from the Interests pane (PRD-10).
+   *
+   * They shipped as inert placeholder switches with no column, no filter and
+   * no surface: the pane rendered them `defaultChecked` and badged
+   * coming-soon, and flipping one changed nothing anywhere. For this audience
+   * "do not show me mental-health content" is a real need rather than a
+   * nice-to-have, so they are now stored here and READ ON THE FEED PATH
+   * (`FeedService.fetchCandidates`, via `src/feed/content-sensitivity.ts`).
+   *
+   * SCOPE, STATED PLAINLY because a filter that quietly covers less than the
+   * member thinks is its own kind of defect. Each flag hides feed items whose
+   * COMMUNITY carries a tag classified into that sensitivity, plus forum
+   * threads whose own tags match. It does not touch community browse, search,
+   * the magazine, resources or a member's own rooms: the pane's helper copy
+   * promises exactly that ("Turning these off never affects your community
+   * access, only your feed"), and the classification behind it is derived from
+   * `COMMUNITY_TAGS` rather than hand-copied beside it.
+   *
+   * Named for what they DO, following `hidePushPreviews`: a `showDating`
+   * spelling reads as the opposite to whoever wires the toggle next, and a
+   * privacy control a plausible misreading can invert eventually gets
+   * inverted.
+   */
+  @Column({ type: 'boolean', default: DEFAULT_HIDE_DATING_CONTENT })
+  hideDatingContent!: boolean;
+
+  @Column({ type: 'boolean', default: DEFAULT_HIDE_MENTAL_HEALTH_CONTENT })
+  hideMentalHealthContent!: boolean;
+
+  @Column({ type: 'boolean', default: DEFAULT_HIDE_SEXUALITY_IDENTITY_CONTENT })
+  hideSexualityIdentityContent!: boolean;
+
+  // --- Suggestion visibility (GET/PUT /me/suggestion-visibility) ------------
+
+  /**
+   * Whether this member may be RECOMMENDED to other people (PRD-16).
+   *
+   * `true` removes them from every other member's suggestion strip. It is
+   * enforced in the candidate QUERY (`MemberSuggestionsService.visibleCandidates`),
+   * beside the block, hidden-from and dismissal gates, so an opted-out member
+   * cannot be scored and then leaked by a mapping bug further down.
+   *
+   * IT IS ONE-DIRECTIONAL, on purpose. Opting out stops the member being
+   * suggested; it never stops them SEEING suggestions. The switch lives on the
+   * Visibility pane, which is about what others see of you, and the member is
+   * not asking to leave people discovery, they are asking to stop being
+   * merchandise in it. A tit-for-tat rule ("no suggestions for you either")
+   * would price a privacy choice, and the receiving side already has its own
+   * controls: per-person dismissal and the 24-hour `profiles.hidden_until`
+   * blackout.
+   *
+   * It is also NARROWER than `hidden_until`. This column governs the
+   * suggestion strip alone: the member stays listed in the member directory,
+   * stays visible on their own profile, and stays findable by search, all
+   * under whatever `profiles.visibility` already allows. A member who wants to
+   * disappear from the directory too has `visibility` for that.
+   */
+  @Column({ type: 'boolean', default: DEFAULT_HIDE_FROM_SUGGESTIONS })
+  hideFromSuggestions!: boolean;
 
   @UpdateDateColumn({ type: 'timestamptz' })
   updatedAt!: Date;

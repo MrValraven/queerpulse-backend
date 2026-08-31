@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -32,8 +31,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * Every bucket is counted and logged. A silent conversion over money is not
  * something anyone should have to take on trust.
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 
 interface PaymentTextRow {

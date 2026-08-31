@@ -51,6 +51,7 @@ import { StatusModule } from './status/status.module';
 import { AdminInvitesModule } from './admin-invites/admin-invites.module';
 import { BanEvasionModule } from './ban-evasion/ban-evasion.module';
 import { ModResponseTemplatesModule } from './mod-response-templates/mod-response-templates.module';
+import { LegalRequestsModule } from './legal-requests/legal-requests.module';
 import { TransparencyModule } from './transparency/transparency.module';
 import { AdminTopicsModule } from './admin-topics/admin-topics.module';
 import { AdminTrustNetworkModule } from './admin-trust-network/admin-trust-network.module';
@@ -124,6 +125,7 @@ import { AllExceptionsFilter } from './common/all-exceptions.filter';
 import { CommonModule } from './common/common.module';
 import { LaunchedFeaturesGuard } from './common/launched-features.guard';
 import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
+import { redactSensitiveQueryParameters } from './common/redact-url';
 
 @Module({
   imports: [
@@ -155,9 +157,12 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
             res.setHeader('x-request-id', id);
             return id;
           },
-          // Never log credentials. Largely redundant now that the serializers
-          // below drop headers entirely, but kept as defense-in-depth for the
-          // prod JSON path in case a serializer is ever widened.
+          // Never log credentials carried in a HEADER. Largely redundant now
+          // that the serializers below drop headers entirely, but kept as
+          // defense-in-depth for the prod JSON path in case a serializer is
+          // ever widened. Credentials carried in the QUERY STRING are a
+          // separate problem this list cannot address; see the note on the req
+          // serializer below.
           redact: [
             'req.headers.cookie',
             'req.headers.authorization',
@@ -172,10 +177,21 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
           },
           // Log only essential fields per request. reqId and responseTime are
           // emitted at the top level by pino-http and survive automatically.
+          //
+          // The URL goes through `redactSensitiveQueryParameters` because the
+          // header redaction above could never reach it: several credentials
+          // on this platform ride in the QUERY STRING rather than in a header,
+          // since the browser carries them across a plain navigation where no
+          // header and no body exist. `GET /auth/google?invite=<code>` was the
+          // clearest case, writing an account-creating invite code into the log
+          // store on every sign-in through an invite link. Redaction is narrow
+          // on purpose: parameter names and every non-sensitive value stay
+          // readable, so the URL keeps the debugging value it is logged for.
+          // The full list and its justification live in `common/redact-url.ts`.
           serializers: {
             req: (req: IncomingMessage) => ({
               method: req.method,
-              url: req.url,
+              url: redactSensitiveQueryParameters(req.url),
             }),
             res: (res: ServerResponse) => ({ statusCode: res.statusCode }),
             err: (err: Error & { type?: string }) => ({
@@ -311,6 +327,10 @@ import { PlatformLockdownGuard } from './common/platform-lockdown.guard';
     // The public, aggregate-only transparency report the constitution names
     // but never had (TS-13).
     TransparencyModule,
+    // The admin-only register of legal, government and law-enforcement
+    // demands for member data (PRD-32). The report above publishes the
+    // aggregate over it; nothing else reads the table.
+    LegalRequestsModule,
     AdminDsarModule,
     AdminStatusModule,
     StatusModule,

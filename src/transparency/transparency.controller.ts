@@ -37,8 +37,12 @@ export class TransparencyController {
       'Aggregate moderation figures for one calendar quarter: reports ' +
       'received by category, reports resolved, median and p90 hours to ' +
       'resolution, moderator actions by type, appeals filed and their ' +
-      'outcomes, and communities frozen. Counts below the published ' +
-      'small-count floor are withheld. No per-member data is served.',
+      'outcomes, communities frozen, and legal, government and ' +
+      'law-enforcement demands for member data by type and outcome with the ' +
+      'accounts affected and notified. Counts below the published ' +
+      'small-count floor are withheld. The legal-request section is always ' +
+      'present and publishes an explicit zero on an empty register. No ' +
+      'per-member data is served.',
   })
   @Public()
   @Get('report')

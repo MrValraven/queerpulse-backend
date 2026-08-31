@@ -28,8 +28,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * most one request, so the read path never has to disambiguate. It is created
  * non-concurrently and this migration adds no enum value, so it stays fully
  * transactional.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddJoinRequestStatusToken1795400000000 implements MigrationInterface {
   name = 'AddJoinRequestStatusToken1795400000000';

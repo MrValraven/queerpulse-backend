@@ -20,8 +20,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * The partial UNIQUE index makes linking idempotent at the DB level — the same
  * (topic, thread) pair can only ever back one row — mirroring
  * `UQ_topic_follows`'s idempotency rationale in `topic-follow.entity.ts`.
- *
- * DO NOT RUN — authored for review only, per the task's instructions.
  */
 export class AddTopicPostForumThreadLink1792400000000 implements MigrationInterface {
   name = 'AddTopicPostForumThreadLink1792400000000';

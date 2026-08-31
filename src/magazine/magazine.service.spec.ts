@@ -42,28 +42,37 @@ function makeQueryBuilder(
 }
 
 /**
- * CON-11: `listAuthors`/`getAuthorBySlug` run ONE grouped published-piece
- * count through `articles.createQueryBuilder`. Default it to an empty result
- * so the author tests exercise the mapping, not the counting.
+ * The default stub for `articles.createQueryBuilder`, covering both ad-hoc
+ * article queries the service runs outside `listArticles`:
+ *
+ * - CON-11: `listAuthors`/`getAuthorBySlug` run ONE grouped published-piece
+ *   count (`select`/`addSelect`/`groupBy`/`getRawMany`).
+ * - CON-16: the article read loads this piece's translation family
+ *   (`where`/`andWhere`/`getMany`).
+ *
+ * Both default to an empty result, so those tests exercise the mapping rather
+ * than the counting or the translation lookup.
  */
-type CountQueryBuilderMock = {
+type ArticlesQueryBuilderMock = {
   select: jest.Mock;
   addSelect: jest.Mock;
   where: jest.Mock;
   andWhere: jest.Mock;
   groupBy: jest.Mock;
   getRawMany: jest.Mock;
+  getMany: jest.Mock;
 };
 
-function makeCountQueryBuilder(): CountQueryBuilderMock {
-  const qb = {} as CountQueryBuilderMock;
-  qb.select = jest.fn().mockReturnValue(qb);
-  qb.addSelect = jest.fn().mockReturnValue(qb);
-  qb.where = jest.fn().mockReturnValue(qb);
-  qb.andWhere = jest.fn().mockReturnValue(qb);
-  qb.groupBy = jest.fn().mockReturnValue(qb);
-  qb.getRawMany = jest.fn().mockResolvedValue([]);
-  return qb;
+function makeArticlesQueryBuilder(): ArticlesQueryBuilderMock {
+  const queryBuilder = {} as ArticlesQueryBuilderMock;
+  queryBuilder.select = jest.fn().mockReturnValue(queryBuilder);
+  queryBuilder.addSelect = jest.fn().mockReturnValue(queryBuilder);
+  queryBuilder.where = jest.fn().mockReturnValue(queryBuilder);
+  queryBuilder.andWhere = jest.fn().mockReturnValue(queryBuilder);
+  queryBuilder.groupBy = jest.fn().mockReturnValue(queryBuilder);
+  queryBuilder.getRawMany = jest.fn().mockResolvedValue([]);
+  queryBuilder.getMany = jest.fn().mockResolvedValue([]);
+  return queryBuilder;
 }
 
 const AUTHOR: MagazineAuthor = {
@@ -141,7 +150,7 @@ describe('MagazineService', () => {
 
   beforeEach(async () => {
     articles = {
-      createQueryBuilder: jest.fn(() => makeCountQueryBuilder()),
+      createQueryBuilder: jest.fn(() => makeArticlesQueryBuilder()),
       findOne: jest.fn(),
     };
     authors = { find: jest.fn().mockResolvedValue([]), findOne: jest.fn() };
@@ -278,6 +287,11 @@ describe('MagazineService', () => {
             tags: ['Lisbon', 'Community'],
             readMinutes: 12,
             publishedAt: '2026-06-06T00:00:00.000Z',
+            // CON-16 added the lifecycle state and the piece's language to
+            // the list projection; CON-04 added the lead art.
+            lifecycle: 'live',
+            locale: 'en',
+            heroImageUrl: null,
           },
         ],
         total: 1,
@@ -392,10 +406,32 @@ describe('MagazineService', () => {
         readMinutes: 12,
         publishedAt: '2026-06-06T00:00:00.000Z',
         body: 'Full article body text.',
+        blocks: [],
         contentNotes: [],
         corrections: [],
         socialImage: null,
         heroImageUrl: null,
+        // CON-16 — the lifecycle banner and the language switcher. The
+        // switcher always offers the language the reader is already in, so a
+        // piece with no translation still lists itself.
+        lifecycle: 'live',
+        locale: 'en',
+        lifecycleNotice: {
+          note: '',
+          changedAt: null,
+          reviewDueOn: null,
+          supersededBy: null,
+        },
+        translations: [
+          {
+            locale: 'en',
+            slug: 'city-changed',
+            title: 'The city changed. Did we?',
+            isPublished: true,
+          },
+        ],
+        translationOf: null,
+        translator: null,
       });
     });
 

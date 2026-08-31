@@ -9,6 +9,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 
 import { PieceFormat, PieceStage } from '../entities/magazine-piece.entity';
 
@@ -73,6 +74,7 @@ export class ListPiecesQuery {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_PAGE)
   page?: number;
 
   @IsOptional()

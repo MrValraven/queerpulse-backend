@@ -23,6 +23,7 @@ import { ListConnectionsQuery } from './dto/list-connections.query';
 import { RespondConnectionDto } from './dto/respond-connection.dto';
 import { UpsertConnectionNoteDto } from './dto/upsert-connection-note.dto';
 import { ConnectionsService } from './connections.service';
+import type { ConnectionRelationshipSlugs } from './connection-response';
 import { Throttle, seconds } from '@nestjs/throttler';
 import {
   ApiBadRequestResponse,
@@ -73,6 +74,21 @@ export class ConnectionsController {
   @ApiOkResponse({ description: 'The accepted connection slugs.' })
   accepted(@CurrentUser() user: CurrentUserData): Promise<string[]> {
     return this.connectionsService.getAcceptedConnectionSlugs(user.userId);
+  }
+
+  @Get('relationships')
+  @ApiOperation({
+    summary:
+      'Every relationship you hold, as slugs: connected, incoming, and sent.',
+  })
+  @ApiOkResponse({
+    description:
+      'Accepted slugs, pending requests waiting for your answer (slug + connection id), and slugs you have asked.',
+  })
+  relationships(
+    @CurrentUser() user: CurrentUserData,
+  ): Promise<ConnectionRelationshipSlugs> {
+    return this.connectionsService.getRelationshipSlugs(user.userId);
   }
 
   @Throttle({ default: { limit: 30, ttl: seconds(60) } })

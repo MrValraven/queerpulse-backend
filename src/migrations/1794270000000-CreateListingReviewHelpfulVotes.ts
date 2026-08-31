@@ -44,8 +44,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Fully transactional: one CREATE TABLE plus two ADD CONSTRAINTs on a table
  * created in the same transaction, so nothing here takes a lock on a table
  * anyone else is reading. No `CONCURRENTLY`, and no two-phase split.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class CreateListingReviewHelpfulVotes1794270000000 implements MigrationInterface {
   name = 'CreateListingReviewHelpfulVotes1794270000000';

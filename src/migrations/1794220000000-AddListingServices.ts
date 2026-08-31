@@ -27,8 +27,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Fully transactional: one `ADD COLUMN` with a constant default. On PostgreSQL
  * 11+ that is a catalog-only change with no table rewrite, so existing rows
  * read as `[]` without being touched.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class AddListingServices1794220000000 implements MigrationInterface {
   name = 'AddListingServices1794220000000';

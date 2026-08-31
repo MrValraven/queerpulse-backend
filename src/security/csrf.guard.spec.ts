@@ -1,25 +1,67 @@
 import { ExecutionContext, ForbiddenException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
-import { CsrfGuard } from './csrf.guard';
+import { CsrfGuard, isSameSite } from './csrf.guard';
 import { SKIP_CSRF_KEY } from './skip-csrf.decorator';
 
 const ALLOWED_ORIGIN = 'https://app.queerpulse.test';
+// A sibling host under the same registrable domain, which is the deployment the
+// `SameSite=Lax` session cookies already require. Used by the `Sec-Fetch-Site`
+// cases below, where it makes the guard derive a same-site deployment.
+const SAME_SITE_API_ORIGIN = 'https://api.queerpulse.test';
+// Somewhere else entirely, for the case where the derivation must switch the
+// `Sec-Fetch-Site` check back off.
+const CROSS_SITE_API_ORIGIN = 'https://api.somewhere-else.test';
 
 /**
- * A ConfigService stub for the two keys the guard reads: `app.nodeEnv` (which
- * cookie name to expect) and `app.frontendOrigins` (the Origin allowlist).
+ * A ConfigService stub for the three keys the guard reads: `app.nodeEnv` (which
+ * cookie name to expect), `app.frontendOrigins` (the Origin allowlist) and
+ * `app.apiUrl` (this API's own origin, which the allowlist is compared against
+ * to decide whether `Sec-Fetch-Site` can be enforced).
  */
 function configFor(
   nodeEnv: string,
   origins: string[] = [ALLOWED_ORIGIN],
+  apiUrl?: string,
 ): { get: jest.Mock } {
   return {
     get: jest.fn((key: string, fallback?: unknown) => {
       if (key === 'app.nodeEnv') return nodeEnv;
       if (key === 'app.frontendOrigins') return origins;
+      if (key === 'app.apiUrl') return apiUrl ?? fallback;
       return fallback;
     }),
+  };
+}
+
+/**
+ * A guard whose configuration makes the deployment same-site, so the
+ * `Sec-Fetch-Site` check is live. Production is used because outside it the
+ * allowlist gains the Vite dev origin, which sits on another site and would
+ * (correctly) switch the check back off.
+ */
+function sameSiteGuard(reflector: Reflector): CsrfGuard {
+  return new CsrfGuard(
+    reflector,
+    configFor(
+      'production',
+      [ALLOWED_ORIGIN],
+      SAME_SITE_API_ORIGIN,
+    ) as unknown as ConfigService,
+  );
+}
+
+/** A matching production token pair, so only the header under test decides. */
+function matchingProdTokens(secFetchSite?: string): {
+  cookies: Record<string, string>;
+  headers: Record<string, string>;
+} {
+  return {
+    cookies: { '__Host-csrf_token': 'match' },
+    headers: {
+      'x-csrf-token': 'match',
+      ...(secFetchSite ? { 'sec-fetch-site': secFetchSite } : {}),
+    },
   };
 }
 
@@ -133,6 +175,114 @@ describe('CsrfGuard', () => {
         ),
       ),
     ).toThrow(ForbiddenException);
+  });
+
+  describe('Sec-Fetch-Site', () => {
+    it('rejects a cross-site label when the deployment is derived same-site', () => {
+      const guardOnOneSite = sameSiteGuard(reflector as unknown as Reflector);
+      const { cookies, headers } = matchingProdTokens('cross-site');
+      expect(() =>
+        guardOnOneSite.canActivate(httpContext('POST', cookies, headers)),
+      ).toThrow(ForbiddenException);
+    });
+
+    it('allows a cross-site label when the app and API are on different sites', () => {
+      // Here every legitimate mutation the browser makes is labelled
+      // cross-site, so acting on the label would reject real members.
+      const guardAcrossSites = new CsrfGuard(
+        reflector as unknown as Reflector,
+        configFor(
+          'production',
+          [ALLOWED_ORIGIN],
+          CROSS_SITE_API_ORIGIN,
+        ) as unknown as ConfigService,
+      );
+      const { cookies, headers } = matchingProdTokens('cross-site');
+      expect(
+        guardAcrossSites.canActivate(httpContext('POST', cookies, headers)),
+      ).toBe(true);
+    });
+
+    it('allows a cross-site label when any one allowlisted origin is off-site', () => {
+      // The verdict is all-or-nothing: one entry on another site means some
+      // legitimate traffic carries the cross-site label.
+      const guardWithMixedAllowlist = new CsrfGuard(
+        reflector as unknown as Reflector,
+        configFor(
+          'production',
+          [ALLOWED_ORIGIN, 'https://partner.elsewhere.test'],
+          SAME_SITE_API_ORIGIN,
+        ) as unknown as ConfigService,
+      );
+      const { cookies, headers } = matchingProdTokens('cross-site');
+      expect(
+        guardWithMixedAllowlist.canActivate(
+          httpContext('POST', cookies, headers),
+        ),
+      ).toBe(true);
+    });
+
+    it.each([
+      ['absent', undefined],
+      ['none', 'none'],
+      ['same-origin', 'same-origin'],
+      ['same-site', 'same-site'],
+      ['an unrecognised value', 'future-label'],
+    ])('allows %s even on a same-site deployment', (_label, value) => {
+      const guardOnOneSite = sameSiteGuard(reflector as unknown as Reflector);
+      const { cookies, headers } = matchingProdTokens(value);
+      expect(
+        guardOnOneSite.canActivate(httpContext('POST', cookies, headers)),
+      ).toBe(true);
+    });
+
+    it('still rejects a mismatched token pair carrying a friendly label', () => {
+      // The label is a third factor stacked on the other two; it never excuses
+      // a failed double-submit compare.
+      const guardOnOneSite = sameSiteGuard(reflector as unknown as Reflector);
+      expect(() =>
+        guardOnOneSite.canActivate(
+          httpContext(
+            'POST',
+            { '__Host-csrf_token': 'aaa' },
+            { 'x-csrf-token': 'bbb', 'sec-fetch-site': 'same-origin' },
+          ),
+        ),
+      ).toThrow(ForbiddenException);
+    });
+  });
+
+  describe('isSameSite', () => {
+    it('treats a shared parent domain as one site regardless of port', () => {
+      expect(
+        isSameSite('https://app.queerpulse.test', SAME_SITE_API_ORIGIN),
+      ).toBe(true);
+      expect(isSameSite('http://localhost:5173', 'http://localhost:3000')).toBe(
+        true,
+      );
+    });
+
+    it('treats a differing scheme as cross-site, matching the schemeful rule', () => {
+      expect(
+        isSameSite('http://app.queerpulse.test', SAME_SITE_API_ORIGIN),
+      ).toBe(false);
+    });
+
+    it('treats different registrable domains and unparseable values as cross-site', () => {
+      expect(isSameSite(ALLOWED_ORIGIN, CROSS_SITE_API_ORIGIN)).toBe(false);
+      expect(isSameSite(ALLOWED_ORIGIN, 'not-an-origin')).toBe(false);
+    });
+
+    it('matches a bare host or an IP literal against itself alone', () => {
+      // `localhost` and `127.0.0.1` have no parent domain to share, so nothing
+      // else can be judged same-site with them.
+      expect(isSameSite('http://localhost', 'http://localhost:3000')).toBe(
+        true,
+      );
+      expect(isSameSite('http://127.0.0.1:5173', 'http://127.0.0.2:3000')).toBe(
+        false,
+      );
+    });
   });
 
   it('allows token-less mutating requests on @SkipCsrf routes', () => {

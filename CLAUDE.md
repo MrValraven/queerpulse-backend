@@ -47,6 +47,7 @@ pnpm run migration:run                    # apply pending migrations (dev, ts-no
 pnpm run migration:revert                 # revert the last migration
 pnpm run migration:generate src/migrations/<Name>  # diff entities -> migration
 pnpm run migration:create   src/migrations/<Name>  # empty migration
+pnpm run migration:reconcile:prod          # deploy step: repair renamed ledger rows
 pnpm run migration:run:prod               # apply migrations from compiled dist/
 pnpm run typeorm ...                       # raw TypeORM CLI (-d src/data-source.ts)
 pnpm run seed                              # local fixture members (refuses NODE_ENV=production)
@@ -106,6 +107,16 @@ see the test-database safety guard below.
   timestamps between migrations are harmless — leave them alone rather than
   renumbering to break the tie. `1782800650000` is shared by `AddSubprofiles`
   and `AddProfileInterests` for exactly this reason.
+- **The `DO NOT RUN` banner on a migration file means "not applied yet", and
+  it comes off once the migration has run.** A newly authored migration opens
+  with `// DO NOT RUN: authored for review only; the maintainer runs
+  migrations.` so a reviewer knows the schema change is still pending. Delete
+  that line once the migration is applied. Leaving it on an applied file turns
+  every banner into noise that readers learn to skip, and believing an applied
+  file is pending is one step from renaming or renumbering it, which the bullet
+  above explains is the most damaging thing you can do in this directory. As of
+  2026-08-31 the 457 migrations up to `1795750000000` are all applied and none
+  of them carries a banner.
 - Guarding migration DDL with `IF [NOT] EXISTS` is **not** the fix for an
   "already exists" failure. It writes a second ledger row for work already
   recorded (making `down()` runnable twice against one application) and hides
@@ -121,4 +132,9 @@ see the test-database safety guard below.
   `.env.test.example`).
 - CI (`.github/workflows/ci.yml`) runs lint → build → unit → e2e against a
   Postgres service container. Multi-stage `Dockerfile` + `docker-compose.yml`
-  build and run the app; deploy order is migrate (`migration:run:prod`) → start.
+  build and run the app; deploy order is preflight (`migration:preflight`) →
+  reconcile ledger (`migration:reconcile:prod`) → migrate (`migration:run:prod`)
+  → bucket CORS (`storage:cors`) → start. The first three all take the same
+  Postgres advisory lock (`src/database/migration-lock.ts`) as the app's
+  boot-time catch-up run, so only one of them can ever be touching the ledger or
+  a concurrent index build.

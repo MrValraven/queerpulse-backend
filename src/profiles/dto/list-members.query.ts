@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { MAX_PAGE } from '../../common/pagination';
 
 /**
  * Directory sort orders. The directory is paginated, so the ordering MUST be
@@ -43,7 +44,12 @@ export class ListMembersQuery {
   // Directory sort order; defaults to RecentlyJoined when omitted.
   @IsOptional() @IsEnum(MemberSort) sort?: MemberSort;
 
-  @IsOptional() @Type(() => Number) @IsInt() @Min(1) page?: number;
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(MAX_PAGE)
+  page?: number;
 
   // comma-separated "open to" PRESET ids, e.g. ?openTo=mentoring,swaps. Custom
   // (freeform) entries are never filterable — see open-to.ts. Filters

@@ -25,6 +25,7 @@ import { UsersService } from '../users/users.service';
 import { AuthService } from './auth.service';
 import { SignupRejectedError } from './errors/signup-rejected.error';
 import { RefreshToken } from './entities/refresh-token.entity';
+import { IdentityRelinkCandidate } from './entities/identity-relink-candidate.entity';
 import { SECURITY_NEW_SIGN_IN } from './security.events';
 
 const sha256 = (v: string) => createHash('sha256').update(v).digest('hex');
@@ -47,7 +48,7 @@ interface UsersMock {
   findByIdWithEmail: jest.Mock;
   findByGoogleId: jest.Mock;
   createGoogleUser: jest.Mock;
-  existsByEmail: jest.Mock;
+  findIdByEmail: jest.Mock;
 }
 
 function buildMocks() {
@@ -93,8 +94,9 @@ function buildMocks() {
     findByGoogleId: jest.fn(),
     createGoogleUser: jest.fn(),
     // Signup's "a different Google subject already holds this email" guard.
-    // Nobody holds it by default, so signup is unaffected unless a test says so.
-    existsByEmail: jest.fn().mockResolvedValue(false),
+    // Nobody holds it by default, so signup is unaffected unless a test says
+    // so; a test that returns an id gets the PRD-06 relink-candidate path.
+    findIdByEmail: jest.fn().mockResolvedValue(null),
   };
   // The transaction manager exposes getRepository so the atomic rotation can
   // run its conditional claim + insert through the same (mock) repo, plus a
@@ -154,6 +156,25 @@ function buildMocks() {
   const platformSettings = {
     get: jest.fn().mockResolvedValue({ registrationEnabled: true }),
   };
+  // Write-side (PRD-06) — `recordRelinkCandidate` inserts through a query
+  // builder and trims through `find`/`update`. The insert reports "already
+  // existed" by default (no identifier), which is the branch that only bumps
+  // the attempt counter.
+  const relinkCandidates = {
+    find: jest.fn().mockResolvedValue([]),
+    update: jest.fn().mockResolvedValue({ affected: 1 }),
+    createQueryBuilder: jest.fn(() => ({
+      insert: jest.fn().mockReturnThis(),
+      into: jest.fn().mockReturnThis(),
+      values: jest.fn().mockReturnThis(),
+      orIgnore: jest.fn().mockReturnThis(),
+      update: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      execute: jest.fn().mockResolvedValue({ identifiers: [] }),
+    })),
+  };
   return {
     repo,
     jwt,
@@ -172,6 +193,7 @@ function buildMocks() {
     staffRoles,
     memberPreferences,
     platformSettings,
+    relinkCandidates,
   };
 }
 
@@ -225,6 +247,13 @@ async function buildService(
         useValue: mocks.memberPreferences,
       },
       {
+        // Write-side (PRD-06) — backs `recordRelinkCandidate`. The signup tests
+        // never reach it (`findIdByEmail` resolves null by default), so a bare
+        // repo mock is enough to satisfy injection.
+        provide: getRepositoryToken(IdentityRelinkCandidate),
+        useValue: mocks.relinkCandidates,
+      },
+      {
         provide: PlatformSettingsService,
         useValue: mocks.platformSettings,
       },
@@ -257,6 +286,12 @@ describe('AuthService.rotateRefreshToken', () => {
     const result = await service.rotateRefreshToken('raw-token', 'agent');
 
     expect(result).toEqual({ accessToken: 'signed', refreshToken: 'signed' });
+    // Rotation carries the SAME session forward, so the replacement access
+    // token names the same family the device has held since it signed in.
+    const [accessClaims] = mocks.jwt.signAsync.mock.calls[0] as [
+      { sid?: string },
+    ];
+    expect(accessClaims.sid).toBe('fam-1');
     expect(mocks.repo.findOne).toHaveBeenCalledWith({
       where: { tokenHash: sha256('raw-token') },
     });
@@ -444,6 +479,18 @@ describe('AuthService.issueTokens / revokeSessionForToken', () => {
     ];
     expect(created.familyId).toEqual(expect.any(String));
     expect(created.sessionStartedAt).toBeInstanceOf(Date);
+  });
+
+  // Every access token has to name its session, or `JwtStrategy.validate`
+  // cannot tell a revoked device from a live one and `/account/sessions` cannot
+  // tell the caller which listed device is the one in their hand.
+  it('issueTokens signs the family id into the access token as `sid`', async () => {
+    await service.issueTokens(activeUser, 'agent');
+    const [created] = mocks.repo.create.mock.calls[0] as [{ familyId: string }];
+    const [accessClaims] = mocks.jwt.signAsync.mock.calls[0] as [
+      { sub: string; sid?: string },
+    ];
+    expect(accessClaims.sid).toBe(created.familyId);
   });
 
   // The sign-in alert (ID-06). Three cases, and the two SILENT ones are the

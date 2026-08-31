@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -7,8 +6,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * user.id`, mirroring `magazine_piece.writer_id`. Nullable + no `FOREIGN
  * KEY` (repo idiom — see `AddMagazinePieces`): pitches can still arrive from
  * outside the platform with no linked writer account.
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class AddPitchSubmitter1786800000000 implements MigrationInterface {
   name = 'AddPitchSubmitter1786800000000';

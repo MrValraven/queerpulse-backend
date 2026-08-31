@@ -1,4 +1,3 @@
-// DO NOT RUN — authored for review only; the maintainer runs migrations.
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -26,8 +25,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * OPEN claim per listing — mirrors `UQ_listing_reviews_reviewer`
  * (`1785600200000-AddListingReviewReviewerDedupeIndex`) /
  * `UQ_community_join_requests_pending`'s identical partial-unique shape.
- *
- * UNAPPLIED — the maintainer runs `pnpm run migration:run`.
  */
 export class AddListingClaims1790800100000 implements MigrationInterface {
   name = 'AddListingClaims1790800100000';

@@ -18,6 +18,8 @@ import { CommunitiesService } from './communities.service';
 import { Event } from '../events/entities/event.entity';
 import { CommunityActivityCounterService } from './community-activity-counter.service';
 import { CommunityAutoFreezeService } from './community-auto-freeze.service';
+import { CommunityBanRatificationController } from './community-ban-ratification.controller';
+import { CommunityBanRatificationService } from './community-ban-ratification.service';
 import { CommunityBansController } from './community-bans.controller';
 import { CommunityBansService } from './community-bans.service';
 import { CommunityDigestService } from './community-digest.service';
@@ -47,6 +49,7 @@ import { CommunityPostsService } from './community-posts.service';
 import { CommunityPulseController } from './community-pulse.controller';
 import { CommunityPulseService } from './community-pulse.service';
 import { CommunityBan } from './entities/community-ban.entity';
+import { CommunityBanRatification } from './entities/community-ban-ratification.entity';
 import { CommunityGovernanceLog } from './entities/community-governance-log.entity';
 import { CommunityOwnerReviewRequest } from './entities/community-owner-review-request.entity';
 import { CommunityResource } from './entities/community-resource.entity';
@@ -87,6 +90,12 @@ import { MeCommunitiesController } from './me-communities.controller';
       // out (`CommunitiesService.removeMember`) and read back by the
       // owner/mod ban list and the join gate.
       CommunityBan,
+      // PRD-25. Where a PERMANENT bar waits for its second signature. Written
+      // on the way out of a removal that asked for one and read by the
+      // community's own ratification pane; the 30-day bar it settles at is
+      // already on the `CommunityBan` row above, so nothing here enforces
+      // anything by itself.
+      CommunityBanRatification,
       // The owner-editable link shelf on the About tab, which until now could
       // only ever show demo fixtures.
       CommunityResource,
@@ -187,6 +196,7 @@ import { MeCommunitiesController } from './me-communities.controller';
     CommunityResourcesController,
     CommunityInvitesController,
     CommunityBansController,
+    CommunityBanRatificationController,
     CommunityOwnerReviewController,
     CommunitySupportOffersController,
     // A community's own staff reading their own audit trail. Until now the
@@ -225,6 +235,11 @@ import { MeCommunitiesController } from './me-communities.controller';
     CommunityResourcesService,
     CommunityInvitesService,
     CommunityBansService,
+    // PRD-25. Opens, lists, decides and lazily expires the hold a permanent
+    // bar now waits in. Injected by `CommunitiesService` (the removal path)
+    // and `CommunityBansService` (the "make this permanent" path); it depends
+    // on neither, so the graph stays acyclic.
+    CommunityBanRatificationService,
     CommunityOwnerReviewService,
     CommunityGovernanceHistoryService,
     CommunitySupportOffersService,

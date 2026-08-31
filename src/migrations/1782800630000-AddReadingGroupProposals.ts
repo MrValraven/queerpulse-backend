@@ -7,8 +7,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * curated group directory with no server-backed listing — this is the one
  * genuine member-submitted data point on the page (the "Start your own
  * group" strip in `ListGroupStrip.tsx`).
- *
- * DO NOT RUN — authored for review only, per the task's instructions.
  */
 export class AddReadingGroupProposals1782800630000 implements MigrationInterface {
   name = 'AddReadingGroupProposals1782800630000';

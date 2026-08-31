@@ -32,6 +32,7 @@ import { Listing } from '../listings/entities/listing.entity';
 import { ListingReview } from '../listings/entities/listing-review.entity';
 import { Company } from '../companies/entities/company.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
+import { PressContact } from '../press-kit/entities/press-contact.entity';
 import { FILES_PREFIX, toBareKey } from '../storage/bare-key';
 
 // Re-exported so every existing importer of `toBareKey` from this module
@@ -323,6 +324,35 @@ export const PLAIN_MEDIA_REFERENCE_SOURCES: MediaReferenceSource[] = [
     // `cover` is a varchar "cover colour/image key" — it CAN hold an upload
     // key. No slug column on Collection — label-only reference on the
     // frontend (it is owner-scoped and has no public route regardless).
+  }),
+  plainSource({
+    // The photo beside an admin-curated press contact on the public
+    // `/about/press-kit` page.
+    //
+    // This field used to sit in `RULED_OUT_IMAGE_FIELDS` instead, on the
+    // (then-true) grounds that the column could only hold an external URL:
+    // it was validated with `@IsUrl()`, which refuses a bare storage key, so
+    // no upload could ever land here and there was nothing for a resolver to
+    // find. `@IsImageReference()` (ENG-46) makes an upload possible, and
+    // "ruled out" means "an upload key in this column does NOT count as in
+    // use" — leaving it there would let `StorageMaintenanceService` garbage
+    // collect the object behind a live press-kit avatar, because the resolver
+    // is exactly what that sweep asks "is anything still pointing at this
+    // key?". So it is a real source now.
+    //
+    // Labelled with the contact's `name`, the only human title the row has.
+    // NO `slugColumn`, and that is a decision rather than a missing column:
+    // press contacts have no per-contact route to link to. They render as
+    // cards inside the single `/about/press-kit` page (there is no
+    // `/press-kit/:slug`), and `press_contact` has no slug column to point at
+    // one. A slugless reference renders as a plain label on both media
+    // surfaces, which is the honest result here.
+    type: 'press-contact',
+    field: 'PressContact.avatarUrl',
+    entity: PressContact,
+    column: 'avatarUrl',
+    idColumn: 'id',
+    labelColumns: ['name'],
   }),
 ];
 
@@ -672,5 +702,4 @@ export const RULED_OUT_IMAGE_FIELDS: string[] = [
   // `MagazineArticle.blocks[].src`.
   'MagazineArticleVersion.blocks',
   'Partner.logo',
-  'PressContact.avatarUrl',
 ];

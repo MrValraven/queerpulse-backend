@@ -5,8 +5,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * whether they may be selected for the admin-curated live landing page
  * (member quote / changemaker highlight, see `landing_feature`). Default
  * false: opt-in only, mirroring `private_network`.
- *
- * DO NOT RUN — authored for review only; the maintainer runs migrations.
  */
 export class AddProfileFeaturedConsent1785903300000 implements MigrationInterface {
   name = 'AddProfileFeaturedConsent1785903300000';

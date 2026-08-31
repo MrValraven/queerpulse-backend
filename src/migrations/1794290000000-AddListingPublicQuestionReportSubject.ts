@@ -27,8 +27,6 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * ADD VALUE only, never used in the same transaction, which is safe inside the
  * migration transaction on PostgreSQL 12+ — mirrors
  * `AddReviewReportSubject1785800400000` exactly.
- *
- * DO NOT RUN: authored for review only, the maintainer runs migrations.
  */
 export class AddListingPublicQuestionReportSubject1794290000000 implements MigrationInterface {
   name = 'AddListingPublicQuestionReportSubject1794290000000';
