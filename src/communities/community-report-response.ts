@@ -7,6 +7,7 @@ import {
   ReportSubjectType,
 } from '../reports/entities/report.entity';
 import { acknowledgementFor } from '../reports/report-severity';
+import { EventPhoto } from '../events/entities/event-photo.entity';
 import { toPlainTextExcerpt } from './community-plain-text';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
 import { CommunityPost } from './entities/community-post.entity';
@@ -30,27 +31,38 @@ export const REPORT_EXCERPT_LENGTH = 320;
  * table entirely, which is the one case a moderator cannot be shown anything.
  */
 export interface CommunityReportContentDTO {
-  /** Whether the report's subject is a top-level post or a reply under one. */
-  kind: 'post' | 'reply';
-  /** The reported row's own id (the post id, or the reply id). */
+  /**
+   * What the report's subject is: a top-level post, a reply under one, or
+   * (TS-13) one photograph in the album of a gathering this community hosts.
+   */
+  kind: 'post' | 'reply' | 'event_photo';
+  /** The reported row's own id (the post id, the reply id, or the photo id). */
   id: string;
   /**
    * The thread to open. For a post this is the post's own id; for a reply it
    * is the parent post, because a reply has no page of its own and the
    * frontend links to the thread that contains it.
+   *
+   * ABSENT on an `event_photo`, which lives in a gathering's album and has no
+   * thread at all. It is omitted rather than sent as `null` so the frontend's
+   * `threadPostId?: string` stays true on the wire and the "open the thread"
+   * affordance simply does not render.
    */
-  postId: string;
+  postId?: string;
   /** Plain-text, whitespace-collapsed, cut at {@link REPORT_EXCERPT_LENGTH}. */
   excerpt: string;
   /** True when the body ran past the excerpt window. */
   isExcerptTruncated: boolean;
   /** When the reported content was written (ISO), distinct from the report's
-   *  own `createdAt`. */
+   *  own `createdAt`. For a photo, when it was attached to the album. */
   authoredAt: string;
   /** The author, or `null` for an erased account (see
-   *  `CommunityPost.authorId`). */
+   *  `CommunityPost.authorId`). For a photo this is its UPLOADER, the only
+   *  member `event_photos` records: nothing there says who is depicted. */
   author: MemberRef | null;
-  /** The author or a moderator already tombstoned this row. */
+  /** The author or a moderator already tombstoned this row. Always `false` for
+   *  a photo: `event_photos` has no soft-delete column, so a removed photo is
+   *  gone from the table and its report arrives with `content: null`. */
   isDeleted: boolean;
   /** Moderation-hidden: withheld from ordinary members right now. */
   isHidden: boolean;
@@ -70,7 +82,7 @@ export interface CommunityReportContentDTO {
  */
 export interface CommunityReportDTO {
   id: string;
-  subjectType: 'post' | 'reply';
+  subjectType: 'post' | 'reply' | 'event_photo';
   subjectId: string;
   reasonCode: string;
   severity: ReportSeverity;
@@ -84,19 +96,87 @@ export interface CommunityReportDTO {
   content: CommunityReportContentDTO | null;
 }
 
+/**
+ * The gathering a reported photograph belongs to, as much of it as the excerpt
+ * names.
+ *
+ * A structural shape rather than the `Event` entity, so this response file
+ * stays out of the events module's entity graph: the queue only ever needs
+ * something to call the album by.
+ */
+export interface CommunityReportGatheringRef {
+  title: string;
+  slug: string;
+}
+
 /** Everything about the reported row that is not the report itself, gathered
- *  by the batched lookups in `CommunityPostsService.listCommunityReports`. */
+ *  by the batched lookups in `CommunityPostsService.listCommunityReports`.
+ *  Exactly one of `post`/`reply`/`photo` is ever non-null, because the service
+ *  keys each report by its OWN subject type before filling this in. */
 export interface CommunityReportContentInput {
   post: CommunityPost | null;
   reply: CommunityPostReply | null;
+  /** TS-13: one photograph out of a community-hosted gathering's album. */
+  photo: EventPhoto | null;
+  /** The gathering `photo` is in, for the excerpt. Null when `photo` is. */
+  gathering: CommunityReportGatheringRef | null;
   author: MemberRef | null;
   moderation: ContentModerationState;
+}
+
+/**
+ * The text a photo report's excerpt is cut from.
+ *
+ * MIRRORS `EVENT_PHOTO_SQL` in
+ * `moderation/report-subject-resolver.service.ts`, which produces this exact
+ * shape for the platform queue: `(photo in the album for: <gathering>)
+ * <caption clause>`, with the gathering named by its trimmed title falling
+ * back to its slug, and `no caption` where a caption clause would otherwise be
+ * empty. It is mirrored rather than called because that resolver is a private
+ * provider of `ModerationModule` and is deliberately not exported (see the
+ * "NO MODULE IMPORT IS ADDED FOR IT" note in `moderation.module.ts`). A
+ * community-side reader cannot reach it without re-registering another
+ * module's internals. If that shape ever changes, change it here too: a
+ * moderator must not read one description of a photo in the community queue
+ * and a different one in the platform queue.
+ *
+ * A photograph has no body, so this line IS the whole evidence a community
+ * moderator gets in text. The bytes are a separate, staff-only grant (see
+ * `reports/report-photo-evidence.controller.ts`).
+ */
+function photoExcerptSource(
+  photo: EventPhoto,
+  gathering: CommunityReportGatheringRef | null,
+): string {
+  const album = gathering
+    ? `(photo in the album for: ${gathering.title.trim() || gathering.slug})`
+    : '(photo, gathering not found)';
+  const caption = photo.caption?.trim();
+  return `${album} ${caption ? `caption: ${caption}` : 'no caption'}`;
 }
 
 function toContentDTO(
   input: CommunityReportContentInput,
 ): CommunityReportContentDTO | null {
-  const { post, reply, author, moderation } = input;
+  const { post, reply, photo, gathering, author, moderation } = input;
+  if (photo) {
+    const excerpt = toPlainTextExcerpt(
+      photoExcerptSource(photo, gathering),
+      REPORT_EXCERPT_LENGTH,
+    );
+    return {
+      kind: 'event_photo',
+      id: photo.id,
+      // No `postId`: a photo lives in an album, which has no thread to open.
+      excerpt: excerpt.text,
+      isExcerptTruncated: excerpt.isTruncated,
+      authoredAt: photo.createdAt.toISOString(),
+      author,
+      isDeleted: false,
+      isHidden: moderation.hidden,
+      isRemoved: moderation.removed,
+    };
+  }
   if (reply) {
     const excerpt = toPlainTextExcerpt(reply.text, REPORT_EXCERPT_LENGTH);
     return {
@@ -128,6 +208,17 @@ function toContentDTO(
   };
 }
 
+/** The three taxonomy codes this queue can ever carry, narrowed from the full
+ *  `ReportSubjectType` enum. `post` is the fallback because it is the only one
+ *  of the three whose code is also the default shape of a community report. */
+function subjectTypeOf(
+  subjectType: ReportSubjectType,
+): 'post' | 'reply' | 'event_photo' {
+  if (subjectType === ReportSubjectType.Reply) return 'reply';
+  if (subjectType === ReportSubjectType.EventPhoto) return 'event_photo';
+  return 'post';
+}
+
 /**
  * Maps one report plus its already-resolved content to the queue DTO.
  *
@@ -142,10 +233,10 @@ export function toCommunityReportDTO(
 ): CommunityReportDTO {
   return {
     id: report.id,
-    // The queue's SQL already restricts subjects to community posts and
-    // replies, so the narrower union is the truth about what can arrive here.
-    subjectType:
-      report.subjectType === ReportSubjectType.Reply ? 'reply' : 'post',
+    // The queue's SQL already restricts subjects to this community's posts and
+    // replies and to photos in its own gatherings' albums, so the narrower
+    // union is the truth about what can arrive here.
+    subjectType: subjectTypeOf(report.subjectType),
     subjectId: report.subjectId,
     reasonCode: report.reasonCode,
     severity: report.severity,

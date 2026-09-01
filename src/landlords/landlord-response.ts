@@ -75,9 +75,31 @@ export function toLandlordCardDTO(
 }
 
 export interface RecommendationDTO {
+  /**
+   * The recommendation's own uuid, and the ONLY new field a public reader
+   * gained here.
+   *
+   * It used to be withheld on the reasoning that a public reader has no use for
+   * another member's primary key. That reasoning ran out: with
+   * `landlord_recommendation` in the report taxonomy, this id is what a member
+   * points their complaint at, and without it their only report control names
+   * the whole directory entry, so acting on it takes down every other tenant's
+   * warning about that landlord too. It is a report handle, and it addresses
+   * nothing a reader could not already read on the page: there is no
+   * member-facing route that mutates a recommendation by id (the author
+   * withdraws theirs by landlord slug, and the takedown routes are behind the
+   * moderator guard).
+   */
+  id: string;
+  /** Empty when the author has erased their account, alongside a `null`
+   * `member`. Render a removed-member placeholder; never assume a byline. */
   name: string;
   initials: string;
   tint: LandlordTint;
+  /** `null` for a recommendation whose author has since erased their account
+   * (`authorUserId` is `ON DELETE SET NULL`), and for one whose profile row is
+   * missing. Both read the same way on the page: the warning stands, the byline
+   * is gone. */
   member: MemberRef | null;
   /** The recommending MEMBER's real verification level — an honest badge on the
    * recommendation. The landlord themselves is NOT a platform member and never
@@ -95,9 +117,13 @@ export function toRecommendationDTO(
 ): RecommendationDTO {
   const name = memberName(member);
   return {
+    id: rec.id,
     name,
     initials: initialsForName(name),
-    tint: tintForKey(rec.authorUserId),
+    // Falls back to the row's own id once the author has been erased, so an
+    // anonymised recommendation still gets a stable colour instead of throwing
+    // on a NULL author.
+    tint: tintForKey(rec.authorUserId ?? rec.id),
     member,
     verificationLevel,
     stars: rec.stars,
@@ -109,24 +135,40 @@ export function toRecommendationDTO(
 /**
  * A moderator's view of one recommendation (LOC-19).
  *
- * `DELETE /admin/landlords/recommendations/:id` shipped unreachable: the id it
- * is keyed by appeared in no response the API produced. `RecommendationDTO` is
- * the shape a PUBLIC reader gets on a landlord page, and a public reader has
- * no use for the row's primary key, so the handle is added here instead of
- * there. This DTO is only ever returned from behind the moderator/admin guard.
+ * The `id` moved down to `RecommendationDTO` once a member gained the ability
+ * to report a single recommendation, so what this adds is the moderation state:
+ * the admin reads deliberately do NOT filter takedowns out, so staff can see
+ * what they took down and lift it again. `moderation` is how the console tells
+ * a live recommendation from a withheld one. Only ever returned from behind the
+ * moderator/admin guard.
  */
 export interface AdminRecommendationDTO extends RecommendationDTO {
-  id: string;
+  moderation: RecommendationModerationDTO;
+}
+
+/**
+ * Whether a takedown currently stands on this recommendation.
+ *
+ * `hidden` withholds the words; `removed` tombstones them. Both are lifted by
+ * `DELETE /admin/landlords/recommendations/:id/takedown`, and neither touches
+ * the row, so lifting either restores the original text exactly. A
+ * recommendation that was HARD-deleted before this mechanism existed is not
+ * represented here at all: it is gone, and nothing can bring it back.
+ */
+export interface RecommendationModerationDTO {
+  hidden: boolean;
+  removed: boolean;
 }
 
 export function toAdminRecommendationDTO(
   rec: LandlordRecommendation,
   member: MemberRef | null,
   verificationLevel: VerificationLevel,
+  moderation: RecommendationModerationDTO,
 ): AdminRecommendationDTO {
   return {
     ...toRecommendationDTO(rec, member, verificationLevel),
-    id: rec.id,
+    moderation,
   };
 }
 

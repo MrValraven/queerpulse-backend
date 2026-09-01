@@ -60,7 +60,7 @@ export class ListingEnquiriesController {
   })
   @ApiOkResponse({
     description:
-      'Whether the owner is reachable, why not when they are not, whether a reply will need a connection, and any conversation the caller already has with them.',
+      'Whether the owner is reachable, why not when they are not, whether a reply will need a connection, any conversation the caller already has with them, and whether a counted cap would refuse their next enquiry (with the instant it lifts). Everything a member needs before they type. The cap fields are a courtesy for the composer, never a gate: POST /directory/:slug/enquiries re-checks every cap and is the only authority.',
   })
   @ApiNotFoundResponse({ description: 'No live listing with that slug.' })
   @ApiUnauthorizedResponse({

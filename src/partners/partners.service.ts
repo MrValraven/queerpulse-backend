@@ -18,13 +18,20 @@ import {
   Paginated,
 } from '../common/pagination';
 import { allocateUniqueSlug, slugify } from '../common/slug.util';
+import { SubmissionDecisionNotifier } from '../submissions/submission-decision-notifier.service';
+import {
+  SubmissionKind,
+  SubmissionOutcome,
+} from '../submissions/submission-kinds';
 import { Profile } from '../users/entities/profile.entity';
 import { UserRole } from '../users/entities/user.entity';
 import { partnerApplicationDueAt } from './partner-application-sla';
 import {
+  MyPartnerApplicationDTO,
   PartnerApplicationDTO,
   PartnerCardDTO,
   PartnerDetailDTO,
+  toMyPartnerApplication,
   toPartnerApplication,
   toPartnerCard,
   toPartnerDetail,
@@ -112,6 +119,11 @@ export class PartnersService {
   constructor(
     @InjectRepository(Partner) private readonly partners: Repository<Partner>,
     @InjectRepository(Profile) private readonly profiles: Repository<Profile>,
+    // PRD-37. The shared intake primitive (PRD-48), not a hand-rolled
+    // notification: partner applications are one of the three black holes it
+    // was built to close, and `SubmissionKind.PartnerApplication` already
+    // exists there with its copy shipped in both languages.
+    private readonly submissionDecisions: SubmissionDecisionNotifier,
   ) {}
 
   // Public directory: approved partners only, optionally filtered by region.
@@ -150,6 +162,35 @@ export class PartnersService {
   ): Promise<PartnerApplicationDTO> {
     const saved = await this.createWithUniqueSlug(memberId, dto);
     return this.buildApplication(saved);
+  }
+
+  /**
+   * The caller's OWN partner applications, with their current status and, when
+   * a decision has been made, when (PRD-37).
+   *
+   * Until this existed an organisation could apply, be approved or rejected,
+   * and never find out: nothing notified them and no route would tell them.
+   * This is the durable half of the fix — the notification is the nudge, this
+   * is the place the answer stays. It is scoped by `submittedById` alone, so
+   * it can only ever return rows the caller created.
+   *
+   * Hand-mapped to `MyPartnerApplicationDTO`, which is a much smaller shape
+   * than the admin queue's `PartnerApplicationDTO`; see that interface for
+   * exactly what is withheld and why.
+   *
+   * ORDERED `created_at DESC, id DESC`. The `created_at` tiebreak matters:
+   * two applications submitted in the same millisecond would otherwise come
+   * back in an order Postgres is free to change between calls, which would
+   * make a paginated or diffed client show a row twice or not at all. The `id`
+   * is unique, so the pair is a total order.
+   */
+  async listMine(memberId: string): Promise<MyPartnerApplicationDTO[]> {
+    const rows = await this.partners.find({
+      where: { submittedById: memberId },
+      order: { createdAt: 'DESC', id: 'DESC' },
+      take: DEFAULT_LIST_LIMIT,
+    });
+    return rows.map(toMyPartnerApplication);
   }
 
   /**
@@ -201,28 +242,53 @@ export class PartnersService {
     return this.buildApplications(rows);
   }
 
-  // `approve` publishes the partner into the public directory; `reject`
-  // records the admin's `note` as `reviewNote`. Mirrors the spec's endpoint
-  // table verbatim: approve only flips `status`, reject flips `status` AND
-  // sets `reviewNote` — an approval note isn't part of the contract.
+  /**
+   * `approve` publishes the partner into the public directory; `reject`
+   * records the admin's `note` as `reviewNote`. Mirrors the spec's endpoint
+   * table verbatim: approve only flips `status`, reject flips `status` AND
+   * sets `reviewNote` — an approval note isn't part of the contract.
+   *
+   * Both are TERMINAL: `pending` is the only open state, and approved and
+   * rejected are the two ways an application ends. Landing on either for the
+   * first time stamps `decidedAt` and tells the applicant (PRD-37).
+   *
+   * A re-triage to the status the row ALREADY holds is a no-op for both of
+   * those. It still saves, because a repeated `reject` may be carrying a
+   * corrected review note and that behaviour predates this change, but it
+   * does not restamp `decidedAt` and it does not notify. That is what stops a
+   * double-click, a retried request or a note edit from telling the same
+   * organisation twice that it was rejected.
+   */
   async triage(
     id: string,
     action: 'approve' | 'reject',
     note?: string,
+    // The admin making the decision. Used only to avoid notifying somebody
+    // about their own action (an admin who applied on behalf of their own
+    // organisation), the same guard `notifyReporterOfOutcomeBestEffort` uses.
+    actorId?: string,
   ): Promise<PartnerApplicationDTO> {
     const partner = await this.partners.findOne({ where: { id } });
     if (!partner) {
       throw new NotFoundException('Partner application not found');
     }
 
-    if (action === 'approve') {
-      partner.status = PartnerStatus.Approved;
-    } else {
-      partner.status = PartnerStatus.Rejected;
+    const decidedStatus =
+      action === 'approve' ? PartnerStatus.Approved : PartnerStatus.Rejected;
+    const isNewDecision = partner.status !== decidedStatus;
+
+    partner.status = decidedStatus;
+    if (action === 'reject') {
       partner.reviewNote = note ?? null;
+    }
+    if (isNewDecision) {
+      partner.decidedAt = new Date();
     }
 
     const saved = await this.partners.save(partner);
+    if (isNewDecision) {
+      await this.notifyApplicantOfDecisionBestEffort(saved, actorId);
+    }
     return this.buildApplication(saved);
   }
 
@@ -347,6 +413,59 @@ export class PartnersService {
   }
 
   // --- internals ---
+
+  /**
+   * Tell the organisation that applied what was decided (PRD-37).
+   *
+   * This is the half of the finding that could not be fixed by adding a route:
+   * before it, an application was approved or rejected and absolutely nothing
+   * reached the person who submitted it, on a form that promised they would
+   * hear back.
+   *
+   * MAPPING. `approved` -> `Accepted`, `rejected` -> `Declined`. Both are real
+   * verdicts here: a partner application is only ever settled by a human in the
+   * triage console who read it and decided, so neither is `Archived`, which
+   * exists for a submission closed with nobody having weighed it. Pending is
+   * the only non-terminal status, and it never reaches this method.
+   *
+   * THE NOTE RIDES ALONG ONLY ON A REFUSAL. `reviewNote` is written only by a
+   * reject (`triage`), and `PRD-48` decided on the record that this kind's note
+   * IS delivered, because the bell is the applicant's only channel and a
+   * refusal with the reason withheld is a refusal with no reason. On an
+   * approval it is passed as null rather than as whatever the column happens to
+   * hold, so an application rejected once and later approved cannot mail the
+   * old refusal out attached to the good news.
+   *
+   * BEST EFFORT, POST-COMMIT. Called after `save()` has returned, and wrapped
+   * even though `SubmissionDecisionNotifier.notifyDecided` documents itself as
+   * never throwing: the decision has already committed and the admin's request
+   * must not fail because the bell did, and this call site should not have to
+   * be re-audited if that guarantee ever changes. The same shape as
+   * `ModerationService.notifyReporterOfOutcomeBestEffort`.
+   */
+  private async notifyApplicantOfDecisionBestEffort(
+    partner: Partner,
+    actorId?: string,
+  ): Promise<void> {
+    // An admin who applied on behalf of their own organisation and then decided
+    // it themselves is not told about their own click.
+    if (!partner.submittedById || partner.submittedById === actorId) return;
+    const isRejected = partner.status === PartnerStatus.Rejected;
+    try {
+      await this.submissionDecisions.notifyDecided({
+        recipientId: partner.submittedById,
+        kind: SubmissionKind.PartnerApplication,
+        outcome: isRejected
+          ? SubmissionOutcome.Declined
+          : SubmissionOutcome.Accepted,
+        // The organisation's own name, so the row says WHICH application.
+        subjectLabel: partner.name,
+        reviewNote: isRejected ? partner.reviewNote : null,
+      });
+    } catch {
+      // Intentionally ignored — the decision already committed.
+    }
+  }
 
   // The slug pre-check (`allocateUniqueSlug`) can lose a race to a concurrent
   // submission landing between the read and this INSERT; the unique index on

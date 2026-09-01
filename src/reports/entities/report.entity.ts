@@ -53,6 +53,29 @@ export enum ReportSubjectType {
   // Backed by `AddListingPublicQuestionReportSubject1794290000000` (adds the
   // value to `reports_subject_type_enum`).
   ListingPublicQuestion = 'listing_public_question',
+  // ONE photograph in a gathering's album (`event_photos`), addressed by the
+  // photo's uuid.
+  //
+  // `Event` already existed, and it is the wrong grain for this: acting on it
+  // takes down the whole gathering over one image. Until this value existed a
+  // photo of an identifiable person at a queer event could be removed only by
+  // the member who uploaded it or by an organizer, which on the reports that
+  // matter most is the very people being complained about. That is why this is
+  // the one place the taxonomy is worth widening.
+  //
+  // Backed by `AddPhotoAndRecommendationReportSubjects1797700000000`.
+  EventPhoto = 'event_photo',
+  // ONE tenant's recommendation of a landlord (`landlord_recommendations`),
+  // addressed by the recommendation's uuid.
+  //
+  // Same grain problem as above, and sharper: `Landlord` reports the whole
+  // directory entry, so acting on a complaint about one recommendation takes
+  // down every other tenant's warning about that landlord with it. These
+  // recommendations are how tenants warn each other, so removing them wholesale
+  // is the failure mode to avoid.
+  //
+  // Backed by `AddPhotoAndRecommendationReportSubjects1797700000000`.
+  LandlordRecommendation = 'landlord_recommendation',
 }
 
 // Mirrors the frontend's `ReportDTO`/`ModReportDTO` status union

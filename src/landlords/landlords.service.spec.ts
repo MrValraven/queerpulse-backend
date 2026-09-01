@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { DataSource } from 'typeorm';
 import {
   resetImageUrlBaseForTesting,
   setImageUrlBase,
@@ -120,10 +121,13 @@ function uniqueViolation(): Error & { code: string } {
 // Declared with the exact method shape (rather than a `Record<string,
 // jest.Mock>` index signature) so `ratingQb.getRawOne.mockResolvedValue(...)`
 // doesn't see `noUncheckedIndexedAccess`'s `| undefined`.
+// `andWhere` is on here because the aggregate now carries the
+// `landlord_recommendation` takedown exclusion in-query.
 type RatingQueryBuilderStub = {
   select: jest.Mock;
   addSelect: jest.Mock;
   where: jest.Mock;
+  andWhere: jest.Mock;
   getRawOne: jest.Mock;
 };
 
@@ -132,11 +136,13 @@ const ratingQbStub = (): RatingQueryBuilderStub => {
     select: jest.fn(),
     addSelect: jest.fn(),
     where: jest.fn(),
+    andWhere: jest.fn(),
     getRawOne: jest.fn().mockResolvedValue({ average: null, count: '0' }),
   };
   qb.select.mockReturnValue(qb);
   qb.addSelect.mockReturnValue(qb);
   qb.where.mockReturnValue(qb);
+  qb.andWhere.mockReturnValue(qb);
   return qb;
 };
 
@@ -179,7 +185,18 @@ describe('LandlordsService', () => {
   let affirmingPledge: { requireAccepted: jest.Mock };
   // LOC-19: every staff decision now reaches the member it is about.
   let notifications: { create: jest.Mock };
-  let contentModeration: { stateFor: jest.Mock };
+  let contentModeration: {
+    stateFor: jest.Mock;
+    statesFor: jest.Mock;
+    applyAction: jest.Mock;
+    revert: jest.Mock;
+  };
+  // The takedown/restore pair opens its own transaction, because
+  // `ContentModerationService`'s writes take the caller's `EntityManager` so
+  // they can enlist in `ModerationService`'s action transaction. The stub runs
+  // the callback straight through with a sentinel manager.
+  let dataSource: { transaction: jest.Mock };
+  const transactionManager = { sentinel: 'entity-manager' };
 
   beforeEach(async () => {
     landlords = {
@@ -222,6 +239,15 @@ describe('LandlordsService', () => {
     notifications = { create: jest.fn().mockResolvedValue(null) };
     contentModeration = {
       stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
+      statesFor: jest.fn().mockResolvedValue(new Map()),
+      applyAction: jest.fn().mockResolvedValue(undefined),
+      revert: jest.fn().mockResolvedValue(undefined),
+    };
+    dataSource = {
+      transaction: jest.fn(
+        (runInTransaction: (manager: unknown) => Promise<unknown>) =>
+          runInTransaction(transactionManager),
+      ),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -241,6 +267,7 @@ describe('LandlordsService', () => {
         { provide: AffirmingPledgeService, useValue: affirmingPledge },
         { provide: NotificationsService, useValue: notifications },
         { provide: ContentModerationService, useValue: contentModeration },
+        { provide: DataSource, useValue: dataSource },
       ],
     }).compile();
     service = module.get(LandlordsService);
@@ -752,22 +779,338 @@ describe('LandlordsService', () => {
     });
   });
 
-  describe('removeRecommendation', () => {
+  // The takedown replaced a `repository.remove` hard delete. These cover the
+  // property that made the replacement worth making: a moderator can undo it,
+  // and while it stands the recommendation is absent from every read and every
+  // aggregate rather than merely absent from the list.
+  describe('takeDownRecommendation', () => {
+    const note = 'Names the reporter\u2019s employer and street.';
+
     it('404s an unknown recommendation', async () => {
       recommendations.findOne.mockResolvedValue(null);
 
-      await expect(service.removeRecommendation('x')).rejects.toThrow(
-        NotFoundException,
+      await expect(
+        service.takeDownRecommendation('rec-1', 'mod-1', { note }),
+      ).rejects.toThrow(NotFoundException);
+      expect(contentModeration.applyAction).not.toHaveBeenCalled();
+    });
+
+    it('refuses a takedown with no note, and writes nothing', async () => {
+      recommendations.findOne.mockResolvedValue(makeRec());
+
+      await expect(
+        service.takeDownRecommendation('rec-1', 'mod-1', { note: '   ' }),
+      ).rejects.toThrow(BadRequestException);
+      expect(contentModeration.applyAction).not.toHaveBeenCalled();
+    });
+
+    it('writes a reversible content_moderation row keyed by the recommendation uuid', async () => {
+      recommendations.findOne.mockResolvedValue(makeRec());
+
+      await service.takeDownRecommendation('rec-1', 'mod-1', {
+        note,
+        reasonCode: 'doxxing',
+      });
+
+      expect(contentModeration.applyAction).toHaveBeenCalledWith(
+        transactionManager,
+        {
+          subjectType: 'landlord_recommendation',
+          subjectId: 'rec-1',
+          action: 'hide_content',
+          actorId: 'mod-1',
+          reasonCode: 'doxxing',
+          note,
+        },
+      );
+      // The row itself is untouched, which is what makes the takedown
+      // reversible at all.
+      expect(recommendations.remove).not.toHaveBeenCalled();
+      expect(recommendations.delete).not.toHaveBeenCalled();
+    });
+
+    it('defaults to the lighter action, so remove_content has to be asked for', async () => {
+      recommendations.findOne.mockResolvedValue(makeRec());
+
+      await service.takeDownRecommendation('rec-1', 'mod-1', { note });
+
+      expect(contentModeration.applyAction).toHaveBeenCalledWith(
+        transactionManager,
+        expect.objectContaining({ action: 'hide_content' }),
       );
     });
 
-    it('removes an existing recommendation', async () => {
-      const rec = makeRec();
-      recommendations.findOne.mockResolvedValue(rec);
+    it('escalates to remove_content when the moderator asks for it', async () => {
+      recommendations.findOne.mockResolvedValue(makeRec());
 
-      await service.removeRecommendation('rec-1');
+      await service.takeDownRecommendation('rec-1', 'mod-1', {
+        note,
+        action: 'remove_content',
+      });
 
-      expect(recommendations.remove).toHaveBeenCalledWith(rec);
+      expect(contentModeration.applyAction).toHaveBeenCalledWith(
+        transactionManager,
+        expect.objectContaining({ action: 'remove_content' }),
+      );
+    });
+
+    it('answers with the recommendation carrying its new takedown state', async () => {
+      recommendations.findOne.mockResolvedValue(makeRec());
+      contentModeration.statesFor.mockResolvedValue(
+        new Map([['rec-1', { hidden: true, removed: false }]]),
+      );
+
+      const result = await service.takeDownRecommendation('rec-1', 'mod-1', {
+        note,
+      });
+
+      expect(result).toMatchObject({
+        id: 'rec-1',
+        moderation: { hidden: true, removed: false },
+      });
+    });
+  });
+
+  describe('restoreRecommendation', () => {
+    it('404s an unknown recommendation', async () => {
+      recommendations.findOne.mockResolvedValue(null);
+
+      await expect(service.restoreRecommendation('rec-1')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(contentModeration.revert).not.toHaveBeenCalled();
+    });
+
+    it('lifts the takedown, putting the warning and its stars back', async () => {
+      recommendations.findOne.mockResolvedValue(makeRec());
+
+      const result = await service.restoreRecommendation('rec-1');
+
+      expect(contentModeration.revert).toHaveBeenCalledWith(
+        transactionManager,
+        'landlord_recommendation',
+        'rec-1',
+      );
+      expect(result.moderation).toEqual({ hidden: false, removed: false });
+    });
+
+    it('is idempotent on a recommendation carrying no takedown', async () => {
+      recommendations.findOne.mockResolvedValue(makeRec());
+      contentModeration.statesFor.mockResolvedValue(new Map());
+
+      await expect(
+        service.restoreRecommendation('rec-1'),
+      ).resolves.toMatchObject({
+        moderation: { hidden: false, removed: false },
+      });
+    });
+  });
+
+  // A taken-down recommendation has to be gone from EVERY read and EVERY
+  // aggregate. While the takedown was a hard delete that came for free; a soft
+  // one that any read forgets to filter is a withheld warning still readable,
+  // or a score still counting stars nobody can see.
+  describe('takedown visibility', () => {
+    it('withholds a taken-down recommendation from the public detail list', async () => {
+      landlords.findOne.mockResolvedValue(makeLandlord());
+      recommendations.find.mockResolvedValue([
+        makeRec({ id: 'rec-1' }),
+        makeRec({ id: 'rec-2', authorUserId: 'author-2' }),
+      ]);
+      contentModeration.statesFor.mockResolvedValue(
+        new Map([['rec-2', { hidden: true, removed: false }]]),
+      );
+
+      const detail = await service.detail('friendly-landlord');
+
+      expect(detail.recommendations.map((rec) => rec.id)).toEqual(['rec-1']);
+    });
+
+    it('withholds a REMOVED recommendation too, not only a hidden one', async () => {
+      landlords.findOne.mockResolvedValue(makeLandlord());
+      recommendations.find.mockResolvedValue([makeRec({ id: 'rec-1' })]);
+      contentModeration.statesFor.mockResolvedValue(
+        new Map([['rec-1', { hidden: true, removed: true }]]),
+      );
+
+      const detail = await service.detail('friendly-landlord');
+
+      expect(detail.recommendations).toEqual([]);
+    });
+
+    it("excludes taken-down stars from the entry's headline rating IN-QUERY", async () => {
+      landlords.findOne.mockResolvedValue(makeLandlord());
+      const ratingQb = ratingQbStub();
+      recommendations.createQueryBuilder.mockReturnValue(ratingQb);
+
+      await service.detail('friendly-landlord');
+
+      // In-query, not post-query: the aggregate deliberately runs over EVERY
+      // row rather than the capped page, so a post-query filter here could only
+      // ever see the page and would leave the headline score disagreeing with
+      // the list under it.
+      expect(ratingQb.andWhere).toHaveBeenCalledWith(
+        expect.stringContaining('"content_moderation"'),
+        { recommendationSubjectType: 'landlord_recommendation' },
+      );
+    });
+
+    it('excludes taken-down stars from the browse grid ratings', async () => {
+      landlords.createQueryBuilder.mockReturnValue(
+        makePaginatedBuilder([makeLandlord()], 1),
+      );
+      recommendations.find.mockResolvedValue([
+        makeRec({ id: 'rec-1', stars: 5 }),
+        makeRec({ id: 'rec-2', stars: 1, authorUserId: 'author-2' }),
+      ]);
+      contentModeration.statesFor.mockResolvedValue(
+        new Map([['rec-2', { hidden: true, removed: false }]]),
+      );
+
+      const result = await service.browse({ page: 1 });
+
+      // 5 alone, never (5 + 1) / 2.
+      expect(result.items[0]?.rating).toEqual({ score: '5.0', count: 1 });
+    });
+
+    it('excludes taken-down stars from the admin console list ratings too', async () => {
+      landlords.createQueryBuilder.mockReturnValue(
+        makePaginatedBuilder([makeLandlord()], 1),
+      );
+      recommendations.find.mockResolvedValue([
+        makeRec({ id: 'rec-1', stars: 5 }),
+        makeRec({ id: 'rec-2', stars: 1, authorUserId: 'author-2' }),
+      ]);
+      contentModeration.statesFor.mockResolvedValue(
+        new Map([['rec-2', { hidden: true, removed: false }]]),
+      );
+
+      const result = await service.listForAdmin({ page: 1 });
+
+      expect(result.items[0]?.rating).toEqual({ score: '5.0', count: 1 });
+    });
+
+    it('still SHOWS a taken-down recommendation to staff, flagged, so it can be lifted', async () => {
+      landlords.findOne.mockResolvedValue(makeLandlord());
+      recommendations.find.mockResolvedValue([makeRec({ id: 'rec-1' })]);
+      contentModeration.statesFor.mockResolvedValue(
+        new Map([['rec-1', { hidden: true, removed: false }]]),
+      );
+
+      const rows = await service.listRecommendationsForAdmin('landlord-1');
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        id: 'rec-1',
+        moderation: { hidden: true, removed: false },
+      });
+    });
+  });
+
+  // `author_user_id` is `ON DELETE SET NULL` since
+  // `SetNullLandlordRecommendationAuthorFk1797900000000`, so a warning survives
+  // its author leaving. Nothing downstream may assume there is an author.
+  describe('a recommendation whose author erased their account', () => {
+    it('renders with no byline instead of throwing, and keeps its stars', async () => {
+      landlords.findOne.mockResolvedValue(makeLandlord());
+      recommendations.find.mockResolvedValue([
+        makeRec({ id: 'rec-1', authorUserId: null, stars: 2 }),
+      ]);
+
+      const detail = await service.detail('friendly-landlord');
+
+      expect(detail.recommendations).toHaveLength(1);
+      expect(detail.recommendations[0]).toMatchObject({
+        id: 'rec-1',
+        member: null,
+        name: '',
+        initials: '',
+        stars: 2,
+      });
+      // A stable tint still comes back, falling back to the row's own id.
+      expect(detail.recommendations[0]?.tint).toBeDefined();
+    });
+
+    it('never sends a NULL author id to the profile or verification lookups', async () => {
+      landlords.findOne.mockResolvedValue(makeLandlord());
+      recommendations.find.mockResolvedValue([
+        makeRec({ id: 'rec-1', authorUserId: null }),
+        makeRec({ id: 'rec-2', authorUserId: 'author-2' }),
+      ]);
+
+      await service.detail('friendly-landlord');
+
+      expect(verification.levelsForUsers).toHaveBeenCalledWith(['author-2']);
+    });
+
+    it('falls back to the email verification floor for the erased author', async () => {
+      landlords.findOne.mockResolvedValue(makeLandlord());
+      recommendations.find.mockResolvedValue([
+        makeRec({ id: 'rec-1', authorUserId: null }),
+      ]);
+
+      const detail = await service.detail('friendly-landlord');
+
+      expect(detail.recommendations[0]?.verificationLevel).toBe(
+        VerificationLevel.Email,
+      );
+    });
+
+    it('shows staff the same anonymised row rather than failing the console', async () => {
+      landlords.findOne.mockResolvedValue(makeLandlord());
+      recommendations.find.mockResolvedValue([
+        makeRec({ id: 'rec-1', authorUserId: null }),
+      ]);
+
+      const rows = await service.listRecommendationsForAdmin('landlord-1');
+
+      expect(rows[0]).toMatchObject({ id: 'rec-1', member: null });
+    });
+  });
+
+  // The report path (PRD-47d): a member points a complaint at ONE
+  // recommendation instead of the whole directory entry. The id is the handle
+  // that makes that possible, so the public DTO carrying it is the contract.
+  describe('the public recommendation DTO carries its report handle', () => {
+    it('exposes the recommendation id to a member reader', async () => {
+      landlords.findOne.mockResolvedValue(makeLandlord());
+      recommendations.find.mockResolvedValue([makeRec({ id: 'rec-1' })]);
+
+      const detail = await service.detail('friendly-landlord');
+
+      expect(detail.recommendations[0]?.id).toBe('rec-1');
+    });
+
+    it('exposes the id and nothing else new: no author user id leaks', async () => {
+      landlords.findOne.mockResolvedValue(makeLandlord());
+      recommendations.find.mockResolvedValue([makeRec()]);
+
+      const detail = await service.detail('friendly-landlord');
+
+      expect(Object.keys(detail.recommendations[0] ?? {}).sort()).toEqual([
+        'createdAt',
+        'id',
+        'initials',
+        'member',
+        'name',
+        'stars',
+        'text',
+        'tint',
+        'verificationLevel',
+      ]);
+    });
+
+    it('hands the same id back from the write, so a fresh rating is reportable', async () => {
+      landlords.findOne.mockResolvedValue(makeLandlord());
+      recommendations.findOne.mockResolvedValue(null);
+      recommendations.save.mockResolvedValue(makeRec({ id: 'rec-9' }));
+
+      const saved = await service.recommend('friendly-landlord', 'author-1', {
+        stars: 4,
+        text: 'Fixed the boiler the same week.',
+      });
+
+      expect(saved.id).toBe('rec-9');
     });
   });
 

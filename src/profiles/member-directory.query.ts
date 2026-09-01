@@ -1,4 +1,5 @@
 import { type ObjectLiteral, type SelectQueryBuilder } from 'typeorm';
+import { countByFilterClauses } from '../common/facet-counts';
 import { escapeLikeTerm } from '../common/like-escape';
 import {
   PROFILE_SEARCH_COLUMNS,
@@ -290,42 +291,6 @@ export function applyDirectoryFilters<E extends ObjectLiteral>(
       yearsTo: q.yearsTo,
     });
   }
-}
-
-/**
- * One aggregate row of `COUNT(*) FILTER (WHERE <option matches>)`, one column
- * per option, over the base query with this group's own predicate dropped.
- *
- * Aliases are positional (`f0`, `f1`, …) rather than the option ids themselves:
- * ids like `musicIndustryAR` are camelCase and would come back from Postgres
- * folded to lowercase, and ids are member-facing vocabulary that may gain
- * characters an unquoted SQL alias cannot hold.
- *
- * A `COUNT(*)` is safe here despite the `u` join — it is many-to-one, so it
- * cannot fan a profile out into several rows — and despite the block and
- * hidden-from gates, which are `NOT EXISTS` predicates rather than joins.
- */
-async function countByFilterClauses<E extends ObjectLiteral>(
-  qb: SelectQueryBuilder<E>,
-  options: readonly string[],
-  clause: (param: string) => string,
-  parameterFor: (option: string) => unknown,
-): Promise<Record<string, number>> {
-  if (!options.length) return {};
-  qb.select([]);
-  options.forEach((option, index) => {
-    const param = `facetOption${index}`;
-    qb.addSelect(`COUNT(*) FILTER (WHERE ${clause(param)})`, `f${index}`);
-    qb.setParameter(param, parameterFor(option));
-  });
-  const row = await qb.getRawOne<Record<string, string | number | null>>();
-  const counts: Record<string, number> = {};
-  options.forEach((option, index) => {
-    // Postgres returns bigint as a string through node-postgres; a group whose
-    // base query matched nothing returns no row at all rather than zeros.
-    counts[option] = Number(row?.[`f${index}`] ?? 0);
-  });
-  return counts;
 }
 
 /**

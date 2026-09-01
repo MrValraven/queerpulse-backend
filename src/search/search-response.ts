@@ -21,6 +21,24 @@ export interface SearchResultDTO {
   avatarUrl?: string | null;
 }
 
+/**
+ * `GET /search/types` — the result types search can currently answer with.
+ *
+ * Hand-mapped rather than returned raw: the registry behind it
+ * (`RESULT_TYPE_FEATURE`) is keyed by result type but VALUED by internal
+ * `FeatureKey` names, and there is no global serializer to strip them. The
+ * client needs the result types, so those are all it gets.
+ */
+export interface SearchTypesDTO {
+  /**
+   * The launched result types, in the same order `search` groups them.
+   * A type absent here runs no query and returns no rows, so a client
+   * rendering one tab per type must leave it out rather than offer a tab
+   * that can only ever be empty.
+   */
+  types: `${SearchResultType}`[];
+}
+
 export interface SearchResponseDTO {
   query: string;
   results: SearchResultDTO[];

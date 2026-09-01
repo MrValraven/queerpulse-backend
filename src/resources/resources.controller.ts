@@ -93,6 +93,26 @@ export class ResourcesController {
     return this.resourcesService.listIndex();
   }
 
+  // Declared before `getBySlug(':slug')` for the same declaration-order
+  // reason as `listListings` above. `/resources/suggestions/mine` is three
+  // segments and `:slug` is one, so it would not actually be swallowed today,
+  // but keeping every literal route above the wildcard is the rule this
+  // controller already follows and the next literal route may not be so
+  // lucky.
+  @Get('suggestions/mine')
+  @ApiOperation({
+    summary: 'Your own resource suggestions and what was decided on each',
+  })
+  @ApiOkResponse({
+    description:
+      "Your suggestions, newest first, each with its status, when it was decided, and the reviewer's note.",
+  })
+  @ApiUnauthorizedResponse({ description: 'Missing or invalid session.' })
+  @ApiForbiddenResponse({ description: 'Caller is not an active member.' })
+  listMySuggestions(@CurrentUser() user: CurrentUserData) {
+    return this.resourceSuggestionsService.listMine(user.userId);
+  }
+
   @Post('suggestions')
   @ApiOperation({
     summary: 'Suggest a Legal Aid / Sexual Health Testing resource',

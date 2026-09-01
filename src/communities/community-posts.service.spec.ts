@@ -6,6 +6,8 @@ import { MentionNotificationService } from '../mentions/mention-notification.ser
 import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { Event } from '../events/entities/event.entity';
+import { EventPhoto } from '../events/entities/event-photo.entity';
 import { StorageService } from '../storage/storage.service';
 import { Profile } from '../users/entities/profile.entity';
 import { CommunityPostsService } from './community-posts.service';
@@ -237,6 +239,10 @@ describe('CommunityPostsService', () => {
   // empty) — the `posts`/`replies` repos it also reads from are the same
   // mocks every other test in this file already sets up.
   let reports: { createQueryBuilder: jest.Mock };
+  // TS-13: the `event_photo` arm of that queue. Both default to empty, so a
+  // page with no photo report never touches either repository.
+  let eventPhotos: { find: jest.Mock };
+  let events: { find: jest.Mock };
 
   beforeEach(async () => {
     communities = { findOne: jest.fn().mockResolvedValue(COMMUNITY) };
@@ -342,6 +348,8 @@ describe('CommunityPostsService', () => {
       createForRecipients: jest.fn().mockResolvedValue(undefined),
     };
     reports = { createQueryBuilder: jest.fn(() => reportsQbStub()) };
+    eventPhotos = { find: jest.fn().mockResolvedValue([]) };
+    events = { find: jest.fn().mockResolvedValue([]) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -362,6 +370,8 @@ describe('CommunityPostsService', () => {
           useValue: replyEdits,
         },
         { provide: getRepositoryToken(Report), useValue: reports },
+        { provide: getRepositoryToken(EventPhoto), useValue: eventPhotos },
+        { provide: getRepositoryToken(Event), useValue: events },
         { provide: MentionNotificationService, useValue: mentions },
         { provide: NotificationsService, useValue: notifications },
         { provide: ContentModerationService, useValue: contentModeration },
@@ -1533,6 +1543,30 @@ describe('CommunityPostsService', () => {
       subjectId: 'r1',
       slaDueAt: new Date('2999-01-01T00:00:00.000Z'),
     } as Report;
+    // TS-13. `outing` is one of the two `EMERGENCY_REASONS` codes the photo
+    // subject type exists for, so the fixture files under it.
+    const OPEN_PHOTO_REPORT = {
+      ...OPEN_POST_REPORT,
+      id: 'rep-4',
+      subjectType: ReportSubjectType.EventPhoto,
+      subjectId: 'photo-1',
+      reasonCode: 'outing',
+      severity: ReportSeverity.Emergency,
+      slaDueAt: new Date('2999-01-01T00:00:00.000Z'),
+    } as Report;
+    const PHOTO = {
+      id: 'photo-1',
+      eventId: 'ev-1',
+      storageKey: 'gathering-photos/author-1/abc.jpg',
+      uploaderId: 'author-1',
+      caption: 'the back room',
+      createdAt: new Date('2026-01-20T18:00:00.000Z'),
+    };
+    const GATHERING = {
+      id: 'ev-1',
+      title: 'Trans Joy Night',
+      slug: 'trans-joy-night',
+    };
 
     const queueOf = (rows: Report[]) => {
       const qb = reportsQbStub();
@@ -1638,6 +1672,136 @@ describe('CommunityPostsService', () => {
 
       expect(row.id).toBe('rep-1');
       expect(row.content).toBeNull();
+    });
+
+    // TS-13: a photograph in a community-hosted gathering's album is now
+    // reportable, a community moderator may act on that report, and until now
+    // this queue was the missing half: they could action a report they had no
+    // permitted read of.
+    it('carries a photo report with its album excerpt, uploader and no thread id', async () => {
+      queueOf([OPEN_PHOTO_REPORT]);
+      eventPhotos.find.mockResolvedValue([PHOTO]);
+      events.find.mockResolvedValue([GATHERING]);
+
+      const row = (await service.listCommunityReports('slug', 'u1'))[0]!;
+
+      expect(row.subjectType).toBe('event_photo');
+      expect(row.subjectId).toBe('photo-1');
+      expect(row.content).toMatchObject({
+        kind: 'event_photo',
+        id: 'photo-1',
+        // The shape `EVENT_PHOTO_SQL` in the platform-side subject resolver
+        // produces, mirrored so there is one description of a photograph.
+        excerpt:
+          '(photo in the album for: Trans Joy Night) caption: the back room',
+        isExcerptTruncated: false,
+        isDeleted: false,
+        isHidden: false,
+        isRemoved: false,
+      });
+      // The uploader, the only member `event_photos` records.
+      expect(row.content?.author?.slug).toBe('ana');
+      // A photo lives in an album, so there is no thread to open.
+      expect(row.content?.postId).toBeUndefined();
+    });
+
+    it('names an uncaptioned photo by its gathering alone', async () => {
+      queueOf([OPEN_PHOTO_REPORT]);
+      eventPhotos.find.mockResolvedValue([{ ...PHOTO, caption: '   ' }]);
+      events.find.mockResolvedValue([GATHERING]);
+
+      const row = (await service.listCommunityReports('slug', 'u1'))[0]!;
+
+      expect(row.content?.excerpt).toBe(
+        '(photo in the album for: Trans Joy Night) no caption',
+      );
+    });
+
+    it('surfaces a photo a moderator has already taken down', async () => {
+      queueOf([OPEN_PHOTO_REPORT]);
+      eventPhotos.find.mockResolvedValue([PHOTO]);
+      events.find.mockResolvedValue([GATHERING]);
+      contentModeration.statesForAnyType.mockResolvedValue(
+        new Map([['photo-1', { hidden: false, removed: true }]]),
+      );
+
+      const row = (await service.listCommunityReports('slug', 'u1'))[0]!;
+
+      expect(row.content?.isRemoved).toBe(true);
+      // ONE takedown lookup for the whole page, spanning all three codes.
+      expect(contentModeration.statesForAnyType).toHaveBeenCalledTimes(1);
+      expect(contentModeration.statesForAnyType).toHaveBeenCalledWith(
+        ['post', 'reply', 'event_photo'],
+        ['photo-1'],
+      );
+    });
+
+    it('keeps a photo report whose photo has since been deleted', async () => {
+      queueOf([OPEN_PHOTO_REPORT]);
+      eventPhotos.find.mockResolvedValue([]);
+
+      const row = (await service.listCommunityReports('slug', 'u1'))[0]!;
+
+      expect(row.id).toBe('rep-4');
+      expect(row.content).toBeNull();
+      // No photo rows, so nothing to look a gathering up for.
+      expect(events.find).not.toHaveBeenCalled();
+    });
+
+    // The scoping predicate is what keeps a community out of
+    // another room's business: a gathering with no community satisfies neither
+    // `events.community_id = :communityId` nor the INNER join behind it, so the
+    // report never reaches this page at all. Asserted on the SQL because the
+    // predicate is the whole guarantee.
+    it("scopes photo reports to the community's OWN gatherings", async () => {
+      const qb = reportsQbStub();
+      qb.getMany!.mockResolvedValue([]);
+      reports.createQueryBuilder.mockReturnValue(qb);
+
+      await service.listCommunityReports('slug', 'u1');
+
+      const [sql, params] = qb.andWhere!.mock.calls[0] as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(sql).toContain('"event_photos" "__scoped_photo"');
+      expect(sql).toContain(
+        '"__scoped_photo_event"."community_id" = :communityId',
+      );
+      expect(params.eventPhotoType).toBe(ReportSubjectType.EventPhoto);
+      expect(params.communityId).toBe('c1');
+    });
+
+    it('never queries photos for a page that holds none', async () => {
+      queueOf([OPEN_POST_REPORT, OPEN_REPLY_REPORT]);
+      posts.find.mockResolvedValue([{ ...POST }]);
+      replies.find.mockResolvedValue([REPLY]);
+
+      await service.listCommunityReports('slug', 'u1');
+
+      expect(eventPhotos.find).not.toHaveBeenCalled();
+      expect(events.find).not.toHaveBeenCalled();
+    });
+
+    it('resolves a mixed page in one query per table', async () => {
+      queueOf([
+        OPEN_POST_REPORT,
+        OPEN_REPLY_REPORT,
+        OPEN_PHOTO_REPORT,
+        { ...OPEN_PHOTO_REPORT, id: 'rep-5' },
+      ]);
+      posts.find.mockResolvedValue([{ ...POST }]);
+      replies.find.mockResolvedValue([REPLY]);
+      eventPhotos.find.mockResolvedValue([PHOTO]);
+      events.find.mockResolvedValue([GATHERING]);
+
+      const rows = await service.listCommunityReports('slug', 'u1');
+
+      expect(rows).toHaveLength(4);
+      expect(eventPhotos.find).toHaveBeenCalledTimes(1);
+      expect(events.find).toHaveBeenCalledTimes(1);
+      expect(profiles.find).toHaveBeenCalledTimes(1);
+      expect(contentModeration.statesForAnyType).toHaveBeenCalledTimes(1);
     });
   });
 });

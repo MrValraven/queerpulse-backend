@@ -1,5 +1,6 @@
 import { SearchService } from './search.service';
 import { SearchResultType } from './dto/search.query';
+import { isResultTypeLaunched } from './search-features';
 
 // Direct construction (mirrors `mention-notification.service.spec.ts`): the 12
 // federated resources are injected verbatim, so each is a minimal fake exposing
@@ -345,6 +346,165 @@ describe('SearchService.search', () => {
         11,
         200,
       );
+    });
+  });
+
+  describe('feature launch gating', () => {
+    type Bag = ReturnType<typeof build>;
+
+    // The one fake `SearchService` reaches for to produce each result type.
+    // Forum titles and reply bodies are separate queries under a single
+    // feature, so both appear here.
+    const queryFor: Record<SearchResultType, (bag: Bag) => jest.Mock> = {
+      [SearchResultType.Member]: (bag) => bag.profiles.searchMembers,
+      [SearchResultType.Community]: (bag) => bag.communities.searchByText,
+      [SearchResultType.Event]: (bag) => bag.events.searchByText,
+      [SearchResultType.Forum]: (bag) => bag.forumThreads.searchByText,
+      [SearchResultType.ForumPost]: (bag) => bag.forumPosts.searchByText,
+      [SearchResultType.Business]: (bag) => bag.directory.listDirectory,
+      [SearchResultType.Magazine]: (bag) => bag.magazine.searchByText,
+      [SearchResultType.Job]: (bag) => bag.jobs.searchByText,
+      [SearchResultType.Housing]: (bag) => bag.housing.searchByText,
+      [SearchResultType.Resource]: (bag) => bag.resources.searchByText,
+      [SearchResultType.Subprofile]: (bag) => bag.subprofiles.searchByText,
+      [SearchResultType.Topic]: (bag) => bag.topics.searchByText,
+    };
+
+    const allResultTypes = Object.values(SearchResultType);
+
+    it('queries a resource on the unfiltered view only while its feature is launched', async () => {
+      const bag = build();
+
+      await bag.service.search('viewer-1', 'pride', undefined, undefined);
+
+      // Asserted in both directions for all twelve types, so this stays a real
+      // assertion whichever way a flag is flipped in `launchedFeatures.ts`.
+      for (const resultType of allResultTypes) {
+        const wasQueried = queryFor[resultType](bag).mock.calls.length > 0;
+        expect({ resultType, wasQueried }).toEqual({
+          resultType,
+          wasQueried: isResultTypeLaunched(resultType),
+        });
+      }
+    });
+
+    // Registry-driven rather than naming `job` outright: today the closed set
+    // is the Work and Economy surface, tomorrow it is whatever
+    // `launchedFeatures.ts` says. If every searched feature is ever launched
+    // at once this loop has nothing to iterate; `search-features.spec.ts`
+    // proves the gate itself against a fabricated registry, so the mechanism
+    // stays covered either way.
+    const closedResultTypes = allResultTypes.filter(
+      (resultType) => !isResultTypeLaunched(resultType),
+    );
+
+    it('returns an empty page for a closed feature even when its resource has rows', async () => {
+      for (const resultType of closedResultTypes) {
+        const bag = build();
+        // Rows the fake would happily hand back if it were ever asked.
+        queryFor[resultType](bag).mockResolvedValue([
+          {
+            slug: 'backend-engineer',
+            title: 'Backend Engineer',
+            category: 'Engineering',
+            location: 'Remote',
+          },
+        ]);
+
+        const result = await bag.service.search(
+          'viewer-1',
+          'pride',
+          resultType,
+          undefined,
+        );
+
+        expect(result).toEqual({ query: 'pride', results: [], hasMore: false });
+        expect(queryFor[resultType](bag)).not.toHaveBeenCalled();
+      }
+    });
+
+    it('leaves a closed feature out of the merged, all-types list', async () => {
+      const bag = build();
+      for (const resultType of closedResultTypes) {
+        queryFor[resultType](bag).mockResolvedValue([
+          { slug: 'backend-engineer', title: 'Backend Engineer' },
+        ]);
+      }
+
+      const result = await bag.service.search(
+        'viewer-1',
+        'pride',
+        undefined,
+        undefined,
+      );
+
+      // `SearchResultDTO.type` is the widened `` `${SearchResultType}` ``
+      // string, so compare on the string value the enum member carries.
+      const returnedTypes = result.results.map((row) => String(row.type));
+      for (const resultType of closedResultTypes) {
+        expect(returnedTypes).not.toContain(String(resultType));
+      }
+    });
+
+    // `launchedTypes()` is what the frontend builds its category tabs from, so
+    // it has to describe THIS service, not a parallel opinion about it. The
+    // assertion runs against the real registry and compares the advertised
+    // list to the queries `search` actually issued, in both directions: a type
+    // advertised but never queried would give a member a tab that can only
+    // ever be empty, and a type queried but not advertised would hide results
+    // that do exist.
+    it('advertises exactly the types the unfiltered search queries', async () => {
+      const bag = build();
+
+      await bag.service.search('viewer-1', 'pride', undefined, undefined);
+      const advertised = new Set(bag.service.launchedTypes().types);
+
+      for (const resultType of allResultTypes) {
+        const wasQueried = queryFor[resultType](bag).mock.calls.length > 0;
+        expect({
+          resultType,
+          isAdvertised: advertised.has(resultType),
+        }).toEqual({ resultType, isAdvertised: wasQueried });
+      }
+    });
+
+    it('advertises no type that returns an empty page when asked for by name', async () => {
+      for (const resultType of allResultTypes) {
+        const bag = build();
+        const advertised = new Set(bag.service.launchedTypes().types);
+        // One row the resource would hand back if it were ever asked.
+        // `ProfilesService.searchMembers` alone answers with a page envelope
+        // rather than a bare array, so it gets its own shape.
+        queryFor[resultType](bag).mockResolvedValue(
+          resultType === SearchResultType.Member
+            ? { items: [memberCard('ada')] }
+            : [
+                {
+                  slug: 'backend-engineer',
+                  threadSlug: 'backend-engineer',
+                  handle: 'backend-engineer',
+                  tag: 'hiring',
+                  title: 'Backend Engineer',
+                  threadTitle: 'Backend Engineer',
+                  name: 'Backend Engineer',
+                  category: 'Engineering',
+                  location: 'Remote',
+                },
+              ],
+        );
+
+        const result = await bag.service.search(
+          'viewer-1',
+          'pride',
+          resultType,
+          undefined,
+        );
+
+        expect({
+          resultType,
+          isAdvertised: advertised.has(resultType),
+        }).toEqual({ resultType, isAdvertised: result.results.length > 0 });
+      }
     });
   });
 });

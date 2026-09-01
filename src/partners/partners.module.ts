@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Profile } from '../users/entities/profile.entity';
+import { SubmissionsModule } from '../submissions/submissions.module';
 import { UsersModule } from '../users/users.module';
 import { Partner } from './entities/partner.entity';
 import {
@@ -23,6 +24,11 @@ import { PartnersService } from './partners.service';
       Profile,
     ]),
     UsersModule,
+    // PRD-37. The shared intake primitive, so approving or rejecting a partner
+    // application tells the organisation that applied. A plain import: it pulls
+    // in `NotificationsModule` only, nothing there reaches back here, so no
+    // `forwardRef()`.
+    SubmissionsModule,
   ],
   controllers: [
     PartnersController,

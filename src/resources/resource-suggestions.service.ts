@@ -4,7 +4,9 @@ import { Repository } from 'typeorm';
 import { CreateResourceSuggestionDto } from './dto/create-resource-suggestion.dto';
 import { ResourceSuggestion } from './entities/resource-suggestion.entity';
 import {
+  MyResourceSuggestionsDTO,
   ResourceSuggestionResponseDTO,
+  toMyResourceSuggestionDTO,
   toResourceSuggestionResponse,
 } from './resource-suggestion-response';
 
@@ -37,5 +39,32 @@ export class ResourceSuggestionsService {
       }),
     );
     return toResourceSuggestionResponse(saved);
+  }
+
+  /**
+   * The submitter's own suggestions and what happened to each (PRD-45).
+   *
+   * Scoped to `memberId` from the session, never from a parameter: this is a
+   * member's own resource, guarded exactly the way
+   * `SafeSpaceNominationsController.listMine` is, so there is no id a caller
+   * could swap to read somebody else's queue.
+   *
+   * ORDERING carries an `id` tiebreak on purpose. `created_at DESC` alone is
+   * not a total order, and two suggestions written in the same transaction
+   * share a `now()`, at which point Postgres is free to return them in either
+   * order on either request and the list flickers between refetches. The same
+   * defect was found on the housing and story queues in this codebase.
+   *
+   * Capped at 50, matching `SafeSpaceNominationsService.listMine`: this is a
+   * personal tracker, not a paginated archive, and nobody has 50 pending
+   * resource suggestions.
+   */
+  async listMine(memberId: string): Promise<MyResourceSuggestionsDTO> {
+    const rows = await this.suggestions.find({
+      where: { memberId },
+      order: { createdAt: 'DESC', id: 'DESC' },
+      take: 50,
+    });
+    return { items: rows.map(toMyResourceSuggestionDTO) };
   }
 }

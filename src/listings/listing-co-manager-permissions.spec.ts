@@ -28,6 +28,7 @@ import {
   ListingManagementRole,
   OWNER_PERSONAL_LISTING_FIELDS,
 } from './listing-owner-personal-fields';
+import { ReviewReplyNotifier } from '../submissions/review-reply-notifier.service';
 import { ListingsService } from './listings.service';
 
 /**
@@ -290,6 +291,12 @@ describe('listing co-manager permission boundary', () => {
           useValue: { getMany: jest.fn().mockResolvedValue(new Map()) },
         },
         { provide: ListingCoManagersService, useValue: coManagers },
+        // PRD-47: `replyToReview`'s bell emit. Nothing in this file calls
+        // it; the provider exists so `ListingsService` still resolves.
+        {
+          provide: ReviewReplyNotifier,
+          useValue: { notifyReviewReplied: jest.fn() },
+        },
       ],
     }).compile();
     service = module.get(ListingsService);

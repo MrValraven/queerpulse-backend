@@ -4,6 +4,7 @@ import { ContentModerationModule } from '../content-moderation/content-moderatio
 import { UsersModule } from '../users/users.module';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { HousingViewingsModule } from '../housing-viewings/housing-viewings.module';
+import { SubmissionsModule } from '../submissions/submissions.module';
 import { HousingReview } from './entities/housing-review.entity';
 import { HousingReviewsController } from './housing-reviews.controller';
 import { HousingReviewsService } from './housing-reviews.service';
@@ -24,6 +25,11 @@ import { HousingReviewsService } from './housing-reviews.service';
     // listing (`housing` subject) and on an individual review (`review`
     // subject), matching every other public housing read (BE-HSG-13).
     ContentModerationModule,
+    // PRD-47: the shared `ReviewReplied` bell row, so a guest hears that the
+    // lister answered them through the same primitive every other vertical's
+    // right of reply uses. Plain import, no `forwardRef`: `SubmissionsModule`
+    // pulls in `NotificationsModule` only, which never reaches back here.
+    SubmissionsModule,
   ],
   controllers: [HousingReviewsController],
   providers: [HousingReviewsService],

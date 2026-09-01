@@ -33,6 +33,7 @@ import { CreateBarterListingDto } from './dto/create-barter-listing.dto';
 import { CreateBarterProposalDto } from './dto/create-barter-proposal.dto';
 import { DecideBarterProposalDto } from './dto/decide-barter-proposal.dto';
 import { ListBarterQuery } from './dto/list-barter.query';
+import { UpdateBarterListingDto } from './dto/update-barter-listing.dto';
 
 /**
  * The skill exchange: swap listings and the proposals members make against
@@ -67,6 +68,21 @@ export class BarterController {
     return this.barterService.listMine(user.userId);
   }
 
+  /**
+   * The proposer's own half of the board. Declared HERE, above
+   * `:id/proposals`, because Nest matches in declaration order and `mine`
+   * would otherwise be read as a listing id (and rejected by `ParseUUIDPipe`
+   * as a 400 rather than reaching this handler).
+   */
+  @Get('mine/proposals')
+  @ApiOperation({ summary: 'List the proposals you sent, with their outcomes' })
+  @ApiOkResponse({
+    description: 'Your sent proposals, newest first, each with its listing.',
+  })
+  listMySentProposals(@CurrentUser() user: CurrentUserData) {
+    return this.barterService.listMySentProposals(user.userId);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get one swap listing' })
   @ApiOkResponse({ description: 'The listing detail.' })
@@ -88,6 +104,20 @@ export class BarterController {
     @Body() dto: CreateBarterListingDto,
   ) {
     return this.barterService.create(user.userId, dto);
+  }
+
+  @Patch(':id')
+  @UseGuards(NotRestrictedGuard)
+  @ApiOperation({ summary: 'Correct a swap you posted' })
+  @ApiOkResponse({ description: 'The updated listing, owner view.' })
+  @ApiForbiddenResponse({ description: 'Only the poster can edit it.' })
+  @ApiNotFoundResponse({ description: 'No listing with that id.' })
+  update(
+    @CurrentUser() user: CurrentUserData,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateBarterListingDto,
+  ) {
+    return this.barterService.update(id, user.userId, dto);
   }
 
   @Post(':id/close')

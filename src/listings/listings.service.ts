@@ -28,6 +28,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { ReportsService } from '../reports/reports.service';
 import { ReportDTO } from '../reports/report-response';
 import { ReportSubjectType } from '../reports/entities/report.entity';
+import { ReviewReplyNotifier } from '../submissions/review-reply-notifier.service';
 import { ListingCoManagersService } from './listing-co-managers.service';
 import {
   assertNoOwnerPersonalListingFields,
@@ -100,6 +101,7 @@ import { UpdateListingVisibilityDto } from './dto/update-listing-visibility.dto'
 import { UpdateQueerOwnedVerifiedDto } from './dto/update-queer-owned-verified.dto';
 import {
   listingPhotoKeys,
+  isOwnerPubliclyNamed,
   ConfirmedDetailsDTO,
   ListingDTO,
   ReviewDTO,
@@ -728,6 +730,11 @@ export class ListingsService {
     // this listing day to day. `ListingCoManagersService` injects no service
     // from this file, so there is no cycle to break here.
     private readonly coManagers: ListingCoManagersService,
+    // PRD-47/48: the one shared emit for "the subject of your review has
+    // answered it". `SubmissionsModule` imports `NotificationsModule` and
+    // nothing else, so there is no cycle back into this module and no
+    // `forwardRef`.
+    private readonly reviewReplies: ReviewReplyNotifier,
   ) {}
 
   async create(ownerId: string, dto: CreateListingDto): Promise<ListingDTO> {
@@ -1725,6 +1732,9 @@ export class ListingsService {
    * with `update`/`remove`/`getByRef`; `DirectoryService` never enforces
    * ownership. The review is scoped to this listing so a reply can't be
    * attached to a review on a different owner's listing via a guessed id.
+   *
+   * The review's author is told about a FIRST reply and about nothing else;
+   * `notifyReviewRepliedBestEffort` below carries that whole decision.
    */
   async replyToReview(
     ref: string,
@@ -1736,7 +1746,10 @@ export class ListingsService {
     // reply either way; it is signed by the venue, not by the person typing,
     // so nothing about the co-manager reaches the public page. `ReviewDTO`
     // carries no listing fields, so there is nothing to redact.
-    const { listing } = await this.loadOwnedOrCoManagedOr404(ref, userId);
+    const { listing, isOwner } = await this.loadOwnedOrCoManagedOr404(
+      ref,
+      userId,
+    );
 
     const review = await this.reviews.findOne({
       where: { id: reviewId, listingId: listing.id },
@@ -1756,9 +1769,28 @@ export class ListingsService {
       throw new BadRequestException('Reply cannot be empty');
     }
 
+    // Whether this is the business's FIRST reply to this review or an
+    // overwrite of one it already had. Read BEFORE the assignment below,
+    // because it is the only thing that decides whether the reviewer hears
+    // about it at all. The truthy test is the same one `toReviewDTO` applies
+    // to `ownerReplyText`, so "already replied" means exactly what the public
+    // page has been showing as a reply.
+    const isFirstReply = !review.ownerReplyText;
+
     review.ownerReplyText = text;
     review.ownerRepliedAt = new Date();
     const saved = await this.reviews.save(review);
+
+    // After the write, and unable to fail it: the reply has committed and the
+    // notifier swallows its own errors.
+    await this.notifyReviewRepliedBestEffort({
+      review: saved,
+      listing,
+      replierUserId: userId,
+      isReplierOwner: isOwner,
+      isFirstReply,
+    });
+
     // The reply's author is the owner, but the returned row still represents
     // the reviewer — resolve their profile so the DTO keeps the avatar + link.
     const author = saved.reviewerId
@@ -1771,6 +1803,112 @@ export class ListingsService {
       saved,
       author ? { slug: author.slug, avatarUrl: author.avatarUrl } : null,
     );
+  }
+
+  /**
+   * Best-effort "the business you reviewed has answered you" notification to
+   * the review's author (PRD-47/48). Never throws: `ReviewReplyNotifier`
+   * swallows its own failures, and the reply has already committed by the time
+   * this runs, so nothing here can roll it back.
+   *
+   * ON THE FIRST REPLY ONLY, and that is a safety decision rather than a
+   * de-duplication convenience. A listing carries ONE owner reply and
+   * `replyToReview` overwrites it in place, so an owner who re-saved it would
+   * otherwise be able to ring the reviewer's bell as often as they cared to
+   * retype it. The reviewer is the less powerful party here and has no way to
+   * mute a business, so an edited reply stays silent: the current text is
+   * always on the page the first row already links to, and an owner with
+   * something genuinely new to say has the public reply itself to say it in.
+   *
+   * IT NAMES THE REPLIER ONLY WHERE THE PUBLIC PAGE ALREADY DOES. The
+   * published reply is signed by the business and carries no person at all
+   * (`ReviewOwnerReplyDTO` is text plus a timestamp), a co-manager is invisible
+   * on the public page by design (`listing-owner-personal-fields.ts`), and an
+   * owner on `visibility: 'anon'`/`'role'`, or one who withheld
+   * `linkToProfile`, has told this platform not to tie their name to this
+   * business. Passing them as the actor puts their face, name and profile link
+   * in the reviewer's bell, which outs them off the back of a reply the page
+   * itself attributes to nobody. So the actor rides along only where
+   * `isOwnerPubliclyNamed` says the public detail read already links the owner's
+   * QueerPulse profile. Every other reply reads as "Someone replied to your
+   * review of <business>", exactly as the page reads.
+   *
+   * `isOwnerPubliclyNamed` is the SAME exported predicate `ownerIdentity` in
+   * `listing-response.ts` uses to build the public page, and
+   * `notifyQuestionAnsweredBestEffort` calls it too. It was a hand-copied
+   * duplicate here until the two copies were merged: a privacy rule written
+   * twice drifts, and drift in this direction names somebody who asked not to
+   * be named.
+   *
+   * WITHHOLDING THE NAME DOES NOT WITHHOLD THE BLOCK/MUTE GATE. The replier
+   * rides along as `blockGateActorId` on every call, named or not, so a
+   * reviewer who has blocked this owner or co-manager is still unreachable
+   * through the bell. That is a second field because it was one field until
+   * recently: `replyingSubjectId` carried both jobs, so passing `null` to hide
+   * an anonymous owner's name also dropped the gate and delivered the row to
+   * somebody who had blocked them. `notifyQuestionAnsweredBestEffort` below
+   * splits the same two questions the same way, into `memberUserId` and
+   * `isNamedToTheAsker`.
+   */
+  private async notifyReviewRepliedBestEffort(options: {
+    review: ListingReview;
+    listing: Listing;
+    replierUserId: string;
+    isReplierOwner: boolean;
+    isFirstReply: boolean;
+  }): Promise<void> {
+    const { review, listing, replierUserId, isReplierOwner, isFirstReply } =
+      options;
+    if (!isFirstReply) return;
+    // `listing_reviews.reviewer_id` is `ON DELETE SET NULL`, so an erased
+    // account leaves the review standing with nobody left to tell.
+    // `ReviewReplyNotifier` guards this too; returning here keeps the intent
+    // legible at the site that knows why the column is nullable.
+    if (!review.reviewerId) return;
+    // Somebody answering their own review, which IS reachable:
+    // `DirectoryService.addReview` blocks only `listing.ownerId`, so a
+    // co-manager can review the listing they help run and then reply to it.
+    // The notifier guards this too, off `blockGateActorId` (the real replier,
+    // which this site now passes), so the two agree. Kept here because this is
+    // the site that knows a co-manager can be their own reviewer, and because
+    // the notifier's guard used to read the NAMED replier and so was blind to
+    // exactly this case.
+    if (replierUserId === review.reviewerId) return;
+
+    // A co-manager is never the subject of the question, so `isReplierOwner`
+    // gates it before the listing's own visibility is consulted at all.
+    const isReplierNamedOnThePage =
+      isReplierOwner && isOwnerPubliclyNamed(listing);
+
+    try {
+      await this.reviewReplies.notifyReviewReplied({
+        reviewAuthorId: review.reviewerId,
+        replyingSubjectId: isReplierNamedOnThePage ? replierUserId : null,
+        // The member who actually typed the reply, passed whether or not the
+        // row above is allowed to name them. This is what
+        // `NotificationsService.create`'s block/mute gate keys on, so a
+        // reviewer who blocked this owner or co-manager stays unreachable even
+        // on the rows that name nobody. Withholding a name must never withhold
+        // the safety gate with it.
+        blockGateActorId: replierUserId,
+        subjectLabel: listing.name,
+        // `sourceHrefFromPayload` resolves `listing` + `listingSlug` to the
+        // business detail page, which is where the reply is published, so this
+        // row is genuinely clickable.
+        deepLinkSource: 'listing',
+        deepLinkSlug: listing.slug,
+      });
+    } catch (error) {
+      // Belt and braces. `ReviewReplyNotifier` already swallows its own
+      // failures, so nothing should reach here; the guard is what makes this
+      // method's name true no matter what that class does later. Same shape as
+      // `notifyQuestionAnsweredBestEffort` above.
+      this.logger.warn(
+        `Failed to notify a reply to review ${review.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   // Moderator/admin-only (`ListingsController.setStatus`'s `RolesGuard`
@@ -2053,8 +2191,21 @@ export class ListingsService {
     // under the business's name on its own page, and leaving it owner-only
     // would mean the person actually running the page watches questions go
     // unanswered.
-    const { listing } = await this.loadOwnedOrCoManagedOr404(ref, userId);
-    return this.writePublicAnswer(listing, questionId, userId, answer, false);
+    const { listing, isOwner } = await this.loadOwnedOrCoManagedOr404(
+      ref,
+      userId,
+    );
+    // `isOwner` rides through only so the notification can tell an OWNER from a
+    // co-manager. The answer itself is recorded and published identically for
+    // both: the page attributes it to the business.
+    return this.writePublicAnswer(
+      listing,
+      questionId,
+      userId,
+      answer,
+      false,
+      isOwner,
+    );
   }
 
   /**
@@ -2097,6 +2248,8 @@ export class ListingsService {
       moderatorUserId,
       answer,
       true,
+      // Staff are never the listing's owner on this path, whoever owns it.
+      false,
     );
   }
 
@@ -2112,6 +2265,7 @@ export class ListingsService {
     actorUserId: string,
     answer: string,
     isModerator: boolean,
+    isActorTheOwner: boolean,
   ): Promise<ListingPublicQuestionDTO> {
     const question = await this.publicQuestions.findOne({
       where: { id: questionId, listingId: listing.id },
@@ -2134,11 +2288,13 @@ export class ListingsService {
     question.isAnsweredByModerator = isModerator;
     const saved = await this.publicQuestions.save(question);
 
-    await this.notifyQuestionAnsweredBestEffort(
-      saved.askerId,
-      listing,
-      isModerator ? null : actorUserId,
-    );
+    await this.notifyQuestionAnsweredBestEffort(saved.askerId, listing, {
+      // Platform staff are not a member the asker is in a conversation with,
+      // so a moderator answer carries no member at all. See the helper.
+      memberUserId: isModerator ? null : actorUserId,
+      isNamedToTheAsker:
+        !isModerator && isActorTheOwner && isOwnerPubliclyNamed(listing),
+    });
 
     const asker = saved.askerId
       ? await this.profiles.findOne({
@@ -2162,35 +2318,76 @@ export class ListingsService {
    * throws: the answer has already committed, and the same never-block ordering
    * every other notification in this module uses.
    *
-   * `ownerActorId` is the answering OWNER, or `null` when a moderator answered.
-   * Passing no actor for a moderator answer is deliberate on two counts: the
-   * asker is owed the answer rather than the name of the staff member who wrote
-   * it, and an actor is also what block/mute filtering keys on, which is a
-   * member-to-member control that should not silence platform staff.
+   * `answerer` splits the two things "who answered" is used for, because they
+   * are not the same person-shaped question:
+   *
+   * - `memberUserId` is the MEMBER who wrote the answer, owner or co-manager,
+   *   and `null` when platform staff did. It is what
+   *   `NotificationsService.create`'s block/mute gate keys on, so an asker who
+   *   has blocked this member is never reached through the bell. It is `null`
+   *   for a moderator on purpose: block/mute is a member-to-member control and
+   *   must not let one member silence platform staff.
+   * - `isNamedToTheAsker` decides whether that member also becomes
+   *   `payload.actorId`, which is the field the bell reads to give the row a
+   *   name, a face and a link to their profile (`actorIdOf` in
+   *   `notification-response.ts`, and `resolveActor` on the push side).
+   *
+   * WHY THOSE ARE SPLIT, which is a change to a shipped feature. This bell row
+   * used to carry the answering owner as `actorId` unconditionally. Meanwhile
+   * the public Q&A names nobody: `ListingPublicQuestionDTO` attributes an
+   * answer by ROLE only (`answeredByRole: 'owner' | 'moderator'`), a
+   * co-manager is invisible on the public page by design
+   * (`listing-owner-personal-fields.ts`), and an owner on `visibility: 'anon'`
+   * or `'role'`, or one who withheld `linkToProfile`, has told this platform
+   * not to tie their name to this business. So the asker's bell was handing out
+   * an identity the page they asked on deliberately withholds, which on this
+   * platform outs a queer business owner. Now the actor rides along only where
+   * `isOwnerPubliclyNamed` says the public detail read already links that
+   * owner's profile, the same predicate `ownerIdentity` builds the page from
+   * and the same one `notifyReviewRepliedBestEffort` uses.
+   *
+   * The row stays USEFUL when the actor is withheld: the asker is owed the
+   * answer. `listingName` still rides along for the copy, `source` +
+   * `listingSlug` still build the deep link to the page the answer is published
+   * on, and an actorless row keeps its generic text and bell icon rather than
+   * rendering empty (`notifications.adapters.ts` only upgrades a row to an
+   * avatar and a profile link when the backend resolved an actor). The answer
+   * text itself was never in the payload and still is not: it lives on the page
+   * this row opens.
    */
   private async notifyQuestionAnsweredBestEffort(
     askerId: string | null,
     listing: Listing,
-    ownerActorId: string | null,
+    answerer: { memberUserId: string | null; isNamedToTheAsker: boolean },
   ): Promise<void> {
     // Null after an account erasure nulled the FK out. The question and its
     // answer survive for other readers; there is simply nobody left to tell.
     if (!askerId) return;
-    // An owner answering their own question would be a notification to
-    // themselves. `askQuestion` blocks the owner from asking, so this is
-    // belt-and-braces against a future path that does not.
-    if (ownerActorId === askerId) return;
+    // Somebody answering their own question would be a notification to
+    // themselves. `askQuestion` blocks the OWNER from asking, so the reachable
+    // case is a co-manager who asked before taking the seat. Guarded on the
+    // real member rather than on the published actor, so withholding a name
+    // above can never resurrect a self-notification here.
+    if (answerer.memberUserId && answerer.memberUserId === askerId) return;
     try {
       await this.notifications.create(
         askerId,
         NotificationType.ListingPublicQuestionAnswered,
         {
-          ...(ownerActorId ? { actorId: ownerActorId } : {}),
+          // Spread only where the public page already links this owner's
+          // profile. Everything else answers the question without naming
+          // anyone, exactly as the page does.
+          ...(answerer.isNamedToTheAsker && answerer.memberUserId
+            ? { actorId: answerer.memberUserId }
+            : {}),
           source: 'listing',
           listingSlug: listing.slug,
           listingName: listing.name,
         },
-        ownerActorId ?? undefined,
+        // The block/mute gate, passed even where the payload omits the id: the
+        // same split `SafeSpaceVouch` uses for an anonymous vouch, so an asker
+        // who blocked this member is still not reached.
+        answerer.memberUserId ?? undefined,
       );
     } catch {
       // Intentionally ignored — the answer already committed.

@@ -33,6 +33,7 @@ import {
 } from './entities/listing.entity';
 import { emptyAccessibilityAnswers } from './listing-accessibility';
 import { ListingCoManagersService } from './listing-co-managers.service';
+import { ReviewReplyNotifier } from '../submissions/review-reply-notifier.service';
 import { ListingsService } from './listings.service';
 
 // A chainable query-builder stub whose terminal methods resolve to empty
@@ -236,6 +237,11 @@ describe('ListingsService', () => {
   };
   let messaging: { deliverEnquiry: jest.Mock };
   let notifications: { create: jest.Mock };
+  // PRD-47: the shared "the subject answered your review" emit, which
+  // `replyToReview` calls. Mocked rather than exercised end to end, so
+  // these tests assert on the NOTICE this service composes; the notifier's
+  // own guards live in `submissions/`.
+  let reviewReplies: { notifyReviewReplied: jest.Mock };
   let dataSource: { query: jest.Mock; transaction: jest.Mock };
   let coManagers: {
     isActiveCoManager: jest.Mock;
@@ -310,6 +316,7 @@ describe('ListingsService', () => {
     };
     messaging = { deliverEnquiry: jest.fn() };
     notifications = { create: jest.fn() };
+    reviewReplies = { notifyReviewReplied: jest.fn() };
     coManagers = {
       isActiveCoManager: jest.fn().mockResolvedValue(false),
       listingIdsCoManagedBy: jest.fn().mockResolvedValue([]),
@@ -365,6 +372,7 @@ describe('ListingsService', () => {
         // `listing-co-manager-permissions.spec.ts`, where the answer is varied
         // deliberately.
         { provide: ListingCoManagersService, useValue: coManagers },
+        { provide: ReviewReplyNotifier, useValue: reviewReplies },
       ],
     }).compile();
     service = module.get(ListingsService);
@@ -847,6 +855,206 @@ describe('ListingsService', () => {
       );
 
       expect(dto.ownerReply?.text).toBe('New reply');
+    });
+
+    // PRD-47. The directory was the precedent the employer and housing review
+    // replies were built from, and it was the one that answered the reviewer
+    // in silence.
+    describe('telling the review author about it', () => {
+      it('tells the author, deep-linking the business page the reply is on', async () => {
+        listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+        reviews.findOne.mockResolvedValue({ ...baseReview });
+
+        await service.replyToReview('QPL-2026-0001', 'owner-1', 'review-1', {
+          text: 'Thanks for the kind words!',
+        });
+
+        expect(reviewReplies.notifyReviewReplied).toHaveBeenCalledTimes(1);
+        expect(reviewReplies.notifyReviewReplied).toHaveBeenCalledWith({
+          reviewAuthorId: 'member-1',
+          // `linkToProfile` is false on the fixture, so the page does not name
+          // the owner and neither does the bell.
+          replyingSubjectId: null,
+          // The gate actor is the real replier even so, which is the whole
+          // point of the second field: withholding the name must not withhold
+          // the block/mute gate.
+          blockGateActorId: 'owner-1',
+          subjectLabel: 'Lux Café',
+          deepLinkSource: 'listing',
+          deepLinkSlug: 'lux-cafe',
+        });
+      });
+
+      it('names the owner only where the public page already links them', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: 'owner-1',
+            visibility: 'public',
+            linkToProfile: true,
+          }),
+        );
+        reviews.findOne.mockResolvedValue({ ...baseReview });
+
+        await service.replyToReview('QPL-2026-0001', 'owner-1', 'review-1', {
+          text: 'Thanks!',
+        });
+
+        expect(reviewReplies.notifyReviewReplied).toHaveBeenCalledWith(
+          expect.objectContaining({ replyingSubjectId: 'owner-1' }),
+        );
+      });
+
+      it('never names an owner who chose to stay anonymous', async () => {
+        // `visibility: 'anon'` is a safety decision about being publicly known
+        // as a queer business owner. An actor on this row would put their name,
+        // face and profile link in the reviewer's bell and undo it.
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: 'owner-1',
+            visibility: 'anon',
+            linkToProfile: true,
+          }),
+        );
+        reviews.findOne.mockResolvedValue({ ...baseReview });
+
+        await service.replyToReview('QPL-2026-0001', 'owner-1', 'review-1', {
+          text: 'Thanks!',
+        });
+
+        expect(reviewReplies.notifyReviewReplied).toHaveBeenCalledWith(
+          expect.objectContaining({ replyingSubjectId: null }),
+        );
+      });
+
+      it('still gates an anonymous owner on block and mute, having withheld their name', async () => {
+        // The regression this exists for: `replyingSubjectId` used to be both
+        // the name and the block/mute gate, so hiding the name here silently
+        // handed the row to a reviewer who had blocked this owner.
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: 'owner-1',
+            visibility: 'anon',
+            linkToProfile: true,
+          }),
+        );
+        reviews.findOne.mockResolvedValue({ ...baseReview });
+
+        await service.replyToReview('QPL-2026-0001', 'owner-1', 'review-1', {
+          text: 'Thanks!',
+        });
+
+        expect(reviewReplies.notifyReviewReplied).toHaveBeenCalledWith(
+          expect.objectContaining({
+            replyingSubjectId: null,
+            blockGateActorId: 'owner-1',
+          }),
+        );
+      });
+
+      it('never names a co-manager, who is invisible on the public page', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: 'owner-1',
+            visibility: 'public',
+            linkToProfile: true,
+          }),
+        );
+        coManagers.isActiveCoManager.mockResolvedValue(true);
+        reviews.findOne.mockResolvedValue({ ...baseReview });
+
+        await service.replyToReview(
+          'QPL-2026-0001',
+          'co-manager-1',
+          'review-1',
+          { text: 'Thanks!' },
+        );
+
+        expect(reviewReplies.notifyReviewReplied).toHaveBeenCalledWith(
+          expect.objectContaining({
+            replyingSubjectId: null,
+            // A blocked co-manager stays unreachable too, on the same field.
+            blockGateActorId: 'co-manager-1',
+          }),
+        );
+      });
+
+      it('stays silent when the owner edits a reply they already published', async () => {
+        // The harassment vector: one listing carries ONE reply and this method
+        // overwrites it, so notifying per save would let an owner ring the
+        // reviewer's bell as often as they cared to retype it.
+        listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+        reviews.findOne.mockResolvedValue({
+          ...baseReview,
+          ownerReplyText: 'Old reply',
+          ownerRepliedAt: new Date('2026-01-02T00:00:00.000Z'),
+        });
+
+        await service.replyToReview('QPL-2026-0001', 'owner-1', 'review-1', {
+          text: 'New reply',
+        });
+
+        expect(reviewReplies.notifyReviewReplied).not.toHaveBeenCalled();
+        // The edit itself still lands.
+        expect(reviews.save).toHaveBeenCalledWith(
+          expect.objectContaining({ ownerReplyText: 'New reply' }),
+        );
+      });
+
+      it('writes nothing when the review author has erased their account', async () => {
+        // `listing_reviews.reviewer_id` is ON DELETE SET NULL: the review
+        // survives for other readers with nobody left to tell.
+        listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+        reviews.findOne.mockResolvedValue({
+          ...baseReview,
+          reviewerId: null,
+        });
+
+        const dto = await service.replyToReview(
+          'QPL-2026-0001',
+          'owner-1',
+          'review-1',
+          { text: 'Thanks!' },
+        );
+
+        expect(reviewReplies.notifyReviewReplied).not.toHaveBeenCalled();
+        expect(dto.ownerReply?.text).toBe('Thanks!');
+      });
+
+      it('does not notify a co-manager who replied to their own review', async () => {
+        // Reachable: `DirectoryService.addReview` blocks only the OWNER from
+        // reviewing, so a co-manager can review the listing they help run. The
+        // notifier guards it too, off `blockGateActorId`, but this service is
+        // where a reader learns the case exists, so it is caught here as well.
+        listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+        coManagers.isActiveCoManager.mockResolvedValue(true);
+        reviews.findOne.mockResolvedValue({
+          ...baseReview,
+          reviewerId: 'co-manager-1',
+        });
+
+        await service.replyToReview(
+          'QPL-2026-0001',
+          'co-manager-1',
+          'review-1',
+          { text: 'Thanks!' },
+        );
+
+        expect(reviewReplies.notifyReviewReplied).not.toHaveBeenCalled();
+      });
+
+      it('never fails the reply when the bell write fails', async () => {
+        listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+        reviews.findOne.mockResolvedValue({ ...baseReview });
+        reviewReplies.notifyReviewReplied.mockRejectedValue(
+          new Error('bell down'),
+        );
+
+        await expect(
+          service.replyToReview('QPL-2026-0001', 'owner-1', 'review-1', {
+            text: 'Thanks!',
+          }),
+        ).resolves.toBeDefined();
+      });
     });
   });
 
@@ -1333,7 +1541,7 @@ describe('ListingsService', () => {
       expect(publicQuestions.save).not.toHaveBeenCalled();
     });
 
-    it("records an owner answer as the OWNER's, and notifies the asker with the owner as actor", async () => {
+    it("records an owner answer as the OWNER's, and tells the asker", async () => {
       listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
       publicQuestions.findOne.mockResolvedValue(openQuestion());
 
@@ -1355,9 +1563,202 @@ describe('ListingsService', () => {
       expect(notifications.create).toHaveBeenCalledWith(
         'asker-1',
         NotificationType.ListingPublicQuestionAnswered,
-        expect.objectContaining({ actorId: 'owner-1', source: 'listing' }),
+        expect.objectContaining({
+          source: 'listing',
+          listingSlug: 'lux-cafe',
+          listingName: 'Lux Café',
+        }),
+        // The block/mute gate still keys on the real answerer, whether or not
+        // the row is allowed to name them.
         'owner-1',
       );
+    });
+
+    /**
+     * The public Q&A attributes an answer by ROLE only
+     * (`answeredByRole: 'owner' | 'moderator'`), so the bell must not hand the
+     * asker an identity the page they asked on withholds. An actor on this row
+     * is the answerer's name, face and a link to their profile.
+     */
+    describe('naming the answerer to the asker', () => {
+      /** The payload of the one `notifications.create` call, for the tests
+       *  below that care whether `actorId` is in it. */
+      const answeredPayload = () => {
+        const call = notifications.create.mock.calls[0] as [
+          string,
+          NotificationType,
+          Record<string, unknown>,
+          string | undefined,
+        ];
+        return call[2];
+      };
+
+      it('names an owner whose public page already links their profile', async () => {
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: 'owner-1',
+            visibility: 'public',
+            linkToProfile: true,
+          }),
+        );
+        publicQuestions.findOne.mockResolvedValue(openQuestion());
+
+        await service.answerPublicQuestion(
+          'QPL-2026-0001',
+          'public-question-1',
+          'owner-1',
+          'Yes.',
+        );
+
+        expect(answeredPayload()).toHaveProperty('actorId', 'owner-1');
+      });
+
+      it('never names an owner who chose to stay anonymous', async () => {
+        // `visibility: 'anon'` is a safety decision about being publicly known
+        // as a queer business owner. An actor on this row would undo it from a
+        // page that names nobody.
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: 'owner-1',
+            visibility: 'anon',
+            linkToProfile: true,
+          }),
+        );
+        publicQuestions.findOne.mockResolvedValue(openQuestion());
+
+        await service.answerPublicQuestion(
+          'QPL-2026-0001',
+          'public-question-1',
+          'owner-1',
+          'Yes.',
+        );
+
+        expect(answeredPayload()).not.toHaveProperty('actorId');
+      });
+
+      it('never names an owner who publishes only their role', async () => {
+        // `visibility: 'role'` publishes "co-founder and baker" and refuses the
+        // real name, the first name and the profile link alike.
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: 'owner-1',
+            visibility: 'role',
+            linkToProfile: true,
+          }),
+        );
+        publicQuestions.findOne.mockResolvedValue(openQuestion());
+
+        await service.answerPublicQuestion(
+          'QPL-2026-0001',
+          'public-question-1',
+          'owner-1',
+          'Yes.',
+        );
+
+        expect(answeredPayload()).not.toHaveProperty('actorId');
+      });
+
+      it('never names an owner who withheld the profile link', async () => {
+        // A `public` listing still prints `ownerName` as free text, and that is
+        // not the same consent: an actor is a route to the member's profile,
+        // which is exactly what `linkToProfile: false` refuses.
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: 'owner-1',
+            visibility: 'public',
+            linkToProfile: false,
+          }),
+        );
+        publicQuestions.findOne.mockResolvedValue(openQuestion());
+
+        await service.answerPublicQuestion(
+          'QPL-2026-0001',
+          'public-question-1',
+          'owner-1',
+          'Yes.',
+        );
+
+        expect(answeredPayload()).not.toHaveProperty('actorId');
+      });
+
+      it('never names a co-manager, who is invisible on the public page', async () => {
+        // Regardless of the OWNER's visibility: the co-manager seat itself is
+        // never published, so naming the person who typed the answer would
+        // reveal a relationship the page does not carry at all.
+        listings.findOne.mockResolvedValue(
+          baseListing({
+            ownerId: 'owner-1',
+            visibility: 'public',
+            linkToProfile: true,
+          }),
+        );
+        coManagers.isActiveCoManager.mockResolvedValue(true);
+        publicQuestions.findOne.mockResolvedValue(openQuestion());
+
+        await service.answerPublicQuestion(
+          'QPL-2026-0001',
+          'public-question-1',
+          'co-manager-1',
+          'Yes.',
+        );
+
+        expect(answeredPayload()).not.toHaveProperty('actorId');
+        // The block/mute gate still keys on them, so an asker who blocked this
+        // co-manager is not reached even though the row will not name them.
+        const call = notifications.create.mock.calls[0] as [
+          string,
+          NotificationType,
+          Record<string, unknown>,
+          string | undefined,
+        ];
+        expect(call[3]).toBe('co-manager-1');
+      });
+
+      it('still answers usefully with no actor: the deep link survives', async () => {
+        // The asker is owed the ANSWER. Withholding the name must not leave a
+        // row with nothing in it: `source` + `listingSlug` build the link to
+        // the page the answer is published on, and `listingName` is the
+        // business's own public name.
+        listings.findOne.mockResolvedValue(
+          baseListing({ ownerId: 'owner-1', visibility: 'anon' }),
+        );
+        publicQuestions.findOne.mockResolvedValue(openQuestion());
+
+        await service.answerPublicQuestion(
+          'QPL-2026-0001',
+          'public-question-1',
+          'owner-1',
+          'Yes.',
+        );
+
+        expect(answeredPayload()).toEqual({
+          source: 'listing',
+          listingSlug: 'lux-cafe',
+          listingName: 'Lux Café',
+        });
+      });
+
+      it('does not notify a co-manager who answered their own question', async () => {
+        // Reachable: `askQuestion` blocks the OWNER from asking, so a member
+        // can ask and later take a co-manager seat on the same listing. The
+        // guard reads the real answerer rather than the published actor, which
+        // is null for a co-manager.
+        listings.findOne.mockResolvedValue(baseListing({ ownerId: 'owner-1' }));
+        coManagers.isActiveCoManager.mockResolvedValue(true);
+        publicQuestions.findOne.mockResolvedValue({
+          ...openQuestion(),
+          askerId: 'co-manager-1',
+        });
+
+        await service.answerPublicQuestion(
+          'QPL-2026-0001',
+          'public-question-1',
+          'co-manager-1',
+          'Yes.',
+        );
+
+        expect(notifications.create).not.toHaveBeenCalled();
+      });
     });
 
     it('never lets a moderator answer read as the business speaking', async () => {

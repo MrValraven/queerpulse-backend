@@ -68,11 +68,18 @@ const qbStub = () => {
     'take',
     'limit',
     'offset',
+    // Singular, and distinct from `setParameters`: the tag facet count query
+    // binds one parameter per tag as it builds the select
+    // (`countByFilterClauses`), same as `profiles.service.spec.ts`'s stub.
+    'setParameter',
   ]) {
     qb[m] = jest.fn().mockReturnValue(qb);
   }
   qb.getMany = jest.fn().mockResolvedValue([]);
   qb.getRawMany = jest.fn().mockResolvedValue([]);
+  // The tag facet count reads one aggregate row. `undefined` is the honest
+  // stub: `countByFilterClauses` treats a missing row as zero for every tag.
+  qb.getRawOne = jest.fn().mockResolvedValue(undefined);
   qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
   return qb;
 };

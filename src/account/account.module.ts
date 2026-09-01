@@ -25,6 +25,7 @@ import { MagazineArticle } from '../magazine/entities/magazine-article.entity';
 import { MagazineAuthor } from '../magazine/entities/magazine-author.entity';
 import { MagazinePiece } from '../magazine/entities/magazine-piece.entity';
 import { MagazineStorySubmission } from '../magazine/entities/magazine-story-submission.entity';
+import { MediaReferencesModule } from '../media-references/media-references.module';
 import { MembershipCardsModule } from '../membership-cards/membership-cards.module';
 import { Message } from '../messaging/entities/message.entity';
 import { Notification } from '../notifications/entities/notification.entity';
@@ -86,6 +87,15 @@ import { DsarRequest } from './entities/dsar-request.entity';
     // `forwardRef`: `NotificationsModule` does not import `AccountModule`,
     // directly or transitively.
     NotificationsModule,
+    // `MediaReferenceResolver`: the erasure sweep's storage step asks it
+    // whether anything still points at each of the erased member's uploaded
+    // objects, and deletes only the ones nothing does. Without that check the
+    // sweep deleted by key prefix alone, which destroyed media that surviving
+    // rows still referenced (a gathering photo, whose `uploader_id` is
+    // `ON DELETE SET NULL`, being the case that surfaced it). Plain import, no
+    // `forwardRef`: `MediaReferencesModule` does not import `AccountModule`,
+    // directly or transitively.
+    MediaReferencesModule,
     TypeOrmModule.forFeature([
       DeletionRequest,
       DsarRequest,

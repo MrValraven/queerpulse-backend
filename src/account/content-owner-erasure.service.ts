@@ -54,6 +54,16 @@ import {
  *    `safe_space_nominations`) keep their text and lose their byline, which is
  *    the whole point of the `SET NULL` conversion: the next applicant, tenant
  *    or moderator still needs to read them.
+ *  - gathering photos (`event_photos.uploader_id`, `SET NULL` since
+ *    `AddEventPhotoAndFeaturedCommunityForeignKeys1785001300000`) stay in the
+ *    album they were added to and lose their uploader, on the same reasoning
+ *    as the reviews above: an album is the shared record of an event that
+ *    other attendees are in, and one attendee leaving does not withdraw the
+ *    photographs they took of everyone else. Nothing to do here, but the
+ *    STORAGE side of that promise had to be repaired:
+ *    `AccountDeletionProcessorService` step 4 used to delete every object under
+ *    the member's key prefixes, which left these rows pointing at deleted
+ *    objects. It now deletes only objects no surviving row references.
  *
  * ## Wiring: READ BEFORE CALLING
  *

@@ -15,6 +15,8 @@ import {
   COMMUNITY_POST_CREATED,
   CommunityPostCreatedEvent,
 } from './community.events';
+import { Event } from '../events/entities/event.entity';
+import { EventPhoto } from '../events/entities/event-photo.entity';
 import { StorageService } from '../storage/storage.service';
 import { escapeLikeTerm } from '../common/like-escape';
 import { MemberLookup, MemberRef } from '../common/member-ref';
@@ -144,6 +146,18 @@ export class CommunityPostsService {
     // does with this entity in this same module (`Report` is registered once
     // in `CommunitiesModule`, shared by both providers).
     @InjectRepository(Report) private readonly reports: Repository<Report>,
+    // Read-only, for the `event_photo` arm of that same queue (TS-13). A photo
+    // report reaches a community moderator only through
+    // `listCommunityReports`, and the row carries the caption, the uploader
+    // and the album's own timestamp. `EventPhoto` is registered once in
+    // `CommunitiesModule`, the same cross-module `forFeature` reuse `Report`
+    // and `Event` already have there; `EventsModule` provides services and
+    // never repositories.
+    @InjectRepository(EventPhoto)
+    private readonly eventPhotos: Repository<EventPhoto>,
+    // Read-only, and only for the title a photo report's excerpt names its
+    // gathering by.
+    @InjectRepository(Event) private readonly events: Repository<Event>,
     private readonly mentions: MentionNotificationService,
     // Roster-wide fan-out on post creation (see `notifyRosterOfPost`). Batched
     // through `createForRecipients`, the same path
@@ -159,6 +173,18 @@ export class CommunityPostsService {
   // A community post/reply can be taken down under either taxonomy code
   // (`post` / `reply`), keyed by the row's uuid — reads check both.
   private static readonly SUBJECT_TYPES = ['post', 'reply'];
+
+  // The takedown codes the community moderation queue has to check, which is
+  // the post/reply pair plus `event_photo` (TS-13). Kept apart from
+  // `SUBJECT_TYPES` above so the post/reply FEEDS never widen: only the queue
+  // ever holds a photo id, and every id in all three tables is a uuid from a
+  // disjoint space, so the wider list can never let one table's takedown
+  // answer for another's row.
+  private static readonly REPORT_SUBJECT_TYPES = [
+    'post',
+    'reply',
+    'event_photo',
+  ];
 
   // Owner/co-owner/mod see moderated content (flagged); ordinary
   // members/non-members do not receive hidden content. `co_owner` is a role
@@ -648,17 +674,29 @@ export class CommunityPostsService {
   }
 
   // GET /communities/:slug/reports — owner/mod-only queue of OPEN reports
-  // whose subject resolves to a post or reply IN THIS COMMUNITY. Resolution
-  // mirrors `CommunityAutoFreezeService.resolveCommunity`'s post/reply
-  // handling and `admin-communities/community-report-scope.ts`'s aggregation
-  // shape, narrowed from admin-wide to one community and from totals to the
-  // actual rows a moderator queue needs.
+  // whose subject resolves to a post or reply IN THIS COMMUNITY, or (TS-13) to
+  // a photograph in the album of a gathering this community hosts. Resolution
+  // mirrors `CommunityAutoFreezeService.resolveCommunity` and
+  // `admin-communities/community-report-scope.ts`'s aggregation shape,
+  // narrowed from admin-wide to one community and from totals to the actual
+  // rows a moderator queue needs.
   //
-  // Each row carries the content it is about (excerpt, author, thread id,
-  // moderation state) so a moderator reads the statement before acting on it.
-  // Resolving that stays batched: whatever the page size, this runs a fixed
-  // five queries (reports, posts, replies, authors, moderation states) rather
-  // than one lookup per report.
+  // THE READ HAS TO MATCH THE WRITE, EXACTLY. `ModerationService
+  // .communityIdForReportSubject` decides which reports a community moderator
+  // may action, and it answers for three subject types: `post`, `reply` and
+  // `event_photo`. This predicate is the only permitted read that hands a
+  // community moderator a report id, so anything that resolver attributes to
+  // this community and this query does not is a report they may act on and
+  // cannot find, and anything this query shows and that resolver does not
+  // attribute here is a report they can see and will be refused. Change the
+  // two together or neither.
+  //
+  // Each row carries the content it is about (excerpt, author, thread id where
+  // there is one, moderation state) so a moderator reads what they are being
+  // asked to judge before acting on it. Resolving that stays batched: whatever
+  // the page size, this runs a fixed number of queries (reports, posts,
+  // replies, photos, then authors, moderation states and the photos'
+  // gatherings) rather than one lookup per report.
   //
   // The route lives on `CommunitiesController` (`GET /communities/:slug/reports`),
   // because a route's path is controller-prefix + method path and this
@@ -699,10 +737,26 @@ export class CommunityPostsService {
             WHERE "__scoped_reply"."id"::text = report.subject_id
               AND "__scoped_reply_post"."community_id" = :communityId
           ))
+          OR (report.subject_type = :eventPhotoType AND EXISTS (
+            SELECT 1 FROM "event_photos" "__scoped_photo"
+            JOIN "events" "__scoped_photo_event"
+              ON "__scoped_photo_event"."id" = "__scoped_photo"."event_id"
+            WHERE "__scoped_photo"."id"::text = report.subject_id
+              AND "__scoped_photo_event"."community_id" = :communityId
+          ))
         )`,
         {
           postType: ReportSubjectType.Post,
           replyType: ReportSubjectType.Reply,
+          // TS-13. The community has to be the GATHERING's own
+          // (`events.community_id`), never one inferred from the uploader's
+          // memberships, which would hand a photo report to a room that had
+          // nothing to do with the event. The join to `events` is INNER and
+          // the comparison is an equality, so a gathering that belongs to no
+          // community (`community_id IS NULL`) matches nothing and its photos
+          // stay platform-only. The failure this rules out is a photo with no
+          // community turning up in EVERY community's queue at once.
+          eventPhotoType: ReportSubjectType.EventPhoto,
           communityId: community.id,
         },
       )
@@ -719,9 +773,16 @@ export class CommunityPostsService {
    *
    * The subject ids arriving here already passed the scoping predicate above,
    * so every one of them is a real uuid of a post or reply inside this
-   * community. The posts/replies loads are still unconditional `find`s on
-   * those ids: a row can be tombstoned or moderation-hidden and must still
-   * reach the moderator, which is the whole point of the queue.
+   * community, or of a photo in one of its gatherings' albums. The loads are
+   * still unconditional `find`s on those ids: a row can be tombstoned or
+   * moderation-hidden and must still reach the moderator, which is the whole
+   * point of the queue. A row that has since disappeared entirely resolves to
+   * `content: null` and the report itself is still listed.
+   *
+   * `event_photos` has no soft-delete column, so a photo the uploader or an
+   * organizer took down is simply absent here and its report reads as
+   * `content: null`, the same "the row it pointed at is gone" case a
+   * hard-deleted post would produce.
    */
   private async attachReportedContent(
     rows: Report[],
@@ -742,49 +803,86 @@ export class CommunityPostsService {
           .map((report) => report.subjectId),
       ),
     ];
+    const photoIds = [
+      ...new Set(
+        rows
+          .filter(
+            (report) => report.subjectType === ReportSubjectType.EventPhoto,
+          )
+          .map((report) => report.subjectId),
+      ),
+    ];
 
-    const [postRows, replyRows] = await Promise.all([
+    const [postRows, replyRows, photoRows] = await Promise.all([
       postIds.length
         ? this.posts.find({ where: { id: In(postIds) } })
         : Promise.resolve([]),
       replyIds.length
         ? this.replies.find({ where: { id: In(replyIds) } })
         : Promise.resolve([]),
+      photoIds.length
+        ? this.eventPhotos.find({ where: { id: In(photoIds) } })
+        : Promise.resolve([]),
     ]);
 
     const postsById = new Map(postRows.map((post) => [post.id, post]));
     const repliesById = new Map(replyRows.map((reply) => [reply.id, reply]));
+    const photosById = new Map(photoRows.map((photo) => [photo.id, photo]));
 
-    const [authors, states] = await Promise.all([
+    // The gatherings ride in this second batch rather than a third round trip:
+    // they depend only on the photo rows, which are already in hand, and the
+    // authors/states lookups below do not depend on them.
+    const gatheringIds = [...new Set(photoRows.map((photo) => photo.eventId))];
+    const [authors, states, gatheringRows] = await Promise.all([
       new MemberLookup(this.profiles).byUserIds([
         ...new Set(
           nonNullIds([
             ...postRows.map((post) => post.authorId),
             ...replyRows.map((reply) => reply.authorId),
+            // A photo's "author" is its uploader, `ON DELETE SET NULL`, so an
+            // erased uploader drops out here exactly like an erased post
+            // author does.
+            ...photoRows.map((photo) => photo.uploaderId),
           ]),
         ),
       ]),
-      this.moderationStatesFor(postIds, replyIds),
+      this.reportModerationStatesFor(postIds, replyIds, photoIds),
+      gatheringIds.length
+        ? this.events.find({
+            where: { id: In(gatheringIds) },
+            select: { id: true, title: true, slug: true },
+          })
+        : Promise.resolve([]),
     ]);
+    const gatheringsById = new Map(
+      gatheringRows.map((gathering) => [gathering.id, gathering]),
+    );
 
     const now = new Date();
     return rows.map((report) => {
-      // Keyed by the report's OWN subject type: a post and a reply are both
-      // addressed by uuid, so looking a subject id up in both maps would let
-      // one table answer for the other.
+      // Keyed by the report's OWN subject type: a post, a reply and a photo
+      // are all addressed by uuid, so looking a subject id up in every map
+      // would let one table answer for another.
       const isReply = report.subjectType === ReportSubjectType.Reply;
-      const post = isReply ? null : (postsById.get(report.subjectId) ?? null);
+      const isPhoto = report.subjectType === ReportSubjectType.EventPhoto;
+      const post =
+        isReply || isPhoto ? null : (postsById.get(report.subjectId) ?? null);
       const reply = isReply
         ? (repliesById.get(report.subjectId) ?? null)
         : null;
-      const authorId = isReply
-        ? (reply?.authorId ?? null)
-        : (post?.authorId ?? null);
+      const photo = isPhoto ? (photosById.get(report.subjectId) ?? null) : null;
+      const authorId = isPhoto
+        ? (photo?.uploaderId ?? null)
+        : isReply
+          ? (reply?.authorId ?? null)
+          : (post?.authorId ?? null);
       return toCommunityReportDTO(
         report,
         {
           post,
           reply,
+          photo,
+          gathering: photo ? (gatheringsById.get(photo.eventId) ?? null) : null,
           author: authorRefOf(authors, authorId),
           moderation:
             states.get(report.subjectId) ?? CommunityPostsService.VISIBLE,
@@ -1659,6 +1757,22 @@ export class CommunityPostsService {
     return this.contentModeration.statesForAnyType(
       CommunityPostsService.SUBJECT_TYPES,
       [...postIds, ...replyIds],
+    );
+  }
+
+  // The same lookup for the moderation queue, which also carries gathering
+  // photos. ONE query for the whole page rather than a second call for the
+  // photo ids: `statesForAnyType` already spans several subject types and
+  // takes the strongest state per subject id, and post, reply and photo ids
+  // are uuids from disjoint tables, so nothing can collide.
+  private async reportModerationStatesFor(
+    postIds: string[],
+    replyIds: string[],
+    photoIds: string[],
+  ): Promise<Map<string, ContentModerationState>> {
+    return this.contentModeration.statesForAnyType(
+      CommunityPostsService.REPORT_SUBJECT_TYPES,
+      [...postIds, ...replyIds, ...photoIds],
     );
   }
 

@@ -75,6 +75,98 @@ export interface PartnerApplicationDTO extends PartnerDetailDTO {
   dueAt: string | null;
 }
 
+/**
+ * What the APPLICANT sees about their own application (PRD-37).
+ *
+ * A separate, deliberately small shape rather than a reuse of
+ * `PartnerApplicationDTO`, which is the admin queue's view and carries the
+ * reviewer's identity, the internal review note and the ops due clock. There
+ * is no global serializer in this app, so anything not named here cannot leak
+ * — and that is the point of writing the applicant's view as its own
+ * interface instead of spreading the admin one and deleting fields, which
+ * would silently re-admit every field a later change adds to the admin DTO.
+ *
+ * WHAT IS WITHHELD, and why (the same boundary `ReportsController.listMine`
+ * draws, which returns `resolvedAt` and none of the moderator's reasoning):
+ *
+ *  - `assignedStaffId` / `assignedStaffName` — which staff member is holding
+ *    the row. That is a reviewer's identity attached to a decision about the
+ *    applicant, and no other "mine" endpoint discloses it.
+ *  - `dueAt` — the partnerships team's internal fourteen-day SLA. It is an
+ *    ops clock the team set for itself, and showing it to an applicant turns
+ *    it into a promise nobody made to them.
+ *  - `featured`, `testimonialQuote`, `testimonialAuthor`, `testimonialRole` —
+ *    editorial fields the platform owns, not the applicant's, and meaningless
+ *    before approval.
+ *  - `submittedBy` — the caller themselves, by definition. Nothing to say.
+ *
+ * WHAT IS EXPOSED: the organisation's own submitted identity (`name`, `slug`,
+ * `city`, `tagline`), which is their own content read back to them; `status`;
+ * `createdAt`; `decidedAt`, the answer to "have I heard back yet?"; and, on a
+ * refusal, `reviewNote`. `slug` is here because an APPROVED application is a
+ * live directory entry and the submissions index links straight to it; on a
+ * pending or rejected row it resolves to no public page, which is correct.
+ */
+export interface MyPartnerApplicationDTO {
+  id: string;
+  slug: string;
+  name: string;
+  city: string;
+  tagline: string;
+  status: PartnerStatus;
+  /** ISO 8601. When the application was submitted. */
+  createdAt: string;
+  /**
+   * ISO 8601, or null. When an admin approved or rejected it. NULL while the
+   * application is still pending, and also on applications settled before
+   * this was recorded — see `Partner.decidedAt`. A client must render a
+   * decided-with-no-date row as decided, never as still waiting.
+   */
+  decidedAt: string | null;
+  /**
+   * The reviewer's reason for turning the application down, or null.
+   *
+   * PRD-48 settled on the record that a partner application's review note is
+   * member-facing: `SUBMISSION_KIND_NOTIFICATION[PartnerApplication]` sets
+   * `isReviewNoteDelivered: true`, so the decision notification already carries
+   * it, on the reasoning that a refusal with the reason withheld is a refusal
+   * with no reason. Given that, withholding it HERE would be the worst of the
+   * three options: the applicant reads the reason once in the bell and then
+   * loses it permanently the moment they clear the row, on the very page built
+   * to be the durable record.
+   *
+   * TWO CONDITIONS, both load-bearing (see `toMyPartnerApplication`):
+   *
+   *  - only on a `rejected` row, because `reviewNote` is written only by a
+   *    reject and is never cleared, so an application refused once and later
+   *    approved still carries the old refusal in the column;
+   *  - only when `decidedAt` is set, which is exactly the set of decisions made
+   *    after the note became member-facing. Every application settled before
+   *    that carries `decidedAt: null` (the migration deliberately does not
+   *    backfill it), and its note was written by a reviewer with every reason
+   *    to believe it was private. Publishing those retroactively is not a
+   *    decision this endpoint gets to make on their behalf.
+   */
+  reviewNote: string | null;
+}
+
+export function toMyPartnerApplication(p: Partner): MyPartnerApplicationDTO {
+  // See `MyPartnerApplicationDTO.reviewNote` for why both halves are required.
+  const isNoteMemberFacing =
+    p.status === PartnerStatus.Rejected && p.decidedAt !== null;
+  return {
+    id: p.id,
+    slug: p.slug,
+    name: p.name,
+    city: p.city,
+    tagline: p.tagline,
+    status: p.status,
+    createdAt: p.createdAt.toISOString(),
+    decidedAt: p.decidedAt ? p.decidedAt.toISOString() : null,
+    reviewNote: isNoteMemberFacing ? p.reviewNote : null,
+  };
+}
+
 export function toPartnerCard(p: Partner): PartnerCardDTO {
   return {
     slug: p.slug,

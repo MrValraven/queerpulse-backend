@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -9,6 +10,7 @@ import { isUniqueViolation } from '../common/db-errors';
 import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { CompanyOpenRolesService } from '../jobs/company-open-roles.service';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { ReviewReplyNotifier } from '../submissions/review-reply-notifier.service';
 import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import { MemberLookup, MemberRef, toMemberRef } from '../common/member-ref';
 import { normalizePage, paginate, Paginated } from '../common/pagination';
@@ -94,6 +96,15 @@ export interface CreateReviewInput {
   body: string[];
 }
 
+/** An edit replaces the whole review, so it carries the same four fields the
+ *  composer submitted. Deliberately no reply field: the employer's answer is a
+ *  different person's part of the same row. */
+export type UpdateReviewInput = CreateReviewInput;
+
+export interface ReplyToReviewInput {
+  text: string;
+}
+
 @Injectable()
 export class CompaniesService {
   constructor(
@@ -115,6 +126,10 @@ export class CompaniesService {
     // subject (keyed by the company slug — matching what the frontend report
     // control sends) withholds the company from every public read below.
     private readonly contentModeration: ContentModerationService,
+    // The one shared "the subject of your review answered it" emit (PRD-48).
+    // Companies must not grow their own notification type for this: the same
+    // silence was being shipped once per vertical, which is the whole finding.
+    private readonly reviewReplyNotifier: ReviewReplyNotifier,
   ) {}
 
   // A company is reported (and taken down) under the `company` subject code,
@@ -124,6 +139,29 @@ export class CompaniesService {
   // it entirely rather than rendering a tombstone. The owner still manages it
   // through the owner-gated write routes, which don't re-check this state.
   private static readonly SUBJECT_TYPE = 'company';
+
+  // A REVIEW (and, with it, the employer reply written under it) is reported
+  // and taken down under the `review` code, keyed by the review's uuid — the
+  // same code and the same shape the directory uses for its own reviews
+  // (`DirectoryService.REVIEW_SUBJECT_TYPE`). One subject covers the pair on
+  // purpose: an employer's reply read without the review it answers is not the
+  // same statement, which is exactly the reasoning `ReportSubjectType.Review`
+  // already records for listing reviews.
+  //
+  // A hidden OR removed review is dropped from every public read here and from
+  // the star aggregate with it, so a taken-down review cannot go on scoring the
+  // employer. This surface is public with no per-viewer staff role, so there is
+  // no tombstone: it simply stops rendering.
+  //
+  // KNOWN GAP, deliberately not papered over here: `ReportSubjectType.Review`
+  // resolves its moderator-queue excerpt through `LISTING_REVIEW_SQL` only, so
+  // a report filed against a COMPANY review reaches the queue and is actionable
+  // but shows no excerpt or author. Closing that is a `mergeSources` arm in
+  // `moderation/report-subject-resolver.service.ts` (the `post` subject already
+  // merges two tables this way); it is not a new taxonomy value, and inventing
+  // one here would be exactly the curated-list-beside-a-taxonomy drift this
+  // codebase has already paid for once.
+  private static readonly REVIEW_SUBJECT_TYPE = 'review';
 
   async create(
     ownerId: string,
@@ -303,6 +341,8 @@ export class CompaniesService {
       .createQueryBuilder('r')
       .where('r.company_id = :companyId', { companyId: company.id })
       .orderBy('r.created_at', 'DESC');
+    // In-query, so the paginated count and the page agree with each other.
+    this.excludeModeratedReviews(qb, 'r.id');
 
     return paginate(qb, page, async (rows) => {
       if (!rows.length) return [];
@@ -345,6 +385,196 @@ export class CompaniesService {
       }
       throw err;
     }
+  }
+
+  /**
+   * The EMPLOYER answers one review of them, in public. Posting again
+   * overwrites the previous reply (idempotent update, never a thread).
+   *
+   * WHO. The company's owner, and nobody else. `companies.owner_id` is
+   * nullable and NULL means the company profile is UNCLAIMED, so an unclaimed
+   * company has no one who can speak for it and every reply attempt on it is
+   * refused. That is the whole gate, and it is the honest one: a company is
+   * claimed by being CREATED (`create()` writes the caller onto `ownerId`), and
+   * there is no endpoint anywhere that transfers or claims an existing
+   * company's ownership afterwards, so `ownerId` is either the member who made
+   * the profile or NULL because that member's account was erased
+   * (`SetNullContentAuthorFksOnUserErasure1794610000000`).
+   *
+   * DELIBERATE DEVIATION FROM THE DIRECTORY. `ListingsService.replyToReview` is
+   * owner-OR-co-manager, because listings have a co-manager role. Companies
+   * have no such role: `update()` — editing the public profile, which is a
+   * strictly larger power than answering one review — is owner-only, and a
+   * `company_team_members` row means "may post jobs under this company"
+   * (`getCompanyForJobPosting`), not "may speak for it". So the reply follows
+   * this module's own ownership rule rather than importing the directory's.
+   *
+   * WHICH IDENTIFIER, and the other deviation. The directory splits the two
+   * writers across two namespaces: the owner replies through the owner-scoped
+   * `ref`, the reviewer edits through the public `slug`. A company has ONE
+   * identifier, its slug, so both writes are addressed by it and the two people
+   * are separated by the gate instead: `ownerId === userId` here,
+   * `authorId === userId` in `updateReview`. Two different people, editing two
+   * different parts of one row.
+   *
+   * The review is looked up SCOPED TO THIS COMPANY, so a reply cannot be
+   * attached to a review of somebody else's company via a guessed id.
+   *
+   * NOT gated on `assertNotModerated`, matching `update`/`createReview`: a
+   * takedown of the company must not also silence its owner's management.
+   */
+  async replyToReview(
+    slug: string,
+    userId: string,
+    reviewId: string,
+    dto: ReplyToReviewInput,
+  ): Promise<CompanyReviewDTO> {
+    const company = await this.loadOr404(slug);
+    if (!company.ownerId) {
+      // Unclaimed. Deliberately a 403 and not a 404: the company plainly
+      // exists (its page is public), so pretending otherwise would only
+      // confuse. There is nobody entitled to reply, which is what this says.
+      throw new ForbiddenException(
+        'This company profile is unclaimed, so it has no owner who can reply',
+      );
+    }
+    if (company.ownerId !== userId) {
+      throw new ForbiddenException('Only the owner can reply to this review');
+    }
+
+    const review = await this.reviews.findOne({
+      where: { id: reviewId, companyId: company.id },
+    });
+    if (!review) {
+      throw new NotFoundException('Review not found');
+    }
+
+    // `@IsNotEmpty` rejects `""` but not `" "`. A whitespace-only reply trims
+    // to `""`, and `toCompanyReview`'s truthy check on `ownerReplyText` would
+    // then serialize `ownerReply: null` while a real `ownerRepliedAt` stranded
+    // in the row: a reply that exists in the database and nowhere on screen.
+    // Re-check post-trim (mirrors `ListingsService.replyToReview`).
+    const text = dto.text.trim();
+    if (!text) {
+      throw new BadRequestException('Reply cannot be empty');
+    }
+
+    review.ownerReplyText = text;
+    review.ownerRepliedAt = new Date();
+    const saved = await this.reviews.save(review);
+
+    // Tell the reviewer their employer answered them, through the ONE shared
+    // notifier (PRD-48) rather than a company-specific notification type. Best
+    // effort by that method's contract: it never throws, so the reply the
+    // employer just wrote cannot fail on a bell failure. The self-reply and
+    // missing-author guards live inside it, and the block/mute gate fires there
+    // too, so a reviewer who has blocked this employer is not reached.
+    //
+    // NO DEEP LINK, on purpose. `SubmissionDeepLinkSource` has no `company`
+    // member, so the notifier is called without a source, and the row reads as
+    // an honest text-only line naming the employer instead of a link the client
+    // would silently fail to build. Adding `company` there (plus the matching
+    // `sourceHrefFromPayload` branch on the frontend) is what would let this row
+    // point at the reviews tab.
+    await this.reviewReplyNotifier.notifyReviewReplied({
+      reviewAuthorId: saved.authorId,
+      replyingSubjectId: userId,
+      subjectLabel: company.nameText,
+    });
+
+    // The reply's author is the employer, but the returned row still represents
+    // the REVIEWER, so resolve their profile to keep the DTO's author ref.
+    const author = saved.authorId
+      ? await this.memberRefOrNull(saved.authorId)
+      : null;
+    return toCompanyReview(saved, author);
+  }
+
+  /**
+   * The REVIEW'S AUTHOR edits their own review.
+   *
+   * A member gets exactly one review per company (`UQ_company_reviews`).
+   * Without an edit path that one review stood unchanged forever: a complaint
+   * about a practice the employer has since fixed, a warm note about a team
+   * that has since gone, a typo. The one-review rule is worth keeping, and this
+   * is what makes it fair to keep. It matters more here than on a cafe, because
+   * an employer review follows a real employment relationship that changes.
+   *
+   * Gated on being the AUTHOR, and 403 rather than 404 for somebody else's
+   * review: a company review id is a uuid already published in the public
+   * reviews payload, so there is no existence to protect and a 403 says what
+   * actually happened.
+   *
+   * WHAT AN EDIT DOES TO THE EMPLOYER'S REPLY, which is the interesting case:
+   *
+   *  - The reply is KEPT, always, and both its text and `ownerRepliedAt` are
+   *    untouched. Clearing it on edit would hand the reviewer a delete button
+   *    for the employer's public response, usable by changing one character.
+   *  - `editedAt` is stamped, and `isEditedAfterOwnerReply` goes true whenever
+   *    it lands after `ownerRepliedAt`. Silence here is the real hazard:
+   *    without it a reviewer could post something mild, collect a warm reply,
+   *    then rewrite the review into an accusation, leaving the employer
+   *    apparently replying agreeably to words they never saw. The page can now
+   *    say the review changed after the reply, so a reader can weigh both.
+   *  - Nothing is hidden and nothing is versioned. Publishing prior revisions
+   *    of a review would mean republishing text a member has actively
+   *    withdrawn, which on this platform is a worse failure than the ordering
+   *    problem it would solve.
+   *
+   * The edit stamp is applied ONLY when something actually changed, so
+   * re-saving an identical body cannot manufacture an "edited after the reply"
+   * flag against an employer. A genuine one-character change still can, and
+   * that is the honest reading: the review did change after the reply.
+   *
+   * The star aggregate needs no maintenance here, by design. Nothing on
+   * `companies` is denormalized: `reviewAggregatesForMany` recomputes from the
+   * review rows themselves, so changing `stars` on this row IS the aggregate
+   * update and it cannot drift.
+   */
+  async updateReview(
+    slug: string,
+    reviewId: string,
+    userId: string,
+    dto: UpdateReviewInput,
+  ): Promise<CompanyReviewDTO> {
+    const company = await this.loadOr404(slug);
+    const review = await this.reviews.findOne({
+      where: { id: reviewId, companyId: company.id },
+    });
+    if (!review) {
+      throw new NotFoundException('Review not found');
+    }
+    if (!review.authorId || review.authorId !== userId) {
+      throw new ForbiddenException('You can only edit your own review');
+    }
+
+    const title = dto.title.trim();
+    const byline = dto.byline.trim();
+    // Blank paragraphs are dropped rather than stored: the composer submits an
+    // array of paragraphs, and an empty one renders as a gap nobody typed.
+    const body = dto.body.map((paragraph) => paragraph.trim()).filter(Boolean);
+    if (!title || !body.length) {
+      throw new BadRequestException('Review cannot be empty');
+    }
+
+    const isChanged =
+      review.title !== title ||
+      review.stars !== dto.stars ||
+      review.byline !== byline ||
+      review.body.length !== body.length ||
+      review.body.some((paragraph, index) => paragraph !== body[index]);
+
+    review.title = title;
+    review.stars = dto.stars;
+    review.byline = byline;
+    review.body = body;
+    // `ownerReplyText` / `ownerRepliedAt` are pointedly untouched. See above.
+    if (isChanged) {
+      review.editedAt = new Date();
+    }
+    const saved = await this.reviews.save(review);
+
+    return toCompanyReview(saved, await this.memberRefOrNull(userId));
   }
 
   /**
@@ -410,6 +640,38 @@ export class CompaniesService {
       )`,
       { companySubjectType: CompaniesService.SUBJECT_TYPE },
     );
+  }
+
+  // NOT EXISTS predicate dropping any review under a `review` takedown (hidden
+  // OR removed) from a review query builder, in-query so pagination AND the
+  // star aggregate stay consistent with each other. `reviewIdColumn` is spliced
+  // verbatim into raw SQL, so pass an actual column reference and never user
+  // input; it is cast to text because `content_moderation.subject_id` is
+  // varchar while a review id is uuid. Mirrors
+  // `DirectoryService.excludeModeratedReviews`.
+  private excludeModeratedReviews(
+    qb: SelectQueryBuilder<CompanyReview>,
+    reviewIdColumn: string,
+  ): void {
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "content_moderation" "cmr"
+        WHERE "cmr"."subject_type" = :reviewSubjectType
+          AND "cmr"."subject_id" = ${reviewIdColumn}::text
+          AND ("cmr"."hidden_at" IS NOT NULL OR "cmr"."removed_at" IS NOT NULL)
+      )`,
+      { reviewSubjectType: CompaniesService.REVIEW_SUBJECT_TYPE },
+    );
+  }
+
+  // Resolves a userId to a `MemberRef`, or `null` when there is no profile
+  // behind it. Used on the review write paths, where a missing profile must
+  // degrade to an unattributed review rather than fail the write that already
+  // committed — unlike `memberRefFor` below, whose caller is creating the row
+  // and can still refuse.
+  private async memberRefOrNull(userId: string): Promise<MemberRef | null> {
+    const refs = await new MemberLookup(this.profiles).byUserIds([userId]);
+    return refs.get(userId) ?? null;
   }
 
   // Resolves a single userId to a MemberRef for an actor who just created a
@@ -500,12 +762,20 @@ export class CompaniesService {
     );
     if (!companyIds.length) return result;
 
-    const rows = await this.reviews
+    const aggregateQb = this.reviews
       .createQueryBuilder('r')
       .select('r.company_id', 'companyId')
       .addSelect('r.stars', 'stars')
-      .where('r.company_id IN (:...ids)', { ids: companyIds })
-      .getRawMany<{ companyId: string; stars: number | string }>();
+      .where('r.company_id IN (:...ids)', { ids: companyIds });
+    // A review a moderator has taken down must stop scoring the employer too,
+    // not just stop rendering. Filtered HERE rather than only in `listReviews`
+    // so the star average, the histogram and the visible list are computed over
+    // the same set of rows and cannot disagree.
+    this.excludeModeratedReviews(aggregateQb, 'r.id');
+    const rows = await aggregateQb.getRawMany<{
+      companyId: string;
+      stars: number | string;
+    }>();
 
     const starsByCompany = new Map<string, number[]>(
       companyIds.map((id) => [id, []]),

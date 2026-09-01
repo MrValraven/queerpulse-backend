@@ -88,6 +88,63 @@ export class HousingReview {
   @Column({ type: 'timestamptz' })
   submittedAt!: Date;
 
+  /**
+   * The LISTER's single public reply to a guest→lister review (PRD-47), and
+   * when they wrote it. Both NULL until they answer; posting again overwrites
+   * the text and re-stamps the time, so this is one reply rather than a thread.
+   *
+   * WHY IT LIVES ON THE REVIEW ROW and not in a table of its own: the reply is
+   * a property of the statement it answers. Read apart from the review it is
+   * not the same statement, which is also why it needs no report subject of its
+   * own (see `HousingReviewsService.replyToReview`).
+   *
+   * WHY ONLY ON A GUEST→LISTER ROW: that is the review the public listing block
+   * aggregates, so it is the only one with a public audience for a right of
+   * reply to correct. A reply on a lister→guest review would be a second
+   * private message between two people who already have a thread. The rule is
+   * enforced in the service, not by the schema, because the columns are the
+   * same shape either way and a CHECK here would have to be dropped the day the
+   * product decides otherwise.
+   *
+   * WHY A REPLY CANNOT BREAK BLINDNESS: replying proves the lister has read the
+   * review, so it is refused until the review has REVEALED (both parties
+   * submitted, or the anti-retaliation window elapsed). Reveal is the same
+   * predicate the public block uses, so a reply is possible exactly when there
+   * is a public audience and never one moment earlier.
+   */
+  @Column({ type: 'varchar', length: 2000, nullable: true })
+  listerReplyText!: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  listerRepliedAt!: Date | null;
+
+  /**
+   * When the AUTHOR last changed their own review, or NULL for one never
+   * edited (the correct reading of every row that predates this column).
+   *
+   * EDITS CLOSE AT REVEAL, so every stamp this column can now carry is from a
+   * still-blind review: you can correct your words up until they go public and
+   * not after. That is what keeps the blind window blind, because an edit
+   * allowed past reveal would let a member choose their rating only after
+   * reading the counterparty's review of them.
+   *
+   * The stamp still matters after that, because a pre-reveal edit is a real
+   * change to a review the counterparty and the public will go on to read, and
+   * the page says so ("edited on ..."). Only stamped when something actually
+   * changed, so re-saving an identical body writes nothing.
+   *
+   * ON THE ORDERING FLAG. An edit never clears `listerReplyText`, and comparing
+   * this against `listerRepliedAt` is what powers
+   * `HousingReviewDTO.isEditedAfterListerReply`. Because a reply is refused
+   * before reveal and an edit is refused after it, that comparison can no
+   * longer come out true on this surface. Both the guard and the flag are kept
+   * regardless: the guard is the line that matters the day the reveal gate
+   * moves, and the flag reports the row rather than the policy. See
+   * `HousingReviewsService.updateOwnReview`.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  editedAt!: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 

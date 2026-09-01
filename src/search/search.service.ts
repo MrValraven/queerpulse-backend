@@ -12,9 +12,11 @@ import { ResourcesService } from '../resources/resources.service';
 import { SubprofilesService } from '../subprofiles/subprofiles.service';
 import { TopicsService } from '../content/topics.service';
 import { SearchResultType } from './dto/search.query';
+import { isResultTypeLaunched, launchedResultTypes } from './search-features';
 import {
   SearchResponseDTO,
   SearchResultDTO,
+  SearchTypesDTO,
   memberToResult,
   communityToResult,
   eventToResult,
@@ -77,6 +79,21 @@ export class SearchService {
     private readonly topics: TopicsService,
   ) {}
 
+  /**
+   * The result types this service will actually query, for a client that
+   * renders one tab (or filter chip) per type.
+   *
+   * Reads the compile-time launch registry only: no database, no viewer
+   * scoping, no per-member variation. The answer changes on deploy, so a
+   * client can hold it for the life of a session.
+   */
+  launchedTypes(): SearchTypesDTO {
+    // Hand-mapped to the result types alone. Handing out `RESULT_TYPE_FEATURE`
+    // would be one line shorter and would leak the internal `FeatureKey`
+    // names with it: there is no global serializer to strip them.
+    return { types: launchedResultTypes() };
+  }
+
   async search(
     viewerUserId: string,
     rawQuery: string,
@@ -88,7 +105,14 @@ export class SearchService {
     const totalLimit = Math.min(limit ?? DEFAULT_TOTAL_LIMIT, 50);
     if (!query) return { query, results: [], hasMore: false };
 
-    const wants = (candidate: SearchResultType) => !type || type === candidate;
+    // A result type whose feature is closed is dropped BEFORE its query runs:
+    // `wants` gates the thunk, so the database never pays for rows that would
+    // be filtered out of the response anyway, and a caller asking for that one
+    // type (`?type=job`) gets an empty page instead of links into a surface
+    // the shipped bundle hides. See `search-features.ts`; the flags themselves
+    // live in `launchedFeatures.ts`.
+    const wants = (candidate: SearchResultType) =>
+      isResultTypeLaunched(candidate) && (!type || type === candidate);
     // `PER_TYPE_LIMIT` (6) keeps a broad, all-types query balanced across up
     // to 12 result groups. But it was applied even when the caller filtered
     // to a single `type` — so `?type=member&limit=50` still came back with

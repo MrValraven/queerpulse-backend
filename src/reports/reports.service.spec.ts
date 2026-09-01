@@ -8,6 +8,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { MetricsService } from '../metrics/metrics.service';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { EventPhoto } from '../events/entities/event-photo.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { Message } from '../messaging/entities/message.entity';
 import {
@@ -42,6 +43,12 @@ describe('ReportsService', () => {
   let messages: {
     findOne: jest.Mock;
   };
+  // The gathering-photo evidence snapshot reads this at filing time. Held on a
+  // variable so the photo cases can seed a row and the other cases can assert
+  // it is never even consulted.
+  let eventPhotos: {
+    findOne: jest.Mock;
+  };
   // Held on a variable (rather than inlined into the provider) so the flood-cap
   // cases can assert that a refused filing emits no `report.created`.
   let emitter: { emit: jest.Mock };
@@ -68,6 +75,9 @@ describe('ReportsService', () => {
     messages = {
       findOne: jest.fn().mockResolvedValue(null),
     };
+    eventPhotos = {
+      findOne: jest.fn().mockResolvedValue(null),
+    };
     emitter = { emit: jest.fn() };
     metrics = { incrementReportFloodRefusal: jest.fn() };
 
@@ -80,6 +90,7 @@ describe('ReportsService', () => {
           provide: getRepositoryToken(HousingListing),
           useValue: { findOne: jest.fn().mockResolvedValue(null) },
         },
+        { provide: getRepositoryToken(EventPhoto), useValue: eventPhotos },
         { provide: EventEmitter2, useValue: emitter },
         { provide: MetricsService, useValue: metrics },
       ],
@@ -223,6 +234,144 @@ describe('ReportsService', () => {
             }) as unknown,
           ],
         }),
+      );
+    });
+
+    // The gathering-photo snapshot. An `event_photo` report is the one subject
+    // whose entire content is an image, the uploader can delete that image (row,
+    // crop AND stored object), and the drawer's thread block is empty for every
+    // subject — so without this a moderator judging "is this photo outing
+    // someone" inside a one-hour SLA has prose about a picture and nothing else.
+    const PHOTO_ID = '7f1c0e2a-3b4d-4e5f-8a9b-0c1d2e3f4a5b';
+
+    it('snapshots the reported gathering photo into evidence at filing time', async () => {
+      eventPhotos.findOne.mockResolvedValue({
+        id: PHOTO_ID,
+        eventId: 'b2c3d4e5-6f70-4812-9a3b-4c5d6e7f8091',
+        storageKey:
+          'gathering-photos/11111111-2222-4333-8444-555555555555/66666666-7777-4888-8999-aaaaaaaaaaaa.jpg',
+        uploaderId: '11111111-2222-4333-8444-555555555555',
+        caption: 'Everyone at the after-party',
+        createdAt: new Date('2026-08-20T21:30:00.000Z'),
+      });
+
+      await service.create('reporter-1', {
+        subjectType: ReportSubjectType.EventPhoto,
+        subjectId: PHOTO_ID,
+        reasonCode: 'outing',
+      });
+
+      expect(eventPhotos.findOne).toHaveBeenCalledWith({
+        where: { id: PHOTO_ID },
+      });
+      expect(reports.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          evidence: [
+            expect.objectContaining({
+              type: 'photo-snapshot',
+              photoId: PHOTO_ID,
+              eventId: 'b2c3d4e5-6f70-4812-9a3b-4c5d6e7f8091',
+              storageKey:
+                'gathering-photos/11111111-2222-4333-8444-555555555555/66666666-7777-4888-8999-aaaaaaaaaaaa.jpg',
+              caption: 'Everyone at the after-party',
+              uploaderId: '11111111-2222-4333-8444-555555555555',
+              uploadedAt: '2026-08-20T21:30:00.000Z',
+            }) as unknown,
+          ],
+        }),
+      );
+    });
+
+    // The snapshot holds the image BY REFERENCE and the platform keeps no copy
+    // of the photograph (see `PhotoSnapshotEvidence`). This pins that: an
+    // evidence entry that ever grows a `url`, a `dataUrl` or a second key is
+    // a retained photo of an identifiable person after a takedown, and that is
+    // a decision to take deliberately rather than to drift into.
+    it('stores the photo by reference, never a copy or a resolved URL', async () => {
+      eventPhotos.findOne.mockResolvedValue({
+        id: PHOTO_ID,
+        eventId: 'b2c3d4e5-6f70-4812-9a3b-4c5d6e7f8091',
+        storageKey:
+          'gathering-photos/11111111-2222-4333-8444-555555555555/66666666-7777-4888-8999-aaaaaaaaaaaa.jpg',
+        uploaderId: '11111111-2222-4333-8444-555555555555',
+        caption: null,
+        createdAt: new Date('2026-08-20T21:30:00.000Z'),
+      });
+
+      await service.create('reporter-1', {
+        subjectType: ReportSubjectType.EventPhoto,
+        subjectId: PHOTO_ID,
+        reasonCode: 'outing',
+      });
+
+      const savedCalls = reports.save.mock.calls as [
+        { evidence: Record<string, unknown>[] },
+      ][];
+      const snapshot = savedCalls[0]?.[0].evidence[0] ?? {};
+      expect(snapshot).not.toHaveProperty('url');
+      expect(snapshot).not.toHaveProperty('fileUrl');
+      expect(snapshot).not.toHaveProperty('presignedUrl');
+      expect(snapshot).not.toHaveProperty('dataUrl');
+      expect(snapshot).not.toHaveProperty('evidenceStorageKey');
+    });
+
+    // A photo already deleted when the report is filed still files a report.
+    // The moderator loses the image and keeps the complaint, which is the right
+    // trade: a photo being gone is not the same as nothing having happened, and
+    // refusing the filing would hand the uploader a way to block reports by
+    // deleting fast.
+    it('degrades to no snapshot when the reported photo is already gone', async () => {
+      eventPhotos.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.create('reporter-1', {
+          subjectType: ReportSubjectType.EventPhoto,
+          subjectId: PHOTO_ID,
+          reasonCode: 'outing',
+        }),
+      ).resolves.toBeDefined();
+
+      expect(reports.save).toHaveBeenCalledWith(
+        expect.objectContaining({ evidence: null }),
+      );
+    });
+
+    // `subjectId` is a client-supplied `varchar` and `event_photos.id` is a
+    // `uuid` column, so an arbitrary string must never reach the query: it would
+    // be a Postgres 22P02 and a 500 on the filing path rather than a miss.
+    it('skips the photo lookup for a subjectId that is not a uuid', async () => {
+      await expect(
+        service.create('reporter-1', {
+          subjectType: ReportSubjectType.EventPhoto,
+          subjectId: 'not-a-uuid',
+          reasonCode: 'outing',
+        }),
+      ).resolves.toBeDefined();
+
+      expect(eventPhotos.findOne).not.toHaveBeenCalled();
+      expect(reports.save).toHaveBeenCalledWith(
+        expect.objectContaining({ evidence: null }),
+      );
+    });
+
+    // The snapshot is scoped to the ONE subject that needs it. A photo lookup on
+    // every filing would be a query per report for nothing, and a `photo-snapshot`
+    // on a member or a post would be evidence about the wrong thing.
+    it.each([
+      ReportSubjectType.Member,
+      ReportSubjectType.Post,
+      ReportSubjectType.Event,
+      ReportSubjectType.Community,
+    ])('writes no photo snapshot for a %s report', async (subjectType) => {
+      await service.create('reporter-1', {
+        subjectType,
+        subjectId: PHOTO_ID,
+        reasonCode: 'harassment',
+      });
+
+      expect(eventPhotos.findOne).not.toHaveBeenCalled();
+      expect(reports.save).toHaveBeenCalledWith(
+        expect.objectContaining({ evidence: null }),
       );
     });
 

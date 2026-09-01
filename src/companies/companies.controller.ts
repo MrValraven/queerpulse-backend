@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
@@ -19,8 +20,11 @@ import { CompaniesService } from './companies.service';
 import { CreateCompanyDto } from './dto/create-company.dto';
 import { CreateCompanyReviewDto } from './dto/create-review.dto';
 import { ListCompaniesQuery } from './dto/list-companies.query';
+import { ReplyToCompanyReviewDto } from './dto/reply-to-review.dto';
+import { UpdateCompanyReviewDto } from './dto/update-review.dto';
 import { UpdateCompanyDto } from './dto/update-company.dto';
 import {
+  ApiBadRequestResponse,
   ApiConflictResponse,
   ApiCookieAuth,
   ApiCreatedResponse,
@@ -105,5 +109,64 @@ export class CompaniesController {
     @Body() dto: CreateCompanyReviewDto,
   ) {
     return this.companiesService.createReview(slug, user.userId, dto);
+  }
+
+  // AUTHOR-GATED: the member who wrote the review changes their own words.
+  //
+  // A company has ONE identifier, its slug, so this and the employer's reply
+  // below share it. The directory splits the same pair across two namespaces
+  // (the public `slug` for the reviewer, the owner-scoped `ref` for the owner)
+  // because listings HAVE two; companies do not, so the two writers are
+  // separated by the service's gate instead. Two different people, editing two
+  // different parts of one row.
+  @Patch(':slug/reviews/:reviewId')
+  @UseGuards(NotRestrictedGuard)
+  @ApiOperation({ summary: 'Edit your own review of a company.' })
+  @ApiOkResponse({ description: 'The updated review.' })
+  @ApiNotFoundResponse({ description: 'No company or review with that id.' })
+  @ApiForbiddenResponse({ description: 'The review is not yours.' })
+  @ApiBadRequestResponse({
+    description: 'Malformed review id, or the review is empty.',
+  })
+  updateReview(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('reviewId', ParseUUIDPipe) reviewId: string,
+    @Body() dto: UpdateCompanyReviewDto,
+  ) {
+    return this.companiesService.updateReview(slug, reviewId, user.userId, dto);
+  }
+
+  // OWNER-GATED: the employer posts or overwrites their single public reply to
+  // one review of them. Only a CLAIMED company has anyone entitled to write
+  // here — `companies.ownerId` is nullable and NULL means unclaimed — so an
+  // unclaimed company refuses every reply. Owner-only, deliberately narrower
+  // than the directory's owner-or-co-manager reply: companies have no
+  // co-manager role, and `update` (a larger power) is owner-only too.
+  @Patch(':slug/reviews/:reviewId/reply')
+  @UseGuards(NotRestrictedGuard)
+  @ApiOperation({
+    summary: "Post or overwrite the employer's public reply to a review",
+  })
+  @ApiOkResponse({ description: 'The review with the updated employer reply.' })
+  @ApiNotFoundResponse({ description: 'No company or review with that id.' })
+  @ApiForbiddenResponse({
+    description: 'The company is unclaimed, or not owned by the caller.',
+  })
+  @ApiBadRequestResponse({
+    description: 'Malformed review id, or the reply is empty.',
+  })
+  replyToReview(
+    @CurrentUser() user: CurrentUserData,
+    @Param('slug') slug: string,
+    @Param('reviewId', ParseUUIDPipe) reviewId: string,
+    @Body() dto: ReplyToCompanyReviewDto,
+  ) {
+    return this.companiesService.replyToReview(
+      slug,
+      user.userId,
+      reviewId,
+      dto,
+    );
   }
 }

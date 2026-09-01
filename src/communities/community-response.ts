@@ -72,6 +72,23 @@ export interface CommunityStats {
   postsThisWeek: number;
 }
 
+/**
+ * Availability counts for the browse facets that carry them, returned
+ * alongside every `GET /communities` page (the member directory's `facets` is
+ * the same contract). Taken over the page's own filters with the counted
+ * group's predicate lifted, so each number answers "how many would I get if I
+ * picked this one, given everything else I have already narrowed by".
+ */
+export interface CommunityBrowseFacetCounts {
+  /**
+   * Curated tag id (`COMMUNITY_TAGS`) to how many communities carry it. Every
+   * id in the taxonomy is present, zeros included: "nobody is here" is a real
+   * answer, and it is the one that greys a tag chip out. An id MISSING from
+   * this map means "not counted", which must never be rendered as a 0.
+   */
+  tags: Record<string, number>;
+}
+
 export interface CommunityCardDTO {
   slug: string;
   name: string;

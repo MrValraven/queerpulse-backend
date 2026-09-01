@@ -96,6 +96,26 @@ export class BarterListing {
   })
   status!: BarterListingStatus;
 
+  /**
+   * When the poster last changed something a proposal was actually made
+   * AGAINST: the category, the mode, or either headline (see
+   * `BarterService.MATERIAL_EDIT_FIELDS`). Null until that happens.
+   *
+   * It exists because a listing edited out from under a pending proposal is a
+   * trap: someone offered to trade for what the post said last week, and the
+   * post now says something else. Rather than refuse the edit (which would
+   * strand a poster behind their own typo) or silently rewrite the deal, the
+   * stamp lets the proposer's own view say "this listing changed after you
+   * proposed" and lets them withdraw the offer in the DM thread the proposal
+   * opened.
+   *
+   * Deliberately NOT `updatedAt`: that moves on every save, including a close
+   * and a purely cosmetic detail/tag edit, so reading it as "the deal changed"
+   * would cry wolf on almost every write.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  materialEditedAt!: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 

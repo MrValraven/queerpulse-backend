@@ -119,6 +119,7 @@ import { GeocodeModule } from './geocode/geocode.module';
 import { MagazineModule } from './magazine/magazine.module';
 import { ResourcesModule } from './resources/resources.module';
 import { ContentModule } from './content/content.module';
+import { SubmissionsModule } from './submissions/submissions.module';
 import { BootstrapModule } from './bootstrap/bootstrap.module';
 import { GenesisModule } from './genesis/genesis.module';
 import { AllExceptionsFilter } from './common/all-exceptions.filter';
@@ -306,6 +307,12 @@ import { redactSensitiveQueryParameters } from './common/redact-url';
     // so module order does not affect routing.
     MemberSuggestionsModule,
     ContentModule,
+    // PRD-48. The shared intake primitive: no controller and no entity, only
+    // the two notifiers (`SubmissionDecisionNotifier`, `ReviewReplyNotifier`)
+    // that every submission surface uses to tell the person who submitted what
+    // happened. Registered here so the module instantiates on its own; the
+    // feature modules that emit import it directly.
+    SubmissionsModule,
     CultureModule,
     GovernanceModule,
     RoadmapModule,

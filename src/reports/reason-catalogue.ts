@@ -322,6 +322,39 @@ const SUBJECT_REASONS: Record<ReportSubjectType, ReasonCode[]> = {
     'off_topic',
     'other',
   ],
+  // One photograph in a gathering's album. `outing` and `doxxing` lead
+  // deliberately: a photograph of a face at a queer event outs somebody in a
+  // way a paragraph of text cannot, and it is the single most likely reason
+  // anyone reaches for this control. `venue_safety` is absent because a photo
+  // is not an incident at a place, and `off_topic` is absent because an album
+  // has no topic to be off.
+  [ReportSubjectType.EventPhoto]: [
+    'outing',
+    'doxxing',
+    'harassment',
+    'hate_speech',
+    'discrimination',
+    'impersonation',
+    'spam',
+    'other',
+  ],
+  // One tenant's recommendation of a landlord. The same set the whole
+  // `Landlord` entry carries, unchanged and deliberately so: a complaint about
+  // a single recommendation raises exactly the concerns a complaint about the
+  // entry raises, and the only thing that differs is how much gets taken down
+  // when a moderator acts. Keeping the sets identical also means a moderator
+  // reading the two never has to learn which codes exist at which grain.
+  [ReportSubjectType.LandlordRecommendation]: [
+    'outing',
+    'doxxing',
+    'not_affirming',
+    'discrimination',
+    'harassment',
+    'hate_speech',
+    'impersonation',
+    'spam',
+    'other',
+  ],
 };
 
 /** The reason options a given subject type should offer, as `{code, label}`. */

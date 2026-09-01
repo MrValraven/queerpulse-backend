@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   NotFoundException,
@@ -11,6 +12,7 @@ import {
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { ContentModerationService } from '../content-moderation/content-moderation.service';
+import { ReviewReplyNotifier } from '../submissions/review-reply-notifier.service';
 import { CompanyOpenRolesService } from '../jobs/company-open-roles.service';
 import { Profile } from '../users/entities/profile.entity';
 import { CompaniesService } from './companies.service';
@@ -59,9 +61,15 @@ describe('CompaniesService', () => {
   };
   let reviews: {
     create: jest.Mock;
+    findOne: jest.Mock;
     save: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
+  // The ONE shared review-reply bell (PRD-48). Stubbed rather than spied on the
+  // real class so a test cannot accidentally depend on notification internals;
+  // what matters here is that the reply path calls it with the reviewer, the
+  // replying employer and the company's public name.
+  let reviewReplyNotifier: { notifyReviewReplied: jest.Mock };
   let profiles: {
     findOne: jest.Mock;
     find: jest.Mock;
@@ -96,6 +104,7 @@ describe('CompaniesService', () => {
     };
     reviews = {
       create: jest.fn((v: object) => v),
+      findOne: jest.fn().mockResolvedValue(null),
       // Synthesizes generated columns (`id`, `createdAt`) so a mapper reading
       // them off a `save()` result never sees `undefined` (the A4 lesson:
       // a bare-passthrough mock caused an `undefined.toISOString()` throw).
@@ -123,6 +132,9 @@ describe('CompaniesService', () => {
     contentModeration = {
       stateFor: jest.fn().mockResolvedValue({ hidden: false, removed: false }),
       statesFor: jest.fn().mockResolvedValue(new Map()),
+    };
+    reviewReplyNotifier = {
+      notifyReviewReplied: jest.fn().mockResolvedValue(undefined),
     };
 
     // `manager.getRepository(Entity)` routes to the same mocks the outer
@@ -155,6 +167,7 @@ describe('CompaniesService', () => {
         { provide: DataSource, useValue: dataSource },
         { provide: CompanyOpenRolesService, useValue: openRoles },
         { provide: ContentModerationService, useValue: contentModeration },
+        { provide: ReviewReplyNotifier, useValue: reviewReplyNotifier },
       ],
     }).compile();
     service = module.get(CompaniesService);
@@ -433,6 +446,255 @@ describe('CompaniesService', () => {
 
       expect(res.stars).toBe(5);
       expect(res.author?.slug).toBe('jo');
+    });
+  });
+  // PRD-47: the employer's right of reply, and what a later edit by the
+  // reviewer may and may not do to it.
+  describe('replyToReview', () => {
+    const claimed = {
+      id: 'co-1',
+      slug: 'x',
+      nameText: 'Atelier Pulso',
+      ownerId: 'owner-1',
+    };
+
+    /** A stored review with no reply and no edit yet. */
+    const freshReview = () => ({
+      id: '11111111-1111-4111-8111-111111111111',
+      companyId: 'co-1',
+      authorId: 'author-1',
+      title: 'Good place, slow payroll',
+      stars: 4,
+      byline: 'Former employee',
+      body: ['Payroll was late twice.'],
+      ownerReplyText: null as string | null,
+      ownerRepliedAt: null as Date | null,
+      editedAt: null as Date | null,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+
+    it('refuses a reply on an UNCLAIMED company: nobody is entitled to answer', async () => {
+      companies.findOne.mockResolvedValue({ ...claimed, ownerId: null });
+
+      await expect(
+        service.replyToReview('x', 'someone-1', freshReview().id, {
+          text: 'We fixed it.',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(reviews.findOne).not.toHaveBeenCalled();
+    });
+
+    it('refuses a reply from a member who is not the owner', async () => {
+      companies.findOne.mockResolvedValue(claimed);
+
+      await expect(
+        service.replyToReview('x', 'not-the-owner', freshReview().id, {
+          text: 'We fixed it.',
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('404s a review id that belongs to another company', async () => {
+      companies.findOne.mockResolvedValue(claimed);
+      reviews.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.replyToReview('x', 'owner-1', freshReview().id, {
+          text: 'We fixed it.',
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      // Scoped to THIS company, so a guessed id cannot reach another
+      // employer's review.
+      expect(reviews.findOne).toHaveBeenCalledWith({
+        where: { id: freshReview().id, companyId: 'co-1' },
+      });
+    });
+
+    it('refuses a whitespace-only reply, which would strand a timestamp with nothing on screen', async () => {
+      companies.findOne.mockResolvedValue(claimed);
+      reviews.findOne.mockResolvedValue(freshReview());
+
+      await expect(
+        service.replyToReview('x', 'owner-1', freshReview().id, {
+          text: '   ',
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(reviews.save).not.toHaveBeenCalled();
+    });
+
+    it('stores the trimmed reply, stamps ownerRepliedAt and returns it on the DTO', async () => {
+      companies.findOne.mockResolvedValue(claimed);
+      reviews.findOne.mockResolvedValue(freshReview());
+
+      const dto = await service.replyToReview(
+        'x',
+        'owner-1',
+        freshReview().id,
+        {
+          text: '  Payroll moved to the 25th in March.  ',
+        },
+      );
+
+      expect(reviews.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ownerReplyText: 'Payroll moved to the 25th in March.',
+          ownerRepliedAt: expect.any(Date) as unknown,
+        }),
+      );
+      expect(dto.ownerReply?.text).toBe('Payroll moved to the 25th in March.');
+      expect(dto.isEditedAfterOwnerReply).toBe(false);
+    });
+
+    it('overwrites an existing reply rather than threading a second one', async () => {
+      companies.findOne.mockResolvedValue(claimed);
+      reviews.findOne.mockResolvedValue({
+        ...freshReview(),
+        ownerReplyText: 'Old reply',
+        ownerRepliedAt: new Date('2026-02-01T00:00:00.000Z'),
+      });
+
+      const dto = await service.replyToReview(
+        'x',
+        'owner-1',
+        freshReview().id,
+        {
+          text: 'Corrected reply',
+        },
+      );
+
+      expect(dto.ownerReply?.text).toBe('Corrected reply');
+    });
+
+    it('notifies the reviewer through the shared notifier, naming the employer and never the reply text', async () => {
+      companies.findOne.mockResolvedValue(claimed);
+      reviews.findOne.mockResolvedValue(freshReview());
+
+      await service.replyToReview('x', 'owner-1', freshReview().id, {
+        text: 'Payroll moved to the 25th.',
+      });
+
+      expect(reviewReplyNotifier.notifyReviewReplied).toHaveBeenCalledWith({
+        reviewAuthorId: 'author-1',
+        replyingSubjectId: 'owner-1',
+        subjectLabel: 'Atelier Pulso',
+      });
+    });
+  });
+
+  describe('updateReview', () => {
+    const company = {
+      id: 'co-1',
+      slug: 'x',
+      nameText: 'Atelier Pulso',
+      ownerId: 'owner-1',
+    };
+    const repliedReview = () => ({
+      id: '22222222-2222-4222-8222-222222222222',
+      companyId: 'co-1',
+      authorId: 'author-1',
+      title: 'Good place, slow payroll',
+      stars: 4,
+      byline: 'Former employee',
+      body: ['Payroll was late twice.'],
+      ownerReplyText: 'Payroll moved to the 25th.',
+      ownerRepliedAt: new Date('2026-02-01T00:00:00.000Z'),
+      editedAt: null as Date | null,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+
+    it("refuses to edit somebody else's review", async () => {
+      companies.findOne.mockResolvedValue(company);
+      reviews.findOne.mockResolvedValue(repliedReview());
+
+      await expect(
+        service.updateReview('x', repliedReview().id, 'not-the-author', {
+          title: 'Rewritten',
+          stars: 1,
+          byline: 'Former employee',
+          body: ['Different words.'],
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('KEEPS the employer reply on edit: an edit is never a delete button for it', async () => {
+      companies.findOne.mockResolvedValue(company);
+      reviews.findOne.mockResolvedValue(repliedReview());
+
+      const dto = await service.updateReview(
+        'x',
+        repliedReview().id,
+        'author-1',
+        {
+          title: 'Good place, slow payroll',
+          stars: 2,
+          byline: 'Former employee',
+          body: ['Payroll was late four times, not twice.'],
+        },
+      );
+
+      expect(reviews.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ownerReplyText: 'Payroll moved to the 25th.',
+          ownerRepliedAt: new Date('2026-02-01T00:00:00.000Z'),
+        }),
+      );
+      expect(dto.ownerReply?.text).toBe('Payroll moved to the 25th.');
+    });
+
+    it('flags isEditedAfterOwnerReply when the words change after the reply went up', async () => {
+      companies.findOne.mockResolvedValue(company);
+      reviews.findOne.mockResolvedValue(repliedReview());
+
+      const dto = await service.updateReview(
+        'x',
+        repliedReview().id,
+        'author-1',
+        {
+          title: 'Good place, slow payroll',
+          stars: 1,
+          byline: 'Former employee',
+          body: ['Payroll was late every single month.'],
+        },
+      );
+
+      expect(dto.editedAt).not.toBeNull();
+      expect(dto.isEditedAfterOwnerReply).toBe(true);
+    });
+
+    it('does NOT stamp an edit when nothing actually changed, so an identical re-save cannot manufacture the flag', async () => {
+      companies.findOne.mockResolvedValue(company);
+      reviews.findOne.mockResolvedValue(repliedReview());
+
+      const dto = await service.updateReview(
+        'x',
+        repliedReview().id,
+        'author-1',
+        {
+          title: 'Good place, slow payroll',
+          stars: 4,
+          byline: 'Former employee',
+          body: ['Payroll was late twice.'],
+        },
+      );
+
+      expect(dto.editedAt).toBeNull();
+      expect(dto.isEditedAfterOwnerReply).toBe(false);
+      expect(dto.ownerReply?.text).toBe('Payroll moved to the 25th.');
+    });
+
+    it('refuses an edit that empties the review', async () => {
+      companies.findOne.mockResolvedValue(company);
+      reviews.findOne.mockResolvedValue(repliedReview());
+
+      await expect(
+        service.updateReview('x', repliedReview().id, 'author-1', {
+          title: '   ',
+          stars: 3,
+          byline: 'Former employee',
+          body: ['   '],
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(reviews.save).not.toHaveBeenCalled();
     });
   });
 });

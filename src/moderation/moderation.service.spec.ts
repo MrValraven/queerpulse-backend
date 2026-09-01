@@ -930,6 +930,390 @@ describe('ModerationService', () => {
         expect(reports.save).not.toHaveBeenCalled();
       });
 
+      /**
+       * TS-13: a photograph in a gathering's album is reportable on its own,
+       * and a gathering hosted by a community is that community's room. The
+       * carve-out's two resolvers used to be `post`/`reply` only, so a photo
+       * report was unreachable for the moderators closest to the event.
+       *
+       * `event_photo` resolves through the shared subject resolver rather than
+       * `CommunityMembershipService`, so these tests drive
+       * `subjectResolver.resolve` and assert the post/reply lookups are never
+       * consulted.
+       */
+      describe('a gathering photo belongs to the community hosting it (TS-13)', () => {
+        // Real uuid shape: `reports.subject_id` is a varchar carrying slugs as
+        // well as ids, and the organizer check refuses to compare a non-uuid
+        // against a uuid column at all.
+        const PHOTO_ID = '11111111-2222-4333-8444-555555555555';
+
+        const photoReport = (overrides: Partial<Report> = {}): Report =>
+          baseReport({
+            subjectType: ReportSubjectType.EventPhoto,
+            subjectId: PHOTO_ID,
+            ...overrides,
+          });
+
+        /** What the resolver answers for one photo. */
+        const resolvedPhoto = (
+          overrides: Partial<{
+            authorUserId: string | null;
+            communityId: string | null;
+          }> = {},
+        ): void => {
+          subjectResolver.resolve.mockResolvedValue({
+            authorUserId: 'uploader-1',
+            excerpt: '(photo in the album for: Trans swim night) no caption',
+            communityId: 'community-1',
+            isAuthorAmbiguous: false,
+            ...overrides,
+          });
+        };
+
+        // TS-13 routed the photo report to the community. TS-14 then narrowed
+        // what arrives there to ONE action, so this is the test that the
+        // routing itself still works: the community is resolved from the
+        // gathering, the roster is checked, and the moderator gets a redacted
+        // response.
+        it('lets a community owner/mod escalate a report about a photo in a gathering their community hosts', async () => {
+          reports.findOne.mockResolvedValue(photoReport());
+          resolvedPhoto();
+          communityMembership.isOwnerOrMod.mockResolvedValue(true);
+
+          const res = await service.actOnReport(
+            'report-1',
+            'community-mod-1',
+            UserRole.Member,
+            {
+              action: 'escalate',
+              reasonCode: 'spam',
+              note: 'Two of us recognise the uploader, staff should look.',
+            },
+          );
+
+          expect(res.status).toBe(ReportStatus.Escalated);
+          expect(communityMembership.isOwnerOrMod).toHaveBeenCalledWith(
+            'community-1',
+            'community-mod-1',
+          );
+          // The community comes from the GATHERING, never from a post/reply
+          // lookup and never from the uploader's own memberships.
+          expect(communityMembership.communityIdForPost).not.toHaveBeenCalled();
+          expect(
+            communityMembership.communityIdForReply,
+          ).not.toHaveBeenCalled();
+          // Still no report visibility: this carve-out redacts its response
+          // exactly as the post/reply one does.
+          expect(res.reporter).toEqual({ anonymous: true });
+        });
+
+        // A gathering with no community is platform-only. Inferring one from
+        // the uploader's memberships would hand the photo to a room that had
+        // nothing to do with the event.
+        it('forbids a community owner/mod on a photo from a gathering with no community', async () => {
+          reports.findOne.mockResolvedValue(photoReport());
+          resolvedPhoto({ communityId: null });
+          // Even a member who moderates somewhere gets nowhere: with no
+          // community resolved there is no roster to check them against.
+          communityMembership.isOwnerOrMod.mockResolvedValue(true);
+
+          await expect(
+            service.actOnReport(
+              'report-1',
+              'community-mod-1',
+              UserRole.Member,
+              {
+                action: 'dismiss',
+                reasonCode: 'spam',
+                note: 'Not a violation.',
+              },
+            ),
+          ).rejects.toBeInstanceOf(ForbiddenException);
+          expect(communityMembership.isOwnerOrMod).not.toHaveBeenCalled();
+          expect(reports.save).not.toHaveBeenCalled();
+        });
+
+        /**
+         * `event_photos.uploader_id` is `ON DELETE SET NULL`
+         * (`AddEventPhotoAndFeaturedCommunityForeignKeys1785001300000`), so an
+         * uploader who erased their account leaves the photo with no author.
+         * The conflict check must then find nobody to match rather than
+         * throwing or resolving to the gathering's host, who is a different
+         * person on most albums.
+         */
+        it('degrades to no author when the uploader erased their account, and still lets the community escalate', async () => {
+          reports.findOne.mockResolvedValue(photoReport());
+          resolvedPhoto({ authorUserId: null });
+          communityMembership.isOwnerOrMod.mockResolvedValue(true);
+
+          const res = await service.actOnReport(
+            'report-1',
+            'community-mod-1',
+            UserRole.Member,
+            {
+              action: 'escalate',
+              reasonCode: 'harassment',
+              note: 'Sending this up.',
+            },
+          );
+
+          expect(res.status).toBe(ReportStatus.Escalated);
+          expect(reports.save).toHaveBeenCalledWith(
+            expect.objectContaining({ status: ReportStatus.Escalated }),
+          );
+        });
+
+        // The same self-dealing the post arm refuses: `isOwnerOrMod` says the
+        // actor moderates the room, and says nothing about whether they are
+        // impartial about this photo. Since TS-14 the subject refusal lands
+        // first and this is doubly refused; the assertion stays because the
+        // outcome it protects is the one that matters.
+        it('forbids a community owner/mod from closing a report about a photo they uploaded', async () => {
+          reports.findOne.mockResolvedValue(photoReport());
+          resolvedPhoto({ authorUserId: 'community-mod-1' });
+          communityMembership.isOwnerOrMod.mockResolvedValue(true);
+
+          await expect(
+            service.actOnReport(
+              'report-1',
+              'community-mod-1',
+              UserRole.Member,
+              {
+                action: 'dismiss',
+                reasonCode: 'spam',
+                note: 'Nothing to see here.',
+              },
+            ),
+          ).rejects.toBeInstanceOf(ForbiddenException);
+          expect(reports.save).not.toHaveBeenCalled();
+        });
+
+        /**
+         * A photo has a conflicted party a post does not. Attaching to an album
+         * is organizer-only, so the host and co-hosts publish the album
+         * together and a report about it is a complaint about something they
+         * run. `authorIdForReportSubject` cannot see them, so the carve-out
+         * asks the gathering directly.
+         */
+        it('forbids a community owner/mod who hosts the gathering the photo is in, now via the subject refusal that lands first', async () => {
+          reports.findOne.mockResolvedValue(photoReport());
+          // Somebody else uploaded it, so the author check would pass and only
+          // the organizer check could catch this.
+          resolvedPhoto({ authorUserId: 'uploader-1' });
+          communityMembership.isOwnerOrMod.mockResolvedValue(true);
+          dataSourceQuery.mockResolvedValue([{ one: 1 }]);
+
+          await expect(
+            service.actOnReport(
+              'report-1',
+              'community-mod-1',
+              UserRole.Member,
+              {
+                action: 'dismiss',
+                reasonCode: 'spam',
+                note: 'Nothing to see here.',
+              },
+            ),
+          ).rejects.toBeInstanceOf(ForbiddenException);
+          // TS-14 refuses every non-escalate action on an `event_photo` before
+          // the carve-out resolves the community, so the organizer query is
+          // never reached. `assertNotOrganiserOfReportedPhoto` is kept on
+          // purpose: take `event_photo` back out of
+          // `SUBJECT_TYPES_A_COMMUNITY_MOD_CANNOT_SEE` and it is load bearing
+          // again immediately.
+          expect(dataSourceQuery).not.toHaveBeenCalled();
+          expect(reports.save).not.toHaveBeenCalled();
+        });
+
+        /**
+         * `outing` and `doxxing` are `ReportSeverity.Emergency` with a one-hour
+         * SLA, and they lead the photo reason set. Routing photos to a
+         * community must not put the emergency band in its moderators' hands:
+         * TS-07 already refuses every settling action there, and escalation
+         * stays open so the report reaches trained staff in one call.
+         */
+        it('still refuses an emergency photo report to the community, and still lets it be escalated', async () => {
+          reports.findOne.mockResolvedValue(
+            photoReport({ severity: ReportSeverity.Emergency }),
+          );
+          resolvedPhoto();
+          communityMembership.isOwnerOrMod.mockResolvedValue(true);
+
+          await expect(
+            service.actOnReport(
+              'report-1',
+              'community-mod-1',
+              UserRole.Member,
+              {
+                action: 'dismiss',
+                reasonCode: 'outing',
+                note: 'Nothing to see here.',
+              },
+            ),
+          ).rejects.toBeInstanceOf(ForbiddenException);
+          expect(reports.save).not.toHaveBeenCalled();
+
+          const res = await service.actOnReport(
+            'report-1',
+            'community-mod-1',
+            UserRole.Member,
+            {
+              action: 'escalate',
+              reasonCode: 'outing',
+              note: 'Staff should decide this.',
+            },
+          );
+          expect(res.status).toBe(ReportStatus.Escalated);
+        });
+
+        /**
+         * TS-14: a community moderator cannot be shown the reported
+         * photograph by ANY route. `GET /mod/report-photo-evidence/:reportId`
+         * is `@Roles(Moderator, Admin)`, `GET /events/:slug/photos` is that
+         * gathering's participants only, and `GET /files/gathering-photos/...`
+         * is uploader-only. The emergency rule covers `outing` and `doxxing`
+         * and stops there, so on the six non-emergency reason codes an
+         * `event_photo` report carries they were being offered a takedown and
+         * a platform-wide dismissal over a photo they had never seen.
+         *
+         * These tests are about the ACTION being narrowed. No test here, and
+         * nothing in this change, gives anybody a new way to look at a
+         * photograph.
+         */
+        describe('a photo a community moderator cannot see is not theirs to settle (TS-14)', () => {
+          it.each(['dismiss', 'remove_content'] as const)(
+            'forbids a community owner/mod from applying %s to a NON-emergency photo report, and says why',
+            async (action) => {
+              reports.findOne.mockResolvedValue(
+                // Every non-emergency reason an `event_photo` report can
+                // carry lands here. `harassment` stands for the six.
+                photoReport({
+                  reasonCode: 'harassment',
+                  severity: ReportSeverity.High,
+                }),
+              );
+              resolvedPhoto();
+              communityMembership.isOwnerOrMod.mockResolvedValue(true);
+
+              // The refusal names the real reason and the way forward. A bare
+              // "not permitted" reads as a bug or a slight to the moderator
+              // who was just offered the button.
+              await expect(
+                service.actOnReport(
+                  'report-1',
+                  'community-mod-1',
+                  UserRole.Member,
+                  {
+                    action,
+                    reasonCode: 'harassment',
+                    note: 'Handled internally.',
+                  },
+                ),
+              ).rejects.toThrow(/cannot be shown to you[\s\S]*escalate/i);
+              expect(reports.save).not.toHaveBeenCalled();
+              // Above all: no takedown was written for a photograph nobody in
+              // the community could look at.
+              expect(applyContentAction).not.toHaveBeenCalled();
+            },
+          );
+
+          // The refusal must never be a dead end. Escalation is what carries
+          // the community's local knowledge to the people who can see the
+          // image, and it is the reason a photo report cannot get stuck in a
+          // community queue with nothing its moderators may do.
+          it('still lets a community owner/mod ESCALATE the same non-emergency photo report', async () => {
+            reports.findOne.mockResolvedValue(
+              photoReport({
+                reasonCode: 'harassment',
+                severity: ReportSeverity.High,
+              }),
+            );
+            resolvedPhoto();
+            communityMembership.isOwnerOrMod.mockResolvedValue(true);
+
+            const res = await service.actOnReport(
+              'report-1',
+              'community-mod-1',
+              UserRole.Member,
+              {
+                action: 'escalate',
+                reasonCode: 'harassment',
+                note: 'The uploader was warned about this at the last event.',
+              },
+            );
+
+            expect(res.status).toBe(ReportStatus.Escalated);
+            // Escalating settles nothing and grants no visibility.
+            expect(res).not.toHaveProperty('resolution');
+            expect(res.reporter).toEqual({ anonymous: true });
+          });
+
+          // The rule is about who can SEE the photo, so it narrows the
+          // community carve-out and touches platform staff nowhere: they have
+          // `GET /mod/report-photo-evidence/:reportId` and decide as before.
+          it.each(['dismiss', 'remove_content', 'escalate'] as const)(
+            'leaves platform staff free to apply %s to the same photo report',
+            async (action) => {
+              reports.findOne.mockResolvedValue(
+                photoReport({
+                  reasonCode: 'harassment',
+                  severity: ReportSeverity.High,
+                }),
+              );
+              resolvedPhoto();
+
+              const res = await service.actOnReport(
+                'report-1',
+                'staff-1',
+                UserRole.Moderator,
+                {
+                  action,
+                  reasonCode: 'harassment',
+                  note: 'Reviewed the image.',
+                },
+              );
+
+              expect(res.status).toBe(
+                action === 'escalate'
+                  ? ReportStatus.Escalated
+                  : ReportStatus.Resolved,
+              );
+              // Staff authorize on their role, so the community roster is
+              // never consulted for them.
+              expect(communityMembership.isOwnerOrMod).not.toHaveBeenCalled();
+            },
+          );
+
+          // The two refusals coexist and refuse for different reasons, so an
+          // emergency photo report keeps answering with the emergency
+          // sentence. Nobody reading the code should come away thinking one
+          // rule replaced the other.
+          it('keeps the emergency wording on an emergency photo report', async () => {
+            reports.findOne.mockResolvedValue(
+              photoReport({
+                reasonCode: 'outing',
+                severity: ReportSeverity.Emergency,
+              }),
+            );
+            resolvedPhoto();
+            communityMembership.isOwnerOrMod.mockResolvedValue(true);
+
+            await expect(
+              service.actOnReport(
+                'report-1',
+                'community-mod-1',
+                UserRole.Member,
+                {
+                  action: 'dismiss',
+                  reasonCode: 'outing',
+                  note: 'Handled internally.',
+                },
+              ),
+            ).rejects.toThrow(/trained platform staff/i);
+          });
+        });
+      });
+
       // `escalated` means "send this up" — letting the community it came from
       // close it undoes a platform moderator's decision.
       it('forbids a community owner/mod from dismissing a report that is no longer open', async () => {

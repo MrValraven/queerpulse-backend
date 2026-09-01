@@ -40,6 +40,44 @@ export class CompanyReview {
   @Column({ type: 'jsonb', default: () => "'[]'" })
   body!: string[];
 
+  /**
+   * The EMPLOYER's single public reply to this review, set via the owner-gated
+   * `PATCH /companies/:slug/reviews/:reviewId/reply`. Both columns are null
+   * until a reply is posted; posting again overwrites them (idempotent update,
+   * never a reply thread).
+   *
+   * Named `ownerReply*` rather than `employerReply*` on purpose: this is the
+   * same column pair as `listing_reviews.owner_reply_text` /
+   * `owner_replied_at`, holding the same thing (the reviewed subject's one
+   * public answer), and PRD-47 is about the five review primitives converging
+   * on ONE shape. The word the reader sees is "employer", which is the
+   * frontend's job.
+   *
+   * Only a CLAIMED company has anyone who can write here: `companies.owner_id`
+   * is nullable and NULL means unclaimed, so the reply is gated on a non-null
+   * owner matching the caller. See `CompaniesService.replyToReview`.
+   */
+  @Column({ type: 'text', nullable: true })
+  ownerReplyText!: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  ownerRepliedAt!: Date | null;
+
+  /**
+   * When the review's AUTHOR last changed it (`PATCH
+   * /companies/:slug/reviews/:reviewId`). Null for a review never edited.
+   *
+   * Stamped only when something actually changed, so re-saving an identical
+   * body cannot manufacture an edit against an employer. Read alongside
+   * `ownerRepliedAt`: an `editedAt` LATER than `ownerRepliedAt` means the
+   * employer's reply answers words that no longer stand, and
+   * `CompanyReviewDTO.isEditedAfterOwnerReply` says so on the page. See
+   * `CompaniesService.updateReview` for why the reply is kept rather than
+   * cleared.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  editedAt!: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 }

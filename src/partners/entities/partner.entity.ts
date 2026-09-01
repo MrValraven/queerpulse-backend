@@ -163,6 +163,22 @@ export class Partner extends QueueAssignmentColumns {
   @Column({ type: 'text', nullable: true })
   reviewNote!: string | null;
 
+  /**
+   * When an admin approved or rejected this application (PRD-37). NULL while
+   * it is still pending, and NULL forever on rows decided before this column
+   * existed: we do not know when those were settled, and `updated_at` is not
+   * an answer, because an approved partner's marketing fields keep moving
+   * long after the decision. Every read path treats NULL as "nothing to say"
+   * rather than inventing a date, the same rule `dueAt` follows.
+   *
+   * Stamped once, only on the transition INTO a terminal status, so a second
+   * `reject` that only rewrites the review note leaves the original decision
+   * date alone. That single-write property is also what makes it a safe
+   * record of the decision the applicant was told about.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  decidedAt!: Date | null;
+
   @Column({ type: 'boolean', default: false })
   featured!: boolean;
 

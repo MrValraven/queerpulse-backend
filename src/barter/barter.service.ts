@@ -21,6 +21,11 @@ import { MessagingService } from '../messaging/messaging.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { SubmissionDecisionNotifier } from '../submissions/submission-decision-notifier.service';
+import {
+  SubmissionKind,
+  SubmissionOutcome,
+} from '../submissions/submission-kinds';
 import { Profile } from '../users/entities/profile.entity';
 import {
   BarterListingDTO,
@@ -28,14 +33,18 @@ import {
   BarterProposalAckDTO,
   BarterProposalDTO,
   MyBarterListingDTO,
+  MySentBarterProposalDTO,
   toBarterListingDTO,
   toBarterMemberRef,
   toBarterProposalDTO,
   toMyBarterListingDTO,
+  toMySentBarterProposalDTO,
+  toProposedBarterListingDTO,
 } from './barter-response';
 import { CreateBarterListingDto } from './dto/create-barter-listing.dto';
 import { CreateBarterProposalDto } from './dto/create-barter-proposal.dto';
 import { ListBarterQuery } from './dto/list-barter.query';
+import { UpdateBarterListingDto } from './dto/update-barter-listing.dto';
 import {
   BarterListing,
   BarterListingStatus,
@@ -64,6 +73,7 @@ export class BarterService {
     private readonly blockFilter: BlockFilterService,
     private readonly messaging: MessagingService,
     private readonly notifications: NotificationsService,
+    private readonly submissionDecisions: SubmissionDecisionNotifier,
   ) {}
 
   /**
@@ -146,6 +156,89 @@ export class BarterService {
   }
 
   /**
+   * Correct a swap you posted (PRD-42). Barter was the one vertical with no
+   * edit path at all: jobs, volunteering and housing listings all have one, so
+   * a barter typo was permanent and the only escape was closing the post and
+   * writing it again, which dropped every proposal already made against it.
+   *
+   * Not the owner is a **403, never a 404**. A barter listing is already
+   * published to every member, so there is no existence to protect the way
+   * there is with a draft or a private thread; answering 404 would only make a
+   * real refusal read as a broken link.
+   *
+   * **Editing a listing that already has pending proposals is allowed.** The
+   * alternative, refusing until the owner has decided them, strands a poster
+   * behind their own typo for as long as somebody leaves an offer unanswered,
+   * and gives them a reason to close the post instead, which is strictly worse
+   * for the proposers. What is NOT allowed is the deal quietly changing: when
+   * a MATERIAL field (category, mode, or either headline) moves while at least
+   * one proposal is still pending, `materialEditedAt` is stamped, and every
+   * proposal sent before that stamp is flagged in the proposer's own view
+   * (`listMySentProposals`) as "this listing changed after you proposed" so
+   * they can withdraw in the DM thread the proposal opened. A purely cosmetic
+   * edit (detail copy, tags) stamps nothing, so the flag never cries wolf.
+   *
+   * Returns the OWNER's shape (`MyBarterListingDTO`), so the response carries
+   * the pending-proposal count the editor needs to show how many people are
+   * waiting on the post that just changed.
+   */
+  async update(
+    id: string,
+    ownerId: string,
+    dto: UpdateBarterListingDto,
+  ): Promise<MyBarterListingDTO> {
+    const listing = await this.loadOr404(id);
+    if (listing.ownerId !== ownerId) {
+      throw new ForbiddenException('Only the poster can edit this listing');
+    }
+
+    // The merged values are validated as a whole, exactly as `create` does:
+    // patching `mode` alone must not leave a post advertising a side it never
+    // carried, and patching a headline to `''` must not empty a side its mode
+    // still advertises.
+    const category = dto.category ?? listing.category;
+    const mode = dto.mode ?? listing.mode;
+    const offer = dto.offer === undefined ? listing.offer : dto.offer.trim();
+    const want = dto.want === undefined ? listing.want : dto.want.trim();
+    this.assertSidesMatchMode(mode, offer, want);
+
+    const isMaterialChange =
+      category !== listing.category ||
+      mode !== listing.mode ||
+      offer !== listing.offer ||
+      want !== listing.want;
+
+    listing.category = category;
+    listing.mode = mode;
+    listing.offer = offer;
+    listing.want = want;
+    if (dto.offerDetail !== undefined) {
+      listing.offerDetail = dto.offerDetail.trim();
+    }
+    if (dto.wantDetail !== undefined) {
+      listing.wantDetail = dto.wantDetail.trim();
+    }
+    if (dto.tags !== undefined) {
+      listing.tags = this.normalizeTags(dto.tags);
+    }
+
+    const pendingCounts = await this.pendingCountsByListing([listing.id]);
+    const pendingProposalCount = pendingCounts.get(listing.id) ?? 0;
+    // Only stamped when somebody is actually waiting on this post. A material
+    // edit with nothing pending changes nobody's deal, and stamping it would
+    // flag every proposal sent afterwards for a change that predates them.
+    if (isMaterialChange && pendingProposalCount > 0) {
+      listing.materialEditedAt = new Date();
+    }
+
+    const saved = await this.listings.save(listing);
+    return toMyBarterListingDTO(saved, {
+      member: await this.ownerRefFor(ownerId),
+      pendingProposalCount,
+    });
+  }
+
+  /**
    * Take a listing off the board. Idempotent — re-closing an already-closed
    * listing re-saves the same status rather than 409ing (mirrors
    * `VolunteeringService.close`).
@@ -182,6 +275,69 @@ export class BarterService {
         pendingProposalCount: pendingCounts.get(row.id) ?? 0,
       }),
     );
+  }
+
+  /**
+   * The proposals the caller SENT, with each one's outcome and the listing it
+   * was made against (PRD-43). The mirror of `listProposals`, which is the
+   * owner's inbox: before this, a proposal left for someone else's inbox and
+   * the proposer had no view of it anywhere, so "did they ever answer?" had no
+   * surface at all.
+   *
+   * Ordered `created_at DESC` with an **`id` tiebreak**: two proposals sent in
+   * the same millisecond otherwise come back in whatever order the planner
+   * feels like, which is the exact non-determinism found elsewhere in this
+   * codebase. Bounded rather than paginated, like `listMine`: a member's own
+   * sent offers are a short list.
+   *
+   * Hand-mapped to {@link MySentBarterProposalDTO}; there is no global
+   * serializer, so returning the rows would leak `proposer_id` and the whole
+   * listing entity.
+   */
+  async listMySentProposals(
+    proposerId: string,
+  ): Promise<MySentBarterProposalDTO[]> {
+    const rows = await this.proposals
+      .createQueryBuilder('proposal')
+      .where('proposal.proposer_id = :proposerId', { proposerId })
+      .orderBy('proposal.created_at', 'DESC')
+      .addOrderBy('proposal.id', 'DESC')
+      .take(DEFAULT_LIST_LIMIT)
+      .getMany();
+    if (!rows.length) return [];
+
+    const listingRows = await this.listings.find({
+      where: { id: In([...new Set(rows.map((row) => row.listingId))]) },
+    });
+    const listingById = new Map(listingRows.map((row) => [row.id, row]));
+
+    // A poster the proposer has since blocked (either way) is severed here the
+    // same way the board severs them: the listing half of the row goes, the
+    // proposer's own record of what they sent stays.
+    const hidden = await this.blockFilter.hiddenUserIds(
+      proposerId,
+      listingRows.map((row) => row.ownerId),
+    );
+    const refs = await this.ownerRefs(
+      listingRows
+        .filter((row) => !hidden.has(row.ownerId))
+        .map((row) => row.ownerId),
+    );
+
+    return rows.map((row) => {
+      const listing = listingById.get(row.listingId);
+      const isVisible = Boolean(listing && !hidden.has(listing.ownerId));
+      return toMySentBarterProposalDTO(
+        row,
+        listing && isVisible
+          ? toProposedBarterListingDTO(
+              listing,
+              refs.get(listing.ownerId) ?? null,
+            )
+          : null,
+        listing?.materialEditedAt ?? null,
+      );
+    });
   }
 
   /**
@@ -376,7 +532,7 @@ export class BarterService {
     ownerId: string,
     status: BarterProposalStatus.Accepted | BarterProposalStatus.Declined,
   ): Promise<BarterProposalDTO> {
-    await this.loadOwnedOr403(listingId, ownerId);
+    const listing = await this.loadOwnedOr403(listingId, ownerId);
 
     const proposal = await this.proposals.findOne({
       where: { id: proposalId, listingId },
@@ -403,6 +559,43 @@ export class BarterService {
     }
     proposal.status = status;
     proposal.decidedAt = decidedAt;
+
+    // PRD-43: tell the PROPOSER. Until now `decideProposal` wrote the status
+    // and returned, so the only way a member learned their swap was accepted
+    // or declined was if the owner happened to type it into the DM thread the
+    // proposal opened. Volunteering and jobs both notify their applicant; this
+    // is the same shape, through the shared submission-decision primitive
+    // rather than a barter-specific notification type.
+    //
+    // Reached only after the guarded `status = 'pending'` UPDATE claimed the
+    // row, so a no-op re-decision has already thrown 409 above and one
+    // decision can never emit twice.
+    //
+    // The payload carries the listing's own PUBLIC headline and nothing else.
+    // The proposal's `message` is member-authored private text that belongs in
+    // the DM thread, for exactly the reason `BarterProposalReceived`'s
+    // docstring gives; the same reasoning binds this one. No `reviewNote`
+    // either: there is no owner-written reasoning field on a barter decision,
+    // and anything an owner wants to say goes to one person in the thread.
+    //
+    // `notifyDecided` already swallows its own failures, and this guard is the
+    // second belt: a notification must never roll back a decision that has
+    // committed (the same shape as the best-effort emit in `createProposal`).
+    try {
+      await this.submissionDecisions.notifyDecided({
+        recipientId: proposal.proposerId,
+        kind: SubmissionKind.BarterProposal,
+        outcome:
+          status === BarterProposalStatus.Accepted
+            ? SubmissionOutcome.Accepted
+            : SubmissionOutcome.Declined,
+        subjectLabel: listing.offer || listing.want,
+      });
+    } catch (error) {
+      this.logger.error(
+        `Barter proposal ${proposal.id} decided but notification failed: ${String(error)}`,
+      );
+    }
 
     const proposer = await this.memberRefFor(proposal.proposerId);
     return toBarterProposalDTO(proposal, proposer);

@@ -96,6 +96,36 @@ export class PartnerApplicationsController {
   ) {
     return this.partnersService.submitApplication(user.userId, dto);
   }
+
+  /**
+   * The caller's own applications and where each one stands (PRD-37).
+   *
+   * PATH. `GET /partner-applications/mine`, on this controller rather than a
+   * new one: this is the applications namespace, the submitter already POSTs
+   * here, and the class guard (`ActiveMemberGuard`) is already exactly the
+   * gate this route wants — a member's own resource, scoped inside the
+   * service by `submittedById` so the session, never the wire, decides whose
+   * rows come back. That is the identical shape as
+   * `WriterApplicationsController.getMine` and `ReportsController.listMine`,
+   * the two closest intakes on the platform. The admin queue stays where it
+   * is, on `AdminPartnersController` behind the admin/staff gate; adding this
+   * here does not widen that by anything.
+   *
+   * `mine` is a literal segment and this controller declares no `:id` route,
+   * so there is nothing for it to be swallowed by. Declared first anyway, the
+   * convention `AdminPartnersController` already follows.
+   */
+  @Get('mine')
+  @ApiOperation({ summary: "The caller's own partner applications" })
+  @ApiOkResponse({
+    description:
+      'The caller’s own applications, newest first, with the decision date where there is one.',
+  })
+  @ApiUnauthorizedResponse({ description: 'Authentication is required.' })
+  @ApiForbiddenResponse({ description: 'Requires an active member account.' })
+  listMine(@CurrentUser() user: CurrentUserData) {
+    return this.partnersService.listMine(user.userId);
+  }
 }
 
 // Admin edit of an approved partner's featured/testimonial marketing fields.
@@ -195,10 +225,13 @@ export class AdminPartnersController {
     description: 'The partner application does not exist.',
   })
   triage(
+    @CurrentUser() user: CurrentUserData,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: TriagePartnerApplicationDto,
   ) {
-    return this.partnersService.triage(id, dto.action, dto.note);
+    // The actor rides along only so the decision notification can skip an
+    // admin who decided their own organisation's application (PRD-37).
+    return this.partnersService.triage(id, dto.action, dto.note, user.userId);
   }
 
   @Patch(':id')

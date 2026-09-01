@@ -16,6 +16,7 @@ import { VolunteeringModule } from '../volunteering/volunteering.module';
 import { CommunitiesController } from './communities.controller';
 import { CommunitiesService } from './communities.service';
 import { Event } from '../events/entities/event.entity';
+import { EventPhoto } from '../events/entities/event-photo.entity';
 import { CommunityActivityCounterService } from './community-activity-counter.service';
 import { CommunityAutoFreezeService } from './community-auto-freeze.service';
 import { CommunityBanRatificationController } from './community-ban-ratification.controller';
@@ -116,12 +117,21 @@ import { MeCommunitiesController } from './me-communities.controller';
       // `Message`/`HousingListing` — TypeORM allows an entity's repo in more
       // than one module.
       Report,
-      // Read-only, for `CommunityDigestService`'s upcoming-gathering counts
-      // and `CommunityPublicService`'s next-public-gathering lookup.
-      // Importing `EventsModule` (already done below, for the pulse service)
-      // provides the service and never the repository, so the entity has to
-      // be listed here. Same cross-module `forFeature` reuse as `Report`.
+      // Read-only, for `CommunityDigestService`'s upcoming-gathering counts,
+      // `CommunityPublicService`'s next-public-gathering lookup, and the
+      // gathering title `CommunityPostsService`'s report queue names a
+      // reported photo's album by. Importing `EventsModule` (already done
+      // below, for the pulse service) provides the service and never the
+      // repository, so the entity has to be listed here. Same cross-module
+      // `forFeature` reuse as `Report`.
       Event,
+      // Read-only, for the `event_photo` arm of the community moderation
+      // queue and of the auto-freeze scope (TS-13): a photograph in the album
+      // of a gathering this community hosts is now reportable, and both the
+      // queue a community moderator reads and the freeze an emergency report
+      // trips have to resolve it back to `events.community_id`. Same
+      // cross-module `forFeature` reuse as `Report` and `Event` above.
+      EventPhoto,
     ]),
     UsersModule,
     // `ConnectionsService` — `suggestedCommunities` reads the viewer's accepted

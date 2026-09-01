@@ -71,6 +71,57 @@ export interface MyBarterListingDTO extends BarterListingDTO {
 }
 
 /**
+ * The listing as the member who PROPOSED on it needs to recognise it: enough
+ * to know which swap this was, who posted it, and whether it still stands.
+ *
+ * Deliberately narrower than {@link BarterListingDTO}. `isOwner` is always
+ * false here by construction (you cannot propose on your own listing) and
+ * `hasProposed` is always true, so neither carries information; the long
+ * `offerDetail`/`wantDetail` bodies belong on the listing page the row links
+ * to rather than in a list of a member's own sent offers.
+ */
+export interface ProposedBarterListingDTO {
+  id: string;
+  member: BarterMemberRef | null;
+  category: BarterCategory;
+  mode: BarterMode;
+  offer: string;
+  want: string;
+  status: BarterListingStatus;
+}
+
+/**
+ * A proposal as the member who SENT it sees it (`GET /barter/mine/proposals`).
+ *
+ * Before this the proposer had no view of their own offers at all: a proposal
+ * left for the owner's inbox and never came back. `status` and `decidedAt` are
+ * the outcome; `listing` is what the outcome was about.
+ *
+ * What is NOT here is as deliberate as what is. There is no owner-written
+ * reasoning field on the schema and none is added: an owner's answer is
+ * accept or decline, and anything they want to say about it goes in the DM
+ * thread the proposal opened, in their own words to one person. `message` IS
+ * returned because the proposer wrote it and is reading their own text back.
+ */
+export interface MySentBarterProposalDTO {
+  id: string;
+  listingId: string;
+  listing: ProposedBarterListingDTO | null;
+  message: string;
+  status: BarterProposalStatus;
+  decidedAt: string | null;
+  createdAt: string;
+  /**
+   * True when the poster materially changed the listing (category, mode, or
+   * either headline) AFTER this proposal was sent. The proposer offered
+   * against what the post said at the time, so the surface says so plainly
+   * rather than letting the deal quietly become a different one. See
+   * `BarterListing.materialEditedAt`.
+   */
+  wasListingEditedAfterProposal: boolean;
+}
+
+/**
  * A proposal as its listing's owner sees it. The proposer is a `MemberRef`, so
  * the raw `proposer_id` never crosses the wire; the message is included because
  * the owner is its intended recipient (it is also in their inbox).
@@ -150,6 +201,49 @@ export function toMyBarterListingDTO(
       hasProposed: false,
     }),
     pendingProposalCount: options.pendingProposalCount,
+  };
+}
+
+/** A listing mapped down to what the proposer's own row needs to show. */
+export function toProposedBarterListingDTO(
+  listing: BarterListing,
+  member: BarterMemberRef | null,
+): ProposedBarterListingDTO {
+  return {
+    id: listing.id,
+    member,
+    category: listing.category,
+    mode: listing.mode,
+    offer: listing.offer,
+    want: listing.want,
+    status: listing.status,
+  };
+}
+
+/**
+ * One of the caller's own sent proposals.
+ *
+ * `listing` is `null` when the post is gone (deleted with its poster's
+ * account) or when the two members have since blocked each other. The row
+ * itself is still returned: it is the proposer's own record of something they
+ * sent, and dropping it would make their history silently incomplete.
+ */
+export function toMySentBarterProposalDTO(
+  proposal: BarterProposal,
+  listing: ProposedBarterListingDTO | null,
+  materialEditedAt: Date | null,
+): MySentBarterProposalDTO {
+  return {
+    id: proposal.id,
+    listingId: proposal.listingId,
+    listing,
+    message: proposal.message,
+    status: proposal.status,
+    decidedAt: proposal.decidedAt ? proposal.decidedAt.toISOString() : null,
+    createdAt: proposal.createdAt.toISOString(),
+    wasListingEditedAfterProposal: Boolean(
+      materialEditedAt && materialEditedAt > proposal.createdAt,
+    ),
   };
 }
 

@@ -7,8 +7,9 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isUniqueViolation } from '../common/db-errors';
-import { In, Repository, SelectQueryBuilder } from 'typeorm';
+import { DataSource, In, Repository, SelectQueryBuilder } from 'typeorm';
 import { MemberLookup, MemberRef } from '../common/member-ref';
+import { actorFromLookup, presentActorIds } from '../common/nullable-actor';
 import {
   DEFAULT_LIST_LIMIT,
   normalizePage,
@@ -28,6 +29,7 @@ import { ContentModerationService } from '../content-moderation/content-moderati
 import { CreateIntroRequestDto } from './dto/create-intro-request.dto';
 import { CreateLandlordDto } from './dto/create-landlord.dto';
 import { CreateRecommendationDto } from './dto/create-recommendation.dto';
+import { TakeDownRecommendationDto } from './dto/take-down-recommendation.dto';
 import { ListAdminLandlordsQuery } from './dto/list-admin-landlords.query';
 import { ListIntroRequestsQuery } from './dto/list-intro-requests.query';
 import { TriageIntroRequestDto } from './dto/triage-intro-request.dto';
@@ -94,10 +96,19 @@ export class LandlordsService {
     // LOC-19: the member who suggested an entry, or asked for an
     // introduction, is told what was decided. In-app plus push, never email.
     private readonly notifications: NotificationsService,
-    // Read-only: a `hide_content`/`remove_content` takedown on a `landlord`
-    // subject (keyed by the entry slug, which is what the report modal on
-    // `LandlordPage` sends) withholds the entry from every member read below.
+    // A `hide_content`/`remove_content` takedown on a `landlord` subject
+    // (keyed by the entry slug, which is what the report modal on
+    // `LandlordPage` sends) withholds the entry from every member read below;
+    // one on a `landlord_recommendation` subject (keyed by the recommendation's
+    // uuid) withholds a single tenant's warning from every read AND every star
+    // aggregate. Read AND write: the admin takedown/restore pair below is the
+    // one place outside `ModerationService` that writes this table.
     private readonly contentModeration: ContentModerationService,
+    // Only for the takedown/restore writes: `ContentModerationService`'s
+    // mutations take the caller's `EntityManager` so they can enlist in the
+    // moderation service's action transaction, so a caller outside that
+    // transaction has to open one of its own.
+    private readonly dataSource: DataSource,
   ) {}
 
   // A landlord entry is reported (and taken down) under the `landlord` subject
@@ -108,6 +119,73 @@ export class LandlordsService {
   // treats a `housing` takedown. The admin routes below deliberately do NOT
   // filter on it, so staff can still see and triage what they took down.
   private static readonly SUBJECT_TYPE = 'landlord';
+
+  // ONE tenant's recommendation is reported (and taken down) under the
+  // `landlord_recommendation` subject code, keyed by the recommendation's uuid.
+  // Distinct from `SUBJECT_TYPE` above on purpose and at a finer grain: acting
+  // on a complaint about one sentence must not withhold every other tenant's
+  // warning about the same landlord.
+  //
+  // A hidden OR removed recommendation is withheld from every member read AND
+  // from every star aggregate below. The two have to move together: this
+  // surface has no tombstone rendering, so a withheld recommendation simply
+  // stops existing for readers, and a score that still counted its stars would
+  // be a number no reader could account for.
+  //
+  // The admin reads deliberately do NOT filter on it, so staff can see what
+  // they took down and lift it again.
+  private static readonly RECOMMENDATION_SUBJECT_TYPE =
+    'landlord_recommendation';
+
+  /**
+   * NOT EXISTS predicate dropping any recommendation under a
+   * `landlord_recommendation` takedown (hidden OR removed) from a
+   * recommendation query builder, in-query so an aggregate computed over EVERY
+   * row still excludes the withheld ones.
+   *
+   * `recommendationIdColumn` is spliced verbatim into raw SQL, so pass an
+   * actual column reference and never user input; it is cast to text because
+   * `content_moderation.subject_id` is varchar while a recommendation id is
+   * uuid. Mirrors `DirectoryService.excludeModeratedReviews`.
+   */
+  private excludeModeratedRecommendations(
+    qb: SelectQueryBuilder<LandlordRecommendation>,
+    recommendationIdColumn: string,
+  ): void {
+    qb.andWhere(
+      `NOT EXISTS (
+        SELECT 1 FROM "content_moderation" "cmr"
+        WHERE "cmr"."subject_type" = :recommendationSubjectType
+          AND "cmr"."subject_id" = ${recommendationIdColumn}::text
+          AND ("cmr"."hidden_at" IS NOT NULL OR "cmr"."removed_at" IS NOT NULL)
+      )`,
+      {
+        recommendationSubjectType: LandlordsService.RECOMMENDATION_SUBJECT_TYPE,
+      },
+    );
+  }
+
+  /**
+   * Post-query twin of {@link excludeModeratedRecommendations}, for the
+   * `find`-based reads that already hold rows (the capped detail page, and the
+   * browse grid's batched rating). Mirrors
+   * `DirectoryService.dropModeratedReviews` exactly, and uses the same subject
+   * constant, so a recommendation withheld from the list is withheld from the
+   * score too.
+   */
+  private async dropModeratedRecommendations(
+    recs: LandlordRecommendation[],
+  ): Promise<LandlordRecommendation[]> {
+    if (!recs.length) return recs;
+    const states = await this.contentModeration.statesFor(
+      LandlordsService.RECOMMENDATION_SUBJECT_TYPE,
+      recs.map((rec) => rec.id),
+    );
+    return recs.filter((rec) => {
+      const state = states.get(rec.id);
+      return !state || (!state.hidden && !state.removed);
+    });
+  }
 
   /**
    * NOT EXISTS predicate dropping any landlord under a `landlord` takedown
@@ -249,6 +327,12 @@ export class LandlordsService {
       authorUserId,
     ]);
     const level = await this.verification.levelForUser(authorUserId);
+    // No takedown check here, and none is wanted: this is an upsert on the
+    // author's OWN row, so the id is unchanged and any standing
+    // `landlord_recommendation` takedown still points at it. Rewriting a
+    // withheld recommendation does not put it back; only a moderator lifting
+    // the takedown does. The author gets their own edit echoed back, which is
+    // what they asked for, while every OTHER read below still withholds it.
     return toRecommendationDTO(saved, members.get(authorUserId) ?? null, level);
   }
 
@@ -260,6 +344,17 @@ export class LandlordsService {
    *
    * Idempotent: no row means there is nothing to withdraw, which is the state
    * the caller asked for, so it succeeds rather than 404s.
+   *
+   * Still a HARD delete, deliberately: this is the author retracting their own
+   * words about a named real person, which is the one case where nothing should
+   * survive to be restored. Any `content_moderation` row that was standing on
+   * the deleted uuid is left behind as an orphan, which is harmless because
+   * uuids are never reused, and because a re-posted recommendation is a new row
+   * with a new id. That last point is also the honest limitation: an author
+   * whose recommendation was taken down can withdraw it and write a new one,
+   * and the takedown does not follow them. Repeat evasion is a member-level
+   * enforcement question for the moderation queue, not something to solve by
+   * blocking a member from retracting their own words.
    */
   async removeMyRecommendation(
     slug: string,
@@ -485,12 +580,10 @@ export class LandlordsService {
    * The recommendations on one landlord entry, as a moderator sees them
    * (LOC-19).
    *
-   * `removeRecommendation` below is keyed by a recommendation id that no
-   * response in the API carried: the public landlord detail returns
-   * `RecommendationDTO`, which has no `id`, so the DELETE route was
-   * unreachable from any client. This is the admin-side read that supplies it,
-   * and it stays admin-side so a public reader is never handed the key to
-   * somebody else's row.
+   * Deliberately UNFILTERED. This is the one read that shows a moderator what
+   * they have already taken down, so each row carries its `moderation` state
+   * rather than being dropped: a takedown nobody can see is a takedown nobody
+   * can lift.
    *
    * Capped at `DEFAULT_LIST_LIMIT` and newest first, matching the public
    * detail read, and it 404s on an unknown landlord rather than answering an
@@ -505,26 +598,148 @@ export class LandlordsService {
       order: { createdAt: 'DESC' },
       take: DEFAULT_LIST_LIMIT,
     });
-    const authorUserIds = recs.map((rec) => rec.authorUserId);
+    return this.toAdminRecommendationDTOs(recs);
+  }
+
+  /**
+   * Hand-map a batch of recommendations for staff: author refs, honest
+   * verification badges and the takedown state, each in ONE batched query for
+   * the whole list rather than one per row.
+   */
+  private async toAdminRecommendationDTOs(
+    recs: LandlordRecommendation[],
+  ): Promise<AdminRecommendationDTO[]> {
+    if (!recs.length) return [];
+    const authorUserIds = presentActorIds(recs.map((rec) => rec.authorUserId));
     const members = await new MemberLookup(this.profiles).byUserIds(
       authorUserIds,
     );
     const levels = await this.recLevels(authorUserIds);
-    return recs.map((rec) =>
-      toAdminRecommendationDTO(
-        rec,
-        members.get(rec.authorUserId) ?? null,
-        levels.get(rec.authorUserId) ?? VerificationLevel.Email,
-      ),
+    const states = await this.contentModeration.statesFor(
+      LandlordsService.RECOMMENDATION_SUBJECT_TYPE,
+      recs.map((rec) => rec.id),
     );
+    return recs.map((rec) => {
+      const state = states.get(rec.id);
+      return toAdminRecommendationDTO(
+        rec,
+        actorFromLookup(members, rec.authorUserId) ?? null,
+        actorFromLookup(levels, rec.authorUserId) ?? VerificationLevel.Email,
+        { hidden: state?.hidden ?? false, removed: state?.removed ?? false },
+      );
+    });
   }
 
-  async removeRecommendation(id: string): Promise<void> {
+  /**
+   * Take ONE tenant's recommendation of a landlord down, REVERSIBLY.
+   *
+   * ## What replaced what, and why the route changed shape
+   *
+   * This used to be `removeRecommendation(id)`, a `repository.remove` behind
+   * `DELETE /admin/landlords/recommendations/:id`: no tombstone, no restore,
+   * and no state a later read could reconsider. It was the only takedown on the
+   * platform a moderator could not undo, on the one surface where being wrong
+   * costs the most. These recommendations are how tenants warn each other about
+   * landlords on a queer housing platform, so the writer is by construction the
+   * party with less power, and the moderator judging the complaint has none of
+   * the facts about a deposit or a doorstep conversation. A mistake there has
+   * to be recoverable.
+   *
+   * It now writes a `content_moderation` row under
+   * `RECOMMENDATION_SUBJECT_TYPE`, keyed by the recommendation's uuid: the
+   * same mechanism, the same table and the same reversal as every other
+   * member-written surface, and the same one the moderation queue's
+   * `hide_content`/`remove_content` on a `landlord_recommendation` report
+   * writes. One takedown, one state, whichever door the moderator came in
+   * through.
+   *
+   * The old `DELETE /admin/landlords/recommendations/:id` route is GONE rather
+   * than quietly repurposed. Leaving a `DELETE` in place that no longer deletes
+   * would tell every future reader of the API the opposite of what happens, and
+   * an old client calling it now gets a loud 404 instead of silently taking a
+   * different action than it asked for. Nothing in the frontend called it.
+   *
+   * ## What is NOT recoverable
+   *
+   * Any recommendation hard-deleted before this existed is gone. There is no
+   * row, no `content_moderation` state, and nothing anywhere that could restore
+   * it. This method changes what happens from now on and makes no claim about
+   * what already happened.
+   *
+   * The write is transactional so the state row is the whole unit of work,
+   * matching how `ModerationService` enrolls its own `applyAction` call.
+   */
+  async takeDownRecommendation(
+    id: string,
+    actorUserId: string,
+    dto: TakeDownRecommendationDto,
+  ): Promise<AdminRecommendationDTO> {
     const rec = await this.recommendations.findOne({ where: { id } });
     if (!rec) {
       throw new NotFoundException('Recommendation not found');
     }
-    await this.recommendations.remove(rec);
+    const note = LandlordsService.trimToNull(dto.note);
+    if (!note) {
+      throw new BadRequestException(
+        'Say why the recommendation is coming down. A second moderator reads this when the author asks for it back.',
+      );
+    }
+    await this.dataSource.transaction(async (manager) => {
+      await this.contentModeration.applyAction(manager, {
+        subjectType: LandlordsService.RECOMMENDATION_SUBJECT_TYPE,
+        subjectId: rec.id,
+        // The lighter action is the default: `remove_content` has to be asked
+        // for.
+        action: dto.action ?? 'hide_content',
+        actorId: actorUserId,
+        reasonCode: dto.reasonCode ?? null,
+        note,
+      });
+    });
+    return this.oneAdminRecommendationOr404(rec.id);
+  }
+
+  /**
+   * Lift a takedown on one recommendation and put the tenant's warning back.
+   *
+   * `ContentModerationService.revert` deletes the state row, and because the
+   * takedown never touched `landlord_recommendations`, the original stars and
+   * text return exactly as written, along with their contribution to the
+   * landlord's rating.
+   *
+   * IDEMPOTENT: a recommendation carrying no takedown is already in the state
+   * the caller asked for, so this succeeds rather than 404s. It DOES 404 on an
+   * unknown recommendation id, which is the honest answer for a row that has
+   * been hard-deleted or whose landlord entry was deleted out from under it.
+   */
+  async restoreRecommendation(id: string): Promise<AdminRecommendationDTO> {
+    const rec = await this.recommendations.findOne({ where: { id } });
+    if (!rec) {
+      throw new NotFoundException('Recommendation not found');
+    }
+    await this.dataSource.transaction(async (manager) => {
+      await this.contentModeration.revert(
+        manager,
+        LandlordsService.RECOMMENDATION_SUBJECT_TYPE,
+        rec.id,
+      );
+    });
+    return this.oneAdminRecommendationOr404(rec.id);
+  }
+
+  /** Re-read one recommendation as staff see it, after a state change. */
+  private async oneAdminRecommendationOr404(
+    id: string,
+  ): Promise<AdminRecommendationDTO> {
+    const rec = await this.recommendations.findOne({ where: { id } });
+    if (!rec) {
+      throw new NotFoundException('Recommendation not found');
+    }
+    const [dto] = await this.toAdminRecommendationDTOs([rec]);
+    if (!dto) {
+      throw new NotFoundException('Recommendation not found');
+    }
+    return dto;
   }
 
   /**
@@ -759,20 +974,32 @@ export class LandlordsService {
     // Newest `DEFAULT_LIST_LIMIT` recommendations, not every one ever written:
     // this was an unbounded read whose cost grew with the landlord's history,
     // and it also drove a member lookup and a verification-level lookup per row.
-    const recs = await this.recommendations.find({
+    const pagedRecs = await this.recommendations.find({
       where: { landlordId: landlord.id },
       order: { createdAt: 'DESC' },
       take: DEFAULT_LIST_LIMIT,
     });
+    // Moderator takedowns. Applied after the capped fetch, which is the same
+    // trade-off `DirectoryService.dropModeratedReviews` makes on the listing
+    // detail page: the page can come back one or two short of the cap, and
+    // nothing paginates past it, so nothing is skipped.
+    const recs = await this.dropModeratedRecommendations(pagedRecs);
+    // `authorUserId` is NULL once that member erased their account, so the
+    // nulls are filtered out before any lookup rather than sent to `In([...])`
+    // as ids that no longer exist.
+    const authorUserIds = presentActorIds(recs.map((rec) => rec.authorUserId));
     const members = await new MemberLookup(this.profiles).byUserIds(
-      recs.map((rec) => rec.authorUserId),
+      authorUserIds,
     );
-    const levels = await this.recLevels(recs.map((rec) => rec.authorUserId));
+    const levels = await this.recLevels(authorUserIds);
     const recDTOs: RecommendationDTO[] = recs.map((rec) =>
       toRecommendationDTO(
         rec,
-        members.get(rec.authorUserId) ?? null,
-        levels.get(rec.authorUserId) ?? VerificationLevel.Email,
+        actorFromLookup(members, rec.authorUserId) ?? null,
+        // An erased author has no live verification level to claim, so the
+        // badge falls back to the email floor rather than keeping whatever the
+        // member had verified before they left.
+        actorFromLookup(levels, rec.authorUserId) ?? VerificationLevel.Email,
       ),
     );
     // The headline rating has to be computed over EVERY recommendation, so it
@@ -785,29 +1012,49 @@ export class LandlordsService {
     );
   }
 
-  /** Average stars + count for one landlord, aggregated in SQL. */
+  /**
+   * Average stars + count for one landlord, aggregated in SQL over EVERY
+   * recommendation (the detail page's list is capped, and capping the list must
+   * not quietly change the score).
+   *
+   * The takedown exclusion is therefore IN-QUERY: a post-query filter here
+   * could only ever see the capped page, which would leave the headline score
+   * and the list under it disagreeing about which recommendations exist.
+   */
   private async rating(
     landlordId: string,
   ): Promise<{ score: string; count: number }> {
-    const row = await this.recommendations
+    const ratingQuery = this.recommendations
       .createQueryBuilder('r')
       .select('AVG(r.stars)', 'average')
       .addSelect('COUNT(*)', 'count')
-      .where('r.landlord_id = :landlordId', { landlordId })
-      .getRawOne<{ average: string | null; count: string }>();
+      .where('r.landlord_id = :landlordId', { landlordId });
+    this.excludeModeratedRecommendations(ratingQuery, 'r.id');
+    const row = await ratingQuery.getRawOne<{
+      average: string | null;
+      count: string;
+    }>();
     const count = Number(row?.count ?? 0);
     if (!count || row?.average == null) return { score: '0', count: 0 };
     return { score: Number(row.average).toFixed(1), count };
   }
 
+  /**
+   * Batched average stars + count for a page of landlords (the browse grid and
+   * the admin console list). One query for the whole page, then the same
+   * takedown filter the detail page and its headline score apply, so a
+   * withheld recommendation cannot survive in a card's rating after it has
+   * vanished from the entry it belongs to.
+   */
   private async ratingsFor(
     landlordIds: string[],
   ): Promise<Map<string, { score: string; count: number }>> {
     const map = new Map<string, { score: string; count: number }>();
     if (!landlordIds.length) return map;
-    const recs = await this.recommendations.find({
+    const allRecs = await this.recommendations.find({
       where: { landlordId: In(landlordIds) },
     });
+    const recs = await this.dropModeratedRecommendations(allRecs);
     const byLandlord = new Map<string, LandlordRecommendation[]>();
     for (const rec of recs) {
       const list = byLandlord.get(rec.landlordId);

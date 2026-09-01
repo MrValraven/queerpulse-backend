@@ -7,6 +7,7 @@ import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import { GoogleAuthGuard } from '../src/auth/guards/google-auth.guard';
 import { encodeOAuthState } from '../src/auth/oauth-state';
+import { LaunchedFeaturesGuard } from '../src/common/launched-features.guard';
 import { CompanyReview } from '../src/companies/entities/company-review.entity';
 import { CompanyTeamMember } from '../src/companies/entities/company-team-member.entity';
 import { Company } from '../src/companies/entities/company.entity';
@@ -39,6 +40,21 @@ describe('Jobs (e2e)', () => {
     })
       .overrideGuard(GoogleAuthGuard)
       .useValue(stubGuard)
+      // `jobs` (and `companies`, which this suite creates a job under) now
+      // ship with `launched: false` in src/launchedFeatures.ts: the Work and
+      // Economy pages are hidden in every production build, so
+      // LaunchedFeaturesGuard 404s POST /jobs, GET /jobs/:slug, the apply flow
+      // and POST /companies before auth even runs. Neutralising the flag gate
+      // keeps this suite exercising the jobs code end to end while the surface
+      // is closed, exactly as cinema.e2e-spec.ts does for its own flag: the
+      // routes' ownership, CSRF and 403 rules are what the tests below assert,
+      // and none of that changed. Drop this override once
+      // launchedFeatures.jobs.launched and .companies.launched are both true
+      // again (the same change that unhides /work/jobs, /work/companies and
+      // /work/application-status from COMING_SOON_PATTERNS in the frontend's
+      // src/app/authGate.ts), so the suite runs against the real global chain.
+      .overrideGuard(LaunchedFeaturesGuard)
+      .useValue({ canActivate: () => true })
       .compile();
     app = moduleRef.createNestApplication();
     // Same as src/main.ts: req.cookies is only populated once cookie-parser is

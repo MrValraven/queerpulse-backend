@@ -52,7 +52,8 @@ export class EventPhotosController {
   })
   @ApiNotFoundResponse({ description: 'No event with that slug.' })
   @ApiConflictResponse({
-    description: 'The photo is already attached to another event.',
+    description:
+      'The photo is already attached to another event, or a moderator has taken it down.',
   })
   attach(
     @Param('slug') slug: string,
@@ -63,7 +64,11 @@ export class EventPhotosController {
   }
 
   @Get(':slug/photos')
-  @ApiOperation({ summary: "List an event's photo album." })
+  @ApiOperation({
+    summary: "List an event's photo album.",
+    description:
+      'Participants only (host, co-hosts, and members who RSVPd going). Any photo a moderator has hidden or removed under the `event_photo` subject is dropped from the album for every viewer, organizers included: an organizer is often the person a photo report is about, so there is no staff view of a taken-down photograph here.',
+  })
   @ApiOkResponse({ description: 'The event photo views.' })
   @ApiForbiddenResponse({ description: 'Event photos are for attendees only.' })
   @ApiNotFoundResponse({ description: 'No event with that slug.' })
@@ -72,7 +77,11 @@ export class EventPhotosController {
   }
 
   @Delete(':slug/photos/:photoId')
-  @ApiOperation({ summary: "Remove a photo from an event's album." })
+  @ApiOperation({
+    summary: "Remove a photo from an event's album.",
+    description:
+      'Takes down all three pieces: the stored object, its crop, and the album row. The uploader or an organizer may call it. Ordering is deliberate (see `EventPhotosService.remove`): a storage failure removes nothing and answers 5xx, so the take-down can simply be repeated. Repeating it after a fully successful removal answers 404.',
+  })
   @ApiOkResponse({ description: 'Removal acknowledged.' })
   @ApiForbiddenResponse({ description: 'You cannot remove this photo.' })
   @ApiNotFoundResponse({ description: 'No such event or photo.' })

@@ -11,6 +11,11 @@ import { MessagingService } from '../messaging/messaging.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BlockFilterService } from '../social/block-filter.service';
+import { SubmissionDecisionNotifier } from '../submissions/submission-decision-notifier.service';
+import {
+  SubmissionKind,
+  SubmissionOutcome,
+} from '../submissions/submission-kinds';
 import { Profile } from '../users/entities/profile.entity';
 import { BarterService } from './barter.service';
 import {
@@ -55,12 +60,15 @@ const qbStub = () => {
     'addOrderBy',
     'skip',
     'take',
+    'limit',
+    'offset',
     'update',
     'set',
   ]) {
     qb[method] = jest.fn().mockReturnValue(qb);
   }
   qb.getRawMany = jest.fn().mockResolvedValue([]);
+  qb.getMany = jest.fn().mockResolvedValue([]);
   qb.getManyAndCount = jest.fn().mockResolvedValue([[], 0]);
   qb.execute = jest.fn().mockResolvedValue({ affected: 1 });
   return qb;
@@ -82,6 +90,7 @@ function listingRow(overrides: Partial<BarterListing> = {}): BarterListing {
     wantDetail: 'Two hours of your time.',
     tags: ['design'],
     status: BarterListingStatus.Open,
+    materialEditedAt: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     ...overrides,
@@ -128,6 +137,11 @@ describe('BarterService', () => {
         actorId?: string,
       ]
     >;
+  };
+  // Typed by its argument list so reading `mock.calls[0][0]` below is a real
+  // shape rather than an `any` the lint rules have to wave through.
+  let submissionDecisions: {
+    notifyDecided: jest.Mock<Promise<void>, [Record<string, unknown>]>;
   };
   let managerFindOne: jest.Mock;
 
@@ -188,6 +202,11 @@ describe('BarterService', () => {
         >()
         .mockResolvedValue(null),
     };
+    submissionDecisions = {
+      notifyDecided: jest
+        .fn<Promise<void>, [Record<string, unknown>]>()
+        .mockResolvedValue(undefined),
+    };
     managerFindOne = jest.fn().mockResolvedValue(listingRow());
 
     const manager = {
@@ -215,6 +234,10 @@ describe('BarterService', () => {
         { provide: BlockFilterService, useValue: blockFilter },
         { provide: MessagingService, useValue: messaging },
         { provide: NotificationsService, useValue: notifications },
+        {
+          provide: SubmissionDecisionNotifier,
+          useValue: submissionDecisions,
+        },
       ],
     }).compile();
 
@@ -523,6 +546,305 @@ describe('BarterService', () => {
           BarterProposalStatus.Accepted,
         ),
       ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    // PRD-43. Before this the proposer was told nothing at all: the status was
+    // written and the method returned.
+    it('tells the proposer their swap was accepted', async () => {
+      proposals.findOne.mockResolvedValue({ ...pendingRow });
+      await service.decideProposal(
+        LISTING_ID,
+        'proposal-1',
+        OWNER_ID,
+        BarterProposalStatus.Accepted,
+      );
+      expect(submissionDecisions.notifyDecided).toHaveBeenCalledTimes(1);
+      expect(submissionDecisions.notifyDecided).toHaveBeenCalledWith({
+        recipientId: PROPOSER_ID,
+        kind: SubmissionKind.BarterProposal,
+        outcome: SubmissionOutcome.Accepted,
+        subjectLabel: 'Brand identity design',
+      });
+    });
+
+    it('tells the proposer their swap was declined', async () => {
+      proposals.findOne.mockResolvedValue({ ...pendingRow });
+      await service.decideProposal(
+        LISTING_ID,
+        'proposal-1',
+        OWNER_ID,
+        BarterProposalStatus.Declined,
+      );
+      expect(submissionDecisions.notifyDecided).toHaveBeenCalledWith(
+        expect.objectContaining({ outcome: SubmissionOutcome.Declined }),
+      );
+    });
+
+    // The proposal's own message is member-authored private text: it belongs in
+    // the DM thread the proposal opened, never in a notification payload. Same
+    // rule `BarterProposalReceived` states for the owner's side.
+    it("never carries the proposer's own message into the notice", async () => {
+      proposals.findOne.mockResolvedValue({ ...pendingRow });
+      await service.decideProposal(
+        LISTING_ID,
+        'proposal-1',
+        OWNER_ID,
+        BarterProposalStatus.Accepted,
+      );
+      const notice = submissionDecisions.notifyDecided.mock.calls[0]?.[0] ?? {};
+      expect(JSON.stringify(notice)).not.toContain(pendingRow.message);
+      expect(notice).not.toHaveProperty('message');
+      expect(notice).not.toHaveProperty('reviewNote');
+    });
+
+    it('emits nothing when the decision was refused', async () => {
+      proposals.findOne.mockResolvedValue({
+        ...pendingRow,
+        status: BarterProposalStatus.Accepted,
+      });
+      await expect(
+        service.decideProposal(
+          LISTING_ID,
+          'proposal-1',
+          OWNER_ID,
+          BarterProposalStatus.Declined,
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(submissionDecisions.notifyDecided).not.toHaveBeenCalled();
+    });
+
+    it('emits nothing when a concurrent decision won the claim', async () => {
+      proposals.findOne.mockResolvedValue({ ...pendingRow });
+      const qb = qbStub();
+      qb.execute = jest.fn().mockResolvedValue({ affected: 0 });
+      proposals.createQueryBuilder.mockReturnValue(qb);
+
+      await expect(
+        service.decideProposal(
+          LISTING_ID,
+          'proposal-1',
+          OWNER_ID,
+          BarterProposalStatus.Accepted,
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(submissionDecisions.notifyDecided).not.toHaveBeenCalled();
+    });
+
+    it('still stores the decision when the notification fails', async () => {
+      proposals.findOne.mockResolvedValue({ ...pendingRow });
+      submissionDecisions.notifyDecided.mockRejectedValue(
+        new Error('bell down'),
+      );
+      const decided = await service.decideProposal(
+        LISTING_ID,
+        'proposal-1',
+        OWNER_ID,
+        BarterProposalStatus.Accepted,
+      );
+      expect(decided.status).toBe(BarterProposalStatus.Accepted);
+    });
+  });
+
+  describe('update', () => {
+    it('refuses an edit from someone other than the poster with a 403', async () => {
+      await expect(
+        service.update(LISTING_ID, PROPOSER_ID, { offer: 'Something else' }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('404s on a listing that is not there', async () => {
+      listings.findOne.mockResolvedValue(null);
+      await expect(
+        service.update(LISTING_ID, OWNER_ID, { offer: 'Something else' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('leaves an omitted field alone', async () => {
+      await service.update(LISTING_ID, OWNER_ID, { offerDetail: 'New copy.' });
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          offer: 'Brand identity design',
+          want: 'Tax return help',
+          offerDetail: 'New copy.',
+        }),
+      );
+    });
+
+    it('trims what it stores', async () => {
+      await service.update(LISTING_ID, OWNER_ID, { offer: '  Logo work  ' });
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({ offer: 'Logo work' }),
+      );
+    });
+
+    // The merged values are validated, so patching `mode` alone can never leave
+    // a post advertising a side it does not carry.
+    it('refuses a mode change the existing sides cannot satisfy', async () => {
+      listings.findOne.mockResolvedValue(listingRow({ want: '' }));
+      await expect(
+        service.update(LISTING_ID, OWNER_ID, { mode: BarterMode.Seeking }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('refuses emptying a headline the mode still advertises', async () => {
+      await expect(
+        service.update(LISTING_ID, OWNER_ID, { offer: '   ' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('de-duplicates tags exactly as create does', async () => {
+      await service.update(LISTING_ID, OWNER_ID, {
+        tags: [' design ', 'design', '', 'branding'],
+      });
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({ tags: ['design', 'branding'] }),
+      );
+    });
+
+    // The trap this stamp exists to close: somebody offered against what the
+    // post said, and the post now says something else.
+    it('stamps a material edit made under a pending proposal', async () => {
+      const qb = qbStub();
+      qb.getRawMany = jest
+        .fn()
+        .mockResolvedValue([{ listingId: LISTING_ID, count: '2' }]);
+      proposals.createQueryBuilder.mockReturnValue(qb);
+
+      const updated = await service.update(LISTING_ID, OWNER_ID, {
+        offer: 'Something materially different',
+      });
+
+      // The sibling tests below pin the un-stamped case to `null`, so "not
+      // null" is exactly what a stamp means here.
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.not.objectContaining({ materialEditedAt: null }),
+      );
+      expect(updated.pendingProposalCount).toBe(2);
+    });
+
+    it('does not stamp a cosmetic edit', async () => {
+      const qb = qbStub();
+      qb.getRawMany = jest
+        .fn()
+        .mockResolvedValue([{ listingId: LISTING_ID, count: '2' }]);
+      proposals.createQueryBuilder.mockReturnValue(qb);
+
+      await service.update(LISTING_ID, OWNER_ID, {
+        offerDetail: 'Same deal, better words.',
+        tags: ['design'],
+      });
+
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({ materialEditedAt: null }),
+      );
+    });
+
+    it('does not stamp when nobody is waiting on the swap', async () => {
+      await service.update(LISTING_ID, OWNER_ID, {
+        offer: 'Something materially different',
+      });
+      expect(listings.save).toHaveBeenCalledWith(
+        expect.objectContaining({ materialEditedAt: null }),
+      );
+    });
+  });
+
+  describe('listMySentProposals', () => {
+    const sentRow = {
+      id: 'proposal-1',
+      listingId: LISTING_ID,
+      proposerId: PROPOSER_ID,
+      message: 'I can trade you two hours of tax help.',
+      status: BarterProposalStatus.Pending,
+      decidedAt: null,
+      createdAt: new Date('2026-01-02T00:00:00.000Z'),
+    };
+
+    function sentQueryBuilder(rows: unknown[]) {
+      const qb = qbStub();
+      qb.getMany = jest.fn().mockResolvedValue(rows);
+      proposals.createQueryBuilder.mockReturnValue(qb);
+      return qb;
+    }
+
+    it('answers empty with no rows, without touching the listings', async () => {
+      sentQueryBuilder([]);
+      await expect(service.listMySentProposals(PROPOSER_ID)).resolves.toEqual(
+        [],
+      );
+      expect(listings.find).not.toHaveBeenCalled();
+    });
+
+    // `created_at DESC` alone is not deterministic when two timestamps tie.
+    it('orders newest first with an id tiebreak', async () => {
+      const qb = sentQueryBuilder([]);
+      await service.listMySentProposals(PROPOSER_ID);
+      expect(qb.orderBy).toHaveBeenCalledWith('proposal.created_at', 'DESC');
+      expect(qb.addOrderBy).toHaveBeenCalledWith('proposal.id', 'DESC');
+    });
+
+    it('returns the outcome and the listing it was made against', async () => {
+      sentQueryBuilder([sentRow]);
+      listings.find.mockResolvedValue([listingRow()]);
+      profiles.find.mockResolvedValue([profileRow()]);
+
+      const row = firstOrThrow(await service.listMySentProposals(PROPOSER_ID));
+      expect(row.status).toBe(BarterProposalStatus.Pending);
+      expect(row.listing?.offer).toBe('Brand identity design');
+      expect(row.listing?.member?.slug).toBe('nadia-osei');
+    });
+
+    // No owner-written reasoning field exists on a barter decision, and the
+    // raw entity is never returned, so `proposerId` cannot ride along either.
+    it('leaks no owner-side column onto the wire', async () => {
+      sentQueryBuilder([sentRow]);
+      listings.find.mockResolvedValue([listingRow()]);
+
+      const row = firstOrThrow(await service.listMySentProposals(PROPOSER_ID));
+      expect(row).not.toHaveProperty('proposerId');
+      expect(row).not.toHaveProperty('reviewNote');
+      expect(row.listing).not.toHaveProperty('ownerId');
+      expect(row.listing).not.toHaveProperty('offerDetail');
+    });
+
+    it('flags a listing the poster changed after the proposal went out', async () => {
+      sentQueryBuilder([sentRow]);
+      listings.find.mockResolvedValue([
+        listingRow({ materialEditedAt: new Date('2026-01-03T00:00:00.000Z') }),
+      ]);
+
+      const row = firstOrThrow(await service.listMySentProposals(PROPOSER_ID));
+      expect(row.wasListingEditedAfterProposal).toBe(true);
+    });
+
+    it('does not flag an edit that predates the proposal', async () => {
+      sentQueryBuilder([sentRow]);
+      listings.find.mockResolvedValue([
+        listingRow({ materialEditedAt: new Date('2026-01-01T12:00:00.000Z') }),
+      ]);
+
+      const row = firstOrThrow(await service.listMySentProposals(PROPOSER_ID));
+      expect(row.wasListingEditedAfterProposal).toBe(false);
+    });
+
+    // The proposer keeps their own record; only the poster's half is severed.
+    it('withholds the listing when the pair has since blocked', async () => {
+      sentQueryBuilder([sentRow]);
+      listings.find.mockResolvedValue([listingRow()]);
+      blockFilter.hiddenUserIds.mockResolvedValue(new Set([OWNER_ID]));
+
+      const row = firstOrThrow(await service.listMySentProposals(PROPOSER_ID));
+      expect(row.listing).toBeNull();
+      expect(row.message).toBe(sentRow.message);
+    });
+
+    it('keeps the row when the listing itself is gone', async () => {
+      sentQueryBuilder([sentRow]);
+      listings.find.mockResolvedValue([]);
+
+      const row = firstOrThrow(await service.listMySentProposals(PROPOSER_ID));
+      expect(row.listing).toBeNull();
+      expect(row.listingId).toBe(LISTING_ID);
     });
   });
 });

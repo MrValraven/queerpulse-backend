@@ -4,7 +4,10 @@ import {
   ReportStatus,
   ReportSubjectType,
 } from '../reports/entities/report.entity';
-import { summariseReportsByCommunity } from './community-report-scope';
+import {
+  COMMUNITY_SCOPED_SUBJECT_TYPES,
+  summariseReportsByCommunity,
+} from './community-report-scope';
 
 const NOW = new Date('2026-07-19T12:00:00.000Z');
 const YESTERDAY = new Date('2026-07-18T12:00:00.000Z');
@@ -86,6 +89,61 @@ describe('summariseReportsByCommunity', () => {
       NOW,
     );
     expect(totals.get('community-1')?.totalReportCount).toBe(1);
+  });
+
+  it('attributes a gathering-photo report through the same content lookup', () => {
+    // TS-13. A photo id is neither a post id nor a reply id, but all three are
+    // content ids and resolve through `communityIdBySubjectId`. This guards
+    // the contract that the service must populate that map from ALL THREE
+    // tables: a map built from only the two forum tables drops photo reports
+    // here silently, with no error, and the community's queue quietly
+    // under-counts the one subject type built for the emergency band.
+    const totals = summariseReportsByCommunity(
+      [
+        makeReport({
+          id: 'report-4',
+          subjectType: ReportSubjectType.EventPhoto,
+          subjectId: 'photo-2',
+          reasonCode: 'outing',
+          severity: ReportSeverity.Emergency,
+        }),
+      ],
+      new Map([['photo-2', 'community-1']]),
+      SLUG_TO_COMMUNITY_ID,
+      NOW,
+    );
+    expect(totals.get('community-1')?.totalReportCount).toBe(1);
+    expect(totals.get('community-1')?.openReportCount).toBe(1);
+  });
+
+  it('drops a photo report whose gathering belongs to no community', () => {
+    // A gathering nobody hosts resolves to nothing in the map, so the report
+    // is attributed to no community rather than guessed onto one.
+    const totals = summariseReportsByCommunity(
+      [
+        makeReport({
+          id: 'report-5',
+          subjectType: ReportSubjectType.EventPhoto,
+          subjectId: 'photo-3',
+        }),
+      ],
+      new Map(),
+      SLUG_TO_COMMUNITY_ID,
+      NOW,
+    );
+    expect(totals.size).toBe(0);
+  });
+
+  it('lists every subject type a community can be answerable for', () => {
+    // The single source of truth behind the service's `subject_type IN (...)`
+    // fetch. A subject type missing here never reaches the dashboard at all,
+    // which is the failure this list exists to make visible.
+    expect([...COMMUNITY_SCOPED_SUBJECT_TYPES]).toEqual([
+      ReportSubjectType.Post,
+      ReportSubjectType.Reply,
+      ReportSubjectType.EventPhoto,
+      ReportSubjectType.Community,
+    ]);
   });
 
   it('drops a report whose subject belongs to no known community', () => {

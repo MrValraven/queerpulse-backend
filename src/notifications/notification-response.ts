@@ -70,9 +70,16 @@ const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   [NotificationType.ListingReview]: 'actorId',
   // The member who asked the public question, resolved for the owner's bell.
   [NotificationType.ListingPublicQuestion]: 'actorId',
-  // The listing OWNER who answered. A moderator-written answer omits `actorId`
-  // from the payload entirely (the emit site only spreads it for an owner
-  // answer), so this yields `null` and the row reads as the platform speaking.
+  // The listing OWNER who answered, resolved for the asker's bell, and ONLY
+  // where the public listing page already links that owner's QueerPulse
+  // profile. The emit site spreads `actorId` on exactly that condition
+  // (`isOwnerPubliclyNamed`, the predicate the public page is built from), so a
+  // MODERATOR-written answer, a CO-MANAGER's answer, and an owner on
+  // `visibility: 'anon'`/`'role'` or with `linkToProfile` off all omit the key
+  // entirely and yield `null` here: the row reads as the platform speaking,
+  // exactly as the page attributes the answer to nobody. The block/mute gate is
+  // unaffected, because the emit site passes the answering member as `create`'s
+  // `actorId` argument regardless, the same split `SafeSpaceVouch` uses.
   [NotificationType.ListingPublicQuestionAnswered]: 'actorId',
   // The listing OWNER who sent the co-manager invitation, resolved for the
   // invited member's bell so the ask has a face on it.
@@ -99,6 +106,19 @@ const ACTOR_PAYLOAD_KEY: Partial<Record<NotificationType, string>> = {
   // The member proposing the swap — `BarterService.createProposal` writes this
   // alongside `barterListingId`/`listingOffer`.
   [NotificationType.BarterProposalReceived]: 'actorId',
+  // PRD-48. The SUBJECT of a review who publicly answered it: the business
+  // owner, the employer, the housing lister. Listed here (and `SubmissionDecided`
+  // deliberately is not) because this is one member answering another member in
+  // public, so it is member-driven and has to sit behind the same block/mute
+  // gate `ListingPublicQuestionAnswered` sits behind. The actor is CONDITIONAL,
+  // on exactly the same rule and for exactly the same reason: a MODERATOR-written
+  // reply omits `actorId` from the payload entirely, and on the business
+  // directory so does a CO-MANAGER's reply and an owner whose public page does
+  // not link their profile. Those rows yield `null` here and read as the
+  // platform speaking. The block/mute gate is unaffected in every case: the
+  // notifier passes the real replier as `create`'s `actorId` argument through
+  // its separate `blockGateActorId` field.
+  [NotificationType.ReviewReplied]: 'actorId',
 };
 
 /** The acting member's user id for a notification, or `null` when its type
@@ -497,6 +517,58 @@ const PAYLOAD_ALLOWLIST: Partial<Record<NotificationType, readonly string[]>> =
       'joinRequestId',
       'communityName',
     ],
+
+    // --- The shared submission-decision row (PRD-48) ------------------------
+    //
+    // `kind` and `outcome` are the two discriminators the client branches its
+    // copy on: which intake this was (`SubmissionKind`) and how it ended
+    // (`SubmissionOutcome`). Both are closed, code-defined vocabularies from
+    // `src/submissions/submission-kinds.ts`, never free text.
+    //
+    // `subjectLabel` is the submission's own headline read back to the member,
+    // so the row says WHICH submission — the same class of field as
+    // `StorySubmissionDecided`'s `workingTitle` and
+    // `ReadingGroupProposalDecided`'s `book`. Without it a member with two
+    // pending suggestions cannot tell which one was answered.
+    //
+    // `reviewNote` IS FORWARDED, and that was the judgement call on this entry.
+    // It is REVIEWER-authored prose written TO this recipient, the same class of
+    // value `WriterApplicationApproved`'s `reviewNote`, `CommunityBanned`'s
+    // `reason` and all four LOC-19 queues' `reason` already forward, and never
+    // member-authored content. It is forwarded because the note is the
+    // SUBSTANCE of the answer and the member should be able to read it wherever
+    // the answer reaches them. All three kinds also carry the same note on the
+    // member's own submissions index at `/account/submissions`; carrying it in
+    // both costs nothing and means the row is complete on its own, instead of
+    // the reasonless refusal PRD-48 exists to stop.
+    // `StorySubmissionDecided` is the counter-precedent and withholds its note
+    // because that note genuinely belongs somewhere else: a full editorial
+    // critique is a document rather than a notification line. That is why the
+    // choice is per-kind on
+    // `SUBMISSION_KIND_NOTIFICATION.isReviewNoteDelivered` rather than settled
+    // once here.
+    //
+    // Nothing the member themself wrote into the submission body rides along:
+    // their application text, their proposal message, the URL and description
+    // on a suggested resource. All of it stays in the intake's own row.
+    [NotificationType.SubmissionDecided]: [
+      'kind',
+      'outcome',
+      'subjectLabel',
+      'reviewNote',
+    ],
+    // The subject of a review answering it in public (PRD-48). `subjectLabel`
+    // is the reviewed thing's own PUBLIC name (the business, the employer, the
+    // home), so the row can say which review was answered; the deep link is
+    // built from `source` plus a slug, both in `COMMON_PAYLOAD_KEYS`.
+    //
+    // THE REPLY TEXT IS DELIBERATELY ABSENT, and no future writer may add it.
+    // It is subject-authored prose, and it is already published on the page one
+    // click away — the identical rule that keeps
+    // `ListingPublicQuestionAnswered`'s answer body off the bell. The member's
+    // own review text is absent for the stronger reason that this allowlist
+    // carries no member-authored content at all.
+    [NotificationType.ReviewReplied]: ['subjectLabel'],
   };
 
 /**

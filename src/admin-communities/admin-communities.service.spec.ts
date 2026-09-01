@@ -11,6 +11,8 @@ import {
 } from '../communities/entities/community-member.entity';
 import { CommunityPost } from '../communities/entities/community-post.entity';
 import { CommunityPostReply } from '../communities/entities/community-post-reply.entity';
+import { EventPhoto } from '../events/entities/event-photo.entity';
+import { Event as Gathering } from '../events/entities/event.entity';
 import {
   AccessTier,
   Community,
@@ -40,6 +42,9 @@ const REPORTED_POST_ID = '11111111-1111-1111-1111-111111111111';
 const REPORTED_REPLY_ID = '22222222-2222-2222-2222-222222222222';
 const REPORTED_POST_ID_ANOTHER_COMMUNITY =
   '33333333-3333-3333-3333-333333333333';
+// TS-13: `event_photos.id` is a uuid column too, so a reported photograph's
+// subject id is under the same constraint as the two above.
+const REPORTED_PHOTO_ID = '44444444-4444-4444-4444-444444444444';
 
 function daysAgo(days: number): Date {
   return new Date(FIXED_NOW.getTime() - days * DAY_MS);
@@ -292,7 +297,7 @@ describe('AdminCommunitiesService', () => {
   let reports: { createQueryBuilder: jest.Mock };
   let profiles: { find: jest.Mock; createQueryBuilder: jest.Mock };
   let users: { findOne: jest.Mock };
-  let dataSource: { transaction: jest.Mock };
+  let dataSource: { transaction: jest.Mock; createQueryBuilder: jest.Mock };
   let governanceLog: { log: jest.Mock };
 
   beforeEach(async () => {
@@ -342,6 +347,11 @@ describe('AdminCommunitiesService', () => {
               : communityMembers,
         }),
       ),
+      // TS-13: `loadPhotoCommunityIds` reads `event_photos` joined to `events`
+      // straight off the shared `DataSource`, so no events entity has to be
+      // registered on this module. Defaults to "no reported photograph
+      // resolves", which is what every test that is not about photos wants.
+      createQueryBuilder: jest.fn(() => makeQueryBuilderStub([])),
     };
     governanceLog = { log: jest.fn().mockResolvedValue(undefined) };
 
@@ -890,6 +900,11 @@ describe('AdminCommunitiesService', () => {
           subjectTypes: [
             ReportSubjectType.Post,
             ReportSubjectType.Reply,
+            // TS-13. A photo report on a community's own gathering is
+            // community-scoped, and its reason set leads with the two
+            // emergency-band codes, so leaving it out of the fetch left the
+            // dashboard blind to the reports it answers fastest.
+            ReportSubjectType.EventPhoto,
             ReportSubjectType.Community,
           ],
         },
@@ -998,6 +1013,146 @@ describe('AdminCommunitiesService', () => {
       expect(result.scopedQueue.map((queueItem) => queueItem.id)).toEqual([
         'report-real-post',
       ]);
+    });
+
+    // TS-13. A photo report is community-scoped through the GATHERING whose
+    // album it is in, and its reason set leads with `outing` and `doxxing`, the
+    // only two codes in the emergency band. Before this arm existed the
+    // dashboard's per-community counts and its scoped queue simply had no row
+    // for the subject type built for that band.
+    describe('a reported gathering photograph', () => {
+      it("counts toward the aggregates of the community hosting the photo's gathering", async () => {
+        communities.findOne.mockResolvedValue(makeCommunity());
+        queueQueryBuilders(communityPosts.createQueryBuilder, {
+          'post.id': [],
+          'post.community_id': [],
+        });
+        queueQueryBuilders(communityPostReplies.createQueryBuilder, {
+          'reply.id': [],
+          'post.community_id': [],
+        });
+        const photoQueryBuilders = queueQueryBuilders(
+          dataSource.createQueryBuilder,
+          {
+            'photo.id': [
+              { contentId: REPORTED_PHOTO_ID, communityId: 'community-1' },
+            ],
+          },
+        );
+        stubReportsQueryBuilder(reports.createQueryBuilder, [
+          makeReport({
+            id: 'report-open-photo',
+            subjectType: ReportSubjectType.EventPhoto,
+            subjectId: REPORTED_PHOTO_ID,
+            reasonCode: 'outing',
+            severity: ReportSeverity.Emergency,
+            status: ReportStatus.Open,
+            slaDueAt: daysAgo(1),
+          }),
+        ]);
+
+        const result = await service.getCommunity('circle-of-care', true);
+
+        // The photo's own id is what is bound, and the community comes off the
+        // gathering rather than off the uploader's memberships.
+        expect(photoQueryBuilders['photo.id']!.where).toHaveBeenCalledWith(
+          'photo.id IN (:...reportedContentIds)',
+          { reportedContentIds: [REPORTED_PHOTO_ID] },
+        );
+        expect(photoQueryBuilders['photo.id']!.innerJoin).toHaveBeenCalledWith(
+          Gathering,
+          'gathering',
+          'gathering.id = photo.event_id',
+        );
+        expect(dataSource.createQueryBuilder).toHaveBeenCalledWith(
+          EventPhoto,
+          'photo',
+        );
+        // Counted in the per-community aggregates AND present in the scoped
+        // queue, overdue because its one-hour window closed a day ago.
+        expect(result.openReportCount).toBe(1);
+        expect(result.scopedQueue.map((queueItem) => queueItem.id)).toEqual([
+          'report-open-photo',
+        ]);
+        expect(result.scopedQueue[0]!.overdue).toBe(true);
+      });
+
+      it('is dropped when its gathering belongs to no community', async () => {
+        communities.findOne.mockResolvedValue(makeCommunity());
+        queueQueryBuilders(communityPosts.createQueryBuilder, {
+          'post.id': [],
+          'post.community_id': [],
+        });
+        queueQueryBuilders(communityPostReplies.createQueryBuilder, {
+          'reply.id': [],
+          'post.community_id': [],
+        });
+        // The `community_id IS NOT NULL` clause plus the inner join mean a
+        // photo from a gathering nobody hosts resolves to no row at all.
+        const photoQueryBuilders = queueQueryBuilders(
+          dataSource.createQueryBuilder,
+          { 'photo.id': [] },
+        );
+        stubReportsQueryBuilder(reports.createQueryBuilder, [
+          makeReport({
+            id: 'report-open-photo',
+            subjectType: ReportSubjectType.EventPhoto,
+            subjectId: REPORTED_PHOTO_ID,
+            status: ReportStatus.Open,
+          }),
+        ]);
+
+        const result = await service.getCommunity('circle-of-care', true);
+
+        expect(photoQueryBuilders['photo.id']!.andWhere).toHaveBeenCalledWith(
+          'gathering.community_id IS NOT NULL',
+        );
+        // Attributed to nobody rather than guessed onto this community.
+        expect(result.openReportCount).toBe(0);
+        expect(result.scopedQueue).toEqual([]);
+      });
+
+      it('never reaches the uuid-keyed photo lookup with a non-UUID subjectId', async () => {
+        communities.findOne.mockResolvedValue(makeCommunity());
+        queueQueryBuilders(communityPosts.createQueryBuilder, {
+          'post.id': [],
+          'post.community_id': [],
+        });
+        queueQueryBuilders(communityPostReplies.createQueryBuilder, {
+          'reply.id': [],
+          'post.community_id': [],
+        });
+        const photoQueryBuilders = queueQueryBuilders(
+          dataSource.createQueryBuilder,
+          {
+            'photo.id': [
+              { contentId: REPORTED_PHOTO_ID, communityId: 'community-1' },
+            ],
+          },
+        );
+        stubReportsQueryBuilder(reports.createQueryBuilder, [
+          makeReport({
+            id: 'report-junk-photo-id',
+            subjectType: ReportSubjectType.EventPhoto,
+            subjectId: 'x',
+            status: ReportStatus.Open,
+          }),
+          makeReport({
+            id: 'report-real-photo',
+            subjectType: ReportSubjectType.EventPhoto,
+            subjectId: REPORTED_PHOTO_ID,
+            status: ReportStatus.Open,
+          }),
+        ]);
+
+        await service.getCommunity('circle-of-care', true);
+
+        // `event_photos.id` is a uuid column: 'x' would 500 real Postgres.
+        expect(photoQueryBuilders['photo.id']!.where).toHaveBeenCalledWith(
+          'photo.id IN (:...reportedContentIds)',
+          { reportedContentIds: [REPORTED_PHOTO_ID] },
+        );
+      });
     });
 
     it('flags truncated when the report scan hits MAX_SCANNED_REPORTS', async () => {

@@ -67,6 +67,20 @@ export interface CompanyDetailDTO extends CompanyCardDTO {
   createdAt: string;
 }
 
+/**
+ * The employer's one public reply to a review of them. Shaped exactly like the
+ * directory's `ReviewOwnerReplyDTO` so the two verticals stay one contract
+ * (PRD-47): the text as typed, and when it was posted.
+ *
+ * There is no author here on purpose. The reply is signed by the COMPANY, not
+ * by the person who typed it, so nothing about which member holds `ownerId`
+ * reaches the public page.
+ */
+export interface CompanyReviewOwnerReplyDTO {
+  text: string;
+  at: string;
+}
+
 export interface CompanyReviewDTO {
   id: string;
   author: MemberRef | null;
@@ -75,6 +89,18 @@ export interface CompanyReviewDTO {
   byline: string;
   body: string[];
   createdAt: string;
+  /** When the author last changed it, ISO-8601, or `null` if never. */
+  editedAt: string | null;
+  /**
+   * True when `editedAt` is later than `ownerRepliedAt`: the review was changed
+   * AFTER the employer answered it, so the reply on screen may be answering
+   * words that are no longer there. Precomputed here rather than left as a
+   * timestamp comparison for each client to get right (or not). Always `false`
+   * when there is no reply or no edit.
+   */
+  isEditedAfterOwnerReply: boolean;
+  /** The employer's public reply, or `null` when they have not answered. */
+  ownerReply: CompanyReviewOwnerReplyDTO | null;
 }
 
 function toBadges(c: Company): CompanyBadges {
@@ -129,6 +155,21 @@ export function toCompanyDetail(
   };
 }
 
+/**
+ * Was this review changed after the employer's reply was written?
+ *
+ * The two timestamps are independent and either can move, so the comparison is
+ * done once, here, and shipped as a boolean. A review with no reply, or a reply
+ * with no subsequent edit, is `false`. Mirrors the directory's
+ * `isEditedAfterOwnerReply` exactly.
+ */
+function isEditedAfterOwnerReply(review: CompanyReview): boolean {
+  if (!review.ownerReplyText || !review.ownerRepliedAt || !review.editedAt) {
+    return false;
+  }
+  return review.editedAt.getTime() > review.ownerRepliedAt.getTime();
+}
+
 export function toCompanyReview(
   r: CompanyReview,
   author: MemberRef | null,
@@ -141,6 +182,13 @@ export function toCompanyReview(
     byline: r.byline,
     body: r.body,
     createdAt: r.createdAt.toISOString(),
+    editedAt: r.editedAt ? r.editedAt.toISOString() : null,
+    isEditedAfterOwnerReply: isEditedAfterOwnerReply(r),
+    // Truthy check on the TEXT, not the timestamp: a blank reply is no reply,
+    // and the service refuses to store one (see `ReplyToCompanyReviewDto`).
+    ownerReply: r.ownerReplyText
+      ? { text: r.ownerReplyText, at: r.ownerRepliedAt!.toISOString() }
+      : null,
   };
 }
 

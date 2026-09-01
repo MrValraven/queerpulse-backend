@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   HttpException,
+  HttpStatus,
   NotFoundException,
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -33,12 +34,80 @@ const activeOwner = {
   status: UserStatus.Active,
 };
 
+const HOUR_MS = 60 * 60 * 1000;
+const ONE_DAY_MS = 24 * HOUR_MS;
+
+/** The caps and their sentences, restated here rather than imported: they are
+ *  private to the service on purpose, and a test that reads them from the
+ *  implementation would agree with a typo. */
+const MAX_PER_LISTING = 3;
+const MAX_PER_DAY = 20;
+const LISTING_CAP_SENTENCE =
+  'You have already written to this business today. Give them a chance to reply first.';
+const DIRECTORY_CAP_SENTENCE =
+  'You have sent a lot of enquiries today. Try again tomorrow.';
+
+/** Rows as the quota read gets them: NEWEST FIRST, inside the rolling day.
+ *  Fewest hours ago sorts first, so index 0 is the most recent enquiry and the
+ *  last element is the oldest one still inside the window. */
+const enquiryRows = (listingId: string, hoursAgo: number[]) =>
+  [...hoursAgo]
+    .sort((left, right) => left - right)
+    .map((hours, index) => ({
+      id: `enquiry-${index}`,
+      listingId,
+      createdAt: new Date(Date.now() - hours * HOUR_MS),
+    }));
+
+/** The service reads the caller's rows newest-first straight out of the index,
+ *  so a fixture built from more than one listing has to be merged the same way
+ *  or the release times come out of the wrong row. */
+const newestFirst = <Row extends { createdAt: Date }>(...rowSets: Row[][]) =>
+  rowSets
+    .flat()
+    .sort(
+      (left, right) => right.createdAt.getTime() - left.createdAt.getTime(),
+    );
+
+/**
+ * Both caps biting at once, and the directory one lifting LATER than the
+ * per-listing one. Three enquiries to this listing are the OLDEST rows in the
+ * window, so the per-listing cap lifts first; the window is full, so the
+ * directory cap lifts only when the 20th-newest row ages out, which is newer.
+ */
+const bothCapsBiting = () => {
+  const listingRows = enquiryRows('listing-1', [23, 22.5, 22]);
+  const elsewhereRows = enquiryRows(
+    'listing-elsewhere',
+    Array.from({ length: 18 }, (unused, index) => index + 1),
+  );
+  return {
+    listingRows,
+    elsewhereRows,
+    rows: newestFirst(listingRows, elsewhereRows),
+  };
+};
+
+/** Every field of the contact DTO that is not about the caps, so a test about
+ *  the caps can assert the whole object without restating the rest. */
+const REACHABLE = {
+  canMessageOwner: true,
+  unavailableReason: null,
+  replyRequiresConnection: true,
+  existingConversationId: null,
+};
+const UNCAPPED = {
+  hasReachedEnquiryLimit: false,
+  enquiryLimitReason: null,
+  enquiryLimitClearsAt: null,
+};
+
 describe('ListingEnquiriesService', () => {
   let service: ListingEnquiriesService;
   let listings: { findOne: jest.Mock };
   let enquiries: {
     findOne: jest.Mock;
-    count: jest.Mock;
+    find: jest.Mock;
     create: jest.Mock;
     save: jest.Mock<
       Promise<Partial<ListingEnquiry>>,
@@ -56,7 +125,7 @@ describe('ListingEnquiriesService', () => {
     listings = { findOne: jest.fn().mockResolvedValue(baseListing()) };
     enquiries = {
       findOne: jest.fn().mockResolvedValue(null),
-      count: jest.fn().mockResolvedValue(0),
+      find: jest.fn().mockResolvedValue([]),
       create: jest.fn((value: Partial<ListingEnquiry>) => value),
       save: jest.fn((value: Partial<ListingEnquiry>) =>
         Promise.resolve({ id: 'enquiry-1', ...value }),
@@ -95,12 +164,7 @@ describe('ListingEnquiriesService', () => {
   describe('getContact', () => {
     it('offers the contact route on a claimed, live listing', async () => {
       const contact = await service.getContact('drama-bar', 'member-1');
-      expect(contact).toEqual({
-        canMessageOwner: true,
-        unavailableReason: null,
-        replyRequiresConnection: true,
-        existingConversationId: null,
-      });
+      expect(contact).toEqual({ ...REACHABLE, ...UNCAPPED });
     });
 
     it('deep-links a thread the member already started', async () => {
@@ -267,20 +331,164 @@ describe('ListingEnquiriesService', () => {
       expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
     });
 
-    it('429s the third enquiry to one business in a day', async () => {
-      enquiries.count.mockResolvedValueOnce(3);
+    it('429s the fourth enquiry to one business in a day', async () => {
+      enquiries.find.mockResolvedValue(enquiryRows('listing-1', [20, 10, 2]));
       await expect(
         service.send('drama-bar', 'member-1', { body: 'A question here.' }),
-      ).rejects.toThrow(HttpException);
+      ).rejects.toThrow(
+        new HttpException(LISTING_CAP_SENTENCE, HttpStatus.TOO_MANY_REQUESTS),
+      );
       expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
     });
 
     it('429s once the across-the-directory daily cap is hit', async () => {
-      enquiries.count.mockResolvedValueOnce(0).mockResolvedValueOnce(20);
+      // Twenty enquiries today, none of them to THIS listing.
+      enquiries.find.mockResolvedValue(
+        enquiryRows(
+          'listing-elsewhere',
+          Array.from({ length: MAX_PER_DAY }, (unused, index) => index + 1),
+        ),
+      );
       await expect(
         service.send('drama-bar', 'member-1', { body: 'A question here.' }),
-      ).rejects.toThrow(HttpException);
+      ).rejects.toThrow(
+        new HttpException(DIRECTORY_CAP_SENTENCE, HttpStatus.TOO_MANY_REQUESTS),
+      );
       expect(messaging.deliverEnquiry).not.toHaveBeenCalled();
+    });
+
+    it('lets a member who is under both caps through', async () => {
+      enquiries.find.mockResolvedValue(
+        newestFirst(
+          enquiryRows('listing-1', [6, 2]),
+          enquiryRows('listing-elsewhere', [9]),
+        ),
+      );
+      await expect(
+        service.send('drama-bar', 'member-1', { body: 'A question here.' }),
+      ).resolves.toMatchObject({ conversationId: 'conversation-1' });
+    });
+
+    // The caps are counted from ONE place. If the send path ever grew its own
+    // count again, this is the test that would notice.
+    it('counts the caps in a single bounded read rather than per-cap counts', async () => {
+      await service.send('drama-bar', 'member-1', { body: 'A question here.' });
+      expect(enquiries.find).toHaveBeenCalledTimes(1);
+      expect(enquiries.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          order: { createdAt: 'DESC' },
+          take: MAX_PER_DAY + 1,
+        }),
+      );
+    });
+  });
+
+  /**
+   * The hint and the enforcement must never tell different stories. A composer
+   * that opens on a send the backend will refuse wastes a member's message; one
+   * that stays closed on a send that would have worked silently removes the only
+   * contact route on the page that does not cost them their phone number.
+   *
+   * Every case here drives BOTH paths off the same rows and asserts they agree,
+   * which is the property that matters. Asserting the read's shape alone would
+   * pass against a hint computed from a second, drifting count.
+   */
+  describe('the contact read agrees with what the send path then does', () => {
+    const sendBody = { body: 'A question here.' };
+
+    it('reports nothing capped, and the send then goes through', async () => {
+      enquiries.find.mockResolvedValue(enquiryRows('listing-1', [8, 3]));
+
+      const contact = await service.getContact('drama-bar', 'member-1');
+      expect(contact).toMatchObject(UNCAPPED);
+
+      await expect(
+        service.send('drama-bar', 'member-1', sendBody),
+      ).resolves.toMatchObject({ conversationId: 'conversation-1' });
+    });
+
+    it('reports the per-listing cap, and the send then refuses with that same sentence', async () => {
+      enquiries.find.mockResolvedValue(enquiryRows('listing-1', [23, 12, 1]));
+
+      const contact = await service.getContact('drama-bar', 'member-1');
+      expect(contact.hasReachedEnquiryLimit).toBe(true);
+      expect(contact.enquiryLimitReason).toBe('wrote_to_this_business_today');
+
+      await expect(
+        service.send('drama-bar', 'member-1', sendBody),
+      ).rejects.toThrow(LISTING_CAP_SENTENCE);
+    });
+
+    it('reports the directory-wide cap, and the send then refuses with that same sentence', async () => {
+      enquiries.find.mockResolvedValue(
+        enquiryRows(
+          'listing-elsewhere',
+          Array.from({ length: MAX_PER_DAY }, (unused, index) => index + 1),
+        ),
+      );
+
+      const contact = await service.getContact('drama-bar', 'member-1');
+      expect(contact.hasReachedEnquiryLimit).toBe(true);
+      expect(contact.enquiryLimitReason).toBe('wrote_across_directory_today');
+
+      await expect(
+        service.send('drama-bar', 'member-1', sendBody),
+      ).rejects.toThrow(DIRECTORY_CAP_SENTENCE);
+    });
+
+    // Both biting at once. The read names the per-listing cap because that is
+    // the one the send path refuses with first.
+    it('names the per-listing cap when both are biting, matching the refusal', async () => {
+      enquiries.find.mockResolvedValue(bothCapsBiting().rows);
+
+      const contact = await service.getContact('drama-bar', 'member-1');
+      expect(contact.enquiryLimitReason).toBe('wrote_to_this_business_today');
+
+      await expect(
+        service.send('drama-bar', 'member-1', sendBody),
+      ).rejects.toThrow(LISTING_CAP_SENTENCE);
+    });
+  });
+
+  describe('when the cap lifts', () => {
+    it('is a rolling day from the oldest counted enquiry, never midnight', async () => {
+      const rows = enquiryRows('listing-1', [23, 12, 1]);
+      enquiries.find.mockResolvedValue(rows);
+
+      const contact = await service.getContact('drama-bar', 'member-1');
+      // Rows arrive newest first, so the 3rd is the oldest of the three: the
+      // one whose ageing out drops the count below the cap.
+      const oldest = rows[MAX_PER_LISTING - 1] as { createdAt: Date };
+      expect(contact.enquiryLimitClearsAt).toBe(
+        new Date(oldest.createdAt.getTime() + ONE_DAY_MS).toISOString(),
+      );
+    });
+
+    // Promising the earlier of two biting caps would send a member back to a
+    // button that refuses them again.
+    it('is the later of the two caps when both are biting', async () => {
+      const { listingRows, rows } = bothCapsBiting();
+      enquiries.find.mockResolvedValue(rows);
+
+      const contact = await service.getContact('drama-bar', 'member-1');
+
+      const listingClearsAt =
+        listingRows[MAX_PER_LISTING - 1]!.createdAt.getTime() + ONE_DAY_MS;
+      const directoryClearsAt =
+        rows[MAX_PER_DAY - 1]!.createdAt.getTime() + ONE_DAY_MS;
+      expect(directoryClearsAt).toBeGreaterThan(listingClearsAt);
+      expect(contact.enquiryLimitClearsAt).toBe(
+        new Date(directoryClearsAt).toISOString(),
+      );
+    });
+  });
+
+  describe('the quota read is not run when there is nobody to write to', () => {
+    it('skips it entirely on an unclaimed listing', async () => {
+      listings.findOne.mockResolvedValue(baseListing({ path: 'suggest' }));
+      const contact = await service.getContact('drama-bar', 'member-1');
+      expect(contact).toMatchObject(UNCAPPED);
+      expect(enquiries.find).not.toHaveBeenCalled();
     });
   });
 });

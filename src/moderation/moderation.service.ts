@@ -285,7 +285,9 @@ export class ModerationService {
    * does, and the appeal machinery finally has a true record to rest on.
    *
    * `escalate` is here since TS-07, so an emergency report a community mod may
-   * not settle has somewhere to go.
+   * not settle has somewhere to go. TS-14 leans on it much harder: on an
+   * `event_photo` report it is the ONLY one of the three that survives, since
+   * a community moderator cannot be shown the photograph.
    *
    * Everything else (warn/suspend/ban/restrict/hide_content) stays platform
    * staff only: those are account-level or platform-wide consequences.
@@ -431,8 +433,8 @@ export class ModerationService {
   // class-level `@Roles(Moderator, Admin)` is overridden here) — see
   // `assertCanActOnReport` for the actual authorization: platform
   // Moderator/Admin (unchanged), OR a community owner/mod dismissing,
-  // removing or escalating a report scoped to a post/reply in the community
-  // they moderate.
+  // removing or escalating a report scoped to a post, a reply or a gathering
+  // photo in the community they moderate.
   async actOnReport(
     id: string,
     actorId: string,
@@ -605,14 +607,34 @@ export class ModerationService {
    * A platform Moderator/Admin may take any action on any report, unchanged,
    * and gets the full response (`true`). Everything else is a narrow,
    * community-scoped carve-out over three actions
-   * ({@link COMMUNITY_MOD_ACTIONS}) on a report whose subject resolves to a
-   * post or reply in the community they own or moderate — and gets back
-   * `false`. Everyone else, including a community mod acting outside their own
-   * community or against a non-community-post/reply report (member, message,
-   * venue, ...), is forbidden. This grants no report *visibility*:
-   * `GET /mod/reports` and `GET /mod/reports/:id` are untouched and still
-   * require the platform role, and the community-mod carve-out's own PATCH
-   * response is redacted by `toRow` using the `false` returned here.
+   * ({@link COMMUNITY_MOD_ACTIONS}) on a report whose subject resolves to
+   * something inside the community they own or moderate: a post, a reply, or
+   * (TS-13) a photograph in the album of a gathering that community hosts. On
+   * a photograph the carve-out is one action wide, `escalate`, because a
+   * community moderator has no permitted read of the image (TS-14, see
+   * {@link SUBJECT_TYPES_A_COMMUNITY_MOD_CANNOT_SEE}). It gets back `false`. Everyone else, including a community mod acting outside
+   * their own community or against a report that belongs to no community
+   * (member, message, venue, a photo from a gathering with no community, ...),
+   * is forbidden. This grants no report *visibility*: `GET /mod/reports` and
+   * `GET /mod/reports/:id` are untouched and still require the platform role,
+   * and the community-mod carve-out's own PATCH response is redacted by
+   * `toRow` using the `false` returned here.
+   *
+   * ROUTING A REPORT HERE TAKES IT AWAY FROM NOBODY. There is no hand-off and
+   * no exclusive ownership: `list` never filters a report out of the platform
+   * queue on the ground that a community could handle it, so every report a
+   * community moderator may now act on is still sitting in
+   * `GET /mod/reports` for staff, still counted by `computeCounts`, and still
+   * carrying its own SLA clock. That matters most for the exact reports this
+   * subject type exists for. `outing` and `doxxing` are
+   * `ReportSeverity.Emergency` with a one-hour `slaDueAt`, and
+   * {@link assertCommunityModMaySettle} refuses a community moderator every
+   * action on them except `escalate`, so an emergency-band photo report is
+   * decided by trained staff and by nobody else. Since TS-14 that is true of
+   * EVERY photo report at every severity, for a second reason: the image
+   * itself is unreadable to a community moderator. What routing a photo report
+   * to a community buys is local context and speed on the way to staff, never
+   * a local verdict.
    */
   private async assertCanActOnReport(
     report: Report,
@@ -634,14 +656,20 @@ export class ModerationService {
       //    moderator escalated is out of a community mod's hands by definition:
       //    `escalated` means "send this up", and letting the community it came
       //    from close it undoes that decision.
-      //  - never at EMERGENCY severity, except to escalate it (TS-07). See
+      //  - never at EMERGENCY severity, except to escalate it (TS-07), and
+      //    never on a subject they cannot see, again except to escalate it
+      //    (TS-14, `event_photo` today). Both live in
       //    `assertCommunityModMaySettle`.
       //  - never on their OWN content, for the two actions that settle the
       //    report. `isOwnerOrMod` says the actor moderates the community, not
       //    that they are impartial about this report; a community moderator
       //    reported for their own post could otherwise close the report about
       //    themselves in one call, platform-wide.
-      //  - unchanged: only for a post/reply inside a community they moderate.
+      //  - on an `event_photo`, never when they run the gathering the photo is
+      //    in either (TS-13). The album is the organizers' to publish, so a
+      //    host closing a report about it is the same self-dealing.
+      //  - only for a post, a reply or a gathering photo inside a community
+      //    they moderate.
       if (report.status !== ReportStatus.Open) {
         throw new ForbiddenException(
           'This report is no longer open to a community moderator. Platform staff will decide it.',
@@ -661,9 +689,14 @@ export class ModerationService {
           const subjectAuthorId = await this.authorIdForReportSubject(report);
           if (subjectAuthorId === actorId) {
             throw new ForbiddenException(
-              'You cannot close a report about your own post. Platform staff will decide it.',
+              'You cannot close a report about your own content. Platform staff will decide it.',
             );
           }
+          // TS-13: a photograph has a second conflicted party a post does not,
+          // and the author check above cannot see them. See
+          // `assertNotOrganiserOfReportedPhoto`, which also records the party
+          // no check can see: the person depicted.
+          await this.assertNotOrganiserOfReportedPhoto(report, actorId);
         }
         return false;
       }
@@ -675,30 +708,93 @@ export class ModerationService {
   }
 
   /**
-   * TS-07: an EMERGENCY report is not a community moderator's to settle.
+   * TS-14: subject types a community moderator may not settle a report about
+   * at ANY severity, because they have no permitted way to look at the thing
+   * they are being asked to judge. Each entry carries the sentence the refusal
+   * says, so a subject type joining this map brings its own true explanation
+   * with it.
    *
-   * `report-severity.ts` maps `outing` and `doxxing` to
-   * `ReportSeverity.Emergency`, and both are the report a community's own
-   * moderators are least able to decide: the community whose mods are the
-   * problem, or who are simply out of their depth, could close it before
-   * trained staff ever saw it, and a dismissal is platform-wide and terminal.
-   * The carve-out never guarded against that. It only guarded against a mod
-   * closing a report about their own post.
+   * `event_photo` is here because every read path to a reported gathering
+   * photograph is closed to a community moderator.
+   * `GET /mod/report-photo-evidence/:reportId` is `@Roles(Moderator, Admin)`.
+   * `GET /events/:slug/photos` serves the album to that gathering's
+   * participants only (host, co-hosts, and members who RSVP'd going).
+   * `GET /files/gathering-photos/...` is a session-gated kind and
+   * `FilesController` serves it to the member whose id is in the key, so not
+   * even platform staff read a photo that way. What reaches a community
+   * moderator is the reason code, the gathering's title, the caption, the
+   * uploader's name and the reporter's free text. `remove_content` on that
+   * evidence pulls the photograph out of the album for everyone, and
+   * `dismiss` is platform-wide and terminal. Neither is decidable from a
+   * description of a picture.
    *
-   * `escalate` is deliberately still allowed, and is why this refusal can name
-   * an alternative rather than being a dead end: the community moderator who
-   * finds an outing post keeps a way to put it in front of the people trained
-   * for it, immediately.
+   * WHY THIS SITS BESIDE THE EMERGENCY RULE INSTEAD OF INSIDE IT. The two
+   * refuse for different reasons, and reading one as the other would let a
+   * future change to either quietly reopen the case the other was covering.
+   * The emergency rule turns on SEVERITY and says "this is too serious to
+   * settle locally". This one turns on SUBJECT TYPE and says "you cannot see
+   * what you are being asked to judge", so it holds at every severity and for
+   * every reason code, including the six non-emergency ones an `event_photo`
+   * report carries (`harassment`, `hate_speech`, `discrimination`,
+   * `impersonation`, `spam`, `other`) where the emergency rule says nothing.
+   *
+   * The remedy is deliberately to narrow the ACTION and never to widen the
+   * read: nothing here makes a photograph visible to anyone it was not
+   * visible to before.
+   */
+  private static readonly SUBJECT_TYPES_A_COMMUNITY_MOD_CANNOT_SEE: ReadonlyMap<
+    ReportSubjectType,
+    string
+  > = new Map<ReportSubjectType, string>([
+    [
+      ReportSubjectType.EventPhoto,
+      'The reported photograph cannot be shown to you here, so the decision on it belongs to platform staff, who can see the image. Escalate the report and they will pick it up. Add what you know about the gathering and the people in it to your note, because that travels up with the report.',
+    ],
+  ]);
+
+  /**
+   * The two things the community-mod carve-out will not let a community
+   * moderator settle, in one place so a reader learns both at once:
+   *
+   *  - TS-07, an EMERGENCY report. `report-severity.ts` maps `outing` and
+   *    `doxxing` to `ReportSeverity.Emergency`, and both are the report a
+   *    community's own moderators are least able to decide: the community
+   *    whose mods are the problem, or who are simply out of their depth, could
+   *    close it before trained staff ever saw it, and a dismissal is
+   *    platform-wide and terminal. The carve-out never guarded against that.
+   *    It only guarded against a mod closing a report about their own post.
+   *  - TS-14, a report whose subject they cannot see. See
+   *    {@link SUBJECT_TYPES_A_COMMUNITY_MOD_CANNOT_SEE} for which subjects and
+   *    why the two rules stay distinct.
+   *
+   * `escalate` is deliberately exempt from both, and is why either refusal can
+   * name an alternative rather than being a dead end: the community moderator
+   * who finds an outing post, or a photo report they have no way to look at,
+   * keeps a way to put it in front of the people who can act on it,
+   * immediately. Any rule that joins these must exempt it too, or a report
+   * lands in a community queue with nothing its moderators are allowed to do.
    */
   private static assertCommunityModMaySettle(
     report: Report,
     action: ModActionCode,
   ): void {
-    if (report.severity !== ReportSeverity.Emergency) return;
+    // Escalating hands the report to somebody else instead of settling it, so
+    // it is never what either rule below is guarding against.
     if (action === 'escalate') return;
-    throw new ForbiddenException(
-      'This report is about outing or doxxing, so it goes to trained platform staff. Escalate it and they will pick it up.',
-    );
+
+    if (report.severity === ReportSeverity.Emergency) {
+      throw new ForbiddenException(
+        'This report is about outing or doxxing, so it goes to trained platform staff. Escalate it and they will pick it up.',
+      );
+    }
+
+    const unseeableSubjectRefusal =
+      ModerationService.SUBJECT_TYPES_A_COMMUNITY_MOD_CANNOT_SEE.get(
+        report.subjectType,
+      );
+    if (unseeableSubjectRefusal) {
+      throw new ForbiddenException(unseeableSubjectRefusal);
+    }
   }
 
   /**
@@ -720,11 +816,30 @@ export class ModerationService {
     return report.status;
   }
 
-  // The member who wrote the reported post/reply, for the conflict-of-interest
-  // check on the community-mod carve-out. Null for any other subject
-  // type, an unresolvable id, or an erased author — none of which can equal a
-  // live `actorId`, so the check fails open to "not your own content" only
-  // when there genuinely is no author to match.
+  /**
+   * The member who contributed the reported thing, for the
+   * conflict-of-interest check on the community-mod carve-out. Null for any
+   * other subject type, an unresolvable id, or an erased author. None of those
+   * can equal a live `actorId`, so the check fails open to "not your own
+   * content" only when there genuinely is no author to match.
+   *
+   * `event_photo` (TS-13) answers with the photo's UPLOADER and with nothing
+   * else. `EVENT_PHOTO_SQL` selects `event_photos.uploader_id`, which is
+   * `ON DELETE SET NULL`
+   * (`AddEventPhotoAndFeaturedCommunityForeignKeys1785001300000`), so an
+   * uploader who erased their account resolves to `null` and the check simply
+   * finds nobody to match. It never falls back to the gathering's `host_id`:
+   * the host is a different person from the uploader on most albums, and this
+   * value decides who may and may not moderate, so answering with the wrong
+   * person would either block an impartial moderator or clear a conflicted
+   * one. The host is covered separately and explicitly by
+   * {@link assertNotOrganiserOfReportedPhoto}.
+   *
+   * Read through the shared subject resolver rather than a second query of our
+   * own: it already resolves this exact column for the queue row, and reusing
+   * it keeps one statement as the single definition of "who is behind a
+   * photo".
+   */
   private async authorIdForReportSubject(
     report: Report,
   ): Promise<string | null> {
@@ -734,16 +849,112 @@ export class ModerationService {
     if (report.subjectType === ReportSubjectType.Reply) {
       return this.communityMembership.authorIdForReply(report.subjectId);
     }
+    if (report.subjectType === ReportSubjectType.EventPhoto) {
+      const { authorUserId, isAuthorAmbiguous } =
+        await this.subjectResolver.resolve(report);
+      // A subject whose author is ambiguous names ONE candidate rather than
+      // the answer (see `ReportSubjectResolution.isAuthorAmbiguous`), and a
+      // conflict check that matched a candidate would clear or block the
+      // wrong moderator. `event_photo` is never ambiguous today, so this
+      // stands as a guard for whatever subject type reaches this arm next.
+      return isAuthorAmbiguous ? null : authorUserId;
+    }
     return null;
   }
 
-  // Resolves a report's `subjectType`/`subjectId` to the community it belongs
-  // to, for a `post`/`reply` subject only — mirrors the exact resolution
-  // pattern `CommunityAutoFreezeService.resolveCommunity` and
-  // `CommunityPostsService.listCommunityReports` already establish (a report
-  // on the community itself, a member, a message, etc. resolves to `null`
-  // here; this carve-out is about content *inside* a community, not the
-  // community-as-subject case).
+  /**
+   * TS-13: refuses a community moderator who RUNS the gathering the reported
+   * photograph is in.
+   *
+   * A photo has more interested parties than a post does, and
+   * {@link authorIdForReportSubject} can only see one of them. Attaching to an
+   * album is organizer-only (`EventPhotosService.attach`), so the album is
+   * something the host and co-hosts publish together: a report saying "this
+   * picture of me should not be up" is a complaint about the album they run,
+   * and letting one of them close it is the same self-dealing the uploader
+   * check already refuses. They keep `escalate`, so the report still has
+   * somewhere to go in one call.
+   *
+   * WHAT THIS CHECK STRUCTURALLY CANNOT SEE: the person in the photograph.
+   * Nothing in `event_photos` records who is depicted, there are no tags and
+   * no face data, and on an `outing` or `doxxing` report the depicted person is
+   * usually the reporter, whose identity is withheld from a community
+   * moderator by design (`toRow`'s redaction, and `report.anonymous`). So a
+   * community moderator who is IN the reported photo and is neither its
+   * uploader nor an organizer of the gathering is invisible here and will pass
+   * this check. That gap cannot be closed with the data the platform holds,
+   * and since TS-14 it no longer has to be: a community moderator may not
+   * settle an `event_photo` report at all, at any severity, so being invisibly
+   * conflicted on one costs nothing.
+   *
+   * SINCE TS-14 THIS CANNOT FIRE FROM `assertCanActOnReport`, and it is kept
+   * so that stays visible rather than becoming a silent hole (the same reason
+   * the `ban` branch in `actOnReport` is kept). Its only caller runs it for
+   * `action !== 'escalate'`, and `assertCommunityModMaySettle` now refuses
+   * every non-escalate action on an `event_photo` before that line is reached.
+   * Take `event_photo` back out of
+   * {@link SUBJECT_TYPES_A_COMMUNITY_MOD_CANNOT_SEE} and this check is load
+   * bearing again the same instant, with the organizer self-dealing it refuses
+   * unchanged.
+   *
+   * Read through the shared `DataSource` with a parameterized statement rather
+   * than by importing `EventsModule`, the same reason
+   * `communitySlugForCommunityBan` and `ReportSubjectResolverService` give:
+   * the module graph already runs `CommunitiesModule -> ContentModerationModule
+   * <- this module`, and reaching the other way would close a real cycle.
+   */
+  private async assertNotOrganiserOfReportedPhoto(
+    report: Report,
+    actorId: string,
+  ): Promise<void> {
+    if (report.subjectType !== ReportSubjectType.EventPhoto) return;
+    // `reports.subject_id` is a varchar that carries slugs as well as uuids,
+    // so a non-uuid value must never reach a uuid-typed comparison. Same guard
+    // `CommunityMembershipService.communityIdForPost` and the resolver apply.
+    if (!UUID_RE.test(report.subjectId)) return;
+
+    const rows = await this.dataSource.query<{ one: number }[]>(
+      `SELECT 1 AS "one"
+         FROM event_photos ep
+         JOIN events e ON e.id = ep.event_id
+        WHERE ep.id = $1::uuid
+          AND (
+            e.host_id = $2::uuid
+            OR EXISTS (
+              SELECT 1
+                FROM event_cohosts ec
+               WHERE ec.event_id = e.id
+                 AND ec.user_id = $2::uuid
+            )
+          )
+        LIMIT 1`,
+      [report.subjectId, actorId],
+    );
+    if (rows.length) {
+      throw new ForbiddenException(
+        'You cannot close a report about a photo from a gathering you host. Platform staff will decide it.',
+      );
+    }
+  }
+
+  /**
+   * Resolves a report's `subjectType`/`subjectId` to the community that owns
+   * the reported thing, for the three subject types that live INSIDE a
+   * community: a `post`, a `reply`, and (TS-13) an `event_photo` in the album
+   * of a community-hosted gathering. The post/reply arms mirror the exact
+   * resolution pattern `CommunityAutoFreezeService.resolveCommunity` and
+   * `CommunityPostsService.listCommunityReports` already establish. A report
+   * on the community itself, a member, a message and so on resolves to `null`
+   * here, because this carve-out is about content inside a community and the
+   * community-as-subject case is a different question.
+   *
+   * `event_photo` reads `events.community_id` through the shared subject
+   * resolver, which already selects it for the queue row. A gathering with no
+   * community answers `null` and the report stays platform-only: the community
+   * has to be the gathering's own, and it is never inferred from the
+   * uploader's memberships, which would hand a report to a room that had
+   * nothing to do with the event.
+   */
   private async communityIdForReportSubject(
     report: Report,
   ): Promise<string | null> {
@@ -752,6 +963,10 @@ export class ModerationService {
     }
     if (report.subjectType === ReportSubjectType.Reply) {
       return this.communityMembership.communityIdForReply(report.subjectId);
+    }
+    if (report.subjectType === ReportSubjectType.EventPhoto) {
+      const { communityId } = await this.subjectResolver.resolve(report);
+      return communityId;
     }
     return null;
   }
@@ -1980,8 +2195,16 @@ export class ModerationService {
    *    through `community_posts` / `community_post_replies`.
    *  - an `event` report: `subjectId` is the gathering's slug, and a gathering
    *    hosted inside a community carries `community_id`.
+   *  - an `event_photo` report (TS-13): `subjectId` is the photo's own uuid,
+   *    and the community is the one that hosts the gathering whose album it
+   *    is in. This arm exists so the queue's community filter agrees with the
+   *    community-mod carve-out (`communityIdForReportSubject`): a photo report
+   *    a community's moderators may now act on has to be findable under that
+   *    community here too, or staff triaging one room would be looking at a
+   *    strictly smaller pile than the room's own moderators.
    *  - `member`, `message` and `venue` reports have no community and are
-   *    excluded rather than guessed at, matching that file exactly.
+   *    excluded rather than guessed at, matching that file exactly. So is a
+   *    photo from a gathering that belongs to no community.
    *
    * The slug resolves inside the statement, so an unknown slug makes every
    * content arm compare against NULL (never true) while the `community`-subject
@@ -2013,12 +2236,18 @@ export class ModerationService {
               SELECT 1 FROM events ev
               WHERE ev.slug = r.subject_id
                 AND ev.community_id = (SELECT co.id FROM communities co WHERE co.slug = :communitySlug)))
+        OR (r.subjectType = :eventPhotoSubjectType AND EXISTS (
+              SELECT 1 FROM event_photos ephoto
+              JOIN events ephoto_event ON ephoto_event.id = ephoto.event_id
+              WHERE ephoto.id::text = r.subject_id
+                AND ephoto_event.community_id = (SELECT co.id FROM communities co WHERE co.slug = :communitySlug)))
       )`,
       {
         communitySubjectType: ReportSubjectType.Community,
         postSubjectType: ReportSubjectType.Post,
         replySubjectType: ReportSubjectType.Reply,
         eventSubjectType: ReportSubjectType.Event,
+        eventPhotoSubjectType: ReportSubjectType.EventPhoto,
         communitySlug,
       },
     );

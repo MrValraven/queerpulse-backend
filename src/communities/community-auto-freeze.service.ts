@@ -12,6 +12,8 @@ import {
   ReportSubjectType,
 } from '../reports/entities/report.entity';
 import { REPORT_CREATED, ReportCreatedEvent } from '../reports/report.events';
+import { Event as Gathering } from '../events/entities/event.entity';
+import { EventPhoto } from '../events/entities/event-photo.entity';
 import { CommunityGovernanceLogService } from './community-governance-log.service';
 import { GovernanceLogAction } from './entities/community-governance-log.entity';
 import {
@@ -59,6 +61,15 @@ export class CommunityAutoFreezeService {
     private readonly posts: Repository<CommunityPost>,
     @InjectRepository(CommunityPostReply)
     private readonly replies: Repository<CommunityPostReply>,
+    // TS-13: a reported gathering photo resolves to its community through its
+    // album's gathering. `Event` is imported under the name `Gathering` here
+    // because every listener method in this file already binds `event` to a
+    // `ReportCreatedEvent`, and two different things called "event" in one
+    // resolver is exactly how the wrong row gets read.
+    @InjectRepository(EventPhoto)
+    private readonly eventPhotos: Repository<EventPhoto>,
+    @InjectRepository(Gathering)
+    private readonly gatherings: Repository<Gathering>,
     @InjectRepository(Report)
     private readonly reports: Repository<Report>,
     @InjectRepository(CommunityMember)
@@ -187,8 +198,18 @@ export class CommunityAutoFreezeService {
     }
   }
 
-  /** The community a report belongs to, or null when it isn't community-scoped
-   *  (member/message/venue/… subjects, or a flat post with no community). */
+  /**
+   * The community a report belongs to, or null when it isn't community-scoped
+   * (member/message/venue/… subjects, or a flat post with no community).
+   *
+   * The four arms here are the same four `ModerationService
+   * .communityIdForReportSubject` answers for, plus the `community` subject
+   * that names a community directly. They have to agree: that resolver decides
+   * which community's moderators may ACT on a report, and this one decides
+   * which community a report can freeze, and a report a room is answerable for
+   * but cannot be stopped by is a gap in exactly the emergency band this
+   * trigger exists for.
+   */
   private async resolveCommunity(
     event: ReportCreatedEvent,
   ): Promise<Community | null> {
@@ -206,7 +227,44 @@ export class CommunityAutoFreezeService {
       });
       return reply ? this.communityForPostId(reply.postId) : null;
     }
+    if (event.subjectType === ReportSubjectType.EventPhoto) {
+      return this.communityForPhotoId(event.subjectId);
+    }
     return null;
+  }
+
+  /**
+   * TS-13: the community that hosts the gathering whose album a reported
+   * photograph is in, or null.
+   *
+   * `outing` and `doxxing` are the two codes in `EMERGENCY_REASONS`, they are
+   * the entire reason a single photograph became reportable, and `maybeFreeze`
+   * deliberately lets ONE emergency report stop a community on its own. A
+   * photo of somebody at a community's gathering, filed as outing, is that
+   * report. Leaving it out would have meant the one subject type built for the
+   * emergency band was the one subject type the emergency trigger could not
+   * see.
+   *
+   * The community is the GATHERING's own (`events.community_id`) and is never
+   * inferred from the uploader's memberships: a gathering that belongs to no
+   * community freezes nothing, which is the same answer
+   * `ModerationService.communityIdForReportSubject` gives.
+   */
+  private async communityForPhotoId(
+    photoId: string,
+  ): Promise<Community | null> {
+    if (!UUID_RE.test(photoId)) return null;
+    const photo = await this.eventPhotos.findOne({
+      where: { id: photoId },
+      select: { eventId: true },
+    });
+    if (!photo) return null;
+    const gathering = await this.gatherings.findOne({
+      where: { id: photo.eventId },
+      select: { communityId: true },
+    });
+    if (!gathering?.communityId) return null; // not a community's gathering
+    return this.communities.findOne({ where: { id: gathering.communityId } });
   }
 
   /**
@@ -275,7 +333,18 @@ export class CommunityAutoFreezeService {
 
   /**
    * The shared scope predicate behind both counts above: OPEN reports whose
-   * subject is this community, one of its posts, or one of its replies.
+   * subject is this community, one of its posts, one of its replies, or (TS-13)
+   * a photograph in the album of a gathering it hosts.
+   *
+   * The photo arm is not optional once `resolveCommunity` can freeze on one.
+   * `CommunitiesService.unfreeze` gates lifting an AUTOMATIC freeze on
+   * `openReportCount` reaching zero, so a photo report that could freeze a
+   * community while this predicate could not see it would be a freeze the
+   * owner could lift the same second, with the report still open. The two
+   * change together.
+   *
+   * INNER join and an equality on `community_id`, so a photo from a gathering
+   * that belongs to no community counts against no community at all.
    */
   private openReportsScoped(community: Community): SelectQueryBuilder<Report> {
     return this.reports
@@ -312,6 +381,19 @@ export class CommunityAutoFreezeService {
               )`,
               {
                 replyType: ReportSubjectType.Reply,
+                communityId: community.id,
+              },
+            )
+            .orWhere(
+              `report.subject_type = :eventPhotoType AND EXISTS (
+                SELECT 1 FROM "event_photos" "__scoped_photo"
+                JOIN "events" "__scoped_photo_event"
+                  ON "__scoped_photo_event"."id" = "__scoped_photo"."event_id"
+                WHERE "__scoped_photo"."id"::text = report.subject_id
+                  AND "__scoped_photo_event"."community_id" = :communityId
+              )`,
+              {
+                eventPhotoType: ReportSubjectType.EventPhoto,
                 communityId: community.id,
               },
             );

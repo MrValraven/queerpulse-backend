@@ -14,6 +14,7 @@ import {
   ContentModerationState,
 } from '../content-moderation/content-moderation.service';
 import { isUniqueViolation } from '../common/db-errors';
+import { countCommunityTagFacets } from './community-tag-facets';
 import { escapeLikeTerm } from '../common/like-escape';
 import { assertNoForeignUploadIntroduced } from '../storage/assert-no-foreign-upload';
 import { ConnectionsService } from '../connections/connections.service';
@@ -48,6 +49,7 @@ import {
   CommunityCardDTO,
   CommunityDetailDTO,
   CommunityJoinRequestDTO,
+  CommunityBrowseFacetCounts,
   CommunityStats,
   JoinRequestApplicantContext,
   JoinResultDTO,
@@ -606,11 +608,24 @@ export class CommunitiesService {
     throw new ConflictException('Could not allocate a unique community ref');
   }
 
-  async list(
+  /**
+   * The browse WHERE clause: the viewer's visibility gates plus every
+   * `GET /communities` filter, as a query builder with no ordering and no
+   * pagination.
+   *
+   * Returns a FRESH builder every call — the page read and the facet read both
+   * mutate what they are handed, so they cannot share one.
+   *
+   * `skip` lifts one filter group so that group's own availability counts can
+   * be taken from everything else (the member directory's
+   * `directoryBaseQuery(q, viewer, skip)` is the same contract). Only `tags`
+   * carries counts today.
+   */
+  private browseBaseQuery(
     viewerId: string,
     query: CommunityListQuery,
-  ): Promise<Paginated<CommunityCardDTO>> {
-    const page = normalizePage(query.page);
+    skip?: 'tags',
+  ): SelectQueryBuilder<Community> {
     const filter = query.filter ?? 'discover';
 
     const communitiesQuery = this.communities.createQueryBuilder('c');
@@ -693,12 +708,17 @@ export class CommunitiesService {
     // Unknown ids are dropped; if EVERY id was unknown the caller asked for a
     // tag that cannot exist, so match nothing rather than silently returning
     // the unfiltered list.
-    const tags = knownCommunityTags(csv(query.tags));
-    if (csv(query.tags).length) {
-      if (!tags.length) {
-        communitiesQuery.andWhere('1 = 0');
-      } else {
-        communitiesQuery.andWhere('c.tags && :tags', { tags });
+    // Lifted entirely when this query is the one counting the tag facets —
+    // see `countCommunityTagFacets` for why a tag's own count cannot be taken
+    // through its own predicate.
+    if (skip !== 'tags') {
+      const tags = knownCommunityTags(csv(query.tags));
+      if (csv(query.tags).length) {
+        if (!tags.length) {
+          communitiesQuery.andWhere('1 = 0');
+        } else {
+          communitiesQuery.andWhere('c.tags && :tags', { tags });
+        }
       }
     }
     // An archived community leaves every listing (discover AND mine) — it has
@@ -707,6 +727,17 @@ export class CommunitiesService {
     communitiesQuery.andWhere('c.archived_at IS NULL');
     this.excludeModeratedCommunities(communitiesQuery);
 
+    return communitiesQuery;
+  }
+
+  async list(
+    viewerId: string,
+    query: CommunityListQuery,
+  ): Promise<
+    Paginated<CommunityCardDTO> & { facets: CommunityBrowseFacetCounts }
+  > {
+    const page = normalizePage(query.page);
+    const communitiesQuery = this.browseBaseQuery(viewerId, query);
     // 'name' ties (names aren't unique) get a stable, deterministic
     // secondary key so pagination doesn't reshuffle rows across pages.
     if (query.sort === 'name') {
@@ -725,21 +756,27 @@ export class CommunitiesService {
       communitiesQuery.orderBy('c.createdAt', 'DESC');
     }
 
-    return paginate(communitiesQuery, page, async (rows) => {
-      if (!rows.length) return [];
-      const communityIds = rows.map((community) => community.id);
-      const [stats, myRoles] = await Promise.all([
-        this.statsForMany(communityIds),
-        this.myRoleByCommunity(communityIds, viewerId),
-      ]);
-      return rows.map((community) =>
-        toCommunityCard(
-          community,
-          stats.get(community.id) ?? EMPTY_STATS,
-          myRoles.get(community.id) ?? null,
-        ),
-      );
-    });
+    // The page and the tag aggregate are independent reads of the same
+    // committed snapshot, so they go out together rather than in series.
+    const [pageOfCards, tags] = await Promise.all([
+      paginate(communitiesQuery, page, async (rows) => {
+        if (!rows.length) return [];
+        const communityIds = rows.map((community) => community.id);
+        const [stats, myRoles] = await Promise.all([
+          this.statsForMany(communityIds),
+          this.myRoleByCommunity(communityIds, viewerId),
+        ]);
+        return rows.map((community) =>
+          toCommunityCard(
+            community,
+            stats.get(community.id) ?? EMPTY_STATS,
+            myRoles.get(community.id) ?? null,
+          ),
+        );
+      }),
+      countCommunityTagFacets(this.browseBaseQuery(viewerId, query, 'tags')),
+    ]);
+    return { ...pageOfCards, facets: { tags } };
   }
 
   /**

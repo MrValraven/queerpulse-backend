@@ -218,9 +218,24 @@ export enum NotificationType {
   // something on their page (carries `actorId`, the asker, so a blocked/muted
   // asker is filtered by `NotificationsService.create` like any other
   // member-driven type). `ListingPublicQuestionAnswered` goes to the ASKER when
-  // the question is answered; it carries an `actorId` only when the OWNER
-  // answered, and deliberately none when a moderator did, because the asker is
-  // owed the answer, not the name of the staff member who wrote it.
+  // the question is answered. It carries an `actorId` ONLY where the OWNER
+  // answered AND the public listing page already links that owner's QueerPulse
+  // profile, which is the `isOwnerPubliclyNamed` predicate in
+  // `listings/listing-response.ts` that builds the page itself. Three cases
+  // therefore carry no actor at all: a MODERATOR answered, because staff are
+  // never named on a business page and the asker is owed the answer rather than
+  // the name of whoever wrote it; a CO-MANAGER answered, invisible on the
+  // public page by design (`listing-owner-personal-fields.ts`); or the owner is
+  // on `visibility: 'anon'`/`'role'` or withheld `linkToProfile`, having told
+  // this platform not to tie their name to this business. Naming any of them
+  // would put a face, a name and a profile link in the bell of somebody who
+  // asked their question on a page that attributes the answer to nobody, which
+  // on this platform outs a queer business owner.
+  //
+  // THE BLOCK/MUTE GATE STILL FIRES in every one of those cases: the emit site
+  // passes the answering member as `create`'s `actorId` argument even where the
+  // payload names nobody, the same split `SafeSpaceVouch` above uses for an
+  // anonymous vouch. Withholding a name must never withhold a safety control.
   //
   // Neither has a preference toggle, matching `ListingReview`/`ListingApproved`
   // and every other listing type: these are the platform telling you about
@@ -891,6 +906,110 @@ export enum NotificationType {
    * `AddBanEvasionEscalationNotificationTypes1796200000000`.
    */
   BanEvasionEscalationResolved = 'ban_evasion_escalation_resolved',
+
+  // --- One shared "you submitted something, here is the answer" row (PRD-48) -
+  //
+  // Every intake on this platform grew its own entity, its own status
+  // vocabulary and its own decision endpoint, and whether the submitter ever
+  // heard back was decided one intake at a time. That is why partner
+  // applications, barter proposals and resource suggestions each had to be
+  // found as a separate silent-black-hole finding rather than fixed once.
+  // `SubmissionDecided` is the shared answer, and `src/submissions/` is the one
+  // place a new intake plugs into it.
+  //
+  // NOT A REWRITE OF THE INTAKES THAT ALREADY SPEAK. `VolunteerApplicationDecided`,
+  // `WriterApplicationApproved`/`Declined`, `ChangemakerNominationApproved`/
+  // `Dismissed` and `IntakeReviewed` all keep their own values. They have
+  // shipped copy, shipped enum labels and rows already in members' bells;
+  // folding them in would mean a data migration and a copy rewrite to gain
+  // nothing a member can see. `SubmissionKind` in `src/submissions/` says the
+  // same thing where the next person will look, so this is not re-litigated.
+
+  /**
+   * Sent to the member who submitted something for review when the reviewing
+   * side reaches a terminal outcome on it (PRD-48). Written in exactly one
+   * place, `SubmissionDecisionNotifier` in `src/submissions/`.
+   *
+   * ONE VALUE FOR EVERY INTAKE THAT USES THE SHARED PRIMITIVE, with two
+   * discriminators in the payload rather than an enum label per intake:
+   * `kind` (a `SubmissionKind`: which intake this was) and `outcome` (a
+   * `SubmissionOutcome`: `accepted` / `declined` / `archived`). Same choice
+   * `IntakeReviewed` makes with its `kind`, and `ReportFiled` with its
+   * `severity`: the fourth intake to adopt this is then a code-only change
+   * with no `ALTER TYPE` at all.
+   *
+   * System-driven. NO ACTOR ID, like `VolunteerApplicationDecided` and
+   * `HousingListingDecision`: the bell never names which admin or owner
+   * decided, and a block between the submitter and whoever was on the rota
+   * must never swallow the answer to the submitter's own submission. No
+   * `NotificationPreferenceCategory` either: this is the outcome of something
+   * the member themself asked for, never content volume.
+   *
+   * Payload carries `{ kind, outcome, subjectLabel, reviewNote?, source? }`.
+   * `subjectLabel` is the submission's own headline read back to the member
+   * ("Casa Trans", the swap they proposed against), the same class of field as
+   * `StorySubmissionDecided`'s `workingTitle` and `ReadingGroupProposalDecided`'s
+   * `book`. `reviewNote` is REVIEWER-authored prose written TO this recipient,
+   * the same class of value `CommunityBanned`'s `reason` and
+   * `WriterApplicationApproved`'s `reviewNote` already forward, and it is
+   * carried because the note is the SUBSTANCE of the answer: a member should be
+   * able to read it wherever the answer reaches them. All three kinds now also
+   * appear on the member's own submissions index at `/account/submissions`,
+   * which holds the same note; carrying it in both costs nothing and means this
+   * row is complete on its own rather than a bare refusal the member has to go
+   * and look up. The per-kind `isReviewNoteDelivered` flag in
+   * `SUBMISSION_KIND_NOTIFICATION` is where a kind whose note genuinely belongs
+   * somewhere else turns it off, which is the `StorySubmissionDecided`
+   * precedent: a full editorial critique is a document rather than a
+   * notification line.
+   *
+   * IN-APP (plus push where the push whitelist takes it). QueerPulse sends no
+   * email and never will, so nothing about this type may be described as one.
+   *
+   * See migration `AddSubmissionAndReviewNotificationTypes1796400000000`.
+   */
+  SubmissionDecided = 'submission_decided',
+
+  /**
+   * Sent to the AUTHOR of a review when the SUBJECT of that review answers it
+   * in public (PRD-48). Written in exactly one place, `ReviewReplyNotifier` in
+   * `src/submissions/`.
+   *
+   * The gap it closes, and the precedent the whole row is built on: a business
+   * owner posting their single public reply to a member's review
+   * (`ListingsService.replyToReview`) notified that reviewer of nothing at all,
+   * so the member who wrote it only ever found out by going back to the page.
+   * The same silence was about to be shipped twice more, on employer reviews
+   * and on reviews of a housing listing.
+   *
+   * IT CARRIES AN ACTOR (`payload.actorId`, the replying subject), unlike
+   * `SubmissionDecided` above. That is the deliberate difference between the
+   * two: this is one MEMBER answering another member in public, so it is
+   * member-driven and `NotificationsService.create`'s block/mute gate has to
+   * apply to it exactly as it applies to `ListingPublicQuestionAnswered`,
+   * `ListingReview` and every other member-to-member row. A reviewer who has
+   * blocked the owner must not be reached by them through the bell.
+   *
+   * Where a MODERATOR rather than the subject writes the reply, the emit site
+   * omits `actorId` entirely and the row reads as the platform speaking,
+   * exactly as `ListingPublicQuestionAnswered` already handles that case.
+   *
+   * No `NotificationPreferenceCategory`, matching every other listing type:
+   * this is the answer to something the member personally wrote.
+   *
+   * Payload carries `{ actorId, source, subjectLabel }` plus whichever slug the
+   * deep link needs (`listingSlug` for the business directory). `subjectLabel`
+   * is the reviewed thing's own PUBLIC name, so the row can say which review
+   * was answered. THE REPLY TEXT NEVER RIDES ALONG: it is owner-authored prose,
+   * it is already published on the page this row links to, and the same rule
+   * keeps `ListingPublicQuestionAnswered`'s answer body off the bell.
+   *
+   * IN-APP. QueerPulse sends no email and never will, so nothing about this
+   * type may be described as one.
+   *
+   * See migration `AddSubmissionAndReviewNotificationTypes1796400000000`.
+   */
+  ReviewReplied = 'review_replied',
 }
 
 @Entity('notifications')

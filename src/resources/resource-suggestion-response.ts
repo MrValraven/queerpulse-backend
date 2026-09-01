@@ -90,3 +90,79 @@ export function toAdminResourceSuggestionDTO(
     decisionNote: suggestion.decisionNote,
   };
 }
+
+/**
+ * The submitter's own view of a resource they suggested (PRD-45).
+ *
+ * Before this shape existed a member who suggested a resource was never told
+ * anything: the admin queue recorded their id and the reviewer's note, and
+ * none of it ever came back. This is the pull half of the answer, the bell
+ * row written by `SubmissionDecisionNotifier` is the push half.
+ *
+ * Hand-mapped from the entity because this codebase has no global serializer,
+ * so a column added to `resource_suggestion` never reaches a member by
+ * accident. Two columns are deliberately withheld:
+ *
+ *  - `memberId`: it is always the caller's own id here, so echoing it back
+ *    tells them nothing and puts a user id on the wire for no reason.
+ *  - `decidedBy`: which member of staff decided is an internal fact. The
+ *    admin queue's own DTO withholds it for the same reason, and so does
+ *    `SafeSpaceNominationResponse`.
+ */
+export interface MyResourceSuggestionDTO {
+  id: string;
+  category: string;
+  name: string;
+  description: string;
+  phone: string | null;
+  email: string | null;
+  website: string | null;
+  /** When the member sent it in. */
+  createdAt: string;
+  status: ResourceSuggestionStatus;
+  /** When the current `status` was decided, null while still pending. */
+  decidedAt: string | null;
+  /**
+   * The reviewer's written reason, addressed to this member.
+   *
+   * This is the same `decision_note` column the admin queue writes, and the
+   * column has exactly one audience: the person who submitted. There is no
+   * separate internal-notes field on `resource_suggestion`, the sibling
+   * intake this module was copied from spends the column on the reason it
+   * tells the proposer (`AdminReadingGroupProposalsService.decline`), and the
+   * two nearest precedents for a member's own intake view both carry the
+   * reviewer's prose through to the member: `StorySubmissionResponse.decisionNote`
+   * ("the only prose the member gets about it, since QueerPulse delivers no
+   * email") and `SafeSpaceNominationResponse.decisionReason`.
+   *
+   * So it is shown. A declined suggestion whose reason is withheld is a
+   * refusal with no reason at all, and QueerPulse has no second channel to
+   * put the reason on. `DecideResourceSuggestionDto` says the same thing to
+   * the staff member typing it.
+   */
+  decisionNote: string | null;
+}
+
+/** `GET /resources/suggestions/mine`. Always an object, never null, so the
+ *  client never has to distinguish "no suggestions" from "no answer". */
+export interface MyResourceSuggestionsDTO {
+  items: MyResourceSuggestionDTO[];
+}
+
+export function toMyResourceSuggestionDTO(
+  suggestion: ResourceSuggestion,
+): MyResourceSuggestionDTO {
+  return {
+    id: suggestion.id,
+    category: suggestion.category,
+    name: suggestion.name,
+    description: suggestion.description,
+    phone: suggestion.phone,
+    email: suggestion.email,
+    website: suggestion.website,
+    createdAt: suggestion.createdAt.toISOString(),
+    status: suggestion.status,
+    decidedAt: suggestion.decidedAt ? suggestion.decidedAt.toISOString() : null,
+    decisionNote: suggestion.decisionNote,
+  };
+}

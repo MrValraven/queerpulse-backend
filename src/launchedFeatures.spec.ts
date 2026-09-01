@@ -17,6 +17,19 @@ describe('launchedFeatures registry', () => {
   it('ships cinema disabled (its Mux env is not provisioned by default)', () => {
     expect(isFeatureLaunched('cinema')).toBe(false);
   });
+
+  // The Work and Economy surface is hidden in every production build by
+  // COMING_SOON_PATTERNS (frontend src/app/authGate.ts), so these three keys
+  // must stay off: leaving them on means the API accepts job posts,
+  // applications, company reviews and barter proposals that no member has a
+  // surface to reach. Flip these expectations in the same change that unhides
+  // /work/jobs, /work/companies and /work/barter in the frontend gate.
+  it.each(['companies', 'jobs', 'barter'] as const)(
+    'ships %s disabled while its member-facing surface is hidden',
+    (key) => {
+      expect(isFeatureLaunched(key)).toBe(false);
+    },
+  );
 });
 
 describe('missingLaunchedFeatureEnv', () => {

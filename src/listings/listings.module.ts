@@ -8,6 +8,7 @@ import { MessagingModule } from '../messaging/messaging.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { SavedItem } from '../saved/entities/saved-item.entity';
 import { StorageModule } from '../storage/storage.module';
+import { SubmissionsModule } from '../submissions/submissions.module';
 import { UsersModule } from '../users/users.module';
 import { AdminListingsController } from './admin-listings.controller';
 import { DirectoryController } from './directory.controller';
@@ -120,6 +121,15 @@ import { ListingsService } from './listings.service';
     // which reaches back here. So this is a plain import with no cycle and no
     // `forwardRef`.
     SafeSpaceNominationsModule,
+    // `ReviewReplyNotifier` (PRD-47/48) — the review's author is told when the
+    // business answers it, in `ListingsService.replyToReview`. Before this the
+    // directory was the only one of the three review verticals that answered a
+    // member in silence.
+    //
+    // A plain import with no `forwardRef`: `SubmissionsModule` has no
+    // controller and no entity, and imports `NotificationsModule` alone, which
+    // never reaches back here.
+    SubmissionsModule,
   ],
   controllers: [
     // FIRST, and that is load-bearing rather than stylistic. Nest resolves

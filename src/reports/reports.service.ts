@@ -9,6 +9,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { MoreThanOrEqual, Repository } from 'typeorm';
 import { isUniqueViolation } from '../common/db-errors';
+import { EventPhoto } from '../events/entities/event-photo.entity';
 import { HousingListing } from '../housing-listings/entities/housing-listing.entity';
 import { Message } from '../messaging/entities/message.entity';
 import {
@@ -35,6 +36,7 @@ import { reasonsFor, ReasonCode, ReasonOption } from './reason-catalogue';
 import { deriveSeverity, slaDueAtFor } from './report-severity';
 import { ReportDTO, toReportDTO } from './report-response';
 import { REPORT_CREATED, ReportCreatedEvent } from './report.events';
+import { PHOTO_SNAPSHOT_TYPE } from './report-evidence';
 
 export interface ReportEvidenceInput {
   type: 'url' | 'screenshot';
@@ -47,6 +49,16 @@ export interface ReportEvidenceInput {
 // so this only ever truncates something padded out toward the DTO's 200-char
 // ceiling to push the rest of the line out of view.
 const MAX_LOGGED_SUBJECT_ID_LENGTH = 64;
+
+// A `subjectId` is a `varchar` the reporter's client supplies, validated only
+// as a 1-200 character string (`CreateReportDto`). The subjects addressed by a
+// uuid therefore need this before their id reaches a `uuid` column, or an
+// arbitrary string turns a filing into a Postgres `22P02` and a 500. Declared
+// locally, exactly as `AdminCommunitiesService` and `CommunityMembershipService`
+// each declare their own: the alternative is a shared utility nothing else
+// wants, or reaching into another module's internals for one regex.
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Makes a caller-supplied string safe to interpolate into a `key=value` log
@@ -112,6 +124,13 @@ export class ReportsService {
     // `ReportsModule` (same cross-module `forFeature` pattern as `Message`).
     @InjectRepository(HousingListing)
     private readonly housing: Repository<HousingListing>,
+    // Read-only lookup so an `event_photo` report can snapshot the photo's
+    // facts into `evidence` at filing time. Registered directly in
+    // `ReportsModule` (same cross-module `forFeature` pattern as `Message` and
+    // `HousingListing` above) rather than importing `EventsModule`, which would
+    // pull a whole feature module in for one `findOne`.
+    @InjectRepository(EventPhoto)
+    private readonly eventPhotos: Repository<EventPhoto>,
     // Fire-and-forget domain event on a genuinely new report — a community
     // auto-freeze listener reacts to it. `EventEmitter2` is globally available
     // (`EventEmitterModule.forRoot()` in the root module), so no module change
@@ -157,6 +176,26 @@ export class ReportsService {
     if (input.subjectType === ReportSubjectType.Housing) {
       reportedHousing = await this.housing.findOne({
         where: { slug: input.subjectId },
+      });
+    }
+
+    // Gathering-photo report: snapshot the photo's facts NOW. Sharper than the
+    // two snapshots above, because this subject's whole content is an image and
+    // the uploader can delete it — `EventPhotosService.remove` drops the row,
+    // the crop AND the stored object. See `PhotoSnapshotEvidence` for why the
+    // BYTES are still held by reference and no second copy is kept.
+    //
+    // Guarded by `UUID_RE`: `subjectId` is a client string and `event_photos.id`
+    // is a `uuid` column, so an arbitrary value would 500 the filing rather than
+    // simply failing to match. A non-uuid could never have named a photo anyway,
+    // so skipping the lookup is behaviour-preserving and the report still files.
+    let reportedEventPhoto: EventPhoto | null = null;
+    if (
+      input.subjectType === ReportSubjectType.EventPhoto &&
+      UUID_RE.test(input.subjectId)
+    ) {
+      reportedEventPhoto = await this.eventPhotos.findOne({
+        where: { id: input.subjectId },
       });
     }
 
@@ -206,6 +245,7 @@ export class ReportsService {
             input.evidence,
             reportedMessage,
             reportedHousing,
+            reportedEventPhoto,
           ),
           severity,
           slaDueAt: slaDueAtFor(severity, now),
@@ -670,11 +710,19 @@ export class ReportsService {
    * 'screenshot',…}`); this entry uses its own `type: 'message-snapshot'`
    * discriminant, which existing evidence consumers should treat as opaque
    * unless they specifically render it.
+   *
+   * Two more snapshots have joined it on the same argument, each with its own
+   * discriminant: `housing-snapshot` for a reported home, and `photo-snapshot`
+   * for ONE gathering photo. Every shape is declared in `report-evidence.ts`,
+   * which also carries the reasoning for the one decision that is not obvious:
+   * the photo snapshot holds the image BY REFERENCE and no copy of the
+   * photograph is retained anywhere.
    */
   private buildEvidence(
     clientEvidence: CreateReportInput['evidence'],
     reportedMessage: Message | null,
     reportedHousing: HousingListing | null,
+    reportedEventPhoto: EventPhoto | null,
   ): unknown[] | null {
     const evidence: unknown[] = clientEvidence ? [...clientEvidence] : [];
     if (reportedMessage) {
@@ -705,6 +753,25 @@ export class ReportsService {
         area: reportedHousing.area,
         listerId: reportedHousing.ownerId,
         listedAt: reportedHousing.createdAt.toISOString(),
+        snapshotAt: new Date().toISOString(),
+      });
+    }
+    // Gathering-photo snapshot: the facts a moderator needs to judge ONE
+    // photograph, captured at filing time so a later takedown cannot erase what
+    // was reported. The pixels stay by reference (`storageKey`) and no copy is
+    // made — the argument for that, and what would have to be built to overrule
+    // it, is written out on `PhotoSnapshotEvidence` in `report-evidence.ts`.
+    // Ids rather than names, matching `housing-snapshot`: this is an internal
+    // moderation record and the drawer resolves display names itself.
+    if (reportedEventPhoto) {
+      evidence.push({
+        type: PHOTO_SNAPSHOT_TYPE,
+        photoId: reportedEventPhoto.id,
+        eventId: reportedEventPhoto.eventId,
+        storageKey: reportedEventPhoto.storageKey,
+        caption: reportedEventPhoto.caption,
+        uploaderId: reportedEventPhoto.uploaderId,
+        uploadedAt: reportedEventPhoto.createdAt.toISOString(),
         snapshotAt: new Date().toISOString(),
       });
     }

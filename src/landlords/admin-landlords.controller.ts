@@ -27,6 +27,7 @@ import { ListIntroRequestsQuery } from './dto/list-intro-requests.query';
 import { RemoveLandlordQuery } from './dto/remove-landlord.query';
 import { TriageIntroRequestDto } from './dto/triage-intro-request.dto';
 import { UpdateLandlordStatusDto } from './dto/update-landlord-status.dto';
+import { TakeDownRecommendationDto } from './dto/take-down-recommendation.dto';
 import { UpdateLandlordDto } from './dto/update-landlord.dto';
 import { LandlordsService } from './landlords.service';
 import {
@@ -110,28 +111,89 @@ export class AdminLandlordsController {
     return this.service.triageIntroRequest(id, dto, user.userId);
   }
 
-  // Literal `recommendations` route declared before `:id`.
-  @Delete('recommendations/:id')
-  @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Remove a landlord recommendation' })
-  @ApiNoContentResponse({ description: 'The recommendation was removed.' })
+  // Literal `recommendations` routes declared before `:id`.
+  //
+  // RETIRED: `DELETE /admin/landlords/recommendations/:id`, which hard-deleted
+  // the row. It was the only takedown on the platform a moderator could not
+  // undo, on the surface where being wrong costs the most: these
+  // recommendations are how tenants warn each other about landlords, and the
+  // writer is by construction the party with less power. It is replaced by the
+  // reversible pair below rather than quietly repurposed, because a `DELETE`
+  // that no longer deletes tells every future reader the opposite of what
+  // happens. An old client calling the retired path now gets a loud 404. Any
+  // recommendation already hard-deleted through it is gone for good; nothing
+  // here restores it.
+  //
+  // NO ADMIN CONSOLE CALLS EITHER ROUTE, DELIBERATELY (decided 2026-08-31).
+  // The moderator's path to both is the report queue: a member reports one
+  // recommendation under the `landlord_recommendation` subject, and
+  // `hide_content`/`remove_content` there writes the same `content_moderation`
+  // row these two routes write, so there is exactly one takedown whichever door
+  // it came through. Building a management screen beside that would invite a
+  // takedown with no report behind it, and the report is what creates the record
+  // of WHY a tenant's warning about a landlord was withheld, which on this
+  // surface is the part worth keeping. These two stay as a documented backstop
+  // for direct API use, not as the intended route. If a moderator ever needs to
+  // find and lift an old takedown without the original report to hand, that is
+  // the thing to build, and it is a read surface rather than a console.
+  @Post('recommendations/:id/takedown')
+  @ApiOperation({
+    summary: 'Take one landlord recommendation down, reversibly',
+    description:
+      'Writes a `content_moderation` row under the `landlord_recommendation` ' +
+      'subject, keyed by the recommendation uuid. This is the same mechanism the ' +
+      'moderation queue writes when it acts on a report about one. The ' +
+      'recommendation is withheld from every member read and from every star ' +
+      'aggregate, and the row itself is untouched, so lifting the takedown ' +
+      'restores the original words exactly. A note is required.',
+  })
+  @ApiOkResponse({
+    description: 'The recommendation, with its new moderation state.',
+  })
+  @ApiBadRequestResponse({ description: 'A takedown needs a note.' })
   @ApiNotFoundResponse({ description: 'No recommendation with that id.' })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
   @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
-  removeRecommendation(@Param('id', ParseUUIDPipe) id: string) {
-    return this.service.removeRecommendation(id);
+  takeDownRecommendation(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: TakeDownRecommendationDto,
+    @CurrentUser() user: CurrentUserData,
+  ) {
+    return this.service.takeDownRecommendation(id, user.userId, dto);
   }
 
-  // The recommendations on one entry, WITH their ids — the only place the API
-  // hands out the key `DELETE recommendations/:id` is addressed by. Declared
-  // after the literal routes above so `intro-requests` and `recommendations`
-  // still win their matches.
-  @Get(':id/recommendations')
+  // Reads as what it does: delete the TAKEDOWN, not the recommendation.
+  @Delete('recommendations/:id/takedown')
   @ApiOperation({
-    summary: "List one landlord's recommendations, with their ids",
+    summary: 'Lift the takedown on a landlord recommendation',
+    description:
+      "Puts the tenant's warning back, with its stars counting toward the " +
+      "landlord's rating again. Idempotent on a recommendation that carries " +
+      'no takedown.',
   })
   @ApiOkResponse({
-    description: 'The newest recommendations on the entry, ids included.',
+    description: 'The recommendation, with its takedown lifted.',
+  })
+  @ApiNotFoundResponse({ description: 'No recommendation with that id.' })
+  @ApiUnauthorizedResponse({ description: 'Not authenticated.' })
+  @ApiForbiddenResponse({ description: 'Requires moderator or admin role.' })
+  restoreRecommendation(@Param('id', ParseUUIDPipe) id: string) {
+    return this.service.restoreRecommendation(id);
+  }
+
+  // The recommendations on one entry, with their moderation state: the read
+  // that shows a moderator what they have already taken down, so they can lift
+  // it. Declared after the literal routes above so `intro-requests` and
+  // `recommendations` still win their matches.
+  @Get(':id/recommendations')
+  @ApiOperation({
+    summary: "List one landlord's recommendations, with their takedown state",
+  })
+  @ApiOkResponse({
+    description:
+      'The newest recommendations on the entry, including any already taken ' +
+      'down. Deliberately unfiltered: a takedown nobody can see is a takedown ' +
+      'nobody can lift.',
   })
   @ApiNotFoundResponse({ description: 'No landlord with that id.' })
   @ApiUnauthorizedResponse({ description: 'Not authenticated.' })

@@ -4,8 +4,10 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, IsNull, LessThanOrEqual, Repository } from 'typeorm';
 import { CommunityOwnerOrphanService } from '../communities/community-owner-orphan.service';
 import { DAY_MS, DELETION_FINAL_WARNING_LEAD_DAYS } from './account.constants';
+import { MediaReferenceResolver } from '../media-references/media-reference.resolver';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { toBareKey } from '../storage/bare-key';
 import { StorageService } from '../storage/storage.service';
 import { ContentOwnerErasureService } from './content-owner-erasure.service';
 import { User } from '../users/entities/user.entity';
@@ -17,6 +19,12 @@ import {
   DeletionRequest,
   DeletionRequestStatus,
 } from './entities/deletion-request.entity';
+
+// How many storage keys are reference-checked per `MediaReferenceResolver`
+// call in step 4. Mirrors `StorageMaintenanceService`'s own batch size, for the
+// same reason: the resolver's array sources run a `LIKE ANY` per candidate key,
+// so an unbounded batch would build a pathological query.
+const REFERENCE_CHECK_BATCH_SIZE = 200;
 
 /**
  * Executes the right to erasure. `POST /account/deletion-request` only *writes*
@@ -31,6 +39,10 @@ import {
 @Injectable()
 export class AccountDeletionProcessorService {
   private readonly logger = new Logger(AccountDeletionProcessorService.name);
+
+  /** Answers "is this storage key still referenced by any DB row?" for step 4.
+   *  Assigned in the constructor. See the note there for why it is built
+   *  rather than injected. */
 
   constructor(
     @InjectRepository(DeletionRequest)
@@ -49,6 +61,15 @@ export class AccountDeletionProcessorService {
     // by `AccountModule` (for `ContentOwnerErasureService`'s cancellation
     // fan-out), so this needs no new module wiring.
     private readonly notifications: NotificationsService,
+    // Step 4 needs this to tell "nothing points at this object any more"
+    // (delete it) from "a row that outlived the erasure still does" (keep it),
+    // which is the distinction that stops the sweep destroying a gathering
+    // photo whose row survives on `ON DELETE SET NULL`. Injected rather than
+    // built by hand: constructing it directly worked only while the resolver's
+    // sole dependency was the `DataSource` this service already holds, and
+    // would break silently the day it gains another. `MediaReferencesModule`
+    // does not import `AccountModule`, so this needs no `forwardRef`.
+    private readonly mediaReferences: MediaReferenceResolver,
   ) {}
 
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
@@ -199,11 +220,15 @@ export class AccountDeletionProcessorService {
    * Order matters:
    *  1. suppress the email — must be read off the user row *before* it is gone;
    *  2. pseudonymize the moderation history we are keeping;
-   *  3. delete the user row, which cascades every member-owned DB row away.
+   *  3. delete the user row, which cascades every member-owned DB row away
+   *     (member-owned: content other members depend on is `ON DELETE SET NULL`
+   *     and survives with a null byline).
    *
-   * Then, AFTER the transaction commits, erase the member's uploaded objects from
-   * bucket storage (step 4). This lives outside the transaction on purpose — see
-   * the comment there.
+   * Then, AFTER the transaction commits, erase the member's uploaded bucket
+   * objects that nothing references any more (step 4), keeping the ones a row
+   * that outlived the erasure still points at. This lives outside the
+   * transaction on purpose, and adds no DB write of its own. See the comment
+   * there.
    *
    * BEFORE any of that, resolve community ownership and the content other
    * members depend on (step 0) — see the calls below.
@@ -358,36 +383,142 @@ export class AccountDeletionProcessorService {
       await manager.delete(User, { id: userId });
     });
 
-    // 4. Erase the member's uploaded objects from bucket storage (audit §B P1).
-    //    The DB columns that referenced them (avatar, work images, listing and
-    //    gathering photos, group/story covers) were cascaded away above, but the
-    //    objects themselves live in Railway Buckets outside Postgres and would
-    //    otherwise keep serving through `GET /files/*` forever — an avatar of an
-    //    erased member still fetchable is exactly the leak the erasure exists to
-    //    close.
+    // 4. Erase the member's uploaded objects from bucket storage (audit §B P1),
+    //    EXCEPT the ones a DB row that OUTLIVED the erasure still points at.
+    //
+    //    CORRECTION 2026-08-31. What stood here claimed the DB columns that
+    //    referenced these objects "were cascaded away above", and named
+    //    gathering photos among them. That was false, and acting on it broke
+    //    real albums. `event_photos.uploader_id` is `ON DELETE SET NULL`
+    //    (`AddEventPhotoAndFeaturedCommunityForeignKeys1785001300000`, and the
+    //    entity's own note), so the row SURVIVES step 3 with a null uploader
+    //    while a blanket prefix sweep deleted the object underneath it: a tile
+    //    in a gathering album that can never load again. The same split hit
+    //    every other `SET NULL` content type that carries media (see
+    //    `SetNullContentAuthorFksOnUserErasure1794610000000`): a business
+    //    listing's gallery, a housing listing's photos, a community's cover and
+    //    avatar, a group conversation's photo, a listing review's photo, a
+    //    landlord photo, a past gathering's cover.
+    //
+    //    THE DECISION, so it can be overruled deliberately rather than by
+    //    accident. Two fixes were coherent: delete the surviving rows to match
+    //    the object deletion, or stop deleting objects a surviving row needs.
+    //    This takes the second, because it is the one the rest of the codebase
+    //    has already settled on:
+    //      - `SetNullContentAuthorFksOnUserErasure1794610000000` moved eleven
+    //        content FKs off CASCADE precisely so erasing one member does not
+    //        destroy what other members rely on. Reviews, listings and
+    //        gatherings keep their text and lose their byline. A photograph is
+    //        the same kind of contribution as the review text beside it.
+    //      - The old comment here already stated that a gathering photo taken
+    //        by SOMEONE ELSE that depicts the erased member survives. Keeping
+    //        the photos of them while destroying the photos they took of other
+    //        people is an accident of key prefixes rather than a position
+    //        anyone chose.
+    //      - Deleting a bucket object anywhere else in this codebase means
+    //        proving nothing references it first: `StorageMaintenanceService`
+    //        (the orphan sweep), `MyMediaService` and `AdminMediaService` all
+    //        run `MediaReferenceResolver` and all REFUSE to delete when it
+    //        reports `degraded`. Erasure was the one delete path that skipped
+    //        the check. It no longer does.
+    //    So: an object nothing points at any more (the avatar and work images
+    //    whose rows cascaded away, replaced media, presigned-then-abandoned
+    //    uploads with no DB row) is deleted, which is the whole privacy point
+    //    of this step. An object a surviving row still points at is kept, and
+    //    that row reads as a removed member, exactly as its text does.
+    //
+    //    NO DB WRITE HAPPENS HERE, so there is nothing that can half-apply and
+    //    nothing to move inside the transaction above. The reference check has
+    //    to run against COMMITTED post-cascade state anyway: asked inside the
+    //    transaction it would still see the rows step 3 is about to remove and
+    //    would keep their objects forever.
     //
     //    Runs AFTER the transaction commits, never inside it: object deletion is
     //    not transactional, so deleting first and then having the DB transaction
     //    roll back would wipe a still-live member's files. Best-effort — a
     //    storage failure is logged, not thrown, so it cannot strand the
     //    already-committed DB erasure back in `processing`; the legally-critical
-    //    record removal has happened, and an orphaned object is a storage-cost
-    //    residual an operator can sweep, not a correctness failure.
-    //
-    //    `deleteUserObjects` enumerates by key prefix (`<kind>/<userId>/…`), so
-    //    it removes every object THIS member uploaded, including presigned-then-
-    //    abandoned ones with no DB row. It does NOT reach objects other members
-    //    uploaded that happen to depict this person (e.g. a gathering photo taken
-    //    by someone else) — those are keyed to the uploader and are out of scope.
+    //    record removal has happened, and a residual object is a storage-cost
+    //    item an operator (or the nightly orphan sweep) can clear. Correctness
+    //    is unaffected.
     try {
-      const deletedCount = await this.storage.deleteUserObjects(userId);
-      this.logger.log(
-        `Erased ${deletedCount} storage object(s) for account ${userId}`,
-      );
+      await this.eraseUnreferencedStorageObjects(userId);
     } catch (err) {
       this.logger.error(
         `Storage object erasure failed for account ${userId} (DB erasure already committed): ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       );
     }
+  }
+
+  /**
+   * Delete every bucket object this member uploaded that nothing references any
+   * more, and KEEP the ones a row that outlived the erasure still points at.
+   * See step 4 in `eraseAccount` for why that split is the right one.
+   *
+   * Enumerates the same per-kind prefixes (`<kind>/<userId>/…`) that
+   * `StorageService.deleteUserObjects` sweeps, so abandoned presigned uploads
+   * with no DB row are still caught. It does not reach objects OTHER members
+   * uploaded that happen to depict this person; those are keyed to their own
+   * uploader and out of scope.
+   *
+   * `degraded` is honoured the way every other delete path in the codebase
+   * honours it (`StorageMaintenanceService.orphansInBatch`, `MyMediaService`,
+   * `AdminMediaService`): a reference set that could not be fully computed is
+   * never a green light to delete. The batch is kept instead. Keeping an object
+   * too long is recoverable by a later run or the nightly orphan sweep;
+   * deleting one a live row needs is permanent.
+   *
+   * Per-object failures are counted rather than thrown, so one unhappy key
+   * cannot leave the rest of a member's uploads behind.
+   */
+  private async eraseUnreferencedStorageObjects(userId: string): Promise<void> {
+    const objects = await this.storage.listUserObjects(userId);
+    if (objects.length === 0) {
+      return;
+    }
+
+    let deletedCount = 0;
+    let retainedCount = 0;
+    let failedCount = 0;
+
+    for (
+      let start = 0;
+      start < objects.length;
+      start += REFERENCE_CHECK_BATCH_SIZE
+    ) {
+      const batch = objects.slice(start, start + REFERENCE_CHECK_BATCH_SIZE);
+      const resolution = await this.mediaReferences.resolve(
+        batch.map((object) => toBareKey(object.key)),
+      );
+      if (resolution.degraded) {
+        retainedCount += batch.length;
+        this.logger.warn(
+          `Media-reference resolution degraded while erasing account ${userId}; ` +
+            `kept ${batch.length} object(s) rather than risk deleting one a live row still uses.`,
+        );
+        continue;
+      }
+      for (const object of batch) {
+        if (resolution.references.has(toBareKey(object.key))) {
+          retainedCount += 1;
+          continue;
+        }
+        try {
+          await this.storage.deleteObjectByKey(object.key);
+          deletedCount += 1;
+        } catch (err) {
+          failedCount += 1;
+          this.logger.error(
+            `Could not erase storage object ${object.key} for account ${userId}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+          );
+        }
+      }
+    }
+
+    this.logger.log(
+      `Erased ${deletedCount} storage object(s) for account ${userId}; ` +
+        `kept ${retainedCount} still referenced by content that outlived the account` +
+        (failedCount > 0 ? `; ${failedCount} could not be deleted` : ''),
+    );
   }
 }

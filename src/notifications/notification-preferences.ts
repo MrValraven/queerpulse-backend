@@ -298,7 +298,49 @@ export const ALWAYS_DELIVERED_NOTIFICATION_TYPES: readonly NotificationType[] =
     // of the closure and nothing about what staff found, so there is nothing
     // here a member would want turned down.
     NotificationType.BanEvasionEscalationResolved,
+    // The outcome of a partner application, a swap proposal or a resource
+    // suggestion (PRD-48), routed through `SubmissionDecisionNotifier`. Group 4
+    // in the plainest form this list has: a person weighed something the member
+    // sent in and said yes or no. None of the three intakes has a member-facing
+    // tracker page and QueerPulse sends no email, so the bell is the entire
+    // channel, and it arrives once per submission.
+    NotificationType.SubmissionDecided,
+    // The subject of a review the member wrote has answered it in public
+    // (PRD-47): a business owner, an employer, a housing lister. Group 4 read
+    // one step wider, because what the member asked for here was to be heard
+    // rather than to be decided about, and this is the answer.
+    //
+    // It arrives AT MOST ONCE PER REVIEW. Every emit site fires on the first
+    // reply only and stays silent on an edit, because a reply is overwritten in
+    // place and notifying per save would let the subject of a review ring the
+    // reviewer's bell as often as they cared to retype it. So there is no
+    // volume here for a switch to control, and the reviewer is the less
+    // powerful party in the exchange: the platform owes them the one answer.
+    NotificationType.ReviewReplied,
   ];
+
+/**
+ * BOTH OF THE TWO TYPES ABOVE ARE IN-APP ONLY, on purpose. Neither appears in
+ * `PushNotificationListener`'s switch, so neither buzzes a phone (PRD-47/48).
+ *
+ * The push whitelist is not "everything unmutable". Every other decision on
+ * something a member sent in is already bell-only: `intake_reviewed`,
+ * `writer_application_approved`/`_declined`, `volunteer_application_decided`,
+ * `listing_claim_approved`/`_declined`, `join_request_approved`/`_declined`,
+ * both changemaker nomination outcomes and `listing_approved`. The four LOC-19
+ * queues and `housing_listing_decision` that DO push are the minority, and they
+ * push because each unblocks something a member is waiting on to act.
+ *
+ * `review_replied` has a second reason on top of that one. A push is the
+ * subject of a review buzzing the phone of the person who reviewed them, which
+ * is the more powerful party reaching the less powerful one on their lock
+ * screen. A bell row they find when they next look says the same thing without
+ * the reach, and the reply is public on the page either way.
+ *
+ * Changing this is a one-case addition to that switch plus a
+ * `sendSplitByPreviewPreference` handler; it is written down here so the
+ * omission reads as a decision rather than as something nobody got to.
+ */
 
 /** The category a type belongs to, or `null` when it has no member switch. */
 export function categoryForType(

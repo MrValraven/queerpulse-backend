@@ -20,6 +20,12 @@ import {
   Community,
   CommunityFrozenReason,
 } from '../communities/entities/community.entity';
+// TS-13: a reported gathering photograph resolves to the community through its
+// album's gathering. `Event` is imported under the name `Gathering` because
+// this file already talks about weekly activity "events" in prose and the
+// report scope reads two different tables that both want the word.
+import { EventPhoto } from '../events/entities/event-photo.entity';
+import { Event as Gathering } from '../events/entities/event.entity';
 import {
   Report,
   ReportStatus,
@@ -40,6 +46,8 @@ import {
   toAdminModerator,
 } from './admin-communities-response';
 import {
+  COMMUNITY_SCOPED_SUBJECT_TYPES,
+  CommunityContentSubjectType,
   CommunityReportTotals,
   summariseReportsByCommunity,
 } from './community-report-scope';
@@ -84,16 +92,6 @@ const MAX_LISTED_COMMUNITIES = 1000;
  *  `subject_type IN (...) ORDER BY created_at DESC LIMIT` as a bounded index
  *  scan rather than sorting the whole table first. */
 const MAX_SCANNED_REPORTS = 2000;
-
-/** Subject types whose reports can ever be attributed to a community.
- *  `member`, `venue` and `message` reports have no community and are dropped
- *  by `summariseReportsByCommunity` anyway — excluding them here keeps the
- *  fetch itself narrow. */
-const COMMUNITY_SCOPED_SUBJECT_TYPES = [
-  ReportSubjectType.Post,
-  ReportSubjectType.Reply,
-  ReportSubjectType.Community,
-];
 
 // `post`/`reply` subject ids end up bound against `post.id`/`reply.id`, both
 // `@PrimaryGeneratedColumn('uuid')`. `Report.subjectId` is only ever validated
@@ -995,9 +993,13 @@ export class AdminCommunitiesService {
   /**
    * Everything needed to attribute reports to communities:
    *
-   * - `communityIdBySubjectId` is keyed by BOTH post ids AND reply ids, as
-   *   `summariseReportsByCommunity` requires — a map built from only one of
-   *   the two content tables silently drops the other subject type's reports.
+   * - `communityIdBySubjectId` is keyed by EVERY `CommunityContentSubjectType`
+   *   (post ids, reply ids and gathering-photo ids), as
+   *   `summariseReportsByCommunity` requires — a map built from only some of
+   *   the content tables silently drops the rest of the reports. The loaders
+   *   below are assembled as a `Record` keyed by that union precisely so a new
+   *   content subject type cannot be added to the fetch without a loader:
+   *   `Record` refuses to compile with a member missing.
    * - `slugToCommunityId` resolves `community`-subject reports, whose
    *   `subjectId` is a slug rather than a content id.
    *
@@ -1059,12 +1061,13 @@ export class AdminCommunitiesService {
     }
 
     // `community` reports carry a slug, resolved through `slugToCommunityId`;
-    // only post and reply subjects need a content-id lookup. Non-UUID subject
-    // ids are dropped before they can reach the `post.id`/`reply.id IN (...)`
-    // clauses below (CRITICAL) — those are `uuid` columns, and a member can
-    // file a report with an arbitrary string `subjectId` (see `UUID_RE`'s
-    // comment above). Dropping them here is behaviour-preserving: a non-UUID
-    // string could never have matched a `post.id` or `reply.id` anyway.
+    // every other community-scoped subject needs a content-id lookup. Non-UUID
+    // subject ids are dropped before they can reach the
+    // `post.id`/`reply.id`/`photo.id IN (...)` clauses below (CRITICAL) —
+    // those are `uuid` columns, and a member can file a report with an
+    // arbitrary string `subjectId` (see `UUID_RE`'s comment above). Dropping
+    // them here is behaviour-preserving: a non-UUID string could never have
+    // matched any of those ids anyway.
     const reportedContentIds = [
       ...new Set(
         reports
@@ -1080,12 +1083,32 @@ export class AdminCommunitiesService {
       return { reports, communityIdBySubjectId, slugToCommunityId, truncated };
     }
 
-    const [postIdRows, replyIdRows] = await Promise.all([
-      this.loadPostCommunityIds(communityIdsInScope, reportedContentIds),
-      this.loadReplyCommunityIds(communityIdsInScope, reportedContentIds),
-    ]);
+    // Keyed by subject type rather than positionally: this is the object the
+    // `communityIdBySubjectId` contract is enforced through, and a
+    // `Record<CommunityContentSubjectType, ...>` missing a member is a compile
+    // error rather than a community quietly under-counting its own queue.
+    const contentIdLoadersBySubjectType: Record<
+      CommunityContentSubjectType,
+      Promise<CommunityContentIdRow[]>
+    > = {
+      [ReportSubjectType.Post]: this.loadPostCommunityIds(
+        communityIdsInScope,
+        reportedContentIds,
+      ),
+      [ReportSubjectType.Reply]: this.loadReplyCommunityIds(
+        communityIdsInScope,
+        reportedContentIds,
+      ),
+      [ReportSubjectType.EventPhoto]: this.loadPhotoCommunityIds(
+        communityIdsInScope,
+        reportedContentIds,
+      ),
+    };
+    const contentIdRowGroups = await Promise.all(
+      Object.values(contentIdLoadersBySubjectType),
+    );
 
-    for (const contentIdRow of [...postIdRows, ...replyIdRows]) {
+    for (const contentIdRow of contentIdRowGroups.flat()) {
       communityIdBySubjectId.set(
         contentIdRow.contentId,
         contentIdRow.communityId,
@@ -1110,6 +1133,40 @@ export class AdminCommunitiesService {
         communityIdsInScope,
       })
       .andWhere('post.community_id IS NOT NULL')
+      .getRawMany<CommunityContentIdRow>();
+  }
+
+  /**
+   * TS-13: a reported photograph resolves to the community that hosts the
+   * GATHERING whose album it is in (`events.community_id`).
+   *
+   * `innerJoin` and the `community_id IS NOT NULL` clause together mean a
+   * photo from a gathering that belongs to no community resolves to nothing
+   * and is dropped, which is the same answer `CommunityAutoFreezeService` and
+   * `ModerationService.communityIdForReportSubject` give: the community has to
+   * be the gathering's own, and is never inferred from the uploader's
+   * memberships, which would put a report on the tally of a room that had
+   * nothing to do with the event.
+   *
+   * Read through the shared `DataSource` rather than a repository, so no
+   * events entity has to be registered on this module: the same scoped,
+   * read-only, parameterized approach `ReportSubjectResolverService` takes to
+   * the identical join.
+   */
+  private loadPhotoCommunityIds(
+    communityIdsInScope: string[],
+    reportedContentIds: string[],
+  ): Promise<CommunityContentIdRow[]> {
+    return this.dataSource
+      .createQueryBuilder(EventPhoto, 'photo')
+      .innerJoin(Gathering, 'gathering', 'gathering.id = photo.event_id')
+      .select('photo.id', 'contentId')
+      .addSelect('gathering.community_id', 'communityId')
+      .where('photo.id IN (:...reportedContentIds)', { reportedContentIds })
+      .andWhere('gathering.community_id IN (:...communityIdsInScope)', {
+        communityIdsInScope,
+      })
+      .andWhere('gathering.community_id IS NOT NULL')
       .getRawMany<CommunityContentIdRow>();
   }
 

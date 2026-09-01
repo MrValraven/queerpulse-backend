@@ -81,7 +81,13 @@ export class CommunitiesController {
       'the trailing week. Each card carries that number too, so a "busy this ' +
       'week" treatment needs no second call.',
   })
-  @ApiOkResponse({ description: 'A paginated page of community cards.' })
+  @ApiOkResponse({
+    description:
+      'A paginated page of community cards, plus `facets.tags` — how many ' +
+      'communities each curated tag would yield under the rest of this ' +
+      "request's filters (its own `tags` filter lifted), so the browse can " +
+      'number the tag chips and grey out the ones that lead nowhere.',
+  })
   list(
     @CurrentUser() user: CurrentUserData,
     @Query() query: ListCommunitiesQuery,

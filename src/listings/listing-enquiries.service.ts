@@ -17,6 +17,7 @@ import { Listing, ListingStatus } from './entities/listing.entity';
 import {
   ListingContactDTO,
   ListingContactUnavailableReason,
+  ListingEnquiryLimitReason,
   ListingEnquirySentDTO,
 } from './listing-enquiry-response';
 
@@ -24,6 +25,25 @@ import {
 type OwnerReachability =
   | { isReachable: true; ownerId: string }
   | { isReachable: false; reason: ListingContactUnavailableReason };
+
+/**
+ * Where the caller stands against the counted caps right now.
+ *
+ * ONE VALUE, TWO CONSUMERS. `getContact` maps it into the DTO so the composer
+ * can be closed before anybody types, and `assertEnquiryQuota` turns it into
+ * the 429. They must never be two separate counts: a hint that disagrees with
+ * enforcement is worse than no hint, because it either invites a member to
+ * write a message that will be thrown away or hides a route that was open all
+ * along. Deriving both from `evaluateEnquiryQuota` makes disagreement
+ * impossible rather than merely unlikely.
+ */
+type EnquiryQuotaState =
+  | { hasReachedLimit: false }
+  | {
+      hasReachedLimit: true;
+      reason: ListingEnquiryLimitReason;
+      clearsAt: Date;
+    };
 
 /**
  * "Message this business" on a directory listing.
@@ -97,11 +117,38 @@ export class ListingEnquiriesService {
    * Three a day to one business leaves room for a genuine follow-up and a
    * correction without leaving room for a campaign. Twenty across the whole
    * directory is far above any honest day of researching somewhere to go.
+   *
+   * BOTH ARE REPORTED BY `getContact` AS WELL AS ENFORCED BY `send`, out of the
+   * one evaluation in `evaluateEnquiryQuota`, so a member is told they cannot
+   * write before they type instead of after. The numbers themselves stay off the
+   * wire: see `ListingEnquiryLimitReason` for why a remaining count would be the
+   * wrong thing to hand a member.
    */
   private static readonly MAX_ENQUIRIES_PER_LISTING_PER_DAY = 3;
   private static readonly MAX_ENQUIRIES_PER_DAY = 20;
 
   private static readonly ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+  /**
+   * How many of the caller's rows inside the window one quota read pulls back.
+   *
+   * Both caps are evaluated from a SINGLE bounded fetch rather than two COUNTs,
+   * and the bound is safe because it is one more than the largest cap:
+   *
+   *  - Fewer than this many rows come back and the window is COMPLETE, so both
+   *    counts and both release times are exact.
+   *  - This many come back and the window holds at least `MAX_ENQUIRIES_PER_DAY`
+   *    rows, so the directory cap binds on its own and the answer is "blocked"
+   *    whatever the per-listing breakdown turns out to be. Truncation can only
+   *    ever miss a per-listing cap that is already masked by a directory cap,
+   *    so it can never turn a refusal into a permission.
+   *
+   * Ordering newest-first also makes the release times fall out for free: a cap
+   * of N lifts exactly when the Nth-newest counted row ages out, which is always
+   * inside this slice.
+   */
+  private static readonly QUOTA_WINDOW_ROW_LIMIT =
+    ListingEnquiriesService.MAX_ENQUIRIES_PER_DAY + 1;
 
   constructor(
     @InjectRepository(Listing) private readonly listings: Repository<Listing>,
@@ -132,12 +179,17 @@ export class ListingEnquiriesService {
         unavailableReason: reachability.reason,
         replyRequiresConnection: false,
         existingConversationId: null,
+        // Not evaluated at all on this path: with nobody to write to, the
+        // caller's own quota is not a question, and asking would cost a query
+        // on every view of an unclaimed listing.
+        ...ListingEnquiriesService.UNCAPPED,
       };
     }
 
-    const [contactability, previous] = await Promise.all([
+    const [contactability, previous, quota] = await Promise.all([
       this.messaging.enquiryContactability(viewerUserId, reachability.ownerId),
       this.findLatestEnquiry(listing.id, viewerUserId),
+      this.evaluateEnquiryQuota(listing.id, viewerUserId),
     ]);
 
     if (!contactability.canDeliver) {
@@ -148,6 +200,7 @@ export class ListingEnquiriesService {
         unavailableReason: 'unavailable',
         replyRequiresConnection: false,
         existingConversationId: null,
+        ...ListingEnquiriesService.UNCAPPED,
       };
     }
 
@@ -156,8 +209,26 @@ export class ListingEnquiriesService {
       unavailableReason: null,
       replyRequiresConnection: contactability.replyRequiresConnection,
       existingConversationId: previous?.conversationId ?? null,
+      // Hand-mapped, like everything else on the wire here: there is no global
+      // serializer, and `EnquiryQuotaState` is a Date-carrying internal shape
+      // that must not be handed to a client as-is.
+      ...(quota.hasReachedLimit
+        ? {
+            hasReachedEnquiryLimit: true,
+            enquiryLimitReason: quota.reason,
+            enquiryLimitClearsAt: quota.clearsAt.toISOString(),
+          }
+        : ListingEnquiriesService.UNCAPPED),
     };
   }
+
+  /** The three quota fields when nothing is capped, or when the question does
+   *  not arise because the owner is unreachable anyway. */
+  private static readonly UNCAPPED = {
+    hasReachedEnquiryLimit: false,
+    enquiryLimitReason: null,
+    enquiryLimitClearsAt: null,
+  } as const;
 
   /**
    * Deliver a member's private enquiry to the listing's owner and record that it
@@ -318,37 +389,142 @@ export class ListingEnquiriesService {
     });
   }
 
-  /** The two counted caps described on the constants above. Two indexed COUNTs,
-   *  both bounded, run before anything is sent. 429 rather than a silent drop:
-   *  a member who has hit a limit is told, because the alternative teaches
-   *  people their messages vanish. */
+  /**
+   * Where the caller stands against the two counted caps described on the
+   * constants above. THE ONLY PLACE EITHER CAP IS COUNTED. `getContact` reads it
+   * to close the composer in advance and `assertEnquiryQuota` reads it to refuse
+   * a send; neither counts anything of its own, so the hint and the enforcement
+   * cannot drift apart.
+   *
+   * ONE QUERY, NOT TWO COUNTS. The caller's rows inside the rolling day are
+   * fetched once, newest first and hard-bounded (see `QUOTA_WINDOW_ROW_LIMIT`),
+   * and both caps are read off that slice. It replaces the two COUNTs the send
+   * path used to run, so this is a query cheaper on the write path and one query
+   * on the read path.
+   *
+   * INDEX. The predicate is `sender_id = ? AND created_at > ?`, ordered by
+   * `created_at DESC` and limited, which is exactly
+   * `IDX_listing_enquiries_sender_id_created_at` (`CreateListingEnquiries`)
+   * front to back: an index range scan of at most 21 rows, with the sort taken
+   * from the index rather than performed. No new index is needed and none was
+   * added. The per-listing count is filtered in memory out of that same slice
+   * rather than through `IDX_listing_enquiries_listing_id_sender_id`, because a
+   * second round trip costs more than filtering 21 rows.
+   */
+  private async evaluateEnquiryQuota(
+    listingId: string,
+    senderId: string,
+  ): Promise<EnquiryQuotaState> {
+    const since = new Date(Date.now() - ListingEnquiriesService.ONE_DAY_MS);
+
+    const recentEnquiries = await this.enquiries.find({
+      where: { senderId, createdAt: MoreThan(since) },
+      select: { id: true, listingId: true, createdAt: true },
+      order: { createdAt: 'DESC' },
+      take: ListingEnquiriesService.QUOTA_WINDOW_ROW_LIMIT,
+    });
+
+    // Both arrays stay newest-first, which is what `clearsAt` wants.
+    const onThisListing = recentEnquiries.filter(
+      (enquiry) => enquiry.listingId === listingId,
+    );
+
+    const isListingCapped =
+      onThisListing.length >=
+      ListingEnquiriesService.MAX_ENQUIRIES_PER_LISTING_PER_DAY;
+    const isDirectoryCapped =
+      recentEnquiries.length >= ListingEnquiriesService.MAX_ENQUIRIES_PER_DAY;
+
+    if (!isListingCapped && !isDirectoryCapped) {
+      return { hasReachedLimit: false };
+    }
+
+    const releaseTimes: number[] = [];
+    if (isListingCapped) {
+      releaseTimes.push(
+        ListingEnquiriesService.clearsAt(
+          onThisListing,
+          ListingEnquiriesService.MAX_ENQUIRIES_PER_LISTING_PER_DAY,
+        ),
+      );
+    }
+    if (isDirectoryCapped) {
+      releaseTimes.push(
+        ListingEnquiriesService.clearsAt(
+          recentEnquiries,
+          ListingEnquiriesService.MAX_ENQUIRIES_PER_DAY,
+        ),
+      );
+    }
+
+    return {
+      hasReachedLimit: true,
+      // The per-listing cap is named first when both bite, because it is the
+      // one the send path refuses with first and the two must tell the same
+      // story. It is also the more useful sentence: it points the member at a
+      // conversation they already have rather than at the whole directory.
+      reason: isListingCapped
+        ? 'wrote_to_this_business_today'
+        : 'wrote_across_directory_today',
+      // The LATER of the caps that are actually biting. Promising the earlier
+      // one would send a member back to a button that refuses them again.
+      clearsAt: new Date(Math.max(...releaseTimes)),
+    };
+  }
+
+  /**
+   * When a cap of `limit` lifts, given the caller's counted rows newest first.
+   *
+   * The window rolls, so a cap of N stops biting the moment the Nth-newest
+   * counted row ages out of its 24 hours: everything older than it has gone
+   * too, leaving N-1 rows behind. Callers only reach this with at least `limit`
+   * rows in hand.
+   */
+  private static clearsAt(
+    newestFirst: Pick<ListingEnquiry, 'createdAt'>[],
+    limit: number,
+  ): number {
+    const nthNewest = newestFirst[limit - 1];
+    // Unreachable given the guards above, and the fallback is a full day out
+    // rather than `now`: erring late leaves a member waiting slightly longer
+    // than they had to, erring early sends them back to a button that refuses
+    // them again.
+    if (!nthNewest) {
+      return Date.now() + ListingEnquiriesService.ONE_DAY_MS;
+    }
+    return nthNewest.createdAt.getTime() + ListingEnquiriesService.ONE_DAY_MS;
+  }
+
+  /**
+   * The counted caps, enforced. 429 rather than a silent drop: a member who has
+   * hit a limit is told, because the alternative teaches people their messages
+   * vanish.
+   *
+   * Still runs on every send even though `getContact` already reported the same
+   * answer to the client. The read is a courtesy that can be minutes stale by
+   * the time somebody finishes typing, and it is trivially skippable by anything
+   * that is not the web client, so this is the authority and the hint is never
+   * trusted.
+   */
   private async assertEnquiryQuota(
     listingId: string,
     senderId: string,
   ): Promise<void> {
-    const since = new Date(Date.now() - ListingEnquiriesService.ONE_DAY_MS);
+    const quota = await this.evaluateEnquiryQuota(listingId, senderId);
+    if (!quota.hasReachedLimit) return;
+    throw new HttpException(
+      ListingEnquiriesService.limitMessage(quota.reason),
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+  }
 
-    const onThisListing = await this.enquiries.count({
-      where: { listingId, senderId, createdAt: MoreThan(since) },
-    });
-    if (
-      onThisListing >= ListingEnquiriesService.MAX_ENQUIRIES_PER_LISTING_PER_DAY
-    ) {
-      throw new HttpException(
-        'You have already written to this business today. Give them a chance to reply first.',
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
-    }
-
-    const sentRecently = await this.enquiries.count({
-      where: { senderId, createdAt: MoreThan(since) },
-    });
-    if (sentRecently >= ListingEnquiriesService.MAX_ENQUIRIES_PER_DAY) {
-      throw new HttpException(
-        'You have sent a lot of enquiries today. Try again tomorrow.',
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
-    }
+  /** The sentence behind each 429. Kept beside the reason codes so a client
+   *  that closed its composer on `enquiryLimitReason` and a client that only
+   *  ever sees the 429 body are told the same thing. */
+  private static limitMessage(reason: ListingEnquiryLimitReason): string {
+    return reason === 'wrote_to_this_business_today'
+      ? 'You have already written to this business today. Give them a chance to reply first.'
+      : 'You have sent a lot of enquiries today. Try again tomorrow.';
   }
 
   /**

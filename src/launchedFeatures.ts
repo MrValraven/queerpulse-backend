@@ -29,11 +29,36 @@ export type FeatureConfig = {
 
 export const launchedFeatures = {
   communities: { launched: true },
-  companies: { launched: true },
-  jobs: { launched: true },
+  // Companies ships off with the rest of the Work and Economy surface: the
+  // member-facing pages (/work/companies and /work/companies/:slug, plus the
+  // employer reviews board) are hidden in every production build by
+  // COMING_SOON_PATTERNS in the frontend's src/app/authGate.ts, so the API was
+  // accepting company creations and employer reviews that no member could
+  // reach. The flag now says the same thing the shipped bundle does. Flip back
+  // to `launched: true` in the same change that removes /work/companies,
+  // /work/employer-reviews and /account/work-profile from COMING_SOON_PATTERNS.
+  companies: { launched: false },
+  // Jobs ships off for the same reason: the whole board (/work/jobs and every
+  // path under it, the poster's index, the apply flow and
+  // /work/application-status) is hidden in every production build, while
+  // POST /jobs, POST /jobs/:slug/applications and the poster's decision
+  // endpoint stayed open to any active member. `GET /search` is untagged and
+  // federates twelve resources, so it stays reachable, but it now consults this
+  // registry per result type through `search/search-features.ts` and issues no
+  // job query at all while this is false. Flip back to `launched: true` in the
+  // same change that unhides /work/jobs and /work/application-status.
+  jobs: { launched: false },
   partners: { launched: true },
   volunteering: { launched: true },
-  barter: { launched: true },
+  // Barter ships off with the Economy column: /work/barter and everything
+  // under it (the board, the poster's listings, the proposal inbox) is hidden
+  // in every production build, so POST /barter and POST /barter/:id/proposals
+  // were taking rows and emitting `barter_proposal_received` notifications
+  // whose deep link bounces to /roadmap. Flip back to `launched: true` in the
+  // same change that removes /work/barter from COMING_SOON_PATTERNS. The
+  // member profile's own "on the board" list is a separate, still-live surface
+  // on ProfilesController (PUT /profiles/me/board) and is unaffected.
+  barter: { launched: false },
   events: { launched: true },
   connections: { launched: true },
   messaging: { launched: true },

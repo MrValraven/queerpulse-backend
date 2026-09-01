@@ -594,9 +594,59 @@ interface OwnerIdentityView {
   inQueerPulse: boolean;
 }
 
+/** The two owner-personal columns the naming decision below reads, and only
+ *  those two, so a caller can ask the question with a partial row. */
+export type ListingOwnerVisibilityFields = Pick<
+  Listing,
+  'visibility' | 'linkToProfile'
+>;
+
+/**
+ * Whether the public listing page ties this business to the OWNER'S QUEERPULSE
+ * PROFILE. The one condition under which anything on this platform may name
+ * that person as the human behind the business.
+ *
+ * WHY IT IS EXPORTED, when everything else about `ownerIdentity` is file-local.
+ * `ListingsService` has to answer the same question before it hands a
+ * notification an actor: an actor is a `MemberRef`, so it puts the person's
+ * name, face and a link to their profile in somebody else's bell. That is
+ * exactly the tie `linkToProfile` consents to and exactly what `anon` and
+ * `role` refuse, so the notification boundary and the page boundary have to
+ * give the same answer. Written twice they will not: the copy that drifts is
+ * the one that outs a queer business owner who asked this platform not to name
+ * them. One predicate, both callers.
+ *
+ * WHY `inQueerPulse` AND NOT "does the page print any owner name at all".
+ * A `public` listing whose owner withheld `linkToProfile` still prints
+ * `ownerName` as free text ("run by Ana"), and that is deliberate: a first name
+ * on a business page is not a route to a member's profile, their photo, their
+ * other listings or their DMs. A notification actor is all of those. So the
+ * gate is the profile-link consent, which is the same thing `ownerIdentity`
+ * reports as `inQueerPulse`.
+ *
+ * A CO-MANAGER IS NEVER THE SUBJECT OF THIS QUESTION. This asks about the
+ * listing's owner. A co-manager is invisible on the public page by design
+ * (`listing-owner-personal-fields.ts`), so callers must confirm the person they
+ * are about to name IS the owner before asking.
+ */
+export function isOwnerPubliclyNamed(
+  listing: ListingOwnerVisibilityFields,
+): boolean {
+  if (listing.visibility === 'anon' || listing.visibility === 'role') {
+    return false;
+  }
+  return listing.linkToProfile;
+}
+
 function ownerIdentity(listing: Listing): OwnerIdentityView {
   if (listing.visibility === 'anon') {
-    return { name: '', role: '', bio: '', first: '', inQueerPulse: false };
+    return {
+      name: '',
+      role: '',
+      bio: '',
+      first: '',
+      inQueerPulse: isOwnerPubliclyNamed(listing),
+    };
   }
   if (listing.visibility === 'role') {
     return {
@@ -604,7 +654,7 @@ function ownerIdentity(listing: Listing): OwnerIdentityView {
       role: '',
       bio: listing.ownerBio,
       first: '',
-      inQueerPulse: false,
+      inQueerPulse: isOwnerPubliclyNamed(listing),
     };
   }
   return {
@@ -612,7 +662,7 @@ function ownerIdentity(listing: Listing): OwnerIdentityView {
     role: listing.ownerRole,
     bio: listing.ownerBio,
     first: ownerFirstName(listing.ownerName),
-    inQueerPulse: listing.linkToProfile,
+    inQueerPulse: isOwnerPubliclyNamed(listing),
   };
 }
 

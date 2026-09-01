@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { SubmissionsModule } from '../submissions/submissions.module';
 import { UserStaffRole } from '../users/entities/user-staff-role.entity';
 import { Profile } from '../users/entities/profile.entity';
 import { GlossaryTerm } from './entities/glossary-term.entity';
@@ -32,6 +33,12 @@ import { AdminResourceGuideRatingsService } from './admin-resource-guide-ratings
   // `AdminResourceSuggestionsService` can resolve suggester refs — same
   // pattern as `ReadingGroupProposalsModule`.
   imports: [
+    // The shared intake primitive (PRD-48), so a member who suggests a
+    // resource is told what was decided. Plain import, no `forwardRef`: it
+    // pulls in `NotificationsModule` only, and nothing there reaches back
+    // here.
+    SubmissionsModule,
+
     TypeOrmModule.forFeature([
       // Read-only, and only for `RolesOrStaffGuard` on this module's admin
       // controllers: it resolves the caller's additive staff grants when their
