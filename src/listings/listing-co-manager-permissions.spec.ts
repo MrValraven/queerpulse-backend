@@ -6,6 +6,7 @@ import {
   resetImageUrlBaseForTesting,
   setImageUrlBase,
 } from '../common/image-url';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { MediaCropService } from '../media-crops/media-crops.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -296,6 +297,12 @@ describe('listing co-manager permission boundary', () => {
         {
           provide: ReviewReplyNotifier,
           useValue: { notifyReviewReplied: jest.fn() },
+        },
+        // The listing-claim queue announcement. Nothing in this file reaches
+        // it either; the provider exists so `ListingsService` still resolves.
+        {
+          provide: AdminQueueNotificationsService,
+          useValue: { announce: jest.fn().mockResolvedValue(undefined) },
         },
       ],
     }).compile();

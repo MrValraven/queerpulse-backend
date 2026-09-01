@@ -855,19 +855,34 @@ describe('AccountService', () => {
           // The check is `expiresAt <= now`, so the expiry instant itself is
           // already too late. Both sides are pinned so a later refactor cannot
           // quietly move the comparison by a day.
-          exportJobs.findOne.mockResolvedValue(
-            jobGeneratedAgo(EXPORT_LINK_EXPIRY_DAYS * DAY_MS),
-          );
-          await expect(
-            service.getExportDownload('u1', 'job-1'),
-          ).rejects.toBeInstanceOf(NotFoundException);
+          //
+          // THE CLOCK IS FROZEN FOR THIS TEST, and must stay frozen. The
+          // fixture reads `Date.now()` to build `generatedAt` and the service
+          // reads it again to compare, so on a loaded machine the
+          // one-millisecond-before case could spend that very millisecond
+          // between the two reads and be refused — a green/red coin flip that
+          // says nothing about the boundary. This is the only test in the file
+          // written to millisecond tolerance, hence the local freeze rather
+          // than a suite-wide one.
+          const frozenNow = Date.now();
+          const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(frozenNow);
+          try {
+            exportJobs.findOne.mockResolvedValue(
+              jobGeneratedAgo(EXPORT_LINK_EXPIRY_DAYS * DAY_MS),
+            );
+            await expect(
+              service.getExportDownload('u1', 'job-1'),
+            ).rejects.toBeInstanceOf(NotFoundException);
 
-          exportJobs.findOne.mockResolvedValue(
-            jobGeneratedAgo(EXPORT_LINK_EXPIRY_DAYS * DAY_MS - 1),
-          );
-          await expect(
-            service.getExportDownload('u1', 'job-1'),
-          ).resolves.toMatchObject({ kind: 'json' });
+            exportJobs.findOne.mockResolvedValue(
+              jobGeneratedAgo(EXPORT_LINK_EXPIRY_DAYS * DAY_MS - 1),
+            );
+            await expect(
+              service.getExportDownload('u1', 'job-1'),
+            ).resolves.toMatchObject({ kind: 'json' });
+          } finally {
+            nowSpy.mockRestore();
+          }
         });
 
         it('does NOT wait for the 30-day retention sweep to destroy the payload', async () => {

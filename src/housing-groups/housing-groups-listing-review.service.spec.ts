@@ -1,6 +1,7 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { AdminQueueNotificationsService } from '../admin-queue-notifications/admin-queue-notifications.service';
 import { AffirmingPledgeService } from '../affirming-pledge/affirming-pledge.service';
 import { Connection } from '../connections/entities/connection.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
@@ -80,6 +81,12 @@ describe('HousingGroupsService — group-listing review (LOC-19)', () => {
         { provide: AffirmingPledgeService, useValue: {} },
         { provide: VerificationService, useValue: {} },
         { provide: NotificationsService, useValue: notifications },
+        // `createListing` announces to the housing-group-listing queue; the
+        // review paths under test never reach it, so a bare stub is enough.
+        {
+          provide: AdminQueueNotificationsService,
+          useValue: { announce: jest.fn().mockResolvedValue(undefined) },
+        },
       ],
     }).compile();
     service = module.get(HousingGroupsService);

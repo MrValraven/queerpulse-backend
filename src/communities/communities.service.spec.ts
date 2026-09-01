@@ -44,7 +44,10 @@ import {
 } from './entities/community-member.entity';
 import { GovernanceLogAction } from './entities/community-governance-log.entity';
 import { CommunityPostReply } from './entities/community-post-reply.entity';
-import { CommunityTagRequest } from './entities/community-tag-request.entity';
+import {
+  CommunityTagRequest,
+  CommunityTagRequestStatus,
+} from './entities/community-tag-request.entity';
 import { CommunityPost } from './entities/community-post.entity';
 import {
   AccessTier,
@@ -2211,11 +2214,16 @@ describe('CommunitiesService', () => {
         role: RosterRole.Mod,
         userId: 'mod-1',
       });
+      // `status` and `createdAt` are column defaults, so a real saved row
+      // carries both; the response mapper reads them straight back out.
       tagRequests.save.mockResolvedValue({
         id: 'tag-request-1',
         communityId: 'c1',
         requestedByUserId: 'mod-1',
         label: 'polyamory',
+        note: null,
+        status: CommunityTagRequestStatus.Pending,
+        createdAt: new Date('2026-08-01T00:00:00.000Z'),
       });
 
       await service.createTagRequest('x', 'mod-1', {
